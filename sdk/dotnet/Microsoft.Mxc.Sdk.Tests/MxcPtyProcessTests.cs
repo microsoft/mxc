@@ -17,17 +17,17 @@ public class MxcPtyProcessTests
     }
 
     [Fact]
-    public void SpawnWithPty_NullPolicy_Throws()
+    public void SpawnWithPty_NullRequest_Throws()
     {
         Assert.Throws<ArgumentNullException>(
-            () => MxcSandbox.SpawnWithPty(null!, "echo hi"));
+            () => MxcContainer.SpawnWithPty(null!));
     }
 
     [Fact]
-    public void SpawnWithPty_NullCommand_Throws()
+    public void ContainerRequest_NullCommand_Throws()
     {
         Assert.Throws<ArgumentNullException>(
-            () => MxcSandbox.SpawnWithPty(new SandboxPolicy(), null!));
+            () => new ContainerRequest(null!));
     }
 
     [Theory]
@@ -40,19 +40,23 @@ public class MxcPtyProcessTests
         ushort columns)
     {
         Assert.Throws<ArgumentOutOfRangeException>(
-            () => MxcSandbox.SpawnWithPty(
-                new SandboxPolicy(),
-                "echo hi",
-                new MxcPtySize(rows, columns)));
+            () => MxcContainer.SpawnWithPty(
+                new ContainerRequest("echo hi"),
+                new SpawnWithPtyOptions
+                {
+                    Size = new MxcPtySize(rows, columns),
+                }));
     }
 
     [Fact]
-    public void PolicyCommandOverload_TargetsIsolationSession()
+    public void PtyOptions_ResolveCustomAndDefaultInitialDimensions()
     {
-        var request = MxcSandbox.CreatePtyCompatibilityRequest(
-            new SandboxPolicy(),
-            "echo hi");
+        var size = new MxcPtySize(40, 120);
+        var creation = new SpawnWithPtyOptions { Size = size };
+        var existing = new SpawnInContainerWithPtyOptions { Size = size };
 
-        Assert.IsType<IsolationSessionContainment>(request.Containment);
+        Assert.Equal(size, MxcPtySize.ResolveInitial(creation.Size));
+        Assert.Equal(size, MxcPtySize.ResolveInitial(existing.Size));
+        Assert.Equal(MxcPtySize.Default, MxcPtySize.ResolveInitial(null));
     }
 }

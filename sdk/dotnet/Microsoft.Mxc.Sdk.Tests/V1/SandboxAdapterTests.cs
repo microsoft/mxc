@@ -13,28 +13,39 @@ public class SandboxAdapterTests
     [Fact]
     public void DefaultAdaptersImplementInjectableContracts()
     {
-        ISandboxRunner runner = MxcSandboxRunner.Default;
-        ISandboxLifecycle lifecycle = MxcSandboxLifecycle.Default;
+        IContainerRunner runner = MxcContainerRunner.Default;
+        IContainerLifecycle lifecycle = MxcContainerLifecycle.Default;
 
-        Assert.Same(MxcSandboxRunner.Default, runner);
-        Assert.Same(MxcSandboxLifecycle.Default, lifecycle);
+        Assert.Same(MxcContainerRunner.Default, runner);
+        Assert.Same(MxcContainerLifecycle.Default, lifecycle);
+    }
+
+    [Fact]
+    public void InjectableAdaptersAreNotPartOfThePublicSdkSurface()
+    {
+        var exportedTypes = typeof(MxcContainer).Assembly.GetExportedTypes();
+
+        Assert.DoesNotContain(exportedTypes, type => type == typeof(IContainerRunner));
+        Assert.DoesNotContain(exportedTypes, type => type == typeof(MxcContainerRunner));
+        Assert.DoesNotContain(exportedTypes, type => type == typeof(IContainerLifecycle));
+        Assert.DoesNotContain(exportedTypes, type => type == typeof(MxcContainerLifecycle));
     }
 
     [Fact]
     public void RunnerAdapterDelegatesStaticArgumentValidation()
     {
-        ISandboxRunner runner = new MxcSandboxRunner();
+        IContainerRunner runner = new MxcContainerRunner();
 
         Assert.Throws<ArgumentNullException>(
-            () => runner.Run((SandboxRequest)null!));
+            () => runner.Run((ContainerRequest)null!));
         Assert.Throws<ArgumentNullException>(
-            () => runner.Spawn((SandboxPolicy)null!, "echo hi"));
+            () => runner.Spawn((ContainerRequest)null!));
     }
 
     [Fact]
-    public void ExistingRunnerImplementationsRemainSourceCompatible()
+    public void RunnerContractSupportsInMemoryFakes()
     {
-        ISandboxRunner runner = new ExistingRunnerFake();
+        IContainerRunner runner = new ExistingRunnerFake();
 
         Assert.Equal("fake", runner.NativeVersion);
     }
@@ -42,8 +53,8 @@ public class SandboxAdapterTests
     [Fact]
     public void LifecyclePtyCapabilityHasDefaultImplementation()
     {
-        var method = typeof(ISandboxLifecycle).GetMethod(
-            nameof(ISandboxLifecycle.SpawnInContainerWithPty));
+        var method = typeof(IContainerLifecycle).GetMethod(
+            nameof(IContainerLifecycle.SpawnInContainerWithPty));
 
         Assert.NotNull(method?.GetMethodBody());
     }
@@ -51,17 +62,17 @@ public class SandboxAdapterTests
     [Fact]
     public void LifecycleAdapterDelegatesStaticValidation()
     {
-        ISandboxLifecycle lifecycle = new MxcSandboxLifecycle();
+        IContainerLifecycle lifecycle = new MxcContainerLifecycle();
 
         var exception = Assert.Throws<MxcException>(
-            () => lifecycle.DryRunStopSandbox(new SandboxId("missing-prefix")));
+            () => lifecycle.ValidateStop(new ContainerId("missing-prefix")));
 
         Assert.Equal(ErrorCode.MalformedId, exception.Code);
     }
 
     [Theory]
-    [InlineData(typeof(MxcSandbox), typeof(ISandboxRunner))]
-    [InlineData(typeof(MxcLifecycle), typeof(ISandboxLifecycle))]
+    [InlineData(typeof(MxcContainer), typeof(IContainerRunner))]
+    [InlineData(typeof(MxcLifecycle), typeof(IContainerLifecycle))]
     public void InjectableContractsMirrorStaticFacadeMethods(
         Type staticFacade,
         Type contract)
@@ -70,7 +81,7 @@ public class SandboxAdapterTests
         foreach (var facadeMethod in staticFacade
             .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
             .Where(method => !method.IsSpecialName)
-            .Where(method => staticFacade != typeof(MxcSandbox) || method.Name != nameof(MxcSandbox.Probe)))
+            .Where(method => staticFacade != typeof(MxcContainer) || method.Name != nameof(MxcContainer.Probe)))
         {
             var parameterTypes = facadeMethod.GetParameters()
                 .Select(parameter => parameter.ParameterType)
@@ -82,8 +93,17 @@ public class SandboxAdapterTests
                         .SequenceEqual(parameterTypes));
 
             Assert.NotNull(contractMethod);
+            var contractReturn = contractMethod.ReturnType;
+            var facadeReturn = facadeMethod.ReturnType;
+            if (contractReturn.IsGenericType && facadeReturn.IsGenericType
+                && contractReturn.GetGenericTypeDefinition() == typeof(Task<>)
+                && facadeReturn.GetGenericTypeDefinition() == typeof(Task<>))
+            {
+                contractReturn = contractReturn.GetGenericArguments()[0];
+                facadeReturn = facadeReturn.GetGenericArguments()[0];
+            }
             Assert.True(
-                contractMethod.ReturnType.IsAssignableFrom(facadeMethod.ReturnType),
+                contractReturn.IsAssignableFrom(facadeReturn),
                 $"{contractMethod} cannot represent {facadeMethod.ReturnType}");
         }
 
@@ -103,7 +123,7 @@ public class SandboxAdapterTests
     public async Task SandboxProcessContractSupportsInMemoryFakes()
     {
         using var fake = new FakeSandboxProcess("fake output");
-        ISandboxProcess process = fake;
+        IMxcProcess process = fake;
 
         using var reader = new StreamReader(process.StandardOutput!);
         using var closer = process.StandardOutputCloser;
@@ -121,14 +141,14 @@ public class SandboxAdapterTests
     [Fact]
     public void BlockingNativeWaitIsNotPublic()
     {
-        var method = typeof(MxcSandboxProcess).GetMethod(
+        var method = typeof(MxcProcess).GetMethod(
             "WaitBlocking",
             BindingFlags.Public | BindingFlags.Instance);
 
         Assert.Null(method);
     }
 
-    private sealed class ExistingRunnerFake : ISandboxRunner
+    private sealed class ExistingRunnerFake : IContainerRunner
     {
         public string NativeVersion => "fake";
 
@@ -136,31 +156,31 @@ public class SandboxAdapterTests
 
         public PlatformSupport GetPlatformSupport() => new();
 
-        public RunResult Run(SandboxPolicy policy, string command) =>
+        public ExecutionResult Run(ContainerRequest request, RunOptions? options = null) =>
             throw new NotSupportedException();
 
-        public RunResult Run(SandboxRequest request) =>
-            throw new NotSupportedException();
-
-        public Task<RunResult> RunAsync(
-            SandboxPolicy policy,
-            string command,
+        public Task<ExecutionResult> RunAsync(
+            ContainerRequest request,
+            RunOptions? options = null,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
-        public Task<RunResult> RunAsync(
-            SandboxRequest request,
+        public IMxcProcess Spawn(ContainerRequest request, SpawnOptions? options = null) =>
+            throw new NotSupportedException();
+
+        public Task<IMxcProcess> SpawnAsync(
+            ContainerRequest request,
+            SpawnOptions? options = null,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
-        public ISandboxProcess Spawn(SandboxPolicy policy, string command) =>
-            throw new NotSupportedException();
-
-        public ISandboxProcess Spawn(SandboxRequest request) =>
+        public MxcPtyProcess SpawnWithPty(
+            ContainerRequest request,
+            SpawnWithPtyOptions? options = null) =>
             throw new NotSupportedException();
     }
 
-    private sealed class FakeSandboxProcess(string output) : ISandboxProcess
+    private sealed class FakeSandboxProcess(string output) : IMxcProcess
     {
         private readonly MemoryStream _stdout =
             new(System.Text.Encoding.UTF8.GetBytes(output));
@@ -170,15 +190,15 @@ public class SandboxAdapterTests
         public Stream? StandardOutput => _stdout;
         public Stream? StandardError => Stream.Null;
         public bool OutputCloseRequested { get; private set; }
-        public ISandboxStreamCloser? StandardOutputCloser =>
+        public IMxcStreamCloser? StandardOutputCloser =>
             new FakeSandboxStreamCloser(() => OutputCloseRequested = true);
-        public ISandboxStreamCloser? StandardErrorCloser => null;
+        public IMxcStreamCloser? StandardErrorCloser => null;
         public IReadOnlyList<string> Warnings => Array.Empty<string>();
-        public SandboxOutputMetadata? OutputMetadata => null;
+        public ExecutionMetadata? OutputMetadata => null;
 
-        public SandboxWaitResult Wait() => new() { ExitCode = 0 };
+        public WaitResult Wait() => new() { ExitCode = 0 };
 
-        public Task<SandboxWaitResult> WaitAsync(
+        public Task<WaitResult> WaitAsync(
             CancellationToken cancellationToken = default) =>
             Task.FromResult(Wait());
 
@@ -188,7 +208,7 @@ public class SandboxAdapterTests
             return true;
         }
 
-        public Task<(SandboxWaitResult Result, byte[] Stdout, byte[] Stderr)>
+        public Task<(WaitResult Result, byte[] Stdout, byte[] Stderr)>
             WaitForExitWithOutputAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult((Wait(), _stdout.ToArray(), Array.Empty<byte>()));
 
@@ -199,7 +219,7 @@ public class SandboxAdapterTests
         public void Dispose() => _stdout.Dispose();
     }
 
-    private sealed class FakeSandboxStreamCloser(Action close) : ISandboxStreamCloser
+    private sealed class FakeSandboxStreamCloser(Action close) : IMxcStreamCloser
     {
         public void Close() => close();
 

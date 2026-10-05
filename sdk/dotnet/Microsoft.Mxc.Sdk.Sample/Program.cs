@@ -4,21 +4,21 @@
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 
-// A minimal end-to-end sample: build a policy, run a command in a sandbox, and
-// print what it produced. The command defaults to a simple echo; pass your own
-// as arguments (joined into a single command line).
+// A minimal end-to-end sample: build a request, run a command in a sandbox,
+// and print what it produced. The command defaults to a simple echo; pass your
+// own as arguments (joined into a single command line).
 //
 // Note: actually running a sandbox requires a working host backend
 // (e.g. an elevated, host-prepped Windows host — see docs/host-prep.md). The
 // sample reports MXC errors instead of crashing so it is safe to run anywhere.
 
-Console.WriteLine($"mxc_ffi native version: {Microsoft.Mxc.Sdk.MxcPlatform.NativeVersion}");
+Console.WriteLine($"mxc_ffi native version: {Microsoft.Mxc.Sdk.V1.MxcPlatform.NativeVersion}");
 
 var command = args.Length > 0
     ? string.Join(' ', args)
     : (OperatingSystem.IsWindows() ? "cmd /c echo hello from MXC" : "echo hello from MXC");
 
-var policy = new SandboxPolicy
+var request = new ContainerRequest(command)
 {
     Filesystem = new FilesystemPolicy
     {
@@ -26,7 +26,7 @@ var policy = new SandboxPolicy
     },
     TimeoutMs = 30_000,
 };
-SandboxContainment containment = new ProcessContainment();
+request.Containment = new Containment.Process();
 
 // Set MXC_SAMPLE_CAPTURE_DENIALS=1 to opt into Windows denial capture without
 // changing the sample's default host requirements or generating traces by default.
@@ -36,7 +36,7 @@ if (OperatingSystem.IsWindows()
         "1",
         StringComparison.Ordinal))
 {
-    containment = new ProcessContainerContainment
+    request.Containment = new Containment.ProcessContainer
     {
         CaptureDenials = new CaptureDenialsPolicy
         {
@@ -47,11 +47,10 @@ if (OperatingSystem.IsWindows()
 }
 
 Console.WriteLine($"Running: {command}");
-var request = new SandboxRequest(policy, command) { Containment = containment };
 
 try
 {
-    var result = MxcSandbox.Run(request);
+    var result = MxcContainer.Run(request);
     Console.WriteLine($"exit code : {result.ExitCode}");
     Console.WriteLine($"timed out : {result.TimedOut}");
     Console.WriteLine($"stdout    : {result.Stdout.TrimEnd()}");
@@ -81,7 +80,7 @@ try
     // its stdout as it is produced, then wait for exit.
     Console.WriteLine();
     Console.WriteLine("Streaming the same command live:");
-    using (var proc = MxcSandbox.Spawn(request))
+    using (var proc = MxcContainer.Spawn(request))
     {
         var stdout = proc.StandardOutput;
         if (stdout is not null)
@@ -111,16 +110,15 @@ try
         }
     }
 
-    // State-aware lifecycle: provision -> start -> exec -> stop -> deprovision.
+    // Lifecycle: provision -> start -> execute -> stop -> deprovision.
     // Requires the IsolationSession backend (Windows-only, with
     // its OS-side service), so this reports the MXC error on hosts without it.
     Console.WriteLine();
     Console.WriteLine("State-aware lifecycle:");
     try
     {
-        var provisioned = MxcLifecycle.ProvisionSandbox(
-            StateAwareContainment.IsolationSession,
-            new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy
+        var provisioned = MxcLifecycle.ProvisionContainer(
+            new IsolationSessionProvisionRequest(new NetworkPolicy
             {
                 Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
                 Ingress = new NetworkIngressPolicy
@@ -129,18 +127,20 @@ try
                     HostLoopback = NetworkAction.Allow,
                 },
             }));
-        Console.WriteLine($"  provisioned: {provisioned.SandboxId}");
+        Console.WriteLine($"  provisioned: {provisioned.ContainerId}");
         try
         {
-            MxcLifecycle.StartSandbox(provisioned.SandboxId);
-            var lifecycleRun = await MxcLifecycle.ExecInSandboxAsync(provisioned.SandboxId, command);
+            MxcLifecycle.StartContainer(provisioned.ContainerId);
+            var lifecycleRun = await MxcLifecycle.RunInContainerAsync(
+                provisioned.ContainerId,
+                new ExecutionRequest(command));
             Console.WriteLine($"  exec exit={lifecycleRun.ExitCode} stdout={lifecycleRun.Stdout.TrimEnd()}");
         }
         finally
         {
             try
             {
-                MxcLifecycle.StopSandbox(provisioned.SandboxId);
+                MxcLifecycle.StopContainer(provisioned.ContainerId);
             }
             catch (MxcException)
             {
@@ -148,7 +148,7 @@ try
             }
             try
             {
-                MxcLifecycle.DeprovisionSandbox(provisioned.SandboxId);
+                MxcLifecycle.DeprovisionContainer(provisioned.ContainerId);
             }
             catch (MxcException ex)
             {

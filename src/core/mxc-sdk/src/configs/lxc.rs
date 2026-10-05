@@ -6,14 +6,14 @@
 /// Linux LXC distribution settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Lxc {
+pub struct LxcConfig {
     /// Linux distribution for the container rootfs.
     pub distribution: String,
     /// Distribution release version.
     pub release: String,
 }
 
-impl Default for Lxc {
+impl Default for LxcConfig {
     fn default() -> Self {
         Self {
             distribution: "alpine".to_string(),

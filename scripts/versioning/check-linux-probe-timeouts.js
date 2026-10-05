@@ -38,7 +38,7 @@ const RUST_TERMS = [
   },
 ];
 
-const PLATFORM_TS = join(repoRoot, "sdk", "node", "src", "platform.ts");
+const PLATFORM_TS = join(repoRoot, "sdk", "node", "src", "v1", "platform.ts");
 
 function read(path) {
   try {
@@ -96,7 +96,7 @@ if (platform !== null) {
       if (declared !== nativeTotalMs) {
         errors.push(
           `NATIVE_PROBE_WORST_CASE_MS is ${declared}ms but the Rust constants now sum to ${nativeTotalMs}ms ` +
-            `[${breakdown.join(", ")}]. Update sdk/node/src/platform.ts.`
+            `[${breakdown.join(", ")}]. Update sdk/node/src/v1/platform.ts.`
         );
       }
     }

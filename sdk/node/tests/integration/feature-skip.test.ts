@@ -3,7 +3,7 @@
 
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { MxcError } from '@microsoft/mxc-sdk';
+import { MxcError } from '@microsoft/mxc-sdk/v1';
 import {
   isolationSessionFeatureSkipReason,
   stateAwareRuntimeUnavailable,

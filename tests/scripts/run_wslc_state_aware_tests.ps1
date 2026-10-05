@@ -11,7 +11,7 @@
 
 .DESCRIPTION
     Each test invokes wxc-exec.exe with lifecycle routing in --operation /
-    --sandbox-id and a base64-encoded phase-specific request payload.
+    --container-id and a base64-encoded phase-specific request payload.
     Provision / start / stop / deprovision return a JSON envelope on stdout
     (asserted on `result` / `error`); a successful exec streams the script's
     own stdout (relayed from the daemon) and exits with the script's exit code.
@@ -243,7 +243,7 @@ function Invoke-StateAware {
 
     $argList = @('--operation', $invocation.Operation)
     if ($invocation.Operation -ne 'provision') {
-        $argList += @('--sandbox-id', $invocation.SandboxId)
+        $argList += @('--container-id', $invocation.SandboxId)
     }
     if ($DryRun) { $argList += '--dry-run' }
     if ($Debug) { $argList += '--debug' }
@@ -299,7 +299,7 @@ function Invoke-StateAwareStreaming {
 
     $argList = @('--operation', $invocation.Operation)
     if ($invocation.Operation -ne 'provision') {
-        $argList += @('--sandbox-id', $invocation.SandboxId)
+        $argList += @('--container-id', $invocation.SandboxId)
     }
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $invocation.ConfigBase64)

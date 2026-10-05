@@ -4,7 +4,8 @@
 // Shared decoding for native status codes, owned strings, and error details.
 
 import koffi from 'koffi';
-import { MxcError, type ErrorCode } from '../errors.js';
+import { MxcError, type ErrorCode } from '../v1/errors.js';
+import type { ExecutionMetadata, CaptureDenialsResult, CaptureDenialsError } from '../v1/types.js';
 
 export interface AbiErrorDetail {
   message: unknown | null;
@@ -73,6 +74,53 @@ export function parseStringArray(
   const value: unknown = JSON.parse(json);
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
     throw new MxcError('backend_error', message);
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isCaptureDenialsResult(value: unknown): value is CaptureDenialsResult {
+  return isRecord(value)
+    && value.type === 'captureDenials'
+    && typeof value.outputPath === 'string'
+    && typeof value.exitCode === 'number'
+    && Number.isInteger(value.exitCode)
+    && value.exitCode >= -2147483648 && value.exitCode <= 2147483647
+    && typeof value.totalDenials === 'number'
+    && Number.isSafeInteger(value.totalDenials) && value.totalDenials >= 0
+    && typeof value.deniedResourcesTruncated === 'boolean'
+    && (value.etlPath === undefined || typeof value.etlPath === 'string');
+}
+
+function isCaptureDenialsError(value: unknown): value is CaptureDenialsError {
+  return isRecord(value)
+    && typeof value.message === 'string'
+    && typeof value.etlPath === 'string';
+}
+
+function isExecutionMetadata(value: unknown): value is ExecutionMetadata {
+  return isRecord(value)
+    && (value.captureDenials === undefined || isCaptureDenialsResult(value.captureDenials))
+    && (value.captureDenialsError === undefined || isCaptureDenialsError(value.captureDenialsError));
+}
+
+export function parseExecutionMetadata(json: string | undefined): ExecutionMetadata | undefined {
+  if (json === undefined) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch (error) {
+    throw new MxcError({
+      code: 'backend_error',
+      message: 'native runtime returned malformed output metadata',
+      details: { cause: error instanceof Error ? error.message : String(error) },
+    });
+  }
+  if (!isExecutionMetadata(value)) {
+    throw new MxcError('backend_error', 'native runtime returned malformed output metadata');
   }
   return value;
 }

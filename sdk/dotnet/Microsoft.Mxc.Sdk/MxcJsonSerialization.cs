@@ -36,16 +36,31 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 // Public request/policy surface.
 [JsonSerializable(typeof(Generated.OneShotRequest))]
-[JsonSerializable(typeof(SandboxRequest))]
-[JsonSerializable(typeof(SandboxPolicy))]
-[JsonSerializable(typeof(SandboxContainment))]
-[JsonSerializable(typeof(ProcessContainment))]
-[JsonSerializable(typeof(ProcessContainerContainment))]
-[JsonSerializable(typeof(SeatbeltContainment))]
-[JsonSerializable(typeof(LxcContainment))]
-[JsonSerializable(typeof(BubblewrapContainment))]
-[JsonSerializable(typeof(WslcContainment))]
-[JsonSerializable(typeof(IsolationSessionContainment))]
+[JsonSerializable(typeof(ContainerRequest))]
+[JsonSerializable(typeof(ProvisionRequest))]
+[JsonSerializable(typeof(IsolationSessionProvisionRequest))]
+[JsonSerializable(typeof(WslcProvisionRequest))]
+[JsonSerializable(typeof(ExecutionRequest))]
+[JsonSerializable(typeof(ProcessNetworkPolicy))]
+[JsonSerializable(typeof(RunOptions))]
+[JsonSerializable(typeof(SpawnOptions))]
+[JsonSerializable(typeof(SpawnWithPtyOptions))]
+[JsonSerializable(typeof(ProvisionOptions))]
+[JsonSerializable(typeof(StartOptions))]
+[JsonSerializable(typeof(StopOptions))]
+[JsonSerializable(typeof(DeprovisionOptions))]
+[JsonSerializable(typeof(SpawnInContainerOptions))]
+[JsonSerializable(typeof(RunInContainerOptions))]
+[JsonSerializable(typeof(SpawnInContainerWithPtyOptions))]
+[JsonSerializable(typeof(MxcPtySize))]
+[JsonSerializable(typeof(Containment))]
+[JsonSerializable(typeof(Containment.Process), TypeInfoPropertyName = "SdkContainmentProcess")]
+[JsonSerializable(typeof(Containment.ProcessContainer), TypeInfoPropertyName = "SdkContainmentProcessContainer")]
+[JsonSerializable(typeof(Containment.Seatbelt), TypeInfoPropertyName = "SdkContainmentSeatbelt")]
+[JsonSerializable(typeof(Containment.Lxc), TypeInfoPropertyName = "SdkContainmentLxc")]
+[JsonSerializable(typeof(Containment.Bubblewrap), TypeInfoPropertyName = "SdkContainmentBubblewrap")]
+[JsonSerializable(typeof(Containment.Wslc), TypeInfoPropertyName = "SdkContainmentWslc")]
+[JsonSerializable(typeof(Containment.IsolationSession), TypeInfoPropertyName = "SdkContainmentIsolationSession")]
 [JsonSerializable(typeof(ProcessContainerUiPolicy))]
 [JsonSerializable(typeof(ProcessContainerFilesystemPolicy))]
 [JsonSerializable(typeof(ProcessContainerNetworkPolicy))]
@@ -54,7 +69,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(NetworkPolicy))]
 [JsonSerializable(typeof(UiPolicy))]
 [JsonSerializable(typeof(CaptureDenialsPolicy))]
-[JsonSerializable(typeof(TelemetrySettings))]
+[JsonSerializable(typeof(TelemetryConfig))]
 // Directional network sub-objects (egress/ingress resolved through the
 // non-null section converter).
 [JsonSerializable(typeof(NetworkEgressPolicy))]
@@ -63,25 +78,25 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(NetworkRulePolicy))]
 [JsonSerializable(typeof(NetworkPeerPolicy))]
 [JsonSerializable(typeof(NetworkPortPolicy))]
-// State-aware lifecycle cross-cutting sections.
-[JsonSerializable(typeof(StateAwareNetworkPolicy))]
-[JsonSerializable(typeof(StateAwareFilesystemPolicy))]
 // Native discovery, output, and provision metadata.
 [JsonSerializable(typeof(NativeAvailableBackend[]))]
 [JsonSerializable(typeof(NativePlatformSupport))]
 [JsonSerializable(typeof(NativeProbeOutput))]
-[JsonSerializable(typeof(SandboxOutputMetadata))]
-[JsonSerializable(typeof(CaptureDenialsOutput))]
-[JsonSerializable(typeof(CaptureDenialsErrorOutput))]
+[JsonSerializable(typeof(ExecutionMetadata))]
+[JsonSerializable(typeof(CaptureDenialsResult))]
+[JsonSerializable(typeof(CaptureDenialsError))]
 [JsonSerializable(typeof(IsolationSessionProvisionMetadata))]
+[JsonSerializable(typeof(ProvisionMetadata))]
+[JsonSerializable(typeof(ValidationResult))]
+[JsonSerializable(typeof(LifecycleResult))]
+[JsonSerializable(typeof(ProvisionResult))]
+[JsonSerializable(typeof(ContainerId))]
 // Primitive and collection shapes resolved by the custom converters and helpers.
 [JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(List<string>))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(bool?))]
-[JsonSerializable(typeof(StateAwareNetworkDefault))]
-[JsonSerializable(typeof(StateAwareNetworkDefault?))]
 internal sealed partial class MxcJsonContext : JsonSerializerContext
 {
 }
@@ -133,7 +148,6 @@ internal static class MxcJson
         options.Converters.Add(new CamelCaseJsonStringEnumConverter<ClipboardPolicy>());
         options.Converters.Add(new CamelCaseJsonStringEnumConverter<ProcessContainerUiIsolation>());
         options.Converters.Add(new CamelCaseJsonStringEnumConverter<ProcessContainerSystemSettings>());
-        options.Converters.Add(new CamelCaseJsonStringEnumConverter<StateAwareNetworkDefault>());
     }
 
     /// <summary>

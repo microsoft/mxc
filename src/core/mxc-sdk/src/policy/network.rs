@@ -3,19 +3,17 @@
 
 //! Network policy authoring types.
 
-/// Network section of a [`SandboxPolicy`](super::SandboxPolicy).
+/// Network section of a [`ContainerRequest`](crate::v1::ContainerRequest).
 ///
-/// The v1 high-level SDK exposes directional policy only. Exact legacy
-/// configuration remains available through the raw configuration parser.
+/// The V1 SDK exposes directional policy only.
 #[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct NetworkSection {
+pub struct NetworkPolicy {
     /// Outbound network policy.
-    pub egress: Option<NetworkEgressSection>,
+    pub egress: Option<NetworkEgressPolicy>,
     /// Inbound and host-loopback network policy.
-    pub ingress: Option<NetworkIngressSection>,
+    pub ingress: Option<NetworkIngressPolicy>,
     /// Runtime values supplied separately from sandbox policy.
-    pub runtime_config: Option<RuntimeConfigSection>,
+    pub runtime_config: Option<NetworkRuntimeConfig>,
 }
 
 /// Allow or deny a network action.
@@ -39,13 +37,12 @@ pub enum NetworkProtocol {
 
 /// CIDR network peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct NetworkPeerSection {
+pub struct NetworkPeerPolicy {
     pub cidr: String,
     pub except: Option<Vec<String>>,
 }
 
-impl NetworkPeerSection {
+impl NetworkPeerPolicy {
     /// Creates a peer matching `cidr` with no exclusions.
     pub fn new(cidr: impl Into<String>) -> Self {
         Self {
@@ -57,8 +54,7 @@ impl NetworkPeerSection {
 
 /// Protocol and destination-port selector.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct NetworkPortSection {
+pub struct NetworkPortPolicy {
     pub protocol: Option<NetworkProtocol>,
     pub port: Option<u16>,
     pub end_port: Option<u16>,
@@ -66,33 +62,29 @@ pub struct NetworkPortSection {
 
 /// Outbound network rule.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct NetworkRuleSection {
-    pub to: Option<Vec<NetworkPeerSection>>,
-    pub ports: Option<Vec<NetworkPortSection>>,
+pub struct NetworkRulePolicy {
+    pub to: Option<Vec<NetworkPeerPolicy>>,
+    pub ports: Option<Vec<NetworkPortPolicy>>,
 }
 
 /// Outbound network policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct NetworkEgressSection {
+pub struct NetworkEgressPolicy {
     pub default: Option<NetworkAction>,
-    pub allow: Option<Vec<NetworkRuleSection>>,
-    pub deny: Option<Vec<NetworkRuleSection>>,
+    pub allow: Option<Vec<NetworkRulePolicy>>,
+    pub deny: Option<Vec<NetworkRulePolicy>>,
 }
 
 /// Inbound and host-loopback network policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct NetworkIngressSection {
+pub struct NetworkIngressPolicy {
     pub default: Option<NetworkAction>,
     pub host_loopback: Option<NetworkAction>,
 }
 
 /// Runtime values supplied separately from sandbox policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct RuntimeConfigSection {
+pub struct NetworkRuntimeConfig {
     /// HTTP/S proxy URL. Host-process backends require localhost; WSLc requires
     /// a container-routable endpoint and does not filter egress through it.
     pub network_proxy: Option<String>,

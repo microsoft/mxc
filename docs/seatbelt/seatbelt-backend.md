@@ -81,7 +81,7 @@ inheriting ingress allow.
 | Firewall / packet-filter enforcement mode | ❌ | Rejected — no packet-filter layer |
 | Proxy peer identity pinning | ❌ | Rejected — not supported |
 | Named containers, attach, lifecycle | ❌ | Not applicable — process-scoped |
-| Caller-owned PTY | ✅ | Direct `exec` only; incompatible with `guiAccess` and legacy `launchMethod: "open"` |
+| Caller-controlled PTY | ✅ | Direct `exec` only; incompatible with `guiAccess` and legacy `launchMethod: "open"` |
 
 The short version: **Seatbelt gives you an on/off switch for outbound network
 plus a loopback exception. It has no concept of "this host but not that one."**
@@ -658,8 +658,8 @@ deliberate: the alternative is a rule that matches nothing, which for
 | Config | Why it's rejected |
 |---|---|
 | `guiAccess: true` with `ui.disable: true`, or with no `ui` section | The GUI rules are only emitted when UI is enabled, so the request would otherwise be dropped without a word |
-| `guiAccess: true` with piped stdio or a caller-owned PTY | GUI mode needs inherited stdio and an externally owned terminal |
-| `launchMethod: "open"` with piped stdio or a caller-owned PTY *(0.7/0.8 only)* | Launches Terminal.app; MXC does not own its streams or PTY |
+| `guiAccess: true` with piped stdio or a caller-controlled PTY | GUI mode needs inherited stdio and an externally owned terminal |
+| `launchMethod: "open"` with piped stdio or a caller-controlled PTY *(0.7/0.8 only)* | Launches Terminal.app; MXC does not own its streams or PTY |
 | `launchMethod` on schema `0.9.0-alpha` | The field is not in the 0.9 contract |
 
 ## Limitations

@@ -16,7 +16,7 @@
     "deniedPaths": []
   },
   "processContainer": {
-    "leastPrivilege": true,
+    "leastPrivilege": false,
     "learningMode": true,
     "capabilities": [
       "registryRead"

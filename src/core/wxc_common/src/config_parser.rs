@@ -727,18 +727,18 @@ pub fn load_state_aware_request_from_json_with_options(
         match (phase, sandbox_id) {
             (Phase::Provision, Some(_)) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    "the provision operation does not accept --sandbox-id",
+                    "the provision operation does not accept --container-id",
                 )));
             }
             (Phase::Provision, None) => {}
             (_, None) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    format!("the {phase} operation requires --sandbox-id"),
+                    format!("the {phase} operation requires --container-id"),
                 )));
             }
             (_, Some("")) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    "--sandbox-id must not be empty",
+                    "--container-id must not be empty",
                 )));
             }
             (_, Some(_)) => {}
@@ -5251,7 +5251,7 @@ mod tests {
         .unwrap_err();
         assert!(provision_error
             .message()
-            .contains("does not accept --sandbox-id"));
+            .contains("does not accept --container-id"));
 
         let start_error = load_state_aware_request_from_json_with_options(
             r#"{"version":"1.0.0"}"#,
@@ -5261,7 +5261,7 @@ mod tests {
             &[],
         )
         .unwrap_err();
-        assert!(start_error.message().contains("requires --sandbox-id"));
+        assert!(start_error.message().contains("requires --container-id"));
     }
 
     #[test]

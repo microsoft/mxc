@@ -4,7 +4,7 @@
 // Worker-thread entry point for the blocking native consent request.
 
 import { parentPort, workerData } from 'node:worker_threads';
-import { MxcError } from '../errors.js';
+import { MxcError } from '../v1/errors.js';
 import {
   requestTelemetryConsentJson,
 } from './telemetry.js';

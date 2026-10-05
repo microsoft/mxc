@@ -4,8 +4,7 @@
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::v1::{spawn_with_pty, SandboxRequest};
-use mxc_sdk::{MxcPtySize, WaitOutcome};
+use mxc_sdk::v1::{spawn_with_pty, ContainerRequest, MxcPtySize, SpawnWithPtyOptions, WaitResult};
 
 pub const ROUND_TRIP_COMMAND: &str =
     "read value; stty size; printf 'stdout:%s\\n' \"$value\"; printf 'stderr:merged\\n' >&2";
@@ -13,13 +12,16 @@ pub const TIMEOUT_COMMAND: &str = "sleep 30";
 pub const NATIVE_STDIO_COMMAND: &str =
     "read value; printf 'native-stdout:%s\\n' \"$value\"; printf 'native-stderr\\n' >&2";
 
-pub fn assert_round_trip(request: SandboxRequest) {
+pub fn assert_round_trip(request: ContainerRequest) {
     let terminal = spawn_with_pty(
         request,
-        MxcPtySize {
-            rows: 24,
-            cols: 80,
-            ..MxcPtySize::default()
+        SpawnWithPtyOptions {
+            size: MxcPtySize {
+                rows: 24,
+                cols: 80,
+                ..MxcPtySize::default()
+            },
+            ..Default::default()
         },
     )
     .expect("spawn_with_pty");
@@ -41,7 +43,7 @@ pub fn assert_round_trip(request: SandboxRequest) {
     writer.write_all(b"hello").expect("write partial input");
     drop(writer);
 
-    assert_eq!(terminal.wait().expect("wait"), WaitOutcome::Exited(0));
+    assert_eq!(terminal.wait().expect("wait"), WaitResult::Exited(0));
     let output = reader_thread.join().expect("reader thread");
     assert!(
         output.contains("40 120"),
@@ -57,9 +59,8 @@ pub fn assert_round_trip(request: SandboxRequest) {
     );
 }
 
-pub fn assert_timeout(request: SandboxRequest, maximum: Duration) {
-    let terminal =
-        spawn_with_pty(request, MxcPtySize::default()).expect("spawn_with_pty for timeout");
+pub fn assert_timeout(request: ContainerRequest, maximum: Duration) {
+    let terminal = spawn_with_pty(request, Default::default()).expect("spawn_with_pty for timeout");
     let started = Instant::now();
     loop {
         match terminal.try_wait() {
@@ -72,7 +73,7 @@ pub fn assert_timeout(request: SandboxRequest, maximum: Duration) {
         .try_wait()
         .expect_err("timeout classification must remain latched");
     assert_eq!(repeated.kind(), std::io::ErrorKind::TimedOut);
-    assert_eq!(terminal.wait().expect("wait"), WaitOutcome::TimedOut);
+    assert_eq!(terminal.wait().expect("wait"), WaitResult::TimedOut);
     assert!(
         started.elapsed() < maximum,
         "PTY timeout exceeded {maximum:?}: {:?}",
@@ -80,8 +81,8 @@ pub fn assert_timeout(request: SandboxRequest, maximum: Duration) {
     );
 }
 
-pub fn assert_explicit_timeout_kill(request: SandboxRequest) {
-    let terminal = spawn_with_pty(request, MxcPtySize::default())
+pub fn assert_explicit_timeout_kill(request: ContainerRequest) {
+    let terminal = spawn_with_pty(request, Default::default())
         .expect("spawn_with_pty for explicit timeout kill");
     terminal
         .kill_for_timeout()
@@ -90,12 +91,12 @@ pub fn assert_explicit_timeout_kill(request: SandboxRequest) {
         .try_wait()
         .expect_err("explicit timeout kill must latch timeout classification");
     assert_eq!(repeated.kind(), std::io::ErrorKind::TimedOut);
-    assert_eq!(terminal.wait().expect("wait"), WaitOutcome::TimedOut);
+    assert_eq!(terminal.wait().expect("wait"), WaitResult::TimedOut);
 }
 
-pub fn assert_native_stdio(request: SandboxRequest) {
+pub fn assert_native_stdio(request: ContainerRequest) {
     let mut terminal =
-        spawn_with_pty(request, MxcPtySize::default()).expect("spawn_with_pty for native stdio");
+        spawn_with_pty(request, Default::default()).expect("spawn_with_pty for native stdio");
     let stdio = terminal
         .take_native_stdio()
         .expect("take native stdio")
@@ -116,7 +117,7 @@ pub fn assert_native_stdio(request: SandboxRequest) {
         .expect("read native output");
     assert_eq!(
         outcome,
-        WaitOutcome::Exited(0),
+        WaitResult::Exited(0),
         "native PTY output before termination: {text:?}"
     );
     assert!(

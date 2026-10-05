@@ -90,15 +90,13 @@ public sealed class MxcTelemetryTests : IDisposable
     }
 
     [Fact]
-    public void SandboxPolicy_TelemetrySerializesCanonically()
+    public void CreationOptions_TelemetrySerializesCanonically()
     {
-        var policy = new SandboxPolicy
-        {
-            Telemetry = new TelemetrySettings { Enabled = true },
-        };
+        var request = new ContainerRequest("echo telemetry");
+        var options = new RunOptions { Telemetry = new TelemetryConfig { Enabled = true } };
 
-        var json = System.Text.Json.JsonSerializer.Serialize(policy);
-        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        using var doc = System.Text.Json.JsonDocument.Parse(
+            MxcContainer.SerializeRequest(request, options.Telemetry));
 
         Assert.True(doc.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
     }

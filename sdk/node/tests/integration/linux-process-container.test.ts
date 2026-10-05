@@ -6,8 +6,6 @@ import assert from 'node:assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { ContainerConfig } from '@microsoft/mxc-sdk';
-import type { SandboxPolicy } from '@microsoft/mxc-sdk/v1';
 import {
   sdk,
   supportedVersions,
@@ -15,9 +13,9 @@ import {
   createTempDir,
   NETWORK_TEST_URL,
   lxcNetworkSkipReason,
-  debugSpawnOptions,
-  spawnFromConfigAsync,
+  runConfigForTest,
 } from './test-helpers.js';
+import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
 // MXC_SKIP_LXC_TESTS=1 skips the entire LXC describe block. Provided as
 // an escape hatch for local dev or for CI hosts that genuinely lack the
@@ -39,18 +37,16 @@ const lxcSkipReason = !isLinuxRoot
 // (Bubblewrap). The LXC backend is covered by an explicit opt-in only.
 async function runLxc(
   script: string,
-  policy: SandboxPolicy,
+  request: Omit<ContainerRequest, 'command'>,
   containerId: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const config = sdk.createConfigFromPolicy(policy, 'lxc', containerId);
+  const config = sdk.createConfigForTest(request, 'lxc', containerId);
   config.process!.commandLine = script;
-  return spawnFromConfigAsync(config, debugSpawnOptions);
+  return runConfigForTest(config);
 }
 
-function outboundNetwork(version: (typeof supportedVersions)[number]) {
-  return version.compare('0.8.0-alpha') >= 0
-    ? { egress: { default: 'allow' as const } }
-    : { allowOutbound: true };
+function outboundNetwork() {
+  return { egress: { default: 'allow' as const } };
 }
 
 for (const schemaVersion of supportedVersions) {
@@ -116,7 +112,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should allow outbound network access', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { network: outboundNetwork(schemaVersion) };
+    const policy = { network: outboundNetwork() };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'Network accessible'`,
       policy,
@@ -153,7 +149,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
     tempDir = createTempDir('mxc-lxc-test');
     const policy = {
       filesystem: { readwritePaths: [tempDir] },
-      network: outboundNetwork(schemaVersion),
+      network: outboundNetwork(),
     };
     const script =
       `wget -q -T 10 -O ${tempDir}/download.json '${NETWORK_TEST_URL}'` +
@@ -164,7 +160,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should access HTTPS endpoint', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { network: outboundNetwork(schemaVersion) };
+    const policy = { network: outboundNetwork() };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'HTTPS endpoint accessible'`,
       policy,
@@ -190,7 +186,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
 describe('Linux LXC Container default-deny network posture', {
   skip: lxcSkipReason,
 }, () => {
-  it('should give schema 0.8 no network interface when the policy names no network fields', async () => {
+  it('should have no network interface when the policy names no network fields', async () => {
     // `awk` takes the interface names out of /proc/net/dev and strips the
     // trailing colon; the `ip` call reports whether loopback carries
     // 127.0.0.1.  The container prints two lines:
@@ -199,20 +195,16 @@ describe('Linux LXC Container default-deny network posture', {
     const probe =
       "echo \"ifaces=[$(awk 'NR>2 {sub(/:.*/, \"\", $1); print $1}' /proc/net/dev | sort | tr '\\n' ' ')]\"; " +
       "ip -4 addr show lo 2>/dev/null | grep -q '127.0.0.1' && echo 'loopback=up' || echo 'loopback=down'";
-    const config: ContainerConfig = {
-      version: '0.8.0-alpha',
-      containment: 'lxc',
-      containerId: 'lxc-deny-080',
-      process: { commandLine: probe },
-      lxc: { distribution: 'alpine', release: '3.23' },
-    };
-    const result = await spawnFromConfigAsync(config, debugSpawnOptions);
+    const config = sdk.createConfigForTest({}, 'lxc', 'lxc-deny-default');
+    config.process!.commandLine = probe;
+    config.lxc = { distribution: 'alpine', release: '3.23' };
+    const result = await runConfigForTest(config);
 
     assert.strictEqual(result.exitCode, 0, `Expected the container to run: ${result.stderr}`);
     assert.ok(
       result.stdout.includes('ifaces=[lo ]'),
-      `Schema 0.8 promises no network access when the policy names no network fields` +
-        ` (docs/sandbox-policy/0.8.0/policy.md), but the container was given more than` +
+      `The policy denies network access when no network fields are supplied,` +
+        ` but the container was given more than` +
         ` loopback: ${result.stdout}`,
     );
     // Taking the network away must not take localhost with it.

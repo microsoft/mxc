@@ -5,6 +5,23 @@ All notable changes to `Microsoft.Mxc.Sdk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The managed V1 facade uses `MxcContainer` with `ContainerRequest` for
+  complete requests, and `MxcLifecycle` with typed `ProvisionRequest`,
+  `LifecycleContainmentKind`, `ContainerId`, and `ExecutionRequest` for
+  persistent container operations.
+  Provisioning selects its backend through the SDK-owned provision request;
+  creation requests use the closed `Containment` choices.
+- The injectable runner and lifecycle adapters are internal implementation and
+  test seams, not part of the consumer API.
+- `MxcLifecycle.ExecuteInContainerAttached` remains a private helper that
+  forwards to the native attached-execution API; it is not publicly exposed.
+
+Entries below describe historical release APIs, not the current V1 surface.
+
 ## [0.9.0]
 
 The state-aware lifecycle surface shipped in 0.8.0 was incomplete: it could
@@ -27,14 +44,14 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
   managed policy deadline, so calling it directly granted the workload a second
   full timeout budget (see "Fixed" below). Use `Wait()` / `WaitAsync()`, which
   enforce the deadline.
-- `StartSandboxOptions` is replaced by `StateAwarePhaseOptions`, which every
+- `StartSandboxOptions` is replaced by `LifecycleOptions`, which every
   non-provision phase now shares.
 
 ### Changed (breaking)
 
 - `MxcLifecycle.ProvisionSandbox` takes the backend as a required leading
-  `StateAwareContainment` argument, and its options parameter widened from
-  `ProvisionSandboxOptions` to the abstract `StateAwareProvisionOptions`.
+  `LifecycleBackend` argument, and its options parameter widened from
+  `ProvisionSandboxOptions` to the abstract `ProvisionOptions`.
   `ProvisionSandboxOptions` still exists and now derives from that base, so
   object initializers are unchanged — add the containment argument:
 
@@ -43,7 +60,7 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
   MxcLifecycle.ProvisionSandbox(new ProvisionSandboxOptions { … });
   // 0.9.0
   MxcLifecycle.ProvisionSandbox(
-      StateAwareContainment.IsolationSession,
+      LifecycleBackend.IsolationSession,
       new ProvisionSandboxOptions { … });
   ```
 
@@ -53,7 +70,7 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
   method signature, assemblies compiled against 0.8.0 must be recompiled
   rather than dropped in place.
 - Non-exec phases reject `StateAwareExecOptions` instead of ignoring exec-only
-  fields. Use `StateAwarePhaseOptions`.
+  fields. Use `LifecycleOptions`.
 
 ### Deprecated
 

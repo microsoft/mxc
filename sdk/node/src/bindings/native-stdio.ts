@@ -9,7 +9,7 @@ import {
   satisfies as semverSatisfies,
   valid as semverValid,
 } from 'semver';
-import { MxcError } from '../errors.js';
+import { MxcError } from '../v1/errors.js';
 
 export type NativeHandle = number | bigint;
 

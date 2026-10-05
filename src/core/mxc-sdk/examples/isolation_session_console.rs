@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Hosts an interactive terminal inside an isolation session, in-process, from
-//! a console application. Takes the same request JSON as `wxc-exec`.
+//! Manual native attached-console driver for IsolationSession. Lifecycle setup
+//! uses the typed SDK; attached execution exercises the engine directly.
 //!
 //! # Operator scenarios
 //!
@@ -25,21 +25,21 @@
 //!
 //! Must run at a real interactive console.
 
-use mxc_sdk::WaitOutcome;
+use mxc_sdk::v1::{container, ContainerId, ProvisionRequest};
+use wxc_common::state_aware_backend::ExecOutcome as WaitResult;
 
 /// Provision mints a real OS account, so an early return or a panic would
 /// otherwise leave one behind on the host.
-struct Teardown(String);
+struct Teardown(ContainerId);
 
 impl Drop for Teardown {
     fn drop(&mut self) {
         let id = &self.0;
         eprintln!("\n[driver] tearing down…");
-        let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
-        let _ = mxc_sdk::run_state_aware_json(&stop, false, true);
-        let deprovision =
-            format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
-        match mxc_sdk::run_state_aware_json(&deprovision, false, true) {
+        if let Err(e) = container::stop_container(id, Default::default()) {
+            eprintln!("[driver] WARNING: stop failed: {e:?}");
+        }
+        match container::deprovision_container(id, Default::default()) {
             Ok(_) => eprintln!("[driver] deprovisioned."),
             Err(e) => eprintln!("[driver] WARNING: deprovision failed, account may leak: {e:?}"),
         }
@@ -108,7 +108,7 @@ fn run() -> i32 {
         None => ("custom", arg, None),
     };
 
-    if !mxc_sdk::available_backends()
+    if !mxc_sdk::v1::available_backends()
         .iter()
         .any(|b| b.backend == "isolation_session")
     {
@@ -116,40 +116,36 @@ fn run() -> i32 {
         return 2;
     }
 
-    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-    let response = mxc_sdk::run_state_aware_json(provision, false, true).expect("provision");
-    // The sandbox id is opaque by contract — carried verbatim, never parsed.
-    let sandbox_id = response
-        .split(r#""sandboxId":""#)
-        .nth(1)
-        .and_then(|rest| rest.split('"').next())
-        .expect("provision returned no sandboxId")
-        .to_string();
+    let provisioned = container::provision_container(
+        ProvisionRequest::isolation_session(None),
+        Default::default(),
+    )
+    .expect("provision");
+    let sandbox_id = provisioned.container_id;
     let _teardown = Teardown(sandbox_id.clone());
     eprintln!("[driver] provisioned.");
 
-    let start =
-        format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
-    mxc_sdk::run_state_aware_json(&start, false, true).expect("start");
+    container::start_container(&sandbox_id, Default::default()).expect("start");
     eprintln!("[driver] started. Scenario: {label}");
     if let Some(g) = guidance {
         eprintln!("[driver] WHAT TO LOOK FOR: {g}");
     }
     eprintln!("[driver] everything below runs inside the isolation session.\n");
 
-    let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
-    let exec = format!(
-        r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}",
-            "process":{{"commandLine":"{escaped}","timeout":3600000}}}}"#
-    );
+    let exec = serde_json::json!({
+        "version": "1.0.0",
+        "phase": "exec",
+        "sandboxId": sandbox_id.as_str(),
+        "process": {"commandLine": command, "timeout": 3_600_000}
+    })
+    .to_string();
 
-    match mxc_sdk::exec_attached(&exec, true) {
+    match mxc_engine::exec_state_aware_attached(&exec, true) {
         Ok(outcome) => {
             println!("\n[driver] outcome: {outcome:?}");
             match outcome {
-                WaitOutcome::Exited(code) => code,
-                WaitOutcome::TimedOut => 1,
+                WaitResult::Exited(code) => code,
+                WaitResult::TimedOut => 1,
             }
         }
         Err(e) => {

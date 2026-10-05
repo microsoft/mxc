@@ -11,6 +11,72 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 
 public sealed class ExactOneShotRequestWriterTests
 {
+    [Fact]
+    public void EmptyTelemetryConfig_DoesNotEnableTelemetry()
+    {
+        var request = new ContainerRequest("echo telemetry");
+        using var document = JsonDocument.Parse(
+            ExactOneShotRequestWriter.Serialize(request, new TelemetryConfig()));
+        Assert.False(document.RootElement.GetProperty("telemetry").TryGetProperty("enabled", out _));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void CreationOptions_PreserveTelemetryPresenceWithoutChangingRequest(bool? enabled)
+    {
+        var request = new ContainerRequest("echo telemetry") { ContainerName = "reusable" };
+        var telemetry = enabled.HasValue ? new TelemetryConfig { Enabled = enabled.Value } : null;
+        var before = ExactOneShotRequestWriter.Serialize(request);
+        foreach (var preference in new[]
+        {
+            new RunOptions { Telemetry = telemetry }.Telemetry,
+            new SpawnOptions { Telemetry = telemetry }.Telemetry,
+            new SpawnWithPtyOptions { Telemetry = telemetry }.Telemetry,
+        })
+        {
+            using var document = JsonDocument.Parse(MxcContainer.SerializeRequest(request, preference));
+            if (enabled.HasValue)
+            {
+                Assert.Equal(enabled.Value, document.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
+            }
+            else
+            {
+                Assert.False(document.RootElement.TryGetProperty("telemetry", out _));
+            }
+        }
+        Assert.Equal(before, ExactOneShotRequestWriter.Serialize(request));
+    }
+
+    [Fact]
+    public void Containment_IsClosedToSdkImplementations()
+    {
+        var constructor = Assert.Single(typeof(Containment).GetConstructors(
+            System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic));
+        Assert.True(constructor.IsFamilyAndAssembly);
+        Assert.True(typeof(Containment).IsAbstract);
+        foreach (var type in new[]
+        {
+            typeof(Containment.Process),
+            typeof(Containment.ProcessContainer),
+            typeof(Containment.Bubblewrap),
+            typeof(Containment.Lxc),
+            typeof(Containment.Seatbelt),
+            typeof(Containment.Wslc),
+            typeof(Containment.IsolationSession),
+        })
+        {
+            Assert.True(type.IsSealed);
+            Assert.Equal(typeof(Containment), type.BaseType);
+        }
+        Assert.Null(typeof(ContainerRequest).GetProperty("Experimental"));
+        Assert.Null(typeof(ContainerRequest).GetProperty("Version"));
+        Assert.Null(typeof(ContainerRequest).GetProperty("Telemetry"));
+        Assert.Null(typeof(Containment.ProcessContainer).GetProperty("LeastPrivilege"));
+    }
+
     public static IEnumerable<object[]> SdkV1Cases =>
         ResourceNames("input")
             .Select(name => new object[] { name });
@@ -23,7 +89,11 @@ public sealed class ExactOneShotRequestWriterTests
         var expected = ReadSdkV1("expected", name);
         var request = RequestFromFixture(input);
 
-        var actual = ExactOneShotRequestWriter.Serialize(request);
+        using var document = JsonDocument.Parse(input);
+        var telemetry = document.RootElement.TryGetProperty("telemetry", out var enabled)
+            ? new TelemetryConfig { Enabled = enabled.GetBoolean() }
+            : null;
+        var actual = ExactOneShotRequestWriter.Serialize(request, telemetry);
 
         JsonAssert.MatchesJson(actual, expected, $"sdk-v1/{name}.json");
     }
@@ -32,9 +102,9 @@ public sealed class ExactOneShotRequestWriterTests
     public void Writer_MintsContainerIdForUnnamedRequests()
     {
         var first = ExactOneShotRequestWriter.Serialize(
-            new SandboxRequest(new SandboxPolicy(), "echo first"));
+            new ContainerRequest("echo first"));
         var second = ExactOneShotRequestWriter.Serialize(
-            new SandboxRequest(new SandboxPolicy(), "echo second"));
+            new ContainerRequest("echo second"));
 
         using var firstDocument = JsonDocument.Parse(first);
         using var secondDocument = JsonDocument.Parse(second);
@@ -52,7 +122,7 @@ public sealed class ExactOneShotRequestWriterTests
     [InlineData("user-selected")]
     public void Writer_PreservesSuppliedContainerNames(string name)
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo id")
+        var request = new ContainerRequest("echo id")
         {
             ContainerName = name,
         };
@@ -72,7 +142,7 @@ public sealed class ExactOneShotRequestWriterTests
             ["A"] = "last",
         };
         environment["PATH"] = "updated";
-        var request = new SandboxRequest(new SandboxPolicy(), "echo env")
+        var request = new ContainerRequest("echo env")
         {
             Environment = environment,
         };
@@ -84,13 +154,14 @@ public sealed class ExactOneShotRequestWriterTests
     }
 
     [Fact]
-    public void Writer_RespectsDictionaryComparerThroughLegacyCaptureMigration()
+    public void Writer_MapsProcessContainerCaptureDenialsWithoutChangingEnvironmentOrder()
     {
-#pragma warning disable MXC0001
-        var policy = new SandboxPolicy { CaptureDenials = new CaptureDenialsPolicy() };
-#pragma warning restore MXC0001
-        var request = new SandboxRequest(policy, "echo env")
+        var request = new ContainerRequest("echo env")
         {
+            Containment = new Containment.ProcessContainer
+            {
+                CaptureDenials = new CaptureDenialsPolicy(),
+            },
             Environment = new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["PATH"] = "first",
@@ -113,7 +184,7 @@ public sealed class ExactOneShotRequestWriterTests
             ["Other"] = "middle",
         };
         environment["KEY"] = "last";
-        var request = new SandboxRequest(new SandboxPolicy(), "echo env")
+        var request = new ContainerRequest("echo env")
         {
             Environment = environment,
         };
@@ -129,7 +200,7 @@ public sealed class ExactOneShotRequestWriterTests
     [InlineData("BAD=KEY")]
     public void Writer_RejectsMalformedEnvironmentKeys(string key)
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo env")
+        var request = new ContainerRequest("echo env")
         {
             Environment = new Dictionary<string, string> { [key] = "" },
         };
@@ -146,9 +217,9 @@ public sealed class ExactOneShotRequestWriterTests
     [InlineData(ulong.MaxValue)]
     public void Writer_PreservesFullUnsignedWslcMemoryMb(ulong memoryMb)
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo memory")
+        var request = new ContainerRequest("echo memory")
         {
-            Containment = new WslcContainment { MemoryMb = memoryMb },
+            Containment = new Containment.Wslc { MemoryMb = memoryMb },
         };
 
         using var document = JsonDocument.Parse(ExactOneShotRequestWriter.Serialize(request));
@@ -158,27 +229,9 @@ public sealed class ExactOneShotRequestWriterTests
     }
 
     [Fact]
-    public void Writer_RejectsExperimentalOptInBeforeAliasMigration()
-    {
-#pragma warning disable MXC0001
-        var request = new SandboxRequest(
-            new SandboxPolicy { CaptureDenials = new CaptureDenialsPolicy() }, "echo")
-        {
-            Experimental = true,
-            Containment = new WslcContainment(),
-        };
-#pragma warning restore MXC0001
-
-        var error = Assert.Throws<ArgumentException>(
-            () => ExactOneShotRequestWriter.Serialize(request));
-        Assert.Equal("request", error.ParamName);
-        Assert.Contains("Stable V1", error.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void Writer_IgnoresInheritDefaultEnvironmentWithoutEnvironment()
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo env")
+        var request = new ContainerRequest("echo env")
         {
             InheritDefaultEnvironment = true,
         };
@@ -193,18 +246,16 @@ public sealed class ExactOneShotRequestWriterTests
     [Fact]
     public void Writer_RejectsUndefinedNetworkAction()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy
+        var request = new ContainerRequest("echo invalid")
+        {
+            Network = new NetworkPolicy
             {
-                Network = new NetworkPolicy
+                Egress = new NetworkEgressPolicy
                 {
-                    Egress = new NetworkEgressPolicy
-                    {
-                        Default = (NetworkAction)42,
-                    },
+                    Default = (NetworkAction)42,
                 },
             },
-            "echo invalid");
+        };
 
         var exception = Assert.Throws<ArgumentOutOfRangeException>(
             () => ExactOneShotRequestWriter.Serialize(request));
@@ -219,9 +270,9 @@ public sealed class ExactOneShotRequestWriterTests
     [Fact]
     public void Writer_RejectsCommaSeparatedProcessContainerCapability()
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo invalid")
+        var request = new ContainerRequest("echo invalid")
         {
-            Containment = new ProcessContainerContainment
+            Containment = new Containment.ProcessContainer
             {
                 Capabilities = ["internetClient,registryRead"],
             },
@@ -238,11 +289,11 @@ public sealed class ExactOneShotRequestWriterTests
     }
 
     [Fact]
-    public void Writer_MigratesLegacyCaptureDenialsToProcessContainer()
+    public void Writer_MapsProcessContainerCaptureDenials()
     {
-#pragma warning disable MXC0001
-        var request = new SandboxRequest(
-            new SandboxPolicy
+        var request = new ContainerRequest("echo capture")
+        {
+            Containment = new Containment.ProcessContainer
             {
                 CaptureDenials = new CaptureDenialsPolicy
                 {
@@ -250,8 +301,7 @@ public sealed class ExactOneShotRequestWriterTests
                     RetainEtl = true,
                 },
             },
-            "echo capture");
-#pragma warning restore MXC0001
+        };
 
         using var document = JsonDocument.Parse(ExactOneShotRequestWriter.Serialize(request));
         var root = document.RootElement;
@@ -266,18 +316,12 @@ public sealed class ExactOneShotRequestWriterTests
         Assert.False(root.TryGetProperty("captureDenials", out _));
     }
 
-    private static SandboxRequest RequestFromFixture(string json)
+    private static ContainerRequest RequestFromFixture(string json)
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        var policy = Policy(root.GetProperty("policy"));
-        if (root.TryGetProperty("telemetry", out var telemetry)
-            && telemetry.GetBoolean())
-        {
-            policy.Telemetry = new TelemetrySettings { Enabled = true };
-        }
-
-        var request = new SandboxRequest(policy, root.GetProperty("command").GetString()!)
+        var sections = root.GetProperty("policy");
+        var request = new ContainerRequest(root.GetProperty("command").GetString()!)
         {
             Containment = Containment(root.GetProperty("containment")),
             ContainerName = root.TryGetProperty("containerName", out var containerName)
@@ -290,6 +334,22 @@ public sealed class ExactOneShotRequestWriterTests
                 root.TryGetProperty("inheritDefaultEnv", out var inherit)
                 && inherit.GetBoolean(),
         };
+        if (sections.TryGetProperty("filesystem", out var filesystem))
+        {
+            request.Filesystem = Filesystem(filesystem);
+        }
+        if (sections.TryGetProperty("network", out var network))
+        {
+            request.Network = Network(network);
+        }
+        if (sections.TryGetProperty("ui", out var ui))
+        {
+            request.Ui = Ui(ui);
+        }
+        if (sections.TryGetProperty("timeoutMs", out var timeout))
+        {
+            request.TimeoutMs = timeout.GetUInt32();
+        }
         if (root.TryGetProperty("environment", out var environment))
         {
             request.Environment = environment.EnumerateObject()
@@ -299,28 +359,6 @@ public sealed class ExactOneShotRequestWriterTests
                     StringComparer.Ordinal);
         }
         return request;
-    }
-
-    private static SandboxPolicy Policy(JsonElement policy)
-    {
-        var result = new SandboxPolicy();
-        if (policy.TryGetProperty("filesystem", out var filesystem))
-        {
-            result.Filesystem = Filesystem(filesystem);
-        }
-        if (policy.TryGetProperty("network", out var network))
-        {
-            result.Network = Network(network);
-        }
-        if (policy.TryGetProperty("ui", out var ui))
-        {
-            result.Ui = Ui(ui);
-        }
-        if (policy.TryGetProperty("timeoutMs", out var timeout))
-        {
-            result.TimeoutMs = timeout.GetUInt32();
-        }
-        return result;
     }
 
     private static FilesystemPolicy Filesystem(JsonElement filesystem) => new()
@@ -335,7 +373,7 @@ public sealed class ExactOneShotRequestWriterTests
 
     private static NetworkPolicy Network(JsonElement network)
     {
-        var policy = new NetworkPolicy
+        var networkPolicy = new NetworkPolicy
         {
             Egress = network.TryGetProperty("egress", out var egress) ? Egress(egress) : null,
             Ingress = network.TryGetProperty("ingress", out var ingress) ? Ingress(ingress) : null,
@@ -346,7 +384,7 @@ public sealed class ExactOneShotRequestWriterTests
                 }
                 : null,
         };
-        return policy;
+        return networkPolicy;
     }
 
     private static NetworkEgressPolicy Egress(JsonElement egress) => new()
@@ -399,8 +437,8 @@ public sealed class ExactOneShotRequestWriterTests
 
     private static UiPolicy Ui(JsonElement ui) => new()
     {
-        AllowWindows = ui.TryGetProperty("allowWindows", out var allowWindows)
-            && allowWindows.GetBoolean(),
+        Disable = !ui.TryGetProperty("disable", out var disable)
+            || disable.GetBoolean(),
         Clipboard = ui.TryGetProperty("clipboard", out var clipboard)
             ? Clipboard(clipboard)
             : ClipboardPolicy.None,
@@ -409,31 +447,28 @@ public sealed class ExactOneShotRequestWriterTests
             && injection.GetBoolean(),
     };
 
-    private static SandboxContainment Containment(JsonElement containment)
+    private static Containment Containment(JsonElement containment)
     {
         var kind = containment.GetProperty("kind").GetString();
         return kind switch
         {
-            "process" => new ProcessContainment(),
+            "process" => new Containment.Process(),
             "processContainer" => ProcessContainer(containment),
-            "lxc" => new LxcContainment
+            "lxc" => new Containment.Lxc
             {
                 Distribution = containment.GetProperty("distribution").GetString()!,
                 Release = containment.GetProperty("release").GetString()!,
             },
-            "bubblewrap" => new BubblewrapContainment(),
+            "bubblewrap" => new Containment.Bubblewrap(),
             "seatbelt" => Seatbelt(containment),
-            "isolationSession" => new IsolationSessionContainment(),
+            "isolationSession" => new Containment.IsolationSession(),
             "wslc" => Wslc(containment),
             _ => throw new InvalidOperationException($"unknown fixture containment {kind}"),
         };
     }
 
-    private static ProcessContainerContainment ProcessContainer(JsonElement containment) => new()
+    private static Containment.ProcessContainer ProcessContainer(JsonElement containment) => new()
     {
-        LeastPrivilege =
-            containment.TryGetProperty("leastPrivilege", out var leastPrivilege)
-            && leastPrivilege.GetBoolean(),
         LearningMode =
             containment.TryGetProperty("learningMode", out var learningMode)
             && learningMode.GetBoolean(),
@@ -446,7 +481,7 @@ public sealed class ExactOneShotRequestWriterTests
             : null,
     };
 
-    private static SeatbeltContainment Seatbelt(JsonElement containment) => new()
+    private static Containment.Seatbelt Seatbelt(JsonElement containment) => new()
     {
         GuiAccess = containment.TryGetProperty("guiAccess", out var guiAccess)
             && guiAccess.GetBoolean(),
@@ -457,7 +492,7 @@ public sealed class ExactOneShotRequestWriterTests
         ExtraMachLookups = StringList(containment, "extraMachLookups"),
     };
 
-    private static WslcContainment Wslc(JsonElement containment) => new()
+    private static Containment.Wslc Wslc(JsonElement containment) => new()
     {
         Image = containment.GetProperty("image").GetString()!,
         CpuCount = containment.TryGetProperty("cpuCount", out var cpuCount)

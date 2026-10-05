@@ -215,45 +215,43 @@ prepare a machine that will run offline — warm the cache first:
 
 ### TypeScript SDK
 
-Use the v1 `createConfigFromPolicy()` API to build an exact `1.0.0` config, then
-customize WSLC-specific fields before spawning:
+Create a V1 `ContainerRequest` with WSLC configuration and use `spawnAsync`
+for live output:
 
 ```typescript
-import {
-  spawnSandboxFromConfig,
-} from '@microsoft/mxc-sdk';
-import {
-  createConfigFromPolicy,
-  type SandboxPolicy,
-} from '@microsoft/mxc-sdk/v1';
+import { spawnAsync, type ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
-const policy = {
-  network: {
-    egress: { default: 'allow' as const },
-    ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
+const request: ContainerRequest = {
+  containment: {
+    type: 'wslc',
+    config: { image: 'python:3.12-alpine', cpuCount: 2, memoryMb: 1024 },
   },
-} satisfies SandboxPolicy;
+  command: 'python3 -c "print(\'Hello from WSLC\')"',
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
+  timeoutMs: 30_000,
+};
 
-const config = createConfigFromPolicy(policy, 'wslc');
-config.process!.commandLine = 'python3 -c "print(\'Hello from WSLC\')"';
-config.wslc!.image = 'python:3.12-alpine';
-config.wslc!.cpuCount = 2;
-config.wslc!.memoryMb = 1024;
-
-// PTY mode (interactive terminal):
-const ptyProcess = spawnSandboxFromConfig(config);
-
-// Non-PTY mode (reliable exit codes, separate stdout/stderr):
-const child = spawnSandboxFromConfig(config, { usePty: false });
-child.stdout?.on('data', (data) => console.log(data.toString()));
-child.on('close', (code) => console.log('Exit code:', code));
+const child = await spawnAsync(request);
+try {
+  child.standardOutput?.on('data', (data) => process.stdout.write(data));
+  child.standardError?.on('data', (data) => process.stderr.write(data));
+  console.log(await child.waitAsync());
+} finally {
+  child.dispose();
+}
 ```
+
+WSLC SDK execution uses standard output/error streams and does not expose a
+caller-controlled PTY or stdin.
 
 ### Rust SDK
 
 The Rust SDK (`mxc-sdk`) runs WSLC **in-process** — it does not spawn
 `wxc-exec.exe`. Build the crate with its `wslc` feature, select the backend with
-`build_request_with_containment`, and run the request directly:
+`Containment::Wslc`, and run the request directly:
 
 ```toml
 # Cargo.toml
@@ -262,35 +260,31 @@ mxc-sdk = { path = "…/src/core/mxc-sdk", features = ["wslc"] }
 ```
 
 ```rust
-use mxc_sdk::v1::{
-    build_request_with_containment, run, spawn_sandbox, Containment, SandboxPolicy, WslcSection,
-};
+use mxc_sdk::v1::{self, configs::WslcConfig, ContainerRequest, Containment};
 
-let policy = SandboxPolicy::default();
-
-let wslc = WslcSection {
+let wslc = WslcConfig {
     image: "python:3.12-alpine".to_string(),
     cpu_count: Some(2),
     memory_mb: Some(1024),
     ..Default::default()
 };
-
-let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c \"print('Hello from WSLC')\"", None)?;
+let request = ContainerRequest {
+    containment: Containment::Wslc(wslc),
+    ..ContainerRequest::new("python3 -c \"print('Hello from WSLC')\"")
+};
 
 // Run to completion, capturing output…
-let output = run(request.clone())?;
+let output = v1::run(request.clone(), Default::default())?;
 println!("{}", String::from_utf8_lossy(&output.stdout));
 
 // …or stream it live (read stdout/stderr while it runs, kill it, wait).
-let mut sandbox = spawn_sandbox(request)?;
-let stdout = sandbox.take_stdout().expect("stdout");
+let mut process = v1::spawn(request, Default::default())?;
+let stdout = process.take_stdout().expect("stdout");
 ```
 
-`WslcSection` mirrors the `wslc` block below;
-`WslcSection::default()` matches the SDK default (`alpine:latest`). Settings go
-through the same parser the executor uses, so a rejected value (e.g. a port
-mapping with a zero or duplicated host port) fails at
-`build_request_with_containment` rather than at spawn.
+`WslcConfig` mirrors the `wslc` settings below;
+`WslcConfig::default()` matches the SDK default (`alpine:latest`). The typed
+request is validated by the same native engine as executor requests.
 
 Notes and limits:
 

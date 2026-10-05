@@ -5,7 +5,8 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{spawn_with_pty_json, MxcPtySize};
+use mxc_sdk::__ffi::spawn_with_pty_json;
+use mxc_sdk::v1::MxcPtySize;
 
 use crate::streaming::{finish_handle, sdk_error_detail, MxcSandbox};
 use crate::{

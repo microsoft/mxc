@@ -5,7 +5,7 @@
 //!
 //! `input/<name>.json` describes an SDK-neutral policy invocation. This module
 //! converts it to authoring types and calls [`build_request_with_containment`],
-//! the request constructor exported by the Rust SDK, to get a `SandboxRequest`.
+//! the request constructor exported by the Rust SDK, to get a `ContainerRequest`.
 //! Its exact-contract adapter produces the internal [`ExecutionRequest`].
 //!
 //! `expected/<name>.json` is an independently hand-authored exact `1.0.0` JSON
@@ -16,7 +16,7 @@
 //! must fail exact parsing with their recorded error code and diagnostic.
 //!
 //! The parent policy module includes this module only under `#[cfg(test)]`.
-//! It lives beside the implementation to inspect the private `SandboxRequest`
+//! It lives beside the implementation to inspect the private `ContainerRequest`
 //! internals without exposing them through the public SDK API.
 
 use std::collections::BTreeMap;
@@ -27,13 +27,15 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 use wxc_common::state_aware_request::MxcRequest;
 
-use crate::configs::{Lxc, ProcessContainer, ProcessContainerNetwork, Seatbelt};
+use crate::configs::{
+    LxcConfig, ProcessContainerConfig, ProcessContainerNetwork, SeatbeltConfig, WslcConfig,
+};
 
 use super::{
-    build_request_with_containment, ClipboardPolicy, Containment, FilesystemSection, NetworkAction,
-    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
-    NetworkProtocol, NetworkRuleSection, NetworkSection, RuntimeConfigSection, SandboxPolicy,
-    UiSection, WslcSection,
+    build_request_with_containment, ClipboardPolicy, ContainerPolicy, Containment,
+    FilesystemPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy,
+    NetworkPolicy, NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig,
+    UiPolicy,
 };
 
 #[derive(Deserialize)]
@@ -58,8 +60,6 @@ enum ContainmentInput {
     Process,
     #[serde(rename_all = "camelCase")]
     ProcessContainer {
-        #[serde(default)]
-        least_privilege: bool,
         #[serde(default)]
         learning_mode: bool,
         #[serde(default)]
@@ -126,7 +126,7 @@ struct FilesystemInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UiInput {
     #[serde(default)]
-    allow_windows: bool,
+    disable: bool,
     #[serde(default)]
     clipboard: ClipboardInput,
     #[serde(default)]
@@ -220,12 +220,12 @@ impl ActionInput {
 }
 
 impl RuleInput {
-    fn into_policy(self) -> NetworkRuleSection {
-        NetworkRuleSection {
+    fn into_policy(self) -> NetworkRulePolicy {
+        NetworkRulePolicy {
             to: self.to.map(|peers| {
                 peers
                     .into_iter()
-                    .map(|peer| NetworkPeerSection {
+                    .map(|peer| NetworkPeerPolicy {
                         cidr: peer.cidr,
                         except: peer.except,
                     })
@@ -234,7 +234,7 @@ impl RuleInput {
             ports: self.ports.map(|ports| {
                 ports
                     .into_iter()
-                    .map(|port| NetworkPortSection {
+                    .map(|port| NetworkPortPolicy {
                         protocol: port.protocol.map(|protocol| match protocol {
                             ProtocolInput::Tcp => NetworkProtocol::Tcp,
                             ProtocolInput::Udp => NetworkProtocol::Udp,
@@ -250,35 +250,35 @@ impl RuleInput {
     }
 }
 
-fn rules(rules: Option<Vec<RuleInput>>) -> Option<Vec<NetworkRuleSection>> {
+fn rules(rules: Option<Vec<RuleInput>>) -> Option<Vec<NetworkRulePolicy>> {
     rules.map(|rules| rules.into_iter().map(RuleInput::into_policy).collect())
 }
 
 impl PolicyInput {
-    fn into_policy(self) -> SandboxPolicy {
-        SandboxPolicy {
-            filesystem: self.filesystem.map(|filesystem| FilesystemSection {
+    fn into_policy(self) -> ContainerPolicy {
+        ContainerPolicy {
+            filesystem: self.filesystem.map(|filesystem| FilesystemPolicy {
                 readwrite_paths: filesystem.readwrite_paths,
                 readonly_paths: filesystem.readonly_paths,
                 denied_paths: filesystem.denied_paths,
                 clear_policy_on_exit: filesystem.clear_policy_on_exit,
             }),
-            network: self.network.map(|network| NetworkSection {
-                egress: network.egress.map(|egress| NetworkEgressSection {
+            network: self.network.map(|network| NetworkPolicy {
+                egress: network.egress.map(|egress| NetworkEgressPolicy {
                     default: egress.default.map(ActionInput::into_policy),
                     allow: rules(egress.allow),
                     deny: rules(egress.deny),
                 }),
-                ingress: network.ingress.map(|ingress| NetworkIngressSection {
+                ingress: network.ingress.map(|ingress| NetworkIngressPolicy {
                     default: ingress.default.map(ActionInput::into_policy),
                     host_loopback: ingress.host_loopback.map(ActionInput::into_policy),
                 }),
-                runtime_config: network.runtime_config.map(|runtime| RuntimeConfigSection {
+                runtime_config: network.runtime_config.map(|runtime| NetworkRuntimeConfig {
                     network_proxy: runtime.network_proxy,
                 }),
             }),
-            ui: self.ui.map(|ui| UiSection {
-                allow_windows: ui.allow_windows,
+            ui: self.ui.map(|ui| UiPolicy {
+                disable: ui.disable,
                 clipboard: match ui.clipboard {
                     ClipboardInput::None => ClipboardPolicy::None,
                     ClipboardInput::Read => ClipboardPolicy::Read,
@@ -301,12 +301,10 @@ impl ContainmentInput {
         match self {
             Self::Process => Containment::Process,
             Self::ProcessContainer {
-                least_privilege,
                 learning_mode,
                 capabilities,
                 allowed_proxy_peer,
-            } => Containment::ProcessContainer(ProcessContainer {
-                least_privilege,
+            } => Containment::ProcessContainer(ProcessContainerConfig {
                 learning_mode,
                 capabilities,
                 network: allowed_proxy_peer.map(|peer| ProcessContainerNetwork {
@@ -320,7 +318,7 @@ impl ContainmentInput {
                 nested_pty,
                 keychain_access,
                 extra_mach_lookups,
-            } => Containment::Seatbelt(Seatbelt {
+            } => Containment::Seatbelt(SeatbeltConfig {
                 profile_override,
                 gui_access,
                 nested_pty,
@@ -330,7 +328,7 @@ impl ContainmentInput {
             Self::Lxc {
                 distribution,
                 release,
-            } => Containment::Lxc(Lxc {
+            } => Containment::Lxc(LxcConfig {
                 distribution,
                 release,
             }),
@@ -343,7 +341,7 @@ impl ContainmentInput {
                 gpu,
                 storage_path,
                 port_mappings,
-            } => Containment::Wslc(WslcSection {
+            } => Containment::Wslc(WslcConfig {
                 image,
                 image_tar_path,
                 cpu_count,
@@ -526,7 +524,7 @@ fn invalid_documents_are_rejected() {
 /// default container instead.
 #[test]
 fn unnamed_requests_mint_a_distinct_container_id() {
-    let policy = SandboxPolicy::default();
+    let policy = ContainerPolicy::default();
     let first = build_request_with_containment(&policy, &Containment::Process, "echo", None)
         .unwrap()
         .inner

@@ -18,18 +18,18 @@ import type {
   Seatbelt,
   Ui,
 } from '../generated/v1_0_0/wire.js';
-import { MxcError } from '../errors.js';
-import { SDK_CONTRACT_VERSION } from '../contract-version.js';
+import { MxcError } from '../v1/errors.js';
+import { SDK_CONTRACT_VERSION } from '../v1/contract-version.js';
 import type {
   ContainerConfig,
   NetworkConfig,
   PortMapping,
   ProcessContainerConfig,
   WslcConfig,
-} from '../types.js';
+} from '../v1/types.js';
 import {
   UnsupportedV1NetworkFields,
-} from '../types.js';
+} from '../v1/types.js';
 
 export interface OneShotRequestOptions {
   workingDirectory?: string;
@@ -74,8 +74,7 @@ function validateStableConfig(config: ContainerConfig): void {
   if (config.version !== SDK_CONTRACT_VERSION) {
     malformed(
       `the in-process Node binding accepts only the SDK-owned ` +
-      `${SDK_CONTRACT_VERSION} contract; use spawnSandboxFromConfig for raw ` +
-      `exact-version configs`,
+      `${SDK_CONTRACT_VERSION} contract`,
     );
   }
   if ('appContainer' in config) {
@@ -276,7 +275,7 @@ function processContainer(config: ContainerConfig): ProcessContainer | undefined
   const directionalNetwork = config.network?.egress !== undefined
     || config.network?.ingress !== undefined;
   const output: ProcessContainer = {
-    leastPrivilege: source?.leastPrivilege ?? false,
+    leastPrivilege: false,
     capabilities: directionalNetwork
       ? (source?.capabilities ?? []).filter(
         (capability) =>

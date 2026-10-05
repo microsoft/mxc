@@ -7,7 +7,7 @@
 //! Linux-gated file, and a live one: every case creates, starts, and destroys a
 //! real container, so it needs LXC installed and root. `lxc-exec` cannot stand
 //! in for any of it — that binary runs through `mxc_engine::run`, which never
-//! reaches `spawn_sandbox`.
+//! reaches `spawn`.
 //!
 //! Tests skip when LXC is missing or the runner is unprivileged, unless
 //! `MXC_LXC_TESTS_REQUIRE_EXECUTION` turns a skip into a failure.
@@ -21,12 +21,9 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::v1::policy::{Containment, FilesystemSection, NetworkSection};
-use mxc_sdk::v1::{
-    build_request_with_containment, spawn_sandbox, NetworkAction, NetworkEgressSection,
-    NetworkIngressSection, SandboxPolicy,
-};
-use mxc_sdk::WaitOutcome;
+use mxc_sdk::v1::WaitResult;
+use mxc_sdk::v1::{spawn, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
+use mxc_sdk::v1::{ContainerRequest, Containment, FilesystemPolicy, NetworkPolicy};
 
 /// The bound on a read or wait that should already have finished. Long enough
 /// to create a container, start it, and destroy it again on a loaded CI runner.
@@ -181,7 +178,7 @@ fn lxc_pty_closing_input_sends_canonical_eof() {
             &name,
             LIVE_TIMEOUT_MS,
         ),
-        mxc_sdk::MxcPtySize::default(),
+        Default::default(),
     )
     .expect("spawn_with_pty");
     let mut reader = terminal.try_clone_reader().expect("reader");
@@ -196,7 +193,7 @@ fn lxc_pty_closing_input_sends_canonical_eof() {
         .expect("write input");
     drop(writer);
 
-    assert_eq!(terminal.wait().expect("wait"), WaitOutcome::Exited(0));
+    assert_eq!(terminal.wait().expect("wait"), WaitResult::Exited(0));
     let output = reader_thread.join().expect("reader thread");
     assert!(output.contains("eof-observed"), "got: {output:?}");
     assert_container_released(&name);
@@ -227,7 +224,7 @@ fn container_is_running(name: &str) -> bool {
 /// would hold this file's mutex until the CI job's own cap. A healthy workload
 /// here finishes in well under a second, so the bound only ever fires on a
 /// failure, and it fires as a reported timeout with teardown rather than a hang.
-fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_sdk::v1::SandboxRequest {
+fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_sdk::v1::ContainerRequest {
     lxc_request_with_network(command, name, timeout_ms, isolated_network())
 }
 
@@ -238,41 +235,39 @@ fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_sdk::v1::Sandb
 /// names no network defaults to `enforcementMode: 'capabilities'`, which
 /// selects Windows AppContainer capability SIDs; LXC has no mechanism for that
 /// and refuses the request before it reaches a container.
-fn isolated_network() -> NetworkSection {
-    let mut egress = NetworkEgressSection::default();
-    egress.default = Some(NetworkAction::Deny);
-    let mut ingress = NetworkIngressSection::default();
-    ingress.default = Some(NetworkAction::Deny);
-    ingress.host_loopback = Some(NetworkAction::Deny);
-
-    let mut network = NetworkSection::default();
-    network.egress = Some(egress);
-    network.ingress = Some(ingress);
-    network
+fn isolated_network() -> NetworkPolicy {
+    NetworkPolicy {
+        egress: Some(NetworkEgressPolicy {
+            default: Some(NetworkAction::Deny),
+            ..Default::default()
+        }),
+        ingress: Some(NetworkIngressPolicy {
+            default: Some(NetworkAction::Deny),
+            host_loopback: Some(NetworkAction::Deny),
+        }),
+        ..Default::default()
+    }
 }
 
 fn lxc_request_with_network(
     command: &str,
     name: &str,
     timeout_ms: u32,
-    network: NetworkSection,
-) -> mxc_sdk::v1::SandboxRequest {
-    let mut policy = SandboxPolicy::default();
-    policy.filesystem = Some(FilesystemSection {
-        readwrite_paths: vec!["/tmp".to_string()],
-        readonly_paths: vec![],
-        denied_paths: vec![],
-        clear_policy_on_exit: None,
-    });
-    policy.network = Some(network);
-    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
-    build_request_with_containment(
-        &policy,
-        &Containment::Lxc(mxc_sdk::v1::configs::Lxc::default()),
-        command,
-        Some(name),
-    )
-    .expect("build_request_with_containment should succeed")
+    network: NetworkPolicy,
+) -> mxc_sdk::v1::ContainerRequest {
+    ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec!["/tmp".to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![],
+            clear_policy_on_exit: None,
+        }),
+        network: Some(network),
+        containment: Containment::Lxc(mxc_sdk::v1::configs::LxcConfig::default()),
+        container_name: Some(name.to_string()),
+        timeout_ms: (timeout_ms != 0).then_some(timeout_ms),
+        ..ContainerRequest::new(command)
+    }
 }
 
 /// Reads `stream` to EOF on its own thread, so a stream a killed workload
@@ -333,11 +328,14 @@ fn streaming_lxc_delivers_stdout_before_exit() {
     // Blocking on stdin rather than sleeping: the workload cannot reach its
     // exit until this test lets it, so the "still running" assertion below
     // cannot race a slow runner.
-    let mut proc = spawn_sandbox(lxc_request(
-        "printf 'FIRST\\n'; IFS= read -r _; printf 'SECOND\\n'",
-        &name,
-        LIVE_TIMEOUT_MS,
-    ))
+    let mut proc = spawn(
+        lxc_request(
+            "printf 'FIRST\\n'; IFS= read -r _; printf 'SECOND\\n'",
+            &name,
+            LIVE_TIMEOUT_MS,
+        ),
+        Default::default(),
+    )
     .expect("spawn");
     let mut stdin = proc.take_stdin().expect("stdin available");
     let stdout = read_first_line_within(
@@ -356,7 +354,7 @@ fn streaming_lxc_delivers_stdout_before_exit() {
 
     let rest = read_to_end_within(Box::new(stdout), LIVE_TIMEOUT, "stdout").expect("read stdout");
     assert!(rest.contains("SECOND"), "got: {rest:?}");
-    assert_eq!(proc.wait().expect("wait"), WaitOutcome::Exited(0));
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
     assert_container_released(&name);
 }
 
@@ -368,11 +366,14 @@ fn streaming_lxc_keeps_stdout_and_stderr_apart() {
     let _guard = exclusive();
     let name = container_name("streams");
 
-    let mut proc = spawn_sandbox(lxc_request(
-        "printf 'TO_STDOUT\\n'; printf 'TO_STDERR\\n' >&2",
-        &name,
-        LIVE_TIMEOUT_MS,
-    ))
+    let mut proc = spawn(
+        lxc_request(
+            "printf 'TO_STDOUT\\n'; printf 'TO_STDERR\\n' >&2",
+            &name,
+            LIVE_TIMEOUT_MS,
+        ),
+        Default::default(),
+    )
     .expect("spawn");
     let stdout = proc.take_stdout().expect("stdout available");
     let stderr = proc.take_stderr().expect("stderr available");
@@ -391,7 +392,7 @@ fn streaming_lxc_keeps_stdout_and_stderr_apart() {
         "stdout leaked into stderr: {err:?}"
     );
 
-    assert_eq!(proc.wait().expect("wait"), WaitOutcome::Exited(0));
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
     assert_container_released(&name);
 }
 
@@ -404,7 +405,11 @@ fn streaming_lxc_delivers_stdin_and_closing_it_sends_eof() {
     let name = container_name("stdin");
 
     // `cat` runs until EOF, so it exits only because the writer was dropped.
-    let mut proc = spawn_sandbox(lxc_request("cat", &name, LIVE_TIMEOUT_MS)).expect("spawn");
+    let mut proc = spawn(
+        lxc_request("cat", &name, LIVE_TIMEOUT_MS),
+        Default::default(),
+    )
+    .expect("spawn");
     let mut stdin = proc.take_stdin().expect("stdin available");
     let stdout = proc.take_stdout().expect("stdout available");
 
@@ -414,7 +419,7 @@ fn streaming_lxc_delivers_stdin_and_closing_it_sends_eof() {
     let out = read_to_end_within(stdout, LIVE_TIMEOUT, "stdout").expect("read stdout");
     assert!(out.contains("ping-pong"), "got: {out:?}");
 
-    assert_eq!(proc.wait().expect("wait"), WaitOutcome::Exited(0));
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
     assert_container_released(&name);
 }
 
@@ -429,11 +434,14 @@ fn streaming_lxc_wait_reports_the_workloads_exit_code() {
     // workload's status propagates, not the attach process's own.
     for code in [0, 1, 42] {
         let name = container_name(&format!("exit{code}"));
-        let mut proc = spawn_sandbox(lxc_request(&format!("exit {code}"), &name, LIVE_TIMEOUT_MS))
-            .expect("spawn");
+        let mut proc = spawn(
+            lxc_request(&format!("exit {code}"), &name, LIVE_TIMEOUT_MS),
+            Default::default(),
+        )
+        .expect("spawn");
         assert_eq!(
             proc.wait().expect("wait"),
-            WaitOutcome::Exited(code),
+            WaitResult::Exited(code),
             "workload exited {code}"
         );
         assert_container_released(&name);
@@ -451,11 +459,14 @@ fn streaming_lxc_kill_stops_the_whole_container() {
     // The backgrounded sleep stands in for a descendant the workload leaves
     // behind: it inherits stdout and outlives the foreground one, which keeps
     // the attach alive so the kill has something to reach.
-    let mut proc = spawn_sandbox(lxc_request(
-        &format!("sleep {SLEEP_SECONDS} & printf 'READY\\n'; sleep {SLEEP_SECONDS}"),
-        &name,
-        LIVE_TIMEOUT_MS,
-    ))
+    let mut proc = spawn(
+        lxc_request(
+            &format!("sleep {SLEEP_SECONDS} & printf 'READY\\n'; sleep {SLEEP_SECONDS}"),
+            &name,
+            LIVE_TIMEOUT_MS,
+        ),
+        Default::default(),
+    )
     .expect("spawn");
     let stdout = read_first_line_within(
         proc.take_stdout().expect("stdout available"),
@@ -490,7 +501,7 @@ fn streaming_lxc_kill_stops_the_whole_container() {
 
     assert_ne!(
         proc.wait().expect("wait after kill"),
-        WaitOutcome::Exited(0),
+        WaitResult::Exited(0),
         "a killed workload should not report success"
     );
     assert_container_released(&name);
@@ -504,11 +515,14 @@ fn streaming_lxc_timeout_reports_timed_out_and_tears_down() {
     let _guard = exclusive();
     let name = container_name("timeout");
 
-    let mut proc = spawn_sandbox(lxc_request(
-        &format!("printf 'READY\\n'; sleep {SLEEP_SECONDS}"),
-        &name,
-        2_000,
-    ))
+    let mut proc = spawn(
+        lxc_request(
+            &format!("printf 'READY\\n'; sleep {SLEEP_SECONDS}"),
+            &name,
+            2_000,
+        ),
+        Default::default(),
+    )
     .expect("spawn");
     let _stdout = read_first_line_within(
         proc.take_stdout().expect("stdout available"),
@@ -521,7 +535,7 @@ fn streaming_lxc_timeout_reports_timed_out_and_tears_down() {
     let start = Instant::now();
     assert_eq!(
         proc.wait().expect("wait yields an outcome"),
-        WaitOutcome::TimedOut,
+        WaitResult::TimedOut,
         "a workload outliving its timeout should report a timeout"
     );
     assert!(
@@ -541,11 +555,14 @@ fn streaming_lxc_dropping_the_handle_tears_down() {
     let name = container_name("drop");
 
     {
-        let mut proc = spawn_sandbox(lxc_request(
-            &format!("printf 'READY\\n'; sleep {SLEEP_SECONDS}"),
-            &name,
-            LIVE_TIMEOUT_MS,
-        ))
+        let mut proc = spawn(
+            lxc_request(
+                &format!("printf 'READY\\n'; sleep {SLEEP_SECONDS}"),
+                &name,
+                LIVE_TIMEOUT_MS,
+            ),
+            Default::default(),
+        )
         .expect("spawn");
         let _stdout = read_first_line_within(
             proc.take_stdout().expect("stdout available"),
@@ -571,11 +588,14 @@ fn streaming_lxc_refuses_a_container_a_live_sandbox_holds() {
     let _guard = exclusive();
     let name = container_name("shared");
 
-    let mut held = spawn_sandbox(lxc_request(
-        &format!("printf 'READY\\n'; sleep {SLEEP_SECONDS}"),
-        &name,
-        LIVE_TIMEOUT_MS,
-    ))
+    let mut held = spawn(
+        lxc_request(
+            &format!("printf 'READY\\n'; sleep {SLEEP_SECONDS}"),
+            &name,
+            LIVE_TIMEOUT_MS,
+        ),
+        Default::default(),
+    )
     .expect("spawn");
     let _stdout = read_first_line_within(
         held.take_stdout().expect("stdout available"),
@@ -586,7 +606,10 @@ fn streaming_lxc_refuses_a_container_a_live_sandbox_holds() {
     // LXC applies a run's network section only when the container starts, so
     // serving a second sandbox on the same container would mean stopping this
     // workload to restart it under the other run's policy.
-    let refusal = match spawn_sandbox(lxc_request("true", &name, LIVE_TIMEOUT_MS)) {
+    let refusal = match spawn(
+        lxc_request("true", &name, LIVE_TIMEOUT_MS),
+        Default::default(),
+    ) {
         Ok(_) => panic!("a second sandbox on a live container must be refused"),
         Err(e) => e,
     };
@@ -603,9 +626,12 @@ fn streaming_lxc_refuses_a_container_a_live_sandbox_holds() {
 
     // The refusal must not strand the name: the claim is released with the
     // handle, so the next sandbox can have it.
-    let mut reused =
-        spawn_sandbox(lxc_request("true", &name, LIVE_TIMEOUT_MS)).expect("spawn after release");
-    assert_eq!(reused.wait().expect("wait"), WaitOutcome::Exited(0));
+    let mut reused = spawn(
+        lxc_request("true", &name, LIVE_TIMEOUT_MS),
+        Default::default(),
+    )
+    .expect("spawn after release");
+    assert_eq!(reused.wait().expect("wait"), WaitResult::Exited(0));
     assert_container_released(&name);
 }
 
@@ -619,23 +645,24 @@ fn streaming_lxc_tears_down_a_networked_container() {
 
     // Outbound access puts the container on the bridge and installs egress
     // chains, so this is the case whose teardown has firewall rules to remove.
-    let mut egress = NetworkEgressSection::default();
-    egress.default = Some(NetworkAction::Allow);
-    let mut network = NetworkSection::default();
-    network.egress = Some(egress);
-    let mut proc = spawn_sandbox(lxc_request_with_network(
-        "printf 'NETWORKED\\n'",
-        &name,
-        LIVE_TIMEOUT_MS,
-        network,
-    ))
+    let network = NetworkPolicy {
+        egress: Some(NetworkEgressPolicy {
+            default: Some(NetworkAction::Allow),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut proc = spawn(
+        lxc_request_with_network("printf 'NETWORKED\\n'", &name, LIVE_TIMEOUT_MS, network),
+        Default::default(),
+    )
     .expect("spawn");
     let stdout = proc.take_stdout().expect("stdout available");
 
     let out = read_to_end_within(stdout, LIVE_TIMEOUT, "stdout").expect("read stdout");
     assert!(out.contains("NETWORKED"), "got: {out:?}");
 
-    assert_eq!(proc.wait().expect("wait"), WaitOutcome::Exited(0));
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
     // The chains live in the container's own network namespace, so destroying
     // the container is what proves they are gone.
     assert_container_released(&name);

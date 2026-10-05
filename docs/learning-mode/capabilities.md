@@ -356,8 +356,8 @@ so CLI callers can locate the deliverable without scanning the filesystem:
 The pointer echoes the policy file's `summary`; that file is the authoritative
 record of denials. In-process Rust callers receive the same summary information through
 `Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
-C# SDK exposes it through `RunResult.OutputMetadata` and
-`MxcSandboxProcess.OutputMetadata`.
+C# SDK exposes `ExecutionMetadata` through `ExecutionResult.OutputMetadata` and
+`MxcProcess.OutputMetadata`.
 
 By default, the intermediate ETW `.etl` trace is an internal, runner-managed
 file in a protected per-run temporary directory that MXC deletes after

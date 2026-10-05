@@ -6,18 +6,18 @@ use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{
     CaptureDenialsMode, ProcessContainerSystemSettings, ProcessContainerUi,
-    ProcessContainerUiIsolation,
+    ProcessContainerUiIsolation, WslcConfig,
 };
 
 use super::super::{
-    ClipboardPolicy, Containment, NetworkAction, NetworkEgressSection, NetworkIngressSection,
-    NetworkProtocol, NetworkRuleSection, UiSection, WslcSection,
+    ClipboardPolicy, Containment, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
+    NetworkProtocol, NetworkRulePolicy, UiPolicy,
 };
 use super::{error, non_empty_port, selected_process_container, selected_seatbelt, PreparedInput};
 
-fn map_ui(ui: &UiSection) -> contract::Ui {
+fn map_ui(ui: &UiPolicy) -> contract::Ui {
     contract::Ui {
-        disable: contract::OptionalField::present(!ui.allow_windows),
+        disable: contract::OptionalField::present(ui.disable),
         clipboard: contract::OptionalField::present(match ui.clipboard {
             ClipboardPolicy::None => contract::UiClipboard::None,
             ClipboardPolicy::Read => contract::UiClipboard::Read,
@@ -68,7 +68,7 @@ fn map_protocol(value: NetworkProtocol) -> contract::NetworkProtocol {
     }
 }
 
-fn map_rule(rule: &NetworkRuleSection) -> Result<contract::NetworkRule, MxcError> {
+fn map_rule(rule: &NetworkRulePolicy) -> Result<contract::NetworkRule, MxcError> {
     Ok(contract::NetworkRule {
         to: optional!(
             contract,
@@ -121,7 +121,7 @@ fn map_rule(rule: &NetworkRuleSection) -> Result<contract::NetworkRule, MxcError
     })
 }
 
-fn map_egress(value: &NetworkEgressSection) -> Result<contract::NetworkEgress, MxcError> {
+fn map_egress(value: &NetworkEgressPolicy) -> Result<contract::NetworkEgress, MxcError> {
     Ok(contract::NetworkEgress {
         default: optional!(contract, value.default.map(map_action)),
         allow: optional!(
@@ -143,14 +143,14 @@ fn map_egress(value: &NetworkEgressSection) -> Result<contract::NetworkEgress, M
     })
 }
 
-fn map_ingress(value: &NetworkIngressSection) -> contract::NetworkIngress {
+fn map_ingress(value: &NetworkIngressPolicy) -> contract::NetworkIngress {
     contract::NetworkIngress {
         default: optional!(contract, value.default.map(map_action)),
         host_loopback: optional!(contract, value.host_loopback.map(map_action)),
     }
 }
 
-fn map_wslc(wslc: &WslcSection) -> Result<contract::OneShotWslc, MxcError> {
+fn map_wslc(wslc: &WslcConfig) -> Result<contract::OneShotWslc, MxcError> {
     let port_mappings = if wslc.port_mappings.is_empty() {
         Default::default()
     } else {
@@ -232,9 +232,7 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(error)?;
             Ok(contract::ProcessContainer {
-                least_privilege: contract::OptionalField::present(
-                    process_container.least_privilege,
-                ),
+                least_privilege: contract::OptionalField::present(false),
                 learning_mode: optional!(contract, process_container.learning_mode.then_some(true)),
                 capabilities: contract::OptionalField::present(capabilities),
                 capture_denials: optional!(

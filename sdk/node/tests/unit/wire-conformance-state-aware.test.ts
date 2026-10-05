@@ -32,26 +32,26 @@
 
 import { test } from 'node:test';
 
-import type { ProcessConfig } from '../../src/types.js';
+import type { ProcessConfig } from '../../src/v1/types.js';
 
 import type {
   Phase,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
-  IsolationSessionExecConfig,
+  IsolationSessionExecuteConfig,
   IsolationSessionStopConfig,
   IsolationSessionDeprovisionConfig,
   WslcProvisionConfig,
   WslcStartConfig,
-  WslcExecConfig,
+  WslcExecuteConfig,
   WslcStopConfig,
   WslcDeprovisionConfig,
-} from '../../src/state-aware-types.js';
+} from '../../src/v1/lifecycle-types.js';
 
 import type {
   IsolationSessionProvision as WireProvisionPhase,
   IsolationSessionProvisionRequest,
-  ExecRequest,
+  ExecRequest as WireExecRequest,
   StartRequest,
   StopRequest,
   DeprovisionRequest,
@@ -70,7 +70,7 @@ import type {
 // --- enum conformance ------------------------------------------------------
 
 type WirePhase = (
-  IsolationSessionProvisionRequest | ExecRequest | StartRequest | StopRequest | DeprovisionRequest
+  IsolationSessionProvisionRequest | WireExecRequest | StartRequest | StopRequest | DeprovisionRequest
 )['phase'];
 // The lifecycle phase enum must be value-for-value identical to the wire `Phase`.
 type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
@@ -79,8 +79,8 @@ type _ExactWslcNetwork = AssertTrue<
 >;
 type _ExactExecRuntime = AssertTrue<
   Equivalent<
-    NonNullable<WslcExecConfig['runtimeConfig']>,
-    NonNullable<ExecRequest['runtimeConfig']>
+    NonNullable<NonNullable<WslcExecuteConfig['network']>['runtimeConfig']>,
+    NonNullable<WireExecRequest['runtimeConfig']>
   >
 >;
 type _ExactIsoNetwork = AssertTrue<
@@ -138,7 +138,7 @@ type _ProvisionFieldValueTypes = AssertTrue<
 // start / exec / stop / deprovision take no per-phase wire object at all (their
 // Rust associated types are `()`), so they must expose no backend-specific field.
 type _StartNoBackendKeys = AssertTrue<Equivalent<BackendKeys<IsolationSessionStartConfig>, never>>;
-type _ExecNoBackendKeys = AssertTrue<Equivalent<BackendKeys<IsolationSessionExecConfig>, never>>;
+type _ExecNoBackendKeys = AssertTrue<Equivalent<BackendKeys<IsolationSessionExecuteConfig>, never>>;
 type _StopNoBackendKeys = AssertTrue<Equivalent<BackendKeys<IsolationSessionStopConfig>, never>>;
 type _DeprovisionNoBackendKeys = AssertTrue<
   Equivalent<BackendKeys<IsolationSessionDeprovisionConfig>, never>
@@ -180,7 +180,7 @@ type _WslcProvisionFieldValueTypes = AssertTrue<
 >;
 
 type _WslcStartNoBackendKeys = AssertTrue<Equivalent<BackendKeys<WslcStartConfig>, never>>;
-type _WslcExecNoBackendKeys = AssertTrue<Equivalent<BackendKeys<WslcExecConfig>, never>>;
+type _WslcExecNoBackendKeys = AssertTrue<Equivalent<BackendKeys<WslcExecuteConfig>, never>>;
 type _WslcStopNoBackendKeys = AssertTrue<Equivalent<BackendKeys<WslcStopConfig>, never>>;
 type _WslcDeprovisionNoBackendKeys = AssertTrue<
   Equivalent<BackendKeys<WslcDeprovisionConfig>, never>
@@ -201,8 +201,8 @@ type _WslcProvisionWireKeysNonVacuous = AssertTrue<
 // top-level fields, so the one-shot oracle already pins those shapes. If a config
 // re-declared an inline shape instead, it would escape that coverage — these
 // assertions fail if that ever happens.
-type _ExecProcessReuse = AssertTrue<Equivalent<IsolationSessionExecConfig['process'], ProcessConfig>>;
-type _WslcExecProcessReuse = AssertTrue<Equivalent<WslcExecConfig['process'], ProcessConfig>>;
+type _ExecProcessReuse = AssertTrue<Equivalent<IsolationSessionExecuteConfig['process'], ProcessConfig>>;
+type _WslcExecProcessReuse = AssertTrue<Equivalent<WslcExecuteConfig['process'], ProcessConfig>>;
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type StateAwareWireConformanceAssertions = [

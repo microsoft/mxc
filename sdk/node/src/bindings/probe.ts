@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import koffi from 'koffi';
-import { MxcError } from '../errors.js';
+import { MxcError } from '../v1/errors.js';
 import { loadMxcFfi } from '../native-library.js';
 import {
   AbiErrorDetailType,
@@ -35,6 +35,52 @@ type ProbeRequestFunction = (
 ) => number;
 type FreeStringFunction = (value: Pointer) => void;
 type FreeErrorFunction = (error: AbiErrorDetail) => void;
+type AvailableBackendsFunction = () => Pointer;
+
+export interface DiscoveryNativeFacade {
+  availableBackends(): Pointer;
+  freeString(value: Pointer): void;
+}
+
+/** @internal Deterministic owned-string boundary for backend discovery. */
+export function readAvailableBackendsJsonWithNative(
+  native: DiscoveryNativeFacade,
+  decode: (pointer: Pointer) => string | undefined = decodeString,
+): string {
+  const pointer = native.availableBackends();
+  if (pointer === null || pointer === undefined || pointer === 0 || pointer === 0n) {
+    throw new MxcError('backend_error', 'native backend discovery returned a null result');
+  }
+  try {
+    const json = decode(pointer);
+    if (json === undefined) {
+      throw new MxcError('backend_error', 'native backend discovery returned an undecodable string');
+    }
+    return json;
+  } finally {
+    native.freeString(pointer);
+  }
+}
+
+export function readAvailableBackendsJson(): string {
+  const native = loadProbeLibrary();
+  try {
+    return readAvailableBackendsJsonWithNative({
+      availableBackends: bindProbeFunction<AvailableBackendsFunction>(native.handle, {
+        symbol: 'mxc_available_backends_json',
+        result: 'void *',
+        parameters: [],
+      }),
+      freeString: bindProbeFunction<FreeStringFunction>(native.handle, {
+        symbol: 'mxc_string_free',
+        result: 'void',
+        parameters: ['void *'],
+      }),
+    }, decodeProbeString);
+  } finally {
+    native.handle.unload();
+  }
+}
 
 export interface ProbeNativeFacade {
   probeRequest(

@@ -4,6 +4,7 @@
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 using Microsoft.Mxc.Sdk.Native;
 using Xunit;
 

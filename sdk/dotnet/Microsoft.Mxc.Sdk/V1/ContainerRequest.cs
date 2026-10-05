@@ -1,0 +1,318 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+using System.Text.Json.Serialization;
+
+namespace Microsoft.Mxc.Sdk.V1;
+
+/// <summary>
+/// A complete container request. This is the managed counterpart of the
+/// Rust SDK's public-field <c>v1::ContainerRequest</c>.
+/// </summary>
+public sealed class ContainerRequest
+{
+    /// <summary>Create a request for <paramref name="command"/>.</summary>
+    public ContainerRequest(string command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        Command = command;
+    }
+
+    /// <summary>The command line to run.</summary>
+    [JsonPropertyName("command")]
+    public string Command { get; }
+
+    /// <summary>Cross-backend filesystem access restrictions.</summary>
+    [JsonPropertyName("filesystem")]
+    public FilesystemPolicy? Filesystem { get; set; }
+
+    /// <summary>Cross-backend directional network restrictions.</summary>
+    [JsonPropertyName("network")]
+    public NetworkPolicy? Network { get; set; }
+
+    /// <summary>Cross-backend UI access restrictions.</summary>
+    [JsonPropertyName("ui")]
+    public UiPolicy? Ui { get; set; }
+
+    /// <summary>Execution timeout in milliseconds; null means no timeout.</summary>
+    [JsonPropertyName("timeoutMs")]
+    public uint? TimeoutMs { get; set; }
+
+    /// <summary>The selected backend and its backend-specific configuration.</summary>
+    [JsonPropertyName("containment")]
+    public Containment Containment { get; set; } = new Containment.Process();
+
+    /// <summary>
+    /// An optional caller-selected container name. Only null mints a name;
+    /// empty or whitespace names are forwarded for backend validation.
+    /// </summary>
+    [JsonPropertyName("containerName")]
+    public string? ContainerName { get; set; }
+
+    /// <summary>An optional initial working directory.</summary>
+    [JsonPropertyName("workingDirectory")]
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>
+    /// Optional environment variables supplied to the sandboxed process.
+    /// </summary>
+    /// <remarks>
+    /// When non-null, this is the child's environment and is used verbatim —
+    /// including when the dictionary is empty. Nothing is merged into it, so
+    /// an environment missing what the platform requires fails the launch.
+    /// Set <see cref="InheritDefaultEnvironment"/> to layer these entries on
+    /// top of the default environment instead. Leave this property null to
+    /// give the child the backend's default environment (on Windows, the
+    /// user's profile block).
+    /// Entries retain dictionary enumeration order. Keys must be nonempty
+    /// and cannot contain '='; values may be empty.
+    /// </remarks>
+    [JsonPropertyName("environment")]
+    public Dictionary<string, string>? Environment { get; set; }
+
+    /// <summary>
+    /// Start from the backend's default environment and layer
+    /// <see cref="Environment"/> on top of it, rather than replacing it.
+    /// </summary>
+    /// <remarks>
+    /// Use this for "the usual environment, plus these": on Windows the
+    /// default is the user's profile block, which only the OS can produce, so
+    /// it cannot be assembled by a caller. This is a different set from the
+    /// calling process's own variables, which you can still add explicitly.
+    /// Has no effect when <see cref="Environment"/> is null.
+    /// </remarks>
+    [JsonPropertyName("inheritDefaultEnv")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool InheritDefaultEnvironment { get; set; }
+
+}
+
+/// <summary>Choose one of the SDK-supported containment configurations.</summary>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
+[JsonDerivedType(typeof(Containment.Process), "process")]
+[JsonDerivedType(typeof(Containment.ProcessContainer), "processContainer")]
+[JsonDerivedType(typeof(Containment.Seatbelt), "seatbelt")]
+[JsonDerivedType(typeof(Containment.Lxc), "lxc")]
+[JsonDerivedType(typeof(Containment.Bubblewrap), "bubblewrap")]
+[JsonDerivedType(typeof(Containment.Wslc), "wslc")]
+[JsonDerivedType(typeof(Containment.IsolationSession), "isolationSession")]
+public abstract class Containment
+{
+    private protected Containment() { }
+
+    /// <summary>
+    /// The host's native process-isolation backend: ProcessContainer on Windows,
+    /// Bubblewrap on Linux, and Seatbelt on macOS.
+    /// </summary>
+    public sealed class Process : Containment;
+
+    /// <summary>Explicit Windows ProcessContainer configuration.</summary>
+    public sealed class ProcessContainer : Containment
+    {
+        /// <summary>Enable deny-and-record AppContainer learning mode.</summary>
+        [JsonPropertyName("learningMode")]
+        public bool LearningMode { get; set; }
+
+        /// <summary>Additional AppContainer capability names.</summary>
+        [JsonPropertyName("capabilities")]
+        public List<string> Capabilities { get; set; } = new();
+
+        /// <summary>Optional denial-capture configuration.</summary>
+        [JsonPropertyName("captureDenials")]
+        public CaptureDenialsPolicy? CaptureDenials { get; set; }
+
+        /// <summary>BaseProcessContainer-specific UI isolation.</summary>
+        [JsonPropertyName("ui")]
+        public ProcessContainerUiPolicy? Ui { get; set; } = new();
+
+        /// <summary>ProcessContainer-specific filesystem settings.</summary>
+        [JsonPropertyName("filesystem")]
+        public ProcessContainerFilesystemPolicy? Filesystem { get; set; }
+
+        /// <summary>ProcessContainer-specific directional network settings.</summary>
+        [JsonPropertyName("network")]
+        public ProcessContainerNetworkPolicy? Network { get; set; }
+    }
+
+    /// <summary>Explicit macOS Seatbelt configuration.</summary>
+    public sealed class Seatbelt : Containment
+    {
+        /// <summary>Replace the generated Seatbelt profile entirely.</summary>
+        [JsonPropertyName("profileOverride")]
+        public string? ProfileOverride { get; set; }
+
+        /// <summary>Allow GUI applications to reach WindowServer and related services.</summary>
+        [JsonPropertyName("guiAccess")]
+        public bool GuiAccess { get; set; }
+
+        /// <summary>Allow the contained process to allocate nested pseudo-terminals.</summary>
+        [JsonPropertyName("nestedPty")]
+        public bool NestedPty { get; set; } = true;
+
+        /// <summary>Allow access to the macOS Keychain.</summary>
+        [JsonPropertyName("keychainAccess")]
+        public bool KeychainAccess { get; set; }
+
+        /// <summary>Additional Mach service global names the process may resolve.</summary>
+        [JsonPropertyName("extraMachLookups")]
+        public List<string> ExtraMachLookups { get; set; } = new();
+    }
+
+    /// <summary>Explicit Linux LXC configuration.</summary>
+    public sealed class Lxc : Containment
+    {
+        /// <summary>Linux distribution for the container root filesystem.</summary>
+        [JsonPropertyName("distribution")]
+        public string Distribution { get; set; } = "alpine";
+
+        /// <summary>Distribution release version.</summary>
+        [JsonPropertyName("release")]
+        public string Release { get; set; } = "3.23";
+    }
+
+    /// <summary>Explicit Linux Bubblewrap configuration.</summary>
+    public sealed class Bubblewrap : Containment;
+
+    /// <summary>WSL Container backend configuration.</summary>
+    public sealed class Wslc : Containment
+    {
+        /// <summary>Container image reference.</summary>
+        [JsonPropertyName("image")]
+        public string Image { get; set; } = "alpine:latest";
+
+        /// <summary>Optional image archive imported when the image is not cached.</summary>
+        [JsonPropertyName("imageTarPath")]
+        public string? ImageTarPath { get; set; }
+
+        /// <summary>Requested virtual CPU count, or null for the host default.</summary>
+        [JsonPropertyName("cpuCount")]
+        public uint? CpuCount { get; set; }
+
+        /// <summary>Requested memory in MB, or null for the host default.</summary>
+        [JsonPropertyName("memoryMb")]
+        public ulong? MemoryMb { get; set; }
+
+        /// <summary>Enable GPU passthrough.</summary>
+        [JsonPropertyName("gpu")]
+        public bool Gpu { get; set; }
+
+        /// <summary>Optional WSLC image-store path.</summary>
+        [JsonPropertyName("storagePath")]
+        public string? StoragePath { get; set; }
+
+        /// <summary>Host-to-container TCP port mappings.</summary>
+        [JsonPropertyName("portMappings")]
+        public List<WslcPortMapping> PortMappings { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Windows IsolationSession backend, which runs the workload under
+    /// an isolated agent user account.
+    /// </summary>
+    /// <remarks>The native library must be built with IsolationSession support.</remarks>
+    public sealed class IsolationSession : Containment;
+}
+
+/// <summary>ProcessContainer-specific filesystem settings.</summary>
+public sealed class ProcessContainerFilesystemPolicy
+{
+    /// <summary>Paths that may be enumerated without granting file-content reads.</summary>
+    [JsonPropertyName("enumeratePaths")]
+    public List<string> EnumeratePaths { get; set; } = new();
+}
+
+/// <summary>ProcessContainer desktop-resource isolation level.</summary>
+public enum ProcessContainerUiIsolation
+{
+    /// <summary>Isolate the desktop.</summary>
+    Desktop,
+
+    /// <summary>Isolate desktop handles.</summary>
+    Handles,
+
+    /// <summary>Isolate desktop atoms.</summary>
+    Atoms,
+
+    /// <summary>Use the complete container UI isolation posture.</summary>
+    Container,
+}
+
+/// <summary>ProcessContainer system-settings access level.</summary>
+public enum ProcessContainerSystemSettings
+{
+    /// <summary>Allow parameter and display-setting changes.</summary>
+    All,
+
+    /// <summary>Allow parameter changes only.</summary>
+    Parameters,
+
+    /// <summary>Allow display-setting changes only.</summary>
+    Display,
+
+    /// <summary>Block parameter and display-setting changes.</summary>
+    None,
+}
+
+/// <summary>BaseProcessContainer-specific UI settings.</summary>
+public sealed class ProcessContainerUiPolicy
+{
+    /// <summary>Desktop-resource isolation level.</summary>
+    [JsonPropertyName("isolation")]
+    public ProcessContainerUiIsolation Isolation { get; set; } =
+        ProcessContainerUiIsolation.Container;
+
+    /// <summary>Permit desktop system control.</summary>
+    [JsonPropertyName("desktopSystemControl")]
+    public bool DesktopSystemControl { get; set; }
+
+    /// <summary>System-settings access level.</summary>
+    [JsonPropertyName("systemSettings")]
+    public ProcessContainerSystemSettings SystemSettings { get; set; } =
+        ProcessContainerSystemSettings.None;
+
+    /// <summary>Permit Input Method Editor access.</summary>
+    [JsonPropertyName("ime")]
+    public bool Ime { get; set; }
+}
+
+/// <summary>ProcessContainer-specific directional network settings.</summary>
+public sealed class ProcessContainerNetworkPolicy
+{
+    /// <summary>
+    /// Package family name or AppContainer profile authorized to connect to the
+    /// runtime proxy.
+    /// </summary>
+    [JsonPropertyName("allowedProxyPeer")]
+    public string? AllowedProxyPeer { get; set; }
+}
+
+/// <summary>A WSLC host-to-container TCP port mapping.</summary>
+public sealed class WslcPortMapping
+{
+    /// <summary>Create a TCP port mapping.</summary>
+    public WslcPortMapping(int windowsPort, int containerPort)
+    {
+        WindowsPort = ValidatePort(windowsPort, nameof(windowsPort));
+        ContainerPort = ValidatePort(containerPort, nameof(containerPort));
+    }
+
+    /// <summary>The listening port on the Windows host.</summary>
+    [JsonPropertyName("windowsPort")]
+    public ushort WindowsPort { get; }
+
+    /// <summary>The destination port in the container.</summary>
+    [JsonPropertyName("containerPort")]
+    public ushort ContainerPort { get; }
+
+    private static ushort ValidatePort(int port, string parameterName)
+    {
+        if (port is < 1 or > ushort.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                parameterName,
+                port,
+                $"Port must be between 1 and {ushort.MaxValue}.");
+        }
+        return (ushort)port;
+    }
+}

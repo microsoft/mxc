@@ -14,8 +14,8 @@ import {
 import { findMxcFfiLibrary } from '../../src/native-library.js';
 import {
   _setRequestProbeDependencies,
-  probeSandboxSupport,
-} from '../../src/probe.js';
+  probe,
+} from '../../src/v1/probe.js';
 
 const completeProbe = {
   tier: 'appcontainer-dacl',
@@ -56,7 +56,7 @@ function runProbeOutput(payload: unknown) {
     () => JSON.stringify(payload),
     'win32',
   );
-  return probeSandboxSupport();
+  return probe();
 }
 
 function assertProbeOutputRejected(payload: unknown): void {
@@ -71,7 +71,7 @@ afterEach(() => {
   _setProbeNativeDependencies();
 });
 
-describe('probeSandboxSupport', () => {
+describe('probe', () => {
   it('serializes the config and forwards it to the native binding', () => {
     let forwarded: string | undefined;
     _setRequestProbeDependencies((requestJson) => {
@@ -83,10 +83,9 @@ describe('probeSandboxSupport', () => {
       return JSON.stringify(completeProbe);
     }, 'win32');
 
-    const output = probeSandboxSupport({
-      version: '0.9.0-alpha',
-      containment: 'processcontainer',
-      process: { commandLine: 'cmd /c exit 0' },
+    const output = probe({
+      containment: { type: 'processcontainer' },
+      command: 'cmd /c exit 0',
     });
 
     assert.equal(output.tier, 'appcontainer-dacl');
@@ -100,7 +99,7 @@ describe('probeSandboxSupport', () => {
       return JSON.stringify(completeProbe);
     }, 'win32');
 
-    const output = probeSandboxSupport();
+    const output = probe();
 
     assert.equal(output.tier, 'appcontainer-dacl');
     assert.equal(forwarded, 'default');
@@ -113,29 +112,27 @@ describe('probeSandboxSupport', () => {
       return JSON.stringify(completeProbe);
     }, 'win32');
 
-    probeSandboxSupport(undefined);
+    probe(undefined);
 
     assert.equal(forwarded, 'default');
   });
 
-  it('rejects a supplied config that does not serialize to a string', () => {
+  it('rejects a request without a command before dispatch', () => {
     let nativeCalls = 0;
     _setRequestProbeDependencies(() => {
       nativeCalls += 1;
       return JSON.stringify(completeProbe);
     }, 'win32');
-    const config = {
-      toJSON: () => undefined,
-    };
+    const config = { command: undefined };
 
     assert.throws(
-      () => probeSandboxSupport(config as never),
-      /config must serialize to a JSON string/,
+      () => probe(config as never),
+      /command must be a non-empty string/,
     );
     assert.equal(nativeCalls, 0);
   });
 
-  it('rejects other supplied values that stringify to undefined', () => {
+  it('rejects non-request values before dispatch', () => {
     let nativeCalls = 0;
     _setRequestProbeDependencies(() => {
       nativeCalls += 1;
@@ -144,8 +141,8 @@ describe('probeSandboxSupport', () => {
 
     for (const config of [() => undefined, Symbol('config')]) {
       assert.throws(
-        () => probeSandboxSupport(config as never),
-        /config must serialize to a JSON string/,
+        () => probe(config as never),
+        (error) => error instanceof Error,
       );
     }
     assert.equal(nativeCalls, 0);
@@ -158,10 +155,9 @@ describe('probeSandboxSupport', () => {
     }, 'win32');
 
     assert.throws(() => {
-      probeSandboxSupport({
-        version: '0.9.0-alpha',
-        containment: 'wslc',
-        process: { commandLine: 'echo hi' },
+      probe({
+        containment: { type: 'wslc' },
+        command: 'echo hi',
       });
     }, (error) => error === nativeError);
   });
@@ -171,7 +167,7 @@ describe('probeSandboxSupport', () => {
       () => 'not json',
       'win32',
     );
-    assert.throws(() => probeSandboxSupport(), /invalid request probe JSON/);
+    assert.throws(() => probe(), /invalid request probe JSON/);
   });
 
   it('rejects complete facts with neither a tier nor an error', () => {
@@ -284,13 +280,13 @@ describe('probeSandboxSupport', () => {
       'linux',
     );
     assert.throws(
-      () => probeSandboxSupport(),
+      () => probe(),
       /available only for Windows ProcessContainer/,
     );
     assert.equal(nativeCalls, 0);
   });
 
-  it('reports serialization failures before off-Windows platform errors', () => {
+  it('rejects malformed requests before off-Windows platform errors', () => {
     let nativeCalls = 0;
     _setRequestProbeDependencies(
       () => {
@@ -301,8 +297,8 @@ describe('probeSandboxSupport', () => {
     );
 
     assert.throws(
-      () => probeSandboxSupport({ toJSON: () => undefined } as never),
-      /config must serialize to a JSON string/,
+      () => probe({ command: undefined } as never),
+      /command must be a non-empty string/,
     );
     assert.equal(nativeCalls, 0);
   });
@@ -437,21 +433,21 @@ describe('request probe native ownership', () => {
         ? 'requires a built Windows mxc_ffi library'
         : false,
     }, () => {
-      const entrypoint = pathToFileURL(path.join(process.cwd(), 'dist', 'index.js')).href;
+      const entrypoint = pathToFileURL(path.join(process.cwd(), 'dist', 'v1', 'index.js')).href;
       const script = `
-        import { probeSandboxSupport } from ${JSON.stringify(entrypoint)};
-        const first = probeSandboxSupport();
-        const second = probeSandboxSupport();
+        import { probe } from ${JSON.stringify(entrypoint)};
+        const first = probe();
+        const second = probe();
         const hasValidResult = (result) =>
           result.probes && (result.tier !== undefined || result.error !== undefined);
         if (!hasValidResult(first) || !hasValidResult(second)) {
           throw new Error('invalid probe result');
         }
         try {
-          probeSandboxSupport({
-            version: 'malformed',
-            containment: 'processcontainer',
-            process: { commandLine: 'cmd /c exit 0' },
+          probe({
+            containment: { type: 'processcontainer' },
+            command: 'cmd /c exit 0',
+            ui: { disable: 'malformed' },
           });
           throw new Error('malformed request unexpectedly succeeded');
         } catch (error) {

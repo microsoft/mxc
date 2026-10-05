@@ -15,7 +15,7 @@ const policy = readFileSync(
   "utf8"
 );
 const csharp = readFileSync(
-  join(root, "sdk", "dotnet", "Microsoft.Mxc.Sdk", "MxcTelemetry.cs"),
+  join(root, "sdk", "dotnet", "Microsoft.Mxc.Sdk", "V1", "MxcTelemetry.cs"),
   "utf8"
 );
 const rustSdk = readFileSync(
@@ -23,7 +23,7 @@ const rustSdk = readFileSync(
   "utf8"
 );
 const typescript = readFileSync(
-  join(root, "sdk", "node", "src", "telemetry.ts"),
+  join(root, "sdk", "node", "src", "v1", "telemetry.ts"),
   "utf8"
 );
 const errors = [];

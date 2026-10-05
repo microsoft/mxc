@@ -1,23 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Tests for the ported SDK helpers: policy discovery, platform support, and
-//! the SandboxPolicy -> SandboxRequest builder.
+//! Tests for SDK helpers and V1 request authoring.
 
-use mxc_sdk::platform_support;
-use mxc_sdk::v1::{
-    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    SandboxPolicy,
+use mxc_sdk::v1::platform_support;
+use mxc_sdk::v1::policy::filesystem::{
+    available_tools_policy, temporary_files_policy, user_profile_policy,
 };
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use mxc_sdk::v1::ContainerRequest;
 #[cfg(target_os = "windows")]
-use mxc_sdk::v1::{build_request_with_containment, Containment, WslcSection};
+use mxc_sdk::v1::ErrorCode;
 #[cfg(target_os = "windows")]
-use mxc_sdk::ErrorCode;
+use mxc_sdk::v1::{configs::WslcConfig, Containment};
 
 #[cfg(target_os = "macos")]
-use mxc_sdk::v1::spawn_sandbox;
+use mxc_sdk::v1::spawn;
 #[cfg(target_os = "macos")]
-use mxc_sdk::WaitOutcome;
+use mxc_sdk::v1::WaitResult;
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -56,7 +56,7 @@ fn available_tools_policy_filters_nonexistent_and_dedups() {
     let path_val = format!("{cwd}{sep}/this/does/not/exist/xyzzy");
     let env = env_pairs(&[("PATH", &path_val), ("CARGO_HOME", &cwd)]);
 
-    let result = available_tools_policy(Some(&env));
+    let result = available_tools_policy(Some(&env), Default::default());
 
     assert!(
         result.readonly_paths.iter().any(|p| p.contains(&cwd)),
@@ -121,93 +121,87 @@ fn temporary_files_policy_empty_when_missing() {
 fn user_profile_policy_does_not_panic() {
     // Behaviour is host-dependent; assert it returns without error and never
     // populates readwrite (it is a read-only fragment).
-    let result = user_profile_policy();
+    let result = user_profile_policy(None);
     assert!(result.readwrite_paths.is_empty());
 }
 
 #[test]
-fn rust_sdk_builds_directional_networking() {
-    use mxc_sdk::v1::policy::{
-        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
-    };
-
-    let mut egress = NetworkEgressSection::default();
-    egress.default = Some(NetworkAction::Deny);
-    let mut ingress = NetworkIngressSection::default();
-    ingress.default = Some(NetworkAction::Deny);
-    ingress.host_loopback = Some(NetworkAction::Deny);
-    let mut network = NetworkSection::default();
-    network.egress = Some(egress);
-    network.ingress = Some(ingress);
-
-    let mut policy = SandboxPolicy::default();
-    policy.network = Some(network);
-
-    build_request(&policy, "echo hello", None)
-        .expect("the Rust SDK should build directional networking");
+fn explicitly_empty_environment_does_not_discover_host_tools_or_profile() {
+    let empty = [];
+    assert!(available_tools_policy(Some(&empty), Default::default())
+        .readonly_paths
+        .is_empty());
+    assert!(user_profile_policy(Some(&empty)).readonly_paths.is_empty());
 }
 
 #[test]
-fn rust_sdk_builds_directional_process_container_networking_and_capture() {
-    use mxc_sdk::v1::configs::{CaptureDenials, ProcessContainer, ProcessContainerNetwork};
-    use mxc_sdk::v1::policy::{
-        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
-        RuntimeConfigSection,
+fn user_profile_policy_uses_supplied_environment() {
+    let directory = std::env::temp_dir().join(format!("mxc-profile-{}", std::process::id()));
+    let (key, expected) = if cfg!(target_os = "windows") {
+        ("LOCALAPPDATA", directory.join("Programs").join("Tool"))
+    } else {
+        ("HOME", directory.join(".local").join("bin"))
     };
-    use mxc_sdk::v1::{build_request_with_containment, Containment};
+    std::fs::create_dir_all(&expected).unwrap();
+    let environment = env_pairs(&[(key, &directory.to_string_lossy())]);
+    let result = user_profile_policy(Some(&environment));
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(
+        result.readonly_paths,
+        [expected.to_string_lossy().into_owned()]
+    );
+    assert!(result.readwrite_paths.is_empty());
+}
 
-    let mut egress = NetworkEgressSection::default();
-    egress.default = Some(NetworkAction::Deny);
-    let mut ingress = NetworkIngressSection::default();
-    ingress.default = Some(NetworkAction::Allow);
-    ingress.host_loopback = Some(NetworkAction::Deny);
-    let mut runtime_config = RuntimeConfigSection::default();
-    runtime_config.network_proxy = Some("http://127.0.0.1:8080".to_string());
-    let mut network = NetworkSection::default();
-    network.egress = Some(egress);
-    network.ingress = Some(ingress);
-    network.runtime_config = Some(runtime_config);
-
-    let mut policy = SandboxPolicy::default();
-    policy.network = Some(network);
-    let mut process_network = ProcessContainerNetwork::default();
-    process_network.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
-    let mut process_container = ProcessContainer::default();
-    process_container.capture_denials = Some(CaptureDenials::default());
-    process_container.network = Some(process_network);
-
-    build_request_with_containment(
-        &policy,
-        &Containment::ProcessContainer(process_container),
-        "echo hello",
-        None,
-    )
-    .expect("public re-exports should build a schema 0.8 ProcessContainer request");
+#[cfg(target_os = "windows")]
+#[test]
+fn tool_options_filter_all_application_packages_without_changing_default() {
+    use mxc_sdk::v1::policy::filesystem::{ToolsPolicyContainerType, ToolsPolicyOptions};
+    let directory = std::env::temp_dir().join(format!("mxc-tools-{} & paths", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let grant = std::process::Command::new("icacls.exe")
+        .arg(&directory)
+        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(RX)"])
+        .output()
+        .unwrap();
+    assert!(grant.status.success(), "icacls failed: {:?}", grant);
+    let environment = env_pairs(&[("PATH", &directory.to_string_lossy())]);
+    let unfiltered = available_tools_policy(Some(&environment), Default::default());
+    let filtered = available_tools_policy(
+        Some(&environment),
+        ToolsPolicyOptions {
+            container_type: Some(ToolsPolicyContainerType::ProcessContainer),
+        },
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(unfiltered
+        .readonly_paths
+        .contains(&directory.to_string_lossy().into_owned()));
+    assert!(filtered.readonly_paths.is_empty());
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn build_request_then_run_seatbelt() {
-    let mut policy = SandboxPolicy::default();
-    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
-        readwrite_paths: vec!["/tmp".to_string()],
-        readonly_paths: vec![],
-        denied_paths: vec![],
-        clear_policy_on_exit: None,
-    });
-    policy.timeout_ms = Some(10000);
+    let request = ContainerRequest {
+        filesystem: Some(mxc_sdk::v1::FilesystemPolicy {
+            readwrite_paths: vec!["/tmp".to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: Some(10000),
+        ..ContainerRequest::new("echo built-from-request")
+    };
 
-    let request = build_request(&policy, "echo built-from-policy", None)
-        .expect("build_request should succeed");
-
-    let mut proc = spawn_sandbox(request).expect("spawn should succeed");
+    let mut proc = spawn(request, Default::default()).expect("spawn should succeed");
     let mut out = String::new();
     if let Some(mut stdout) = proc.take_stdout() {
         let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
     }
     let outcome = proc.wait().expect("wait should succeed");
-    assert_eq!(outcome, WaitOutcome::Exited(0));
-    assert!(out.contains("built-from-policy"), "got: {out:?}");
+    assert_eq!(outcome, WaitResult::Exited(0));
+    assert!(out.contains("built-from-request"), "got: {out:?}");
 }
 
 #[cfg(target_os = "linux")]
@@ -301,17 +295,20 @@ fn platform_support_windows_omits_wslc_when_not_compiled_in() {
 #[test]
 fn request_probe_accepts_default_and_typed_requests() {
     let _: fn(
-        Option<&mxc_sdk::v1::SandboxRequest>,
-    ) -> Result<mxc_sdk::ProbeOutput, mxc_sdk::Error> = mxc_sdk::v1::probe;
+        Option<&mxc_sdk::v1::ContainerRequest>,
+    ) -> Result<mxc_sdk::v1::ProbeOutput, mxc_sdk::v1::Error> = mxc_sdk::v1::probe;
 
-    let policy = SandboxPolicy::default();
-    let request = build_request(&policy, "cmd /c exit 0", None)
-        .expect("default ProcessContainer request should build");
+    let request = ContainerRequest {
+        containment: Containment::ProcessContainer(
+            mxc_sdk::v1::configs::ProcessContainerConfig::default(),
+        ),
+        ..ContainerRequest::new("cmd /c exit 0")
+    };
 
     for request in [None, Some(&request)] {
         let output = mxc_sdk::v1::probe(request).expect("ProcessContainer request should probe");
-        let _: &mxc_sdk::ProbeFacts = &output.probes;
-        let _: &mxc_sdk::UiCapabilitySupport = &output.probes.ui_capabilities;
+        let _: &mxc_sdk::v1::ProbeFacts = &output.probes;
+        let _: &mxc_sdk::v1::UiCapabilitySupport = &output.probes.ui_capabilities;
         assert!(!output.warnings.iter().any(String::is_empty));
     }
 }
@@ -319,14 +316,10 @@ fn request_probe_accepts_default_and_typed_requests() {
 #[cfg(target_os = "windows")]
 #[test]
 fn request_probe_rejects_non_process_container_requests() {
-    let policy = SandboxPolicy::default();
-    let request = build_request_with_containment(
-        &policy,
-        &Containment::Wslc(WslcSection::default()),
-        "echo hi",
-        None,
-    )
-    .expect("WSLC request should build");
+    let request = ContainerRequest {
+        containment: Containment::Wslc(WslcConfig::default()),
+        ..ContainerRequest::new("echo hi")
+    };
 
     let error = mxc_sdk::v1::probe(Some(&request))
         .expect_err("request probe should reject non-ProcessContainer containment");
@@ -349,7 +342,7 @@ fn available_tools_policy_filters_system_critical() {
         return; // skip if the critical dir doesn't exist on this host
     }
     let env = env_pairs(&[("PATH", &critical)]);
-    let result = available_tools_policy(Some(&env));
+    let result = available_tools_policy(Some(&env), Default::default());
     assert!(
         !result
             .readonly_paths
@@ -364,7 +357,7 @@ fn available_tools_policy_filters_system_critical() {
 /// alone; a consumer should never need `mxc_engine` as a direct dependency.
 #[test]
 fn bubblewrap_network_types_are_reachable_from_the_facade() {
-    use mxc_sdk::{BubblewrapNetworkSupport, ProxyEnforcement};
+    use mxc_sdk::v1::{BubblewrapNetworkSupport, ProxyEnforcement};
 
     let network: Option<BubblewrapNetworkSupport> = platform_support().bubblewrap_network;
     if let Some(network) = network {

@@ -240,14 +240,14 @@ const managedRequest = read(
   "dotnet",
   "Microsoft.Mxc.Sdk",
   "V1",
-  "SandboxRequest.cs"
+  "ContainerRequest.cs"
 );
 const managedPolicy = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
   "V1",
-  "SandboxPolicy.cs"
+  "ContainerRequestSections.cs"
 );
 const generatedWire = read(
   "sdk",
@@ -268,12 +268,11 @@ const managedContainmentWire = new Map([
 ]);
 const managedOneShotContainments = managedDerivedTypes(
   managedRequest,
-  "SandboxContainment"
+  "Containment"
 ).map((name) => {
-  const managedName = name.replace(/Containment$/, "");
-  const wire = managedContainmentWire.get(managedName);
+  const wire = managedContainmentWire.get(name);
   if (!wire) {
-    errors.push(`managed containment ${managedName} has no exact v1 wire mapping`);
+    errors.push(`managed containment ${name} has no exact v1 wire mapping`);
   }
   return wire;
 });
@@ -289,8 +288,14 @@ compare(
 );
 compare(
   "process-container exact fields",
-  managedJsonFields(managedRequest, "ProcessContainerContainment"),
+  managedJsonFields(generatedWire, "ProcessContainer"),
   schemaProperties(exactV1, "ProcessContainer")
+);
+compare(
+  "process-container authoring fields",
+  managedJsonFields(managedRequest, "ProcessContainer"),
+  // The request writer fixes this native-only field to the SDK default.
+  schemaProperties(exactV1, "ProcessContainer").filter((field) => field !== "leastPrivilege")
 );
 compare(
   "process-container UI exact fields",
@@ -314,7 +319,7 @@ compare(
 );
 compare(
   "WSLC one-shot exact fields",
-  managedJsonFields(managedRequest, "WslcContainment"),
+  managedJsonFields(managedRequest, "Wslc"),
   schemaProperties(exactV1, "OneShotWslc").filter((field) => field !== "targetOs")
 );
 compare(
@@ -322,13 +327,24 @@ compare(
   managedJsonFields(managedRequest, "WslcPortMapping"),
   schemaProperties(exactV1, "PortMapping").filter((field) => field !== "protocol")
 );
-compare("LXC exact fields", managedJsonFields(managedRequest, "LxcContainment"), schemaProperties(exactV1, "Lxc"));
-compare("Seatbelt exact fields", managedJsonFields(managedRequest, "SeatbeltContainment"), schemaProperties(exactV1, "Seatbelt"));
+compare("LXC exact fields", managedJsonFields(managedRequest, "Lxc"), schemaProperties(exactV1, "Lxc"));
+compare("Seatbelt exact fields", managedJsonFields(managedRequest, "Seatbelt"), schemaProperties(exactV1, "Seatbelt"));
 compare(
-  "sandbox policy fields handled by exact writer",
-  managedJsonFields(managedPolicy, "SandboxPolicy"),
-  ["filesystem", "network", "ui", "captureDenials", "timeoutMs", "telemetry"]
+  "container request fields handled by exact writer",
+  managedJsonFields(managedRequest, "ContainerRequest"),
+  ["command", "filesystem", "network", "ui", "timeoutMs", "containment",
+    "containerName", "workingDirectory", "environment", "inheritDefaultEnv"]
 );
+const managedOptions = read(
+  "sdk", "dotnet", "Microsoft.Mxc.Sdk", "V1", "ExecutionOptions.cs"
+);
+for (const [name, fields] of [
+  ["RunOptions", ["experimental", "telemetry"]],
+  ["SpawnOptions", ["experimental", "telemetry"]],
+  ["SpawnWithPtyOptions", ["experimental", "telemetry", "size"]],
+]) {
+  compare(`${name} invocation fields`, managedJsonFields(managedOptions, name), fields);
+}
 compare(
   "filesystem policy exact fields plus lifecycle compatibility",
   managedJsonFields(managedPolicy, "FilesystemPolicy"),
@@ -345,11 +361,11 @@ compare("network rule exact fields", managedJsonFields(managedPolicy, "NetworkRu
 compare("network egress exact fields", managedJsonFields(managedPolicy, "NetworkEgressPolicy"), schemaProperties(exactV1, "NetworkEgress"));
 compare("network ingress exact fields", managedJsonFields(managedPolicy, "NetworkIngressPolicy"), schemaProperties(exactV1, "NetworkIngress"));
 compare("network runtime config exact fields", managedJsonFields(managedPolicy, "NetworkRuntimeConfig"), schemaProperties(exactV1, "RuntimeConfig"));
-compare("telemetry settings exact fields", managedJsonFields(managedPolicy, "TelemetrySettings"), schemaProperties(exactV1, "Telemetry"));
+compare("telemetry config exact fields", managedJsonFields(managedPolicy, "TelemetryConfig"), schemaProperties(exactV1, "Telemetry"));
 compare(
   "UI policy exact writer source fields",
   managedJsonFields(managedPolicy, "UiPolicy"),
-  ["allowWindows", "clipboard", "allowInputInjection"]
+  ["disable", "clipboard", "allowInputInjection"]
 );
 
 const rustProbeFull = read("src", "core", "mxc_engine", "src", "probe.rs");
@@ -359,12 +375,14 @@ const managedDiscovery = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
+  "V1",
   "PlatformDiscovery.cs"
 );
 const managedSandbox = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
+  "V1",
   "MxcPlatform.cs"
 );
 
@@ -462,11 +480,11 @@ if (rustBackends.length === 0) {
     "dotnet",
     "Microsoft.Mxc.Sdk",
     "V1",
-    "StateAwareTypes.cs"
+    "LifecycleTypes.cs"
   );
   compare(
     "state-aware containment enum",
-    enumVariants(managedStateAware, "StateAwareContainment", "csharp"),
+    enumVariants(managedStateAware, "LifecycleContainmentKind", "csharp"),
     rustBackends
   );
 }
@@ -493,19 +511,19 @@ const rustPrefixes = [
   .map((match) => `${match[1]}:${match[2]}`);
 function managedIdPrefixes(source) {
   return [
-    ...namedBody(source, "StateAwareContainment", "ContainmentForId")
-      .matchAll(/"([^"]+)"\s*=>\s*StateAwareContainment\.(\w+)/g),
+    ...namedBody(source, "LifecycleContainmentKind", "ContainmentForId")
+      .matchAll(/"([^"]+)"\s*=>\s*LifecycleContainmentKind\.(\w+)/g),
   ].map((match) => `${match[1]}:${match[2]}`);
 }
 compare(
   "state-aware sandbox-id prefix extractor",
   managedIdPrefixes(
     `class Example {
-      static StateAwareContainment ContainmentForId(string id) {
-        return id switch { "iso" => StateAwareContainment.IsolationSession };
+      static LifecycleContainmentKind ContainmentForId(ContainerId id) {
+        return id switch { "iso" => LifecycleContainmentKind.IsolationSession };
       }
-      static StateAwareContainment Other(string id) {
-        return id switch { "unrelated" => StateAwareContainment.Wslc };
+      static LifecycleContainmentKind Other(string id) {
+        return id switch { "unrelated" => LifecycleContainmentKind.Wslc };
       }
     }`
   ),

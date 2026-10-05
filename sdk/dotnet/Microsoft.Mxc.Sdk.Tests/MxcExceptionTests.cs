@@ -95,9 +95,9 @@ public class MxcExceptionTests
     [Fact]
     public void NativeFailureWithNoApiCall_MarshalsAbsentFieldsAsNull()
     {
-        var policy = InvalidCidrPolicy();
+        var request = InvalidCidrRequest();
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Run(policy, "echo hi"));
+        var ex = Assert.Throws<MxcException>(() => MxcContainer.Run(request));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
@@ -112,16 +112,16 @@ public class MxcExceptionTests
         // The streaming entry point fills a caller-provided detail rather than
         // returning one inside a result struct; this pins that the same shape
         // reaches the caller by that route too.
-        var policy = InvalidCidrPolicy();
+        var request = InvalidCidrRequest();
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Spawn(policy, "echo hi"));
+        var ex = Assert.Throws<MxcException>(() => MxcContainer.Spawn(request));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
         Assert.Null(ex.Operation);
     }
 
-    private static SandboxPolicy InvalidCidrPolicy() => new()
+    private static ContainerRequest InvalidCidrRequest() => new("echo hi")
     {
         Network = new NetworkPolicy
         {

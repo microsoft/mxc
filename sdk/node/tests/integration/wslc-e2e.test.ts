@@ -1,14 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// SDK end-to-end tests — these tests spawn real containers via wxc-exec.exe.
+// SDK end-to-end tests — these tests spawn real containers through mxc_ffi.
 // They require the appropriate runtime to be installed and configured.
 //
 // WSLC tests require:
 //   - Windows 11 with WSL2 enabled
 //   - WSLC SDK runtime installed
-//   - wxc-exec.exe built with --features wslc
-//   - wslcsdk.dll in the same directory as wxc-exec.exe
+//   - mxc_ffi built with WSLC support
+//   - wslcsdk.dll available to the native library
 //   - network access to Docker Hub, or alpine:latest and python:3.12-alpine
 //     already cached
 //
@@ -20,7 +20,6 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import os from 'os';
-import { ChildProcess } from 'child_process';
 import { sdk } from './test-helpers.js';
 
 // WSLC tests require a Windows machine with WSL2 and WSLC SDK installed.
@@ -44,7 +43,7 @@ async function pickAvailableHostPort(start = 40000, end = 40099): Promise<number
   throw new Error(`pickAvailableHostPort: no free port in [${start}, ${end}]`);
 }
 
-describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
+describe('WSLC SDK E2E — V1 request APIs', {
   skip: !isWslcAvailable ? 'WSLC tests require MXC_ENABLE_WSLC_TESTS=1 on Windows with WSL2 and WSLC SDK' : undefined,
 }, () => {
 
@@ -63,37 +62,30 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
         },
         filesystem: { readwritePaths: [mountDir] },
       };
-      const config = sdk.createConfigFromPolicy(policy, 'wslc');
-      config.process!.commandLine = [
-        "python3 -c \"import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}')\"",
-        "nproc",
-        "cat /proc/meminfo | grep MemTotal",
-        "echo 'All fields work'",
-      ].join(' && ');
-      config.wslc!.image = 'python:3.12-alpine';
-      config.wslc!.cpuCount = 2;
-      config.wslc!.memoryMb = 1024;
+      const result = await sdk.runAsync({
+        ...policy,
+        command: [
+          "python3 -c \"import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}')\"",
+          'nproc',
+          'cat /proc/meminfo | grep MemTotal',
+          "echo 'All fields work'",
+        ].join(' && '),
+        containment: {
+          type: 'wslc',
+          config: {
+            image: 'python:3.12-alpine',
+            cpuCount: 2,
+            memoryMb: 1024,
+          },
+        },
+      });
       // Intentionally omit `storagePath` so this test reuses the default
       // image store, where `python:3.12-alpine` is already cached. Pointing at
       // a fresh temp directory would make the run pull the image again.
 
-      const { stdout, stderr, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve, reject) => {
-        const child = sdk.spawnSandboxFromConfig(config, { debug: true, usePty: false }) as ChildProcess;
-        let stdout = '';
-        let stderr = '';
-        child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-        child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-        child.on('error', (error: Error) => {
-          reject(new Error(`Failed to spawn WSLC sandbox process: ${error.message}${stderr ? `\n${stderr}` : ''}`));
-        });
-        child.on('close', (code: number | null) => {
-          resolve({ stdout, stderr, exitCode: code ?? -1 });
-        });
-      });
-
-      assert.strictEqual(exitCode, 0, `exit=${exitCode}\nstdout=${stdout}\nstderr=${stderr}`);
-      assert.ok(stdout.includes('Python 3.12'), `Python 3.12 not found in stdout=${stdout}`);
-      assert.ok(stdout.includes('All fields work'), `'All fields work' not found in stdout=${stdout}`);
+      assert.strictEqual(result.exitCode, 0, `exit=${result.exitCode}\nstdout=${result.stdout}\nstderr=${result.stderr}`);
+      assert.ok(result.stdout.includes('Python 3.12'), `Python 3.12 not found in stdout=${result.stdout}`);
+      assert.ok(result.stdout.includes('All fields work'), `'All fields work' not found in stdout=${result.stdout}`);
     } finally {
       fs.rmSync(testDir, { recursive: true, force: true });
     }
@@ -114,7 +106,6 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
       },
       filesystem: {},
     };
-    const config = sdk.createConfigFromPolicy(policy, 'wslc');
     // The container runs `/bin/sh -c "<script_code>"`. We base64-encode the
     // Python source and run it via a single-argv `python3 -c "..."` call to
     // avoid any embedded-newline / shell-pipeline ambiguity through the WSLC
@@ -138,24 +129,37 @@ srv = socketserver.TCPServer(('0.0.0.0', ${CONTAINER_PORT}), H)
 srv.handle_request()
 `;
     const scriptB64 = Buffer.from(pythonScript, 'utf8').toString('base64');
-    config.process!.commandLine = `python3 -c "import base64; exec(base64.b64decode('${scriptB64}'))"`;
-    config.wslc!.image = 'python:3.12-alpine';
-    config.wslc!.portMappings = [
-      { windowsPort: HOST_PORT, containerPort: CONTAINER_PORT, protocol: 'tcp' },
-    ];
-
-    const child = sdk.spawnSandboxFromConfig(config, { debug: true, usePty: false }) as ChildProcess;
+    const child = sdk.spawn({
+      ...policy,
+      command: `python3 -c "import base64; exec(base64.b64decode('${scriptB64}'))"`,
+      containment: {
+        type: 'wslc',
+        config: {
+          image: 'python:3.12-alpine',
+          portMappings: [
+            { windowsPort: HOST_PORT, containerPort: CONTAINER_PORT, protocol: 'tcp' },
+          ],
+        },
+      },
+    });
+    const standardOutput = child.standardOutput;
+    const standardError = child.standardError;
+    assert.ok(standardOutput, 'stdout should be available');
+    assert.ok(standardError, 'stderr should be available');
     let stdout = '';
     let stderr = '';
-    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-    const closed = new Promise<number | null>((resolve) => {
-      if (child.exitCode !== null) {
-        resolve(child.exitCode);
-      } else {
-        child.on('close', (code: number | null) => resolve(code));
-      }
+    standardOutput.on('data', (d: Buffer | string) => {
+      stdout += Buffer.isBuffer(d) ? d.toString() : d;
     });
+    standardError.on('data', (d: Buffer | string) => {
+      stderr += Buffer.isBuffer(d) ? d.toString() : d;
+    });
+    let completion: { exitCode: number; timedOut: boolean } | undefined;
+    const closed = child.waitAsync().then((result) => {
+      completion = result;
+      return result;
+    });
+    void closed.catch(() => {});
 
     let body = '';
     let lastErr: Error | undefined;
@@ -166,8 +170,8 @@ srv.handle_request()
       // when the container crashed).
       const probeDeadline = Date.now() + 60_000;
       while (Date.now() < probeDeadline) {
-        if (child.exitCode !== null) {
-          throw new Error(`Container exited before probe could succeed (code=${child.exitCode}). stdout=${stdout} stderr=${stderr}`);
+        if (completion !== undefined) {
+          throw new Error(`Container exited before probe could succeed (code=${completion.exitCode}). stdout=${stdout} stderr=${stderr}`);
         }
         try {
           body = await new Promise<string>((resolve, reject) => {
@@ -191,11 +195,11 @@ srv.handle_request()
       // and the container exits naturally. Wait up to 20s for clean exit, then
       // force-kill so a stuck WSLC teardown can never hang the whole suite.
       const cleanExit = await Promise.race([
-        closed,
+        closed.then(() => 'closed' as const),
         new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 20_000)),
       ]);
       if (cleanExit === 'timeout') {
-        child.kill('SIGKILL');
+        child.kill();
         await Promise.race([
           closed,
           new Promise((r) => setTimeout(r, 5_000)),
@@ -204,7 +208,7 @@ srv.handle_request()
     }
   });
 
-  it('should reject UDP port mapping with a clear SDK-limitation message', { timeout: 60_000 }, async () => {
+  it('should reject UDP port mapping before native spawn', () => {
     // The WSLC SDK declares WSLC_PORT_PROTOCOL_UDP in its header but its
     // runtime returns E_NOTIMPL (0x80004001) when UDP is actually requested.
     // The parser rejects UDP up front so SDK consumers get a clear error at
@@ -218,27 +222,26 @@ srv.handle_request()
       },
       filesystem: {},
     };
-    const config = sdk.createConfigFromPolicy(policy, 'wslc');
-    config.process!.commandLine = 'echo unreachable';
-    config.wslc!.image = 'python:3.12-alpine';
-    config.wslc!.portMappings = [
-      { windowsPort: 39000, containerPort: 9000, protocol: 'udp' as unknown as 'tcp' },
-    ];
-
-    const { exitCode, combined } = await new Promise<{ exitCode: number; combined: string }>((resolve, reject) => {
-      const child = sdk.spawnSandboxFromConfig(config, { debug: true, usePty: false }) as ChildProcess;
-      let combined = '';
-      const onData = (d: Buffer) => { combined += d.toString(); };
-      child.stdout?.on('data', onData);
-      child.stderr?.on('data', onData);
-      child.on('error', reject);
-      child.on('close', (code: number | null) => resolve({ exitCode: code ?? -1, combined }));
-    });
-
-    assert.notStrictEqual(exitCode, 0, `expected non-zero exit when UDP is requested; output=${combined}`);
-    assert.ok(
-      /udp/i.test(combined) && /not supported|not implemented/i.test(combined),
-      `expected SDK-limitation message mentioning UDP; output=${combined}`,
+    const request = {
+      ...policy,
+      command: 'echo unreachable',
+      containment: {
+        type: 'wslc' as const,
+        config: {
+          image: 'python:3.12-alpine',
+          portMappings: [
+            {
+              windowsPort: 39000,
+              containerPort: 9000,
+              protocol: 'udp' as unknown as 'tcp',
+            },
+          ],
+        },
+      },
+    };
+    assert.throws(
+      () => sdk.spawn(request),
+      /WSLC port mappings support only protocol 'tcp'/,
     );
   });
 });

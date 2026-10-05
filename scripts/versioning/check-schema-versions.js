@@ -111,7 +111,7 @@ for (const [label, version, requiredRoot] of [
 }
 
 // -- SDK (shared V1 target, high-level builder, state-aware types) --
-const contractVersionTs = read("sdk", "node", "src", "contract-version.ts");
+const contractVersionTs = read("sdk", "node", "src", "v1", "contract-version.ts");
 expectConst(
   "contract-version.ts",
   contractVersionTs,
@@ -119,26 +119,25 @@ expectConst(
   /const SDK_CONTRACT_VERSION\s*=\s*'([^']+)'/,
   sdkV1Target
 );
-const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
+const containerTs = read("sdk", "node", "src", "v1", "container.ts");
 if (
-  !/import\s*\{\s*SDK_CONTRACT_VERSION\s*\}\s*from\s*['"]\.\/contract-version\.js['"]/.test(sandboxTs) ||
-  !/export\s*\{\s*SDK_CONTRACT_VERSION\s*\}/.test(sandboxTs)
+  !/import\s*\{\s*SDK_CONTRACT_VERSION\s*\}\s*from\s*['"]\.\/contract-version\.js['"]/.test(containerTs) ||
+  !/export\s*\{\s*SDK_CONTRACT_VERSION\s*\}/.test(containerTs)
 ) {
-  errors.push("sandbox.ts: SDK_CONTRACT_VERSION must import and re-export the shared contract-version.ts target");
+  errors.push("container.ts: SDK_CONTRACT_VERSION must import and re-export the shared contract-version.ts target");
 }
-const stateAwareTs = read("sdk", "node", "src", "state-aware-types.ts");
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "STATE_AWARE_VERSION",
-  /const STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  sdkV1Target
-);
-// -- C# SDK (sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs) --
+const lifecycleTs = read("sdk", "node", "src", "v1", "lifecycle-types.ts");
+if (
+  !/export\s*\{\s*SDK_CONTRACT_VERSION\s*\}\s*from\s*['"]\.\/contract-version\.js['"]/.test(lifecycleTs)
+) {
+  errors.push("lifecycle-types.ts: SDK_CONTRACT_VERSION must re-export the shared contract-version.ts target");
+}
+// -- C# SDK (sdk/dotnet/Microsoft.Mxc.Sdk/V1/SchemaVersions.cs) --
 const schemaVersionsCs = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
+  "V1",
   "SchemaVersions.cs"
 );
 for (const [label, expected] of [

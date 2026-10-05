@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! State-aware lifecycle C ABI over the MXC public Rust SDK.
+//! State-aware lifecycle C ABI over the native engine and binding adapters.
 //!
-//! Four entry points mirror the SDK's [`mxc_sdk::run_state_aware_json`],
-//! [`mxc_sdk::exec_attached`] and [`mxc_sdk::exec_sandbox`]:
+//! Entry points mirror the SDK's [`mxc_sdk::__ffi::run_lifecycle_json`],
+//! [`mxc_engine::exec_state_aware_attached`] and [`mxc_sdk::__ffi::execute_lifecycle_json`]:
 //!
 //! - [`mxc_run_state_aware_json`] drives the **envelope phases** (`provision` /
 //!   `start` / `stop` / `deprovision`, and a dry run of any phase): JSON
@@ -19,10 +19,12 @@
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
 //! - [`mxc_state_aware_exec_pty`] returns that same lifecycle handle with merged
 //!   PTY output and caller-driven input and resize.
+//! - [`mxc_run_state_aware_exec_json`] blocks until exec finishes and returns
+//!   captured output in [`crate::MxcRunResult`].
 //!
 //! The exec entry points take the **same** request JSON and differ only in
 //! where the workload's stdio goes: relayed onto this process's console,
-//! handed back as ordinary pipes, or handed back as a caller-controlled PTY.
+//! captured, handed back as ordinary pipes, or handed back as a caller-controlled PTY.
 //!
 //! As elsewhere in this crate, every entry point is [`catch_unwind`]-wrapped,
 //! strings in/out are UTF-8 NUL-terminated, and owned out-pointers must be
@@ -32,10 +34,14 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{
-    exec_attached, exec_sandbox, run_state_aware_json, spawn_in_container_with_pty_json,
-    MxcPtySize, WaitOutcome,
+use mxc_sdk::__ffi::{
+    execute_lifecycle_json, run_lifecycle_json as run_state_aware_json,
+    spawn_in_container_with_pty_json,
 };
+use mxc_sdk::v1::MxcPtySize;
+
+use mxc_engine::exec_state_aware_attached as exec_attached;
+use wxc_common::state_aware_backend::ExecOutcome as WaitOutcome;
 
 use crate::streaming::{finish_handle, MxcSandbox};
 use crate::{
@@ -80,7 +86,7 @@ impl MxcStateAwareResult {
     }
 
     /// A failure from the SDK, carrying its API detail across.
-    fn from_sdk_error(error: &mxc_sdk::Error) -> Self {
+    fn from_sdk_error(error: &mxc_sdk::v1::Error) -> Self {
         Self {
             status: status_from_error_code(error.code),
             response_json_utf8: ptr::null_mut(),
@@ -260,7 +266,7 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
                 ))
             }
         };
-        exec_sandbox(request_json, experimental != 0).map_err(|e| {
+        execute_lifecycle_json(request_json, experimental != 0).map_err(|e| {
             (
                 status_from_error_code(e.code),
                 MxcErrorDetail::from_error(&e),
@@ -277,6 +283,66 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
 
     // SAFETY: `out_handle` non-null (checked), `out_error` null or writable.
     unsafe { crate::streaming::finish_spawn(outcome, out_handle, out_error) }
+}
+
+/// Run a state-aware exec request to completion and capture both output streams.
+///
+/// Uses the same exact request contract and experimental authorization as
+/// [`mxc_exec_state_aware_json`]. Stdout and stderr are drained concurrently by
+/// the Rust SDK; timeouts are reported in the captured result.
+///
+/// # Safety
+/// - `request_json_utf8` must be null or a valid NUL-terminated UTF-8 C string.
+/// - `out` must be null or writable [`crate::MxcRunResult`]-sized storage holding
+///   no live result. A null output is rejected before executing the request.
+/// - Release every populated result, including failures, with
+///   [`crate::mxc_run_result_free`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out: *mut crate::MxcRunResult,
+) -> i32 {
+    if out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let result = catch_unwind(|| {
+        // SAFETY: caller contract; borrowed only within this call.
+        let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
+            Some(value) => value,
+            None if request_json_utf8.is_null() => {
+                return crate::MxcRunResult::error(
+                    MXC_STATUS_NULL_ARGUMENT,
+                    "request JSON pointer is null",
+                )
+            }
+            None => {
+                return crate::MxcRunResult::error(
+                    MXC_STATUS_INVALID_UTF8,
+                    "request JSON is not UTF-8",
+                )
+            }
+        };
+        crate::execute_output(
+            execute_lifecycle_json(request_json, experimental != 0).and_then(|process| {
+                process.wait_with_output().map_err(|error| {
+                    mxc_sdk::v1::Error::new(
+                        crate::ErrorCode::BackendError,
+                        format!("waiting for the sandbox to complete failed: {error}"),
+                    )
+                })
+            }),
+        )
+    })
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_run_state_aware_exec_json", &*panic);
+        crate::MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
+    let status = result.status;
+    // SAFETY: out is non-null and caller-guaranteed writable.
+    unsafe { ptr::write(out, result) };
+    status
 }
 
 /// Run a state-aware exec request with a caller-controlled pseudo-terminal.
@@ -489,6 +555,44 @@ mod tests {
     const WINDOWS_SANDBOX_PROVISION_REQUEST: &str =
         r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
 
+    #[test]
+    fn captured_exec_rejects_null_output_before_reading_request() {
+        // SAFETY: both null arguments are explicitly supported.
+        let status = unsafe { mxc_run_state_aware_exec_json(ptr::null(), 0, ptr::null_mut()) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+    }
+
+    #[test]
+    fn captured_exec_errors_are_owned_run_results() {
+        let malformed = CString::new("{}").unwrap();
+        let unknown_backend = CString::new(
+            r#"{"version":"1.0.0","phase":"exec","sandboxId":"nosuchbackend:abc","process":{"commandLine":"echo hi"}}"#,
+        )
+        .unwrap();
+        let invalid_utf8 = [0xffu8, 0];
+        for (request, expected_status) in [
+            (ptr::null(), MXC_STATUS_NULL_ARGUMENT),
+            (invalid_utf8.as_ptr().cast(), MXC_STATUS_INVALID_UTF8),
+            (malformed.as_ptr(), crate::MXC_STATUS_MALFORMED_REQUEST),
+            (
+                unknown_backend.as_ptr(),
+                crate::MXC_STATUS_UNSUPPORTED_CONTAINMENT,
+            ),
+        ] {
+            let mut result = crate::MxcRunResult::empty();
+            // SAFETY: requests are null or live NUL-terminated buffers; out is writable.
+            let status = unsafe { mxc_run_state_aware_exec_json(request, 0, &mut result) };
+            assert_eq!(status, expected_status);
+            assert_eq!(result.status, expected_status);
+            assert!(!result.error.message_utf8.is_null());
+            assert!(result.stdout_utf8.is_null());
+            assert!(result.stderr_utf8.is_null());
+            // SAFETY: result was populated by the captured-exec entry point.
+            unsafe { crate::mxc_run_result_free(&mut result) };
+            assert!(result.error.message_utf8.is_null());
+        }
+    }
+
     fn call(json: &str, dry_run: bool) -> MxcStateAwareResult {
         call_opt(json, dry_run, false)
     }
@@ -509,7 +613,7 @@ mod tests {
     #[test]
     fn from_sdk_error_carries_the_api_detail() {
         let mut error =
-            mxc_sdk::Error::new(crate::ErrorCode::StaleId, "The provision was not found.");
+            mxc_sdk::v1::Error::new(crate::ErrorCode::StaleId, "The provision was not found.");
         error.operation = Some("IsoSessionOps.StopSessionAsync".to_string());
         error.native_code = Some("0x80070490".to_string());
         error.remediation = Some("Re-provision the sandbox.".to_string());
@@ -867,7 +971,7 @@ mod tests {
             if let Err(error) = run_state_aware_json(fixture, true, true) {
                 assert_eq!(
                     error.code,
-                    mxc_sdk::ErrorCode::BackendUnavailable,
+                    mxc_sdk::v1::ErrorCode::BackendUnavailable,
                     "golden must parse and validate; feature-off is the only accepted failure: {error}"
                 );
             }

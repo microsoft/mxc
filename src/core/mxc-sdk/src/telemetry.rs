@@ -9,7 +9,7 @@
 //!
 //! ```no_run
 //! use std::error::Error;
-//! use mxc_sdk::telemetry::{self, ConsentDecision, ConsentState};
+//! use mxc_sdk::v1::telemetry::{self, ConsentDecision, ConsentState};
 //!
 //! fn main() -> Result<(), Box<dyn Error>> {
 //! let outcome = telemetry::request_consent(Some("en-US"), |prompt| {

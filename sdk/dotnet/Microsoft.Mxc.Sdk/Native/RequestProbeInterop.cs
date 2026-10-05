@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using Microsoft.Mxc.Sdk.V1;
+
 namespace Microsoft.Mxc.Sdk.Native;
 
 internal unsafe interface IRequestProbeInterop

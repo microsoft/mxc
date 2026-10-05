@@ -7,7 +7,7 @@
 //! - [`available_tools_policy`], [`user_profile_policy`], and
 //!   [`temporary_files_policy`] enumerate the host environment to discover
 //!   tool/SDK/profile/temp directories as filesystem-policy fragments.
-//! - [`SandboxPolicy`] describes cross-platform restrictions, and
+//! - [`ContainerPolicy`] describes cross-platform restrictions, and
 //!   [`build_request`] maps it to an [`ExecutionRequest`] for Seatbelt,
 //!   Bubblewrap, and ProcessContainer.
 
@@ -20,12 +20,12 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::configs::ProcessContainer;
 #[cfg(test)]
 use crate::configs::{CaptureDenials, CaptureDenialsMode};
+use crate::configs::{ProcessContainerConfig, WslcConfig};
 pub use network::{
-    NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
-    NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, RuntimeConfigSection,
+    NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy,
+    NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig,
 };
 #[cfg(test)]
 use wxc_common::logger::{Logger, Mode};
@@ -35,13 +35,27 @@ use wxc_common::models::{ExecutionRequest, TelemetryConfig};
 // ---------------------------------------------------------------------------
 
 /// A composable fragment of filesystem policy. Callers merge one or more into
-/// a [`SandboxPolicy`]'s filesystem section.
+/// a [`ContainerRequest`]'s filesystem section.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilesystemPolicyResult {
     /// Paths to grant read-only access inside the sandbox.
     pub readonly_paths: Vec<String>,
     /// Paths to grant read-write access inside the sandbox.
     pub readwrite_paths: Vec<String>,
+}
+
+/// Optional tool-policy filtering controls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolsPolicyOptions {
+    /// Exclude directories already accessible to the selected container type.
+    pub container_type: Option<ToolsPolicyContainerType>,
+}
+
+/// Container types with additional tool-policy filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolsPolicyContainerType {
+    /// Filter Windows ALL APPLICATION PACKAGES grants.
+    ProcessContainer,
 }
 
 /// Well-known tool/SDK environment variables and how to extract directories
@@ -242,6 +256,7 @@ fn env_or_process(env: Option<&[(String, String)]>) -> Cow<'_, [(String, String)
     }
 }
 
+#[cfg(test)]
 fn environment_keys_equal(existing_key: &str, override_key: &str) -> bool {
     if cfg!(target_os = "windows") {
         existing_key.eq_ignore_ascii_case(override_key)
@@ -250,6 +265,7 @@ fn environment_keys_equal(existing_key: &str, override_key: &str) -> bool {
     }
 }
 
+#[cfg(test)]
 fn apply_environment_overrides<K, V>(
     entries: &mut Vec<(String, String)>,
     overrides: impl IntoIterator<Item = (K, V)>,
@@ -270,8 +286,7 @@ fn apply_environment_overrides<K, V>(
 /// read-write so the module can persist command history.
 ///
 /// Mirrors the SDK's `getPowerShellPolicy`. The system drive is read from the
-/// process environment (`SystemDrive`, defaulting to `C:`); the user-scoped
-/// `USERPROFILE` comes from the passed-in `env`.
+/// supplied environment (`SystemDrive`, defaulting to `C:`), as does `USERPROFILE`.
 ///
 /// On non-Windows, or when `pwsh.exe` is not on `path_dirs`, returns an empty
 /// policy.
@@ -287,10 +302,9 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
         return FilesystemPolicyResult::default();
     }
 
-    let system_drive = std::env::var("SystemDrive")
-        .ok()
+    let system_drive = env_get(env, "SystemDrive")
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "C:".to_string());
+        .unwrap_or("C:");
     let readonly_paths = vec![format!("{system_drive}\\")];
 
     let mut readwrite_paths: Vec<String> = Vec::new();
@@ -315,16 +329,20 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
     }
 }
 
-/// Discover tool and SDK directories from `env` (defaults to the process
+/// Discover tool and SDK directories from `environment` (defaults to the process
 /// environment) as read-only policy paths.
 ///
 /// Reads `PATH` plus a registry of well-known tool/SDK variables, then filters
 /// out non-existent and system-critical directories, and adds PowerShell paths
 /// when `pwsh.exe` is on `PATH`. The Rust port of `getAvailableToolsPolicy`.
-/// (The SDK's `processcontainer` AAP-ACL filter is Windows-runtime-specific and
-/// is applied server-side; it is not replicated here.)
-pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPolicyResult {
-    let env = env_or_process(env);
+/// ProcessContainer filtering excludes existing ALL APPLICATION PACKAGES
+/// grants on Windows. If ACL inspection fails, retain the directory and emit
+/// a diagnostic warning rather than assume it is already accessible.
+pub fn available_tools_policy(
+    environment: Option<&[(String, String)]>,
+    options: ToolsPolicyOptions,
+) -> FilesystemPolicyResult {
+    let env = env_or_process(environment);
     let env: &[(String, String)] = &env;
 
     let mut collected = Vec::new();
@@ -348,6 +366,10 @@ pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPol
     let filtered: Vec<String> = deduplicate_paths(&collected)
         .into_iter()
         .filter(|dir| directory_exists(dir) && !is_system_critical_path(dir))
+        .filter(|dir| {
+            options.container_type != Some(ToolsPolicyContainerType::ProcessContainer)
+                || !has_all_application_packages_access(dir)
+        })
         .collect();
 
     let pwsh = powershell_policy(&path_dirs, env);
@@ -361,17 +383,94 @@ pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPol
     }
 }
 
+#[cfg(target_os = "windows")]
+fn has_all_application_packages_access(directory: &str) -> bool {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let inspect = || -> std::io::Result<Vec<u8>> {
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let mut child = std::process::Command::new(system_root.join("System32").join("icacls.exe"))
+            .arg(directory)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: discovery must not open a console.
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("missing icacls stdout"))?;
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                let mut bytes = Vec::new();
+                let mut stdout = stdout;
+                stdout.read_to_end(&mut bytes)?;
+                Ok::<_, std::io::Error>(bytes)
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    result => {
+                        let error = result.err().unwrap_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::TimedOut, "icacls timed out")
+                        });
+                        child.kill()?;
+                        child.wait()?;
+                        break Err(error);
+                    }
+                }
+            };
+            let output = reader
+                .join()
+                .map_err(|_| std::io::Error::other("icacls output reader panicked"))??;
+            let status = status?;
+            if !status.success() {
+                return Err(std::io::Error::other(format!(
+                    "icacls exited with {status}"
+                )));
+            }
+            Ok(output)
+        })
+    };
+    match inspect() {
+        Ok(output) => {
+            let output = String::from_utf8_lossy(&output);
+            output.contains("ALL APPLICATION PACKAGES") || output.contains("S-1-15-2-1")
+        }
+        Err(error) => {
+            wxc_common::logger::Logger::inherit_thread_diagnostic_sink().warning_line(&format!(
+                "Tool-policy ACL inspection failed; retaining directory: {error}"
+            ));
+            false
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn has_all_application_packages_access(_directory: &str) -> bool {
+    false
+}
+
 /// Read-only policy for standard user-profile application data locations.
 ///
 /// Windows: immediate subdirectories of `%LOCALAPPDATA%\Programs`. Other
 /// platforms: `~/.local/bin` and `~/.local/lib`. The Rust port of
 /// `getUserProfilePolicy`.
-pub fn user_profile_policy() -> FilesystemPolicyResult {
+pub fn user_profile_policy(environment: Option<&[(String, String)]>) -> FilesystemPolicyResult {
+    let environment = env_or_process(environment);
     let mut readonly_paths = Vec::new();
 
     if is_windows() {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            if directory_exists(&local_app_data) {
+        if let Some(local_app_data) = env_get(&environment, "LOCALAPPDATA") {
+            if directory_exists(local_app_data) {
                 let programs = Path::new(&local_app_data).join("Programs");
                 if let Ok(entries) = std::fs::read_dir(&programs) {
                     for entry in entries.flatten() {
@@ -382,7 +481,7 @@ pub fn user_profile_policy() -> FilesystemPolicyResult {
                 }
             }
         }
-    } else if let Ok(home) = std::env::var("HOME") {
+    } else if let Some(home) = env_get(&environment, "HOME") {
         for sub in [".local/bin", ".local/lib"] {
             let dir = Path::new(&home).join(sub);
             let dir = dir.to_string_lossy().into_owned();
@@ -403,8 +502,8 @@ pub fn user_profile_policy() -> FilesystemPolicyResult {
 /// Windows: `TEMP` or `TMP`. Other platforms: `TMPDIR` or `/tmp`. Returns an
 /// empty fragment when the resolved directory does not exist. The Rust port of
 /// `getTemporaryFilesPolicy`.
-pub fn temporary_files_policy(env: Option<&[(String, String)]>) -> FilesystemPolicyResult {
-    let env = env_or_process(env);
+pub fn temporary_files_policy(environment: Option<&[(String, String)]>) -> FilesystemPolicyResult {
+    let env = env_or_process(environment);
     let env: &[(String, String)] = &env;
 
     let temp_root = if is_windows() {
@@ -423,7 +522,7 @@ pub fn temporary_files_policy(env: Option<&[(String, String)]>) -> FilesystemPol
 }
 
 // ---------------------------------------------------------------------------
-// SandboxPolicy -> ExecutionRequest
+// ContainerPolicy -> ExecutionRequest
 // ---------------------------------------------------------------------------
 
 /// Clipboard access level, mirroring the SDK `ClipboardPolicy`
@@ -441,9 +540,9 @@ pub enum ClipboardPolicy {
     All,
 }
 
-/// Filesystem section of a [`SandboxPolicy`].
+/// Filesystem section of a [`ContainerRequest`].
 #[derive(Debug, Clone, Default)]
-pub struct FilesystemSection {
+pub struct FilesystemPolicy {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
@@ -451,17 +550,25 @@ pub struct FilesystemSection {
     pub clear_policy_on_exit: Option<bool>,
 }
 
-/// UI section of a [`SandboxPolicy`]. All flags default to denied.
-#[derive(Debug, Clone, Default)]
-pub struct UiSection {
-    pub allow_windows: bool,
+/// UI section of a [`ContainerRequest`]. All flags default to denied.
+#[derive(Debug, Clone)]
+pub struct UiPolicy {
+    pub disable: bool,
     pub clipboard: ClipboardPolicy,
     pub allow_input_injection: bool,
 }
 
-/// The containment backend [`build_request_with_containment`] targets — the
-/// Rust analogue of the SDK's `ContainmentType | ContainmentBackend` argument
-/// to `createConfigFromPolicy`.
+impl Default for UiPolicy {
+    fn default() -> Self {
+        Self {
+            disable: true,
+            clipboard: ClipboardPolicy::None,
+            allow_input_injection: false,
+        }
+    }
+}
+
+/// The containment backend selected by a [`ContainerRequest`].
 ///
 /// Only the backends this library can actually run are listed; select a
 /// concrete backend when you specifically need it, and prefer
@@ -475,19 +582,19 @@ pub enum Containment {
     Process,
     /// Windows ProcessContainer with explicit AppContainer/BaseContainer
     /// settings.
-    ProcessContainer(ProcessContainer),
+    ProcessContainer(ProcessContainerConfig),
     /// macOS Seatbelt with explicit backend-specific settings.
-    Seatbelt(crate::configs::Seatbelt),
+    Seatbelt(crate::configs::SeatbeltConfig),
     /// Linux LXC with explicit distribution settings.
-    Lxc(crate::configs::Lxc),
+    Lxc(crate::configs::LxcConfig),
     /// Linux Bubblewrap backend.
     Bubblewrap,
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
-    /// SDK, configured by the carried [`WslcSection`]
-    /// (`WslcSection::default()` matches the SDK's defaults).
+    /// SDK, configured by the carried [`crate::v1::configs::WslcConfig`]
+    /// (`crate::v1::configs::WslcConfig::default()` matches the SDK's defaults).
     ///
     /// Requires the `wslc` build feature but no runtime experimental opt-in.
-    Wslc(WslcSection),
+    Wslc(WslcConfig),
     /// IsolationSession backend: a Windows isolated user session.
     ///
     /// Requires the `isolation_session` build feature but no runtime
@@ -510,102 +617,90 @@ impl Containment {
     }
 }
 
-/// WSL Container settings carried by [`Containment::Wslc`].
-///
-/// [`Default`] matches the native backend's defaults: the `alpine:latest`
-/// image, host-determined CPU/memory, no GPU, and the default store.
-///
-/// # Network policy
-///
-/// WSLC accepts the v1 directional network posture. It supports either
-/// all-deny isolation or all-allow bridged networking; filtering rules and
-/// mixed directional defaults fail closed because the backend cannot enforce
-/// them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WslcSection {
-    /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
-    /// Pulled from its registry when the store misses, unless `image_tar_path`
-    /// supplies it or the request declares no egress, which refuses the pull.
-    pub image: String,
-    /// Path to a local tar (a `docker save` archive or a rootfs) imported as
-    /// the image.
-    ///
-    /// The image store is consulted **first**: if `image` is already cached the
-    /// tar is skipped entirely, so supplying an updated tar under a name that
-    /// is already present runs the stale cached content. Use a new `image` name
-    /// (or clear the store) to pick up changed tar contents.
-    pub image_tar_path: Option<String>,
-    /// vCPUs for the session. `None` lets the host decide.
-    pub cpu_count: Option<u32>,
-    /// Memory for the session, in MB. `None` lets the host decide.
-    pub memory_mb: Option<u64>,
-    /// Enable GPU passthrough.
-    pub gpu: bool,
-    /// Override the WSLC session image-store path. `None` uses the SDK default.
-    pub storage_path: Option<String>,
-    /// Host → container TCP port forwards, as `(windows_port, container_port)`.
-    /// Only TCP is supported (the WSLC runtime returns `E_NOTIMPL` for UDP).
-    pub port_mappings: Vec<(u16, u16)>,
-}
-
-impl Default for WslcSection {
-    fn default() -> Self {
-        Self {
-            image: "alpine:latest".to_string(),
-            image_tar_path: None,
-            cpu_count: None,
-            memory_mb: None,
-            gpu: false,
-            storage_path: None,
-            port_mappings: Vec::new(),
-        }
-    }
-}
-
 /// Cross-platform sandbox policy — the Rust analogue of the SDK
-/// `SandboxPolicy`. Describes *what* to restrict; omitted fields are
+/// `ContainerPolicy`. Describes *what* to restrict; omitted fields are
 /// most-restrictive (default-deny).
 ///
 /// Telemetry is intentionally not a policy field. It is invocation
 /// instrumentation rather than a sandbox restriction, matching the global
-/// sandbox-policy design. Build the request first, then use
-/// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
+/// sandbox-policy design. Set telemetry through the operation's options.
 ///
 /// This is an authoring type, not a JSON contract. SDK builders construct exact
 /// contract values; raw JSON APIs parse documents under their declared version.
 ///
 /// ```compile_fail
-/// let _: mxc_engine::policy::SandboxPolicy = serde_json::from_str("{}").unwrap();
+/// let _: mxc_engine::policy::ContainerPolicy = serde_json::from_str("{}").unwrap();
 /// ```
 ///
 /// ```compile_fail
-/// serde_json::to_string(&mxc_engine::policy::SandboxPolicy::default()).unwrap();
+/// serde_json::to_string(&mxc_engine::policy::ContainerPolicy::default()).unwrap();
 /// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct SandboxPolicy {
-    pub filesystem: Option<FilesystemSection>,
-    pub network: Option<NetworkSection>,
-    pub ui: Option<UiSection>,
+pub(crate) struct ContainerPolicy {
+    pub filesystem: Option<FilesystemPolicy>,
+    pub network: Option<NetworkPolicy>,
+    pub ui: Option<UiPolicy>,
     /// Execution timeout in milliseconds (`None` = no timeout).
     pub timeout_ms: Option<u32>,
 }
 
-/// A spawnable sandbox request, built from a [`SandboxPolicy`] and a command by
-/// [`build_request`]. Optionally adjust the working directory or environment,
-/// then hand it to [`spawn_sandbox`](crate::v1::spawn_sandbox).
-///
-/// This is the SDK's own request type; the internal execution model it maps to
-/// is an implementation detail callers don't depend on.
+/// A complete one-shot request with shared restrictions and backend settings.
 #[derive(Debug, Clone)]
-pub struct SandboxRequest {
+pub struct ContainerRequest {
+    /// Command line to execute.
+    pub command: String,
+    /// Cross-backend filesystem restrictions.
+    pub filesystem: Option<FilesystemPolicy>,
+    /// Cross-backend network restrictions and runtime network values.
+    pub network: Option<NetworkPolicy>,
+    /// Cross-backend UI restrictions.
+    pub ui: Option<UiPolicy>,
+    /// Execution timeout in milliseconds; `None` uses the backend default.
+    pub timeout_ms: Option<u32>,
+    /// Backend selection and backend-specific configuration.
+    pub containment: Containment,
+    /// Optional caller-selected container identifier.
+    pub container_name: Option<String>,
+    /// Initial working directory for the sandboxed process.
+    pub working_directory: Option<String>,
+    /// Optional environment entries. `None` uses the backend default;
+    /// `Some(Vec::new())` requests an explicitly empty environment.
+    pub environment: Option<Vec<(String, String)>>,
+    /// Whether supplied environment entries layer over the backend default.
+    pub inherit_default_environment: Option<bool>,
+}
+
+impl ContainerRequest {
+    /// Create a one-shot request for `command`.
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+            containment: Containment::Process,
+            container_name: None,
+            working_directory: None,
+            environment: None,
+            inherit_default_environment: None,
+        }
+    }
+}
+
+/// Internal normalized request consumed by the execution engine.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedContainerRequest {
     /// The internal execution model. `pub(crate)` so the SDK's own modules and
     /// unit tests can map/inspect it, while it stays out of the public API.
     pub(crate) inner: ExecutionRequest,
+    #[cfg(test)]
     requested_sandbox_kind: &'static str,
 }
 
-impl SandboxRequest {
+#[cfg(test)]
+impl PreparedContainerRequest {
     /// Override the working directory the sandboxed child starts in. Left unset,
     /// it defaults to the policy's resolution.
     pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
@@ -650,13 +745,6 @@ impl SandboxRequest {
         self
     }
 
-    /// The child's environment as `KEY=VALUE` entries, or `None` when none has
-    /// been set (in which case the backend supplies its default — on Windows,
-    /// the user's profile block).
-    pub fn env(&self) -> Option<&[String]> {
-        self.inner.env.as_deref()
-    }
-
     /// Drop any environment set on this request, returning it to the backend
     /// default.
     ///
@@ -694,64 +782,6 @@ impl SandboxRequest {
         self
     }
 
-    /// Start from the *calling process's* environment and append `extra` on top.
-    ///
-    /// Note this is a different, generally larger and leakier set than
-    /// [`Self::inherit_default_env`]: it is whatever your process happens to be
-    /// running with, so anything you inherited — including secrets in the
-    /// ambient environment — is handed to the sandboxed child. Prefer
-    /// `inherit_default_env` unless you specifically need your own variables.
-    /// The environment is set with [`Self::set_env`], which IsolationSession
-    /// refuses.
-    pub fn inherit_process_env<K, V>(
-        &mut self,
-        extra: impl IntoIterator<Item = (K, V)>,
-    ) -> &mut Self
-    where
-        K: Into<String>,
-        V: Into<String>,
-    {
-        let mut entries: Vec<(String, String)> = std::env::vars().collect();
-        apply_environment_overrides(&mut entries, extra);
-        self.set_env(entries)
-    }
-
-    /// The Seatbelt (macOS) extra Mach service names the sandbox profile lets the
-    /// child look up. Empty when the request carries no Seatbelt config (i.e. a
-    /// non-Seatbelt backend). Read these — e.g. to union with your own — before
-    /// [`set_seatbelt_extra_mach_lookups`](Self::set_seatbelt_extra_mach_lookups).
-    pub fn seatbelt_extra_mach_lookups(&self) -> &[String] {
-        self.inner
-            .seatbelt
-            .as_ref()
-            .map_or(&[], |s| s.extra_mach_lookups.as_slice())
-    }
-
-    /// Set the Seatbelt (macOS) extra Mach service names the child may look up.
-    /// Creates a default Seatbelt config if the request carries none.
-    pub fn set_seatbelt_extra_mach_lookups(&mut self, lookups: Vec<String>) -> &mut Self {
-        self.inner
-            .seatbelt
-            .get_or_insert_default()
-            .extra_mach_lookups = lookups;
-        self
-    }
-
-    /// Allow (or deny) the Seatbelt-sandboxed (macOS) child access to the system
-    /// keychain. Creates a default Seatbelt config if the request carries none.
-    pub fn set_seatbelt_keychain_access(&mut self, allow: bool) -> &mut Self {
-        self.inner.seatbelt.get_or_insert_default().keychain_access = allow;
-        self
-    }
-
-    /// Enable (or disable) experimental features for this request — the
-    /// analogue of the SDK's `SandboxSpawnOptions.experimental` and the
-    /// executor's `--experimental` flag.
-    pub fn set_experimental(&mut self, enabled: bool) -> &mut Self {
-        self.inner.experimental_enabled = enabled;
-        self
-    }
-
     /// Enable or disable telemetry for this invocation.
     ///
     /// Enabling this per-request switch is necessary but not sufficient:
@@ -774,54 +804,245 @@ impl SandboxRequest {
     }
 }
 
-/// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
+/// Build a [`ContainerRequest`] from a [`ContainerPolicy`], resolving the host's
 /// containment backend — the Rust port of the SDK's `createConfigFromPolicy`.
 ///
 /// The `script` becomes the request's command line, so the returned request is
 /// complete and needs no post-build patching before streaming it via
-/// [`crate::v1::spawn_sandbox`]. An empty script is rejected.
+/// [`crate::v1::spawn`]. An empty script is rejected.
 ///
 /// Maps the V1 high-level policy into the SDK-owned v1 contract,
 /// then adapts that contract through the shared semantic validation path.
 ///
 /// Targets the host's native process containment; use
 /// [`build_request_with_containment`] to select a specific backend.
-pub fn build_request(
-    policy: &SandboxPolicy,
+#[cfg(test)]
+pub(crate) fn build_request(
+    policy: &ContainerPolicy,
     script: &str,
     container_name: Option<&str>,
-) -> Result<SandboxRequest, crate::Error> {
+) -> Result<PreparedContainerRequest, crate::Error> {
     build_request_with_containment(policy, &Containment::Process, script, container_name)
 }
 
-/// Build a [`SandboxRequest`] for an explicitly chosen [`Containment`] backend
+/// Build a [`ContainerRequest`] for an explicitly chosen [`Containment`] backend
 /// — the Rust port of `createConfigFromPolicy(policy, containment, name)`.
 ///
 /// Same mapping and validation as [`build_request`]; the containment argument
 /// picks the backend rather than always resolving the host's native one.
 ///
 /// ```no_run
-/// use mxc_sdk::v1::{
-///     build_request_with_containment, Containment, SandboxPolicy, WslcSection,
-/// };
+/// use mxc_sdk::v1::{configs::WslcConfig, ContainerRequest, Containment};
 ///
-/// let policy = SandboxPolicy::default();
-/// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-/// let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(1)'", None)?;
-/// # Ok::<(), mxc_sdk::Error>(())
+/// let wslc = WslcConfig { image: "python:3.12".to_string(), ..Default::default() };
+/// let request = ContainerRequest {
+///     containment: Containment::Wslc(wslc),
+///     ..ContainerRequest::new("python3 -c 'print(1)'")
+/// };
 /// ```
-pub fn build_request_with_containment(
-    policy: &SandboxPolicy,
+pub(crate) fn build_request_with_containment(
+    policy: &ContainerPolicy,
     containment: &Containment,
     script: &str,
     container_name: Option<&str>,
-) -> Result<SandboxRequest, crate::Error> {
+) -> Result<PreparedContainerRequest, crate::Error> {
     exact::build_request(policy, containment, script, container_name)
+}
+
+pub(crate) fn prepare_request(
+    request: &ContainerRequest,
+) -> Result<PreparedContainerRequest, crate::Error> {
+    let policy = ContainerPolicy {
+        filesystem: request.filesystem.clone(),
+        network: request.network.clone(),
+        ui: request.ui.clone(),
+        timeout_ms: request.timeout_ms,
+    };
+    let mut prepared = build_request_with_containment(
+        &policy,
+        &request.containment,
+        &request.command,
+        request.container_name.as_deref(),
+    )?;
+    prepared.inner.working_directory = request.working_directory.clone().unwrap_or_default();
+    prepared.inner.env = request.environment.as_ref().map(|environment| {
+        environment
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect()
+    });
+    prepared.inner.inherit_default_env = request.inherit_default_environment.unwrap_or(false);
+    Ok(prepared)
+}
+
+pub(crate) fn prepare_creation_request(
+    request: &ContainerRequest,
+    experimental: bool,
+    telemetry: Option<crate::options::TelemetryConfig>,
+) -> Result<PreparedContainerRequest, crate::Error> {
+    let mut prepared = prepare_request(request)?;
+    prepared.inner.experimental_enabled = experimental;
+    if let Some(telemetry) = telemetry {
+        prepared.inner.telemetry = Some(TelemetryConfig {
+            enabled: telemetry.enabled,
+            requested_sandbox_kind: Some(request.containment.telemetry_kind()),
+        });
+    }
+    Ok(prepared)
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn discovery_map_cannot_override_host_windows_safety_exclusion() {
+        let host_windows = std::env::var("WINDIR")
+            .or_else(|_| std::env::var("windir"))
+            .unwrap_or_else(|_| r"C:\Windows".to_string());
+        for windir in ["", r"C:\SpoofedWindows"] {
+            let environment = vec![
+                ("PATH".to_string(), host_windows.clone()),
+                ("WINDIR".to_string(), windir.to_string()),
+            ];
+            let result = super::available_tools_policy(
+                Some(&environment),
+                super::ToolsPolicyOptions::default(),
+            );
+            assert!(result.readonly_paths.is_empty());
+        }
+    }
+
     const TEST_COMMAND: &str = "echo hello";
+
+    #[test]
+    fn creation_options_preserve_telemetry_presence_and_containment_intent() {
+        let request = super::ContainerRequest {
+            containment: super::Containment::Bubblewrap,
+            ..super::ContainerRequest::new(TEST_COMMAND)
+        };
+        for enabled in [None, Some(true), Some(false)] {
+            let telemetry = enabled.map(|enabled| crate::options::TelemetryConfig {
+                enabled: Some(enabled),
+            });
+            let prepared = super::prepare_creation_request(&request, true, telemetry).unwrap();
+            assert!(prepared.inner.experimental_enabled);
+            assert_eq!(
+                prepared.inner.telemetry.as_ref().and_then(|t| t.enabled),
+                enabled
+            );
+            if let Some(telemetry) = prepared.inner.telemetry {
+                assert_eq!(
+                    telemetry.requested_sandbox_kind,
+                    Some(request.containment.telemetry_kind())
+                );
+            }
+        }
+        assert!(super::prepare_request(&request)
+            .unwrap()
+            .inner
+            .telemetry
+            .is_none());
+    }
+
+    #[test]
+    fn empty_creation_telemetry_config_does_not_enable_telemetry() {
+        let request = super::ContainerRequest::new(TEST_COMMAND);
+        let prepared = super::prepare_creation_request(
+            &request,
+            false,
+            Some(crate::options::TelemetryConfig::default()),
+        )
+        .unwrap();
+        assert_eq!(prepared.inner.telemetry.unwrap().enabled, None);
+    }
+
+    #[test]
+    fn rust_sdk_builds_directional_networking() {
+        let network = NetworkPolicy {
+            egress: Some(NetworkEgressPolicy {
+                default: Some(NetworkAction::Deny),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressPolicy {
+                default: Some(NetworkAction::Deny),
+                host_loopback: Some(NetworkAction::Deny),
+            }),
+            ..Default::default()
+        };
+
+        let request = super::ContainerRequest {
+            network: Some(network),
+            ..super::ContainerRequest::new("echo hello")
+        };
+        super::prepare_request(&request).expect("the Rust SDK should build directional networking");
+    }
+
+    #[test]
+    fn public_request_environment_preserves_omission_empty_and_layering() {
+        let omitted = super::prepare_request(&super::ContainerRequest::new(TEST_COMMAND))
+            .expect("the default request should prepare");
+        assert_eq!(omitted.inner.env, None);
+        assert!(!omitted.inner.inherit_default_env);
+
+        let empty = super::ContainerRequest {
+            environment: Some(Vec::new()),
+            inherit_default_environment: Some(true),
+            working_directory: Some("C:\\work".to_string()),
+            timeout_ms: Some(500),
+            ..super::ContainerRequest::new(TEST_COMMAND)
+        };
+        let prepared =
+            super::prepare_request(&empty).expect("explicit environment settings should prepare");
+        assert_eq!(prepared.inner.env, Some(Vec::new()));
+        assert!(prepared.inner.inherit_default_env);
+        assert_eq!(prepared.inner.working_directory, "C:\\work");
+        assert_eq!(prepared.inner.script_timeout, 500);
+
+        let layered = super::ContainerRequest {
+            environment: Some(vec![("EXTRA".into(), "value".into())]),
+            inherit_default_environment: Some(true),
+            ..super::ContainerRequest::new(TEST_COMMAND)
+        };
+        let prepared =
+            super::prepare_request(&layered).expect("layered environment settings should prepare");
+        assert_eq!(prepared.inner.env, Some(vec!["EXTRA=value".to_string()]));
+        assert!(prepared.inner.inherit_default_env);
+    }
+
+    #[test]
+    fn rust_sdk_builds_directional_process_container_networking_and_capture() {
+        use crate::configs::{CaptureDenials, ProcessContainerNetwork};
+
+        let network = NetworkPolicy {
+            egress: Some(NetworkEgressPolicy {
+                default: Some(NetworkAction::Deny),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressPolicy {
+                default: Some(NetworkAction::Allow),
+                host_loopback: Some(NetworkAction::Deny),
+            }),
+            runtime_config: Some(NetworkRuntimeConfig {
+                network_proxy: Some("http://127.0.0.1:8080".to_string()),
+            }),
+        };
+
+        let process_container = ProcessContainerConfig {
+            capture_denials: Some(CaptureDenials::default()),
+            network: Some(ProcessContainerNetwork {
+                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+            }),
+            ..Default::default()
+        };
+        let request = super::ContainerRequest {
+            network: Some(network),
+            containment: Containment::ProcessContainer(process_container),
+            ..super::ContainerRequest::new("echo hello")
+        };
+
+        super::prepare_request(&request)
+            .expect("public request types should build directional networking and capture");
+    }
 
     #[test]
     fn exact_contract_bridge_is_available_to_policy_builders() {
@@ -858,14 +1079,14 @@ mod tests {
             build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
                 .unwrap();
         assert!(!absent.inner.policy.network_specified);
-        policy.network = Some(NetworkSection::default());
+        policy.network = Some(NetworkPolicy::default());
         let empty =
             build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
                 .unwrap();
         assert!(empty.inner.policy.network_specified);
         assert!(!empty.inner.policy.network_mode_specified);
-        policy.network = Some(NetworkSection {
-            runtime_config: Some(RuntimeConfigSection {
+        policy.network = Some(NetworkPolicy {
+            runtime_config: Some(NetworkRuntimeConfig {
                 network_proxy: Some("http://proxy.example:8080".into()),
             }),
             ..Default::default()
@@ -874,7 +1095,7 @@ mod tests {
         // a provisioned bridged route; the backend owns that validation.
         let runtime_only = build_request_with_containment(
             &policy,
-            &Containment::Wslc(WslcSection::default()),
+            &Containment::Wslc(WslcConfig::default()),
             TEST_COMMAND,
             None,
         )
@@ -885,7 +1106,7 @@ mod tests {
     }
     #[test]
     fn v1_policy_builder_accepts_wslc() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -894,7 +1115,7 @@ mod tests {
 
         let request = build_request_with_containment(
             &policy,
-            &Containment::Wslc(WslcSection::default()),
+            &Containment::Wslc(WslcConfig::default()),
             TEST_COMMAND,
             None,
         )
@@ -904,15 +1125,15 @@ mod tests {
 
     #[test]
     fn v1_policy_builder_enforces_capability_construction_rules() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
             timeout_ms: None,
         };
-        let containment = Containment::ProcessContainer(ProcessContainer {
+        let containment = Containment::ProcessContainer(ProcessContainerConfig {
             capabilities: vec!["internetClient,privateNetworkClientServer".to_string()],
-            ..ProcessContainer::default()
+            ..ProcessContainerConfig::default()
         });
 
         let error =
@@ -924,7 +1145,7 @@ mod tests {
     //
     // These pin the fix for a defect that was invisible by value: the builder
     // used to synthesize a `ui` object unconditionally, and because
-    // `UiSection::default()` is full lockdown the synthesized block was
+    // `UiPolicy::default()` is full lockdown the synthesized block was
     // value-identical to an explicit lockdown. The resulting request therefore
     // carried `ui_specified = true` even when the caller never mentioned `ui`,
     // and a backend that refuses a UI posture on *presence* would reject it.
@@ -933,7 +1154,7 @@ mod tests {
     // that is the only thing that distinguishes the two states downstream.
     #[test]
     fn exact_builder_preserves_absent_ui() {
-        let policy = super::SandboxPolicy::default();
+        let policy = super::ContainerPolicy::default();
         assert!(policy.ui.is_none(), "precondition: no ui supplied");
 
         let request =
@@ -949,8 +1170,8 @@ mod tests {
     fn exact_builder_preserves_explicit_ui() {
         // An explicitly-supplied lockdown `ui` — value-identical to the old
         // synthesized block, which is exactly why presence is what matters.
-        let policy = super::SandboxPolicy {
-            ui: Some(super::UiSection::default()),
+        let policy = super::ContainerPolicy {
+            ui: Some(super::UiPolicy::default()),
             ..Default::default()
         };
         assert!(policy.ui.is_some(), "precondition: ui supplied");
@@ -1014,14 +1235,15 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenials, CaptureDenialsMode, NetworkAction, NetworkEgressSection,
-        NetworkIngressSection, NetworkSection, RuntimeConfigSection, SandboxPolicy,
+        build_request, CaptureDenials, CaptureDenialsMode, ContainerPolicy, NetworkAction,
+        NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, NetworkRuntimeConfig,
+        PreparedContainerRequest,
     };
 
     #[test]
     fn build_request_maps_filesystem_and_timeout() {
-        let policy = SandboxPolicy {
-            filesystem: Some(super::FilesystemSection {
+        let policy = ContainerPolicy {
+            filesystem: Some(super::FilesystemPolicy {
                 readwrite_paths: vec!["/tmp".to_string()],
                 readonly_paths: vec![],
                 denied_paths: vec![],
@@ -1033,7 +1255,7 @@ mod tests {
         };
 
         // Inspect the internal model the SDK maps to — a unit concern; the public
-        // API only hands back the opaque `SandboxRequest`.
+        // API only hands back the opaque `ContainerRequest`.
         let request = build_request(&policy, TEST_COMMAND, Some("test-container"))
             .expect("build_request should succeed");
         assert_eq!(request.inner.script_timeout, 5000);
@@ -1048,13 +1270,13 @@ mod tests {
 
     #[test]
     fn build_request_maps_enumerate_paths_for_v1() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
             timeout_ms: None,
         };
-        let containment = Containment::ProcessContainer(crate::configs::ProcessContainer {
+        let containment = Containment::ProcessContainer(crate::configs::ProcessContainerConfig {
             filesystem: Some(crate::configs::ProcessContainerFilesystem {
                 enumerate_paths: vec!["C:\\tools".to_string()],
             }),
@@ -1072,7 +1294,7 @@ mod tests {
         // The structured `(key, value)` setter mirrors the SDK env channel
         // (`injectEnvIntoConfig`): each pair becomes a `KEY=VALUE` wire entry, in
         // iteration order so a later duplicate key wins downstream.
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1089,13 +1311,13 @@ mod tests {
 
     /// The request's environment as an owned value, so tests can compare it
     /// against a literal without borrowing a temporary.
-    fn env_of(request: &super::SandboxRequest) -> Option<Vec<String>> {
-        request.env().map(<[String]>::to_vec)
+    fn env_of(request: &PreparedContainerRequest) -> Option<Vec<String>> {
+        request.inner.env.clone()
     }
 
     #[test]
     fn set_env_replaces_rather_than_merging() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1130,7 +1352,7 @@ mod tests {
 
     #[test]
     fn inherit_default_env_flags_the_request_and_keeps_the_extras() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1181,11 +1403,11 @@ mod tests {
             (P::Write, Wire::Write),
             (P::All, Wire::All),
         ] {
-            let policy = SandboxPolicy {
+            let policy = ContainerPolicy {
                 filesystem: None,
                 network: None,
-                ui: Some(super::UiSection {
-                    allow_windows: true,
+                ui: Some(super::UiPolicy {
+                    disable: false,
                     clipboard: input,
                     allow_input_injection: false,
                 }),
@@ -1202,7 +1424,7 @@ mod tests {
 
     #[test]
     fn request_builders_reject_an_empty_script() {
-        let policy = SandboxPolicy::default();
+        let policy = ContainerPolicy::default();
 
         let errors = [
             (
@@ -1232,21 +1454,24 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_extra_mach_lookups_and_keychain_round_trip() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
             timeout_ms: None,
         };
-        // build_request leaves `process` for the engine to resolve, so the
-        // setters create the Seatbelt config on first use.
-        let mut request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
-        let mut union: Vec<String> = request.seatbelt_extra_mach_lookups().to_vec();
-        union.push("com.example.service".to_string());
-        request.set_seatbelt_extra_mach_lookups(union.clone());
-        request.set_seatbelt_keychain_access(true);
-
-        assert_eq!(request.seatbelt_extra_mach_lookups(), union.as_slice());
+        let mut seatbelt = crate::configs::SeatbeltConfig::default();
+        seatbelt
+            .extra_mach_lookups
+            .push("com.example.service".to_string());
+        seatbelt.keychain_access = true;
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::Seatbelt(seatbelt),
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
         let cfg = request
             .inner
             .seatbelt
@@ -1260,15 +1485,15 @@ mod tests {
 
     #[test]
     fn explicit_seatbelt_configuration_reaches_the_request() {
-        use crate::configs::Seatbelt;
+        use crate::configs::SeatbeltConfig;
 
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
             timeout_ms: None,
         };
-        let seatbelt = Seatbelt {
+        let seatbelt = SeatbeltConfig {
             profile_override: Some("(version 1)".to_string()),
             gui_access: true,
             nested_pty: false,
@@ -1297,9 +1522,9 @@ mod tests {
 
     #[test]
     fn explicit_lxc_configuration_reaches_the_request() {
-        use crate::configs::Lxc;
+        use crate::configs::LxcConfig;
 
-        let lxc = Lxc {
+        let lxc = LxcConfig {
             distribution: "ubuntu".to_string(),
             release: "24.04".to_string(),
         };
@@ -1331,7 +1556,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     fn process_container_with_capture_denials(config: CaptureDenials) -> Containment {
-        Containment::ProcessContainer(ProcessContainer {
+        Containment::ProcessContainer(ProcessContainerConfig {
             capture_denials: Some(config),
             ..Default::default()
         })
@@ -1386,7 +1611,7 @@ mod tests {
 
         let request = build_request_with_containment(
             &policy,
-            &Containment::ProcessContainer(ProcessContainer::default()),
+            &Containment::ProcessContainer(ProcessContainerConfig::default()),
             TEST_COMMAND,
             None,
         )
@@ -1497,17 +1722,17 @@ mod tests {
 
     // The end-to-end counterpart of the contract test above: the typed policy
     // emits both sections and the parser accepts the result unchanged.
-    use super::{build_request_with_containment, Containment, ProcessContainer, WslcSection};
+    use super::{build_request_with_containment, Containment, ProcessContainerConfig, WslcConfig};
     use wxc_common::models::ContainmentBackend;
 
-    fn minimal_policy() -> SandboxPolicy {
-        SandboxPolicy::default()
+    fn minimal_policy() -> ContainerPolicy {
+        ContainerPolicy::default()
     }
 
-    fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
-        SandboxPolicy {
+    fn policy_with_network(network: NetworkPolicy) -> ContainerPolicy {
+        ContainerPolicy {
             network: Some(network),
-            ..SandboxPolicy::default()
+            ..ContainerPolicy::default()
         }
     }
 
@@ -1524,7 +1749,7 @@ mod tests {
         // Mirrors `createConfigFromPolicy(policy, 'wslc')` plus a tweaked
         // `wslc` block: the wire config goes through the shared
         // parser, so the mapped request carries the WSLC settings verbatim.
-        let wslc = WslcSection {
+        let wslc = WslcConfig {
             image: "python:3.12".to_string(),
             cpu_count: Some(2),
             memory_mb: Some(2048),
@@ -1556,11 +1781,11 @@ mod tests {
 
     #[test]
     fn wslc_defaults_match_the_sdk() {
-        // `WslcSection::default()` must produce the same block the TypeScript
+        // `WslcConfig::default()` must produce the same block the TypeScript
         // SDK's `buildWslcContainerConfig` emits (image only, alpine:latest).
         let request = build_request_with_containment(
             &minimal_policy(),
-            &Containment::Wslc(WslcSection::default()),
+            &Containment::Wslc(WslcConfig::default()),
             TEST_COMMAND,
             None,
         )
@@ -1576,7 +1801,7 @@ mod tests {
     fn wslc_does_not_enable_experimental_features() {
         let request = build_request_with_containment(
             &minimal_policy(),
-            &Containment::Wslc(WslcSection::default()),
+            &Containment::Wslc(WslcConfig::default()),
             TEST_COMMAND,
             None,
         )
@@ -1613,7 +1838,7 @@ mod tests {
 
     #[test]
     fn telemetry_enablement_preserves_explicit_containment_intent() {
-        let containment = ProcessContainer::default();
+        let containment = ProcessContainerConfig::default();
         let mut request = build_request_with_containment(
             &minimal_policy(),
             &Containment::ProcessContainer(containment),
@@ -1638,7 +1863,7 @@ mod tests {
     fn wslc_rejects_an_invalid_port_mapping() {
         // Validation is the shared parser's, so a bad mapping is rejected at
         // build time rather than at spawn.
-        let wslc = WslcSection {
+        let wslc = WslcConfig {
             port_mappings: vec![(8080, 80), (8080, 81)],
             ..Default::default()
         };
@@ -1659,13 +1884,13 @@ mod tests {
     /// The canonical unrestricted-network acknowledgment the IsolationSession
     /// backend requires: outbound allowed, local network allowed, no host
     /// rules, no proxy.
-    fn isolation_session_directional_network() -> NetworkSection {
-        NetworkSection {
-            egress: Some(NetworkEgressSection {
+    fn isolation_session_directional_network() -> NetworkPolicy {
+        NetworkPolicy {
+            egress: Some(NetworkEgressPolicy {
                 default: Some(NetworkAction::Allow),
                 ..Default::default()
             }),
-            ingress: Some(NetworkIngressSection {
+            ingress: Some(NetworkIngressPolicy {
                 default: Some(NetworkAction::Allow),
                 host_loopback: Some(NetworkAction::Allow),
             }),

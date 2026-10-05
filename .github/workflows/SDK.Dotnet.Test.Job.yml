@@ -105,7 +105,7 @@ jobs:
           sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME,DOTNET_ROOT \
             "$(command -v dotnet)" test \
             --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj \
-            --no-build --no-restore -- --filter-method '*MxcSandboxLxcE2ETests*' 2>&1 | tee "$log"
+            --no-build --no-restore -- --filter-method '*MxcContainerLxcE2ETests*' 2>&1 | tee "$log"
           # `tee` succeeds even when the run beneath it fails, and a partially
           # passing run still prints a non-zero succeeded count, so the run's
           # own status has to be read before the summary is trusted.

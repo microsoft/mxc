@@ -6,14 +6,17 @@
 pub(crate) mod lxc;
 pub(crate) mod process_container;
 pub(crate) mod seatbelt;
+pub(crate) mod wslc;
 
 #[doc(inline)]
-pub use lxc::Lxc;
+pub use lxc::LxcConfig;
 #[doc(inline)]
 pub use process_container::{
-    CaptureDenials, CaptureDenialsMode, ProcessContainer, ProcessContainerFilesystem,
+    CaptureDenials, CaptureDenialsMode, ProcessContainerConfig, ProcessContainerFilesystem,
     ProcessContainerNetwork, ProcessContainerSystemSettings, ProcessContainerUi,
     ProcessContainerUiIsolation,
 };
 #[doc(inline)]
-pub use seatbelt::Seatbelt;
+pub use seatbelt::SeatbeltConfig;
+#[doc(inline)]
+pub use wslc::WslcConfig;

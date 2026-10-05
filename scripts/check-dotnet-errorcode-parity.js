@@ -18,6 +18,7 @@ const csharpPath = join(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
+  "V1",
   "ErrorCode.cs"
 );
 

@@ -11,7 +11,7 @@
 
 .DESCRIPTION
     Each test invokes wxc-exec.exe with lifecycle routing in --operation /
-    --sandbox-id and a base64-encoded phase-specific request payload, parses
+    --container-id and a base64-encoded phase-specific request payload, parses
     the JSON response on stdout, and asserts on the envelope's `result` or
     `error` fields (and, for exec, on the streamed stdout / exit code).
 
@@ -160,7 +160,7 @@ function Invoke-StateAware {
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
     $argList = @('--operation', $phase)
     if ($phase -ne 'provision') {
-        $argList += @('--sandbox-id', $routingSandboxId)
+        $argList += @('--container-id', $routingSandboxId)
     }
     $argList += @('--experimental', '--config-base64', $b64)
 

@@ -9,6 +9,8 @@ import * as path from 'path';
 import { Worker } from 'node:worker_threads';
 import {
   getPlatformSupport,
+  getAvailableBackends,
+  parseAvailableBackends,
   _resetPlatformSupportCache,
   _setProbeRunner,
   _parseBwrapVersion,
@@ -28,7 +30,124 @@ import {
   findWxcExecutable,
   _resetWxcExecutableCache,
   _setWxcExecutableVerifier,
-} from '../../src/platform.js';
+} from '../../src/v1/platform.js';
+import {
+  _setProbeNativeDependencies,
+  readAvailableBackendsJsonWithNative,
+} from '../../src/bindings/probe.js';
+import { MxcError } from '../../src/v1/errors.js';
+
+describe('native backend discovery', () => {
+  afterEach(() => _setProbeNativeDependencies());
+
+  it('projects Windows and Linux capability payloads with absent lists normalized', () => {
+    assert.deepStrictEqual(parseAvailableBackends(JSON.stringify([
+      { backend: 'processcontainer', tier: 'base-container', capabilities: [
+        'captureDenials', 'filesystemDeniedPaths', 'filesystemEnumeratePaths',
+        'ingressHostLoopbackAllow',
+      ] },
+      { backend: 'bubblewrap', capabilities: ['proxyEnforcement'], warnings: ['diagnostic'] },
+      { backend: 'lxc' },
+      { backend: 'seatbelt' },
+      { backend: 'isolation_session' },
+    ])), [
+      { backend: 'processcontainer', tier: 'base-container', capabilities: [
+        'captureDenials', 'filesystemDeniedPaths', 'filesystemEnumeratePaths',
+        'ingressHostLoopbackAllow',
+      ], warnings: [] },
+      { backend: 'bubblewrap', capabilities: ['proxyEnforcement'], warnings: ['diagnostic'] },
+      { backend: 'lxc', capabilities: [], warnings: [] },
+      { backend: 'seatbelt', capabilities: [], warnings: [] },
+      { backend: 'isolation_session', capabilities: [], warnings: [] },
+    ]);
+    assert.deepStrictEqual(parseAvailableBackends('[]'), []);
+  });
+
+  it('maps newer native names to unknown without claiming a supported capability', () => {
+    assert.deepStrictEqual(parseAvailableBackends(JSON.stringify([{
+      backend: 'new_backend', tier: 'new_tier', capabilities: ['new_capability'],
+    }])), [{
+      backend: 'unknown', tier: 'unknown', capabilities: ['unknown'], warnings: [],
+    }]);
+  });
+
+  it('rejects malformed discovery results instead of returning no backends', () => {
+    for (const payload of [
+      null, {}, [null], [[]], [{}], [{ backend: 1 }],
+      [{ backend: 'lxc', tier: null }], [{ backend: 'lxc', capabilities: null }],
+      [{ backend: 'lxc', capabilities: [1] }], [{ backend: 'lxc', warnings: [false] }],
+    ]) {
+      assert.throws(() => parseAvailableBackends(JSON.stringify(payload)),
+        (error: unknown) => error instanceof MxcError && error.code === 'backend_error');
+    }
+    assert.throws(() => parseAvailableBackends('not JSON'),
+      (error: unknown) => error instanceof MxcError && error.code === 'backend_error');
+  });
+
+  it('reads the FFI discovery export in process and frees before unloading', () => {
+    const events: string[] = [];
+    const pointer = { address: 1 };
+    _setProbeNativeDependencies(
+      (() => ({ handle: { unload: () => events.push('unload') } })) as never,
+      ((_: unknown, spec: { symbol: string }) => {
+        if (spec.symbol === 'mxc_available_backends_json') {
+          return () => { events.push('discover'); return pointer; };
+        }
+        assert.strictEqual(spec.symbol, 'mxc_string_free');
+        return (value: unknown) => {
+          assert.strictEqual(value, pointer);
+          events.push('free');
+        };
+      }) as never,
+      (value: unknown) => {
+        assert.strictEqual(value, pointer);
+        events.push('decode');
+        return '[{"backend":"lxc"}]';
+      },
+    );
+    const first = getAvailableBackends();
+    first[0].warnings.push('caller mutation');
+    assert.deepStrictEqual(getAvailableBackends(), [{
+      backend: 'lxc', capabilities: [], warnings: [],
+    }]);
+    assert.deepStrictEqual(events, [
+      'discover', 'decode', 'free', 'unload', 'discover', 'decode', 'free', 'unload',
+    ]);
+  });
+
+  it('unloads if the native export cannot be bound', () => {
+    let unloaded = false;
+    _setProbeNativeDependencies(
+      (() => ({ handle: { unload: () => { unloaded = true; } } })) as never,
+      (() => { throw new Error('missing native export'); }) as never,
+    );
+    assert.throws(() => getAvailableBackends(), /missing native export/);
+    assert.strictEqual(unloaded, true);
+  });
+
+  it('frees owned results even if decoding fails', () => {
+    for (const decode of [
+      () => undefined,
+      () => { throw new Error('decode failed'); },
+    ]) {
+      let freed = false;
+      assert.throws(() => readAvailableBackendsJsonWithNative({
+        availableBackends: () => 1,
+        freeString: () => { freed = true; },
+      }, decode));
+      assert.strictEqual(freed, true);
+    }
+  });
+
+  it('rejects null native results without freeing an allocation', () => {
+    for (const pointer of [null, undefined, 0, 0n]) {
+      assert.throws(() => readAvailableBackendsJsonWithNative({
+        availableBackends: () => pointer,
+        freeString: () => assert.fail('no allocation to free'),
+      }), /null result/);
+    }
+  });
+});
 
 const isWindows = os.platform() === 'win32';
 

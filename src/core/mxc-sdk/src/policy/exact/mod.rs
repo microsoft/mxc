@@ -7,9 +7,9 @@ use wxc_common::config_parser::{load_one_shot_request_from_contract, ExactOneSho
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::mxc_error::MxcError;
 
-use crate::configs::{Lxc, ProcessContainer, Seatbelt};
+use crate::configs::{LxcConfig, ProcessContainerConfig, SeatbeltConfig};
 
-use super::{Containment, SandboxPolicy, SandboxRequest};
+use super::{ContainerPolicy, Containment, PreparedContainerRequest};
 
 macro_rules! optional {
     ($module:ident, $value:expr) => {
@@ -23,7 +23,7 @@ macro_rules! optional {
 mod v1_0;
 
 struct PreparedInput<'a> {
-    policy: &'a SandboxPolicy,
+    policy: &'a ContainerPolicy,
     containment: &'a Containment,
     script: &'a str,
     container_id: String,
@@ -37,21 +37,21 @@ fn non_empty_port(value: u16, field: &str) -> Result<NonZeroU16, MxcError> {
     NonZeroU16::new(value).ok_or_else(|| error(format!("{field} must be non-zero")))
 }
 
-fn selected_process_container(containment: &Containment) -> Option<ProcessContainer> {
+fn selected_process_container(containment: &Containment) -> Option<ProcessContainerConfig> {
     match containment {
         Containment::ProcessContainer(process_container) => Some(process_container.clone()),
         _ => None,
     }
 }
 
-fn selected_seatbelt(containment: &Containment) -> Option<Seatbelt> {
+fn selected_seatbelt(containment: &Containment) -> Option<SeatbeltConfig> {
     match containment {
         Containment::Seatbelt(seatbelt) => Some(seatbelt.clone()),
         _ => None,
     }
 }
 
-fn selected_lxc(containment: &Containment) -> Option<Lxc> {
+fn selected_lxc(containment: &Containment) -> Option<LxcConfig> {
     match containment {
         Containment::Lxc(lxc) => Some(lxc.clone()),
         _ => None,
@@ -65,11 +65,11 @@ fn container_id(container_name: Option<&str>) -> String {
 }
 
 pub(super) fn build_request(
-    policy: &SandboxPolicy,
+    policy: &ContainerPolicy,
     containment: &Containment,
     script: &str,
     container_name: Option<&str>,
-) -> Result<SandboxRequest, crate::Error> {
+) -> Result<PreparedContainerRequest, crate::Error> {
     if script.is_empty() {
         return Err(error("script parameter is required").into());
     }
@@ -86,8 +86,9 @@ pub(super) fn build_request(
             MxcError::malformed_request(format!("failed to build request: {error}"))
         })?;
     inner.source_contract = None;
-    Ok(SandboxRequest {
+    Ok(PreparedContainerRequest {
         inner,
+        #[cfg(test)]
         requested_sandbox_kind: containment.telemetry_kind(),
     })
 }
@@ -96,14 +97,14 @@ pub(super) fn build_request(
 mod tests {
     use crate::configs::ProcessContainerNetwork;
     use crate::policy::{
-        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
-        RuntimeConfigSection,
+        NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy,
+        NetworkRuntimeConfig,
     };
 
     use super::*;
 
     fn process_container_with_proxy_peer(peer: &str) -> Containment {
-        Containment::ProcessContainer(ProcessContainer {
+        Containment::ProcessContainer(ProcessContainerConfig {
             network: Some(ProcessContainerNetwork {
                 allowed_proxy_peer: Some(peer.to_string()),
             }),
@@ -112,7 +113,7 @@ mod tests {
     }
 
     fn assert_blank_proxy_peer_uses_shared_validation(peer: &str) {
-        let policy = SandboxPolicy::default();
+        let policy = ContainerPolicy::default();
         let containment = process_container_with_proxy_peer(peer);
         let prepared = PreparedInput {
             policy: &policy,
@@ -147,20 +148,19 @@ mod tests {
 
     #[test]
     fn preserves_nonempty_allowed_proxy_peer() {
-        let policy = SandboxPolicy {
-            network: Some(NetworkSection {
-                egress: Some(NetworkEgressSection {
+        let policy = ContainerPolicy {
+            network: Some(NetworkPolicy {
+                egress: Some(NetworkEgressPolicy {
                     default: Some(NetworkAction::Deny),
                     ..Default::default()
                 }),
-                ingress: Some(NetworkIngressSection {
+                ingress: Some(NetworkIngressPolicy {
                     default: Some(NetworkAction::Allow),
                     host_loopback: Some(NetworkAction::Deny),
                 }),
-                runtime_config: Some(RuntimeConfigSection {
+                runtime_config: Some(NetworkRuntimeConfig {
                     network_proxy: Some("http://127.0.0.1:8080".to_string()),
                 }),
-                ..Default::default()
             }),
             ..Default::default()
         };

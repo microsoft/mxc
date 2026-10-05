@@ -204,10 +204,12 @@ A request that permits nothing and names no proxy keeps its own loopback and rea
 ### SDK
 
 ```typescript
-import { spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
-import { createConfigFromPolicy, SandboxPolicy } from '@microsoft/mxc-sdk/v1';
+import { spawn } from '@microsoft/mxc-sdk/v1';
+import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
-const policy: SandboxPolicy = {
+const request: ContainerRequest = {
+    command: 'echo hello',
+    containment: { type: 'lxc' },
     filesystem: {
         readwritePaths: ['/tmp/output'],
         readonlyPaths: ['/opt/tools'],
@@ -218,25 +220,28 @@ const policy: SandboxPolicy = {
     },
 };
 
-// Select LXC explicitly: the default `process` intent resolves to Bubblewrap
-// on Linux. The resulting config runs through lxc-exec.
-const config = createConfigFromPolicy(policy, 'lxc');
-config.process!.commandLine = 'echo hello';
-
-const pty = spawnSandboxFromConfig(config);
-pty.onData((data) => console.log(data));
-pty.onExit((e) => console.log('Exit:', e.exitCode));
+const child = spawn(request);
+child.standardOutput?.on('data', (data) => process.stdout.write(data));
+try {
+    const outcome = await child.waitAsync();
+    console.log('Exit:', outcome.exitCode);
+} finally {
+    child.dispose();
+}
 ```
+
+Select LXC explicitly: the default `process` intent resolves to Bubblewrap on
+Linux. SDK execution uses the in-process native library, not `lxc-exec`.
 
 ## Streaming
 
-LXC implements `SandboxBackend`, so `mxc_sdk::v1::spawn_sandbox`, `mxc_sdk::v1::run`,
+LXC implements `SandboxBackend`, so `mxc_sdk::v1::spawn`, `mxc_sdk::v1::run`,
 and every SDK built on `mxc_spawn_json` / `mxc_run_json` reach it
 in-process. The handle serves live stdin, stdout, and stderr, plus `wait` and
 `kill`.
 
 Ordinary streaming uses pipes, so `isatty()` is false. `spawn_with_pty` returns
-a caller-owned terminal with merged output, writable input, resize, wait, and
+a caller-controlled terminal with merged output, writable input, resize, wait, and
 kill. `StdioMode::Inherit` remains unsupported.
 
 **`kill()` stops the container,** not just the workload: the workload runs under
@@ -352,7 +357,7 @@ The zone query should answer the zone you assigned.
   host that provides one.
 - **No proxied egress.** See [Proxy](#proxy).
 - **No state-aware lifecycle.** LXC implements `ScriptRunner` (one-shot) and
-  `SandboxBackend` (streaming over pipes or a caller-owned PTY), not
+  `SandboxBackend` (streaming over pipes or a caller-controlled PTY), not
   `StatefulSandboxBackend`. A
   state-aware request is rejected.
 - **Inherited stdio is unavailable.** Use ordinary pipe streaming or

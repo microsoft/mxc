@@ -9,17 +9,25 @@ import fs from 'fs';
 import os from 'os';
 import semver from 'semver';
 import { createRequire } from 'node:module';
-import * as sdkNamespace from '@microsoft/mxc-sdk';
+import { pathToFileURL } from 'node:url';
 import * as sdkV1Namespace from '@microsoft/mxc-sdk/v1';
+import type { OneShotRequest } from './node_modules/@microsoft/mxc-sdk/dist/generated/v1_0_0/wire.js';
+import type { ContainerConfig } from './node_modules/@microsoft/mxc-sdk/dist/v1/types.js';
 import {
   MxcError,
-} from '@microsoft/mxc-sdk';
-import {
-  deprovisionSandbox,
-  provisionSandbox,
-  type SandboxId,
-  type StateAwareContainmentBackend,
 } from '@microsoft/mxc-sdk/v1';
+import {
+  deprovisionContainer,
+  provisionContainer,
+  runAsync,
+  type ContainerId,
+  type Containment,
+  type ContainerRequest,
+  type LifecycleContainmentKind,
+} from '@microsoft/mxc-sdk/v1';
+
+export type ContainerRequestTestSettings =
+  Omit<ContainerRequest, 'command'> & { command?: string };
 
 export const isolationSessionNetwork = {
   egress: { default: 'allow' },
@@ -27,7 +35,60 @@ export const isolationSessionNetwork = {
 } as const;
 
 const require = createRequire(import.meta.url);
-export const sdk = { ...sdkNamespace, ...sdkV1Namespace };
+
+const { runOneShotJsonAsync } = await import(pathToFileURL(
+  path.join(getSdkPackageRoot(), 'dist', 'bindings', 'run.js'),
+).href) as typeof import('./node_modules/@microsoft/mxc-sdk/dist/bindings/run.js');
+const { prepareOneShotRequest } = await import(pathToFileURL(
+  path.join(getSdkPackageRoot(), 'dist', 'bindings', 'one-shot.js'),
+).href) as typeof import('./node_modules/@microsoft/mxc-sdk/dist/bindings/one-shot.js');
+const { createConfigFromRequest } = await import(pathToFileURL(
+  path.join(getSdkPackageRoot(), 'dist', 'v1', 'container.js'),
+).href) as typeof import('./node_modules/@microsoft/mxc-sdk/dist/v1/container.js');
+
+/** Test-only exact-config path for backend contract tests; always calls mxc_ffi. */
+export function runConfigForTest(
+  config: ContainerConfig,
+  options: { experimental?: boolean } = {},
+) {
+  const request: OneShotRequest = prepareOneShotRequest(config);
+  return runOneShotJsonAsync(request, options.experimental === true);
+}
+
+export function createConfigForTest(
+  request: ContainerRequestTestSettings,
+  containment?: Containment['type'],
+  containerName?: string,
+): ContainerConfig {
+  return createConfigFromRequest({
+    ...request,
+    command: request.command ?? '',
+    ...(containment === undefined ? {} : { containment: { type: containment } }),
+    ...(containerName === undefined ? {} : { containerName }),
+  });
+}
+
+/** Exercise the public V1 buffered API for stable-request integration tests. */
+export function runRequestForTest(
+  command: string,
+  request: ContainerRequestTestSettings,
+  _options: Record<string, never> = {},
+  workingDirectory?: string,
+  containerName?: string,
+) {
+  return runAsync({
+    ...request,
+    command,
+    ...(workingDirectory === undefined ? {} : { workingDirectory }),
+    ...(containerName === undefined ? {} : { containerName }),
+  });
+}
+
+export const sdk = {
+  ...sdkV1Namespace,
+  createConfigForTest,
+  runRequestForTest,
+};
 
 // Schema versions
 
@@ -120,15 +181,6 @@ export function platformName(): string {
  * runner on every supported host, so a failing dry-run from the test harness
  * is a real regression, not an expected outcome.
  */
-export function assertDryRunResult(
-  stdout: string,
-  exitCode: number,
-  version: string,
-): void {
-  assert.strictEqual(exitCode, 0, `[${version}] Expected exit 0 but got ${exitCode}`);
-  assert.ok(stdout.includes('Dry run completed. Result: validation passed'), `[${version}] ${stdout}`);
-}
-
 // Environment / skip helpers
 
 const skipOsDependentTests= process.env.MXC_SKIP_OS_BUILD_DEPENDENT_TESTS === '1';
@@ -156,15 +208,6 @@ export const isLinuxBubblewrap = (() => {
   }
   return false;
 })();
-
-// When MXC_DEBUG=true, integration tests pass { debug: true } to spawn options
-// so wxc-exec / lxc-exec emit verbose output. Enable via pipeline parameter or locally.
-const debugMode = process.env.MXC_DEBUG === 'true';
-const experimentalMode = os.platform() === 'darwin';
-export const debugSpawnOptions = {
-  ...(debugMode ? { debug: true } : {}),
-  ...(experimentalMode ? { experimental: true } : {}),
-};
 
 // Network test endpoint reachable from both CI (Azure DevOps agents block
 // external traffic but allow Azure Artifacts feeds) and local builds.
@@ -240,11 +283,11 @@ export async function runOrSkipIfBackendUnavailable<T>(
 }
 
 /** Deprovision a sandbox best-effort, swallowing errors so cleanup never masks the original failure. */
-export async function safeDeprovision<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
+export async function safeDeprovision<C extends LifecycleContainmentKind>(
+  sandboxId: ContainerId<C>,
 ): Promise<void> {
   try {
-    await deprovisionSandbox(sandboxId);
+    await deprovisionContainer(sandboxId);
   } catch (err) {
     console.error(`Cleanup deprovision failed for ${sandboxId}: ${err}`);
   }
@@ -258,7 +301,7 @@ export async function safeDeprovision<C extends StateAwareContainmentBackend>(
  * genuine failures aren't masked as "skipped." Intended for one-shot probing at
  * module load — pair the result with `describe`'s `{ skip }` option.
  */
-export async function probeStateAwareRuntime<C extends StateAwareContainmentBackend>(
+export async function probeStateAwareRuntime<C extends LifecycleContainmentKind>(
   containment: C,
 ): Promise<string | undefined> {
   try {
@@ -269,7 +312,7 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
     // iso-capable host and rethrow it, breaking the suite at module load.
     //
     // The provision call is made per backend rather than once with a cast
-    // config. `provisionSandbox`'s trailing parameters are a conditional tuple
+    // config. `provisionContainer`'s trailing parameters are a conditional tuple
     // keyed on the backend, and that conditional cannot be evaluated while `C`
     // is still an unresolved type parameter — so a single generic call cannot
     // be checked against it. Casting the config would silence that rather than
@@ -280,25 +323,24 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
     // compile error here instead of a wrong config at runtime.
     const sandboxId = await (async () => {
       // Widen once into a local of the concrete union, then switch on that.
-      // Switching on `containment as StateAwareContainmentBackend` would not
+      // Switching on `containment as LifecycleContainmentKind` would not
       // narrow inside the arms — an assertion expression is not a narrowable
       // reference — which would in turn force the default arm to cast, and
       // `x as never` compiles unconditionally, leaving the guard unable to
       // ever fire. Binding the local first makes the narrowing real, so the
       // default arm genuinely reduces to `never` and adding a backend to the
       // union becomes a compile error here.
-      const backend: StateAwareContainmentBackend = containment;
+      const backend: LifecycleContainmentKind = containment;
       switch (backend) {
         case 'isolation_session': {
-          const result = await provisionSandbox(
-            'isolation_session',
-            { network: isolationSessionNetwork },
+          const result = await provisionContainer(
+            { containment: 'isolation_session', network: isolationSessionNetwork },
           );
-          return result.sandboxId;
+          return result.containerId;
         }
         case 'wslc': {
-          const result = await provisionSandbox('wslc');
-          return result.sandboxId;
+          const result = await provisionContainer({ containment: 'wslc' });
+          return result.containerId;
         }
         default: {
           const unhandled: never = backend;
@@ -341,16 +383,12 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
  * there is no generic form to write here.
  */
 export async function probeIsolationSessionFeature(): Promise<string | undefined> {
-  let provisioned: SandboxId<'isolation_session'>;
+  let provisioned: ContainerId<'isolation_session'>;
   try {
-    const result = await provisionSandbox(
-      'isolation_session',
-      {
-        network: isolationSessionNetwork,
-        appId: 'x'.repeat(257),
-      },
+    const result = await provisionContainer(
+      { containment: 'isolation_session', network: isolationSessionNetwork, appId: 'x'.repeat(257) },
     );
-    provisioned = result.sandboxId;
+    provisioned = result.containerId;
   } catch (err) {
     const skipReason = isolationSessionFeatureSkipReason(err);
     if (skipReason !== undefined) return skipReason;
@@ -376,39 +414,6 @@ export function createTempDir(prefix: string = 'mxc-test'): string {
   const dir = path.join(tmpBase, `${prefix}-${Date.now()}`);
   fs.mkdirSync(dir);
   return dir;
-}
-
-// Async spawn from a pre-built ContainerConfig. Mirrors the SDK's own
-// spawnSandboxAsync (sandbox.ts) -- it exists because the SDK doesn't expose
-// an async wrapper around spawnSandboxFromConfig, and tests that need a
-// specific backend build the config directly.
-//
-// Notes (kept in lockstep with spawnSandboxAsync):
-//  - stdout/stderr are merged: wxc-exec runs under node-pty (a single PTY),
-//    so the OS combines both streams. stderr: '' is structural padding.
-//  - No per-call timeout: node:test enforces test-level timeouts and the
-//    config's process.timeout is enforced by the native runner.
-//  - IPty has no onError event. Synchronous spawn failures are caught below;
-//    post-spawn failures surface as a non-zero exitCode via onExit.
-export function spawnFromConfigAsync(
-  config: sdkNamespace.ContainerConfig,
-  options: sdkNamespace.SandboxSpawnOptions = {},
-  workingDirectory?: string,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    try {
-      const ptyProcess = sdkNamespace.spawnSandboxFromConfig(config, options, workingDirectory);
-      let output = '';
-      ptyProcess.onData((data: string) => {
-        output += data;
-      });
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        resolve({ stdout: output, stderr: '', exitCode: event.exitCode });
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
 }
 
 // Python helpers
@@ -441,9 +446,12 @@ export const pythonSkipReason: string | undefined = _python.command ? undefined 
  * Merge host tool paths into a policy so the container can find installed tools.
  * Adds the Python prefix as a readwrite path when needed for DLL loading.
  */
-export function withToolPaths(policy: Record<string, any>): Record<string, any> {
-  const toolsPolicy = sdk.getAvailableToolsPolicy(process.env);
-  const merged = { ...policy, filesystem: { ...policy.filesystem } };
+export function withToolPaths(
+  request: ContainerRequestTestSettings,
+): ContainerRequestTestSettings {
+  const toolsPolicy = sdk.policy.filesystem.getAvailableToolsPolicy(process.env);
+  const filesystem = { ...request.filesystem };
+  const merged: ContainerRequestTestSettings = { ...request, filesystem };
 
   const extraReadwrite: string[] = [];
   if (_python.prefix) {
@@ -451,14 +459,14 @@ export function withToolPaths(policy: Record<string, any>): Record<string, any> 
   }
 
   if (toolsPolicy.readonlyPaths.length > 0) {
-    merged.filesystem.readonlyPaths = [
-      ...(merged.filesystem.readonlyPaths ?? []),
+    filesystem.readonlyPaths = [
+      ...(filesystem.readonlyPaths ?? []),
       ...toolsPolicy.readonlyPaths,
     ];
   }
   if (toolsPolicy.readwritePaths.length > 0 || extraReadwrite.length > 0) {
-    merged.filesystem.readwritePaths = [
-      ...(merged.filesystem.readwritePaths ?? []),
+    filesystem.readwritePaths = [
+      ...(filesystem.readwritePaths ?? []),
       ...toolsPolicy.readwritePaths,
       ...extraReadwrite,
     ];

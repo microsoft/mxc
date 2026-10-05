@@ -11,16 +11,16 @@
       "default": "./dist/index.js"
     },
     "./v1": {
-      "types": "./dist/v1.d.ts",
-      "import": "./dist/v1.js",
-      "default": "./dist/v1.js"
+      "types": "./dist/v1/index.d.ts",
+      "import": "./dist/v1/index.js",
+      "default": "./dist/v1/index.js"
     },
     "./package.json": "./package.json"
   },
   "typesVersions": {
     "*": {
       "v1": [
-        "./dist/v1.d.ts"
+        "./dist/v1/index.d.ts"
       ]
     }
   },
@@ -36,10 +36,10 @@
     "watch": "tsc --watch",
     "clean": "rimraf dist",
     "test": "npm run test:unit",
-    "test:unit": "npm run build:test-unit && node --test dist-tests/tests/unit/sandbox.test.js dist-tests/tests/unit/v1-sandbox-policy.test.js dist-tests/tests/unit/sdk-v1-conformance.test.js dist-tests/tests/unit/policy.test.js dist-tests/tests/unit/logger.test.js dist-tests/tests/unit/errors.test.js dist-tests/tests/unit/state-aware-types.test.js dist-tests/tests/unit/state-aware.test.js dist-tests/tests/unit/state-aware-binding.test.js dist-tests/tests/unit/platform.test.js dist-tests/tests/unit/probe.test.js dist-tests/tests/unit/native-library.test.js dist-tests/tests/unit/binding-run.test.js dist-tests/tests/unit/streaming-binding.test.js dist-tests/tests/unit/pty-binding.test.js dist-tests/tests/unit/inprocess-run.test.js dist-tests/tests/unit/sandbox-process.test.js dist-tests/tests/unit/telemetry.test.js dist-tests/tests/unit/telemetry-request-worker.test.js dist-tests/tests/unit/wire-conformance.test.js dist-tests/tests/unit/wire-conformance-state-aware.test.js",
+    "test:unit": "npm run build:test-unit && node --test dist-tests/tests/unit/sandbox.test.js dist-tests/tests/unit/v1-sandbox-policy.test.js dist-tests/tests/unit/sdk-v1-conformance.test.js dist-tests/tests/unit/policy.test.js dist-tests/tests/unit/logger.test.js dist-tests/tests/unit/errors.test.js dist-tests/tests/unit/state-aware-types.test.js dist-tests/tests/unit/state-aware.test.js dist-tests/tests/unit/state-aware-binding.test.js dist-tests/tests/unit/platform.test.js dist-tests/tests/unit/probe.test.js dist-tests/tests/unit/native-library.test.js dist-tests/tests/unit/binding-run.test.js dist-tests/tests/unit/streaming-binding.test.js dist-tests/tests/unit/pty-binding.test.js dist-tests/tests/unit/pty-options.test.js dist-tests/tests/unit/inprocess-run.test.js dist-tests/tests/unit/sandbox-process.test.js dist-tests/tests/unit/telemetry.test.js dist-tests/tests/unit/telemetry-request-worker.test.js dist-tests/tests/unit/wire-conformance.test.js dist-tests/tests/unit/wire-conformance-state-aware.test.js",
     "test:integration": "cd tests/integration && npm install && npm run build && npm test",
     "prepublishOnly": "npm run build",
-    "typecheck:integration": "cd tests/integration && npx tsc --noEmit -p tsconfig.json",
+    "typecheck:integration": "node tests/integration/check-package-build.mjs",
     "typecheck": "npm run build && npm run build:test-unit && npm run typecheck:integration"
   },
   "keywords": [
@@ -47,8 +47,7 @@
     "sandbox",
     "security",
     "processcontainer",
-    "windows",
-    "node-pty"
+    "windows"
   ],
   "author": "Microsoft Corporation",
   "license": "MIT",
@@ -61,7 +60,6 @@
   },
   "dependencies": {
     "koffi": "^3.2.1",
-    "node-pty": "^1.2.0-beta.12",
     "semver": "^7.7.4"
   },
   "engines": {

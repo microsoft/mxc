@@ -185,10 +185,10 @@ npm install @microsoft/mxc-sdk
 ```
 
 ```typescript
-import { getPlatformSupport, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
 import {
-  createConfigFromPolicy, getAvailableToolsPolicy, getTemporaryFilesPolicy,
+  getPlatformSupport, spawn, getAvailableToolsPolicy, getTemporaryFilesPolicy,
 } from '@microsoft/mxc-sdk/v1';
+import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
 if (!getPlatformSupport().isSupported) {
   throw new Error('MXC not available on this host');
@@ -197,7 +197,8 @@ if (!getPlatformSupport().isSupported) {
 const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
-const config = createConfigFromPolicy({
+const request: ContainerRequest = {
+  command: 'python -c "print(\'hello from container\')"',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
@@ -207,20 +208,24 @@ const config = createConfigFromPolicy({
     ingress: { default: 'deny', hostLoopback: 'deny' },
   },
   timeoutMs: 30_000,
-});
-config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
+};
 
-const child = spawnSandboxFromConfig(config, { usePty: false });
-child.stdout!.on('data', (d) => process.stdout.write(d));
-child.on('close', (code) => console.log('exit:', code));
+const child = spawn(request);
+child.standardOutput?.on('data', (data) => process.stdout.write(data));
+try {
+  const outcome = await child.waitAsync();
+  console.log('exit:', outcome.exitCode);
+} finally {
+  child.dispose();
+}
 ```
 
-The SDK also provides a **state-aware lifecycle** API for long-lived sandboxes:
+The SDK also provides a **lifecycle** API for persistent containers:
 
 ```typescript
 import {
-  provisionSandbox, startSandbox, execInSandboxAsync,
-  stopSandbox, deprovisionSandbox,
+  provisionContainer, startContainer, runInContainerAsync,
+  stopContainer, deprovisionContainer,
 } from '@microsoft/mxc-sdk/v1';
 ```
 

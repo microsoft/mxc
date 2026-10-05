@@ -47,7 +47,7 @@
 //!   [`std::panic::catch_unwind`]; a panic becomes a status code
 //!   ([`MXC_STATUS_PANIC`]), never an unwind across the boundary.
 //! - **Data contract**: JSON in, captured bytes + status out. The status codes
-//!   mirror `mxc_sdk::ErrorCode` one-for-one (plus a few FFI-local codes).
+//!   mirror `mxc_sdk::v1::ErrorCode` one-for-one (plus a few FFI-local codes).
 //! - **Per-invocation telemetry opt-in**: configuration JSON uses
 //!   `telemetry.enabled`.
 //! - **WSLC native co-location** (`wslc` feature, Windows): `wslcsdk.dll`, plus
@@ -72,11 +72,11 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{
-    available_backends, platform_support, run_json, Error, ErrorCode, Output, WaitOutcome,
-};
+use mxc_sdk::__ffi::run_json;
+use mxc_sdk::v1::{available_backends, platform_support, Error, ErrorCode};
 #[cfg(target_os = "windows")]
-use mxc_sdk::{v1::probe, ProbeOutput};
+use mxc_sdk::v1::{probe, ProbeOutput};
+use mxc_sdk::v1::{ExecutionResult, WaitResult};
 
 mod error_detail;
 mod pty;
@@ -172,7 +172,7 @@ fn report_consent_presenter_failure_once() {
 
 /// Success.
 pub const MXC_STATUS_SUCCESS: i32 = 0;
-// 1..=12 mirror `mxc_sdk::ErrorCode`.
+// 1..=12 mirror `mxc_sdk::v1::ErrorCode`.
 /// The request/policy was malformed.
 pub const MXC_STATUS_MALFORMED_REQUEST: i32 = 1;
 /// The requested containment backend is not supported by this library.
@@ -295,7 +295,7 @@ impl MxcRunResult {
     }
 
     /// A failure from the SDK, carrying its API detail across.
-    fn from_sdk_error(error: &mxc_sdk::Error) -> Self {
+    fn from_sdk_error(error: &mxc_sdk::v1::Error) -> Self {
         Self {
             status: status_from_error_code(error.code),
             error: MxcErrorDetail::from_error(error),
@@ -403,12 +403,12 @@ fn run_json_inner(request_json_utf8: *const c_char, experimental: bool) -> MxcRu
     execute_output(run_json(request_json, experimental))
 }
 
-fn execute_output(output: Result<Output, Error>) -> MxcRunResult {
+fn execute_output(output: Result<ExecutionResult, Error>) -> MxcRunResult {
     match output {
         Ok(output) => {
             let (exit_code, timed_out) = match output.outcome {
-                WaitOutcome::Exited(code) => (code, 0),
-                WaitOutcome::TimedOut => (-1, 1),
+                WaitResult::Exited(code) => (code, 0),
+                WaitResult::TimedOut => (-1, 1),
             };
             // Serialize both JSON payloads before allocating any C string, so a
             // failure on the second one can't leak the first.
@@ -457,7 +457,7 @@ fn execute_output(output: Result<Output, Error>) -> MxcRunResult {
 }
 
 /// Free the owned out-strings of an [`MxcRunResult`] produced by
-/// [`mxc_run_json`].
+/// [`mxc_run_json`] or [`mxc_run_state_aware_exec_json`].
 ///
 /// Safe to call once per result. The result struct itself is caller-owned
 /// (typically stack storage); this frees only the heap strings it points to and
@@ -465,7 +465,7 @@ fn execute_output(output: Result<Output, Error>) -> MxcRunResult {
 ///
 /// # Safety
 /// `r` must be null or point to an [`MxcRunResult`] previously filled by
-/// [`mxc_run_json`], not already freed.
+/// [`mxc_run_json`] or [`mxc_run_state_aware_exec_json`], not already freed.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_run_result_free(r: *mut MxcRunResult) {
     if r.is_null() {
@@ -771,7 +771,7 @@ pub unsafe extern "C" fn mxc_telemetry_get_consent(out_utf8: *mut *mut c_char) -
     // than a stale/uninitialized value.
     unsafe { ptr::write(out_utf8, ptr::null_mut()) };
 
-    let result = catch_unwind(|| mxc_sdk::telemetry::get_consent().as_str());
+    let result = catch_unwind(|| mxc_sdk::v1::telemetry::get_consent().as_str());
     let state_str = match result {
         Ok(s) => s,
         Err(p) => {
@@ -786,8 +786,8 @@ pub unsafe extern "C" fn mxc_telemetry_get_consent(out_utf8: *mut *mut c_char) -
 }
 
 fn consent_status_json(
-    status: mxc_sdk::telemetry::ConsentStatus,
-    policy: mxc_sdk::telemetry::PolicyState,
+    status: mxc_sdk::v1::telemetry::ConsentStatus,
+    policy: mxc_sdk::v1::telemetry::PolicyState,
 ) -> serde_json::Value {
     serde_json::json!({
         "storedState": status.stored_state.as_str(),
@@ -797,14 +797,16 @@ fn consent_status_json(
     })
 }
 
-fn consent_outcome_json(outcome: mxc_sdk::telemetry::ConsentActionOutcome) -> serde_json::Value {
+fn consent_outcome_json(
+    outcome: mxc_sdk::v1::telemetry::ConsentActionOutcome,
+) -> serde_json::Value {
     let mut value = consent_status_json(outcome.status, outcome.policy);
     value["result"] = serde_json::Value::String(outcome.result.as_str().to_string());
     value
 }
 
-fn consent_prompt_json(prompt: &mxc_sdk::telemetry::ConsentPrompt) -> serde_json::Value {
-    fn message(value: mxc_sdk::telemetry::ConsentMessage) -> serde_json::Value {
+fn consent_prompt_json(prompt: &mxc_sdk::v1::telemetry::ConsentPrompt) -> serde_json::Value {
+    fn message(value: mxc_sdk::v1::telemetry::ConsentMessage) -> serde_json::Value {
         serde_json::json!({ "id": value.id, "text": value.text })
     }
 
@@ -875,7 +877,7 @@ pub unsafe extern "C" fn mxc_telemetry_request_consent(
     let presenter = presenter.expect("checked above");
 
     let result = catch_unwind(|| {
-        mxc_sdk::telemetry::request_consent(locale.as_deref(), |prompt| {
+        mxc_sdk::v1::telemetry::request_consent(locale.as_deref(), |prompt| {
             let prompt_json = serde_json::to_vec(&consent_prompt_json(prompt))
                 .map_err(|error| error.to_string())?;
             let prompt_json = CString::new(prompt_json).map_err(|error| error.to_string())?;
@@ -883,10 +885,14 @@ pub unsafe extern "C" fn mxc_telemetry_request_consent(
             // pointer remains valid for the duration of this invocation.
             let decision = unsafe { presenter(prompt_json.as_ptr(), context) };
             match decision {
-                MXC_TELEMETRY_CONSENT_DECISION_YES => Ok(mxc_sdk::telemetry::ConsentDecision::Yes),
-                MXC_TELEMETRY_CONSENT_DECISION_NO => Ok(mxc_sdk::telemetry::ConsentDecision::No),
+                MXC_TELEMETRY_CONSENT_DECISION_YES => {
+                    Ok(mxc_sdk::v1::telemetry::ConsentDecision::Yes)
+                }
+                MXC_TELEMETRY_CONSENT_DECISION_NO => {
+                    Ok(mxc_sdk::v1::telemetry::ConsentDecision::No)
+                }
                 MXC_TELEMETRY_CONSENT_DECISION_DISMISSED => {
-                    Ok(mxc_sdk::telemetry::ConsentDecision::Dismissed)
+                    Ok(mxc_sdk::v1::telemetry::ConsentDecision::Dismissed)
                 }
                 MXC_TELEMETRY_CONSENT_PRESENTER_ERROR => {
                     Err("host consent presenter failed".to_string())
@@ -903,12 +909,12 @@ pub unsafe extern "C" fn mxc_telemetry_request_consent(
             // SAFETY: validated above.
             unsafe { write_json_out(consent_outcome_json(outcome), out_utf8) }
         }
-        Ok(Err(mxc_sdk::telemetry::ConsentError::Persist(error))) => {
+        Ok(Err(mxc_sdk::v1::telemetry::ConsentError::Persist(error))) => {
             let _ = error;
             report_request_consent_persist_failure_once();
             MXC_STATUS_CONSENT_WRITE_FAILED
         }
-        Ok(Err(mxc_sdk::telemetry::ConsentError::Presenter(error))) => {
+        Ok(Err(mxc_sdk::v1::telemetry::ConsentError::Presenter(error))) => {
             let _ = error;
             report_consent_presenter_failure_once();
             MXC_STATUS_BACKEND_ERROR
@@ -941,7 +947,7 @@ pub unsafe extern "C" fn mxc_telemetry_withdraw_consent(out_utf8: *mut *mut c_ch
     // out-pointer in a well-defined null state, not the caller's prior value.
     // SAFETY: `out_utf8` is non-null and caller-guaranteed writable.
     unsafe { ptr::write(out_utf8, ptr::null_mut()) };
-    match catch_unwind(mxc_sdk::telemetry::withdraw_consent) {
+    match catch_unwind(mxc_sdk::v1::telemetry::withdraw_consent) {
         Ok(Ok(outcome)) => {
             // SAFETY: validated above.
             unsafe { write_json_out(consent_outcome_json(outcome), out_utf8) }
@@ -978,8 +984,8 @@ pub unsafe extern "C" fn mxc_telemetry_get_consent_status(out_utf8: *mut *mut c_
     unsafe { ptr::write(out_utf8, ptr::null_mut()) };
     let result = catch_unwind(|| {
         consent_status_json(
-            mxc_sdk::telemetry::get_consent_status(),
-            mxc_sdk::telemetry::get_policy(),
+            mxc_sdk::v1::telemetry::get_consent_status(),
+            mxc_sdk::v1::telemetry::get_policy(),
         )
     });
     match result {
@@ -1013,7 +1019,7 @@ pub unsafe extern "C" fn mxc_telemetry_needs_consent_prompt(out_needs_prompt: *m
     // caller with well-defined, non-garbage memory.
     unsafe { ptr::write(out_needs_prompt, 0) };
 
-    let needs_prompt = match catch_unwind(mxc_sdk::telemetry::needs_consent_prompt) {
+    let needs_prompt = match catch_unwind(mxc_sdk::v1::telemetry::needs_consent_prompt) {
         Ok(b) => b,
         Err(p) => {
             report_panic("mxc_telemetry_needs_consent_prompt", &*p);
@@ -1054,7 +1060,7 @@ pub unsafe extern "C" fn mxc_telemetry_get_policy(out_utf8: *mut *mut c_char) ->
     // a well-defined null pointer rather than a stale/uninitialized value.
     unsafe { ptr::write(out_utf8, ptr::null_mut()) };
 
-    let result = catch_unwind(|| mxc_sdk::telemetry::get_policy().as_str());
+    let result = catch_unwind(|| mxc_sdk::v1::telemetry::get_policy().as_str());
     let state_str = match result {
         Ok(s) => s,
         Err(p) => {
@@ -1187,7 +1193,7 @@ mod tests {
     #[test]
     fn from_sdk_error_carries_the_api_detail() {
         let mut error =
-            mxc_sdk::Error::new(ErrorCode::BackendError, "The provision was not found.");
+            mxc_sdk::v1::Error::new(ErrorCode::BackendError, "The provision was not found.");
         error.operation = Some("IsoSessionOps.StopSessionAsync".to_string());
         error.native_code = Some("0x80070490".to_string());
         error.remediation = Some("Re-provision the sandbox.".to_string());

@@ -9,7 +9,8 @@ import {
   type StateAwareNativeFacade,
   type StateAwareNativeResult,
 } from '../../src/bindings/state-aware.js';
-import { MxcError } from '../../src/errors.js';
+import type { AbiErrorDetail } from '../../src/bindings/native-error.js';
+import { MxcError } from '../../src/v1/errors.js';
 
 class FakeStateAwareNative implements StateAwareNativeFacade {
   readonly calls: Array<{

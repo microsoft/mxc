@@ -70,7 +70,7 @@ reuses a warm VM.
 The state-aware surface keeps the VM alive across separate `wxc-exec
 --operation` processes. Raw SDK/FFI requests carry `phase` and, after
 provision, `sandboxId` in JSON. Direct executor calls omit those routing fields
-from JSON and pass them as `--operation` and `--sandbox-id`. The backend is
+from JSON and pass them as `--operation` and `--container-id`. The backend is
 inferred from the `wsb:` sandbox ID after provision.
 
 | Phase | Behaviour |
@@ -133,7 +133,7 @@ wxc-exec.exe config.json --operation provision
 
 Subsequent raw SDK/FFI phases carry the returned `sandboxId` in JSON. Direct
 executor calls remove `phase` and `sandboxId` from JSON and pass
-`--operation <phase> --sandbox-id <id>`.
+`--operation <phase> --container-id <id>`.
 
 The legacy `windowsSandbox.idleTimeoutMs`, `idleTimeout`, and
 `daemonPipeName` fields remain parseable for schema compatibility but do not

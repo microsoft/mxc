@@ -3,6 +3,7 @@
 
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
@@ -12,8 +13,139 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 
 public class MxcLifecycleTests
 {
+    [Theory]
+    [InlineData("StartContainer")]
+    [InlineData("StopContainer")]
+    [InlineData("DeprovisionContainer")]
+    public void LifecycleApis_ReturnLifecycleResult(string method)
+    {
+        Assert.Equal(typeof(LifecycleResult), typeof(MxcLifecycle).GetMethod(method)!.ReturnType);
+    }
+
     [Fact]
-    public void StartSandbox_IsolationSessionDoesNotRequireExperimentalOptIn()
+    public void LifecycleAndProvisionResults_PreserveWarnings()
+    {
+        var result = JsonNode.Parse("""{"sandboxId":"wslc:test","warnings":["cleanup warning"]}""")!.AsObject();
+        Assert.Equal(["cleanup warning"], MxcLifecycle.ParseLifecycleResult(result).Warnings);
+        Assert.Equal(["cleanup warning"],
+            MxcLifecycle.ParseProvisionResult(LifecycleContainmentKind.Wslc, result).Warnings);
+        Assert.Empty(MxcLifecycle.ParseLifecycleResult(new JsonObject()).Warnings);
+    }
+
+    [Theory]
+    [InlineData("""{"warnings":null}""")]
+    [InlineData("""{"warnings":[null]}""")]
+    [InlineData("""{"warnings":[1]}""")]
+    [InlineData("""{"warnings":"warning"}""")]
+    public void LifecycleAndProvisionResults_RejectMalformedWarnings(string json)
+    {
+        var result = JsonNode.Parse(json)!.AsObject();
+        Assert.Equal(ErrorCode.BackendError,
+            Assert.Throws<MxcException>(() => MxcLifecycle.ParseLifecycleResult(result)).Code);
+        result["sandboxId"] = "wslc:test";
+        Assert.Equal(ErrorCode.BackendError, Assert.Throws<MxcException>(() =>
+            MxcLifecycle.ParseProvisionResult(LifecycleContainmentKind.Wslc, result)).Code);
+    }
+
+    [Theory]
+    [InlineData("""{}""")]
+    [InlineData("""{"agentUserName":null,"agentUserSid":"sid","ephemeralWorkspacePath":"path"}""")]
+    [InlineData("""{"agentUserName":"agent","agentUserSid":1,"ephemeralWorkspacePath":"path"}""")]
+    public void ProvisionResult_RejectsIncompleteMetadata(string json)
+    {
+        var result = new JsonObject { ["sandboxId"] = "iso:test", ["metadata"] = JsonNode.Parse(json) };
+        Assert.Equal(ErrorCode.BackendError, Assert.Throws<MxcException>(() =>
+            MxcLifecycle.ParseProvisionResult(LifecycleContainmentKind.IsolationSession, result)).Code);
+    }
+
+    [Theory]
+    [InlineData("ValidateProvision")]
+    [InlineData("ValidateStart")]
+    [InlineData("ValidateStop")]
+    [InlineData("ValidateDeprovision")]
+    [InlineData("ValidateProcess")]
+    public void ValidationApis_ReturnValidationResult(string method)
+    {
+        Assert.Equal(typeof(ValidationResult), typeof(MxcLifecycle).GetMethod(method)!.ReturnType);
+    }
+
+    [Fact]
+    public void ValidationResult_PreservesWarningsAndDefaultsOnlyOmittedWarnings()
+    {
+        var result = MxcLifecycle.ParseValidationResult(
+            JsonNode.Parse("""{"warnings":["policy warning","telemetry warning"]}""")!.AsObject());
+        Assert.Equal(["policy warning", "telemetry warning"], result.Warnings);
+        Assert.Empty(MxcLifecycle.ParseValidationResult(new JsonObject()).Warnings);
+        Assert.Empty(MxcLifecycle.ParseValidationResult(
+            JsonNode.Parse("""{"warnings":[]}""")!.AsObject()).Warnings);
+    }
+
+    [Theory]
+    [InlineData("""{"warnings":null}""")]
+    [InlineData("""{"warnings":"warning"}""")]
+    [InlineData("""{"warnings":[null]}""")]
+    [InlineData("""{"warnings":[1]}""")]
+    public void ValidationResult_RejectsMalformedWarnings(string json)
+    {
+        var error = Assert.Throws<MxcException>(() => MxcLifecycle.ParseValidationResult(
+            JsonNode.Parse(json)!.AsObject()));
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+    }
+
+    [Fact]
+    public void ValidationResult_RejectsMissingResult()
+    {
+        var error = Assert.Throws<MxcException>(() => MxcLifecycle.ParseValidationResult(null));
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+    }
+
+    [Fact]
+    public void ProvisionResult_MapsNativeMetadataToClosedTypedSurface()
+    {
+        var result = MxcLifecycle.ParseProvisionResult(
+            LifecycleContainmentKind.IsolationSession,
+            JsonNode.Parse("""
+                {"sandboxId":"iso:test","metadata":{"agentUserName":"agent","agentUserSid":"S-1-5-21","ephemeralWorkspacePath":"C:\\workspace"}}
+                """)!.AsObject());
+
+        Assert.Equal(new ContainerId("iso:test"), result.ContainerId);
+        var metadata = Assert.IsType<IsolationSessionProvisionMetadata>(result.Metadata);
+        Assert.Equal("agent", metadata.AgentUserName);
+        Assert.Equal("S-1-5-21", metadata.AgentUserSid);
+        Assert.Equal("C:\\workspace", metadata.EphemeralWorkspacePath);
+        Assert.Null(typeof(ProvisionResult).GetProperty("MetadataJson"));
+        Assert.Null(typeof(ProvisionResult).GetProperty("IsolationSessionMetadata"));
+        var constructor = Assert.Single(typeof(ProvisionMetadata).GetConstructors(
+            BindingFlags.Instance | BindingFlags.NonPublic));
+        Assert.True(constructor.IsFamilyAndAssembly);
+    }
+
+    [Theory]
+    [InlineData(LifecycleContainmentKind.IsolationSession)]
+    [InlineData(LifecycleContainmentKind.Wslc)]
+    public void ProvisionResult_PreservesAbsentMetadata(LifecycleContainmentKind containment)
+    {
+        var result = MxcLifecycle.ParseProvisionResult(
+            containment,
+            JsonNode.Parse("""{"sandboxId":"opaque-id"}""")!.AsObject());
+        Assert.Null(result.Metadata);
+    }
+
+    [Fact]
+    public void ProvisionResult_RejectsUnsupportedMetadataAndMissingIdentity()
+    {
+        var error = Assert.Throws<MxcException>(() => MxcLifecycle.ParseProvisionResult(
+            LifecycleContainmentKind.Wslc,
+            JsonNode.Parse("""{"sandboxId":"wslc:test","metadata":{"unexpected":true}}""")!.AsObject()));
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+        Assert.Contains("unsupported metadata", error.Message);
+        Assert.Throws<MxcException>(() => MxcLifecycle.ParseProvisionResult(
+            LifecycleContainmentKind.IsolationSession,
+            new JsonObject()));
+    }
+
+    [Fact]
+    public void StartContainer_IsolationSessionDoesNotRequireExperimentalOptIn()
     {
         // IsolationSession must reach backend dispatch without an experimental
         // opt-in, so an experimental-gate refusal must not appear.
@@ -22,7 +154,7 @@ public class MxcLifecycleTests
         // feature was compiled in and whether or not the host has the service --
         // and it provisions nothing.
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.StartSandbox(new SandboxId("iso:0123456789abcdef")));
+            () => MxcLifecycle.StartContainer(new ContainerId("iso:0123456789abcdef")));
 
         Assert.False(
             ex.Code == ErrorCode.BackendUnavailable
@@ -31,11 +163,11 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void StartSandbox_WslcDoesNotRequireExperimentalOptIn()
+    public void StartContainer_WslcDoesNotRequireExperimentalOptIn()
     {
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.StartSandbox(
-                new SandboxId("wslc:0123456789abcdef0123456789abcdef")));
+            () => MxcLifecycle.StartContainer(
+                new ContainerId("wslc:0123456789abcdef0123456789abcdef")));
 
         Assert.False(
             ex.Code == ErrorCode.BackendUnavailable
@@ -44,21 +176,23 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void StartSandbox_UnregisteredPrefix_ThrowsUnsupportedContainment()
+    public void StartContainer_UnregisteredPrefix_ThrowsUnsupportedContainment()
     {
         // A non-provision phase resolves the backend from the id prefix; an
         // unknown prefix is unsupported_containment, independent of host and
         // build features.
-        var id = new SandboxId("bogus:12345");
-        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StartSandbox(id));
+        var id = new ContainerId("bogus:12345");
+        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StartContainer(id));
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
     }
 
     [Fact]
-    public void ExecInSandbox_RejectsWindowsSandboxIds()
+    public void SpawnInContainer_RejectsWindowsSandboxIds()
     {
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.ExecInSandbox(new SandboxId("wsb:0a1b2c3d"), "echo hi"));
+            () => MxcLifecycle.SpawnInContainer(
+                new ContainerId("wsb:0a1b2c3d"),
+                new ExecutionRequest("echo hi")));
 
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
         Assert.Contains("raw exact 1.1.0-alpha state-aware executor route", ex.Message, StringComparison.Ordinal);
@@ -67,10 +201,10 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void StartSandbox_RejectsWindowsSandboxIds()
+    public void StartContainer_RejectsWindowsSandboxIds()
     {
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.StartSandbox(new SandboxId("wsb:0a1b2c3d")));
+            () => MxcLifecycle.StartContainer(new ContainerId("wsb:0a1b2c3d")));
 
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
         Assert.Contains("raw exact 1.1.0-alpha state-aware executor route", ex.Message, StringComparison.Ordinal);
@@ -81,12 +215,12 @@ public class MxcLifecycleTests
     [Fact]
     public void OtherIdPhases_RejectWindowsSandboxIdsWithRawExactRoute()
     {
-        var id = new SandboxId("wsb:0a1b2c3d");
+        var id = new ContainerId("wsb:0a1b2c3d");
         foreach (var action in new Action[]
                  {
-                     () => MxcLifecycle.StopSandbox(id),
-                     () => MxcLifecycle.DeprovisionSandbox(id),
-                     () => MxcLifecycle.DryRunExecInSandbox(id, "echo hi"),
+                     () => MxcLifecycle.StopContainer(id),
+                     () => MxcLifecycle.DeprovisionContainer(id),
+                     () => MxcLifecycle.ValidateProcess(id, new ExecutionRequest("echo hi")),
                  })
         {
             var ex = Assert.Throws<MxcException>(action);
@@ -96,72 +230,54 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void ExecInSandboxAttached_WithoutATerminal_ThrowsMalformedRequest()
-    {
-        // Crosses mxc_exec_state_aware_attached_json itself, which the envelope tests
-        // cannot: it is a separate entry point. That gate short-circuits ahead of
-        // backend dispatch, which is also why this test cannot pin the
-        // experimental opt-in.
-        Assert.SkipUnless(
-            Console.IsOutputRedirected && Console.IsInputRedirected,
-            "a console host satisfies the terminal gate, so the call would "
-                + "dispatch a real attached exec rather than be refused by it");
-
-        var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.ExecInSandboxAttached(
-                new SandboxId("iso:0123456789abcdef"), "echo hi"));
-        Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
-    }
-
-    [Fact]
-    public void StopSandbox_MalformedId_ThrowsMalformedId()
+    public void StopContainer_MalformedId_ThrowsMalformedId()
     {
         // No backend prefix at all is a malformed id.
-        var id = new SandboxId("no-prefix");
-        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopSandbox(id));
+        var id = new ContainerId("no-prefix");
+        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopContainer(id));
         Assert.Equal(ErrorCode.MalformedId, ex.Code);
     }
 
     [Fact]
-    public void StopSandbox_MalformedIdWithVersionOverride_ThrowsMalformedId()
+    public void StopContainer_MalformedIdWithVersionOverride_ThrowsMalformedId()
     {
-        var id = new SandboxId("no-prefix");
-        var options = new StateAwarePhaseOptions { Version = "0.8.0-alpha" };
+        var id = new ContainerId("no-prefix");
+        var options = new StopOptions { Version = "0.8.0-alpha" };
 
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.StopSandbox(id, options));
+            () => MxcLifecycle.StopContainer(id, options));
 
         Assert.Equal(ErrorCode.MalformedId, ex.Code);
     }
 
     [Fact]
-    public void StopSandbox_EmptyPrefix_ThrowsMalformedId()
+    public void StopContainer_EmptyPrefix_ThrowsMalformedId()
     {
         // ":payload" clears the ctor's null/empty check and has a colon, but an
         // empty prefix is structural rather than an unregistered backend. The
         // native parse_sandbox_id_prefix pins the same split.
-        var id = new SandboxId(":payload");
-        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopSandbox(id));
+        var id = new ContainerId(":payload");
+        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopContainer(id));
         Assert.Equal(ErrorCode.MalformedId, ex.Code);
     }
 
     [Fact]
-    public void StopSandbox_DefaultId_ThrowsMalformedId()
+    public void StopContainer_DefaultId_ThrowsMalformedId()
     {
-        // default(SandboxId) is legal and leaves Value null; it must surface a
+        // default(ContainerId) is legal and leaves Value null; it must surface a
         // typed error rather than a NullReferenceException.
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.StopSandbox(default));
+            () => MxcLifecycle.StopContainer(default));
         Assert.Equal(ErrorCode.MalformedId, ex.Code);
     }
 
     [Fact]
-    public void StopSandbox_UnknownPrefix_ThrowsUnsupportedContainment()
+    public void StopContainer_UnknownPrefix_ThrowsUnsupportedContainment()
     {
         // A non-empty prefix is well-formed, so it stays UnsupportedContainment
         // and does not get folded into MalformedId by the guard above.
-        var id = new SandboxId("nope:payload");
-        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopSandbox(id));
+        var id = new ContainerId("nope:payload");
+        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopContainer(id));
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
     }
 
@@ -173,9 +289,9 @@ public class MxcLifecycleTests
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         };
-        var options = new WslcProvisionOptions
+        var options = new WslcProvisionRequest
         {
-            Network = new StateAwareNetworkPolicy
+            Network = new NetworkPolicy
             {
                 Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
                 Ingress = new NetworkIngressPolicy
@@ -187,9 +303,9 @@ public class MxcLifecycleTests
         };
 
         var json = JsonSerializer.Serialize(options, jsonOptions);
-        var roundTripped = JsonSerializer.Deserialize<WslcProvisionOptions>(json, jsonOptions)!;
+        var roundTripped = JsonSerializer.Deserialize<WslcProvisionRequest>(json, jsonOptions)!;
         var envelope = MxcLifecycle.BuildProvisionEnvelope(
-            StateAwareContainment.Wslc,
+            LifecycleContainmentKind.Wslc,
             roundTripped);
 
         Assert.DoesNotContain("defaultPolicy", json, StringComparison.Ordinal);
@@ -201,20 +317,20 @@ public class MxcLifecycleTests
     public void IsolationSessionProvisionOptions_RejectsNullNetwork()
     {
         Assert.Throws<ArgumentNullException>(
-            () => new IsolationSessionProvisionOptions(null!));
+            () => new IsolationSessionProvisionRequest(null!));
     }
 
     [Fact]
     public void BuildProvisionEnvelope_RejectsNetworkResetToNull()
     {
-        var options = new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy())
+        var options = new IsolationSessionProvisionRequest(new NetworkPolicy())
         {
             Network = null!,
         };
 
         var error = Assert.Throws<ArgumentNullException>(
             () => MxcLifecycle.BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
+                LifecycleContainmentKind.IsolationSession,
                 options));
         Assert.Equal("network", error.ParamName);
     }
@@ -222,70 +338,48 @@ public class MxcLifecycleTests
     [Fact]
     public void IsolationSessionProvisionOptions_RequiresNetworkPolicy()
     {
-        var constructor = Assert.Single(typeof(IsolationSessionProvisionOptions).GetConstructors());
+        var constructor = Assert.Single(typeof(IsolationSessionProvisionRequest).GetConstructors());
         Assert.Equal(
-            typeof(StateAwareNetworkPolicy),
+            typeof(NetworkPolicy),
             Assert.Single(constructor.GetParameters()).ParameterType);
-        Assert.NotNull(typeof(IsolationSessionProvisionOptions).GetProperty("Network"));
+        Assert.NotNull(typeof(IsolationSessionProvisionRequest).GetProperty("Network"));
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_CompatibilityOmissionDoesNotCreateAcknowledgment()
+    public void SpawnInContainer_UnregisteredPrefix_ThrowsUnsupportedContainment()
     {
-        var options = new ProvisionSandboxOptions();
-        Assert.Throws<ArgumentException>(
-            () => MxcLifecycle.BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
-                options));
-    }
-
-    [Fact]
-    public void ExecInSandbox_UnregisteredPrefix_ThrowsUnsupportedContainment()
-    {
-        var id = new SandboxId("bogus:12345");
-        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.ExecInSandbox(id, "echo hi"));
+        var id = new ContainerId("bogus:12345");
+        var ex = Assert.Throws<MxcException>(
+            () => MxcLifecycle.SpawnInContainer(id, new ExecutionRequest("echo hi")));
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
     }
 
     [Fact]
-    public void ExecInSandbox_NullCommand_Throws()
+    public void SpawnInContainer_NullRequest_Throws()
     {
-        var id = new SandboxId("iso:12345");
-        Assert.Throws<ArgumentNullException>(() => MxcLifecycle.ExecInSandbox(id, null!));
+        var id = new ContainerId("iso:12345");
+        Assert.Throws<ArgumentNullException>(() => MxcLifecycle.SpawnInContainer(id, null!));
     }
 
     [Fact]
-    public void SpawnInContainerWithPty_NullCommand_Throws()
+    public void ExecuteInContainerAttached_RemainsPrivateAndUnused()
     {
-        var id = new SandboxId("iso:12345");
-        Assert.Throws<ArgumentNullException>(
-            () => MxcLifecycle.SpawnInContainerWithPty(id, null!));
-    }
-
-    [Fact]
-    public void SpawnInContainerWithPty_RejectsZeroDimensionsBeforeNativeCall()
-    {
-        var id = new SandboxId("iso:12345");
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => MxcLifecycle.SpawnInContainerWithPty(
-                id,
-                "cmd.exe",
-                new MxcPtySize(0, 80)));
-    }
-
-    [Fact]
-    public void ExecInSandboxAttached_NullCommand_Throws()
-    {
-        var id = new SandboxId("iso:12345");
-        Assert.Throws<ArgumentNullException>(() => MxcLifecycle.ExecInSandboxAttached(id, null!));
+        var method = typeof(MxcLifecycle).GetMethod(
+            "ExecuteInContainerAttached",
+            System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+        Assert.True(method!.IsPrivate);
+        Assert.Equal(typeof(WaitResult), method.ReturnType);
+        Assert.Null(typeof(IContainerLifecycle).GetMethod("ExecuteInContainerAttached"));
     }
 
     [Fact]
     public void SandboxId_RoundTripsAndCompares()
     {
-        var a = new SandboxId("iso:abc");
-        var b = new SandboxId("iso:abc");
-        var c = new SandboxId("iso:xyz");
+        var a = new ContainerId("iso:abc");
+        var b = new ContainerId("iso:abc");
+        var c = new ContainerId("iso:xyz");
         Assert.Equal(a, b);
         Assert.NotEqual(a, c);
         Assert.Equal("iso:abc", a.Value);
@@ -296,8 +390,8 @@ public class MxcLifecycleTests
     [Fact]
     public void SandboxId_EmptyValue_Throws()
     {
-        Assert.Throws<ArgumentException>(() => new SandboxId(""));
-        Assert.Throws<ArgumentException>(() => new SandboxId(null!));
+        Assert.Throws<ArgumentException>(() => new ContainerId(""));
+        Assert.Throws<ArgumentException>(() => new ContainerId(null!));
     }
 
     [Fact]
@@ -307,8 +401,8 @@ public class MxcLifecycleTests
         // specify them. Post-provision backends reject mode fields by presence.
         var json = MxcLifecycle
             .BuildProvisionEnvelope(
-                StateAwareContainment.Wslc,
-                new WslcProvisionOptions { Network = new StateAwareNetworkPolicy() })
+                LifecycleContainmentKind.Wslc,
+                new WslcProvisionRequest { Network = new NetworkPolicy() })
             .ToJsonString();
         using var doc = JsonDocument.Parse(json);
 
@@ -323,7 +417,7 @@ public class MxcLifecycleTests
     {
         Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
+                LifecycleContainmentKind.IsolationSession,
                 null));
     }
 
@@ -331,7 +425,9 @@ public class MxcLifecycleTests
     public void BuildExecEnvelope_CarriesSandboxIdAndCommandLine()
     {
         var json = MxcLifecycle
-            .BuildExecEnvelope(new SandboxId("iso:abc"), "cmd /c echo hi")
+            .BuildExecEnvelope(
+                new ContainerId("iso:abc"),
+                new ExecutionRequest("cmd /c echo hi"))
             .ToJsonString();
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -344,13 +440,21 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildExecEnvelope_RejectsWslcOptionsForAnotherBackend()
+    public void BuildExecEnvelope_RejectsRuntimeConfigForAnotherBackend()
     {
         Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildExecEnvelope(
-                new SandboxId("iso:abc"),
-                "echo hi",
-                new WslcExecOptions()));
+                new ContainerId("iso:abc"),
+                new ExecutionRequest("echo hi")
+                {
+                    Network = new ProcessNetworkPolicy
+                    {
+                        RuntimeConfig = new NetworkRuntimeConfig
+                        {
+                            NetworkProxy = "http://proxy.example:8080",
+                        },
+                    },
+                }));
     }
 
     [Theory]
@@ -361,39 +465,40 @@ public class MxcLifecycleTests
     public void BuildExecEnvelope_RejectsInvalidRuntimeProxy(string url)
     {
         Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildExecEnvelope(
-            new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
-            "echo test",
-            new WslcExecOptions
+            new ContainerId("wslc:0123456789abcdef0123456789abcdef"),
+            new ExecutionRequest("echo test")
             {
-                RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = url },
+                Network = new ProcessNetworkPolicy
+                {
+                    RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = url },
+                },
             }));
     }
 
     [Fact]
     public void StateAwareTypes_KeepNetworkAndAcknowledgmentOutOfLaterPhases()
     {
-        foreach (var type in new[] { typeof(StateAwarePhaseOptions), typeof(StateAwareExecOptions) })
-        {
-            Assert.Null(type.GetProperty("Network"));
-            Assert.Null(type.GetProperty("RuntimeConfig"));
-            Assert.Null(type.GetProperty("AcknowledgeUnrestrictedNetwork"));
-        }
+        Assert.Null(typeof(StartOptions).GetProperty("Network"));
+        Assert.Null(typeof(StartOptions).GetProperty("RuntimeConfig"));
+        Assert.Null(typeof(StartOptions).GetProperty("AcknowledgeUnrestrictedNetwork"));
+        Assert.NotNull(typeof(ExecutionRequest).GetProperty("Network"));
+        Assert.Null(typeof(ExecutionRequest).GetProperty("RuntimeConfig"));
+        Assert.NotNull(typeof(ProcessNetworkPolicy).GetProperty("RuntimeConfig"));
+        Assert.Null(typeof(ProcessNetworkPolicy).GetProperty("Egress"));
+        Assert.Null(typeof(ProcessNetworkPolicy).GetProperty("Ingress"));
     }
 
     [Theory]
-    [InlineData("wslc:0123456789abcdef0123456789abcdef")]
-    [InlineData("iso:abc")]
-    [InlineData("wsb:01234567")]
-    public void BuildNonExecEnvelopes_RejectProxyCarriedThroughBaseOptions(string value)
+    [InlineData(nameof(MxcLifecycle.StartContainer), typeof(StartOptions))]
+    [InlineData(nameof(MxcLifecycle.StopContainer), typeof(StopOptions))]
+    [InlineData(nameof(MxcLifecycle.DeprovisionContainer), typeof(DeprovisionOptions))]
+    public void NonExecPhases_RequireTheirOwnOptions(string operation, Type optionsType)
     {
-        var id = new SandboxId(value);
-        var options = new WslcExecOptions
-        {
-            RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://proxy.example:8080" },
-        };
-        Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildStartEnvelope(id, options));
-        Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildStopEnvelope(id, options));
-        Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildDeprovisionEnvelope(id, options));
+        var method = typeof(MxcLifecycle).GetMethod(operation);
+        Assert.NotNull(method);
+        Assert.Equal(optionsType, method.GetParameters()[1].ParameterType);
+        Assert.False(optionsType.IsAssignableFrom(typeof(ExecutionRequest)));
+        Assert.Null(optionsType.GetProperty(nameof(ExecutionRequest.Network)));
     }
 
     [Fact]
@@ -402,7 +507,7 @@ public class MxcLifecycleTests
         var names = typeof(MxcLifecycle)
             .GetMethods(BindingFlags.Public | BindingFlags.Static)
             .Select(method => method.Name)
-            .Where(name => name.StartsWith("DryRun", StringComparison.Ordinal))
+            .Where(name => name.StartsWith("Validate", StringComparison.Ordinal))
             .Distinct(StringComparer.Ordinal)
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
@@ -410,11 +515,11 @@ public class MxcLifecycleTests
         Assert.Equal(
             new[]
             {
-                "DryRunDeprovisionSandbox",
-                "DryRunExecInSandbox",
-                "DryRunProvisionSandbox",
-                "DryRunStartSandbox",
-                "DryRunStopSandbox",
+                "ValidateDeprovision",
+                "ValidateProcess",
+                "ValidateProvision",
+                "ValidateStart",
+                "ValidateStop",
             },
             names);
     }
@@ -422,9 +527,8 @@ public class MxcLifecycleTests
     [Fact]
     public void WslcBuildSwitch_MatchesNativeAvailabilityAndStagesRuntimeUnit()
     {
-        Action dryRun = () => MxcLifecycle.DryRunProvisionSandbox(
-            StateAwareContainment.Wslc,
-            new WslcProvisionOptions { Image = "alpine:latest" });
+        Action dryRun = () => MxcLifecycle.ValidateProvision(
+            new WslcProvisionRequest { Image = "alpine:latest" });
 
 #if MXC_WITH_WSLC
         dryRun();
@@ -440,9 +544,9 @@ public class MxcLifecycleTests
     [Fact]
     public void IsolationSessionBuildSwitch_MatchesNativeAvailability()
     {
-        IsolationSessionProvisionOptions[] forms =
+        IsolationSessionProvisionRequest[] forms =
         [
-            new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy
+            new IsolationSessionProvisionRequest(new NetworkPolicy
             {
                 Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
                 Ingress = new NetworkIngressPolicy
@@ -454,8 +558,7 @@ public class MxcLifecycleTests
         ];
         foreach (var options in forms)
         {
-            Action dryRun = () => MxcLifecycle.DryRunProvisionSandbox(
-                StateAwareContainment.IsolationSession,
+            Action dryRun = () => MxcLifecycle.ValidateProvision(
                 options);
 
 #if MXC_WITH_ISOLATION_SESSION
@@ -471,12 +574,12 @@ public class MxcLifecycleTests
     [Fact]
     public void BuildStartEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
     {
-        var options = new StateAwarePhaseOptions
+        var options = new StartOptions
         {
-            Telemetry = new TelemetrySettings { Enabled = true },
+            Telemetry = new TelemetryConfig { Enabled = true },
         };
         var root = MxcLifecycle
-            .BuildStartEnvelope(new SandboxId("iso:abc"), options);
+            .BuildStartEnvelope(new ContainerId("iso:abc"), options);
 
         Assert.False(root.ContainsKey("correlationVector"));
         Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
@@ -487,13 +590,12 @@ public class MxcLifecycleTests
     [Fact]
     public void BuildExecEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
     {
-        var options = new StateAwareExecOptions
+        var options = new ExecutionRequest("echo hi")
         {
-            Telemetry = new TelemetrySettings { Enabled = true },
+            Telemetry = new TelemetryConfig { Enabled = true },
         };
         var root = MxcLifecycle.BuildExecEnvelope(
-            new SandboxId("iso:abc"),
-            "echo hi",
+            new ContainerId("iso:abc"),
             options);
 
         Assert.False(root.ContainsKey("correlationVector"));
@@ -503,37 +605,37 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void ExecOptions_RemainAssignableButAreRejectedByNonExecPhases()
+    public void ProcessRequest_IsRejectedByNonExecPhases()
     {
-        Assert.True(
-            typeof(StateAwarePhaseOptions).IsAssignableFrom(
-                typeof(StateAwareExecOptions)));
-        Assert.True(
-            typeof(StateAwarePhaseOptions).IsAssignableFrom(
-                typeof(WslcExecOptions)));
-
-        var id = new SandboxId("iso:abc");
-        var options = new StateAwareExecOptions { WorkingDirectory = "C:\\" };
-
-        foreach (var build in new Action[]
-                 {
-                     () => _ = MxcLifecycle.BuildStartEnvelope(id, options),
-                     () => _ = MxcLifecycle.BuildStopEnvelope(id, options),
-                     () => _ = MxcLifecycle.BuildDeprovisionEnvelope(id, options),
-                 })
-        {
-            var ex = Assert.Throws<ArgumentException>(build);
-            Assert.Contains(nameof(StateAwarePhaseOptions), ex.Message, StringComparison.Ordinal);
-        }
+        Assert.False(
+            typeof(StartOptions).IsAssignableFrom(
+                typeof(ExecutionRequest)));
+        Assert.Null(typeof(ExecutionRequest).GetProperty(nameof(StartOptions.Experimental)));
     }
 
     [Fact]
-    public void ExecInSandboxAsync_PreservesCancellationTokenAsThirdParameter()
+    public void RunInContainerAsync_AcceptsOptionsBeforeCancellation()
     {
-        static Task<RunResult> InvokeWithDefaultLiteral(SandboxId id, string command) =>
-            MxcLifecycle.ExecInSandboxAsync(id, command, default);
+        static Task<ExecutionResult> InvokeWithDefaultLiteral(ContainerId id, string command) =>
+            MxcLifecycle.RunInContainerAsync(id, new ExecutionRequest(command), default, default);
 
-        Assert.NotNull((Func<SandboxId, string, Task<RunResult>>)InvokeWithDefaultLiteral);
+        Assert.NotNull((Func<ContainerId, string, Task<ExecutionResult>>)InvokeWithDefaultLiteral);
+        var parameters = typeof(MxcLifecycle)
+            .GetMethod(nameof(MxcLifecycle.RunInContainerAsync))!.GetParameters();
+        Assert.Equal(typeof(RunInContainerOptions), parameters[2].ParameterType);
+        Assert.Equal(typeof(CancellationToken), parameters[3].ParameterType);
+    }
+
+    [Fact]
+    public async Task RunAsync_PreCancelledTokenDoesNotExecuteRequest()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => MxcContainer.RunAsync(
+                new ContainerRequest(""),
+                cancellationToken: cancellation.Token));
     }
 
     [Fact]

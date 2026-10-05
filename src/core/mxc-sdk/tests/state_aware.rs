@@ -1,116 +1,111 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Host-independent tests for the `mxc-sdk` state-aware lifecycle surface
-//! (`run_state_aware_json` / `exec_sandbox`).
+//! Host-independent tests for typed lifecycle APIs and internal binding adapters.
 //!
 //! These exercise request parsing, phase routing, and error mapping without a
-//! live host backend. All three state-aware backends — IsolationSession, WSLc
-//! and Windows Sandbox — are Windows-only, and IsolationSession additionally
+//! live host backend. The lifecycle backends — IsolationSession, WSLc
+//! and Windows MxcProcess — are Windows-only, and IsolationSession additionally
 //! needs the OS-side IsoSessionOps service, so the real lifecycle paths are
 //! exercised by the executor E2E suites instead.
 //!
 //! Those suites drive the `ExecStdio::Relayed` path. The
-//! `ExecStdio::Piped` path [`exec_sandbox`] uses is covered end-to-end by
+//! `ExecStdio::Piped` path [`execute_lifecycle_json`] uses is covered end-to-end by
 //! `tests/isolation_session.rs`, which is gated on a host running the OS-side
 //! service. So the assertions here deliberately stop at the facade's contract:
 //! parse, reject one-shot, reject non-dry-run exec, surface unsupported_phase
-//! for a backend without a state-aware impl, and honour the Windows Sandbox
+//! for a backend without a lifecycle implementation, and honour the Windows MxcProcess
 //! experimental opt-in — which stays host-independent because the gate runs
 //! before backend dispatch.
 
+use mxc_sdk::__ffi::{execute_lifecycle_json, run_lifecycle_json};
 use mxc_sdk::v1::{
-    container, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult,
-    SandboxId, ValidationResult,
+    container, ContainerId, DeprovisionOptions, ExecutionRequest, ExecutionResult, LifecycleResult,
+    MxcProcess, ProvisionOptions, ProvisionRequest, ProvisionResult, RunInContainerOptions,
+    SpawnInContainerOptions, StartOptions, StopOptions, ValidationResult,
 };
-use mxc_sdk::{
-    exec_sandbox, exec_sandbox_json, run_state_aware_json, Error, ErrorCode, Sandbox, WaitOutcome,
-};
+use mxc_sdk::v1::{Error, ErrorCode};
 
 #[test]
 fn typed_lifecycle_api_is_operation_specific() {
-    let _: fn(ProvisionRequest, OperationOptions) -> Result<ProvisionResult, Error> =
-        container::provision;
-    let _: fn(ProvisionRequest, OperationOptions) -> Result<ValidationResult, Error> =
+    let _: fn(ProvisionRequest, ProvisionOptions) -> Result<ProvisionResult, Error> =
+        container::provision_container;
+    let _: fn(ProvisionRequest, ProvisionOptions) -> Result<ValidationResult, Error> =
         container::validate_provision;
-    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> = container::start;
-    let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
+    let _: fn(&ContainerId, StartOptions) -> Result<LifecycleResult, Error> =
+        container::start_container;
+    let _: fn(&ContainerId, StartOptions) -> Result<ValidationResult, Error> =
         container::validate_start;
-    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> = container::stop;
-    let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
+    let _: fn(&ContainerId, StopOptions) -> Result<LifecycleResult, Error> =
+        container::stop_container;
+    let _: fn(&ContainerId, StopOptions) -> Result<ValidationResult, Error> =
         container::validate_stop;
-    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> =
-        container::deprovision;
-    let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
+    let _: fn(&ContainerId, DeprovisionOptions) -> Result<LifecycleResult, Error> =
+        container::deprovision_container;
+    let _: fn(&ContainerId, DeprovisionOptions) -> Result<ValidationResult, Error> =
         container::validate_deprovision;
-    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<Sandbox, Error> =
-        container::exec;
-    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<WaitOutcome, Error> =
-        container::exec_attached;
-    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<ValidationResult, Error> =
-        container::validate_exec;
+    let _: fn(
+        &ContainerId,
+        ExecutionRequest,
+        SpawnInContainerOptions,
+    ) -> Result<MxcProcess, Error> = container::spawn_in_container;
+    let _: fn(
+        &ContainerId,
+        ExecutionRequest,
+        RunInContainerOptions,
+    ) -> Result<ExecutionResult, Error> = container::run_in_container;
+    let _: fn(
+        &ContainerId,
+        ExecutionRequest,
+        SpawnInContainerOptions,
+    ) -> Result<ValidationResult, Error> = container::validate_process;
 }
 
 #[test]
 fn typed_state_aware_requests_have_no_caller_schema_version() {
     let _ = ProvisionRequest::isolation_session(None);
     let _ = ProvisionRequest::wslc(None, None);
-    let _ = ExecRequest::new("echo hello");
+    let _ = ExecutionRequest::new("echo hello");
 }
 
 #[test]
 fn typed_lifecycle_routes_by_sandbox_id() {
-    let sandbox_id = SandboxId::parse("nosuchbackend:abc123").unwrap();
-    let error = container::validate_start(&sandbox_id, OperationOptions::default()).unwrap_err();
+    let sandbox_id = ContainerId::parse("nosuchbackend:abc123").unwrap();
+    let error = container::validate_start(&sandbox_id, StartOptions::default()).unwrap_err();
     assert_eq!(error.code, ErrorCode::UnsupportedContainment);
 }
 
 #[test]
 fn sandbox_id_rejects_values_that_cannot_cross_the_ffi_boundary() {
     for value in ["", "iso:valid\0suffix"] {
-        let error = SandboxId::parse(value).unwrap_err();
+        let error = ContainerId::parse(value).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedId);
     }
 }
 
 #[test]
-fn explicit_raw_exec_alias_preserves_existing_behavior() {
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
-    let legacy = match exec_sandbox(json, false) {
-        Ok(_) => panic!("one-shot must be rejected"),
-        Err(error) => error,
-    };
-    let explicit = match exec_sandbox_json(json, false) {
-        Ok(_) => panic!("one-shot must be rejected"),
-        Err(error) => error,
-    };
-    assert_eq!(legacy.code, explicit.code);
-    assert_eq!(legacy.message, explicit.message);
-}
-
-#[test]
-fn run_state_aware_json_rejects_one_shot_config() {
+fn run_lifecycle_json_rejects_one_shot_config() {
     // No `phase` field => one-shot config, not a lifecycle request.
     let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
-    let err = run_state_aware_json(json, false, false).expect_err("one-shot must be rejected");
+    let err = run_lifecycle_json(json, false, false).expect_err("one-shot must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
 }
 
 #[test]
-fn run_state_aware_json_rejects_non_dry_run_exec() {
-    // A non-dry-run exec streams; it must be routed through exec_sandbox, not
+fn run_lifecycle_json_rejects_non_dry_run_exec() {
+    // A non-dry-run exec streams; it must be routed through execute_lifecycle_json, not
     // the envelope entry point.
     let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
     let err =
-        run_state_aware_json(json, false, false).expect_err("non-dry-run exec must be rejected");
+        run_lifecycle_json(json, false, false).expect_err("non-dry-run exec must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
     assert!(err.message.contains("exec"));
 }
 
 #[test]
-fn run_state_aware_json_malformed_json_is_malformed_request() {
+fn run_lifecycle_json_malformed_json_is_malformed_request() {
     let err =
-        run_state_aware_json("{ not json", false, false).expect_err("bad JSON must be rejected");
+        run_lifecycle_json("{ not json", false, false).expect_err("bad JSON must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
 }
 
@@ -128,7 +123,7 @@ fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
              \"_comment\":\"typed payload diagnostic\",\n  \
              \"isolationSession\":{{\"provision\":{{{fields}}}}}\n}}"
         );
-        let error = run_state_aware_json(&json, true, true).unwrap_err();
+        let error = run_lifecycle_json(&json, true, true).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest, "{fields}");
         assert!(error.message.contains("isolationSession.provision"));
         assert!(error.message.contains("line "));
@@ -152,7 +147,7 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
             }},
         })
         .to_string();
-        let result = run_state_aware_json(&json, true, true).unwrap();
+        let result = run_lifecycle_json(&json, true, true).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&result).unwrap(),
             serde_json::json!({"result": {}})
@@ -168,7 +163,7 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
         }},
     })
     .to_string();
-    let error = run_state_aware_json(&json, true, true).unwrap_err();
+    let error = run_lifecycle_json(&json, true, true).unwrap_err();
     assert_eq!(error.code, ErrorCode::PolicyValidation);
     assert_eq!(
         error.message,
@@ -179,19 +174,19 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
 }
 
 #[test]
-fn exec_sandbox_rejects_non_exec_phase() {
+fn execute_lifecycle_rejects_non_exec_phase() {
     let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#;
-    // `Sandbox` is not `Debug`, so match rather than `expect_err`.
-    match exec_sandbox(json, false) {
+    // `MxcProcess` is not `Debug`, so match rather than `expect_err`.
+    match execute_lifecycle_json(json, false) {
         Ok(_) => panic!("a provision request is not an exec"),
         Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),
     }
 }
 
 #[test]
-fn exec_sandbox_rejects_one_shot_config() {
+fn execute_lifecycle_rejects_container_request() {
     let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
-    match exec_sandbox(json, false) {
+    match execute_lifecycle_json(json, false) {
         Ok(_) => panic!("one-shot must be rejected"),
         Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),
     }
@@ -208,7 +203,7 @@ fn exec_sandbox_rejects_one_shot_config() {
 #[test]
 fn unregistered_backend_prefix_is_unsupported_containment() {
     let json = r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
-    let err = run_state_aware_json(json, false, false)
+    let err = run_lifecycle_json(json, false, false)
         .expect_err("an unregistered sandbox-id prefix has no backend");
     assert_eq!(err.code, ErrorCode::UnsupportedContainment);
 }
@@ -219,7 +214,7 @@ fn unregistered_backend_prefix_is_unsupported_containment() {
 #[test]
 fn experimental_backend_is_refused_without_the_optin() {
     let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    let err = run_state_aware_json(json, true, false)
+    let err = run_lifecycle_json(json, true, false)
         .expect_err("an experimental backend without the opt-in must be refused");
     assert_eq!(err.code, ErrorCode::BackendUnavailable);
     assert!(
@@ -240,7 +235,7 @@ fn experimental_backend_is_refused_without_the_optin() {
 #[test]
 fn the_optin_admits_an_experimental_backend() {
     let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    if let Err(err) = run_state_aware_json(json, true, true) {
+    if let Err(err) = run_lifecycle_json(json, true, true) {
         assert_ne!(
             err.code,
             ErrorCode::BackendUnavailable,
@@ -256,7 +251,7 @@ fn the_optin_admits_an_experimental_backend() {
 #[test]
 fn the_refusal_carries_no_api_call_detail() {
     let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    let err = run_state_aware_json(json, true, false).expect_err("must be refused");
+    let err = run_lifecycle_json(json, true, false).expect_err("must be refused");
     assert_eq!(err.operation, None);
     assert_eq!(err.native_code, None);
     assert_eq!(err.remediation, None);
@@ -267,7 +262,7 @@ fn the_refusal_carries_no_api_call_detail() {
 ///
 /// Both are needed: they take separate paths to the same gate, so a change that
 /// hardcoded the flag in only one of them would leave the other's tests green.
-/// A `wsb:` id routes to Windows Sandbox, which has no streaming-exec arm — so
+/// A `wsb:` id routes to Windows MxcProcess, which has no streaming-exec arm — so
 /// once past the gate it lands on `unsupported_phase`, and the two outcomes are
 /// distinguishable without a host, a feature, or any backend work. (A `wslc:`
 /// id would not discriminate: its feature-off arm also answers
@@ -276,12 +271,12 @@ fn the_refusal_carries_no_api_call_detail() {
 fn exec_honours_the_optin_on_its_own_path() {
     let json = r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
 
-    match exec_sandbox(json, false) {
+    match execute_lifecycle_json(json, false) {
         Ok(_) => panic!("without the opt-in the gate must refuse"),
         Err(err) => assert_eq!(err.code, ErrorCode::BackendUnavailable),
     }
 
-    match exec_sandbox(json, true) {
+    match execute_lifecycle_json(json, true) {
         Ok(_) => panic!("windows_sandbox serves no streaming exec"),
         Err(err) => assert_ne!(
             err.code,

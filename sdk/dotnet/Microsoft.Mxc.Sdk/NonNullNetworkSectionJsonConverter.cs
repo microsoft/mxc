@@ -4,6 +4,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+using Microsoft.Mxc.Sdk.V1;
+
 namespace Microsoft.Mxc.Sdk;
 
 internal sealed class NonNullNetworkSectionJsonConverter<T> : JsonConverter<T>

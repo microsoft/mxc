@@ -3,7 +3,6 @@
   "policy": {},
   "containment": {
     "kind": "processContainer",
-    "leastPrivilege": true,
     "learningMode": true,
     "capabilities": [
       "registryRead"

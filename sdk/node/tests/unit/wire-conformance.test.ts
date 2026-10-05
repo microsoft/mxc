@@ -44,23 +44,42 @@
 import { test } from 'node:test';
 
 import type {
-  ContainerConfig as RootContainerConfig,
-} from '../../src/index.js';
+  Containment as V1ContainmentTypes,
+  Containment as V1Containment,
+  FilesystemPolicy,
+  NetworkPolicy,
+  UiPolicy,
+  ContainerId as V1ContainerId,
+  ContainerRequest,
+  ExecutionResult,
+  ExecutionMetadata,
+  CaptureDenialsResult,
+  CaptureDenialsError,
+  ValidationResult,
+  NetworkRuntimeConfig as V1NetworkRuntimeConfig,
+} from '../../src/v1/index.js';
 import type {
-  SandboxPolicy as V1SandboxPolicy,
-  SandboxId as V1SandboxId,
-} from '../../src/v1.js';
+  Containment as InternalContainment,
+} from '../../src/v1/types.js';
 import type {
-  SandboxPolicy as InternalSandboxPolicy,
-} from '../../src/types.js';
-import type {
-  SandboxId as InternalSandboxId,
-} from '../../src/state-aware-types.js';
+  ContainerId as InternalContainerId,
+} from '../../src/v1/lifecycle-types.js';
 
-// @ts-expect-error Policy authoring belongs to V1, not the root entry point.
-import type { SandboxPolicy as RootPolicyAlias } from '../../src/index.js';
+// @ts-expect-error Filesystem discovery is grouped under policy.filesystem.
+import type { getAvailableToolsPolicy, getUserProfilePolicy, getTemporaryFilesPolicy } from '../../src/v1/index.js';
+// @ts-expect-error Discovery result/options types belong to policy.filesystem.
+import type { FilesystemPolicyResult, ToolsPolicyOptions } from '../../src/v1/index.js';
+
+// @ts-expect-error Typed request authoring belongs to V1, not the root entry point.
+import type { ContainerRequest as RootContainerRequest } from '../../src/index.js';
 // @ts-expect-error Typed lifecycle identities belong to V1, not the root.
-import type { SandboxId as RootIdAlias } from '../../src/index.js';
+import type { ContainerId as RootContainerId } from '../../src/index.js';
+// @ts-expect-error The creation containment union is named Containment.
+import type { ContainerContainment } from '../../src/v1/index.js';
+// @ts-expect-error The creation network authoring type is named NetworkPolicy.
+import type { ContainerNetworkConfig } from '../../src/v1/index.js';
+// @ts-expect-error Runtime network authoring is named NetworkRuntimeConfig.
+import type { RuntimeConfig } from '../../src/v1/index.js';
 
 import type {
   ProcessConfig,
@@ -73,7 +92,7 @@ import type {
   NetworkPeerConfig,
   NetworkPortConfig,
   NetworkRuleConfig,
-  RuntimeConfig,
+  NetworkRuntimeConfig,
   UiConfig,
   ProcessContainerConfig,
   BaseProcessUiConfig,
@@ -86,7 +105,7 @@ import type {
   ClipboardPolicy as PublicClipboardPolicy,
   ContainmentType,
   ContainmentBackend,
-} from '../../src/types.js';
+} from '../../src/v1/types.js';
 
 import type {
   Process as WireProcess,
@@ -132,14 +151,54 @@ import type {
 
 // --- enum / union conformance ---------------------------------------------
 
-type _RootConfigExport = AssertTrue<Equivalent<RootContainerConfig, ContainerConfig>>;
-type _V1PolicyExport = AssertTrue<Equivalent<V1SandboxPolicy, InternalSandboxPolicy>>;
-type _V1IdExport = AssertTrue<
+type _V1BackendConfigExport = AssertTrue<
+  Equivalent<V1Containment, InternalContainment>
+>;
+type _V1NetworkRuntimeExport = AssertTrue<Equivalent<V1NetworkRuntimeConfig, NetworkRuntimeConfig>>;
+type _ExecutionMetadataSurface = AssertTrue<
+  Equivalent<ExecutionResult['outputMetadata'], ExecutionMetadata | undefined>
+>;
+type _CaptureDenialsResultSurface = AssertTrue<
+  Equivalent<ExecutionMetadata['captureDenials'], CaptureDenialsResult | undefined>
+>;
+type _CaptureDenialsErrorSurface = AssertTrue<
+  Equivalent<ExecutionMetadata['captureDenialsError'], CaptureDenialsError | undefined>
+>;
+type _ValidationWarningsSurface = AssertTrue<Equivalent<ValidationResult['warnings'], string[]>>;
+type _ContainmentProcessChoice = AssertTrue<
+  Assignable<V1ContainmentTypes.Process, V1Containment>
+>;
+type _ContainmentClosedDiscriminators = AssertTrue<
   Equivalent<
-    V1SandboxId<'isolation_session' | 'wslc'>,
-    InternalSandboxId<'isolation_session' | 'wslc'>
+    V1Containment['type'],
+    'process' | 'processcontainer' | 'wslc' | 'lxc' | 'seatbelt' | 'isolation_session' | 'bubblewrap'
   >
 >;
+type _V1IdExport = AssertTrue<
+  Equivalent<
+    V1ContainerId<'isolation_session' | 'wslc'>,
+    InternalContainerId<'isolation_session' | 'wslc'>
+  >
+>;
+type _ContainerRequestFilesystem = AssertTrue<
+  Assignable<ContainerRequest['filesystem'], FilesystemConfig | undefined>
+>;
+type _FilesystemPolicyAuthoring = AssertTrue<
+  Equivalent<ContainerRequest['filesystem'], FilesystemPolicy | undefined>
+>;
+type _NetworkPolicyAuthoring = AssertTrue<
+  Equivalent<ContainerRequest['network'], NetworkPolicy | undefined>
+>;
+type _UiPolicyAuthoring = AssertTrue<
+  Equivalent<ContainerRequest['ui'], UiPolicy | undefined>
+>;
+type _ContainerRequestNetwork = AssertTrue<
+  Assignable<ContainerRequest['network'], DirectionalNetworkConfig | undefined>
+>;
+type _ContainerRequestContainment = AssertTrue<
+  Assignable<ContainerRequest['containment'], V1Containment | undefined>
+>;
+type _ExecutionResultExitCode = AssertTrue<Assignable<ExecutionResult['exitCode'], number>>;
 
 // Clipboard policy must be value-for-value identical to the wire enum.
 type _Clipboard = AssertTrue<Equivalent<PublicClipboardPolicy, WireClipboardPolicy>>;
@@ -184,7 +243,7 @@ type _NetworkIngressVals = AssertTrue<Assignable<NetworkIngressConfig, WireNetwo
 type _NetworkPeerVals = AssertTrue<Assignable<NetworkPeerConfig, WireNetworkPeer>>;
 type _NetworkPortVals = AssertTrue<Assignable<NetworkPortConfig, WireNetworkPort>>;
 type _NetworkRuleVals = AssertTrue<Assignable<NetworkRuleConfig, WireNetworkRule>>;
-type _RuntimeConfigVals = AssertTrue<Assignable<RuntimeConfig, WireRuntimeConfig>>;
+type _RuntimeConfigVals = AssertTrue<Assignable<NetworkRuntimeConfig, WireRuntimeConfig>>;
 type _UiVals = AssertTrue<Assignable<UiConfig, WireUi>>;
 type _ProcessContainerVals = AssertTrue<Assignable<ProcessContainerConfig, WireProcessContainer>>;
 type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBaseProcessUi>>;
@@ -281,7 +340,7 @@ type _NetworkIngressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkIngressCo
 type _NetworkPeerWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPeerConfig, WireNetworkPeer>, never>>;
 type _NetworkPortWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPortConfig, WireNetworkPort>, never>>;
 type _NetworkRuleWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkRuleConfig, WireNetworkRule>, never>>;
-type _RuntimeConfigWireKeys = AssertTrue<Equivalent<OnlyInWire<RuntimeConfig, WireRuntimeConfig>, never>>;
+type _RuntimeConfigWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkRuntimeConfig, WireRuntimeConfig>, never>>;
 type _UiWireKeys = AssertTrue<Equivalent<OnlyInWire<UiConfig, WireUi>, never>>;
 type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
 type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, never>>;
@@ -289,8 +348,9 @@ type _WslcV09WireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireV09Wslc
 type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, WirePortMapping>, never>>;
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<RawV1LxcConfig, WireLxc>, never>>;
 
+// The binding fixes this native field to false; it is not an authoring option.
 type _ProcessContainerWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, never>
+  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'leastPrivilege'>
 >;
 
 type _SeatbeltWireKeys = AssertTrue<
@@ -313,7 +373,8 @@ type _RootWireKeys = AssertTrue<
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
-  _RootConfigExport, _V1PolicyExport, _V1IdExport,
+  _V1BackendConfigExport, _V1IdExport,
+  _ContainerRequestFilesystem, _ContainerRequestNetwork, _ContainerRequestContainment,
   _Clipboard, _Containment,
   _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
   _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,

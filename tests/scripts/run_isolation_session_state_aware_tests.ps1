@@ -10,7 +10,7 @@
 
 .DESCRIPTION
     Each test invokes wxc-exec.exe with lifecycle routing in --operation /
-    --sandbox-id and a base64-encoded phase-specific request payload, parses
+    --container-id and a base64-encoded phase-specific request payload, parses
     the JSON response on stdout, and asserts on the envelope's `result` or
     `error` fields. The corpus covers lifecycle, process execution,
     sandbox-internal persistence, and validation errors.
@@ -271,7 +271,7 @@ function Invoke-StateAware {
 
     $argList = @('--operation', $invocation.Operation)
     if ($invocation.Operation -ne 'provision') {
-        $argList += @('--sandbox-id', $invocation.SandboxId)
+        $argList += @('--container-id', $invocation.SandboxId)
     }
     if ($DryRun.IsPresent) { $argList += '--dry-run' }
     $argList += @('--config-base64', $invocation.ConfigBase64)

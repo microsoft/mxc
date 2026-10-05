@@ -4,6 +4,8 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
+using Microsoft.Mxc.Sdk.V1;
+
 namespace Microsoft.Mxc.Sdk.Native;
 
 /// <summary>

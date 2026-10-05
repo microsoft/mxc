@@ -14,37 +14,39 @@ concurrency story, and error mapping.
 - The Rust layer of state-aware IsolationSession in `wxc-exec.exe`, behind
   the `--features isolation_session` Cargo feature. The published v0.9
   surface requires no runtime experimental opt-in.
-- The exact state-aware phase contracts. Raw SDK and FFI JSON carries the
+- The state-aware phase contracts. Executor and FFI JSON carries the
   top-level `phase` discriminator and `sandboxId`; direct `wxc-exec.exe`
   calls supply those routing values through `--operation` and
-  `--sandbox-id`.
+  `--container-id`.
 - Mapping from the OS-side service's HRESULTs to the wire-format `MxcError`
   codes.
 
-### In-process callers reach the same lifecycle
+### SDK and executor entry points
 
-The Rust SDK (`mxc-sdk`) and the C ABI over it (`mxc_ffi`), each with an
-`isolation_session` feature, use the raw exact envelope containing `phase` and,
-for non-provision operations, `sandboxId`. The executor uses the same exact
-phase contracts after taking those routing values from CLI arguments.
+Direct `wxc-exec.exe` calls select phases with `--operation` and supply the
+existing lifecycle ID with `--container-id`. The CLI value maps to `sandboxId`
+in the lifecycle request; it does not rename the JSON field or native ABI.
 
-| Phase | `wxc-exec` | In-process |
+The supported Rust SDK lifecycle API is versioned under `mxc_sdk::v1` and uses
+container terminology:
+
+| Phase | `wxc-exec` | Rust SDK (`mxc_sdk::v1`) |
 |---|---|---|
-| provision / start / stop / deprovision | `wxc-exec --operation <phase> [--sandbox-id <id>] --config …` | `mxc_sdk::run_state_aware_json`, `mxc_run_state_aware_json` |
-| exec, attached to the caller's stdio | `wxc-exec --operation exec --sandbox-id <id> --config …` | `mxc_sdk::exec_attached`, `mxc_exec_state_aware_attached_json` |
-| exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_exec_state_aware_json` |
+| provision | `wxc-exec --operation provision --config …` | `mxc_sdk::v1::container::provision_container` |
+| start | `wxc-exec --operation start --container-id <id> --config …` | `mxc_sdk::v1::container::start_container` |
+| exec | `wxc-exec --operation exec --container-id <id> --config …` | `mxc_sdk::v1::container::spawn_in_container` or `mxc_sdk::v1::container::run_in_container` |
+| stop | `wxc-exec --operation stop --container-id <id> --config …` | `mxc_sdk::v1::container::stop_container` |
+| deprovision | `wxc-exec --operation deprovision --container-id <id> --config …` | `mxc_sdk::v1::container::deprovision_container` |
 
-Requirements on an in-process caller:
+For interactive execution, use
+`mxc_sdk::v1::container::spawn_in_container_with_pty`. Its terminal handle
+lets the caller own input, output, resizing, and termination without binding
+the workload to the host application's global console streams. All Rust SDK
+launch operations take typed requests; see the
+[launch-choice table](../reference/rust/v1/api.md#choosing-a-launch-operation).
 
-- **Both stdout and stdin must be terminals**, or the attached exec path
-  refuses. On a terminal it allocates a pseudo-console inside the sandbox, so an
-  embedding console application gets a working interactive shell. Use the
-  streaming entry point for a workload with no terminal.
-- **Only one attached exec at a time per process.** A second concurrent call is
-  refused.
-- **An attached exec takes over this process's console for its duration**:
-  raw VT, so no echo, no line input, and keystrokes — `Ctrl-C` included — go to
-  the sandboxed workload rather than to this process. Restored on return.
+Backend runtime requirements:
+
 - **`start` cannot run from Session 0.** It fails with `0x80040233`, so a caller
   running as a service, or over a remote SYSTEM-context shell, cannot complete
   the lifecycle. `provision` succeeds first and mints an OS account that must be
@@ -53,7 +55,7 @@ Requirements on an in-process caller:
   token at `SecurityImpersonation` level.**
 
 The **one-shot** surface is served in-process with piped stdio:
-`mxc_sdk::v1::run` and `mxc_sdk::v1::spawn_sandbox`, without a runtime
+`mxc_sdk::v1::run` and `mxc_sdk::v1::spawn`, without a runtime
 experimental opt-in.
 
 ### Out of scope (for v1)
@@ -377,9 +379,9 @@ whole section for every backend. See the matrix notes above.
 
 ### Fields valid in state-aware only
 
-These are fields in the raw exact SDK/FFI envelope. Direct `wxc-exec` calls
+These are fields in the native JSON request. Direct `wxc-exec` calls
 remove `phase` and `sandboxId` from the JSON payload and pass them as
-`--operation` and `--sandbox-id`.
+`--operation` and `--container-id`.
 
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
@@ -551,7 +553,7 @@ reclaimed when the session is stopped and deprovisioned.
 An exited process is never routed through the shutdown ladder, which reads only `ExitCode()`
 and so cannot tell a `259` exit from a live process. The adapter maps
 `TimedOut` onto `ErrorKind::TimedOut`, which is what
-`mxc_sdk::Sandbox::wait` reads as `WaitOutcome::TimedOut`. That outcome
+`mxc_sdk::v1::MxcProcess::wait` reads as `WaitResult::TimedOut`. That outcome
 is reachable only under `Piped`; the `Relayed` arm reports `Exited`.
 
 Teardown is bounded only insofar as the kill is: the streaming adapter's

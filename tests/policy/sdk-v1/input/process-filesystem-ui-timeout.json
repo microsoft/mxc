@@ -14,7 +14,7 @@
       "clearPolicyOnExit": false
     },
     "ui": {
-      "allowWindows": true,
+      "disable": false,
       "clipboard": "read",
       "allowInputInjection": false
     },

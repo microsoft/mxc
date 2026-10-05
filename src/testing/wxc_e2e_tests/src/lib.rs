@@ -514,7 +514,7 @@ fn build_wxc_state_aware_args(
 ) -> Vec<String> {
     let mut args = vec!["--operation".to_string(), operation.clone()];
     if operation != "provision" {
-        args.push("--sandbox-id".to_string());
+        args.push("--container-id".to_string());
         args.push(sandbox_id.expect("non-provision test request must contain sandboxId"));
     }
     args.push("--config-base64".to_string());
@@ -579,7 +579,7 @@ mod state_aware_args_tests {
             [
                 "--operation",
                 "exec",
-                "--sandbox-id",
+                "--container-id",
                 "iso:abc",
                 "--config-base64",
                 "encoded",

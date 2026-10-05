@@ -102,11 +102,22 @@ Update documentation in the same change when behavior changes:
 - Experimental features: `docs/authoring-a-new-feature.md`.
 - Versioning or promotion: `docs/versioning.md`.
 - Backend behavior: the corresponding guide under `docs/`.
-- SDK APIs: the affected SDK README/API documentation.
+- SDK APIs: the affected SDK README and versioned references under `docs/reference/{rust,dotnet,node}/v*/`.
 - Telemetry: `docs/telemetry/`.
 - CI validation: `docs/ci-validation-infrastructure.md`.
 
 Do not duplicate detailed backend behavior here. Keep the canonical explanation in the subsystem documentation.
+
+## SDK API consistency
+
+- Publish every SDK operation, type, probe, discovery API, telemetry API, and helper only through a supported versioned (V*) namespace/module/entrypoint.
+- Before adding or changing an API or type, compare the corresponding Rust, .NET, and Node references under `docs/reference/`. Align names, field meanings, defaults, optional-field presence, input order, and result/ownership semantics across SDKs.
+- Use language-idiomatic spelling and construction: Rust snake_case and enums, .NET PascalCase and closed SDK-owned classes, and TypeScript camelCase and discriminated unions. Do not force identical syntax or add convenience abstractions merely to imitate another language.
+- Keep authoring requests as typed data. Use consistent policy and backend configuration names; native adapters own wire mapping and the native engine owns semantic validation.
+- Keep API-specific controls in the API-specific options type. Creation takes request then options; existing-container execution takes identity, request, then options; .NET cancellation tokens come last.
+- Preserve existing behavior and ownership semantics. Do not broaden backend capabilities to manufacture parity.
+- Document intentional language/runtime differences explicitly, and update the affected versioned (V*) signature/type references, examples, and tests in the same change.
+- Breaking changes to a published SDK API require a new versioned (V*) API surface and matching signature/type references. Preserve the published version's references.
 
 ## Issues and pull requests
 

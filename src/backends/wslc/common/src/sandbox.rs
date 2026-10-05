@@ -95,7 +95,7 @@ fn timeout_error(timeout_ms: u32) -> std::io::Error {
 /// confirmed.
 ///
 /// Deliberately *not* `ErrorKind::TimedOut`: the public
-/// [`mxc_sdk::Sandbox::wait`] maps that kind onto `WaitOutcome::TimedOut`, a
+/// `mxc_sdk::v1::MxcProcess::wait` maps that kind onto `WaitResult::TimedOut`, a
 /// success value whose contract is that the process tree *was* killed — which
 /// would silently restore the very claim this case exists to avoid, discarding
 /// the message with it. Being unable to establish the sandbox's state is a
@@ -701,7 +701,7 @@ mod tests {
 
     /// Only a *confirmed* kill may carry `ErrorKind::TimedOut`.
     ///
-    /// `mxc_sdk::Sandbox::wait` turns that kind into `WaitOutcome::TimedOut`, a
+    /// `mxc_sdk::v1::MxcProcess::wait` turns that kind into `WaitResult::TimedOut`, a
     /// success value promising the process tree was killed — and drops the
     /// message doing it. An unconfirmed kill must therefore not use that kind,
     /// or the distinction would be erased at the public API boundary.

@@ -6,15 +6,17 @@
 // loop or require a dedicated Worker per request.
 
 import koffi from 'koffi';
-import { MxcError } from '../errors.js';
+import { MxcError } from '../v1/errors.js';
 import { loadMxcFfi } from '../native-library.js';
 import type { OneShotRequest } from '../generated/v1_0_0/wire.js';
+import type { ExecutionMetadata } from '../v1/types.js';
 import { bindNativeFunction } from './native-function.js';
 import {
   AbiErrorDetailType,
   decodeString,
   nativeStatusError,
   parseStringArray,
+  parseExecutionMetadata,
   type AbiErrorDetail,
 } from './native-error.js';
 
@@ -43,7 +45,7 @@ export interface BindingRunResult {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
-  outputMetadata?: unknown;
+  outputMetadata?: ExecutionMetadata;
   warnings: string[];
 }
 
@@ -60,13 +62,14 @@ const AbiRunResultType = koffi.struct('MxcNodeJsonRunResult', {
 
 function bindRunFunctions(
   native: ReturnType<typeof loadMxcFfi>,
+  symbol = 'mxc_run_json',
 ): {
   run: ReturnType<typeof bindNativeFunction<RunFunction>>;
   free: ReturnType<typeof bindNativeFunction<FreeFunction>>;
 } {
   return {
     run: bindNativeFunction<RunFunction>(native.handle, {
-      symbol: 'mxc_run_json',
+      symbol,
       result: 'int32_t',
       parameters: [
         'const char *',
@@ -86,25 +89,35 @@ function decodeRunResult(status: number, result: AbiRunResult): BindingRunResult
   if (status !== 0 || result.status !== 0) {
     throw nativeStatusError(result.status || status, result.error);
   }
-  const metadata = decodeString(result.outputMetadata);
   return {
     stdout: decodeString(result.stdout) ?? '',
     stderr: decodeString(result.stderr) ?? '',
     exitCode: result.exitCode,
     timedOut: result.timedOut !== 0,
-    outputMetadata: metadata === undefined ? undefined : JSON.parse(metadata),
+    outputMetadata: parseExecutionMetadata(decodeString(result.outputMetadata)),
     warnings: parseStringArray(decodeString(result.warnings)),
   };
 }
 
-export function runOneShotJson(request: OneShotRequest): BindingRunResult {
+function runOneShotJsonNative(
+  request: OneShotRequest,
+  experimental: boolean,
+): BindingRunResult {
+  return runJsonNative(JSON.stringify(request), experimental, 'mxc_run_json');
+}
+
+function runJsonNative(
+  requestJson: string,
+  experimental: boolean,
+  symbol: string,
+): BindingRunResult {
   const native = loadMxcFfi();
   try {
-    const { run, free } = bindRunFunctions(native);
+    const { run, free } = bindRunFunctions(native, symbol);
     const result = {} as AbiRunResult;
     let filled = false;
     try {
-      const status = run(JSON.stringify(request), 0, result);
+      const status = run(requestJson, experimental ? 1 : 0, result);
       filled = true;
       return decodeRunResult(status, result);
     } finally {
@@ -115,8 +128,54 @@ export function runOneShotJson(request: OneShotRequest): BindingRunResult {
   }
 }
 
+type StateAwareRunImplementation = (
+  requestJson: string,
+  experimental: boolean,
+) => BindingRunResult;
+
+const runStateAwareExecJsonNative: StateAwareRunImplementation = (requestJson, experimental) =>
+  runJsonNative(requestJson, experimental, 'mxc_run_state_aware_exec_json');
+
+let stateAwareRunImplementation = runStateAwareExecJsonNative;
+
+/** @internal Replaces the synchronous captured lifecycle call for unit tests. */
+export function _setBindingStateAwareRunImplementation(
+  implementation?: StateAwareRunImplementation,
+): void {
+  stateAwareRunImplementation = implementation ?? runStateAwareExecJsonNative;
+}
+
+export function runStateAwareExecJson(
+  requestJson: string,
+  experimental = false,
+): BindingRunResult {
+  return stateAwareRunImplementation(requestJson, experimental);
+}
+
+type SyncRunImplementation = (
+  request: OneShotRequest,
+  experimental: boolean,
+) => BindingRunResult;
+
+let syncRunImplementation = runOneShotJsonNative;
+
+/** @internal Replaces the synchronous native call for one process's unit tests. */
+export function _setBindingRunImplementation(
+  implementation?: SyncRunImplementation,
+): void {
+  syncRunImplementation = implementation ?? runOneShotJsonNative;
+}
+
+export function runOneShotJson(
+  request: OneShotRequest,
+  experimental = false,
+): BindingRunResult {
+  return syncRunImplementation(request, experimental);
+}
+
 async function runOneShotJsonAsyncNative(
   request: OneShotRequest,
+  experimental: boolean,
 ): Promise<BindingRunResult> {
   const native = loadMxcFfi();
   try {
@@ -126,14 +185,19 @@ async function runOneShotJsonAsyncNative(
     try {
       const requestJson = JSON.stringify(request);
       const status = await new Promise<number>((resolve, reject) => {
-        run.async(requestJson, 0, result, (error, nativeStatus) => {
-          if (error !== null) {
-            reject(error);
-            return;
-          }
-          filled = true;
-          resolve(nativeStatus);
-        });
+        run.async(
+          requestJson,
+          experimental ? 1 : 0,
+          result,
+          (error, nativeStatus) => {
+            if (error !== null) {
+              reject(error);
+              return;
+            }
+            filled = true;
+            resolve(nativeStatus);
+          },
+        );
       });
       return decodeRunResult(status, result);
     } finally {
@@ -146,6 +210,7 @@ async function runOneShotJsonAsyncNative(
 
 type AsyncRunImplementation = (
   request: OneShotRequest,
+  experimental: boolean,
 ) => Promise<BindingRunResult>;
 
 let asyncRunImplementation = runOneShotJsonAsyncNative;
@@ -159,8 +224,9 @@ export function _setBindingRunAsyncImplementation(
 
 export function runOneShotJsonAsync(
   request: OneShotRequest,
+  experimental = false,
 ): Promise<BindingRunResult> {
-  return asyncRunImplementation(request).catch((error: unknown) => {
+  return asyncRunImplementation(request, experimental).catch((error: unknown) => {
     if (error instanceof MxcError) throw error;
     throw new MxcError(
       'backend_error',

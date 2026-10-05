@@ -88,9 +88,9 @@ struct Cli {
     )]
     operation: Option<CliOperation>,
 
-    /// Existing sandbox targeted by start, exec, stop, or deprovision.
-    #[arg(long = "sandbox-id", requires = "operation")]
-    sandbox_id: Option<String>,
+    /// Opaque lifecycle ID (`sandboxId` in JSON) used by start, exec, stop, or deprovision.
+    #[arg(long = "container-id", requires = "operation")]
+    container_id: Option<String>,
 
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
@@ -167,7 +167,7 @@ struct Cli {
             "probe",
             "force_reclaim",
             "operation",
-            "sandbox_id"
+            "container_id"
         ]
     )]
     #[cfg_attr(
@@ -1356,7 +1356,7 @@ fn main() {
                 &config_json,
                 &mut logger,
                 phase,
-                cli.sandbox_id.as_deref(),
+                cli.container_id.as_deref(),
                 &cli.command,
             ) {
                 Ok(parsed) => parsed,
@@ -1804,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_accepts_lifecycle_operation_and_sandbox_id() {
+    fn cli_accepts_lifecycle_operation_and_container_id() {
         for (name, expected) in [
             ("provision", CliOperation::Provision),
             ("start", CliOperation::Start),
@@ -1821,24 +1821,59 @@ mod tests {
             "policy.json",
             "--operation",
             "start",
-            "--sandbox-id",
+            "--container-id",
             "wsb:abcd1234",
         ]);
-        assert_eq!(cli.sandbox_id.as_deref(), Some("wsb:abcd1234"));
+        assert_eq!(cli.container_id.as_deref(), Some("wsb:abcd1234"));
+
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "exec",
+            "--container-id",
+            "iso:abcd1234",
+            "--",
+            "echo",
+            "hello",
+        ]);
+        assert_eq!(cli.container_id.as_deref(), Some("iso:abcd1234"));
+        assert_eq!(cli.command, vec!["echo".to_string(), "hello".to_string()]);
 
         let error = match Cli::try_parse_from([
             "wxc-exec",
             "policy.json",
-            "--sandbox-id",
+            "--container-id",
             "wsb:abcd1234",
         ]) {
             Err(error) => error,
-            Ok(_) => panic!("--sandbox-id must require --operation"),
+            Ok(_) => panic!("--container-id must require --operation"),
         };
         assert_eq!(
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
+
+        let error = match Cli::try_parse_from([
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "start",
+            "--sandbox-id",
+            "wsb:abcd1234",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("the removed --sandbox-id option must not be accepted"),
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn cli_help_advertises_container_id_for_lifecycle_routing() {
+        let help = Cli::command().render_help().to_string();
+
+        assert!(help.contains("--container-id"));
+        assert!(!help.contains("--sandbox-id"));
     }
 
     #[test]
@@ -1872,7 +1907,7 @@ mod tests {
             "policy.json",
             "--operation",
             "deprovision",
-            "--sandbox-id",
+            "--container-id",
             "iso:abc",
             "--containername",
             "legacy-profile",

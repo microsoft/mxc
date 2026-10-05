@@ -17,6 +17,9 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+use mxc_sdk::v1::{container, ContainerId, ExecutionRequest, ProvisionRequest};
+
 /// Provision on a healthy host takes a couple of seconds, so this is well past
 /// slow and into hung.
 const WATCHDOG: Duration = Duration::from_secs(90);
@@ -42,19 +45,22 @@ fn teardown(id: &str, who: &str) {
     if id.is_empty() {
         return;
     }
-    let id = id.to_string();
+    let id = match ContainerId::parse(id) {
+        Ok(id) => id,
+        Err(e) => {
+            println!("    [{who}] invalid container ID, cannot tear down: {e:?}");
+            return;
+        }
+    };
     let who = who.to_string();
     let worker = std::thread::spawn(move || {
         println!("    [{who}] tearing down {id}");
         let _ = std::io::stdout().flush();
-        let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
-        match mxc_sdk::run_state_aware_json(&stop, false, true) {
+        match container::stop_container(&id, Default::default()) {
             Ok(_) => println!("    [{who}] stopped"),
             Err(e) => println!("    [{who}] stop failed: {e:?}"),
         }
-        let deprovision =
-            format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
-        match mxc_sdk::run_state_aware_json(&deprovision, false, true) {
+        match container::deprovision_container(&id, Default::default()) {
             Ok(_) => println!("    [{who}] deprovisioned"),
             Err(e) => println!("    [{who}] WARNING: deprovision failed, account may leak: {e:?}"),
         }
@@ -136,7 +142,7 @@ fn main() {
         let _ = std::io::stdout().flush();
 
         checkpoint("available_backends()");
-        let backends = mxc_sdk::available_backends();
+        let backends = mxc_sdk::v1::available_backends();
         let supported = backends.iter().any(|b| b.backend == "isolation_session");
         println!("    isolation_session available: {supported}");
         if !supported {
@@ -145,9 +151,10 @@ fn main() {
         }
 
         checkpoint("provision — the first async join");
-        let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-            "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-        let response = match mxc_sdk::run_state_aware_json(provision, false, true) {
+        let provisioned = match container::provision_container(
+            ProvisionRequest::isolation_session(None),
+            Default::default(),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 println!("\nRESULT: FAILED (not hung) at provision");
@@ -155,28 +162,15 @@ fn main() {
                 return;
             }
         };
-        let sandbox_id = response
-            .split(r#""sandboxId":""#)
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .unwrap_or_default()
-            .to_string();
-        if sandbox_id.is_empty() {
-            println!("\nRESULT: FAILED — no sandboxId in: {response}");
-            return;
-        }
+        let sandbox_id = provisioned.container_id;
         println!("    provisioned: {sandbox_id}");
-        *SANDBOX.lock().unwrap() = sandbox_id.clone();
+        *SANDBOX.lock().unwrap() = sandbox_id.as_str().to_string();
 
         // Provision mints a real OS account; every exit path must tear it down.
-        let _teardown = Teardown(sandbox_id.clone());
+        let _teardown = Teardown(sandbox_id.as_str().to_string());
 
         checkpoint("start — a second async join, on a live session");
-        if let Err(e) = mxc_sdk::run_state_aware_json(
-            &format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#),
-            false,
-            true,
-        ) {
+        if let Err(e) = container::start_container(&sandbox_id, Default::default()) {
             println!("\nRESULT: FAILED (not hung) at start");
             println!("error: {e:?}");
             return;
@@ -186,12 +180,12 @@ fn main() {
         // Exec spawns relay and waiter threads that call into WinRT without
         // initialising COM themselves.
         checkpoint("exec — worker threads call WinRT with no apartment of their own");
-        let exec = format!(
-            r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}",
-                "process":{{"commandLine":"cmd.exe /c echo sta-probe-marker","timeout":30000}}}}"#
-        );
+        let exec = ExecutionRequest {
+            timeout_ms: Some(30_000),
+            ..ExecutionRequest::new("cmd.exe /c echo sta-probe-marker")
+        };
         let mut exec_ok = false;
-        match mxc_sdk::exec_sandbox(&exec, true) {
+        match container::spawn_in_container(&sandbox_id, exec, Default::default()) {
             Ok(mut sandbox) => {
                 let out = sandbox.take_stdout();
                 let reader = std::thread::spawn(move || {
@@ -259,32 +253,22 @@ fn measure_handle_outliving_its_thread() {
     let (tx, rx) = std::sync::mpsc::channel();
     let (exec_tx, exec_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-            "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-        let response = match mxc_sdk::run_state_aware_json(provision, false, true) {
+        let provisioned = match container::provision_container(
+            ProvisionRequest::isolation_session(None),
+            Default::default(),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 let _ = tx.send(Err(format!("provision failed: {e:?}")));
                 return;
             }
         };
-        let sandbox_id = response
-            .split(r#""sandboxId":""#)
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .unwrap_or_default()
-            .to_string();
-        if sandbox_id.is_empty() {
-            let _ = tx.send(Err(format!("no sandboxId in: {response}")));
-            return;
-        }
-        *SANDBOX.lock().unwrap() = sandbox_id.clone();
+        let sandbox_id = provisioned.container_id;
+        *SANDBOX.lock().unwrap() = sandbox_id.as_str().to_string();
         // Sent before anything else can fail, so main owns cleanup from here.
-        let _ = tx.send(Ok(sandbox_id.clone()));
+        let _ = tx.send(Ok(sandbox_id.as_str().to_string()));
 
-        let start =
-            format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
-        if let Err(e) = mxc_sdk::run_state_aware_json(&start, false, true) {
+        if let Err(e) = container::start_container(&sandbox_id, Default::default()) {
             let _ = exec_tx.send(Err(format!("start failed: {e:?}")));
             return;
         }
@@ -292,11 +276,11 @@ fn measure_handle_outliving_its_thread() {
         // Long enough that the workload is certainly still running when this
         // thread exits, so the handle under test is live, but short enough to
         // end on its own so no kill races the read path.
-        let exec = format!(
-            r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}",
-                "process":{{"commandLine":"cmd.exe /c echo marker-before && ping -n 4 127.0.0.1","timeout":120000}}}}"#
-        );
-        match mxc_sdk::exec_sandbox(&exec, true) {
+        let exec = ExecutionRequest {
+            timeout_ms: Some(120_000),
+            ..ExecutionRequest::new("cmd.exe /c echo marker-before && ping -n 4 127.0.0.1")
+        };
+        match container::spawn_in_container(&sandbox_id, exec, Default::default()) {
             Ok(sandbox) => {
                 let _ = exec_tx.send(Ok(sandbox));
             }

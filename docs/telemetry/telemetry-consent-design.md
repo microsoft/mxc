@@ -178,6 +178,21 @@ the stable top-level `telemetry.enabled: true` setting. The switch never
 prompts, never persists consent, and never bypasses consent or administrative
 policy.
 
+For SDK container creation, opt-in is an invocation option on `RunOptions`,
+`SpawnOptions`, or `SpawnWithPtyOptions`, including the asynchronous variants
+that share those options. `ContainerRequest` has no telemetry field.
+
+| SDK | Creation option |
+| --- | --- |
+| Rust | `telemetry: Some(TelemetryConfig { enabled: Some(true) })` |
+| .NET | `Telemetry = new TelemetryConfig { Enabled = true }` |
+| Node | `telemetry: { enabled: true }` |
+
+SDK adapters preserve this setting in the native top-level `telemetry.enabled`
+field without changing the request. Omission leaves telemetry disabled;
+explicit `false` remains an explicit disable. Existing-container and lifecycle
+telemetry behavior is unchanged.
+
 Consent-management surfaces should still support the three behavior classes
 defined here:
 

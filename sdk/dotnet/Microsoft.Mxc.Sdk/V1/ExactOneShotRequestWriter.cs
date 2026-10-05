@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Text.Json;
+using ContainmentChoice = Microsoft.Mxc.Sdk.V1.Containment;
 using Wire = Microsoft.Mxc.Sdk.Generated;
 
 namespace Microsoft.Mxc.Sdk.V1;
@@ -10,74 +11,63 @@ internal static class ExactOneShotRequestWriter
 {
     internal static readonly JsonSerializerOptions JsonOptions = MxcJson.Options;
 
-    internal static string Serialize(SandboxRequest request)
+    internal static string Serialize(ContainerRequest request, TelemetryConfig? telemetry = null)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return MxcJson.Serialize(ToWire(request), JsonOptions);
+        return MxcJson.Serialize(ToWire(request, telemetry), JsonOptions);
     }
 
-    internal static Wire.OneShotRequest ToWire(SandboxRequest request)
+    internal static Wire.OneShotRequest ToWire(ContainerRequest request, TelemetryConfig? telemetry = null)
     {
         ArgumentNullException.ThrowIfNull(request);
-#pragma warning disable MXC0001 // Reject the obsolete option before any normalization or native call.
-        if (request.Experimental)
-#pragma warning restore MXC0001
-        {
-            throw new ArgumentException(
-                "Stable V1 requests cannot opt in to experimental features; "
-                    + "use a raw exact development-contract request with explicit authorization.",
-                nameof(request));
-        }
-        var normalized = NormalizeCompatibilityAliases(request);
-        var policy = normalized.Policy;
 
         var wire = new Wire.OneShotRequest
         {
             Version = Wire.Version._100,
-            ContainerId = normalized.ContainerName is null
+            ContainerId = request.ContainerName is null
                 ? MintContainerId()
-                : normalized.ContainerName,
-            Containment = Containment(normalized.Containment),
+                : request.ContainerName,
+            Containment = Containment(request.Containment),
             Lifecycle = new Wire.Lifecycle
             {
                 DestroyOnExit = true,
-                PreservePolicy = policy.Filesystem?.ClearPolicyOnExit == false,
+                PreservePolicy = request.Filesystem?.ClearPolicyOnExit == false,
             },
-            Process = Process(normalized),
-            Filesystem = Filesystem(policy.Filesystem),
-            Network = Network(policy.Network),
-            RuntimeConfig = RuntimeConfig(policy.Network?.RuntimeConfig),
-            Ui = Ui(policy.Ui),
-            Telemetry = policy.Telemetry is null
+            Process = Process(request),
+            Filesystem = Filesystem(request.Filesystem),
+            Network = Network(request.Network),
+            RuntimeConfig = RuntimeConfig(request.Network?.RuntimeConfig),
+            Ui = Ui(request.Ui),
+            Telemetry = telemetry is null
                 ? null
-                : new Wire.Telemetry { Enabled = policy.Telemetry.Enabled },
+                : new Wire.Telemetry { Enabled = telemetry.Enabled },
         };
 
-        switch (normalized.Containment)
+        switch (request.Containment)
         {
-            case ProcessContainment:
-            case BubblewrapContainment:
-            case IsolationSessionContainment:
+            case ContainmentChoice.Process:
+            case ContainmentChoice.Bubblewrap:
+            case ContainmentChoice.IsolationSession:
                 break;
-            case ProcessContainerContainment processContainer:
+            case ContainmentChoice.ProcessContainer processContainer:
                 wire.ProcessContainer = ProcessContainer(processContainer);
                 break;
-            case LxcContainment lxc:
+            case ContainmentChoice.Lxc lxc:
                 wire.Lxc = new Wire.Lxc
                 {
                     Distribution = lxc.Distribution,
                     Release = lxc.Release,
                 };
                 break;
-            case SeatbeltContainment seatbelt:
+            case ContainmentChoice.Seatbelt seatbelt:
                 wire.Seatbelt = Seatbelt(seatbelt);
                 break;
-            case WslcContainment wslc:
+            case ContainmentChoice.Wslc wslc:
                 wire.Wslc = Wslc(wslc);
                 break;
             default:
                 throw new ArgumentException(
-                    $"unsupported containment type '{normalized.Containment.GetType().Name}'",
+                    $"unsupported containment type '{request.Containment.GetType().Name}'",
                     nameof(request));
         }
 
@@ -86,28 +76,14 @@ internal static class ExactOneShotRequestWriter
 
     private static string MintContainerId() => $"dotnet-{Guid.NewGuid():N}";
 
-    private static Wire.Process Process(SandboxRequest request)
+    private static Wire.Process Process(ContainerRequest request)
     {
         var process = new Wire.Process
         {
             CommandLine = request.Command,
             Cwd = request.WorkingDirectory,
-            Env = request.Environment is null
-                ? null
-                : request.Environment
-                    .Select(pair =>
-                    {
-                        if (string.IsNullOrEmpty(pair.Key)
-                            || pair.Key.Contains('=', StringComparison.Ordinal))
-                        {
-                            throw new ArgumentException(
-                                "Environment keys must be nonempty and must not contain '='.",
-                                nameof(request));
-                        }
-                        return $"{pair.Key}={pair.Value}";
-                    })
-                    .ToList(),
-            Timeout = request.Policy.TimeoutMs ?? 0,
+            Env = Environment(request.Environment),
+            Timeout = request.TimeoutMs ?? 0,
         };
         if (request.Environment is not null && request.InheritDefaultEnvironment)
         {
@@ -115,6 +91,19 @@ internal static class ExactOneShotRequestWriter
         }
         return process;
     }
+
+    internal static List<string>? Environment(Dictionary<string, string>? environment) =>
+        environment?.Select(pair =>
+        {
+            if (string.IsNullOrEmpty(pair.Key)
+                || pair.Key.Contains('=', StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "Environment keys must be nonempty and must not contain '='.",
+                    "request");
+            }
+            return $"{pair.Key}={pair.Value}";
+        }).ToList();
 
     private static Wire.Filesystem Filesystem(FilesystemPolicy? policy) => new()
     {
@@ -208,18 +197,18 @@ internal static class ExactOneShotRequestWriter
         }
         return new Wire.Ui
         {
-            Disable = !policy.AllowWindows,
+            Disable = policy.Disable,
             Clipboard = Clipboard(policy.Clipboard, "ui.clipboard"),
             Injection = policy.AllowInputInjection,
         };
     }
 
     private static Wire.ProcessContainer ProcessContainer(
-        ProcessContainerContainment containment)
+        ContainmentChoice.ProcessContainer containment)
     {
         var wire = new Wire.ProcessContainer
         {
-            LeastPrivilege = containment.LeastPrivilege,
+            LeastPrivilege = false,
             Capabilities = ValidatedCapabilities(containment.Capabilities),
             CaptureDenials = CaptureDenials(containment.CaptureDenials),
             Filesystem = containment.Filesystem is null
@@ -295,7 +284,7 @@ internal static class ExactOneShotRequestWriter
             && policy.SystemSettings == global::Microsoft.Mxc.Sdk.V1.ProcessContainerSystemSettings.None
             && !policy.Ime;
 
-    private static Wire.Seatbelt Seatbelt(SeatbeltContainment containment) => new()
+    private static Wire.Seatbelt Seatbelt(ContainmentChoice.Seatbelt containment) => new()
     {
         ProfileOverride = containment.ProfileOverride,
         GuiAccess = containment.GuiAccess ? true : null,
@@ -306,7 +295,7 @@ internal static class ExactOneShotRequestWriter
             : new List<string>(containment.ExtraMachLookups),
     };
 
-    private static Wire.OneShotWslc Wslc(WslcContainment containment) => new()
+    private static Wire.OneShotWslc Wslc(ContainmentChoice.Wslc containment) => new()
     {
         Image = containment.Image,
         ImageTarPath = containment.ImageTarPath,
@@ -324,15 +313,15 @@ internal static class ExactOneShotRequestWriter
             }).ToList(),
     };
 
-    private static string Containment(SandboxContainment containment) => containment switch
+    private static string Containment(Containment containment) => containment switch
     {
-        ProcessContainment => Wire.OneShotContainment.Process,
-        ProcessContainerContainment => Wire.OneShotContainment.Processcontainer,
-        LxcContainment => Wire.OneShotContainment.Lxc,
-        BubblewrapContainment => Wire.OneShotContainment.Bubblewrap,
-        SeatbeltContainment => Wire.OneShotContainment.Seatbelt,
-        IsolationSessionContainment => Wire.OneShotContainment.IsolationSession,
-        WslcContainment => Wire.OneShotContainment.Wslc,
+        ContainmentChoice.Process => Wire.OneShotContainment.Process,
+        ContainmentChoice.ProcessContainer => Wire.OneShotContainment.Processcontainer,
+        ContainmentChoice.Lxc => Wire.OneShotContainment.Lxc,
+        ContainmentChoice.Bubblewrap => Wire.OneShotContainment.Bubblewrap,
+        ContainmentChoice.Seatbelt => Wire.OneShotContainment.Seatbelt,
+        ContainmentChoice.IsolationSession => Wire.OneShotContainment.IsolationSession,
+        ContainmentChoice.Wslc => Wire.OneShotContainment.Wslc,
         _ => throw new ArgumentException(
             $"unsupported containment type '{containment.GetType().Name}'",
             "request"),
@@ -427,75 +416,4 @@ internal static class ExactOneShotRequestWriter
         where TEnum : struct, Enum =>
         new(path, value, $"{typeof(TEnum).Name} value '{Convert.ToInt64(value)}' is not supported.");
 
-    private static SandboxRequest NormalizeCompatibilityAliases(SandboxRequest request)
-    {
-#pragma warning disable MXC0001 // Compatibility migration for the obsolete policy field.
-        var legacyCaptureDenials = request.Policy.CaptureDenials;
-#pragma warning restore MXC0001
-        if (legacyCaptureDenials is null)
-        {
-            return request;
-        }
-
-        var containment = request.Containment switch
-        {
-            ProcessContainment => new ProcessContainerContainment
-            {
-                CaptureDenials = legacyCaptureDenials,
-            },
-            ProcessContainerContainment processContainer =>
-                CloneProcessContainer(processContainer, legacyCaptureDenials),
-            _ => throw new ArgumentException(
-                $"{nameof(SandboxPolicy)}.CaptureDenials cannot be used with "
-                    + $"{request.Containment.GetType().Name}; set "
-                    + $"{nameof(ProcessContainerContainment)}."
-                    + $"{nameof(ProcessContainerContainment.CaptureDenials)} instead.",
-                nameof(request)),
-        };
-
-        return new SandboxRequest(request.Policy.WithoutLegacyCaptureDenials(), request.Command)
-        {
-            Containment = containment,
-            ContainerName = request.ContainerName,
-            WorkingDirectory = request.WorkingDirectory,
-            Environment = request.Environment is null
-                ? null
-                : new Dictionary<string, string>(
-                    request.Environment, request.Environment.Comparer),
-            InheritDefaultEnvironment = request.InheritDefaultEnvironment,
-        };
-    }
-
-    private static ProcessContainerContainment CloneProcessContainer(
-        ProcessContainerContainment containment,
-        CaptureDenialsPolicy legacyCaptureDenials)
-    {
-        if (containment.CaptureDenials is not null
-            && !CaptureDenialsEqual(containment.CaptureDenials, legacyCaptureDenials))
-        {
-            throw new ArgumentException(
-                $"{nameof(SandboxPolicy)}.CaptureDenials conflicts with "
-                    + $"{nameof(ProcessContainerContainment)}."
-                    + $"{nameof(ProcessContainerContainment.CaptureDenials)}.",
-                "request");
-        }
-
-        return new ProcessContainerContainment
-        {
-            LeastPrivilege = containment.LeastPrivilege,
-            LearningMode = containment.LearningMode,
-            Capabilities = new List<string>(containment.Capabilities),
-            CaptureDenials = containment.CaptureDenials ?? legacyCaptureDenials,
-            Ui = containment.Ui,
-            Filesystem = containment.Filesystem,
-            Network = containment.Network,
-        };
-    }
-
-    private static bool CaptureDenialsEqual(
-        CaptureDenialsPolicy left,
-        CaptureDenialsPolicy right) =>
-        left.Mode == right.Mode
-            && string.Equals(left.OutputPath, right.OutputPath, StringComparison.Ordinal)
-            && left.RetainEtl == right.RetainEtl;
 }

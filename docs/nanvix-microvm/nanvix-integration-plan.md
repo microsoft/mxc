@@ -351,25 +351,11 @@ Python 3.12.3 (tags/0715636-nanvix-03bba66:0715636) on nanvix
 
 ### SDK Usage (After Phase 2)
 
-MicroVM is an experimental backend, so it is outside the v1 high-level API.
-Use a raw exact development-contract config through the root
-`spawnSandboxFromConfig` with the experimental opt-in:
-
-```typescript
-import { spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
-
-const child = spawnSandboxFromConfig(
-  {
-    version: '1.1.0-alpha',
-    containment: 'microvm',
-    process: { commandLine: "print('Hello from NanVix!')" },
-  },
-  { experimental: true, usePty: false },
-);
-
-child.stdout!.on('data', (d) => process.stdout.write(d)); // "Hello from NanVix!"
-child.on('close', (code) => console.log('exit:', code));  // 0
-```
+MicroVM is an experimental backend and is not exposed by the Node V1 typed
+containment choices. Use the executor with an exact development-contract
+configuration and explicit experimental opt-in. A Node SDK example requires a
+supported versioned API for MicroVM; the existing V1 `spawn` API does not accept
+this containment.
 
 
 ## Testing Strategy

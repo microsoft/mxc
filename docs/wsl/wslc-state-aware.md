@@ -66,7 +66,7 @@ deserialization DTO.
 `provision` mints an id of the form `wslc:<32 lowercase hex>` (`wslc:` + a UUID simple form).
 Raw SDK/FFI requests carry this id in `sandboxId` for every post-provision phase
 (`start` / `exec` / `stop` / `deprovision`). Direct `wxc-exec` calls omit it from JSON and pass it
-as `--sandbox-id`; the dispatcher derives the backend from the `wslc:` prefix (later operations do
+as `--container-id`; the dispatcher derives the backend from the `wslc:` prefix (later operations do
 **not** repeat `containment`).
 
 ## Phase → WSLc SDK mapping
@@ -82,15 +82,14 @@ as `--sandbox-id`; the dispatcher derives the backend from the `wslc:` prefix (l
 ### exec output semantics
 
 `provision` / `start` / `stop` / `deprovision` return a JSON `{result | error}` envelope on stdout.
-For attached execution, a **successful** `exec` relays the script's raw stdout/stderr live from
-daemon frames and exits with the script's own exit code — it does **not** wrap the result in an
-envelope. Piped execution writes those same live frames into separate anonymous stdout/stderr
-pipes returned to the in-process SDK caller; no stdin pipe is returned. An attached dispatch
-**failure** writes its `{error}` envelope to stderr, because the script's output may already own
-stdout by the time the failure is known — so stdout carries the script's output either way, and a
-caller reads the typed error from stderr. A timeout on the attached relay surfaces as a backend
-error because that path cannot return a typed timeout; the piped path reports it through its wait
-result.
+For `wxc-exec` CLI execution, a **successful** `exec` relays the script's raw stdout/stderr live
+from daemon frames and exits with the script's own exit code — it does **not** wrap the result in
+an envelope. A CLI dispatch **failure** writes its `{error}` envelope to stderr, because the
+script's output may already own stdout by the time the failure is known. In-process SDK execution
+uses the supported streaming APIs, which return separate stdout/stderr pipes; no stdin pipe is
+returned. Rust and .NET SDKs do not expose attached exec as a public operation. A timeout on the
+CLI attached relay surfaces as a backend error because that path cannot return a typed timeout;
+the streaming path reports it through its wait result.
 
 ### exec admission, cancellation, and failure containment
 
@@ -249,7 +248,7 @@ run individually or in an arbitrary order:
 
 `run_wslc_state_aware_tests.ps1` handles both concerns automatically (it drives the phases in order
 and does the `{{SANDBOX_ID}}` substitution from each provision's output). It then removes `phase`
-and `sandboxId` from the JSON and passes them as `--operation` and `--sandbox-id`. Exercise these
+and `sandboxId` from the JSON and passes them as `--operation` and `--container-id`. Exercise these
 fixtures **through the harness**, not by pointing `wxc-exec --config` at them directly.
 
 ## Known limitations

@@ -4,36 +4,37 @@
 //! Streaming (handle-based) API tests: live stdio, kill, and wait.
 //! Seatbelt-specific cases run only on macOS.
 //!
-//! These drive the real consumer path: build a [`SandboxRequest`] from a
-//! [`mxc_sdk::v1::SandboxPolicy`] via `mxc_sdk::v1::build_request`, fill in
-//! the command, then `mxc_sdk::v1::spawn_sandbox`.
+//! These drive the real consumer path by constructing a [`ContainerRequest`]
+//! and passing it to `mxc_sdk::v1::spawn`.
 
 #![cfg(target_os = "macos")]
 
 mod unix_pty_contract;
 
-use mxc_sdk::v1::{build_request, spawn_sandbox, spawn_with_pty, SandboxPolicy, SandboxRequest};
-use mxc_sdk::{MxcPtySize, WaitOutcome};
+use mxc_sdk::v1::{
+    spawn, spawn_with_pty, ContainerRequest, FilesystemPolicy, SpawnWithPtyOptions, WaitResult,
+};
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).
 #[cfg(target_os = "macos")]
-fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
-    let mut policy = SandboxPolicy::default();
-    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
-        readwrite_paths: vec!["/tmp".to_string()],
-        readonly_paths: vec![],
-        denied_paths: vec![],
-        clear_policy_on_exit: None,
-    });
-    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
-    build_request(&policy, command, None).expect("build_request should succeed")
+fn seatbelt_request(command: &str, timeout_ms: u32) -> ContainerRequest {
+    ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec!["/tmp".to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms: (timeout_ms != 0).then_some(timeout_ms),
+        ..ContainerRequest::new(command)
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_double_take_returns_none() {
-    let mut proc = spawn_sandbox(seatbelt_request("cat", 0)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("cat", 0), Default::default()).expect("spawn");
 
     assert!(
         proc.take_stdin().is_some(),
@@ -96,7 +97,7 @@ fn seatbelt_pty_transfers_native_stdio() {
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_try_wait_reports_exit_after_completion() {
-    let mut proc = spawn_sandbox(seatbelt_request("true", 0)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("true", 0), Default::default()).expect("spawn");
 
     // Poll try_wait until the quick command exits; it must then report Some.
     let mut code = None;
@@ -116,10 +117,10 @@ fn streaming_kill_after_reap_is_a_noop() {
     // Regression: once the child has exited and been reaped (here via `wait`),
     // `kill()` must not signal its pid/pgid again — a recycled pid could belong
     // to an unrelated process (group). The post-reap `kill()` is a clean no-op.
-    let mut proc = spawn_sandbox(seatbelt_request("true", 0)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("true", 0), Default::default()).expect("spawn");
     assert_eq!(
         proc.wait().expect("wait"),
-        WaitOutcome::Exited(0),
+        WaitResult::Exited(0),
         "quick command should exit 0"
     );
     proc.kill().expect("kill after reap is a no-op Ok");
@@ -131,7 +132,7 @@ fn streaming_kill_after_try_wait_reap_is_a_noop() {
     // The exact race the review flagged: `try_wait()` reaps the exited child, so
     // a later `kill()` must not signal the now-recycled pid/pgid. Poll try_wait
     // to completion, then `kill()` must stay a clean no-op.
-    let mut proc = spawn_sandbox(seatbelt_request("true", 0)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("true", 0), Default::default()).expect("spawn");
     let mut reaped = false;
     for _ in 0..100 {
         if proc.try_wait().expect("try_wait").is_some() {
@@ -152,7 +153,7 @@ fn streaming_kill_after_try_wait_reap_is_a_noop() {
 fn streaming_double_kill_before_wait_completes_promptly() {
     // Calling `kill()` twice before `wait()` must be stable (both Ok), and
     // `wait()` must then complete promptly rather than hang.
-    let mut proc = spawn_sandbox(seatbelt_request("sleep 30", 0)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("sleep 30", 0), Default::default()).expect("spawn");
     proc.kill().expect("first kill");
     proc.kill().expect("second kill stays Ok");
     let start = std::time::Instant::now();
@@ -174,7 +175,7 @@ fn streaming_stdout_closer_unblocks_parked_read_without_killing() {
     // pipe open past the foreground command's exit). The stdout closer must EOF
     // that read promptly *without* terminating the still-running child — a plain
     // `kill()` would defeat the point.
-    let mut proc = spawn_sandbox(seatbelt_request("sleep 30", 0)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("sleep 30", 0), Default::default()).expect("spawn");
 
     let mut stdout = proc.take_stdout().expect("stdout available");
     // The closer is valid even though stdout has already been taken.
@@ -224,13 +225,13 @@ fn streaming_stdout_closer_unblocks_parked_read_without_killing() {
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_wait_discards_untaken_streams() {
-    let mut proc =
-        spawn_sandbox(seatbelt_request("echo streamed-out", 0)).expect("spawn should succeed");
+    let mut proc = spawn(seatbelt_request("echo streamed-out", 0), Default::default())
+        .expect("spawn should succeed");
     // Take nothing -> wait() drains and discards the output, returning only
     // the exit code.
     assert_eq!(
         proc.wait().expect("wait should succeed"),
-        WaitOutcome::Exited(0)
+        WaitResult::Exited(0)
     );
 }
 
@@ -239,12 +240,15 @@ fn streaming_wait_discards_untaken_streams() {
 fn streaming_wait_with_output_captures_both_streams() {
     // wait_with_output drains stdout and stderr concurrently, so a child that
     // writes to both is captured without the take-both deadlock foot-gun.
-    let proc = spawn_sandbox(seatbelt_request("echo to-out; echo to-err 1>&2", 0))
-        .expect("spawn should succeed");
+    let proc = spawn(
+        seatbelt_request("echo to-out; echo to-err 1>&2", 0),
+        Default::default(),
+    )
+    .expect("spawn should succeed");
     let output = proc
         .wait_with_output()
         .expect("wait_with_output should succeed");
-    assert_eq!(output.outcome, WaitOutcome::Exited(0));
+    assert_eq!(output.outcome, WaitResult::Exited(0));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("to-out"),
         "stdout: {:?}",
@@ -263,7 +267,7 @@ fn streaming_bidirectional_stdio() {
     use std::io::{Read, Write};
 
     // `cat` echoes stdin to stdout until EOF, then exits.
-    let mut proc = spawn_sandbox(seatbelt_request("cat", 0)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("cat", 0), Default::default()).expect("spawn");
 
     let mut stdin = proc.take_stdin().expect("stdin available");
     let mut stdout = proc.take_stdout().expect("stdout available");
@@ -275,13 +279,13 @@ fn streaming_bidirectional_stdio() {
     stdout.read_to_string(&mut out).expect("read stdout");
     assert!(out.contains("ping-pong"), "got: {:?}", out);
 
-    assert_eq!(proc.wait().expect("wait"), WaitOutcome::Exited(0));
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_kill_terminates_process() {
-    let mut proc = spawn_sandbox(seatbelt_request("sleep 30", 0)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("sleep 30", 0), Default::default()).expect("spawn");
 
     // Still running shortly after spawn.
     assert!(proc.try_wait().expect("try_wait").is_none());
@@ -291,7 +295,7 @@ fn streaming_kill_terminates_process() {
     // After kill, the process must be reapable and not report success.
     assert_ne!(
         proc.wait().expect("wait after kill"),
-        WaitOutcome::Exited(0),
+        WaitResult::Exited(0),
         "killed process should not exit 0"
     );
 }
@@ -304,7 +308,8 @@ fn streaming_kill_terminates_forked_descendant_quickly() {
     // (which dies) before the just-forked `sleep` joined the group — leaving
     // `sleep` alive and the follow-up `wait()` blocking for its full runtime.
     // The whole tree must die promptly regardless.
-    let mut proc = spawn_sandbox(seatbelt_request("echo hi; sleep 30", 0)).expect("spawn");
+    let mut proc =
+        spawn(seatbelt_request("echo hi; sleep 30", 0), Default::default()).expect("spawn");
 
     proc.kill().expect("kill should succeed");
 
@@ -340,7 +345,7 @@ fn assert_pty_job_control_tree_is_killed(timeout_ms: u32, explicit_kill: bool) {
             "exec /bin/bash -c 'set -m; trap \"\" HUP; sleep 300 & echo CHILD=$!; wait'",
             timeout_ms,
         ),
-        MxcPtySize::default(),
+        SpawnWithPtyOptions::default(),
     )
     .expect("spawn PTY job-control shell");
     let reader = terminal.try_clone_reader().expect("PTY reader");
@@ -445,9 +450,9 @@ fn assert_pty_job_control_tree_is_killed(timeout_ms: u32, explicit_kill: bool) {
     closer.close();
     reader_thread.join().expect("PTY reader thread");
     if explicit_kill {
-        assert_ne!(outcome, WaitOutcome::Exited(0));
+        assert_ne!(outcome, WaitResult::Exited(0));
     } else {
-        assert_eq!(outcome, WaitOutcome::TimedOut);
+        assert_eq!(outcome, WaitResult::TimedOut);
     }
 
     for _ in 0..60 {
@@ -486,7 +491,7 @@ fn seatbelt_pty_kill_sweeps_session_after_leader_exit() {
             "exec /bin/bash -c 'set -m; trap \"\" HUP; sleep 300 & echo CHILD=$!; exit 0'",
             0,
         ),
-        MxcPtySize::default(),
+        SpawnWithPtyOptions::default(),
     )
     .expect("spawn PTY job-control shell");
     let mut reader = BufReader::new(terminal.try_clone_reader().expect("PTY reader"));
@@ -527,8 +532,11 @@ fn streaming_kill_terminates_process_tree() {
     // The sandboxed shell backgrounds a `sleep` (a descendant), prints its
     // pid, then blocks. `kill()` must take the whole process group down,
     // including that descendant.
-    let mut proc =
-        spawn_sandbox(seatbelt_request("sleep 300 & echo CHILD=$!; sleep 300", 0)).expect("spawn");
+    let mut proc = spawn(
+        seatbelt_request("sleep 300 & echo CHILD=$!; sleep 300", 0),
+        Default::default(),
+    )
+    .expect("spawn");
 
     assert!(proc.id() > 0, "id() should expose the child pid");
 
@@ -573,10 +581,10 @@ fn streaming_timeout_kills_process_tree() {
     // 1s timeout; the shell backgrounds a long sleep (descendant), prints its
     // pid, then blocks past the timeout. wait()'s timeout branch must group-
     // kill, taking the descendant down too.
-    let mut proc = spawn_sandbox(seatbelt_request(
-        "sleep 300 & echo CHILD=$!; sleep 300",
-        1000,
-    ))
+    let mut proc = spawn(
+        seatbelt_request("sleep 300 & echo CHILD=$!; sleep 300", 1000),
+        Default::default(),
+    )
     .expect("spawn");
 
     let stdout = proc.take_stdout().expect("stdout");
@@ -592,7 +600,7 @@ fn streaming_timeout_kills_process_tree() {
 
     assert_eq!(
         proc.wait().expect("wait yields an outcome"),
-        WaitOutcome::TimedOut,
+        WaitResult::TimedOut,
         "timed-out process should report a timeout"
     );
 
@@ -615,13 +623,13 @@ fn streaming_wait_returns_when_descendant_holds_not_taken_stream_open() {
     // drains stdout/stderr itself; with no timeout (wait-forever) it must still
     // return promptly once the foreground child exits — the held-open descendant
     // pipe must not wedge the discard drain (cr-002 regression).
-    let mut proc =
-        spawn_sandbox(seatbelt_request("sleep 30 & exit 0", 0)).expect("spawn should succeed");
+    let mut proc = spawn(seatbelt_request("sleep 30 & exit 0", 0), Default::default())
+        .expect("spawn should succeed");
 
     let start = std::time::Instant::now();
     assert_eq!(
         proc.wait().expect("wait should return"),
-        WaitOutcome::Exited(0),
+        WaitResult::Exited(0),
         "foreground command exits 0"
     );
     assert!(
@@ -638,11 +646,11 @@ fn streaming_honors_sub_500ms_timeout() {
     // A sub-500ms timeout used to be rejected outright; it must now be accepted
     // and enforced (cr-011), and fire with low latency (cr-016). `sleep 30`
     // exceeds it, so wait() reports a timeout promptly.
-    let mut proc = spawn_sandbox(seatbelt_request("sleep 30", 200)).expect("spawn");
+    let mut proc = spawn(seatbelt_request("sleep 30", 200), Default::default()).expect("spawn");
     let start = std::time::Instant::now();
     assert_eq!(
         proc.wait().expect("wait yields an outcome"),
-        WaitOutcome::TimedOut,
+        WaitResult::TimedOut,
         "sub-500ms timeout should fire"
     );
     assert!(

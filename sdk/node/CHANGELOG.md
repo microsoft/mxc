@@ -5,6 +5,27 @@ All notable changes to `@microsoft/mxc-sdk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Public operations, request/result types, discovery, and telemetry are
+  exported only from `@microsoft/mxc-sdk/v1`.
+- Creation uses `ContainerRequest` with `run` / `runAsync` or
+  `spawn` / `spawnAsync`. Persistent operations use `provisionContainer`,
+  `startContainer`, `stopContainer`, and `deprovisionContainer`.
+  Use `spawnInContainer` / `spawnInContainerAsync` for live execution or
+  `runInContainer` / `runInContainerAsync` for captured output in an existing container.
+- Each operation takes its own options type. PTY operations take initial
+  dimensions in those options and return SDK-owned terminal process handles.
+- Backend discovery uses in-process `getAvailableBackends()` and returns
+  `AvailableBackend[]`, including tiers, capabilities, and warnings.
+- Telemetry consent uses `getTelemetryConsentStatusAsync`,
+  `requestTelemetryConsentAsync`, and `withdrawTelemetryConsentAsync`.
+  Status queries return `TelemetryConsentStatus`.
+
+Entries below describe historical release APIs, not the current V1 surface.
+
 ## [0.9.0]
 
 ### Added

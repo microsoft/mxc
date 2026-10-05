@@ -6,8 +6,8 @@
 //! Where [`mxc_run_json`](crate::mxc_run_json) runs a sandbox to completion
 //! and captures its output, this surface hands the caller a live,
 //! opaque handle it can feed stdin, read stdout/stderr from, wait on, and kill
-//! while the child runs — mirroring [`mxc_sdk::v1::spawn_sandbox`] /
-//! [`mxc_sdk::Sandbox`].
+//! while the child runs — mirroring [`mxc_sdk::__ffi::spawn_container_json`] /
+//! [`mxc_sdk::v1::MxcProcess`].
 //!
 //! ## Handles & ownership
 //!
@@ -65,10 +65,9 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{
-    spawn_sandbox_json, MxcPtyProcess, MxcPtySize, Sandbox, SandboxOutputMetadata, StreamCloser,
-    WaitOutcome,
-};
+use mxc_sdk::__ffi::spawn_container_json;
+use mxc_sdk::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult};
+use wxc_common::models::SandboxOutputMetadata;
 use wxc_common::sandbox_process::NativeStdio;
 
 use crate::{
@@ -81,7 +80,7 @@ use crate::{
 // Opaque handles
 // ---------------------------------------------------------------------------
 
-/// Opaque sandbox process handle wrapping an [`mxc_sdk::Sandbox`]. Created by
+/// Opaque sandbox process handle wrapping an [`mxc_sdk::v1::MxcProcess`]. Created by
 /// [`mxc_spawn_json`] or
 /// [`mxc_exec_state_aware_json`](crate::mxc_exec_state_aware_json), destroyed by
 /// [`mxc_sandbox_free`].
@@ -90,10 +89,10 @@ pub struct MxcSandbox {
 }
 
 impl MxcSandbox {
-    /// Wrap an [`mxc_sdk::Sandbox`] as an opaque FFI handle. Used by both the
+    /// Wrap an [`MxcProcess`] as an opaque FFI handle. Used by both the
     /// one-shot spawn path ([`mxc_spawn_json`]) and the state-aware streaming exec
     /// path (`mxc_exec_state_aware_json`).
-    pub(crate) fn new(inner: Sandbox) -> Self {
+    pub(crate) fn new(inner: MxcProcess) -> Self {
         Self {
             inner: Box::new(inner),
         }
@@ -123,7 +122,7 @@ trait LiveSandbox: Send {
     fn id(&self) -> u32;
     fn kill(&mut self) -> std::io::Result<()>;
     fn kill_for_timeout(&mut self) -> std::io::Result<()>;
-    fn wait(&mut self) -> std::io::Result<WaitOutcome>;
+    fn wait(&mut self) -> std::io::Result<WaitResult>;
     fn resize_pty(&self, _size: MxcPtySize) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -132,7 +131,7 @@ trait LiveSandbox: Send {
     }
 }
 
-impl LiveSandbox for Sandbox {
+impl LiveSandbox for MxcProcess {
     fn warnings(&self) -> Vec<String> {
         self.warnings()
     }
@@ -181,7 +180,7 @@ impl LiveSandbox for Sandbox {
         self.kill_for_timeout()
     }
 
-    fn wait(&mut self) -> std::io::Result<WaitOutcome> {
+    fn wait(&mut self) -> std::io::Result<WaitResult> {
         self.wait()
     }
 }
@@ -290,7 +289,7 @@ impl LiveSandbox for PtySandbox {
         self.inner.kill_for_timeout()
     }
 
-    fn wait(&mut self) -> std::io::Result<WaitOutcome> {
+    fn wait(&mut self) -> std::io::Result<WaitResult> {
         self.inner.wait()
     }
 
@@ -398,7 +397,7 @@ pub unsafe extern "C" fn mxc_spawn_json(
 fn spawn_json_inner(
     request_json_utf8: *const c_char,
     experimental: bool,
-) -> Result<Sandbox, (i32, MxcErrorDetail)> {
+) -> Result<MxcProcess, (i32, MxcErrorDetail)> {
     // SAFETY: caller contract on `mxc_spawn_json`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
         Some(value) => value,
@@ -415,12 +414,12 @@ fn spawn_json_inner(
             ))
         }
     };
-    spawn_sandbox_json(request_json, experimental).map_err(sdk_error_detail)
+    spawn_container_json(request_json, experimental).map_err(sdk_error_detail)
 }
 
 /// Shared tail of the handle-returning spawn entry points
 /// ([`mxc_spawn_json`] and `mxc_exec_state_aware_json`): on success box the
-/// [`Sandbox`] into an [`MxcSandbox`] handle and write it to `*out_handle`; on
+/// [`MxcProcess`] into an [`MxcSandbox`] handle and write it to `*out_handle`; on
 /// failure hand the detail to `*out_error` (when non-null) and return the
 /// status.
 ///
@@ -428,7 +427,7 @@ fn spawn_json_inner(
 /// `out_handle` must be non-null and writable; `out_error` must be null or
 /// point to writable storage for one [`MxcErrorDetail`].
 pub(crate) unsafe fn finish_spawn(
-    outcome: Result<Sandbox, (i32, MxcErrorDetail)>,
+    outcome: Result<MxcProcess, (i32, MxcErrorDetail)>,
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
@@ -466,7 +465,7 @@ pub(crate) unsafe fn finish_handle(
 
 /// Map an SDK error onto the status + detail pair the spawn chain carries, so
 /// the failing API call survives instead of being flattened to a message.
-pub(crate) fn sdk_error_detail(error: mxc_sdk::Error) -> (i32, MxcErrorDetail) {
+pub(crate) fn sdk_error_detail(error: mxc_sdk::v1::Error) -> (i32, MxcErrorDetail) {
     (
         status_from_error_code(error.code),
         MxcErrorDetail::from_error(&error),
@@ -1061,7 +1060,7 @@ pub unsafe extern "C" fn mxc_sandbox_wait(
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &mut *handle };
         match sandbox.inner.wait() {
-            Ok(WaitOutcome::Exited(code)) => {
+            Ok(WaitResult::Exited(code)) => {
                 // SAFETY: out-params non-null writable per the caller contract.
                 unsafe {
                     *out_exit = code;
@@ -1069,7 +1068,7 @@ pub unsafe extern "C" fn mxc_sandbox_wait(
                 }
                 MXC_STATUS_SUCCESS
             }
-            Ok(WaitOutcome::TimedOut) => {
+            Ok(WaitResult::TimedOut) => {
                 // SAFETY: out-params non-null writable per the caller contract.
                 unsafe {
                     *out_exit = -1;

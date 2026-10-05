@@ -81,12 +81,11 @@ internal static class Program
         var label = scenario?.Name ?? "custom";
         var command = scenario?.Command ?? arg;
 
-        SandboxId id;
+        ContainerId id;
         try
         {
-            var provisioned = MxcLifecycle.ProvisionSandbox(
-                StateAwareContainment.IsolationSession,
-                new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy
+            var provisioned = MxcLifecycle.ProvisionContainer(
+                new IsolationSessionProvisionRequest(new NetworkPolicy
                 {
                     Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
                     Ingress = new NetworkIngressPolicy
@@ -95,7 +94,7 @@ internal static class Program
                         HostLoopback = NetworkAction.Allow,
                     },
                 }));
-            id = provisioned.SandboxId;
+            id = provisioned.ContainerId;
         }
         catch (MxcException e)
         {
@@ -112,7 +111,7 @@ internal static class Program
         try
         {
             Console.Error.WriteLine("[driver] provisioned.");
-            MxcLifecycle.StartSandbox(id);
+            MxcLifecycle.StartContainer(id);
             Console.Error.WriteLine($"[driver] started. Scenario: {label}");
             if (scenario is { } s)
             {
@@ -123,8 +122,11 @@ internal static class Program
 
             using var terminal = MxcLifecycle.SpawnInContainerWithPty(
                 id,
-                command,
-                CurrentConsoleSize());
+                new ExecutionRequest(command),
+                new SpawnInContainerWithPtyOptions
+                {
+                    Size = CurrentConsoleSize(),
+                });
             var outcome = AttachToCurrentConsole(terminal);
             Console.WriteLine(
                 $"\n[driver] timedOut: {outcome.TimedOut}, exitCode: {outcome.ExitCode}");
@@ -145,7 +147,7 @@ internal static class Program
             Console.Error.WriteLine("\n[driver] tearing down…");
             try
             {
-                MxcLifecycle.StopSandbox(id);
+                MxcLifecycle.StopContainer(id);
             }
             catch (MxcException)
             {
@@ -154,7 +156,7 @@ internal static class Program
             }
             try
             {
-                MxcLifecycle.DeprovisionSandbox(id);
+                MxcLifecycle.DeprovisionContainer(id);
                 Console.Error.WriteLine("[driver] deprovisioned.");
             }
             catch (MxcException e)
@@ -167,7 +169,7 @@ internal static class Program
 
     // Attach the caller-controlled PTY to this process's console by relaying its
     // streams and forwarding console input, control characters, and resize events.
-    private static SandboxWaitResult AttachToCurrentConsole(MxcPtyProcess terminal)
+    private static WaitResult AttachToCurrentConsole(MxcPtyProcess terminal)
     {
         using var consoleMode = ConsoleModeScope.EnterRaw();
         using var cancellation = new CancellationTokenSource();

@@ -6,7 +6,7 @@
 /// macOS Seatbelt settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Seatbelt {
+pub struct SeatbeltConfig {
     /// Replace the generated sandbox profile entirely.
     pub profile_override: Option<String>,
     /// Allow GUI applications to reach WindowServer and related services.
@@ -19,7 +19,7 @@ pub struct Seatbelt {
     pub extra_mach_lookups: Vec<String>,
 }
 
-impl Default for Seatbelt {
+impl Default for SeatbeltConfig {
     fn default() -> Self {
         Self {
             profile_override: None,

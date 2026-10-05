@@ -1,27 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// MicroVM SDK end-to-end tests — these tests spawn NanVix VMs via wxc-exec.exe.
+// MicroVM tests remain deferred until the V1 in-process contract supports them.
 //
 // Requirements:
 //   - Windows with WHP enabled (bcdedit /set hypervisorlaunchtype auto)
-//   - wxc-exec.exe built (in src/target/debug/ or src/target/x86_64-pc-windows-msvc/debug/)
-//   - NanVix binaries next to wxc-exec.exe: nanvixd.exe, kernel.elf, python3.12, nanvix_rootfs.img
+//   - Windows with WHP enabled
+//   - NanVix runtime binaries installed
 //
 // Run: cd sdk/tests/integration && npx tsc -p tsconfig.json && node --test dist/microvm-filesystem.test.js
 //
-// All tests use spawnSandboxFromConfig with usePty:false (non-PTY mode).
-// PTY mode is not supported for the MicroVM backend.
-
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
 import { execSync } from 'child_process';
-import { ChildProcess } from 'child_process';
-import { sdk } from './test-helpers.js';
-import type { ContainerConfig } from '@microsoft/mxc-sdk';
+import { runConfigForTest } from './test-helpers.js';
+import type { ContainerConfig } from './node_modules/@microsoft/mxc-sdk/dist/v1/types.js';
 
 function isWhpAvailable(): boolean {
   if (os.platform() !== 'win32') return false;
@@ -45,52 +41,14 @@ function pyEscape(p: string): string {
   return p.replace(/\\/g, '\\\\');
 }
 
-/**
- * Spawn a microvm sandbox using spawnSandboxFromConfig with usePty:false.
- * Returns stdout, stderr, and exit code.
- */
-function runMicrovm(
-  config: ContainerConfig,
-  options: { timeoutMs?: number } = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    const timeout = options.timeoutMs ?? 120_000;
-
-    try {
-      const child: ChildProcess = sdk.spawnSandboxFromConfig(config, {
-        experimental: true,
-        debug: true,
-        usePty: false,
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-      child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
-
-      const timer = setTimeout(() => {
-        child.kill();
-        reject(new Error(`MicroVM test timed out after ${timeout}ms.\nstdout: ${stdout}\nstderr: ${stderr}`));
-      }, timeout);
-
-      child.on('error', (error: Error) => {
-        clearTimeout(timer);
-        reject(new Error(`Failed to spawn wxc-exec: ${error.message}`));
-      });
-
-      child.on('close', (code: number | null) => {
-        clearTimeout(timer);
-        resolve({ stdout, stderr, exitCode: code ?? -1 });
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
+function runMicrovm(config: ContainerConfig): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return runConfigForTest(config, { experimental: true });
 }
 
-describe('MicroVM SDK E2E — spawnSandboxFromConfig with containment: microvm', {
-  skip: !isMicrovmAvailable ? 'MicroVM tests require Windows with WHP' : undefined,
+describe('Node V1 MicroVM integration (deferred)', {
+  skip: !isMicrovmAvailable
+    ? 'MicroVM tests require Windows with WHP'
+    : 'MicroVM is not supported by the V1 in-process Node contract',
 }, () => {
 
   it('should run a simple Python script and capture output', async () => {

@@ -3,7 +3,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { ErrorCode, MxcError, mxcErrorFromCode, mxcErrorFromEnvelope } from '../../src/errors.js';
+import { ErrorCode, MxcError, mxcErrorFromCode, mxcErrorFromEnvelope } from '../../src/v1/errors.js';
 
 const codes: ErrorCode[] = [
   'malformed_request',

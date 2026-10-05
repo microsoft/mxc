@@ -7,18 +7,11 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { MxcError } from '@microsoft/mxc-sdk';
 import {
   sdk,
-  debugSpawnOptions,
   NETWORK_TEST_URL,
   createTempDir,
 } from './test-helpers.js';
-
-const seatbeltSpawnOptions = { ...debugSpawnOptions, experimental: true };
-
-// Seatbelt first appears in the exact 0.7 contract.
-const schemaVersion = '0.7.0-alpha';
 
 // Clipboard tests require a running pasteboard service. Probe once at
 // module load and skip clipboard tests when the service is unavailable
@@ -58,7 +51,7 @@ describe('macOS Seatbelt Container', {
   });
 
   it('should execute hello world in seatbelt sandbox', async () => {
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       "echo 'Hello from seatbelt'",
       {},
       {},
@@ -70,7 +63,7 @@ describe('macOS Seatbelt Container', {
   });
 
   it('should propagate exit code', async () => {
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       'exit 42',
       {},
       {},
@@ -93,7 +86,7 @@ describe('macOS Seatbelt Container', {
       'trap - 0',
       'test "$status" -eq 143',
     ].join('\n');
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       script,
       {},
       {},
@@ -106,7 +99,7 @@ describe('macOS Seatbelt Container', {
 
   it('should deny filesystem access by default', async () => {
     // The default seatbelt profile denies access to /Users.
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       'ls /Users 2>&1 || true',
       {},
       {},
@@ -121,11 +114,11 @@ describe('macOS Seatbelt Container', {
     );
   });
 
-  it('should deny network access when allowOutbound is false', async () => {
+  it('should deny network access when egress defaults to deny', async () => {
     const policy = {
       network: { egress: { default: 'deny' as const } },
     };
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       "curl --max-time 5 --fail --silent --show-error https://example.com 2>&1; echo CURL_EXIT=$?",
       policy,
       {},
@@ -139,11 +132,11 @@ describe('macOS Seatbelt Container', {
     );
   });
 
-  it('should allow network access when allowOutbound is true', { skip: networkSkipReason }, async () => {
+  it('should allow network access when egress defaults to allow', { skip: networkSkipReason }, async () => {
     const policy = {
       network: { egress: { default: 'allow' as const } },
     };
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       `RESULT=$(curl --max-time 10 --fail --silent '${NETWORK_TEST_URL}') && echo 'NETWORK_OK'`,
       policy,
       {},
@@ -156,9 +149,9 @@ describe('macOS Seatbelt Container', {
 
   it('should deny clipboard access when clipboard is none', { skip: clipboardSkipReason }, async () => {
     const policy = {
-      ui: { clipboard: 'none' as const },
+      ui: { disable: true, clipboard: 'none' as const },
     };
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       "echo test_clip | pbcopy 2>&1 && pbpaste 2>&1",
       policy,
       {},
@@ -172,9 +165,9 @@ describe('macOS Seatbelt Container', {
   it('should allow clipboard access when clipboard is all', { skip: clipboardSkipReason }, async () => {
     const uniqueToken = `seatbelt_clip_${Date.now()}`;
     const policy = {
-      ui: { clipboard: 'all' as const },
+      ui: { disable: true, clipboard: 'all' as const },
     };
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       `echo '${uniqueToken}' | pbcopy && pbpaste`,
       policy,
       {},
@@ -186,7 +179,7 @@ describe('macOS Seatbelt Container', {
   });
 
   it('should run multi-command pipeline', async () => {
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       "echo 'step 1' && uname -s && echo 'step 2' && whoami && echo 'Pipeline complete'",
       {},
       {},
@@ -202,48 +195,37 @@ describe('macOS Seatbelt Container', {
     const policy = {
       timeoutMs: 2000,
     };
-    // On timeout the runner kills the process and emits a structured
-    // `backend_error` envelope, so spawnSandboxAsync rejects with an MxcError
-    // (parity with wxc-exec / lxc-exec — issue #564).
-    await assert.rejects(
-      () =>
-        sdk.spawnSandboxAsync(
-          'sleep 30',
-          policy,
-          {},
-          undefined,
-          'seatbelt-timeout',
-        ),
-      (err: unknown) => {
-        assert.ok(err instanceof MxcError, `Expected MxcError, got: ${err}`);
-        assert.strictEqual(err.code, 'backend_error');
-        assert.ok(
-          err.message.includes('timed out'),
-          `Expected timeout message, got: ${err.message}`,
-        );
-        return true;
-      },
+    const result = await sdk.runRequestForTest(
+      'sleep 30',
+      policy,
+      {},
+      undefined,
+      'seatbelt-timeout',
     );
+    assert.strictEqual(result.timedOut, true);
+    assert.strictEqual(result.exitCode, -1);
   });
 
   it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {
-    // Build a config with a custom seatbelt profile that allows everything
-    const config = sdk.createConfigFromPolicy({});
-    config.process = { commandLine: "echo 'profile override works'" };
-    config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
-    config.containerId = 'seatbelt-profile-override';
-
-    const result = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {
-      const ptyProcess = sdk.spawnSandboxFromConfig(config, seatbeltSpawnOptions);
-      let stdout = '';
-      const timer = setTimeout(() => reject(new Error('Test timed out waiting for onExit')), 25_000);
-      ptyProcess.onData((data: string) => { stdout += data; });
-      ptyProcess.onExit((event: { exitCode: number }) => {
-        clearTimeout(timer);
-        resolve({ exitCode: event.exitCode, stdout });
-      });
+    const process = sdk.spawn({
+      command: "echo 'profile override works'",
+      containment: {
+        type: 'seatbelt',
+        config: { profileOverride: '(version 1)\n(allow default)' },
+      },
+      containerName: 'seatbelt-profile-override',
     });
-    assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
-    assert.ok(result.stdout.includes('profile override works'));
+    const standardOutput = process.standardOutput;
+    assert.ok(standardOutput, 'stdout should be available');
+    let stdout = '';
+    const outputEnded = new Promise<void>((resolve, reject) => {
+      standardOutput.on('data', (data: Buffer) => { stdout += data.toString(); });
+      standardOutput.once('end', resolve);
+      standardOutput.once('error', reject);
+    });
+    const outcome = await process.waitAsync();
+    await outputEnded;
+    assert.strictEqual(outcome.exitCode, 0, `Expected exit 0: ${stdout}`);
+    assert.ok(stdout.includes('profile override works'));
   });
 });
