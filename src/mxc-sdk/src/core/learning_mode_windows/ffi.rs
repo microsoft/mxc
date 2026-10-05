@@ -20,7 +20,6 @@ use crate::mxc_common::api_set::is_api_set_implemented;
 use crate::mxc_common::string_util;
 use windows::Win32::Foundation::{
     GetLastError, ERROR_BUSY, ERROR_LOCK_VIOLATION, ERROR_RETRY, ERROR_SHARING_VIOLATION, HANDLE,
-    HMODULE,
 };
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
@@ -86,6 +85,7 @@ type PfnStopLearningModeTrace =
 
 /// `void CloseLearningModeTrace(HLEARNINGMODE_TRACE trace)`.
 type PfnCloseLearningModeTrace = unsafe extern "system" fn(trace: HANDLE);
+type RawExport = unsafe extern "system" fn() -> isize;
 
 /// Opaque handle to an in-progress Learning Mode trace (`HLEARNINGMODE_TRACE`).
 ///
@@ -238,26 +238,10 @@ impl LearningModeApi {
             let hmodule = LoadLibraryExW(PCWSTR(dll.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32)
                 .map_err(|e| LearningModeError::DllLoad(e.to_string()))?;
 
-            let start =
-                match GetProcAddress(hmodule, PCSTR(START_WITH_OPTIONS_NAME.as_ptr().cast())) {
-                    Some(proc) => {
-                        let start_with_options: PfnStartLearningModeTraceWithOptions =
-                            std::mem::transmute(proc);
-                        LearningModeStart::WithOptions(start_with_options)
-                    }
-                    None => {
-                        let legacy: PfnStartLearningModeTrace =
-                            std::mem::transmute(resolve_export(hmodule, START_NAME)?);
-                        LearningModeStart::Legacy(legacy)
-                    }
-                };
-            let stop_proc = resolve_export(hmodule, STOP_NAME)?;
-            let close_proc = resolve_export(hmodule, CLOSE_NAME)?;
-
-            let stop: PfnStopLearningModeTrace = std::mem::transmute(stop_proc);
-            let close: PfnCloseLearningModeTrace = std::mem::transmute(close_proc);
-
-            Ok(Self { start, stop, close })
+            let mut lookup = |name: &'static std::ffi::CStr| {
+                GetProcAddress(hmodule, PCSTR(name.as_ptr().cast()))
+            };
+            select_learning_mode_exports(&mut lookup, last_error)
         }
     }
 
@@ -408,25 +392,59 @@ fn encode_output_path(output_path: Option<&Path>) -> Result<Option<Vec<u16>>, Le
         .transpose()
 }
 
-/// Resolve a single export from an already-loaded module, mapping a missing symbol
-/// to [`LearningModeError::ExportMissing`].
+/// Select the preferred compatible Learning Mode ABI from an export lookup.
 ///
 /// # Safety
-/// `hmodule` must be a valid module handle.
-unsafe fn resolve_export(
-    hmodule: HMODULE,
+/// Every non-null procedure returned by `lookup` must have the signature
+/// associated with its requested export name.
+unsafe fn select_learning_mode_exports(
+    lookup: &mut impl FnMut(&'static std::ffi::CStr) -> Option<RawExport>,
+    get_last_error: impl Fn() -> u32,
+) -> Result<LearningModeApi, LearningModeError> {
+    let start = match lookup(START_WITH_OPTIONS_NAME) {
+        Some(proc) => {
+            let start_with_options: PfnStartLearningModeTraceWithOptions =
+                unsafe { std::mem::transmute(proc) };
+            LearningModeStart::WithOptions(start_with_options)
+        }
+        None => {
+            let legacy: PfnStartLearningModeTrace = unsafe {
+                std::mem::transmute(resolve_required_export(
+                    lookup,
+                    START_NAME,
+                    &get_last_error,
+                )?)
+            };
+            LearningModeStart::Legacy(legacy)
+        }
+    };
+    let stop: PfnStopLearningModeTrace = unsafe {
+        std::mem::transmute(resolve_required_export(lookup, STOP_NAME, &get_last_error)?)
+    };
+    let close: PfnCloseLearningModeTrace = unsafe {
+        std::mem::transmute(resolve_required_export(
+            lookup,
+            CLOSE_NAME,
+            &get_last_error,
+        )?)
+    };
+
+    Ok(LearningModeApi { start, stop, close })
+}
+
+fn resolve_required_export(
+    lookup: &mut impl FnMut(&'static std::ffi::CStr) -> Option<RawExport>,
     name: &'static std::ffi::CStr,
-) -> Result<unsafe extern "system" fn() -> isize, LearningModeError> {
-    // SAFETY: `name` is a valid null-terminated C string; `hmodule` is valid per the
-    // caller's contract.
-    match GetProcAddress(hmodule, PCSTR(name.as_ptr().cast())) {
+    get_last_error: &impl Fn() -> u32,
+) -> Result<RawExport, LearningModeError> {
+    match lookup(name) {
         Some(proc) => Ok(proc),
         None => Err(LearningModeError::ExportMissing {
             api: "Learning Mode trace",
             export: name.to_str().unwrap_or("<non-utf8 export>"),
             detail: format!(
                 "GetProcAddress returned NULL (GetLastError = {})",
-                last_error()
+                get_last_error()
             ),
         }),
     }
@@ -439,8 +457,8 @@ fn last_error() -> u32 {
     unsafe { GetLastError().0 }
 }
 
-/// Undecorated names of the three Learning Mode trace exports, in the order the
-/// 2-phase capture lifecycle uses them.
+/// Undecorated names used to select the preferred start ABI and the required
+/// Stop/Close lifecycle exports.
 const START_WITH_OPTIONS_NAME: &core::ffi::CStr = c"StartLearningModeTraceWithOptions";
 const START_NAME: &core::ffi::CStr = c"StartLearningModeTrace";
 const STOP_NAME: &core::ffi::CStr = c"StopLearningModeTrace";
@@ -533,6 +551,71 @@ mod tests {
         STOP_FAILURES_REMAINING.store(0, Ordering::SeqCst);
         STOP_CALLS.store(0, Ordering::SeqCst);
         CLOSE_CALLS.store(0, Ordering::SeqCst);
+    }
+
+    fn select_from_exports(
+        available: &[&'static std::ffi::CStr],
+    ) -> Result<LearningModeApi, LearningModeError> {
+        let mut lookup = |name: &'static std::ffi::CStr| {
+            available.contains(&name).then(|| {
+                // SAFETY: Each fake is converted only for its matching export name;
+                // selection converts it back to that export's declared signature.
+                unsafe {
+                    if name == START_WITH_OPTIONS_NAME {
+                        std::mem::transmute::<PfnStartLearningModeTraceWithOptions, RawExport>(
+                            fake_start_with_options,
+                        )
+                    } else if name == START_NAME {
+                        std::mem::transmute::<PfnStartLearningModeTrace, RawExport>(fake_start)
+                    } else if name == STOP_NAME {
+                        std::mem::transmute::<PfnStopLearningModeTrace, RawExport>(fake_stop)
+                    } else if name == CLOSE_NAME {
+                        std::mem::transmute::<PfnCloseLearningModeTrace, RawExport>(fake_close)
+                    } else {
+                        unreachable!("selection requests only known export names")
+                    }
+                }
+            })
+        };
+        // SAFETY: The lookup returns the correctly typed fake for every known name.
+        unsafe { select_learning_mode_exports(&mut lookup, || 127) }
+    }
+
+    #[test]
+    fn export_selection_prefers_option_aware_start_without_requiring_legacy() {
+        let api = select_from_exports(&[START_WITH_OPTIONS_NAME, STOP_NAME, CLOSE_NAME])
+            .expect("the preferred ABI should not require the legacy start export");
+
+        assert_eq!(api.start.name(), "StartLearningModeTraceWithOptions");
+    }
+
+    #[test]
+    fn export_selection_falls_back_only_when_option_aware_start_is_absent() {
+        let api = select_from_exports(&[START_NAME, STOP_NAME, CLOSE_NAME])
+            .expect("the complete legacy ABI should remain supported");
+
+        assert_eq!(api.start.name(), "StartLearningModeTrace");
+    }
+
+    #[test]
+    fn export_selection_rejects_missing_required_lifecycle_exports() {
+        for (available, expected_missing) in [
+            (
+                vec![START_WITH_OPTIONS_NAME, CLOSE_NAME],
+                "StopLearningModeTrace",
+            ),
+            (
+                vec![START_WITH_OPTIONS_NAME, STOP_NAME],
+                "CloseLearningModeTrace",
+            ),
+            (vec![STOP_NAME, CLOSE_NAME], "StartLearningModeTrace"),
+        ] {
+            let error = select_from_exports(&available).expect_err("ABI must be incomplete");
+            assert!(matches!(
+                error,
+                LearningModeError::ExportMissing { export, .. } if export == expected_missing
+            ));
+        }
     }
 
     #[test]
