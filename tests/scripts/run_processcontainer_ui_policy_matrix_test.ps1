@@ -45,21 +45,15 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 # Probe tag -> whether a fully permissive UI policy could exercise it on this
-# host. Populated by Measure-UiGrantable; tags it does not measure are absent
-# and stay under strict assertion.
+# host. Tags Measure-UiGrantable does not cover are absent and stay strict.
 $Script:UiGrantable = @{}
 
 
 # Measure which UI capabilities a contained process can exercise when every UI
-# knob is permissive.
-#
-# This is a host measurement, not an assertion. A permissive value only means
-# MXC omits the matching JOB_OBJECT_UILIMIT bit; it never grants the operation,
-# and the surrounding process-container security environment may still deny it.
-# A capability denied here is therefore undecidable in the allow direction on
-# this host, and an unexercisable probe says nothing about the block direction
-# either — the per-knob cases skip those rather than report a containment
-# defect. A capability that IS reachable keeps both directions strict.
+# knob is permissive. This is a host measurement, not an assertion: a permissive
+# value only omits the matching UILIMIT bit, so a capability the host denies
+# anyway is undecidable in the allow direction. Reachable capabilities keep both
+# directions strict.
 function Measure-UiGrantable {
     $tags = @('READCLIPBOARD', 'WRITECLIPBOARD', 'SYSTEMPARAMETERS', 'DISPLAYSETTINGS', 'DESKTOP')
     $cfg = New-Config -Name 'ui-policy-baseline' -CommandLine "`"$UiProbeDebug`" $($tags -join ' ')" `
@@ -78,9 +72,8 @@ function Measure-UiGrantable {
     }
     $absent = @($tags | Where-Object { -not $verdicts.ContainsKey($_) })
     if ($r.ExitCode -ne 0 -or $absent.Count) {
-        # A baseline that did not report on every tag cannot establish what the
-        # host denies, and leaving $Script:UiGrantable empty keeps every case
-        # below strict rather than silently dropping allow-direction coverage.
+        # Leaving the map empty keeps every case below strict rather than
+        # silently dropping allow-direction coverage.
         Record-Result -Phase 'P4e' -Name 'baseline: the fully permissive UI policy case reports every tag' -Pass $false `
             -Detail "exit=$($r.ExitCode); missing=$(if ($absent.Count) { $absent -join ', ' } else { '<none>' })"
         return
@@ -191,16 +184,6 @@ function Invoke-UiPolicyCase {
             if ($hostDenies) {
                 Record-Result -Phase $Phase -Name $name -Status 'skip' `
                     -Detail "expected=$want; this host denies $tag even under a fully permissive UI policy, so the probe cannot exercise the UILIMIT mapping; diag=$diag"
-                continue
-            }
-            # The read probe needs CF_UNICODETEXT on the clipboard the contained
-            # process sees. The clipboard is per-window-station and the
-            # contained process does not share the harness's, so a host-side
-            # seed never reaches it and the verdict reports an unmet
-            # precondition rather than a policy outcome.
-            if ($diag -match 'seed Unicode text') {
-                Record-Result -Phase $Phase -Name $name -Status 'skip' `
-                    -Detail "expected=$want; $tag opened the clipboard but found no CF_UNICODETEXT: the contained process has its own window station, so the harness's host-side seed is not on the clipboard it sees; diag=$diag"
                 continue
             }
             # Nothing documents the probe being unable to run here, so this is a

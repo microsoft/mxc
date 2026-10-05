@@ -73,10 +73,9 @@ function Phase-LeastPrivilege {
     # guarded-WPR prerequisites are unavailable, the request fails before MXC
     # creates the sandbox."
     #
-    # So the combination is never a validation error. Which of the two
-    # documented outcomes applies is decided by the host's guarded-WPR
-    # prerequisites, and both are asserted positively -- neither arm can pass
-    # on a run that simply fell over.
+    # So the combination is never a validation error; which outcome applies
+    # depends on the host, and both arms are asserted positively so neither
+    # passes on a run that simply fell over.
     $cfg = New-Config -Name 'priv-lpac-capture' -CommandLine $Script:PrivCmd -ReadWrite @($rw) `
         -LeastPrivilege $true -CaptureDenialsMode 'block'
     $log = Join-Path $ScratchRoot 'logs\priv-lpac-capture.log'
@@ -92,10 +91,8 @@ function Phase-LeastPrivilege {
             -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; workloadRan=$ran; " +
                      'guarded WPR is available on this host, so the documented tier constraint applies')
     } else {
-        # The dispatcher's own wording for the preflight refusal. Matching it
-        # distinguishes the documented fail-closed from any other launch
-        # failure, which would otherwise look identical (no workload, non-zero
-        # exit).
+        # Matching the dispatcher's own wording distinguishes the documented
+        # fail-closed from any other launch failure, which looks identical.
         $all = "$logText`n$($r.Stderr)"
         $m = [regex]::Match($all, '(?is)captureDenials.{0,160}?(is unavailable|does not support denial capture)')
         Record-Result -Phase 'P15a' -Name 'leastPrivilege + captureDenials fails before sandbox creation when guarded WPR is unavailable' `
