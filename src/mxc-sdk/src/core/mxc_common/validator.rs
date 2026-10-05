@@ -176,12 +176,12 @@ pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> 
 
 /// Reject WSLC port mappings the WSLC runtime cannot apply.
 ///
-/// The exact JSON contract rejects a zero port structurally, but the typed
-/// SDKs hand over plain `u16`, so the check has to live here too.
-///
-/// The same host port on TCP and UDP would in principle be legal, so the
-/// protocol stays in the duplicate key for when the WSLC runtime stops
-/// returning `E_NOTIMPL` for UDP.
+/// The exact JSON contract rejects a zero port and a non-TCP protocol
+/// structurally, but a caller building the runtime config directly hands over
+/// a plain `u16` and `String`, so the checks have to live here too. The daemon
+/// wire format carries no protocol and the worker rebuilds every mapping as
+/// TCP, so accepting anything else here would silently apply a different
+/// mapping than the caller asked for.
 pub fn validate_port_mappings(field_path: &str, mappings: &[PortMapping]) -> Result<(), WxcError> {
     for (index, mapping) in mappings.iter().enumerate() {
         for (name, port) in [
@@ -193,6 +193,12 @@ pub fn validate_port_mappings(field_path: &str, mappings: &[PortMapping]) -> Res
                     "{field_path}[{index}]: '{name}' must be > 0"
                 )));
             }
+        }
+        if mapping.protocol != "tcp" {
+            return Err(WxcError::ConfigParse(format!(
+                "{field_path}[{index}]: 'protocol' must be 'tcp', got '{}'",
+                mapping.protocol
+            )));
         }
     }
 
@@ -282,6 +288,26 @@ mod tests {
             &[port_mapping(8080, 80), port_mapping(8081, 80)]
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_protocol_the_daemon_cannot_carry_is_rejected() {
+        // The daemon wire format drops the protocol and the worker rebuilds
+        // every mapping as TCP, so anything else would be applied as something
+        // the caller did not ask for.
+        for protocol in ["udp", "UDP", "Tcp", "sctp", ""] {
+            let mapping = PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+                protocol: protocol.to_string(),
+            };
+            let error = validate_port_mappings("wslc.portMappings", &[mapping])
+                .expect_err("only 'tcp' is applicable");
+            assert!(
+                error.to_string().contains("'protocol' must be 'tcp'"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
