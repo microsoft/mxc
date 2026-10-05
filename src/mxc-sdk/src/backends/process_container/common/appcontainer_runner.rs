@@ -118,7 +118,7 @@ fn create_process_failure(
 /// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
 pub(crate) fn encode_env_block(entries: &[(String, String)]) -> Vec<u16> {
     let mut sorted: Vec<&(String, String)> = entries.iter().collect();
-    sorted.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
+    sorted.sort_by_key(|(key, _)| key.to_ascii_uppercase());
 
     let mut block = Vec::new();
     for (key, value) in sorted {
@@ -2593,6 +2593,18 @@ mod tests {
         let parsed = super::parse_environment_block(block.as_ptr());
         assert_eq!(parsed[0].0, "alpha");
         assert_eq!(parsed[1].0, "Zebra");
+    }
+
+    #[test]
+    fn encode_env_block_preserves_order_for_case_insensitive_equal_keys() {
+        let entries = vec![
+            ("Alpha".to_string(), "first".to_string()),
+            ("alpha".to_string(), "second".to_string()),
+            ("Beta".to_string(), "third".to_string()),
+        ];
+        let block = super::encode_env_block(&entries);
+        let parsed = super::parse_environment_block(block.as_ptr());
+        assert_eq!(parsed, entries);
     }
 
     #[test]
