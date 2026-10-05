@@ -443,9 +443,9 @@ mod tests {
 
     fn request() -> ExecutionRequest {
         let mut r = ExecutionRequest {
-            source_contract: Some(crate::mxc_contract::ContractVersion::V0_7_0Alpha),
+            source_contract: Some(crate::mxc_contract::ContractVersion::V0_9_0Alpha),
             network_enforcement_compatibility:
-                crate::wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible,
+                crate::wxc_common::models::NetworkEnforcementCompatibility::Strict,
             container_id: "test".to_string(),
             script_code: "echo hello".to_string(),
             working_directory: "C:\\work".to_string(),
@@ -483,15 +483,6 @@ mod tests {
         let mut changed = request();
         changed.source_contract = None;
         assert_eq!(baseline, policy_hash(&changed));
-    }
-
-    #[test]
-    fn network_enforcement_compatibility_changes_the_hash() {
-        let baseline = policy_hash(&request());
-        let mut changed = request();
-        changed.network_enforcement_compatibility =
-            crate::wxc_common::models::NetworkEnforcementCompatibility::Strict;
-        assert_ne!(baseline, policy_hash(&changed));
     }
 
     #[test]

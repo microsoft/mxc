@@ -5,8 +5,6 @@
 mod annotations;
 #[path = "version_boundaries/common.rs"]
 mod common;
-#[path = "version_boundaries/compatibility.rs"]
-mod compatibility;
 #[path = "version_boundaries/containment.rs"]
 mod containment;
 #[path = "version_boundaries/experimental.rs"]

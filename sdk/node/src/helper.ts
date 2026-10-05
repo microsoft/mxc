@@ -21,7 +21,6 @@ import { mxcErrorFromCode } from './v1/errors.js';
 interface SandboxSpawnOptions {
   debug?: boolean;
   experimental?: boolean;
-  allowTestingFeatures?: boolean;
   executablePath?: string;
   skipPlatformCheck?: boolean;
   dryRun?: boolean;
@@ -255,7 +254,7 @@ export function resolveExecutableAndArgs(
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
 
-  // Resolve aliases accepted by the selected historical contract once, and
+  // Resolve aliases accepted by the selected registered contract once, and
   // drive every containment check from the canonical value. The wire payload
   // remains unchanged so the matching exact Rust parser performs normalization.
   const rawContainment = config.containment;
@@ -308,28 +307,7 @@ export function resolveExecutableAndArgs(
     }
   }
 
-  // `network.proxy.builtinTestServer` is testing-only, deliberately-permissive
-  // scaffolding that the native binary gates behind `--allow-testing-features`.
-  // Mirror that fail-closed posture at the SDK boundary: the caller must opt in
-  // explicitly via `allowTestingFeatures` (a distinct axis from `experimental`).
-  // Forwarding the flag automatically whenever the policy used the feature would
-  // make the gate meaningless — requesting the dangerous feature would silently
-  // enable the gate that is supposed to guard it.
-  const proxy = config.network?.proxy as { builtinTestServer?: boolean } | undefined;
-  const usesBuiltinTestServer = proxy?.builtinTestServer === true;
-  if (usesBuiltinTestServer && !options.allowTestingFeatures) {
-    throw new Error(
-      "network.proxy.builtinTestServer is a testing-only feature. Set " +
-      "'allowTestingFeatures: true' in SandboxSpawnOptions to enable it. For " +
-      "production, point network.proxy at a real HTTP proxy via 'localhost' or 'url'.",
-    );
-  }
-
-  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(config), options);
-  if (usesBuiltinTestServer) {
-    resolved.args.push('--allow-testing-features');
-  }
-  return resolved;
+  return resolveBinaryAndCommonArgs(JSON.stringify(config), options);
 }
 
 /**

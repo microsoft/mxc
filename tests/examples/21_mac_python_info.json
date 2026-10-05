@@ -1,21 +1,23 @@
 {
-    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-    "version": "0.8.0-alpha",
-    "containment": "seatbelt",
-    "process": {
-        "commandLine": "echo Python Environment Information && echo ============================================================ && python3 -c 'import sys, platform; print(\"Python Version:\", sys.version); print(\"Python Executable:\", sys.executable); print(\"Platform:\", platform.platform()); print(\"Architecture:\", platform.architecture()); print(); print(\"Python Path:\"); [print(\" \", i, p) for i,p in enumerate(sys.path,1)]; print(); import os; print(\"Environment Variables:\"); [print(\" \", k, \"=\", os.environ.get(k,\"not set\")) for k in [\"PATH\",\"HOME\",\"USER\"]]' && echo ============================================================",
-        "cwd": "/tmp",
-        "timeout": 10000
-    },
-    "filesystem": {
-        "readwritePaths": [
-            "/tmp"
-        ],
-        "readonlyPaths": [
-            "/opt/homebrew"
-        ]
-    },
-    "network": {
-        "defaultPolicy": "block"
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "echo Python Environment Information && echo ============================================================ && python3 -c 'import sys, platform; print(\"Python Version:\", sys.version); print(\"Python Executable:\", sys.executable); print(\"Platform:\", platform.platform()); print(\"Architecture:\", platform.architecture()); print(); print(\"Python Path:\"); [print(\" \", i, p) for i,p in enumerate(sys.path,1)]; print(); import os; print(\"Environment Variables:\"); [print(\" \", k, \"=\", os.environ.get(k,\"not set\")) for k in [\"PATH\",\"HOME\",\"USER\"]]' && echo ============================================================",
+    "cwd": "/tmp",
+    "timeout": 10000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "/tmp"
+    ],
+    "readonlyPaths": [
+      "/opt/homebrew"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
     }
+  }
 }

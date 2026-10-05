@@ -19,14 +19,14 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json"
 ```
 
-### Schema 0.8 networking
+### Directional networking (supported contracts)
 
-Schema 0.8 uses explicit egress and ingress policy and moves the loopback proxy
-endpoint into runtime configuration:
+Supported contracts from `0.9.0-alpha` use explicit egress and ingress policy
+and put the loopback proxy endpoint in runtime configuration:
 
 ```json
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "network": {
         "egress": {
             "default": "deny",
@@ -56,7 +56,7 @@ not the strict proxy-endpoint exception defined by the shared model-2 policy.
 
 ```json
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "network": {
         "egress": { "default": "deny" },
@@ -76,17 +76,16 @@ not the strict proxy-endpoint exception defined by the shared model-2 policy.
 }
 ```
 
-The legacy `defaultPolicy`, `enforcementMode`, `allowLocalNetwork`,
-`allowedHosts`, `blockedHosts`, and `network.proxy` fields remain supported by
-schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
-continue to use those legacy fields or use the directional fields above, but
-cannot mix both formats in one request.
+The `defaultPolicy`, `enforcementMode`, `allowLocalNetwork`, `allowedHosts`,
+`blockedHosts`, and `network.proxy` fields belonged to retired contracts.
+No supported exact contract accepts them. Migrate existing policies to
+directional fields and `runtimeConfig.networkProxy` rather than changing
+the version string alone.
 
-#### Legacy network host-list semantics
+#### Historical legacy network host-list semantics (retired)
 
-Legacy host lists refine `defaultPolicy`; they do not replace it. Shared
-validation rejects a list that cannot refine the selected default before the
-backend executes.
+In the retired contracts, host lists refined `defaultPolicy`; they did not
+replace it. This table describes historical behavior, not supported authoring:
 
 | `defaultPolicy` | `allowedHosts` | `blockedHosts` | Result |
 | --- | --- | --- | --- |
@@ -125,9 +124,9 @@ that actual posture through the standard directional network fields:
 
 All three directional values must be explicitly `allow`; omission defaults to
 deny. Legacy network fields, rules, mixed postures, and proxies are rejected.
-An absent or empty `network` object is rejected. The existing experimental
-execution opt-in remains required. Published v0.6/v0.7/v0.8 contracts are
-unchanged by this addition.
+An absent or empty `network` object is rejected. Exact v0.9 IsolationSession
+does not require an experimental execution opt-in. Earlier published contracts
+remain immutable history but are no longer accepted.
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
 that field when the command is supplied after `--`; `wxc-exec.exe` inserts or
@@ -139,7 +138,7 @@ that can be executed independently.
 
 ```json
 {
-    "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.6.0-alpha"; current stable: "1.0.0".
+    "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -155,7 +154,7 @@ that can be executed independently.
                                            //  than inheriting the launcher's — see
                                            //  "Working Directory" below)
         "env": ["MY_VAR=value"],           // Omitted: backend default; supplied: used verbatim
-        "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha+)
+        "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
 
@@ -170,45 +169,21 @@ that can be executed independently.
     },
 
     "network": {
-        "defaultPolicy": "block",          // "allow" or "block"
-        "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
-        "allowedHosts": ["203.0.113.0/24"],
-        "blockedHosts": ["203.0.113.7"],   // Denies outrank allows, including broader CIDRs
-                                           // Under bubblewrap at schema 0.8+ with
-                                           //  enforcementMode "firewall", entries must be IP
-                                           //  literals or CIDR blocks: DNS names are rejected at
-                                           //  validation time rather than resolved. Use proxy
-                                           //  mode for hostname-based control.
-        "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
-                                           // (use { "builtinTestServer": true } for the bundled
-                                           //  testing-only proxy; requires --allow-testing-features)
-                                           // WSLC and LXC support the cooperative proxy too, but
-                                           // only via { "url": "http://proxy.example:8080" }
-                                           // (own-netns: localhost/builtinTestServer are
-                                           //  unreachable, rejected)
-                                           // Seatbelt requires defaultPolicy "block": a proxy
-                                           //  alongside "allow" adds no enforcement and is rejected
-                                           // Under LXC the proxy is enforced: forwarded egress is
-                                           //  restricted to the proxy endpoint and nothing else, so
-                                           //  the allow/block host lists and DNS are not opened.
-                                           //  The chain hooks FORWARD, so traffic addressed to the
-                                           //  bridge gateway itself is delivered locally via INPUT
-                                           //  and is outside what this chain governs.
-                                           // Under Bubblewrap on schema 0.8+ the proxy is likewise
-                                           //  enforced, in the sandbox's own network namespace:
-                                           //  egress is dropped except the proxy endpoint, and DNS
-                                           //  is not opened. A url-form hostname is resolved on the
-                                           //  host and pinned into the sandbox's /etc/hosts, since
-                                           //  the sandbox has no resolver of its own. `localhost`,
-                                           //  127.0.0.0/8 and the wildcards 0.0.0.0 / :: are
-                                           //  rewritten to the slirp gateway; `::1` is rejected,
-                                           //  because an IPv6-loopback listener cannot accept the
-                                           //  IPv4 connection that gateway produces. Because the
-                                           //  pin outranks every filesystem mount, a `deniedPaths`
-                                           //  entry covering /etc/hosts is rejected rather than
-                                           //  silently overridden. On schema
-                                           //  0.6/0.7 Bubblewrap keeps the cooperative-only
-                                           //  behavior (no egress rules).
+        "egress": {
+            "default": "deny",
+            "allow": [{
+                "to": [{ "cidr": "203.0.113.0/24" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }],
+            "deny": [{
+                "to": [{ "cidr": "203.0.113.7/32" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }]
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
     },
 
     "ui": {
@@ -240,7 +215,7 @@ that can be executed independently.
         }
                                            // Omit outputPath for a managed JSON output file.
                                            // Native PSEC/V2 capture cannot combine with leastPrivilege
-                                           // or network.proxy. Hosts without that complete native set
+                                           // or runtimeConfig.networkProxy. Hosts without that complete native set
                                            // retain an eligible legacy containment tier and use guarded WPR.
                                            // If guarded-WPR prerequisites are unavailable, the request
                                            // fails before MXC creates the sandbox.
@@ -383,7 +358,7 @@ containment tier selected at runtime:
 
 For Windows BaseContainer, a path grant in `readwritePaths` applies to that directory
 and its descendants with the exception of root directories. Granting access to a
-**volume root** (e.g. `C:\`) does **not** cascade to its child folders to prevent over-provisioning. 
+**volume root** (e.g. `C:\`) does **not** cascade to its child folders to prevent over-provisioning.
 
 For example, `"readwritePaths": ["C:\\"]` does **not** grant access to files
 under `C:\data`.
@@ -391,9 +366,9 @@ under `C:\data`.
 #### Upward directory traversal for Windows BaseContainer
 
 Many tools search **upward** from the working directory toward the volume root,
-looking for a marker file that defines their project. With Windows BaseContainer, when such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. 
+looking for a marker file that defines their project. With Windows BaseContainer, when such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned.
 
-When resolving this error, grant only the specific directories the tool must reach and keep that set as small as possible. 
+When resolving this error, grant only the specific directories the tool must reach and keep that set as small as possible.
 Avoid resolving this error by granting broad profile roots. Each 'readwritePaths' grant also exposes that directory's descendants and granting broad profile roots may result in over-permissioning.
 
 ### UI Policy
@@ -484,8 +459,9 @@ State-aware envelopes use an exact backend-specific contract:
 - WSLC uses published `0.9.0-alpha`; Windows Sandbox uses development
   `1.1.0-alpha`.
 
-The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha` contracts contain
-only one-shot request roots. This Windows Sandbox example therefore uses the
+Contracts before `0.9.0-alpha` are retired. The supported published
+`0.9.0-alpha` and `1.0.0` contracts contain one-shot plus IsolationSession
+and WSLC state-aware request roots. This Windows Sandbox example therefore uses the
 exact development schema:
 
 ```json
@@ -538,10 +514,7 @@ Registered contracts:
 
 | Config `version` | Status |
 |---|---|
-| `"0.6.0-alpha"` | Published; minimum supported |
-| `"0.7.0-alpha"` | Published |
-| `"0.8.0-alpha"` | Published |
-| `"0.9.0-alpha"` | Published |
+| `"0.9.0-alpha"` | Published; minimum supported |
 | `"1.0.0"` | Published; current stable |
 | `"1.1.0-alpha"` | Mutable development contract |
 

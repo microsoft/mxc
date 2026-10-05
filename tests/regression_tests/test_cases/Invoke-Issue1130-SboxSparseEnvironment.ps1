@@ -19,7 +19,7 @@ New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
 
 $configJson = @"
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "env": $((ConvertTo-Json -InputObject @("SystemRoot=$env:SystemRoot", "TEMP=$WorkDirectory", "TMP=$WorkDirectory") -Compress))

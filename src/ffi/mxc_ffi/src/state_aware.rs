@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn one_shot_config_is_malformed_request() {
         let mut out = call(
-            r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#,
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#,
             false,
         );
         assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST);

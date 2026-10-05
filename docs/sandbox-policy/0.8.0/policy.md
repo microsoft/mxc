@@ -1,5 +1,8 @@
 # MXC Sandbox Policy Spec v0.8.0
 
+> Historical design reference: schema 0.8 is retired. Use the
+> [current schema and migration guide](../../schema.md) for supported requests.
+
 ## SandboxPolicy
 
 `SandboxPolicy` is MXC's cross-platform JSON authoring contract. It expresses
@@ -140,6 +143,6 @@ selects directional deny defaults.
 
 ## Examples and detailed behavior
 
-- [Schema 0.8 directional config example](../../../tests/examples/30_network_0_8_directional.json)
+- [Current directional config example (supported v1.0)](../../../tests/examples/30_network_0_8_directional.json)
 - [Schema updates from 0.7 to 0.8](networking/schema-updates.md)
 - [Network modes and rule semantics](networking/networking.md)

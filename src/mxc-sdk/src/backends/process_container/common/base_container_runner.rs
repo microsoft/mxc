@@ -2056,9 +2056,9 @@ mod tests {
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
     use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
     use crate::wxc_common::models::{
-        BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, DefaultEnvCompatibility,
-        NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol,
-        NetworkRule, ProxyConfig, UiPolicy,
+        BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr,
+        NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig,
+        UiPolicy,
     };
     use crate::wxc_common::ui_policy::EffectiveUiRestrictions;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2633,23 +2633,6 @@ mod tests {
             2,
             "an empty block still requires two terminators"
         );
-        assert_eq!(environment, vec![0u16, 0u16]);
-    }
-
-    #[test]
-    fn below_0_9_an_explicitly_empty_env_is_still_empty() {
-        // The Windows contract distinguishes omitted from empty at every schema
-        // version; `default_env_compatibility` gates only the Linux and macOS
-        // default block.
-        let request = ExecutionRequest {
-            env: Some(Vec::new()),
-            default_env_compatibility: DefaultEnvCompatibility::LegacyCompatible,
-            ..Default::default()
-        };
-
-        let environment = build_child_env_block(&request)
-            .expect("environment")
-            .expect("an explicitly empty env must still produce a block");
         assert_eq!(environment, vec![0u16, 0u16]);
     }
 
@@ -3331,5 +3314,5 @@ mod tests {
 
     // ETL-retention capability validation (the retainEtl gate, including the
     // BaseContainer native-PSEC exception) is exercised as a consolidated
-    // matrix in `crate::process_container_common::guarded_capture`'s tests, so it is not duplicated here.
+    // matrix in `crate::guarded_capture`'s tests, so it is not duplicated here.
 }

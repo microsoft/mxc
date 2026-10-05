@@ -32,14 +32,6 @@ fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork)
     network.allowed_proxy_peer.is_some()
 }
 
-pub(crate) fn directional_network_version_error() -> WxcError {
-    WxcError::ConfigParse(
-        "network.egress, network.ingress, runtimeConfig, and processContainer.network \
-         require schema version 0.8 or later"
-            .to_string(),
-    )
-}
-
 #[derive(Debug)]
 pub(crate) struct NetworkSections {
     pub network: Option<wire::Network>,
@@ -181,9 +173,7 @@ fn select_network_format(
         .is_some_and(has_process_container_network_fields);
     let has_directional =
         has_directional_policy || has_runtime_config || has_process_container_network;
-    let has_directional_section =
-        sections.runtime.is_some() || sections.process_container.is_some();
-    let supports_directional = compatibility == NetworkEnforcementCompatibility::Strict;
+    let _compatibility = compatibility;
 
     if has_legacy && has_directional {
         return Err(WxcError::ConfigParse(
@@ -194,16 +184,10 @@ fn select_network_format(
         ));
     }
 
-    if (has_directional_policy || has_directional_section) && !supports_directional {
-        return Err(directional_network_version_error());
-    }
-
-    // An empty or omitted network block has no fields that identify its format.
-    // Use directional deny defaults when the schema supports them.
-    if !has_legacy && supports_directional {
-        Ok(NetworkFormat::Directional)
-    } else {
+    if has_legacy {
         Ok(NetworkFormat::Legacy)
+    } else {
+        Ok(NetworkFormat::Directional)
     }
 }
 

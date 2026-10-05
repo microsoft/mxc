@@ -86,7 +86,7 @@ fn sandbox_id_rejects_values_that_cannot_cross_the_ffi_boundary() {
 #[test]
 fn run_lifecycle_json_rejects_one_shot_config() {
     // No `phase` field => one-shot config, not a lifecycle request.
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#;
     let err = run_lifecycle_json(json, false, false).expect_err("one-shot must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
 }
@@ -185,7 +185,7 @@ fn execute_lifecycle_rejects_non_exec_phase() {
 
 #[test]
 fn execute_lifecycle_rejects_container_request() {
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#;
     match execute_lifecycle_json(json, false) {
         Ok(_) => panic!("one-shot must be rejected"),
         Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),

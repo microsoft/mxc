@@ -314,7 +314,7 @@ fn rejects_duplicate_nested_fields() {
 #[test]
 fn rejects_invalid_version_field() {
     for version in [
-        r#""0.7.0-alpha""#,
+        r#""0.9.0-alpha""#,
         r#""0.9.0""#,
         r#""invalid""#,
         "123",

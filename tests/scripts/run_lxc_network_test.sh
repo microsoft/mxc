@@ -52,36 +52,29 @@ PEER_HOST_IP="198.51.100.17"
 PEER_IP="198.51.100.18"
 PEER_PREFIX="29"
 PEER_PORT="443"
-# lxc-exec resolves these names on the host when it builds the rules, so the
-# pin below goes in the host's /etc/hosts and not the container's.  The blocked
-# name needs an address only so that it resolves; nothing contacts it.
-PEER_HOSTNAME="allowed.nettest.mxc.test"
-BLOCKED_HOSTNAME="blocked.nettest.mxc.test"
 BLOCKED_IP="198.51.100.19"
 
 PEER_LISTENER_PID=""
 PEER_LISTENER_LOG="$(mktemp)"
+BLOCKED_LISTENER_PID=""
+BLOCKED_LISTENER_LOG="$(mktemp)"
 IP_FORWARD_WAS=""
-HOSTS_BACKUP=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
         kill "$PEER_LISTENER_PID" >/dev/null 2>&1 || true
     fi
+    if [ -n "$BLOCKED_LISTENER_PID" ]; then
+        kill "$BLOCKED_LISTENER_PID" >/dev/null 2>&1 || true
+    fi
     ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
     ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
-    # Restoring the whole file, rather than filtering out the two added lines,
-    # cannot drop an unrelated entry the box needs.
-    if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
-        cat "$HOSTS_BACKUP" > /etc/hosts
-        rm -f "$HOSTS_BACKUP"
-    fi
     if [ -n "$IP_FORWARD_WAS" ]; then
         sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
     fi
 }
 teardown_run() {
     teardown_peer
-    rm -f "$PEER_LISTENER_LOG"
+    rm -f "$PEER_LISTENER_LOG" "$BLOCKED_LISTENER_LOG"
 }
 trap teardown_run EXIT
 
@@ -97,6 +90,8 @@ ip addr add "$PEER_HOST_IP/$PEER_PREFIX" dev "$PEER_HOST_VETH" \
 ip link set "$PEER_HOST_VETH" up || fail "could not bring up the peer veth."
 ip netns exec "$PEER_NETNS" ip addr add "$PEER_IP/$PEER_PREFIX" dev "$PEER_VETH" \
     || fail "could not address the peer."
+ip netns exec "$PEER_NETNS" ip addr add "$BLOCKED_IP/$PEER_PREFIX" dev "$PEER_VETH" \
+    || fail "could not address the denied peer."
 ip netns exec "$PEER_NETNS" ip link set "$PEER_VETH" up \
     || fail "could not bring up the peer interface."
 ip netns exec "$PEER_NETNS" ip link set lo up \
@@ -109,16 +104,14 @@ IP_FORWARD_WAS="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
     || skip "could not enable IPv4 forwarding."
 
-HOSTS_BACKUP="$(mktemp)"
-cat /etc/hosts > "$HOSTS_BACKUP"
-printf '%s %s\n' "$PEER_IP" "$PEER_HOSTNAME" >> /etc/hosts
-printf '%s %s\n' "$BLOCKED_IP" "$BLOCKED_HOSTNAME" >> /etc/hosts
-
 # The firewall matches the port and not the payload, so plain HTTP on tcp/443
 # is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
     >"$PEER_LISTENER_LOG" 2>&1 &
 PEER_LISTENER_PID=$!
+ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$BLOCKED_IP" \
+    >"$BLOCKED_LISTENER_LOG" 2>&1 &
+BLOCKED_LISTENER_PID=$!
 
 # Alive is not reachable.  A peer that never bound has to fail here as harness
 # breakage, rather than later as the firewall blocking an allowed destination.
@@ -126,15 +119,28 @@ if ! PEER_PROBE_ERROR="$(await_peer_tcp "$PEER_IP" "$PEER_PORT")"; then
     fail_unreachable_peer "the peer" "$PEER_IP:$PEER_PORT" \
         "$PEER_PROBE_ERROR" "$PEER_LISTENER_LOG"
 fi
+if ! PEER_PROBE_ERROR="$(await_peer_tcp "$BLOCKED_IP" "$PEER_PORT")"; then
+    fail_unreachable_peer "the denied peer" "$BLOCKED_IP:$PEER_PORT" \
+        "$PEER_PROBE_ERROR" "$BLOCKED_LISTENER_LOG"
+fi
 
-# Drift guard: the fixture must aim at this peer and name the pinned hosts, or
-# the run would probe a stale address and prove nothing.
-grep -Fq "$PEER_IP" "$CONFIG" \
-    || fail "fixture ${CONFIG##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
-for host in "$PEER_HOSTNAME" "$BLOCKED_HOSTNAME"; do
-    grep -Fq "$host" "$CONFIG" \
-        || fail "fixture ${CONFIG##*/} no longer names $host; script and fixture drifted."
-done
+# The fixture's directional rules must allow the peer but deny its neighbor.
+python3 - "$CONFIG" "$PEER_IP/32" "$BLOCKED_IP/32" <<'PY' \
+    || fail "fixture does not allow the peer and deny its neighbor."
+import json, sys
+egress = json.load(open(sys.argv[1]))["network"]["egress"]
+assert egress["default"] == "deny"
+assert any({"cidr": sys.argv[2]} in rule["to"] for rule in egress["allow"])
+assert any({"cidr": sys.argv[3]} in rule["to"] for rule in egress["deny"])
+PY
 
-"$LXC_EXEC" "$CONFIG"
-echo "LXC network test complete."
+OUTPUT=$("$LXC_EXEC" "$CONFIG" 2>&1) || fail "lxc-exec failed: $OUTPUT"
+echo "$OUTPUT"
+grep -Fq "MXC_NET_ALLOWED" <<<"$OUTPUT" \
+    || fail "the explicitly allowed peer was unreachable or the workload never ran."
+if grep -Fq "MXC_NET_LEAK" <<<"$OUTPUT"; then
+    fail "the explicitly denied peer was reachable."
+fi
+grep -Fq "MXC_NET_BLOCKED" <<<"$OUTPUT" \
+    || fail "the denied peer produced no blocked verdict."
+echo "PASS: directional rules allowed one live peer and blocked another."

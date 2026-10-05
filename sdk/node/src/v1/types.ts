@@ -116,9 +116,9 @@ export const UnsupportedV1NetworkFields = [
 ] as const;
 
 const LegacyConfigAliasVersions: Readonly<Record<string, readonly string[]>> = {
-  appcontainer: ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
-  appContainer: ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
-  macos_sandbox: ['0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
+  appcontainer: ['0.9.0-alpha'],
+  appContainer: ['0.9.0-alpha'],
+  macos_sandbox: ['0.9.0-alpha'],
 };
 
 /**
@@ -252,51 +252,30 @@ export interface FilesystemConfig {
 }
 
 /**
- * Network access configuration across published versions. The legacy fields
- * are valid only through 0.8; 0.9 accepts DirectionalNetworkConfig exclusively.
+ * Network access configuration. Legacy fields remain for TypeScript source
+ * compatibility only; every registered exact contract rejects them. Use
+ * directional fields and runtimeConfig.networkProxy instead.
  */
 export interface NetworkConfig extends DirectionalNetworkConfig {
   /**
-   * Network enforcement mode:
-   * - "capabilities": Use AppContainer capabilities only (no admin required)
-   * - "firewall": Use Windows Firewall rules (requires admin)
-   * - "both": Use both capabilities and firewall rules (requires admin)
-   * (default: "both")
+   * Retired enforcement selector; registered contracts reject this field.
+   * @deprecated Use directional network policy instead.
    */
   enforcementMode?: 'capabilities' | 'firewall' | 'both';
-  /** Default network policy: "allow" or "block" (default: "block") */
+  /** @deprecated Use egress.default instead; registered contracts reject this field. */
   defaultPolicy?: 'allow' | 'block';
   /**
-   * Whether to allow inbound connections to local IP listeners (i.e. the
-   * sandboxed process may call `bind()` + `listen()` and accept incoming
-   * TCP/UDP). Independent of `defaultPolicy`. (default: false)
+   * @deprecated Use ingress.default instead; registered contracts reject this field.
    */
   allowLocalNetwork?: boolean;
-  /** Hostnames or IP addresses/CIDR blocks to allow (firewall mode only) */
+  /** @deprecated Use numeric CIDR egress rules or proxy-side hostname filtering. */
   allowedHosts?: string[];
-  /** Hostnames or IP addresses to block (firewall mode only) */
+  /** @deprecated Use numeric CIDR egress rules or proxy-side hostname filtering. */
   blockedHosts?: string[];
-  /** Proxy configuration (supported on Windows ProcessContainer, Linux Bubblewrap,
-   *  macOS Seatbelt, and WSLC). On Bubblewrap/Seatbelt/WSLC it is a cooperative
-   *  env-var proxy (HTTP_PROXY/HTTPS_PROXY): well-behaved HTTP clients honor it,
-   *  raw-socket clients can bypass it. `builtinTestServer` activates a bundled,
-   *  testing-only proxy; the SDK rejects it unless `allowTestingFeatures: true` is
-   *  set in SpawnOptions (which maps to the native `--allow-testing-features`
-   *  flag).
-   *
-   *  WSLC imposes additional parse-time constraints (a violating config is
-   *  rejected before it runs):
-   *   - Only the `{ url }` form is accepted — its containers run in their own
-   *     network namespace, so the `localhost` / `builtinTestServer` loopback
-   *     forms are unreachable and rejected.
-   *   - The `url` scheme must be `http` or `https`.
-   *   - `defaultPolicy` must be `"allow"` and both `allowedHosts` and
-   *     `blockedHosts` must be empty/unset — WSLC has no in-kernel iptables, so
-   *     it cannot enforce host lists, and the container needs outbound
-   *     networking to reach the proxy at all.
-   *  Enforcement is cooperative (no in-kernel iptables). */
+  /** @deprecated Registered contracts reject network.proxy. Use
+   * runtimeConfig.networkProxy with the backend's supported policy posture. */
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
-  /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
+  /** @deprecated Use lifecycle.preservePolicy; registered contracts reject this field. */
   removeRulesOnExit?: boolean;
 }
 
@@ -460,9 +439,8 @@ export interface ContainerConfig {
   /** ProcessContainer configuration */
   processContainer?: ProcessContainerConfig;
   /**
-   * Legacy alias of {@link processContainer}. Retained for raw configurations
-   * targeting the historical v0 contracts that accepted it. Exact v1
-   * contracts reject this spelling.
+   * Legacy alias of {@link processContainer}. Only the registered exact
+   * v0.9 contract accepts this spelling; exact v1 rejects it.
    *
    * @deprecated Use {@link processContainer} instead.
    */
@@ -818,7 +796,7 @@ export interface ProbeFacts {
 /**
  * Host support for enforcing Bubblewrap proxy-only egress.
  *
- * Schema `0.8.0-alpha`+ proxy policies run the sandbox in a private network
+ * Schema `0.9.0-alpha`+ proxy policies run the sandbox in a private network
  * namespace and default-drop everything except the proxy endpoint. That
  * requires host tooling (slirp4netns, util-linux unshare, nsenter, the
  * iptables family) plus unprivileged user and network namespaces the kernel

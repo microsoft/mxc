@@ -41,7 +41,7 @@ impl EnvScope {
             EnvResolution::Replace => Self::Replace,
             // Every other state keeps the image's environment, which is what
             // the SDK's setter does on its own.
-            EnvResolution::Default | EnvResolution::Overlay | EnvResolution::Legacy => Self::Merge,
+            EnvResolution::Default | EnvResolution::Overlay => Self::Merge,
         }
     }
 }
@@ -194,20 +194,6 @@ mod tests {
         let empty = resolve(&request(Some(vec![]), false));
 
         assert_ne!(omitted.0, empty.0);
-    }
-
-    #[test]
-    fn below_0_9_every_state_keeps_the_image_environment() {
-        for (env, inherit) in [
-            (None, false),
-            (Some(vec![]), false),
-            (Some(vec!["FOO=bar"]), false),
-            (Some(vec!["FOO=bar"]), true),
-        ] {
-            let mut r = request(env, inherit);
-            r.default_env_compatibility = DefaultEnvCompatibility::LegacyCompatible;
-            assert_eq!(EnvScope::of(&r), EnvScope::Merge);
-        }
     }
 
     #[test]

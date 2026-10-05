@@ -1080,14 +1080,14 @@ impl PreparedSandbox {
 pub const LXC_CAPABILITIES_MODE_UNSUPPORTED: &str =
     "LXC: network.enforcementMode='capabilities' (the default) selects Windows AppContainer \
      capability SIDs, which LXC has no mechanism for. Accepting it would enforce the policy by \
-     some means other than the one named. Set network.enforcementMode to 'firewall' or 'both', \
-     or state the policy in the 0.8 network.egress / network.ingress form, which carries no \
-     enforcement mode.";
+     some means other than the one named. Use the supported network.egress / network.ingress \
+     fields instead; no registered LXC contract accepts network.enforcementMode.";
 
 pub const LXC_RUNTIME_PROXY_UNSUPPORTED: &str =
     "LXC: runtimeConfig.networkProxy is not supported. It must name a loopback endpoint, which \
-     inside the container's own network namespace is the container rather than the host. On \
-     schema 0.6-0.8, use network.proxy.url with an address routable from inside the container.";
+     inside the container's own network namespace is the container rather than the host. LXC \
+     has no proxy surface in any supported contract. Select a backend that can enforce a \
+     loopback proxy, or remove the proxy request.";
 
 pub const LXC_INHERIT_STDIO_UNSUPPORTED: &str =
     "LXC: inherited stdio is not available from the in-process sandbox API. LXC gives a workload \
@@ -2163,17 +2163,6 @@ mod tests {
                 .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
         }
 
-        #[test]
-        fn below_0_9_the_caller_env_passes_through_untouched() {
-            // Pre-0.9 the only default is whatever `lxc-attach` supplies.
-            let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-            r.env = None;
-            assert!(resolved_env(&r).is_empty());
-
-            r.env = Some(vec!["FOO=bar".into()]);
-            assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
-        }
-
         /// A direct typed SDK request that named no contract takes the current
         /// behavior.
         #[test]
@@ -2256,15 +2245,6 @@ mod tests {
                 r.working_directory = cwd.into();
                 assert_eq!(value(&resolved_env(&r), "HOME"), Some(expected));
                 assert_eq!(start_directory(&r).as_deref(), Some(expected));
-            }
-        }
-
-        #[test]
-        fn below_0_9_a_relative_start_directory_reaches_cd_untouched() {
-            for cwd in ["work", "./work", "a/../b"] {
-                let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-                r.working_directory = cwd.into();
-                assert_eq!(start_directory(&r).as_deref(), Some(cwd), "cwd {cwd:?}");
             }
         }
 
@@ -2807,6 +2787,13 @@ mod tests {
             response.error_message.contains("LXC"),
             "the refusal must name the backend that refused, or the caller cannot tell which \
              part of the request to change, got: {}",
+            response.error_message
+        );
+        assert!(
+            response.error_message.contains("no proxy surface")
+                && response.error_message.contains("Select a backend")
+                && !response.error_message.contains("network.proxy.url"),
+            "the refusal must recommend a supported alternative, got: {}",
             response.error_message
         );
     }

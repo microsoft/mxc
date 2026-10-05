@@ -190,7 +190,7 @@ function New-Config {
     }
     if ($Cwd) { $proc['cwd'] = $Cwd }
     $obj = [ordered]@{
-        version     = '0.6.0-alpha'
+        version     = '0.9.0-alpha'
         containerId = "MxcT3Workload-$Name"
         containment = 'appcontainer'
         process     = $proc

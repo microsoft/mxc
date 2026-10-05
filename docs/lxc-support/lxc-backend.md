@@ -6,9 +6,8 @@ For exact `0.9.0-alpha`, networking is directional-only: use `network.egress`
 and `network.ingress`. LXC rejects `runtimeConfig.networkProxy`, so a v0.9 LXC
 request has no proxy surface at all — see [Proxy](#proxy) below.
 Legacy host lists and enforcement-mode fields in older examples are not
-accepted in v0.9. Preserve their original published contract when reproducing
-legacy behavior; do not relabel an old request as v0.9 without migrating its
-policy. See [the schema migration reference](../schema.md).
+accepted. Do not relabel an old request as v0.9 without migrating its policy.
+See [the schema migration reference](../schema.md).
 
 ## Overview
 
@@ -66,7 +65,7 @@ Note the required field lxc.
 
 ```json
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containerId": "my-sandbox",
     "containment": "lxc",
     "process": {
@@ -85,10 +84,14 @@ Note the required field lxc.
         "deniedPaths": ["/etc/shadow"]
     },
     "network": {
-        "defaultPolicy": "block",
-        "enforcementMode": "firewall",
-        "allowedHosts": ["api.github.com"],
-        "blockedHosts": ["notapi.example.com"]
+        "egress": {
+            "default": "deny",
+            "allow": [{
+                "to": [{ "cidr": "140.82.112.0/20" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }]
+        },
+        "ingress": { "default": "deny", "hostLoopback": "deny" }
     }
 }
 ```
@@ -146,38 +149,27 @@ not reachable through `process.env`.
 
 ## Network Policy
 
-A legacy deny-default policy that names `allowedHosts` opens port 53
-unconditionally, so it cannot block DNS.  The directional `network.egress`
-rules carry no such exemption and govern port 53 like any other destination.
+Directional `network.egress` rules govern port 53 like any other destination;
+there is no implicit DNS exemption.
 
 `preservePolicy` leaves the inbound and outbound chains in place after the run.
 The chains live in the container's network namespace, so they last only as long
 as the container keeps running; stopping or destroying it takes them with it.  A
 partially installed chain from a failed run is torn down regardless.
 
-If using the legacy network shape, `enforcementMode` cannot be `capabilities`.
-
 ### Proxy
 
 **LXC does not support proxied egress (`runtimeConfig.networkProxy`) today.**
 A request carrying that field is rejected at validation, before any container is
-created, with an error naming the field and the backend. The field exists only
-in schema 0.8 and later; on 0.6 and 0.7 it is not part of the contract, so a
-request carrying it is rejected earlier as an unknown field.
+created, with an error naming the field and the backend.
 
 The field must name a loopback endpoint, and an LXC container has its own
 network namespace, so `127.0.0.1` there is the container rather than the host.
 MXC ships no component that relays a host loopback proxy into that namespace.
 
-On schemas 0.6 through 0.8, LXC accepts the legacy `network.proxy.url` form
-pointed at an address routable from inside the container, such as the bridge
-address `http://10.0.3.1:3128`. The loopback spellings of that field are
-rejected by the parser for the reason above: `network.proxy.localhost`,
-`network.proxy.builtinTestServer`, and a `network.proxy.url` naming
-`127.0.0.0/8`, `::1`, or `localhost`. Schema 0.9 removes the legacy
-`network.proxy` property entirely, which leaves v0.9 with no proxy path.
-
-The `url` must not carry credentials.
+The legacy `network.proxy` fields also have no supported exact contract.
+Choose a backend that supports a loopback proxy if the workload needs one;
+relabeling a retired LXC proxy request as v0.9 cannot make its policy enforceable.
 
 ### No network at all
 

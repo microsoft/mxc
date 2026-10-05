@@ -23,21 +23,12 @@ pub enum EnvResolution {
     Replace,
     /// The caller's entries layered over the backend's default.
     Overlay,
-    /// The caller's entries, with no default block and an omitted environment
-    /// indistinguishable from an empty one.
-    Legacy,
 }
 
 impl EnvResolution {
     /// The state `request` selects.
     ///
-    /// A request whose contract predates the distinct four states resolves to
-    /// [`EnvResolution::Legacy`].
     pub fn of(request: &ExecutionRequest) -> Self {
-        if !request.supplies_default_env() {
-            return Self::Legacy;
-        }
-
         match (&request.env, request.inherit_default_env) {
             (None, _) => Self::Default,
             (Some(_), false) => Self::Replace,
@@ -62,7 +53,7 @@ pub fn resolve_env(
     let supplied = request.env_entries();
 
     let entries = match EnvResolution::of(request) {
-        EnvResolution::Legacy | EnvResolution::Replace => return supplied.to_vec(),
+        EnvResolution::Replace => return supplied.to_vec(),
         EnvResolution::Default => defaults(),
         EnvResolution::Overlay => overlay(defaults(), supplied),
     };
@@ -197,18 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn below_0_9_the_callers_entries_pass_through_untouched() {
-        let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-        r.env = Some(vec!["FEATURE_FLAG".to_string(), "FOO=bar".to_string()]);
-        r.inherit_default_env = true;
-
-        assert_eq!(resolved(&r), ["FEATURE_FLAG", "FOO=bar"]);
-
-        r.env = None;
-        assert!(resolved(&r).is_empty());
-    }
-
-    #[test]
     fn each_state_of_process_env_resolves_to_its_own_outcome() {
         let mut r = request(DefaultEnvCompatibility::DefaultBlock);
 
@@ -229,19 +208,6 @@ mod tests {
 
         r.inherit_default_env = true;
         assert_eq!(EnvResolution::of(&r), EnvResolution::Overlay);
-    }
-
-    #[test]
-    fn below_0_9_every_state_resolves_to_legacy() {
-        let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-
-        for env in [None, Some(Vec::new()), Some(vec!["FOO=bar".to_string()])] {
-            for inherit in [false, true] {
-                r.env = env.clone();
-                r.inherit_default_env = inherit;
-                assert_eq!(EnvResolution::of(&r), EnvResolution::Legacy);
-            }
-        }
     }
 
     #[test]

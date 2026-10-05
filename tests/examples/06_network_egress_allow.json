@@ -1,0 +1,14 @@
+{
+  "version": "0.9.0-alpha",
+  "containerId": "CLI-Network-Egress-Allow",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import urllib.request\nprint('network.egress.default=allow permits general outbound traffic')\nfor url in ('https://api.github.com/zen', 'https://www.google.com'):\n    with urllib.request.urlopen(url, timeout=10) as response:\n        print(url, response.status)\nprint('For granular direct egress, set network.egress.default=deny and use numeric CIDR/port allow rules')\"",
+    "timeout": 30000
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    }
+  }
+}

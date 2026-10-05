@@ -329,7 +329,7 @@ fn rejects_duplicate_stop_experimental_fields() {
 #[test]
 fn rejects_invalid_version_field() {
     for version in [
-        r#""0.7.0-alpha""#,
+        r#""9.9.9""#,
         r#""0.9.0""#,
         r#""invalid""#,
         "123",

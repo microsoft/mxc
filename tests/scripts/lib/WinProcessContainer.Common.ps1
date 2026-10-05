@@ -462,13 +462,8 @@ function Record-UiTelemetryResult {
     Record-Result -Phase $Phase -Name $Name -Pass ($actual -eq $Expected) -Detail $Detail
 }
 
-# Default schema version for generated configs. Everything the current stable
-# schema can express is authored there; the legacy network fields stay at 0.7
-# (the legacy area builds those via -RawNetwork + -SchemaVersion), because the
-# directional egress/ingress shape is the documented way to express network
-# intent and no doc describes mixing the two in one config.
-$Script:SchemaVersion       = '1.0.0'
-$Script:LegacySchemaVersion = '0.7.0-alpha'
+# Default schema version for generated configs.
+$Script:SchemaVersion = '1.0.0'
 
 # Write a config object verbatim. Used by the rejection phase for shapes the
 # typed generator deliberately cannot produce (an explicitly empty `to: []`,
@@ -539,8 +534,7 @@ function New-Config {
         # telemetry.enabled — the config kill-switch (one of three independent
         # terms; it can only ever subtract from consent, never grant).
         [Nullable[bool]]$TelemetryEnabled   = $null,
-        # Override the emitted schema version. Only for version-gating cases:
-        # the default follows the legacy/directional split below.
+        # Override the emitted schema version for version-gating cases.
         [string]$SchemaVersion              = $null,
         # `process` is the intent alias that must resolve to the concrete
         # Windows backend; `processcontainer` is the concrete name.
@@ -571,11 +565,7 @@ function New-Config {
 
         # --- runtime (not policy)
         [string]$NetworkProxy    = $null,   # runtimeConfig.networkProxy
-        [string]$AllowedProxyPeer = $null,  # processContainer.network.allowedProxyPeer
-        # Verbatim `network` block, for shapes the directional parameters above
-        # cannot express -- the legacy 0.7 fields in particular. Pair it with
-        # -SchemaVersion; it replaces the whole block rather than merging.
-        [System.Collections.Specialized.OrderedDictionary]$RawNetwork = $null
+        [string]$AllowedProxyPeer = $null   # processContainer.network.allowedProxyPeer
     )
 
     $obj = [ordered]@{
@@ -616,9 +606,7 @@ function New-Config {
     }
 
     # --- network -------------------------------------------------------
-    if ($null -ne $RawNetwork) {
-        $obj['network'] = $RawNetwork
-    } elseif ($EmptyNetwork) {
+    if ($EmptyNetwork) {
         $obj['network'] = [ordered]@{}
     } elseif ($EgressDefault -or $IngressDefault -or $HostLoopback -or
               $EgressAllow.Count -gt 0 -or $EgressDeny.Count -gt 0) {
@@ -1427,4 +1415,3 @@ function Write-WpcSummary {
         }
     }
 }
-

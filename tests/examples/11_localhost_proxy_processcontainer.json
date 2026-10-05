@@ -1,17 +1,27 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
+  "_comment": "Requires an already-running host proxy at http://127.0.0.1:8080 and native ProcessContainer PSEC 1.1 host-loopback support; the identity-less path is for development and testing.",
   "containerId": "CLI-Proxy-Example",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "python -c \"import urllib.request\n\nprint('Test 1: Requesting api.github.com...')\ntry:\n    response = urllib.request.urlopen('https://api.github.com', timeout=15)\n    print(f'  SUCCESS: status {response.status}')\nexcept Exception as e:\n    print(f'  ERROR: {e}')\n\nprint()\nprint('Test 2: Requesting httpbin.org...')\ntry:\n    response = urllib.request.urlopen('https://httpbin.org/get', timeout=15)\n    print(f'  SUCCESS: status {response.status}')\nexcept Exception as e:\n    print(f'  ERROR: {e}')\n\nprint()\nprint('Done.')\"",
+    "commandLine": "python -c \"import urllib.request\nfor url in ('https://api.github.com', 'https://httpbin.org/get'):\n    with urllib.request.urlopen(url, timeout=15) as response:\n        print(url, response.status)\"",
     "timeout": 45000
   },
   "processContainer": {
-    "capabilities": ["internetClient"]
+    "capabilities": [
+      "internetClient"
+    ]
   },
   "network": {
-    "defaultPolicy": "block",
-    "proxy": { "localhost": 8080 }
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
   }
 }

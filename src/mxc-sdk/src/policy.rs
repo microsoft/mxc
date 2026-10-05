@@ -629,11 +629,11 @@ impl Containment {
 /// contract values; raw JSON APIs parse documents under their declared version.
 ///
 /// ```compile_fail
-/// let _: crate::mxc_engine::policy::ContainerPolicy = serde_json::from_str("{}").unwrap();
+/// let _: mxc_engine::policy::ContainerPolicy = serde_json::from_str("{}").unwrap();
 /// ```
 ///
 /// ```compile_fail
-/// serde_json::to_string(&crate::mxc_engine::policy::ContainerPolicy::default()).unwrap();
+/// serde_json::to_string(&mxc_engine::policy::ContainerPolicy::default()).unwrap();
 /// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -1046,29 +1046,30 @@ mod tests {
 
     #[test]
     fn exact_contract_bridge_is_available_to_policy_builders() {
-        let request: crate::mxc_contract::published::v0_7_0_alpha::Request = serde_json::from_str(
-            r#"{
-                    "version": "0.7.0-alpha",
+        let request: crate::mxc_contract::published::v0_9_0_alpha::OneShotRequest =
+            serde_json::from_str(
+                r#"{
+                    "version": "0.9.0-alpha",
                     "process": {"commandLine": "echo hello"}
                 }"#,
-        )
-        .unwrap();
+            )
+            .unwrap();
         let mut logger =
             crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
 
         let execution = crate::wxc_common::config_parser::load_one_shot_request_from_contract(
-            crate::wxc_common::config_parser::ExactOneShotContract::V0_7(Box::new(request)),
+            crate::wxc_common::config_parser::ExactOneShotContract::V0_9(Box::new(request)),
             &mut logger,
         )
         .unwrap();
 
         assert_eq!(
             execution.source_contract,
-            Some(crate::mxc_contract::ContractVersion::V0_7_0Alpha)
+            Some(crate::mxc_contract::ContractVersion::V0_9_0Alpha)
         );
         assert_eq!(
             execution.network_enforcement_compatibility,
-            crate::wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible
+            crate::wxc_common::models::NetworkEnforcementCompatibility::Strict
         );
         assert_eq!(execution.script_code, "echo hello");
     }

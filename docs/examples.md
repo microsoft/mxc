@@ -1,13 +1,15 @@
 ## Examples
 
-For a more comprehensive list of examples, look in the examples\ directory.
+For a more comprehensive list of examples, see
+[`tests/examples/`](../tests/examples/).
 
 ### Basic Hello World
 ```json
 {
-  "script": "python -c \"import sys; print('Hello from MXC!'); print(f'Python version: {sys.version}');\"",
-  "processContainer": {
-    "name": "CLI-HelloWorld"
+  "version": "1.0.0",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import sys; print('Hello from MXC!'); print(sys.version)\""
   }
 }
 ```
@@ -15,9 +17,10 @@ For a more comprehensive list of examples, look in the examples\ directory.
 ### Filesystem Access Control
 ```json
 {
-  "script": "python -c \"open('C:\\\\temp\\\\output.txt', 'w').write('test')\"",
-  "processContainer": {
-    "name": "CLI-Filesystem-Test"
+  "version": "1.0.0",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"open('C:\\\\temp\\\\output.txt', 'w').write('test')\""
   },
   "filesystem": {
     "readwritePaths": [
@@ -25,35 +28,55 @@ For a more comprehensive list of examples, look in the examples\ directory.
     ],
     "deniedPaths": [
       "C:\\Windows\\System32"
-    ],
-    "clearPolicyOnExit": true
+    ]
   }
 }
 ```
+
+Create `C:\temp` before running this example, or replace it with an existing
+writable directory.
 
 ### Network Restricted Execution
 ```json
 {
-  "script": "import urllib.request\nurllib.request.urlopen('https://api.github.com')",
+  "version": "1.0.0",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import socket; socket.create_connection(('140.82.114.6', 443), timeout=5).close(); print('Allowed destination reached')\"",
+    "timeout": 30000
+  },
+  "processContainer": {
+    "capabilities": ["internetClient"]
+  },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["api.github.com"]
+    "egress": {
+      "default": "deny",
+      "allow": [{
+        "to": [{ "cidr": "140.82.114.6/32" }],
+        "ports": [{ "protocol": "tcp", "port": 443 }]
+      }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
   }
 }
 ```
 
-### Schema 0.8 Directional Network Policy
+The destination is numeric because directional rules accept IP/CIDR, not
+hostnames. It must be reachable from the host to demonstrate the allow rule;
+see the [ProcessContainer networking guide](process-container/networking.md)
+for host requirements and enforcement limits.
 
-Schema 0.8 adds a directional format with explicit egress CIDR, protocol, and
-port rules plus separate ingress defaults:
+### Directional Network Policy (schema 0.9+)
+
+Supported contracts use explicit egress CIDR, protocol, and port rules plus
+separate ingress defaults:
 
 ```json
 {
-  "version": "0.8.0-alpha",
-  "containment": "process",
+  "version": "0.9.0-alpha",
+  "containment": "processcontainer",
   "process": {
-    "commandLine": "echo schema 0.8 directional network example"
+    "commandLine": "cmd.exe /c echo directional network example"
   },
   "network": {
     "egress": {
@@ -77,63 +100,51 @@ See
 [`tests/examples/30_network_0_8_directional.json`](../tests/examples/30_network_0_8_directional.json)
 for the complete config and
 [`sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
-for network modes and backend support.
+for the historical GA design; use the
+[supported schema guide](schema.md) for current backend authoring.
 
 ### Network Proxy
 
-Route sandboxed traffic through a localhost proxy via the legacy `network.proxy`
-field. Supported by **ProcessContainer** (Windows), **Bubblewrap** (Linux), and
-**Seatbelt** (macOS) — see each backend's doc for enforcement specifics. Two
-mutually exclusive modes are available:
-
-**External proxy** — connect to an already-running localhost proxy:
+Supported contracts name a **running** localhost proxy using
+`runtimeConfig.networkProxy`. Egress must default to deny, with no direct
+allow or deny rules. For an unpackaged host proxy on **ProcessContainer**,
+the development/testing configuration is:
 
 ```json
 {
-  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
-  "timeout": 30000,
+  "version": "1.0.0",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
+    "timeout": 30000
+  },
   "processContainer": {
-    "name": "CLI-Proxy",
     "capabilities": ["internetClient"]
   },
   "network": {
-    "proxy": { "localhost": 8080 }
+    "egress": { "default": "deny" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
   }
 }
 ```
 
-**Builtin test server** — the executor launches its own minimal HTTP CONNECT
-proxy on an OS-assigned port (for integration testing only, not production):
+This identity-less host-loopback deployment restricts client egress to the
+configured proxy address and port, but does not verify which process owns that
+endpoint. It requires native PSEC 1.1 ingress/host-loopback support; unsupported
+hosts reject the request. For production ProcessContainer deployments, identify
+a packaged proxy through `processContainer.network.allowedProxyPeer` instead; see
+[proxy deployment choices](process-container/networking.md#proxy-deployment-choices).
+Bubblewrap and Seatbelt also support a caller-managed loopback proxy, but
+their supported ingress policies differ. See their backend guides.
 
-```json
-{
-  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
-  "timeout": 30000,
-  "processContainer": {
-    "name": "CLI-BuiltinProxy",
-    "capabilities": ["internetClient"]
-  },
-  "network": {
-    "proxy": { "builtinTestServer": true }
-  }
-}
-```
+#### `egress` / `ingress` / `runtimeConfig.networkProxy`
 
-When `builtinTestServer` is `true`, it must be the only key in the `proxy`
-object. Because it activates a deliberately-permissive, testing-only proxy
-(no auth, no body limits), it is **not** enabled by default: pass the
-`--allow-testing-features` flag to `wxc-exec`/`lxc-exec`/`mxc-exec-mac`. This
-is a separate axis from `--experimental` (which selects experimental backends
-and features). The MXC SDK exposes the same gate as the `allowTestingFeatures`
-spawn option, which must be set to `true` for a policy that uses
-`builtinTestServer`.
-
-#### Schema 0.8 shape: `egress` / `ingress` / `runtimeConfig.networkProxy`
-
-Starting at `"version": "0.8.0-alpha"`, the `egress`/`ingress`/`runtimeConfig.networkProxy`
-shape replaces the legacy `defaultPolicy`/`allowedHosts`/`blockedHosts`/`network.proxy`
-fields above — a config must use one shape or the other, never both. This is
-the official, cross-backend schema (see
+Every supported contract (`0.9.0-alpha` or later) accepts the directional
+shape and rejects the retired `defaultPolicy`, host-list, and `network.proxy`
+fields. This is the cross-backend schema (see
 [`docs/sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
 for the full design and per-backend enforcement matrix), not a
 backend-specific format: it's parsed the same way regardless of
@@ -143,17 +154,15 @@ given field rejects a config that sets it.
 
 Note that `EGRESS_RULES` is what carries per-CIDR/port rules; a backend
 without it accepts only `egress.default`. On Seatbelt,
-`runtimeConfig.networkProxy` covers only the
-loopback-proxy case (`network.proxy.localhost` / loopback `network.proxy.url`);
-there is no schema-0.8 equivalent for a remote proxy URL or
-`builtinTestServer`. See
+`runtimeConfig.networkProxy` covers only loopback endpoints; there is no
+supported equivalent for a remote proxy URL or `builtinTestServer`. See
 [`docs/sandbox-policy/0.8.0/networking/schema-updates.md`](sandbox-policy/0.8.0/networking/schema-updates.md)
 for the full field mapping and [`tests/examples/31_mac_network_0_8.json`](../tests/examples/31_mac_network_0_8.json)
 for a complete example:
 
 ```json
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "seatbelt",
   "network": {
     "egress": { "default": "deny" },

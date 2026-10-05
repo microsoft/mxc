@@ -1,12 +1,5 @@
 #!/bin/bash
-# Bubblewrap directional network policy tests (schema 0.8 `network.egress` /
-# `network.ingress`).
-#
-# Why this file exists separately from run_bwrap_firewall_test.sh: that suite
-# drives the *legacy* fields (defaultPolicy/enforcementMode/allowedHosts). The
-# directional schema is a different parse path that fills different policy
-# fields, and the backend picks its network mode from them. A regression in one
-# path is invisible to the other.
+# Bubblewrap directional network policy tests (supported v0.9+ contract).
 #
 # The bug this suite is designed to catch: the mode resolver originally
 # classified from the legacy fields alone. Those are left at their defaults on
@@ -92,17 +85,6 @@ run_rejected "ingress.hostLoopback=allow is refused" \
     "bubblewrap_network_directional_hostloopback_allow_rejected.json" \
     "network.ingress.hostLoopback='allow' is not supported" \
     "DIRECTIONAL_HOST_LOOPBACK_ALLOW_SHOULD_NOT_RUN"
-
-# A directional section on a pre-0.8 schema. The declared version selects a
-# closed 0.7 contract that has no `egress`/`ingress` field, so deserialization
-# refuses it before the backend ever sees it. The backend carries its own twin
-# of this rejection for programmatic callers that build an `ExecutionRequest`
-# directly and never pass through the parser; that path has no config file and
-# so is covered by unit tests rather than here.
-run_rejected "a directional section before 0.8 is refused" \
-    "bubblewrap_network_directional_pre08_rejected.json" \
-    "Invalid configuration at \`network.egress\`" \
-    "DIRECTIONAL_PRE_0_8_SHOULD_NOT_RUN"
 
 # The per-peer block budget. `except` is the amplifier: 20 dispersed /32
 # exclusions look small but split 0.0.0.0/0 past the 256-block ceiling, because
@@ -211,36 +193,29 @@ echo "  control listener is on 127.0.0.1:$CONTROL_PORT (10.0.2.2:$CONTROL_PORT f
 
 # The two external anchors the egress assertions are built on. An allow proves
 # the rule fired only if the destination is otherwise reachable, and a deny
-# proves enforcement only under the same condition -- hence two addresses, one
-# to allow and one to deny, each probed under a legacy allowlist first.
+# proves enforcement only under the same condition.
 ALLOW_ANCHOR="1.1.1.1"
 DENY_ANCHOR="9.9.9.9"
 
-# Probed through the legacy path, so the probe cannot be broken by the
-# directional code it exists to measure. Skips rather than fails when an anchor
-# is unreachable: the assertions would still pass, having proven nothing.
-#
-# The anchor is allowlisted under defaultPolicy='block': a legacy allowlist only
-# refines a block default, and the block default is what puts the probe in the
-# same private namespace as the runs it anchors.
+# Probe with the supported, ruleless allow posture to distinguish an unreachable
+# destination from a policy drop. Skips only when the host cannot reach it
+# either; an unprogrammed sandbox firewall is a failure, not a skip.
 probe_anchor() {
     local address="$1"
     local port="$2"
-    local subnet="$3"
     local config="$WORK_DIR/reachability_probe_${address}_${port}.json"
 
     cat >"$config" <<PROBE
 {
-  "version": "0.8.0-alpha",
+  "version": "1.0.0",
   "containerId": "CLI-Bubblewrap-Directional-Reachability-Probe",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "bash -c 'echo PROBE_WORKLOAD_STARTED; timeout 8 bash -c \"exec 3<>/dev/tcp/$address/$port\" >/dev/null 2>&1 && echo ANCHOR_REACHABLE; exit 0'"
+    "commandLine": "bash -c 'echo PROBE_WORKLOAD_STARTED; echo SANDBOX_NETNS=\$(readlink /proc/self/ns/net); timeout 8 bash -c \"exec 3<>/dev/tcp/$address/$port\" >/dev/null 2>&1 && echo ANCHOR_REACHABLE; exit 0'"
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["$subnet"]
+    "egress": { "default": "allow" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
   }
 }
 PROBE
@@ -258,6 +233,13 @@ PROBE
         echo "FAIL: reachability probe workload never ran (no start marker)."
         exit 1
     fi
+    local probe_netns
+    probe_netns="$(sed -n 's/^SANDBOX_NETNS=//p' <<<"$out" | tail -n 1)"
+    if [ -z "$probe_netns" ] || [ "$probe_netns" = "$HOST_NETNS" ]; then
+        echo "$out"
+        echo "FAIL: reachability probe did not use a private network namespace."
+        exit 1
+    fi
     if ! grep -q ANCHOR_REACHABLE <<<"$out"; then
         # Unreachable is only an environment verdict if the host has no route
         # out either. An anchor the host can reach but an allowlisting sandbox
@@ -266,7 +248,7 @@ PROBE
         if timeout 8 bash -c "exec 3<>/dev/tcp/$address/$port" >/dev/null 2>&1; then
             echo "$out"
             echo "FAIL: $address:$port is reachable from the host but not from a sandbox that allows it."
-            echo "      The legacy allowlist or the sandbox's network namespace is broken."
+            echo "      The sandbox's networking is broken."
             exit 1
         fi
         echo "SKIP: $address:$port is not reachable from a sandbox that allows it on this host."
@@ -276,9 +258,9 @@ PROBE
     echo "  $address:$port is reachable when allowed, so a verdict on it is real evidence"
 }
 
-probe_anchor "$ALLOW_ANCHOR" 443 "1.1.1.0/24"
-probe_anchor "$ALLOW_ANCHOR" 80 "1.1.1.0/24"
-probe_anchor "$DENY_ANCHOR" 443 "9.9.9.0/24"
+probe_anchor "$ALLOW_ANCHOR" 443
+probe_anchor "$ALLOW_ANCHOR" 80
+probe_anchor "$DENY_ANCHOR" 443
 
 run_enforced() {
     local label="$1"
@@ -384,21 +366,11 @@ done
 echo "PASS: directional port narrowing"
 
 # ---------------------------------------------------------------------------
-# 3. legacy <-> directional proxy spelling parity
+# 3. Proxy-only policy with implicit and explicit ingress denial
 # ---------------------------------------------------------------------------
-# Declaring RUNTIME_PROXY only says shared validation lets the directional
-# spelling through. What matters is that it lands on the same enforcement the
-# legacy spelling already gets: the parser normalizes
-# `runtimeConfig.networkProxy` into the same `policy.network_proxy`, so both
-# should resolve to the identical proxy-only posture. Both are therefore run
-# against the same workload and compared to each other rather than to a golden
-# string, which keeps the check precise without pinning it to chain formatting.
-#
-# Both sides are 0.8 on purpose. The variable under test is the *spelling*, not
-# the schema version: on 0.7 an external proxy resolves to the legacy shared-
-# host-network mode, which does no egress filtering at all, so a 0.7 baseline
-# would "fail" the direct-egress assertion by design and compare two different
-# modes rather than two spellings of one.
+# Both fixtures use the supported runtime proxy, but one omits ingress and the
+# other explicitly denies it. Both must enforce proxy-only egress. The first
+# fixture retains its historical filename; it no longer uses legacy fields.
 #
 # The test proxy already running on 127.0.0.1:$LISTENER_PORT doubles as the
 # proxy here; the parser requires a loopback endpoint, and the backend
@@ -419,19 +391,19 @@ run_parity() {
     printf '%s\n' "$out" >"$WORK_DIR/$label.parity.out"
     if [ "$rc" -ne 0 ]; then
         printf '%s\n' "$out" >&2
-        echo "FAIL: legacy/directional proxy parity ($label returned $rc)" >&2
+        echo "FAIL: proxy-only ingress parity ($label returned $rc)" >&2
         return 1
     fi
     grep -o 'PARITY_[A-Z_]*' <<<"$out" | sort -u >"$WORK_DIR/$label.marks"
 }
 
-echo "Running Bubblewrap directional test: legacy/directional proxy parity..."
-run_parity "legacy-spelling" "bubblewrap_network_proxy_parity_legacy.json" || exit 1
-run_parity "directional-spelling" "bubblewrap_network_directional_proxy.json" || exit 1
-LEGACY_MARKS="$(cat "$WORK_DIR/legacy-spelling.marks")"
-DIRECTIONAL_MARKS="$(cat "$WORK_DIR/directional-spelling.marks")"
+echo "Running Bubblewrap directional test: proxy-only ingress parity..."
+run_parity "implicit-ingress" "bubblewrap_network_proxy_parity_legacy.json" || exit 1
+run_parity "explicit-ingress" "bubblewrap_network_directional_proxy.json" || exit 1
+IMPLICIT_MARKS="$(cat "$WORK_DIR/implicit-ingress.marks")"
+EXPLICIT_MARKS="$(cat "$WORK_DIR/explicit-ingress.marks")"
 
-# Anchored, not just compared: two spellings that are broken in the same way
+# Anchored, not just compared: two configurations broken in the same way
 # would agree with each other and prove nothing.
 EXPECTED_MARKS="$(printf '%s\n' \
     PARITY_DIRECT_BLOCKED_OK \
@@ -439,20 +411,20 @@ EXPECTED_MARKS="$(printf '%s\n' \
     PARITY_PROXY_ENV_OK \
     PARITY_PROXY_REACHABLE_OK | sort -u)"
 
-if [ "$LEGACY_MARKS" != "$EXPECTED_MARKS" ]; then
-    cat "$WORK_DIR/legacy-spelling.parity.out"
-    echo "FAIL: the legacy proxy spelling did not reach the expected verdict."
+if [ "$IMPLICIT_MARKS" != "$EXPECTED_MARKS" ]; then
+    cat "$WORK_DIR/implicit-ingress.parity.out"
+    echo "FAIL: the implicit-ingress proxy did not reach the expected verdict."
     echo "  expected: $(tr '\n' ' ' <<<"$EXPECTED_MARKS")"
-    echo "  actual:   $(tr '\n' ' ' <<<"$LEGACY_MARKS")"
+    echo "  actual:   $(tr '\n' ' ' <<<"$IMPLICIT_MARKS")"
     exit 1
 fi
-if [ "$DIRECTIONAL_MARKS" != "$LEGACY_MARKS" ]; then
-    cat "$WORK_DIR/directional-spelling.parity.out"
-    echo "FAIL: the directional spelling did not enforce what the legacy spelling enforces."
-    echo "  legacy:      $(tr '\n' ' ' <<<"$LEGACY_MARKS")"
-    echo "  directional: $(tr '\n' ' ' <<<"$DIRECTIONAL_MARKS")"
+if [ "$EXPLICIT_MARKS" != "$IMPLICIT_MARKS" ]; then
+    cat "$WORK_DIR/explicit-ingress.parity.out"
+    echo "FAIL: explicit ingress did not enforce what implicit ingress enforces."
+    echo "  implicit: $(tr '\n' ' ' <<<"$IMPLICIT_MARKS")"
+    echo "  explicit: $(tr '\n' ' ' <<<"$EXPLICIT_MARKS")"
     exit 1
 fi
-echo "PASS: legacy/directional proxy parity"
+echo "PASS: proxy-only ingress parity"
 
 echo "All Bubblewrap directional network tests passed."

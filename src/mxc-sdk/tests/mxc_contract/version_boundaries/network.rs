@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::common::assert_v08_introduces;
+use crate::common::assert_v09_introduces;
 
 #[test]
-fn directional_egress_is_introduced_in_v08() {
-    assert_v08_introduces(
+fn directional_egress_is_introduced_in_v09() {
+    assert_v09_introduces(
         r#""network": {
             "egress": {
                 "default": "deny",
@@ -26,8 +26,8 @@ fn directional_egress_is_introduced_in_v08() {
 }
 
 #[test]
-fn directional_ingress_is_introduced_in_v08() {
-    assert_v08_introduces(
+fn directional_ingress_is_introduced_in_v09() {
+    assert_v09_introduces(
         r#""network": {
             "ingress": {
                 "default": "deny",
@@ -38,8 +38,8 @@ fn directional_ingress_is_introduced_in_v08() {
 }
 
 #[test]
-fn runtime_config_is_introduced_in_v08() {
-    assert_v08_introduces(
+fn runtime_config_is_introduced_in_v09() {
+    assert_v09_introduces(
         r#""runtimeConfig": {
         "networkProxy": "http://127.0.0.1:8080"
     }"#,
@@ -47,8 +47,8 @@ fn runtime_config_is_introduced_in_v08() {
 }
 
 #[test]
-fn process_container_allowed_proxy_peer_is_introduced_in_v08() {
-    assert_v08_introduces(
+fn process_container_allowed_proxy_peer_is_introduced_in_v09() {
+    assert_v09_introduces(
         r#""processContainer": {
         "network": {
             "allowedProxyPeer": "127.0.0.1"
