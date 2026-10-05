@@ -86,11 +86,11 @@ impl StateAwareOperation {
     ///
     /// Both the JSON and typed-SDK entry points call this, so neither surface
     /// can accept a payload the other rejects.
-    pub(crate) fn validate(&self) -> Result<(), crate::error::WxcError> {
+    pub(crate) fn validate(&self) -> Result<(), crate::mxc_common::error::WxcError> {
         match self {
             Self::Provision(StateAwareProvision::Wslc(Some(config))) => {
                 match config.port_mappings.as_deref() {
-                    Some(mappings) => crate::validator::validate_port_mappings(
+                    Some(mappings) => crate::mxc_common::validator::validate_port_mappings(
                         "wslc.provision.portMappings",
                         mappings,
                     ),

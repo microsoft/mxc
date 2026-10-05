@@ -1551,7 +1551,7 @@ fn normalize_common_request_ir(
                     protocol: "tcp".to_string(),
                 })
                 .collect();
-            crate::validator::validate_port_mappings("wslc.portMappings", &converted)?;
+            crate::mxc_common::validator::validate_port_mappings("wslc.portMappings", &converted)?;
             config.port_mappings = converted;
         }
         Some(config)
@@ -2955,10 +2955,10 @@ mod tests {
             ),
             (
                 "wslc_state_aware_provision_port_mappings.json",
-                StateAwareProvision::Wslc(Some(crate::models::WslcProvisionConfig {
+                StateAwareProvision::Wslc(Some(crate::mxc_common::models::WslcProvisionConfig {
                     image: Some("python:3.12-alpine".into()),
                     image_tar_path: None,
-                    port_mappings: Some(vec![crate::models::PortMapping {
+                    port_mappings: Some(vec![crate::mxc_common::models::PortMapping {
                         windows_port: 18081,
                         container_port: 8080,
                         protocol: "tcp".into(),

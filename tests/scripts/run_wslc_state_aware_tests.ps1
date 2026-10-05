@@ -381,8 +381,8 @@ function Test-DaemonRunning {
     $null -ne (Get-Process -Name $DaemonProcName -ErrorAction SilentlyContinue)
 }
 
-# Bind port 0 so the OS picks a free ephemeral port, then release it. The port
-# is only probably still free by the time the caller binds it.
+# Bind port 0 on loopback so the OS picks a free ephemeral port, then release
+# it. WSLC forwards on 127.0.0.1 only, so that is the scope that has to be free.
 function Get-FreeTcpPort {
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
@@ -422,6 +422,40 @@ function Get-TcpResponse {
         Start-Sleep -Milliseconds $RetryMs
     }
     $null
+}
+
+# Provision and start a sandbox with a mapped host port, retrying when another
+# process takes the port first. WSLC installs the forward at container start
+# rather than at provision, so a port claimed in between fails the start phase
+# with HRESULT 0x80072740.
+function New-PortMappedSandbox {
+    param([int]$MaxAttempts = 3)
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $port = Get-FreeTcpPort
+        $provision = Invoke-StateAware `
+            -ConfigFile 'wslc_state_aware_provision_port_mappings.json' -WindowsPort $port
+        $provisionEnv = Parse-Envelope -Stdout $provision.Stdout
+        if ((Envelope-Arm $provisionEnv) -ne 'result') {
+            return @{ Port = $port; SandboxId = $null; Provision = $provision; Start = $null }
+        }
+
+        $sandboxId = [string]$provisionEnv.result.sandboxId
+        $start = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $sandboxId
+        $startEnv = Parse-Envelope -Stdout $start.Stdout
+        $portTaken = (Envelope-Arm $startEnv) -eq 'error' -and
+            "$($startEnv.error.message)" -match '0x80072740'
+
+        if (-not $portTaken -or $attempt -eq $MaxAttempts) {
+            return @{ Port = $port; SandboxId = $sandboxId; Provision = $provision; Start = $start }
+        }
+
+        Write-Host "  host port $port was taken before start; retrying" -ForegroundColor DarkGray
+        try {
+            $null = Invoke-StateAware `
+                -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $sandboxId
+        } catch { }
+    }
 }
 
 $script:TestResults = @()
@@ -886,19 +920,18 @@ try {
 $script:portSandboxId = $null
 $script:portStarted = $false
 $portDeprovisionedOk = $false
-$hostPort = Get-FreeTcpPort
+$portSandbox = New-PortMappedSandbox
+$hostPort = $portSandbox.Port
+$script:portSandboxId = $portSandbox.SandboxId
 try {
     $portProvisionedOk = Run-StateAwareTest "CP: provision (port mappings)" {
-        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_port_mappings.json' -WindowsPort $hostPort
-        $envObj = Assert-ResultEnvelope $r "port-mapping provision"
-        if ($envObj) { $script:portSandboxId = [string]$envObj.result.sandboxId }
+        $null = Assert-ResultEnvelope $portSandbox.Provision "port-mapping provision"
     }
 
     $portStartedOk = $false
     if ($portProvisionedOk) {
         $portStartedOk = Run-StateAwareTest "CP: start" {
-            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:portSandboxId
-            $null = Assert-ResultEnvelope $r "port-mapping start"
+            $null = Assert-ResultEnvelope $portSandbox.Start "port-mapping start"
             $script:portStarted = $true
         }
     }
@@ -940,6 +973,96 @@ try {
             try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:portSandboxId } catch { }
         }
         try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:portSandboxId } catch { }
+    }
+}
+
+# ---------------- Lifecycle CQ: mapped-container ownership ----------------
+
+# The forward belongs to one container, so a sibling listening on the same
+# container port must not answer on it, a second container cannot take a host
+# port already forwarded, and deprovisioning must release the port for reuse.
+$script:cqSandboxId = $null
+$script:cqStarted = $false
+$script:cqSiblingId = $null
+$script:cqCollisionId = $null
+$script:cqReuseId = $null
+$cqSandbox = New-PortMappedSandbox
+$cqPort = $cqSandbox.Port
+$script:cqSandboxId = $cqSandbox.SandboxId
+try {
+    $cqReady = $false
+    if ($null -ne $script:cqSandboxId -and (Envelope-Arm (Parse-Envelope -Stdout $cqSandbox.Start.Stdout)) -eq 'result') {
+        $script:cqStarted = $true
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_port_bind.json' -SandboxId $script:cqSandboxId
+        $cqReady = ($r.ExitCode -eq 0 -and $r.Stdout -match 'LISTENER_STARTED')
+    }
+
+    if ($cqReady) {
+        Run-StateAwareTest "CQ: an unmapped sibling on the same container port never answers the forward" {
+            $script:cqSiblingId = Provision-Sandbox -ConfigFile 'wslc_state_aware_provision_unmapped_sibling.json'
+            Assert-True ($null -ne $script:cqSiblingId) "sibling provisioned"
+            if ($script:cqSiblingId) {
+                $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:cqSiblingId
+                $s = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_sibling_port_bind.json' -SandboxId $script:cqSiblingId
+                Assert-True ($s.Stdout -match 'LISTENER_STARTED') "sibling listener started on the same container port"
+
+                $response = Get-TcpResponse -Port $cqPort
+                Assert-True ($response -match 'STATE_AWARE_PORT_MAPPING_OK') `
+                    "the forward answered from its own container (got '$response')"
+                Assert-True ($response -notmatch 'SIBLING_SENTINEL_MUST_NOT_ESCAPE') `
+                    "the unmapped sibling never reached the host port (got '$response')"
+            }
+        } | Out-Null
+
+        Run-StateAwareTest "CQ: a second container cannot claim a host port already forwarded" {
+            $p = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_port_mappings.json' -WindowsPort $cqPort
+            $envObj = Parse-Envelope -Stdout $p.Stdout
+            if ((Envelope-Arm $envObj) -eq 'result') {
+                $script:cqCollisionId = [string]$envObj.result.sandboxId
+                $s = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:cqCollisionId
+                Assert-True ($s.ExitCode -ne 0) "the colliding sandbox failed to start"
+                $startEnv = Parse-Envelope -Stdout $s.Stdout
+                $code = if ($startEnv) { $startEnv.error.code } else { '<no envelope>' }
+                Assert-True ($code -eq 'backend_error') "the collision surfaced as 'backend_error' (got '$code')"
+                Assert-True ("$($startEnv.error.message)" -match '0x80072740') `
+                    "the message carries the address-in-use HRESULT (got '$($startEnv.error.message)')"
+            } else {
+                Assert-True $false "the colliding provision returned an envelope: $($p.Stdout)"
+            }
+        } | Out-Null
+    }
+
+    # Release the port, then prove a fresh sandbox can forward it again.
+    if ($script:cqSandboxId) {
+        if ($script:cqStarted) {
+            $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:cqSandboxId
+            $script:cqStarted = $false
+        }
+        $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:cqSandboxId
+        $script:cqSandboxId = $null
+
+        Run-StateAwareTest "CQ: deprovision releases the host port for reuse ($cqPort)" {
+            $p = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_port_mappings.json' -WindowsPort $cqPort
+            $envObj = Assert-ResultEnvelope $p "same-port reprovision"
+            if ($envObj) {
+                $script:cqReuseId = [string]$envObj.result.sandboxId
+                $s = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:cqReuseId
+                $null = Assert-ResultEnvelope $s "same-port start"
+                $e = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_port_bind.json' -SandboxId $script:cqReuseId
+                Assert-True ($e.Stdout -match 'LISTENER_STARTED') "listener started in the reusing sandbox"
+                $response = Get-TcpResponse -Port $cqPort
+                Assert-True ($response -match 'STATE_AWARE_PORT_MAPPING_OK') `
+                    "the reused host port forwards again (got '$response')"
+            }
+        } | Out-Null
+    }
+} finally {
+    foreach ($id in @($script:cqSiblingId, $script:cqCollisionId, $script:cqReuseId, $script:cqSandboxId)) {
+        if ($id) {
+            Write-Host "[cleanup] best-effort deprovision of $id" -ForegroundColor DarkGray
+            try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $id } catch { }
+            try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $id } catch { }
+        }
     }
 }
 

@@ -495,6 +495,10 @@ WSLC `provision` accepts `wslc.provision.portMappings`, the same
     "version": "1.1.0-alpha",
     "phase": "provision",
     "containment": "wslc",
+    "network": {
+        "egress": { "default": "allow" },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
+    },
     "wslc": {
         "provision": {
             "image": "alpine:latest",
@@ -505,6 +509,9 @@ WSLC `provision` accepts `wslc.provision.portMappings`, the same
     }
 }
 ```
+
+Mappings require the bridged (all-`allow`) posture shown above; the isolated
+posture is rejected at provision.
 
 Two entries claiming the same `windowsPort` are rejected on both surfaces. The
 session sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) stay

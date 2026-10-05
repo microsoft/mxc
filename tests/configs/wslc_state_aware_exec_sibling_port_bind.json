@@ -1,0 +1,10 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "phase": "exec",
+    "sandboxId": "wslc:{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "sh -c 'nohup python3 -c \"import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind((\\\"0.0.0.0\\\",8080)); s.listen(8); c,_=s.accept(); c.sendall(b\\\"SIBLING_SENTINEL_MUST_NOT_ESCAPE\\\"); c.close()\" >/tmp/listener.log 2>&1 & sleep 1; echo LISTENER_STARTED'",
+        "timeout": 30000
+    }
+}

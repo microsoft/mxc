@@ -528,7 +528,7 @@ fn build_provision_config(
         .as_ref()
         .and_then(|c| c.image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
-    let port_mappings = config
+    let port_mappings: Vec<DaemonPortMapping> = config
         .as_ref()
         .and_then(|c| c.port_mappings.as_ref())
         .map(|mappings| {
@@ -564,6 +564,12 @@ fn build_provision_config(
 
     let volumes = build_daemon_volumes(request)?;
     let network = map_network(request);
+    crate::wslc_common::policy::reject_port_mappings_without_bridged_network(
+        request,
+        "wslc.provision.portMappings",
+        !port_mappings.is_empty(),
+    )?;
+
     Ok(ProvisionConfig {
         image,
         image_tar_path,
@@ -918,12 +924,12 @@ mod tests {
     fn build_provision_config_forwards_port_mappings_to_the_daemon() {
         let phase = WslcProvisionConfig {
             port_mappings: Some(vec![
-                wxc_common::models::PortMapping {
+                crate::mxc_common::models::PortMapping {
                     windows_port: 8080,
                     container_port: 80,
                     protocol: "tcp".to_string(),
                 },
-                wxc_common::models::PortMapping {
+                crate::mxc_common::models::PortMapping {
                     windows_port: 8443,
                     container_port: 443,
                     protocol: "tcp".to_string(),
@@ -931,7 +937,7 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+        let cfg = build_provision_config(&bridged_request(), Some(phase)).unwrap();
         assert_eq!(
             cfg.port_mappings,
             vec![
@@ -944,6 +950,45 @@ mod tests {
                     container_port: 443,
                 },
             ]
+        );
+    }
+
+    fn bridged_request() -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
+                network_ingress: Some(NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: NetworkAction::Allow,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn isolated_networking_rejects_port_mappings_before_the_daemon_sees_them() {
+        let phase = WslcProvisionConfig {
+            port_mappings: Some(vec![crate::mxc_common::models::PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }]),
+            ..Default::default()
+        };
+        let err = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            err.message.contains("portMappings"),
+            "the message must name the field to remove; got: {}",
+            err.message
         );
     }
 

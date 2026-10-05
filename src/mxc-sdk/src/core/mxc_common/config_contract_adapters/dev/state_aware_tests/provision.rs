@@ -225,7 +225,8 @@ fn wslc_rejects_duplicate_windows_ports() {
         r#","wslc":{"provision":{"portMappings":[{"windowsPort":8080,"containerPort":80},{"windowsPort":8080,"containerPort":81}]}}"#,
     );
     let request = contract::parse_request(&json).expect("exact contract accepts the shape");
-    let Err(error) = crate::config_contract_adapters::dev::adapt_request(request) else {
+    let Err(error) = crate::mxc_common::config_contract_adapters::dev::adapt_request(request)
+    else {
         panic!("duplicate windowsPort must be rejected");
     };
     let message = error.to_string();

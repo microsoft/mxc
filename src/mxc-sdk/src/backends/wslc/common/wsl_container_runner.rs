@@ -430,6 +430,12 @@ impl ScriptRunner for WSLContainerRunner {
         policy_mapping::container_working_directory(&request.working_directory)
             .map_err(|msg| WslcError::Rejected(msg).into_response())?;
         policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
+        policy::reject_port_mappings_without_bridged_network(
+            request,
+            "wslc.portMappings",
+            !self.config.port_mappings.is_empty(),
+        )
+        .map_err(as_wslc_rejection)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, policy::network_policy_support())
@@ -1837,6 +1843,66 @@ mod tests {
         assert!(!request.policy.ui_specified);
         let runner = WSLContainerRunner::new(&WslcConfig::default());
         assert!(runner.validate_runner(&request).is_ok());
+    }
+
+    #[test]
+    fn one_shot_rejects_port_mappings_under_isolated_networking() {
+        let config = WslcConfig {
+            port_mappings: vec![crate::mxc_common::models::PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }],
+            ..Default::default()
+        };
+        let request = ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+
+        let err = WSLContainerRunner::new(&config)
+            .validate_runner(&request)
+            .unwrap_err();
+        assert_eq!(
+            err.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            err.error_message.contains("wslc.portMappings"),
+            "the message must name the one-shot list; got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn one_shot_accepts_port_mappings_under_bridged_networking() {
+        let config = WslcConfig {
+            port_mappings: vec![crate::mxc_common::models::PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }],
+            ..Default::default()
+        };
+        let request = ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
+                network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
+                    default: crate::mxc_common::models::NetworkAction::Allow,
+                    ..Default::default()
+                }),
+                network_ingress: Some(crate::mxc_common::models::NetworkIngressPolicy {
+                    default: crate::mxc_common::models::NetworkAction::Allow,
+                    host_loopback: crate::mxc_common::models::NetworkAction::Allow,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(WSLContainerRunner::new(&config)
+            .validate_runner(&request)
+            .is_ok());
     }
 
     /// `destroyOnExit: true` matches what one-shot does; `false` and

@@ -513,9 +513,10 @@ interface PortMapping {
 }
 ```
 
-`wslc.provision.portMappings` requires schema `1.1.0-alpha`; the published
-`0.9.0-alpha` WSLC contract does not declare it. Two entries claiming the same
-`windowsPort` are rejected.
+`wslc.provision.portMappings` requires schema `1.1.0-alpha`; state-aware WSLC
+requests default to `0.9.0-alpha`. Two entries claiming the same `windowsPort`
+are rejected. The v1 SDKs pin stable `1.0.0` and cannot set the field, so it is
+reachable only through raw `1.1.0-alpha` JSON.
 
 | Layer | Wire shape | Constraint |
 |---|---|---|

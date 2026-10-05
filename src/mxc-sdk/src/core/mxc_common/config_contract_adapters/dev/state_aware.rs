@@ -51,13 +51,15 @@ fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -
     }
 }
 
-fn convert_wslc_port_mapping(value: contract::PortMapping) -> crate::models::PortMapping {
+fn convert_wslc_port_mapping(
+    value: contract::PortMapping,
+) -> crate::mxc_common::models::PortMapping {
     let contract::PortMapping {
         windows_port,
         container_port,
         protocol,
     } = value;
-    crate::models::PortMapping {
+    crate::mxc_common::models::PortMapping {
         windows_port: windows_port.get(),
         container_port: container_port.get(),
         protocol: match protocol.into_option() {

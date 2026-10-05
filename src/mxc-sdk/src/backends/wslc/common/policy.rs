@@ -80,6 +80,26 @@ pub(crate) fn network_is_isolated(request: &ExecutionRequest) -> bool {
         .is_none_or(|egress| egress.default == NetworkAction::Deny)
 }
 
+/// Reject port mappings that isolated networking cannot carry. `field_path`
+/// names the list in the caller's own request shape.
+///
+/// WslcCreateContainer fails with E_INVALIDARG when port mappings accompany
+/// isolated networking.
+pub(crate) fn reject_port_mappings_without_bridged_network(
+    request: &ExecutionRequest,
+    field_path: &str,
+    has_port_mappings: bool,
+) -> Result<(), MxcError> {
+    if has_port_mappings && network_is_isolated(request) {
+        return Err(MxcError::policy_validation(format!(
+            "WSLc: {field_path} requires bridged networking. Set network.egress.default, \
+             network.ingress.default and network.ingress.hostLoopback all to 'allow', or remove \
+             the port mappings"
+        )));
+    }
+    Ok(())
+}
+
 /// No firewall is installed inside or outside a WSLc container. NONE denies all
 /// connectivity; BRIDGED cannot promise either inbound or host-loopback filtering.
 pub(crate) fn validate_directional_network(request: &ExecutionRequest) -> Result<(), MxcError> {

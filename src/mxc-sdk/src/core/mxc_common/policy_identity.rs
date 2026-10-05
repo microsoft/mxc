@@ -999,6 +999,50 @@ mod tests {
                     "imageTarPath": "C:\\images\\custom.tar",
                 }),
             ),
+            (
+                "wslc",
+                Some(r#"{"portMappings":[]}"#),
+                serde_json::json!({"portMappings": []}),
+            ),
+            (
+                "wslc",
+                Some(r#"{"portMappings":[{"windowsPort":8080,"containerPort":80}]}"#),
+                serde_json::json!({
+                    "portMappings": [
+                        {"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"},
+                    ],
+                }),
+            ),
+            (
+                "wslc",
+                Some(r#"{"portMappings":[{"windowsPort":8081,"containerPort":80}]}"#),
+                serde_json::json!({
+                    "portMappings": [
+                        {"windowsPort": 8081, "containerPort": 80, "protocol": "tcp"},
+                    ],
+                }),
+            ),
+            (
+                "wslc",
+                Some(r#"{"portMappings":[{"windowsPort":8080,"containerPort":81}]}"#),
+                serde_json::json!({
+                    "portMappings": [
+                        {"windowsPort": 8080, "containerPort": 81, "protocol": "tcp"},
+                    ],
+                }),
+            ),
+            (
+                "wslc",
+                Some(
+                    r#"{"image":"alpine:latest","portMappings":[{"windowsPort":8080,"containerPort":80}]}"#,
+                ),
+                serde_json::json!({
+                    "image": "alpine:latest",
+                    "portMappings": [
+                        {"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"},
+                    ],
+                }),
+            ),
         ] {
             let backend_section = match (backend, payload) {
                 (_, None) => String::new(),
