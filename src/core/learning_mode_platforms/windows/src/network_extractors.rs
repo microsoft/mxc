@@ -179,7 +179,7 @@ fn extract_tessera(
         access_type: AccessType::Unknown,
         filetime,
         details: Some(DenialDetails::Network(NetworkDenialDetails {
-            source: NetworkDenialSource::Tessera,
+            source: NetworkDenialSource::ProcessContainerNetworkPolicy,
             reason: NetworkDenialReason::DirectDefaultDeny,
             direction,
             protocol,

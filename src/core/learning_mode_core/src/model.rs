@@ -78,8 +78,8 @@ pub enum AccessType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NetworkDenialSource {
-    /// Tessera/processmodel schema 0.8 WFP enforcement.
-    Tessera,
+    /// ProcessContainer schema 0.8 network-policy enforcement.
+    ProcessContainerNetworkPolicy,
 }
 
 /// Stable policy reason for an actionable network denial.
@@ -324,7 +324,7 @@ mod tests {
             pid: 0,
             filetime: 42,
             details: Some(DenialDetails::Network(NetworkDenialDetails {
-                source: NetworkDenialSource::Tessera,
+                source: NetworkDenialSource::ProcessContainerNetworkPolicy,
                 reason: NetworkDenialReason::DirectDefaultDeny,
                 direction: NetworkDirection::Outbound,
                 protocol: Some(6),
@@ -339,6 +339,7 @@ mod tests {
 
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["details"]["kind"], "network");
+        assert_eq!(json["details"]["source"], "processContainerNetworkPolicy");
         assert_eq!(json["details"]["filterId"], u64::MAX.to_string());
         assert_eq!(json["details"]["reason"], "directDefaultDeny");
         assert!(json["details"].get("localAddress").is_none());
