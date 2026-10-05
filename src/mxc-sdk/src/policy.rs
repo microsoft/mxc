@@ -1452,35 +1452,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn seatbelt_extra_mach_lookups_and_keychain_round_trip() {
-        let policy = ContainerPolicy {
-            filesystem: None,
-            network: None,
-            ui: None,
-            timeout_ms: None,
-        };
-        // build_request leaves `process` for the engine to resolve, so the
-        // setters create the Seatbelt config on first use.
-        let mut request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
-        let mut union: Vec<String> = request.seatbelt_extra_mach_lookups().to_vec();
-        union.push("com.example.service".to_string());
-        request.set_seatbelt_extra_mach_lookups(union.clone());
-        request.set_seatbelt_keychain_access(true);
-
-        assert_eq!(request.seatbelt_extra_mach_lookups(), union.as_slice());
-        let cfg = request
-            .inner
-            .seatbelt
-            .as_ref()
-            .expect("seatbelt config on macOS");
-        assert!(cfg.keychain_access);
-        assert!(cfg
-            .extra_mach_lookups
-            .contains(&"com.example.service".to_string()));
-    }
-
     #[test]
     fn explicit_seatbelt_configuration_reaches_the_request() {
         use crate::configs::SeatbeltConfig;

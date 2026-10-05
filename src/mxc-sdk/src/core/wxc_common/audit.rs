@@ -306,7 +306,7 @@ impl RejectionReason {
 /// [`Logger::log_audit_event`](crate::wxc_common::logger::Logger::log_audit_event).
 ///
 /// ```
-/// use crate::wxc_common::audit::{AuditEvent, AuditEventName};
+/// use mxc_sdk::wxc_common::audit::{AuditEvent, AuditEventName};
 ///
 /// let line = AuditEvent::new(AuditEventName::ProcessExited)
 ///     .str("backend", "processcontainer")

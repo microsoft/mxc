@@ -85,7 +85,7 @@ pub enum AccessType {
 /// # Examples
 ///
 /// ```
-/// use crate::learning_mode_core::{AccessType, DeniedResource, ResourceType};
+/// use mxc_sdk::learning_mode_core::{AccessType, DeniedResource, ResourceType};
 ///
 /// let denial = DeniedResource {
 ///     resource: r"C:\Users\test\secret.txt".to_string(),
