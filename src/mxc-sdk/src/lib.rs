@@ -173,7 +173,7 @@ pub use core_modules::learning_mode_core;
 #[doc(hidden)]
 pub use core_modules::learning_mode_windows;
 #[doc(hidden)]
-pub use core_modules::mxc_config_contract;
+pub use core_modules::mxc_contract;
 #[doc(hidden)]
 pub use core_modules::mxc_engine;
 #[doc(hidden)]

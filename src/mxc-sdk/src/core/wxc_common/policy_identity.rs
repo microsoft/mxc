@@ -443,7 +443,7 @@ mod tests {
 
     fn request() -> ExecutionRequest {
         let mut r = ExecutionRequest {
-            source_contract: Some(crate::mxc_config_contract::ContractVersion::V0_7_0Alpha),
+            source_contract: Some(crate::mxc_contract::ContractVersion::V0_7_0Alpha),
             network_enforcement_compatibility:
                 crate::wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible,
             container_id: "test".to_string(),

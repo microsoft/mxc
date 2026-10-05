@@ -5,7 +5,7 @@ mod common;
 mod one_shot;
 mod state_aware;
 
-use crate::mxc_config_contract::published::v0_9_0_alpha as contract;
+use crate::mxc_contract::published::v0_9_0_alpha as contract;
 use crate::wxc_common::error::WxcError;
 use crate::wxc_common::state_aware_input::StateAwareInput;
 
@@ -51,7 +51,7 @@ mod tests {
         };
         assert_eq!(
             common.source_contract,
-            crate::mxc_config_contract::ContractVersion::V0_9_0Alpha
+            crate::mxc_contract::ContractVersion::V0_9_0Alpha
         );
         let process = common.process.unwrap();
         assert_eq!(process.command_line.as_deref(), Some("echo hello"));

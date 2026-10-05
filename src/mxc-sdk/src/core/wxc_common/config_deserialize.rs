@@ -516,43 +516,39 @@ mod tests {
             assert!(!message.contains(rust_type_name), "{message}");
         }
 
-        assert_exact_root::<crate::mxc_config_contract::published::v0_6_0_alpha::Request>();
-        assert_exact_root::<crate::mxc_config_contract::published::v0_7_0_alpha::Request>();
-        assert_exact_root::<crate::mxc_config_contract::published::v0_8_0_alpha::Request>();
-        assert_exact_root::<crate::mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v0_6_0_alpha::Request>();
+        assert_exact_root::<crate::mxc_contract::published::v0_7_0_alpha::Request>();
+        assert_exact_root::<crate::mxc_contract::published::v0_8_0_alpha::Request>();
+        assert_exact_root::<crate::mxc_contract::published::v0_9_0_alpha::OneShotRequest>();
         assert_exact_root::<
-            crate::mxc_config_contract::published::v0_9_0_alpha::IsolationSessionProvisionRequest,
+            crate::mxc_contract::published::v0_9_0_alpha::IsolationSessionProvisionRequest,
         >();
-        assert_exact_root::<
-            crate::mxc_config_contract::published::v0_9_0_alpha::WslcProvisionRequest,
-        >();
-        assert_exact_root::<crate::mxc_config_contract::published::v0_9_0_alpha::StartRequest>();
-        assert_exact_root::<crate::mxc_config_contract::published::v0_9_0_alpha::ExecRequest>();
-        assert_exact_root::<crate::mxc_config_contract::published::v0_9_0_alpha::StopRequest>();
-        assert_exact_root::<crate::mxc_config_contract::published::v0_9_0_alpha::DeprovisionRequest>(
+        assert_exact_root::<crate::mxc_contract::published::v0_9_0_alpha::WslcProvisionRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v0_9_0_alpha::StartRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v0_9_0_alpha::ExecRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v0_9_0_alpha::StopRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v0_9_0_alpha::DeprovisionRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v1_0_0::OneShotRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v1_0_0::IsolationSessionProvisionRequest>(
         );
-        assert_exact_root::<crate::mxc_config_contract::published::v1_0_0::OneShotRequest>();
-        assert_exact_root::<
-            crate::mxc_config_contract::published::v1_0_0::IsolationSessionProvisionRequest,
-        >();
-        assert_exact_root::<crate::mxc_config_contract::published::v1_0_0::WslcProvisionRequest>();
-        assert_exact_root::<crate::mxc_config_contract::published::v1_0_0::StartRequest>();
-        assert_exact_root::<crate::mxc_config_contract::published::v1_0_0::ExecRequest>();
-        assert_exact_root::<crate::mxc_config_contract::published::v1_0_0::StopRequest>();
-        assert_exact_root::<crate::mxc_config_contract::published::v1_0_0::DeprovisionRequest>();
-        assert_exact_root::<crate::mxc_config_contract::dev::OneShotRequest>();
-        assert_exact_root::<crate::mxc_config_contract::dev::WindowsSandboxProvisionRequest>();
-        assert_exact_root::<crate::mxc_config_contract::dev::IsolationSessionProvisionRequest>();
-        assert_exact_root::<crate::mxc_config_contract::dev::WslcProvisionRequest>();
-        assert_exact_root::<crate::mxc_config_contract::dev::StartRequest>();
-        assert_exact_root::<crate::mxc_config_contract::dev::ExecRequest>();
-        assert_exact_root::<crate::mxc_config_contract::dev::StopRequest>();
-        assert_exact_root::<crate::mxc_config_contract::dev::DeprovisionRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v1_0_0::WslcProvisionRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v1_0_0::StartRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v1_0_0::ExecRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v1_0_0::StopRequest>();
+        assert_exact_root::<crate::mxc_contract::published::v1_0_0::DeprovisionRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::OneShotRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::WindowsSandboxProvisionRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::IsolationSessionProvisionRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::WslcProvisionRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::StartRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::ExecRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::StopRequest>();
+        assert_exact_root::<crate::mxc_contract::dev::DeprovisionRequest>();
     }
 
     #[test]
     fn root_expectation_rewrite_uses_the_final_serde_marker() {
-        let error = from_str::<crate::mxc_config_contract::dev::OneShotRequest>(
+        let error = from_str::<crate::mxc_contract::dev::OneShotRequest>(
             r#""marker, expected struct Decoy at line 7 column 9""#,
         )
         .unwrap_err();

@@ -43,6 +43,15 @@ build.bat
 ./build-mac.sh
 ```
 
+The sidecars declared as `[[bin]]` targets in `src/mxc-sdk/Cargo.toml` are
+ordinary Cargo binary targets. Workspace builds compile the targets whose
+`required-features` are enabled; do not invoke Cargo recursively from
+`mxc-sdk/build.rs`. Build a sidecar directly with
+`cargo build -p mxc-sdk --bin <target>`. The `wxc-wslc-daemon` target requires
+`--features wslc`. Keep version-resource generation and dependency staging in
+the package build script, and keep artifact copying/signing in the repository
+build and CI entry points.
+
 ### Targeted validation
 
 ```text

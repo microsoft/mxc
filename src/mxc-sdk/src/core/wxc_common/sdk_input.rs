@@ -6,7 +6,7 @@
 //! This module is public only because `mxc-sdk` owns the high-level SDK
 //! types while `wxc_common` owns the private normalization boundary.
 
-use crate::mxc_config_contract::ContractVersion;
+use crate::mxc_contract::ContractVersion;
 
 use crate::wxc_common::common_request_ir::CommonRequestIR;
 use crate::wxc_common::error::WxcError;

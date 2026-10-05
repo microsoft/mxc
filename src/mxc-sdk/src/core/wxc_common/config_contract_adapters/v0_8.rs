@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_config_contract::published::v0_8_0_alpha as contract;
+use crate::mxc_contract::published::v0_8_0_alpha as contract;
 use crate::wxc_common::wire;
 
 fn convert_containment(value: contract::Containment) -> wire::Containment {
@@ -384,7 +384,7 @@ pub(crate) fn into_common_request_ir(
     crate::wxc_common::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
         comment: comment.into_option(),
-        source_contract: crate::mxc_config_contract::ContractVersion::V0_8_0Alpha,
+        source_contract: crate::mxc_contract::ContractVersion::V0_8_0Alpha,
         default_env_compatibility:
             crate::wxc_common::models::DefaultEnvCompatibility::LegacyCompatible,
         network_enforcement_compatibility:
@@ -947,7 +947,7 @@ mod tests {
         assert!(wire.comment.is_none());
         assert_eq!(
             wire.source_contract,
-            crate::mxc_config_contract::ContractVersion::V0_8_0Alpha
+            crate::mxc_contract::ContractVersion::V0_8_0Alpha
         );
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
@@ -983,7 +983,7 @@ mod tests {
         assert!(wire.comment.is_none());
         assert_eq!(
             wire.source_contract,
-            crate::mxc_config_contract::ContractVersion::V0_8_0Alpha
+            crate::mxc_contract::ContractVersion::V0_8_0Alpha
         );
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
@@ -1088,7 +1088,7 @@ mod tests {
         assert!(wire.comment.is_none());
         assert_eq!(
             wire.source_contract,
-            crate::mxc_config_contract::ContractVersion::V0_8_0Alpha
+            crate::mxc_contract::ContractVersion::V0_8_0Alpha
         );
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
@@ -1163,7 +1163,7 @@ mod tests {
         assert!(wire.comment.is_none());
         assert_eq!(
             wire.source_contract,
-            crate::mxc_config_contract::ContractVersion::V0_8_0Alpha
+            crate::mxc_contract::ContractVersion::V0_8_0Alpha
         );
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
@@ -1565,7 +1565,7 @@ mod tests {
 
         assert_eq!(
             wire.source_contract,
-            crate::mxc_config_contract::ContractVersion::V0_8_0Alpha
+            crate::mxc_contract::ContractVersion::V0_8_0Alpha
         );
 
         let network = wire.network.expect("network should be populated");

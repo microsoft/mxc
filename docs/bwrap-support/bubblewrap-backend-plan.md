@@ -43,7 +43,7 @@ Plus optional `validate_runner()`. This is a perfect fit for bwrap, which is fun
 
 ### 1. Schema Changes
 
-**Source:** `src/mxc-sdk/src/core/mxc_config_contract/dev/one_shot.rs`
+**Source:** `src/mxc-sdk/src/core/mxc_contract/dev/one_shot.rs`
 
 Add `"bubblewrap"` to the exact development contract's `containment` enum:
 ```json
@@ -335,7 +335,7 @@ policy gap is a design decision, not an implementation challenge.
 - `src/mxc-sdk/Cargo.toml` — add Bubblewrap dependencies
 - `src/tools/lxc/Cargo.toml` — add `bwrap_common` dependency
 - `src/tools/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
-- `src/mxc-sdk/src/core/mxc_config_contract/dev/one_shot.rs` — add the external
+- `src/mxc-sdk/src/core/mxc_contract/dev/one_shot.rs` — add the external
   `Bubblewrap` containment value and any backend-specific request fields
 - `src/mxc-sdk/src/tools/wxc_common/config_contract_adapters/dev/one_shot.rs` — adapt
   the exact request into `CommonRequestIR`

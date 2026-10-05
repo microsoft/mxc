@@ -178,3 +178,17 @@ entry points that depend on `mxc-sdk`. The Windows Sandbox guest and daemon,
 plus the WSLC daemon when the `wslc` feature is enabled, are published as
 `mxc-sdk` binary targets so their implementation and packaged assets remain
 part of the same release unit.
+
+Cargo builds the `[[bin]]` targets declared in `Cargo.toml` as part of the
+package. They can also be selected directly:
+
+```text
+cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --bin wxc-windows-sandbox-daemon
+cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --bin wxc-windows-sandbox-guest
+cargo build --manifest-path src/Cargo.toml -p mxc-sdk --release --features wslc --bin wxc-wslc-daemon
+```
+
+`required-features = ["wslc"]` prevents Cargo from building the WSLC daemon
+unless WSLC support is enabled. The crate build script prepares package assets
+and Windows version resources; repository build scripts and CI copy, sign, and
+publish the resulting executables from the Cargo target directory.

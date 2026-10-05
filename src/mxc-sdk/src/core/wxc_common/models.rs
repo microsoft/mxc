@@ -1041,7 +1041,7 @@ pub struct ExecutionRequest {
     ///
     /// Direct typed SDK construction has no external contract attribution.
     #[serde(serialize_with = "serialize_source_contract")]
-    pub source_contract: Option<crate::mxc_config_contract::ContractVersion>,
+    pub source_contract: Option<crate::mxc_contract::ContractVersion>,
     /// Whether backends preserve pre-v0.8 network compatibility behavior or
     /// enforce the current strict posture.
     pub network_enforcement_compatibility: NetworkEnforcementCompatibility,
@@ -1150,14 +1150,14 @@ pub enum DefaultEnvCompatibility {
 }
 
 fn serialize_source_contract<S>(
-    value: &Option<crate::mxc_config_contract::ContractVersion>,
+    value: &Option<crate::mxc_contract::ContractVersion>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
     value
-        .map(crate::mxc_config_contract::ContractVersion::as_str)
+        .map(crate::mxc_contract::ContractVersion::as_str)
         .serialize(serializer)
 }
 
@@ -1219,7 +1219,7 @@ impl ExecutionRequest {
     /// external JSON contract attribution.
     pub fn source_contract_version(&self) -> &'static str {
         self.source_contract
-            .map(crate::mxc_config_contract::ContractVersion::as_str)
+            .map(crate::mxc_contract::ContractVersion::as_str)
             .unwrap_or_default()
     }
 

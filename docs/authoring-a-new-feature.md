@@ -110,7 +110,7 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `src/mxc-sdk/src/core/mxc_config_contract/dev/` | Add the field to the authoritative closed mutable development contract |
+| `src/mxc-sdk/src/core/mxc_contract/dev/` | Add the field to the authoritative closed mutable development contract |
 | `src/mxc-sdk/src/core/wxc_common/config_contract_adapters/dev/` | Adapt the exact field into private `CommonRequestIR` |
 | `src/mxc-sdk/src/core/wxc_common/wire.rs` | Add only reusable nested normalization DTOs needed by the adapter; never add a whole-request root |
 | `src/mxc-sdk/src/policy/exact/` | Once the field is in the SDK's published target, update that contract's typed builder (currently `v1_0.rs` for `1.0.0`) |
@@ -129,12 +129,12 @@ when the SDK target advances to a published contract containing that field.
 ## Step 1: Add the field to the development contract and config input
 
 Add the feature to the authoritative closed request types under
-`src/mxc-sdk/src/core/mxc_config_contract/dev/`, then adapt it into the shared internal
+`src/mxc-sdk/src/core/mxc_contract/dev/`, then adapt it into the shared internal
 config input used by semantic normalization.
 The development request and every nested object are recursively closed.
 
 ```rust
-// in mxc_config_contract/src/dev/one_shot.rs
+// in mxc_contract/src/dev/one_shot.rs
 pub struct Request {
     // Existing permanent fields...
     #[serde(default)]

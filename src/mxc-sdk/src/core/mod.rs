@@ -3,7 +3,7 @@
 
 pub mod learning_mode_core;
 pub mod learning_mode_windows;
-pub mod mxc_config_contract;
+pub mod mxc_contract;
 pub mod mxc_engine;
 pub mod mxc_pty;
 pub mod mxc_schema_support;

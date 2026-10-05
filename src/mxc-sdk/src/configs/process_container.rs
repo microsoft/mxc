@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn legacy_process_container_omits_v0_8_defaults() {
-        let contract: crate::mxc_config_contract::published::v0_7_0_alpha::Request =
+        let contract: crate::mxc_contract::published::v0_7_0_alpha::Request =
             serde_json::from_value(serde_json::json!({
                 "version": "0.7.0-alpha",
                 "containment": "processcontainer",

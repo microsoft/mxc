@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_config_contract::published::v1_0_0 as contract;
+use crate::mxc_contract::published::v1_0_0 as contract;
 use crate::wxc_common::config_contract_adapters::v1_0::common::{
     convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
@@ -257,7 +257,7 @@ pub(super) fn into_common_request_ir(
     crate::wxc_common::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
         comment: comment.into_option(),
-        source_contract: crate::mxc_config_contract::ContractVersion::V1_0_0,
+        source_contract: crate::mxc_contract::ContractVersion::V1_0_0,
         default_env_compatibility: crate::wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
         network_enforcement_compatibility:
             crate::wxc_common::models::NetworkEnforcementCompatibility::Strict,

@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use mxc_sdk::mxc_config_contract::{
-    descriptor, supported_versions, ContractDescriptor, ContractVersion,
-};
+use mxc_sdk::mxc_contract::{descriptor, supported_versions, ContractDescriptor, ContractVersion};
 use serde_json::{json, Value};
 
 #[derive(Debug, Parser)]
@@ -66,12 +64,10 @@ fn exact_schema(version: ContractVersion) -> Result<(Value, ContractDescriptor),
 fn renderable_exact_schema(version: ContractVersion) -> Result<Value, String> {
     match version {
         ContractVersion::V0_9_0Alpha => {
-            Ok(mxc_sdk::mxc_config_contract::published::v0_9_0_alpha::published_schema())
+            Ok(mxc_sdk::mxc_contract::published::v0_9_0_alpha::published_schema())
         }
-        ContractVersion::V1_0_0 => {
-            Ok(mxc_sdk::mxc_config_contract::published::v1_0_0::published_schema())
-        }
-        ContractVersion::V1_1_0Alpha => Ok(mxc_sdk::mxc_config_contract::dev::development_schema()),
+        ContractVersion::V1_0_0 => Ok(mxc_sdk::mxc_contract::published::v1_0_0::published_schema()),
+        ContractVersion::V1_1_0Alpha => Ok(mxc_sdk::mxc_contract::dev::development_schema()),
         ContractVersion::V0_6_0Alpha
         | ContractVersion::V0_7_0Alpha
         | ContractVersion::V0_8_0Alpha => Err(format!(

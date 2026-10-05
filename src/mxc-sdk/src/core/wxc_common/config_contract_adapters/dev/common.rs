@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_config_contract::dev as contract;
+use crate::mxc_contract::dev as contract;
 use crate::wxc_common::wire;
 use std::num::NonZeroU16;
 

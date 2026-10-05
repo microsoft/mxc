@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_config_contract::published::v0_6_0_alpha as contract;
+use crate::mxc_contract::published::v0_6_0_alpha as contract;
 use crate::wxc_common::mxc_error::MxcError;
 
 use crate::mxc_engine::configs::{

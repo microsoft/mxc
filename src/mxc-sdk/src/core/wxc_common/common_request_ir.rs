@@ -3,7 +3,7 @@
 
 //! Common request intermediate representation assembled by exact contract adapters.
 
-use crate::mxc_config_contract::ContractVersion;
+use crate::mxc_contract::ContractVersion;
 use crate::wxc_common::models::{DefaultEnvCompatibility, NetworkEnforcementCompatibility};
 use crate::wxc_common::wire;
 

@@ -1046,14 +1046,13 @@ mod tests {
 
     #[test]
     fn exact_contract_bridge_is_available_to_policy_builders() {
-        let request: crate::mxc_config_contract::published::v0_7_0_alpha::Request =
-            serde_json::from_str(
-                r#"{
+        let request: crate::mxc_contract::published::v0_7_0_alpha::Request = serde_json::from_str(
+            r#"{
                     "version": "0.7.0-alpha",
                     "process": {"commandLine": "echo hello"}
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         let mut logger =
             crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
 
@@ -1065,7 +1064,7 @@ mod tests {
 
         assert_eq!(
             execution.source_contract,
-            Some(crate::mxc_config_contract::ContractVersion::V0_7_0Alpha)
+            Some(crate::mxc_contract::ContractVersion::V0_7_0Alpha)
         );
         assert_eq!(
             execution.network_enforcement_compatibility,
@@ -1623,7 +1622,7 @@ mod tests {
     // satisfy.
     #[test]
     fn emitted_capture_denials_json_matches_the_exact_contract() {
-        use crate::mxc_config_contract::dev::{
+        use crate::mxc_contract::dev::{
             CaptureDenials as ContractCaptureDenials,
             CaptureDenialsMode as ContractCaptureDenialsMode,
         };

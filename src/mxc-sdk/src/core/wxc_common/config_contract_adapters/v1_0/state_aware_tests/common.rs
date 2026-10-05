@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_config_contract::published::v1_0_0 as contract;
+use crate::mxc_contract::published::v1_0_0 as contract;
 use crate::wxc_common::config_contract_adapters::v1_0::{adapt_request, AdaptedConfigRequest};
 use crate::wxc_common::state_aware_input::StateAwareInput;
 use crate::wxc_common::state_aware_operation::StateAwareOperation;
@@ -110,7 +110,7 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             assert!(common.network.is_none());
             assert_eq!(
                 common.source_contract,
-                crate::mxc_config_contract::ContractVersion::V1_0_0
+                crate::mxc_contract::ContractVersion::V1_0_0
             );
             if fields.contains("$schema") {
                 assert_eq!(common.schema.as_deref(), Some("https://example.com/schema"));

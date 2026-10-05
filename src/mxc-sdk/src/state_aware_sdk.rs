@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use crate::mxc_config_contract::ContractVersion;
+use crate::mxc_contract::ContractVersion;
 use crate::wxc_common::mxc_error::MxcError;
 use crate::wxc_common::sdk_input::{
     SdkFilesystemInput, SdkNetworkAction, SdkNetworkEgressInput, SdkNetworkIngressInput,

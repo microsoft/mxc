@@ -5,7 +5,7 @@ mod common;
 mod one_shot;
 mod state_aware;
 
-use crate::mxc_config_contract::dev as contract;
+use crate::mxc_contract::dev as contract;
 use crate::wxc_common::error::WxcError;
 use crate::wxc_common::state_aware_input::StateAwareInput;
 
@@ -51,7 +51,7 @@ mod tests {
         };
         assert_eq!(
             common.source_contract,
-            crate::mxc_config_contract::ContractVersion::V1_1_0Alpha
+            crate::mxc_contract::ContractVersion::V1_1_0Alpha
         );
         let process = common.process.unwrap();
         assert_eq!(process.command_line.as_deref(), Some("echo hello"));
@@ -64,7 +64,7 @@ mod tests {
     fn one_shot_preserves_process_container_enumerate_paths() {
         let request = contract::parse_request(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/mxc_config_contract/v1_1_0_alpha/fixtures/one_shot/valid/complete.json"
+            "/tests/mxc_contract/v1_1_0_alpha/fixtures/one_shot/valid/complete.json"
         )))
         .unwrap();
         let AdaptedConfigRequest::OneShot(common) = adapt_request(request).unwrap() else {

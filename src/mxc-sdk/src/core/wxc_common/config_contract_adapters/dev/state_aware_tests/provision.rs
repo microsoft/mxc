@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use super::common::{adapt, assert_clean_common};
-use crate::mxc_config_contract::dev as contract;
+use crate::mxc_contract::dev as contract;
 use crate::wxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::wxc_common::wire;
 
@@ -185,7 +185,7 @@ fn provision_common_fields_are_independent_of_backend_payload() {
             assert_clean_common(&common);
             assert_eq!(
                 common.source_contract,
-                crate::mxc_config_contract::ContractVersion::V1_1_0Alpha
+                crate::mxc_contract::ContractVersion::V1_1_0Alpha
             );
             assert_eq!(operation.phase().as_str(), "provision");
             assert!(operation.sandbox_id().is_none());

@@ -27,7 +27,7 @@ required-features = ["wslc"]
 
 [features]
 default = []
-wslc = ["link-wslcsdk"]
+wslc = ["link-wslcsdk", "dep:tar"]
 link-wslcsdk = []
 isolation_session = []
 test-support = []

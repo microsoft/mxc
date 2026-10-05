@@ -8,7 +8,7 @@ separate:
 
 | Decision | Authority |
 | --- | --- |
-| Which fields and values exist? | The exact Rust contract types and registration in `mxc_config_contract`. Published contracts are immutable; the development contract can evolve. |
+| Which fields and values exist? | The exact Rust contract types and registration in `mxc_contract`. Published contracts are immutable; the development contract can evolve. |
 | Which exact contract does a typed SDK emit? | `sdkMajorTargets` in `schemas/schema-version.json`, checked against the exact Rust registry. Callers select a major-version SDK API, not an exact JSON version. |
 | Which exact contract does raw JSON use? | The caller's declared, registered `version`. A version range or development opt-in cannot authorize another spelling. |
 | Which backend and policy can run? | `mxc_engine` resolves the backend and checks authorization; host capabilities and backend validation determine what can actually be enforced. |
@@ -167,7 +167,7 @@ parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
 The development artifact is generated from the exact
-`mxc_config_contract::dev` model. It describes all eight closed one-shot and
+`mxc_contract::dev` model. It describes all eight closed one-shot and
 state-aware roots, including recursively closed experimental structures. The
 registered Rust types remain the authority for declared `1.1.0-alpha`
 requests; the schema is their derived editor and validation artifact.
@@ -421,7 +421,7 @@ step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
 truth):**
 
 Add the field to the applicable closed request type under
-`src/mxc-sdk/src/core/mxc_config_contract/dev/`, including the backend and phase roots
+`src/mxc-sdk/src/core/mxc_contract/dev/`, including the backend and phase roots
 that admit it.
 
 **In the exact adapter and common request IR:**
@@ -433,7 +433,7 @@ pub(crate) struct CommonRequestIR {
 ```
 
 Edit the authoritative closed mutable contract under
-`src/mxc-sdk/src/core/mxc_config_contract/dev/`, then adapt the exact field into
+`src/mxc-sdk/src/core/mxc_contract/dev/`, then adapt the exact field into
 `CommonRequestIR`. Regenerate the exact schema:
 
 ```text
@@ -518,7 +518,7 @@ Process runs in sandbox
 MXC deliberately keeps three Rust representations rather than sharing one type
 across trust-boundary parsing, common normalization, and backend execution:
 
-- **Exact registered contracts** (`mxc_config_contract`) — version-, phase-, and
+- **Exact registered contracts** (`mxc_contract`) — version-, phase-, and
   backend-specific closed request roots. These are the production JSON
   deserialization boundary and the source for authoritative schemas and
   generated exact TypeScript wire types.

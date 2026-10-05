@@ -1,10 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
-use crate::mxc_config_contract::{
-    probe_version, supported_versions, ContractVersion, VersionProbeError,
-};
+use crate::mxc_contract::dev::{probe_phase, Phase as ContractPhase};
+use crate::mxc_contract::{probe_version, supported_versions, ContractVersion, VersionProbeError};
 use crate::wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext};
 use crate::wxc_common::config_deserialize;
 use crate::wxc_common::encoding::base64_decode;
@@ -116,12 +114,12 @@ pub struct LoadOptions<'a> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExactOneShotContract {
-    V0_6(Box<crate::mxc_config_contract::published::v0_6_0_alpha::Request>),
-    V0_7(Box<crate::mxc_config_contract::published::v0_7_0_alpha::Request>),
-    V0_8(Box<crate::mxc_config_contract::published::v0_8_0_alpha::Request>),
-    V0_9(Box<crate::mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>),
-    V1_0(Box<crate::mxc_config_contract::published::v1_0_0::OneShotRequest>),
-    Dev(Box<crate::mxc_config_contract::dev::OneShotRequest>),
+    V0_6(Box<crate::mxc_contract::published::v0_6_0_alpha::Request>),
+    V0_7(Box<crate::mxc_contract::published::v0_7_0_alpha::Request>),
+    V0_8(Box<crate::mxc_contract::published::v0_8_0_alpha::Request>),
+    V0_9(Box<crate::mxc_contract::published::v0_9_0_alpha::OneShotRequest>),
+    V1_0(Box<crate::mxc_contract::published::v1_0_0::OneShotRequest>),
+    Dev(Box<crate::mxc_contract::dev::OneShotRequest>),
 }
 
 /// Convert a typed exact one-shot contract through its existing adapter and
@@ -144,23 +142,21 @@ pub fn load_one_shot_request_from_contract(
             crate::wxc_common::config_contract_adapters::v0_8::into_common_request_ir(*request)
         }
         ExactOneShotContract::V0_9(request) => {
-            crate::mxc_config_contract::published::v0_9_0_alpha::validate_one_shot_request(
-                &request,
-            )
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+            crate::mxc_contract::published::v0_9_0_alpha::validate_one_shot_request(&request)
+                .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
             crate::wxc_common::config_contract_adapters::v0_9::one_shot_into_common_request_ir(
                 *request,
             )
         }
         ExactOneShotContract::V1_0(request) => {
-            crate::mxc_config_contract::published::v1_0_0::validate_one_shot_request(&request)
+            crate::mxc_contract::published::v1_0_0::validate_one_shot_request(&request)
                 .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
             crate::wxc_common::config_contract_adapters::v1_0::one_shot_into_common_request_ir(
                 *request,
             )
         }
         ExactOneShotContract::Dev(request) => {
-            crate::mxc_config_contract::dev::validate_one_shot_request(&request)
+            crate::mxc_contract::dev::validate_one_shot_request(&request)
                 .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
             crate::wxc_common::config_contract_adapters::dev::one_shot_into_common_request_ir(
                 *request,
@@ -214,26 +210,24 @@ where
         .map_err(ParseError::OneShot)
 }
 
-fn exact_phase_error(error: crate::mxc_config_contract::dev::PhaseProbeError) -> ParseError {
+fn exact_phase_error(error: crate::mxc_contract::dev::PhaseProbeError) -> ParseError {
     let message = match error {
-        crate::mxc_config_contract::dev::PhaseProbeError::InvalidDeclaration(source) => {
+        crate::mxc_contract::dev::PhaseProbeError::InvalidDeclaration(source) => {
             format!("Invalid phase declaration: {source}")
         }
-        crate::mxc_config_contract::dev::PhaseProbeError::UnsupportedPhase(_) => {
+        crate::mxc_contract::dev::PhaseProbeError::UnsupportedPhase(_) => {
             "Unsupported phase".to_string()
         }
     };
     ParseError::StateAware(MxcError::malformed_request(message))
 }
 
-fn exact_containment_error(
-    error: crate::mxc_config_contract::dev::ContainmentProbeError,
-) -> ParseError {
+fn exact_containment_error(error: crate::mxc_contract::dev::ContainmentProbeError) -> ParseError {
     let message = match error {
-        crate::mxc_config_contract::dev::ContainmentProbeError::InvalidDeclaration(source) => {
+        crate::mxc_contract::dev::ContainmentProbeError::InvalidDeclaration(source) => {
             format!("Invalid provision containment declaration: {source}")
         }
-        crate::mxc_config_contract::dev::ContainmentProbeError::UnsupportedContainment(_) => {
+        crate::mxc_contract::dev::ContainmentProbeError::UnsupportedContainment(_) => {
             "Unsupported containment for provision phase".to_string()
         }
     };
@@ -319,13 +313,13 @@ where
 }
 
 fn v0_9_phase_error(
-    error: crate::mxc_config_contract::published::v0_9_0_alpha::PhaseProbeError,
+    error: crate::mxc_contract::published::v0_9_0_alpha::PhaseProbeError,
 ) -> ParseError {
     let message = match error {
-        crate::mxc_config_contract::published::v0_9_0_alpha::PhaseProbeError::InvalidDeclaration(
+        crate::mxc_contract::published::v0_9_0_alpha::PhaseProbeError::InvalidDeclaration(
             source,
         ) => format!("Invalid phase declaration: {source}"),
-        crate::mxc_config_contract::published::v0_9_0_alpha::PhaseProbeError::UnsupportedPhase(_) => {
+        crate::mxc_contract::published::v0_9_0_alpha::PhaseProbeError::UnsupportedPhase(_) => {
             "Unsupported phase".to_string()
         }
     };
@@ -333,13 +327,13 @@ fn v0_9_phase_error(
 }
 
 fn v0_9_containment_error(
-    error: crate::mxc_config_contract::published::v0_9_0_alpha::ContainmentProbeError,
+    error: crate::mxc_contract::published::v0_9_0_alpha::ContainmentProbeError,
 ) -> ParseError {
     let message = match error {
-        crate::mxc_config_contract::published::v0_9_0_alpha::ContainmentProbeError::InvalidDeclaration(
+        crate::mxc_contract::published::v0_9_0_alpha::ContainmentProbeError::InvalidDeclaration(
             source,
         ) => format!("Invalid provision containment declaration: {source}"),
-        crate::mxc_config_contract::published::v0_9_0_alpha::ContainmentProbeError::UnsupportedContainment(
+        crate::mxc_contract::published::v0_9_0_alpha::ContainmentProbeError::UnsupportedContainment(
             _,
         ) => "Unsupported containment for provision phase".to_string(),
     };
@@ -348,9 +342,9 @@ fn v0_9_containment_error(
 
 fn deserialize_v0_9_request(
     json: &str,
-    phase: Option<crate::mxc_config_contract::published::v0_9_0_alpha::Phase>,
-) -> Result<crate::mxc_config_contract::published::v0_9_0_alpha::Request, ParseError> {
-    use crate::mxc_config_contract::published::v0_9_0_alpha::{
+    phase: Option<crate::mxc_contract::published::v0_9_0_alpha::Phase>,
+) -> Result<crate::mxc_contract::published::v0_9_0_alpha::Request, ParseError> {
+    use crate::mxc_contract::published::v0_9_0_alpha::{
         self as contract, Containment, Phase, ProvisionRequest, Request,
     };
 
@@ -391,7 +385,7 @@ fn deserialize_v0_9_request(
 }
 
 fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
-    let phase = crate::mxc_config_contract::published::v0_9_0_alpha::probe_phase(json)
+    let phase = crate::mxc_contract::published::v0_9_0_alpha::probe_phase(json)
         .map_err(v0_9_phase_error)?;
     let request = deserialize_v0_9_request(json, phase)?;
     let adapted = crate::wxc_common::config_contract_adapters::v0_9::adapt_request(request)
@@ -413,16 +407,12 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
     }
 }
 
-fn v1_0_phase_error(
-    error: crate::mxc_config_contract::published::v1_0_0::PhaseProbeError,
-) -> ParseError {
+fn v1_0_phase_error(error: crate::mxc_contract::published::v1_0_0::PhaseProbeError) -> ParseError {
     let message = match error {
-        crate::mxc_config_contract::published::v1_0_0::PhaseProbeError::InvalidDeclaration(
-            source,
-        ) => {
+        crate::mxc_contract::published::v1_0_0::PhaseProbeError::InvalidDeclaration(source) => {
             format!("Invalid phase declaration: {source}")
         }
-        crate::mxc_config_contract::published::v1_0_0::PhaseProbeError::UnsupportedPhase(_) => {
+        crate::mxc_contract::published::v1_0_0::PhaseProbeError::UnsupportedPhase(_) => {
             "Unsupported phase".to_string()
         }
     };
@@ -430,13 +420,13 @@ fn v1_0_phase_error(
 }
 
 fn v1_0_containment_error(
-    error: crate::mxc_config_contract::published::v1_0_0::ContainmentProbeError,
+    error: crate::mxc_contract::published::v1_0_0::ContainmentProbeError,
 ) -> ParseError {
     let message = match error {
-        crate::mxc_config_contract::published::v1_0_0::ContainmentProbeError::InvalidDeclaration(
+        crate::mxc_contract::published::v1_0_0::ContainmentProbeError::InvalidDeclaration(
             source,
         ) => format!("Invalid provision containment declaration: {source}"),
-        crate::mxc_config_contract::published::v1_0_0::ContainmentProbeError::UnsupportedContainment(
+        crate::mxc_contract::published::v1_0_0::ContainmentProbeError::UnsupportedContainment(
             _,
         ) => "Unsupported containment for provision phase".to_string(),
     };
@@ -445,9 +435,9 @@ fn v1_0_containment_error(
 
 fn deserialize_v1_0_request(
     json: &str,
-    phase: Option<crate::mxc_config_contract::published::v1_0_0::Phase>,
-) -> Result<crate::mxc_config_contract::published::v1_0_0::Request, ParseError> {
-    use crate::mxc_config_contract::published::v1_0_0::{
+    phase: Option<crate::mxc_contract::published::v1_0_0::Phase>,
+) -> Result<crate::mxc_contract::published::v1_0_0::Request, ParseError> {
+    use crate::mxc_contract::published::v1_0_0::{
         self as contract, Containment, Phase, ProvisionRequest, Request,
     };
 
@@ -488,8 +478,8 @@ fn deserialize_v1_0_request(
 }
 
 fn parse_exact_v1_0(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
-    let phase = crate::mxc_config_contract::published::v1_0_0::probe_phase(json)
-        .map_err(v1_0_phase_error)?;
+    let phase =
+        crate::mxc_contract::published::v1_0_0::probe_phase(json).map_err(v1_0_phase_error)?;
     let request = deserialize_v1_0_request(json, phase)?;
     let adapted = crate::wxc_common::config_contract_adapters::v1_0::adapt_request(request)
         .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
@@ -512,13 +502,13 @@ fn parse_exact_v1_0(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
 
 fn deserialize_development_request(
     json: &str,
-    phase: Option<crate::mxc_config_contract::dev::Phase>,
-) -> Result<crate::mxc_config_contract::dev::Request, ParseError> {
-    use crate::mxc_config_contract::dev::{self, Containment, Phase, ProvisionRequest, Request};
+    phase: Option<crate::mxc_contract::dev::Phase>,
+) -> Result<crate::mxc_contract::dev::Request, ParseError> {
+    use crate::mxc_contract::dev::{self, Containment, Phase, ProvisionRequest, Request};
 
     match phase {
         None => {
-            let request: crate::mxc_config_contract::dev::OneShotRequest =
+            let request: crate::mxc_contract::dev::OneShotRequest =
                 deserialize_development_root(json, "one-shot", "1.1", false)?;
             dev::validate_one_shot_request(&request)
                 .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
@@ -557,7 +547,7 @@ fn deserialize_development_request(
 }
 
 fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
-    let phase = crate::mxc_config_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
+    let phase = crate::mxc_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
     let request = deserialize_development_request(json, phase)?;
     let adapted = crate::wxc_common::config_contract_adapters::dev::adapt_request(request)
         .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
@@ -840,40 +830,33 @@ fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<Stri
     };
     let phase = match version {
         ContractVersion::V0_9_0Alpha => {
-            let Ok(phase) = crate::mxc_config_contract::published::v0_9_0_alpha::probe_phase(json)
-            else {
+            let Ok(phase) = crate::mxc_contract::published::v0_9_0_alpha::probe_phase(json) else {
                 return Ok((json.to_string(), None));
             };
             phase.map(|phase| match phase {
-                crate::mxc_config_contract::published::v0_9_0_alpha::Phase::Provision => {
+                crate::mxc_contract::published::v0_9_0_alpha::Phase::Provision => {
                     ContractPhase::Provision
                 }
-                crate::mxc_config_contract::published::v0_9_0_alpha::Phase::Start => {
-                    ContractPhase::Start
-                }
-                crate::mxc_config_contract::published::v0_9_0_alpha::Phase::Exec => {
-                    ContractPhase::Exec
-                }
-                crate::mxc_config_contract::published::v0_9_0_alpha::Phase::Stop => {
-                    ContractPhase::Stop
-                }
-                crate::mxc_config_contract::published::v0_9_0_alpha::Phase::Deprovision => {
+                crate::mxc_contract::published::v0_9_0_alpha::Phase::Start => ContractPhase::Start,
+                crate::mxc_contract::published::v0_9_0_alpha::Phase::Exec => ContractPhase::Exec,
+                crate::mxc_contract::published::v0_9_0_alpha::Phase::Stop => ContractPhase::Stop,
+                crate::mxc_contract::published::v0_9_0_alpha::Phase::Deprovision => {
                     ContractPhase::Deprovision
                 }
             })
         }
         ContractVersion::V1_0_0 => {
-            let Ok(phase) = crate::mxc_config_contract::published::v1_0_0::probe_phase(json) else {
+            let Ok(phase) = crate::mxc_contract::published::v1_0_0::probe_phase(json) else {
                 return Ok((json.to_string(), None));
             };
             phase.map(|phase| match phase {
-                crate::mxc_config_contract::published::v1_0_0::Phase::Provision => {
+                crate::mxc_contract::published::v1_0_0::Phase::Provision => {
                     ContractPhase::Provision
                 }
-                crate::mxc_config_contract::published::v1_0_0::Phase::Start => ContractPhase::Start,
-                crate::mxc_config_contract::published::v1_0_0::Phase::Exec => ContractPhase::Exec,
-                crate::mxc_config_contract::published::v1_0_0::Phase::Stop => ContractPhase::Stop,
-                crate::mxc_config_contract::published::v1_0_0::Phase::Deprovision => {
+                crate::mxc_contract::published::v1_0_0::Phase::Start => ContractPhase::Start,
+                crate::mxc_contract::published::v1_0_0::Phase::Exec => ContractPhase::Exec,
+                crate::mxc_contract::published::v1_0_0::Phase::Stop => ContractPhase::Stop,
+                crate::mxc_contract::published::v1_0_0::Phase::Deprovision => {
                     ContractPhase::Deprovision
                 }
             })
@@ -3185,78 +3168,73 @@ mod tests {
 
     #[test]
     fn exact_contract_bridge_accepts_every_registered_one_shot_version() {
-        let v0_6 =
-            serde_json::from_str::<crate::mxc_config_contract::published::v0_6_0_alpha::Request>(
-                r#"{
+        let v0_6 = serde_json::from_str::<crate::mxc_contract::published::v0_6_0_alpha::Request>(
+            r#"{
                     "version": "0.6.0-alpha",
                     "process": {"commandLine": "echo hello"}
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_exact_contract_bridge(
             ExactOneShotContract::V0_6(Box::new(v0_6)),
             ContractVersion::V0_6_0Alpha,
             crate::wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible,
         );
 
-        let v0_7 =
-            serde_json::from_str::<crate::mxc_config_contract::published::v0_7_0_alpha::Request>(
-                r#"{
+        let v0_7 = serde_json::from_str::<crate::mxc_contract::published::v0_7_0_alpha::Request>(
+            r#"{
                     "version": "0.7.0-alpha",
                     "process": {"commandLine": "echo hello"}
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_exact_contract_bridge(
             ExactOneShotContract::V0_7(Box::new(v0_7)),
             ContractVersion::V0_7_0Alpha,
             crate::wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible,
         );
 
-        let v0_8 =
-            serde_json::from_str::<crate::mxc_config_contract::published::v0_8_0_alpha::Request>(
-                r#"{
+        let v0_8 = serde_json::from_str::<crate::mxc_contract::published::v0_8_0_alpha::Request>(
+            r#"{
                     "version": "0.8.0-alpha",
                     "process": {"commandLine": "echo hello"}
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_exact_contract_bridge(
             ExactOneShotContract::V0_8(Box::new(v0_8)),
             ContractVersion::V0_8_0Alpha,
             crate::wxc_common::models::NetworkEnforcementCompatibility::Strict,
         );
 
-        let v0_9 = serde_json::from_str::<
-            crate::mxc_config_contract::published::v0_9_0_alpha::OneShotRequest,
-        >(
-            r#"{
+        let v0_9 =
+            serde_json::from_str::<crate::mxc_contract::published::v0_9_0_alpha::OneShotRequest>(
+                r#"{
                 "version": "0.9.0-alpha",
                 "process": {"commandLine": "echo hello"}
             }"#,
-        )
-        .unwrap();
+            )
+            .unwrap();
         assert_exact_contract_bridge(
             ExactOneShotContract::V0_9(Box::new(v0_9)),
             ContractVersion::V0_9_0Alpha,
             crate::wxc_common::models::NetworkEnforcementCompatibility::Strict,
         );
 
-        let v1_0 =
-            serde_json::from_str::<crate::mxc_config_contract::published::v1_0_0::OneShotRequest>(
-                r#"{
+        let v1_0 = serde_json::from_str::<crate::mxc_contract::published::v1_0_0::OneShotRequest>(
+            r#"{
                 "version": "1.0.0",
                 "process": {"commandLine": "echo hello"}
             }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_exact_contract_bridge(
             ExactOneShotContract::V1_0(Box::new(v1_0)),
             ContractVersion::V1_0_0,
             crate::wxc_common::models::NetworkEnforcementCompatibility::Strict,
         );
 
-        let dev = serde_json::from_str::<crate::mxc_config_contract::dev::OneShotRequest>(
+        let dev = serde_json::from_str::<crate::mxc_contract::dev::OneShotRequest>(
             r#"{
                 "version": "1.1.0-alpha",
                 "process": {"commandLine": "echo hello"}
@@ -3273,7 +3251,7 @@ mod tests {
     #[test]
     fn exact_contract_bridge_runs_shared_semantic_validation() {
         let request =
-            serde_json::from_str::<crate::mxc_config_contract::published::v0_7_0_alpha::Request>(
+            serde_json::from_str::<crate::mxc_contract::published::v0_7_0_alpha::Request>(
                 r#"{
                     "version": "0.7.0-alpha",
                     "containment": "processcontainer",
@@ -3306,7 +3284,7 @@ mod tests {
 
     #[test]
     fn exact_development_contract_bridge_requires_isolation_session_network() {
-        let request = serde_json::from_str::<crate::mxc_config_contract::dev::OneShotRequest>(
+        let request = serde_json::from_str::<crate::mxc_contract::dev::OneShotRequest>(
             r#"{
                 "version": "1.1.0-alpha",
                 "containment": "isolation_session",

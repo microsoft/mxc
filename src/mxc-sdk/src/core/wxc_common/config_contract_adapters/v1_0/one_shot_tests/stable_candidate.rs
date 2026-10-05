@@ -314,7 +314,7 @@ fn minimal_request_maps_expected_wire_fields() {
     assert!(wire.comment.is_none());
     assert_eq!(
         wire.source_contract,
-        crate::mxc_config_contract::ContractVersion::V1_0_0
+        crate::mxc_contract::ContractVersion::V1_0_0
     );
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
@@ -350,7 +350,7 @@ fn process_container_request_maps_expected_wire_fields() {
     assert!(wire.comment.is_none());
     assert_eq!(
         wire.source_contract,
-        crate::mxc_config_contract::ContractVersion::V1_0_0
+        crate::mxc_contract::ContractVersion::V1_0_0
     );
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
@@ -452,7 +452,7 @@ fn lxc_request_maps_expected_wire_fields() {
     assert!(wire.comment.is_none());
     assert_eq!(
         wire.source_contract,
-        crate::mxc_config_contract::ContractVersion::V1_0_0
+        crate::mxc_contract::ContractVersion::V1_0_0
     );
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
@@ -525,7 +525,7 @@ fn seatbelt_request_maps_expected_wire_fields() {
     assert!(wire.comment.is_none());
     assert_eq!(
         wire.source_contract,
-        crate::mxc_config_contract::ContractVersion::V1_0_0
+        crate::mxc_contract::ContractVersion::V1_0_0
     );
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
