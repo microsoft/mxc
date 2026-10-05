@@ -13,7 +13,19 @@ over conflicting historical SDK statements in that earlier phase plan.
 The current state of each pull request is recorded in
 [`version-aware-stack-session-handoff-2026-09-30.md`](version-aware-stack-session-handoff-2026-09-30.md).
 
-Updated: October 2, 2026.
+Updated: October 5, 2026.
+
+**October 5, 2026 raw SDK API decisions:** The
+[`SDK API completion plan`](sdk-api-completion-plan.md) records the later
+public raw API direction. It supersedes the package-root placement of raw
+functions in sections 4.6, 6, and 7.4 with `v1.dev` in Rust, .NET, and Node.
+It also stages an initial implementation on the existing FFI, with its
+documented lossy Node/.NET captured text, before the byte-preserving capture
+end state in section 7.6. The six execution modes, raw lifecycle access,
+caller-authored exact documents, separate experimental authorization, and
+explicit unsupported-mode rejection remain requirements. Whether the
+initial milestone satisfies any stable-v1 release gate remains undecided;
+do not treat the staged output limitation as completion of section 8.1.
 
 ## 1. Decision
 
