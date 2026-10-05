@@ -496,6 +496,14 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
   });
 
   describe('supported runtime proxy', () => {
+    it('rejects the retired testing-feature option at compile time', () => {
+      const invalid = () => {
+        // @ts-expect-error The helper no longer accepts the retired testing-only switch.
+        resolveExecutableAndArgs(makeConfig('process'), { allowTestingFeatures: true });
+      };
+      assert.strictEqual(typeof invalid, 'function');
+    });
+
     it('does not forward a testing-only flag for a caller-supplied endpoint', () => {
       const config: ContainerConfig = {
         version: '0.9.0-alpha',

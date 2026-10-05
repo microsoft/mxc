@@ -21,7 +21,6 @@ import { mxcErrorFromCode } from './v1/errors.js';
 interface SandboxSpawnOptions {
   debug?: boolean;
   experimental?: boolean;
-  allowTestingFeatures?: boolean;
   executablePath?: string;
   skipPlatformCheck?: boolean;
   dryRun?: boolean;

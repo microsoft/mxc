@@ -7,7 +7,6 @@ For a more comprehensive list of examples, see
 ```json
 {
   "version": "1.0.0",
-  "containerId": "CLI-HelloWorld",
   "containment": "processcontainer",
   "process": {
     "commandLine": "python -c \"import sys; print('Hello from MXC!'); print(sys.version)\""
@@ -19,7 +18,6 @@ For a more comprehensive list of examples, see
 ```json
 {
   "version": "1.0.0",
-  "containerId": "CLI-Filesystem-Test",
   "containment": "processcontainer",
   "process": {
     "commandLine": "python -c \"open('C:\\\\temp\\\\output.txt', 'w').write('test')\""
@@ -42,7 +40,6 @@ writable directory.
 ```json
 {
   "version": "1.0.0",
-  "containerId": "CLI-Network-Test",
   "containment": "processcontainer",
   "process": {
     "commandLine": "python -c \"import socket; socket.create_connection(('140.82.114.6', 443), timeout=5).close(); print('Allowed destination reached')\"",
@@ -134,8 +131,9 @@ the development/testing configuration is:
 }
 ```
 
-This identity-less host-loopback deployment cannot pin the proxy process's
-identity and requires native PSEC 1.1 ingress/host-loopback support; unsupported
+This identity-less host-loopback deployment restricts client egress to the
+configured proxy address and port, but does not verify which process owns that
+endpoint. It requires native PSEC 1.1 ingress/host-loopback support; unsupported
 hosts reject the request. For production ProcessContainer deployments, identify
 a packaged proxy through `processContainer.network.allowedProxyPeer` instead; see
 [proxy deployment choices](process-container/networking.md#proxy-deployment-choices).
