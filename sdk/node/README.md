@@ -75,22 +75,18 @@ configuration.
 When UI settings are supplied, `ui.disable` explicitly controls whether UI is
 disabled; clipboard and input-injection permissions remain separate.
 
-## Spawn with an IsolationSession terminal
+## Spawn with a terminal
 
-PTY execution is available only for IsolationSession on a supported Windows
-host. IsolationSession requires explicit unrestricted networking because it
-cannot enforce network restrictions.
+PTY execution is available for ProcessContainer and IsolationSession on
+supported Windows hosts. ProcessContainer launches the bundled `wxc-exec.exe`
+through `node-pty`; IsolationSession uses the native in-process PTY binding.
 
 ```typescript
 import { spawnWithPty } from '@microsoft/mxc-sdk/v1';
 
 const terminal = await spawnWithPty({
-  containment: { type: 'isolation_session' },
+  containment: { type: 'processcontainer' },
   command: 'cmd.exe',
-  network: {
-    egress: { default: 'allow' },
-    ingress: { default: 'allow', hostLoopback: 'allow' },
-  },
   timeoutMs: 30_000,
 }, { size: { rows: 24, columns: 80 } });
 try {
@@ -104,6 +100,11 @@ try {
 
 `spawnWithPty` returns a `Promise<MxcPtyProcess>` with merged terminal output
 and resizing support. Initial dimensions default to 24 rows by 80 columns.
+ProcessContainer uses the same exact V1 request generated for in-process SDK
+execution. IsolationSession still requires explicit unrestricted networking
+because it cannot enforce network restrictions.
+For ProcessContainer, `node-pty` does not expose a separate input-close
+operation; send the terminal's exit or EOF sequence before ending `input`.
 
 ## Lifecycle API
 

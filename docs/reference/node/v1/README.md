@@ -8,4 +8,8 @@ Discovery, probes, telemetry, and policy helpers use the same versioned boundary
 - [Types and fields](types.md)
 - [Cross-SDK requirements](../../README.md)
 
-Request data and operation controls are separate. Initial PTY size belongs to the corresponding PTY options; runtime resize remains a process-handle operation. Backend policy enforcement and support checks remain native.
+Request data and operation controls are separate. Initial PTY size belongs to
+the corresponding PTY options; runtime resize remains a process-handle
+operation. ProcessContainer one-shot PTY execution launches `wxc-exec.exe`
+through `node-pty`; IsolationSession PTY execution remains in-process. Backend
+policy enforcement and support checks remain native.

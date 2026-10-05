@@ -25,6 +25,7 @@ import {
   spawnBindingSandboxProcessSync,
 } from '../bindings/streaming.js';
 import { spawnBindingSandboxWithPty } from '../bindings/pty.js';
+import { spawnProcessContainerWithPty } from '../bindings/process-container-pty.js';
 import type { MxcPtyProcess } from './mxc-pty-process.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
 import type { RunOptions, SpawnOptions, SpawnWithPtyOptions } from './operation-options.js';
@@ -467,8 +468,12 @@ export function spawnWithPty(
       'PTY rows and columns must be integers between 1 and 32767',
     );
   }
-  return spawnBindingSandboxWithPty(
-    prepareContainerRequest(request, options.telemetry),
+  const preparedRequest = prepareContainerRequest(request, options.telemetry);
+  const spawnPty = preparedRequest.containment === 'processcontainer'
+    ? spawnProcessContainerWithPty
+    : spawnBindingSandboxWithPty;
+  return spawnPty(
+    preparedRequest,
     options.experimental === true,
     size.rows,
     size.columns,

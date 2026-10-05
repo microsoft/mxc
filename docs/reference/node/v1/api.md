@@ -15,7 +15,8 @@ Callers do not supply JSON or a schema version.
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
-and operation options. PTY operations are asynchronous and IsolationSession-only.
+and operation options. One-shot PTY creation supports ProcessContainer and
+IsolationSession; existing-container PTY execution is IsolationSession-only.
 Terminal handles give the caller explicit input, output, resize, and process
 ownership; there is no separate attached-console or raw-JSON launch API.
 
@@ -225,6 +226,10 @@ export function spawnInContainerWithPty<C extends LifecycleContainmentKind>(cont
 ## `@microsoft/mxc-sdk/v1::spawnWithPty`
 
 Create a container request attached to an MXC-owned pseudo-terminal.
+ProcessContainer launches `wxc-exec.exe` through `node-pty`; IsolationSession
+uses the native in-process PTY binding. ProcessContainer callers send the
+terminal's exit or EOF sequence before ending the input stream because
+`node-pty` does not expose a separate input-close operation.
 
 ```typescript
 export function spawnWithPty(request: ContainerRequest, options: SpawnWithPtyOptions = {}): Promise<MxcPtyProcess>;

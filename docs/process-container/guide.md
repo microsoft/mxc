@@ -37,6 +37,17 @@ The PSEC FlatBuffer is the contract between MXC and the OS process security
 environment. New features must flow from the versioned config contract into the
 runtime model and then into that FlatBuffer.
 
+### Node SDK PTY execution
+
+The Node V1 `spawnWithPty` API supports ProcessContainer by converting the
+typed request to the SDK-owned exact one-shot JSON contract and passing it to
+`wxc-exec.exe --config-base64`. The executor runs under `node-pty`, and
+`MxcPtyProcess` delegates terminal input, merged output, resize, kill, and exit
+handling to that PTY. Policy parsing, backend selection, and enforcement remain
+owned by `wxc-exec` and `mxc_engine`. Since `node-pty` does not expose a
+separate input-close operation, callers send the terminal's exit or EOF
+sequence before ending the input stream.
+
 ## Step-by-step
 
 ### 1. Update the OS PSEC schema and implementation

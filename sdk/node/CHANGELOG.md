@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `spawnWithPty` supports ProcessContainer by launching `wxc-exec.exe` through
+  `node-pty` with the SDK-owned exact V1 request.
+
 ### Changed
 
 - Public operations, request/result types, discovery, and telemetry are
