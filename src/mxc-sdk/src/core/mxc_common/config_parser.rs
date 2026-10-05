@@ -623,8 +623,8 @@ pub fn load_mxc_request_with_options(
 /// This loader enforces exact registered contracts. No alternate whole-request
 /// raw-JSON loader is available:
 ///
-/// ```compile_fail
-/// use mxc_common::config_parser::load_request_from_json;
+/// ```compile_fail,E0432
+/// use mxc_sdk::mxc_common::config_parser::load_request_from_json;
 /// ```
 pub fn load_mxc_request_from_json(
     json_str: &str,

@@ -81,9 +81,20 @@ jobs:
       # package. The consolidated SDK module holds the LXC-gated unit tests.
       - name: Test lxc_common module
         working-directory: src
+        shell: bash
         run: |
-          cargo test --locked --release --target ${{ matrix.target }} \
-            -p mxc-sdk --lib 'lxc_common::'
+          set -uo pipefail
+          log="$(mktemp)"
+          cargo test --locked --release --target "${{ matrix.target }}" \
+            -p mxc-sdk --lib 'backend_modules::lxc::common::' 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+            echo "::error::LXC module filter ran no tests."
+            exit 1
+          fi
 
       # Bubblewrap is required to run the executor characterization tests in
       # mxc-sdk (they skip via has_bwrap() when it is absent). lxc-exec always
@@ -156,6 +167,11 @@ jobs:
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test wxc_e2e_tests_e2e_bubblewrap_characterization
+
+      - name: Test MicroVM executor characterization
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --test wxc_e2e_tests_e2e_linux_microvm
              
       # PLM (Permissive Learning Mode) is functionally Windows-only, but the
       # crate builds cross-platform: the lib's helper modules compile on every

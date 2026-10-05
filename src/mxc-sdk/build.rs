@@ -12,6 +12,7 @@ mod build_mxc_common;
 mod build_mxc_telemetry;
 #[path = "build/build_nanvix_binaries.rs"]
 mod build_nanvix_binaries;
+#[cfg(feature = "link-wslcsdk")]
 #[path = "build/build_wslc_common.rs"]
 mod build_wslc_common;
 // The SDK build uses the download/cache subset. Executor build scripts include
@@ -31,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some((bin_dir, use_prefetched_binaries)) = build_nanvix_binaries::run() {
         nanvix_build_common::stage_artifacts_next_to_exe(&bin_dir, !use_prefetched_binaries);
     }
+    #[cfg(feature = "link-wslcsdk")]
     build_wslc_common::run();
     build_mxc_common::run()?;
     build_mxc_build_common::embed_version_info_for_binary(

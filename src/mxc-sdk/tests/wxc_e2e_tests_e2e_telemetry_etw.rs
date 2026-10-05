@@ -141,7 +141,7 @@ fn build_instrumented_wxc_exec() -> PathBuf {
             // observable to the child; without it the consent store is the real
             // per-user one and this test would mutate developer state.
             "--features",
-            "mxc_common/test-support",
+            "test-support",
             "--target-dir",
         ])
         .arg(&target_dir)

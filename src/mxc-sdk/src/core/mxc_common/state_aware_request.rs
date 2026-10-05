@@ -55,8 +55,8 @@ impl From<crate::mxc_common::wire::Phase> for Phase {
 ///
 /// Backend configuration cannot be deserialized from a normalized request:
 ///
-/// ```compile_fail
-/// use crate::mxc_common::state_aware_request::ParsedStateAwareRequest;
+/// ```compile_fail,E0599
+/// use mxc_sdk::mxc_common::state_aware_request::ParsedStateAwareRequest;
 /// fn reparse(request: &ParsedStateAwareRequest) {
 ///     let _ = request.deserialize_config::<()>("wslc", "provision");
 /// }
@@ -64,15 +64,15 @@ impl From<crate::mxc_common::wire::Phase> for Phase {
 ///
 /// Successful requests expose neither raw backend JSON nor retained source:
 ///
-/// ```compile_fail
-/// use crate::mxc_common::state_aware_request::ParsedStateAwareRequest;
+/// ```compile_fail,E0609
+/// use mxc_sdk::mxc_common::state_aware_request::ParsedStateAwareRequest;
 /// fn raw_payload(request: &ParsedStateAwareRequest) {
 ///     let _ = &request.experimental_raw;
 /// }
 /// ```
 ///
-/// ```compile_fail
-/// use crate::mxc_common::state_aware_request::ParsedStateAwareRequest;
+/// ```compile_fail,E0609
+/// use mxc_sdk::mxc_common::state_aware_request::ParsedStateAwareRequest;
 /// fn source(request: &ParsedStateAwareRequest) {
 ///     let _ = &request.source_text;
 /// }
@@ -80,10 +80,10 @@ impl From<crate::mxc_common::wire::Phase> for Phase {
 ///
 /// Construction is reserved for checked normalization, not public callers:
 ///
-/// ```compile_fail
-/// use crate::mxc_common::models::ExecutionRequest;
-/// use crate::mxc_common::state_aware_operation::StateAwareOperation;
-/// use crate::mxc_common::state_aware_request::ParsedStateAwareRequest;
+/// ```compile_fail,E0624
+/// use mxc_sdk::mxc_common::models::ExecutionRequest;
+/// use mxc_sdk::mxc_common::state_aware_operation::StateAwareOperation;
+/// use mxc_sdk::mxc_common::state_aware_request::ParsedStateAwareRequest;
 /// let _ = ParsedStateAwareRequest::new(
 ///     ExecutionRequest::default(),
 ///     StateAwareOperation::Start { sandbox_id: "iso:example".into() },
@@ -92,10 +92,10 @@ impl From<crate::mxc_common::wire::Phase> for Phase {
 ///
 /// A caller cannot construct independent phase and payload authorities:
 ///
-/// ```compile_fail
-/// use crate::mxc_common::models::ExecutionRequest;
-/// use crate::mxc_common::state_aware_operation::StateAwareOperation;
-/// use crate::mxc_common::state_aware_request::{ParsedStateAwareRequest, Phase};
+/// ```compile_fail,E0560
+/// use mxc_sdk::mxc_common::models::ExecutionRequest;
+/// use mxc_sdk::mxc_common::state_aware_operation::StateAwareOperation;
+/// use mxc_sdk::mxc_common::state_aware_request::{ParsedStateAwareRequest, Phase};
 /// let _ = ParsedStateAwareRequest {
 ///     request: ExecutionRequest::default(),
 ///     phase: Phase::Exec,

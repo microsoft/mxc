@@ -28,9 +28,9 @@ required-features = ["wslc"]
 
 [features]
 default = []
-wslc = ["link-wslcsdk", "dep:tar"]
-link-wslcsdk = []
-isolation_session = []
+wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
+link-wslcsdk = ["dep:zip"]
+isolation_session = ["dep:windows-collections", "dep:windows-future"]
 test-support = []
 microvm = []
 hyperlight = [
@@ -51,7 +51,7 @@ cidr.workspace = true
 flatbuffers.workspace = true
 getrandom.workspace = true
 libc.workspace = true
-libloading = "0.8"
+libloading = { version = "0.8", optional = true }
 nix.workspace = true
 same-file.workspace = true
 schemars = { workspace = true, optional = true }
@@ -74,7 +74,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
 filetime = "0.2"
@@ -98,9 +98,9 @@ windows = { workspace = true, features = [
     "Win32_Security_WinTrust",
     "Win32_System_EventLog",
 ] }
-windows-collections = "0.3"
+windows-collections = { version = "0.3", optional = true }
 windows-core.workspace = true
-windows-future = "0.3"
+windows-future = { version = "0.3", optional = true }
 winreg.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]

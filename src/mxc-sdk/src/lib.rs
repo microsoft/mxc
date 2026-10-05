@@ -134,8 +134,8 @@
 //! ## Internal module boundaries
 //!
 //! This crate root is the curated public facade. Backend dispatch, host
-//! probing, execution, and backend implementations are private modules of the
-//! published `mxc-sdk` crate.
+//! probing, execution, and backend implementations are doc-hidden compatibility
+//! exports for workspace consumers rather than supported SDK entry points.
 
 #[path = "backends/mod.rs"]
 mod backend_modules;
