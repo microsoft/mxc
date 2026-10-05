@@ -370,15 +370,21 @@ fn probe_globalatoms(args: &ProbeArgs) {
     }
 }
 
-/// Puts `CF_UNICODETEXT` on whatever clipboard the *calling* process sees.
+/// Puts `CF_UNICODETEXT` on whatever clipboard the *calling* process sees and
+/// returns the owner window, which the caller must keep alive until it has read
+/// the data back and then destroy.
 ///
 /// The clipboard is per-window-station, so a seed placed by the harness is not
 /// necessarily on the one a contained process reads. Seeding from inside is the
 /// only way to guarantee the format is present on the clipboard under test.
 ///
+/// The owner outlives the seed deliberately: this process pumps no messages, so
+/// destroying it early leaves `WM_RENDERALLFORMATS` unhandled and the data can
+/// go unreadable while the format list still advertises it.
+///
 /// This travels the write path, so `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` blocks
 /// it; callers report that rather than treating it as fatal.
-fn seed_unicode_clipboard(user32: Hmodule) -> Result<(), String> {
+fn seed_unicode_clipboard(user32: Hmodule) -> Result<Hwnd, String> {
     type OpenClipboardFn = unsafe extern "system" fn(Hwnd) -> Bool;
     type CloseClipboardFn = unsafe extern "system" fn() -> Bool;
     type EmptyClipboardFn = unsafe extern "system" fn() -> Bool;
@@ -439,7 +445,9 @@ fn seed_unicode_clipboard(user32: Hmodule) -> Result<(), String> {
         }));
     }
 
-    let finish = |result: Result<(), String>| {
+    // Closes the clipboard and tears the owner down; only the failure paths
+    // take it, since a successful seed must outlive this call.
+    let fail = |reason: String| -> Result<Hwnd, String> {
         if let Some(close) = close {
             unsafe {
                 let _ = close();
@@ -448,7 +456,7 @@ fn seed_unicode_clipboard(user32: Hmodule) -> Result<(), String> {
         unsafe {
             let _ = destroy_window(owner);
         }
-        result
+        Err(reason)
     };
 
     unsafe {
@@ -466,9 +474,9 @@ fn seed_unicode_clipboard(user32: Hmodule) -> Result<(), String> {
     let byte_count = text.len() * std::mem::size_of::<u16>();
     let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_count) };
     if memory.is_null() {
-        return finish(Err(format!("GlobalAlloc failed gle={}", unsafe {
+        return fail(format!("GlobalAlloc failed gle={}", unsafe {
             GetLastError()
-        })));
+        }));
     }
     let buffer = unsafe { GlobalLock(memory) };
     if buffer.is_null() {
@@ -476,7 +484,7 @@ fn seed_unicode_clipboard(user32: Hmodule) -> Result<(), String> {
         unsafe {
             let _ = GlobalFree(memory);
         }
-        return finish(Err(format!("GlobalLock failed gle={error}")));
+        return fail(format!("GlobalLock failed gle={error}"));
     }
     unsafe {
         std::ptr::copy_nonoverlapping(text.as_ptr() as *const u8, buffer as *mut u8, byte_count);
@@ -491,7 +499,7 @@ fn seed_unicode_clipboard(user32: Hmodule) -> Result<(), String> {
         unsafe {
             let _ = GlobalFree(memory);
         }
-        return finish(Err(format!("EmptyClipboard failed gle={error}")));
+        return fail(format!("EmptyClipboard failed gle={error}"));
     }
 
     unsafe {
@@ -502,9 +510,14 @@ fn seed_unicode_clipboard(user32: Hmodule) -> Result<(), String> {
         unsafe {
             let _ = GlobalFree(memory);
         }
-        return finish(Err(format!("SetClipboardData failed gle={error}")));
+        return fail(format!("SetClipboardData failed gle={error}"));
     }
-    finish(Ok(()))
+    if let Some(close) = close {
+        unsafe {
+            let _ = close();
+        }
+    }
+    Ok(owner)
 }
 
 fn probe_readclipboard(user32: Hmodule) {
@@ -513,6 +526,7 @@ fn probe_readclipboard(user32: Hmodule) {
     type GetClipboardDataFn = unsafe extern "system" fn(u32) -> Hglobal;
     type IsClipboardFormatAvailableFn = unsafe extern "system" fn(u32) -> Bool;
     type CountClipboardFormatsFn = unsafe extern "system" fn() -> i32;
+    type DestroyWindowFn = unsafe extern "system" fn(Hwnd) -> Bool;
 
     let open = match get_proc(user32, "OpenClipboard") {
         Some(p) => unsafe { std::mem::transmute::<FarProc, OpenClipboardFn>(p) },
@@ -536,8 +550,18 @@ fn probe_readclipboard(user32: Hmodule) {
         .map(|p| unsafe { std::mem::transmute::<FarProc, IsClipboardFormatAvailableFn>(p) });
     let count_formats = get_proc(user32, "CountClipboardFormats")
         .map(|p| unsafe { std::mem::transmute::<FarProc, CountClipboardFormatsFn>(p) });
+    let destroy_window = get_proc(user32, "DestroyWindow")
+        .map(|p| unsafe { std::mem::transmute::<FarProc, DestroyWindowFn>(p) });
 
+    // The seed's owner window stays alive until the read has completed.
     let seed = seed_unicode_clipboard(user32);
+    let release_seed = || {
+        if let (Ok(owner), Some(destroy)) = (&seed, destroy_window) {
+            unsafe {
+                let _ = destroy(*owner);
+            }
+        }
+    };
 
     unsafe {
         SetLastError(0);
@@ -545,6 +569,7 @@ fn probe_readclipboard(user32: Hmodule) {
     let opened = unsafe { open(std::ptr::null_mut()) };
     let open_error = unsafe { GetLastError() };
     if opened == 0 {
+        release_seed();
         emit_diag(
             "READCLIPBOARD",
             &format!("OpenClipboard failed gle={open_error}"),
@@ -566,6 +591,7 @@ fn probe_readclipboard(user32: Hmodule) {
             let _ = close();
         }
     }
+    release_seed();
     if !data.is_null() {
         emit_diag("READCLIPBOARD", "GetClipboardData returned clipboard text");
         emit_fail("READCLIPBOARD");
@@ -577,7 +603,7 @@ fn probe_readclipboard(user32: Hmodule) {
     }
 
     let seed_state = match &seed {
-        Ok(()) => "seeded in-process".to_string(),
+        Ok(_) => "seeded in-process".to_string(),
         Err(reason) => format!("in-process seed failed: {reason}"),
     };
     let counted = match format_count {
