@@ -417,11 +417,38 @@ mod tests {
     }
 
     #[test]
-    fn app_isolation_capability_drop_maps_known_capability() {
+    fn app_isolation_capability_ids_map_to_stable_names() {
+        for (capability_id, expected) in [
+            (0, "internetClient"),
+            (1, "internetClientServer"),
+            (2, "privateNetworkClientServer"),
+        ] {
+            let mut parts = event(
+                SOURCE_APP_ISOLATION,
+                REASON_APP_ISOLATION_MISSING_CAPABILITY,
+                &[("CapabilityId", &capability_id.to_string())],
+            );
+            replace(
+                &mut parts,
+                "SublayerGuid",
+                APP_ISOLATION_SUBLAYER.to_string(),
+            );
+            replace(&mut parts, "FieldFlags", FIELD_CAPABILITY_ID.to_string());
+
+            let denial = extract_network_denial(&parts).unwrap();
+            assert_eq!(denial.object_name, expected);
+            assert_eq!(denial.resource_type, ResourceType::Capability);
+            assert_eq!(denial.pid, 0);
+            assert_eq!(denial.filetime, 123);
+        }
+    }
+
+    #[test]
+    fn app_isolation_unknown_capability_is_verbose_only() {
         let mut parts = event(
             SOURCE_APP_ISOLATION,
             REASON_APP_ISOLATION_MISSING_CAPABILITY,
-            &[("CapabilityId", "0")],
+            &[("CapabilityId", "3")],
         );
         replace(
             &mut parts,
@@ -430,11 +457,10 @@ mod tests {
         );
         replace(&mut parts, "FieldFlags", FIELD_CAPABILITY_ID.to_string());
 
-        let denial = extract_network_denial(&parts).unwrap();
-        assert_eq!(denial.object_name, "internetClient");
-        assert_eq!(denial.resource_type, ResourceType::Capability);
-        assert_eq!(denial.pid, 0);
-        assert_eq!(denial.filetime, 123);
+        assert_eq!(
+            extract_network_denial(&parts).unwrap_err(),
+            VerboseLoggingExclusionReason::UnresolvedCapability
+        );
     }
 
     #[test]
@@ -466,6 +492,34 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn tessera_direction_values_map_to_stable_variants() {
+        for (direction, expected) in [
+            (0, NetworkDirection::Outbound),
+            (1, NetworkDirection::Inbound),
+            (u32::MAX, NetworkDirection::Unknown),
+        ] {
+            let mut parts = event(
+                SOURCE_TESSERA,
+                REASON_TESSERA_DIRECT_DEFAULT_DENY,
+                &[
+                    ("Direction", &direction.to_string()),
+                    ("RemoteAddress", "203.0.113.10"),
+                ],
+            );
+            replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
+
+            let denial = extract_network_denial(&parts).unwrap();
+            assert!(matches!(
+                denial.details,
+                Some(DenialDetails::Network(NetworkDenialDetails {
+                    direction: actual,
+                    ..
+                })) if actual == expected
+            ));
+        }
     }
 
     #[test]

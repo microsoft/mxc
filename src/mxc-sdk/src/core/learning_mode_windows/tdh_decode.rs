@@ -1042,14 +1042,22 @@ mod tests {
     }
 
     pub(super) fn uint32_property_buffer(names: &[&str]) -> TdhInfoBuffer {
-        assert!(!names.is_empty());
-        let encoded_names = names
+        let definitions = names
             .iter()
-            .map(|name| utf16_bytes(name))
+            .map(|name| (*name, TDH_INTYPE_UINT32, 4))
+            .collect::<Vec<_>>();
+        property_buffer(&definitions)
+    }
+
+    fn property_buffer(definitions: &[(&str, u16, u16)]) -> TdhInfoBuffer {
+        assert!(!definitions.is_empty());
+        let encoded_names = definitions
+            .iter()
+            .map(|(name, _, _)| utf16_bytes(name))
             .collect::<Vec<_>>();
         let metadata_len = std::mem::size_of::<TRACE_EVENT_INFO>()
-            + (names.len() - 1) * std::mem::size_of::<EVENT_PROPERTY_INFO>();
-        let mut offsets = Vec::with_capacity(names.len());
+            + (definitions.len() - 1) * std::mem::size_of::<EVENT_PROPERTY_INFO>();
+        let mut offsets = Vec::with_capacity(definitions.len());
         let mut next_offset = metadata_len;
         for name in &encoded_names {
             offsets.push(next_offset);
@@ -1061,18 +1069,22 @@ mod tests {
             buffer.as_bytes_mut()[*offset..*offset + name.len()].copy_from_slice(name);
         }
         let info = unsafe { &mut *buffer.as_mut_ptr() };
-        info.PropertyCount = names.len() as u32;
-        info.TopLevelPropertyCount = names.len() as u32;
+        info.PropertyCount = definitions.len() as u32;
+        info.TopLevelPropertyCount = definitions.len() as u32;
         let properties =
             std::ptr::addr_of_mut!(info.EventPropertyInfoArray) as *mut EVENT_PROPERTY_INFO;
-        for (index, offset) in offsets.into_iter().enumerate() {
+        for (index, ((_, in_type, length), offset)) in definitions.iter().zip(offsets).enumerate() {
             let property = unsafe { &mut *properties.add(index) };
             property.NameOffset = offset as u32;
-            property.Anonymous1.nonStructType.InType = TDH_INTYPE_UINT32;
+            property.Anonymous1.nonStructType.InType = *in_type;
             property.Anonymous2.count = 1;
-            property.Anonymous3.length = 4;
+            property.Anonymous3.length = *length;
         }
         buffer
+    }
+
+    fn push_unicode(payload: &mut Vec<u8>, value: &str) {
+        payload.extend(utf16_bytes(value));
     }
 
     fn event_record_for_payload(payload: &[u8]) -> EVENT_RECORD {
@@ -1080,6 +1092,91 @@ mod tests {
         record.UserData = payload.as_ptr().cast_mut().cast();
         record.UserDataLength = payload.len() as u16;
         record
+    }
+
+    #[test]
+    fn shipped_network_v1_tdh_rendering_reaches_network_extractor() {
+        let definitions = [
+            ("SchemaVersion", TDH_INTYPE_UINT16, 2),
+            ("SourceDomain", TDH_INTYPE_UINT8, 1),
+            ("Mode", TDH_INTYPE_UINT8, 1),
+            ("NormalDecision", TDH_INTYPE_UINT8, 1),
+            ("EffectiveDecision", TDH_INTYPE_UINT8, 1),
+            ("Reason", TDH_INTYPE_UINT16, 2),
+            ("FieldFlags", TDH_INTYPE_UINT32, 4),
+            ("OriginalTimestamp", TDH_INTYPE_UINT64, 8),
+            ("UserSid", TDH_INTYPE_UNICODESTRING, 0),
+            ("PackageSid", TDH_INTYPE_UNICODESTRING, 0),
+            ("ApplicationId", TDH_INTYPE_UNICODESTRING, 0),
+            ("WfpEventType", TDH_INTYPE_UINT32, 4),
+            ("FilterId", TDH_INTYPE_UINT64, 8),
+            ("ProviderGuid", TDH_INTYPE_UNICODESTRING, 0),
+            ("SublayerGuid", TDH_INTYPE_UNICODESTRING, 0),
+            ("LayerId", TDH_INTYPE_UINT16, 2),
+            ("Direction", TDH_INTYPE_UINT32, 4),
+            ("IsLoopback", TDH_INTYPE_UINT8, 1),
+            ("Protocol", TDH_INTYPE_UINT8, 1),
+            ("LocalAddress", TDH_INTYPE_UNICODESTRING, 0),
+            ("LocalPort", TDH_INTYPE_UINT16, 2),
+            ("RemoteAddress", TDH_INTYPE_UNICODESTRING, 0),
+            ("RemotePort", TDH_INTYPE_UINT16, 2),
+            ("CapabilityId", TDH_INTYPE_UINT32, 4),
+        ];
+        let buffer = property_buffer(&definitions);
+        let mut payload = Vec::new();
+        payload.extend(1u16.to_le_bytes());
+        payload.push(2);
+        payload.push(1);
+        payload.push(1);
+        payload.push(1);
+        payload.extend(100u16.to_le_bytes());
+        payload.extend(51u32.to_le_bytes());
+        payload.extend(123u64.to_le_bytes());
+        push_unicode(&mut payload, "S-1-5-21-1");
+        push_unicode(&mut payload, "S-1-15-2-1");
+        push_unicode(&mut payload, r"\Device\HarddiskVolume3\app.exe");
+        payload.extend(0u32.to_le_bytes());
+        payload.extend(456u64.to_le_bytes());
+        push_unicode(&mut payload, "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}");
+        push_unicode(&mut payload, "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}");
+        payload.extend(0u16.to_le_bytes());
+        payload.extend(0u32.to_le_bytes());
+        payload.push(0);
+        payload.push(6);
+        push_unicode(&mut payload, "");
+        payload.extend(0u16.to_le_bytes());
+        push_unicode(&mut payload, "203.0.113.10");
+        payload.extend(443u16.to_le_bytes());
+        payload.extend(0u32.to_le_bytes());
+
+        let mut record = event_record_for_payload(&payload);
+        record.EventHeader.ProviderId = crate::network_extractors::NETWORK_DECISION_PROVIDER;
+        record.EventHeader.EventDescriptor.Id =
+            crate::network_extractors::NETWORK_DECISION_EVENT_ID;
+        let info = unsafe { &*buffer.as_ptr() };
+        let props = decode_properties(buffer.as_bytes(), info, &mut record, 8).expect("TDH decode");
+        let parts = DecodedEventParts {
+            provider: record.EventHeader.ProviderId,
+            event_id: record.EventHeader.EventDescriptor.Id,
+            props,
+        };
+
+        let denial =
+            crate::network_extractors::extract_network_denial(&parts).expect("network denial");
+
+        assert_eq!(denial.object_name, "tcp://203.0.113.10:443");
+        assert!(matches!(
+            denial.details,
+            Some(learning_mode_core::DenialDetails::Network(
+                learning_mode_core::NetworkDenialDetails {
+                    direction: learning_mode_core::NetworkDirection::Outbound,
+                    protocol: Some(6),
+                    remote_port: Some(443),
+                    filter_id: 456,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]

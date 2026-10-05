@@ -180,7 +180,9 @@ pub struct DeniedResource {
     ///   capability name (e.g. `internetClient`), resolved from the
     ///   capability SID; unresolved custom capabilities fall back to the
     ///   `S-1-15-3-…` SID string.
-    /// - [`Network`](ResourceType::Network) (when implemented): `host:port`.
+    /// - [`Network`](ResourceType::Network): `protocol://host[:port]`, with
+    ///   IPv6 hosts enclosed in brackets (for example,
+    ///   `tcp://[2001:db8::1]:443`).
     /// - [`Ui`](ResourceType::Ui) / [`Other`](ResourceType::Other): the raw
     ///   resource identifier the source event carried (may be empty).
     pub resource: String,
@@ -297,6 +299,18 @@ mod tests {
             (AccessType::Write, "\"write\""),
             (AccessType::Execute, "\"execute\""),
             (AccessType::Unknown, "\"unknown\""),
+        ] {
+            assert_eq!(serde_json::to_string(&variant).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn network_direction_serialises_each_variant_to_lowercase() {
+        for (variant, expected) in [
+            (NetworkDirection::Inbound, "\"inbound\""),
+            (NetworkDirection::Outbound, "\"outbound\""),
+            (NetworkDirection::Forward, "\"forward\""),
+            (NetworkDirection::Unknown, "\"unknown\""),
         ] {
             assert_eq!(serde_json::to_string(&variant).unwrap(), expected);
         }
