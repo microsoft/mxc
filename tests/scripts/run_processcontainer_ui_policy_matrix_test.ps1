@@ -206,6 +206,25 @@ function Invoke-UiPolicyCase {
         $expectToken = if ($want -eq 'blocked') { 'PASS' } else { 'FAIL' }
         $diag = if ($r.Stdout -match "(?m)^$([regex]::Escape($tag))=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '' }
         $diagPart = if ($diag) { "; diag=$diag" } else { '' }
+
+        # Where the policy also permits writing, the probe can seed the
+        # clipboard it reads, so "the limit did not refuse" is too weak: it
+        # still holds when the data comes back unreadable. Demand the round
+        # trip, which is the only assertion that covers the read path itself.
+        if ($got -eq $expectToken -and $tag -eq 'READCLIPBOARD' -and $Case['RequireClipboardRoundTrip']) {
+            if ($diag -match 'in-process seed failed') {
+                # The WRITECLIPBOARD assertion owns a refused seed; with nothing
+                # on the clipboard there is no round trip to require.
+                Record-Result -Phase $Phase -Name $name -Status 'skip' `
+                    -Detail "expected=$want; the probe could not seed the clipboard, so the read path was not exercised$diagPart; full=$summaryV"
+                continue
+            }
+            if ($diag -notmatch 'returned clipboard text') {
+                Record-Result -Phase $Phase -Name $name -Pass $false `
+                    -Detail "expected=$want with a readable round trip; the limit did not refuse the call but the seeded text did not come back$diagPart; full=$summaryV"
+                continue
+            }
+        }
         Record-Result -Phase $Phase -Name $name -Pass ($got -eq $expectToken) `
             -Detail "expected=$want; got=$gotV$diagPart; full=$summaryV"
     }
@@ -233,6 +252,7 @@ function Phase-UiPolicyMatrix {
         # "the named thing is the thing you keep": read => reading survives.
         $cases = @(
             @{ Name = 'clip-all';   Label = 'ui.clipboard=all';   Clipboard = 'all'
+               RequireClipboardRoundTrip = $true
                Expect = @{ READCLIPBOARD = 'allowed'; WRITECLIPBOARD = 'allowed' } }
             @{ Name = 'clip-read';  Label = 'ui.clipboard=read';  Clipboard = 'read'
                Expect = @{ READCLIPBOARD = 'allowed'; WRITECLIPBOARD = 'blocked' } }
