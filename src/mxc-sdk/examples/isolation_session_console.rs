@@ -25,8 +25,8 @@
 //!
 //! Must run at a real interactive console.
 
+use mxc_sdk::mxc_common::state_aware_backend::ExecOutcome as WaitResult;
 use mxc_sdk::v1::{container, ContainerId, ProvisionRequest};
-use mxc_sdk::wxc_common::state_aware_backend::ExecOutcome as WaitResult;
 
 /// Provision mints a real OS account, so an early return or a panic would
 /// otherwise leave one behind on the host.

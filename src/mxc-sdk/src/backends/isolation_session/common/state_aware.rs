@@ -10,15 +10,15 @@ use std::io::IsTerminal;
 
 use serde::Serialize;
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::sandbox_process::{PtySize, SandboxProcess};
-use crate::wxc_common::state_aware_backend::{
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
+use crate::mxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
-use crate::wxc_common::validator::{
+use crate::mxc_common::validator::{
     validate_state_aware_network_policy_support, NetworkPolicySupport,
 };
 
@@ -296,7 +296,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     /// dev machines do not have, so those tests skip elsewhere.
     ///
     /// Pinned host-independently: the topology split itself
-    /// (`wants_interactive_console`), and — in `wxc_common` — that
+    /// (`wants_interactive_console`), and — in `mxc_common` — that
     /// `ExecSandboxProcess::wait` drains streams the caller did not take, which
     /// is the deadlock this branch would otherwise arm.
     fn exec(
@@ -372,11 +372,11 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
         ProxyConfig,
     };
-    use crate::wxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     // ====== Wire-format constants ======
 

@@ -31,15 +31,15 @@ use std::io::{Read, Write};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::OnceLock;
 
-use crate::wxc_common::logger::{Logger, Mode};
-use crate::wxc_common::models::{ExecutionRequest, ScriptResponse};
-use crate::wxc_common::process_util::{create_local_pipe, PipeWriter};
-use crate::wxc_common::sandbox_process::{
+use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::process_util::{create_local_pipe, PipeWriter};
+use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, NativeStdio, OwnedPipe,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
-use crate::wxc_common::script_runner::ScriptRunner;
-use crate::wxc_common::validator::validate_common;
+use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::validator::validate_common;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{
@@ -572,16 +572,16 @@ mod tests {
     #[test]
     fn spawn_rejects_policy_before_touching_the_wslc_sdk() {
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             script_code: "echo hi".to_string(),
-            policy: crate::wxc_common::models::ContainerPolicy {
+            policy: crate::mxc_common::models::ContainerPolicy {
                 ui_specified: true,
                 ..Default::default()
             },
             ..Default::default()
         };
         let mut logger = Logger::new(Mode::Buffer);
-        let mut runner = WSLContainerRunner::new(&crate::wxc_common::models::WslcConfig::default());
+        let mut runner = WSLContainerRunner::new(&crate::mxc_common::models::WslcConfig::default());
 
         let err = runner
             .spawn(&request, &mut logger, StdioMode::Pipes)
@@ -594,7 +594,7 @@ mod tests {
         );
         assert_eq!(
             err.failure_phase,
-            crate::wxc_common::models::FailurePhase::Rejected
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             !logger.get_buffer().contains(START_CONTAINER_BANNER),
@@ -608,13 +608,13 @@ mod tests {
     #[test]
     fn spawn_rejects_unmappable_working_directory_before_touching_the_wslc_sdk() {
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             script_code: "pwd".to_string(),
             working_directory: "/workspace".to_string(),
             ..Default::default()
         };
         let mut logger = Logger::new(Mode::Buffer);
-        let mut runner = WSLContainerRunner::new(&crate::wxc_common::models::WslcConfig::default());
+        let mut runner = WSLContainerRunner::new(&crate::mxc_common::models::WslcConfig::default());
 
         let err = runner
             .spawn(&request, &mut logger, StdioMode::Pipes)
@@ -627,7 +627,7 @@ mod tests {
         );
         assert_eq!(
             err.failure_phase,
-            crate::wxc_common::models::FailurePhase::Rejected
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             !logger.get_buffer().contains(START_CONTAINER_BANNER),

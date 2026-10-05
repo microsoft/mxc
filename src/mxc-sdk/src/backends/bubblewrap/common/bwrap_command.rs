@@ -9,12 +9,12 @@
 
 use std::collections::HashSet;
 
-use crate::wxc_common::filesystem_resolve::FsIntent;
-use crate::wxc_common::models::{
+use crate::mxc_common::filesystem_resolve::FsIntent;
+use crate::mxc_common::models::{
     ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementCompatibility,
     NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
 };
-use crate::wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
+use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
 /// The fixed prefix of the command bwrap is asked to run.
 ///
@@ -132,7 +132,7 @@ fn uses_strict_network_contract(request: &ExecutionRequest) -> bool {
 /// directional intent is silently discarded. Shared by every site that splits
 /// directional from legacy so the fail-closed reading cannot drift apart.
 ///
-/// Distinct from `crate::wxc_common::validator::directional_posture_supplied`, which
+/// Distinct from `crate::mxc_common::validator::directional_posture_supplied`, which
 /// also folds in `network_mode_specified` and the proxy; the two are not
 /// interchangeable.
 pub(crate) fn is_directional(policy: &ContainerPolicy) -> bool {
@@ -558,7 +558,7 @@ fn start_directory(request: &ExecutionRequest) -> Option<String> {
         .filter(|dir| !dir.is_empty())
         .map(|dir| {
             if request.supplies_default_env() {
-                crate::wxc_common::models::sandbox_absolute_path(dir)
+                crate::mxc_common::models::sandbox_absolute_path(dir)
             } else {
                 dir.to_string()
             }
@@ -587,10 +587,10 @@ fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
 /// The entries the child should get, as `KEY=VALUE` strings.
 ///
 /// The state dispatch and overlay merge are shared; see
-/// [`crate::wxc_common::default_env::resolve_env`]. Below 0.9 the caller's entries are
+/// [`crate::mxc_common::default_env::resolve_env`]. Below 0.9 the caller's entries are
 /// passed through untouched.
 fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
-    crate::wxc_common::default_env::resolve_env(request, || default_env(request))
+    crate::mxc_common::default_env::resolve_env(request, || default_env(request))
 }
 
 /// Build the complete `bwrap` argument list, masking **every** denied path as a
@@ -704,7 +704,7 @@ pub(crate) fn build_args_classified_with_mode(
     // precedence. `resolve_mount_order` assumes object normalization already ran
     // (it does, in the runner before `build_args`), so exact same-path conflicts
     // are already collapsed to the strictest intent.
-    for mount in crate::wxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
+    for mount in crate::mxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
         match mount.intent {
             // Read-write: override the base ro-bind and any standard mount.
             FsIntent::ReadWrite => {
@@ -772,7 +772,7 @@ pub(crate) fn build_args_classified_with_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::ContainerPolicy;
+    use crate::mxc_common::models::ContainerPolicy;
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -785,7 +785,7 @@ mod tests {
     /// `process.env` resolution, which schema 0.9 gave a default block.
     mod env {
         use super::*;
-        use crate::wxc_common::models::DefaultEnvCompatibility;
+        use crate::mxc_common::models::DefaultEnvCompatibility;
 
         fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
             ExecutionRequest {
@@ -1374,7 +1374,7 @@ mod tests {
     /// here.
     #[test]
     fn a_directional_runtime_proxy_is_not_refused_by_the_legacy_host_list_guard() {
-        use crate::wxc_common::models::{NetworkEgressPolicy, NetworkRule};
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkRule};
 
         let mut r = base_request();
         r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
@@ -1402,7 +1402,7 @@ mod tests {
         // legacy discriminator on `egress` alone read the defaulted `Block` as
         // a caller statement and refused it.
         r.policy.network_egress = None;
-        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy::default());
+        r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy::default());
         assert!(
             external_proxy_host_rules_rejection(&r).is_none(),
             "an absent egress section is not a legacy `defaultPolicy='block'`"
@@ -1576,7 +1576,7 @@ mod tests {
     /// host-loopback drop.
     #[test]
     fn an_ingress_only_directional_request_still_gets_a_private_namespace() {
-        use crate::wxc_common::models::{NetworkIngressPolicy, NetworkPolicy};
+        use crate::mxc_common::models::{NetworkIngressPolicy, NetworkPolicy};
 
         let mut request = base_request();
         request.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
@@ -1596,7 +1596,7 @@ mod tests {
     /// a per-site test would let one drift without failing the others.
     #[test]
     fn either_directional_section_alone_marks_the_policy_directional() {
-        use crate::wxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
 
         let cases = [
             (None, None, false),
@@ -1632,7 +1632,7 @@ mod tests {
         default: NetworkAction,
         with_rule: bool,
     ) -> ExecutionRequest {
-        use crate::wxc_common::models::{NetworkEgressPolicy, NetworkRule};
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkRule};
 
         let mut request = base_request();
         request.network_enforcement_compatibility = compatibility;
@@ -1654,7 +1654,7 @@ mod tests {
         ingress_default: NetworkAction,
         host_loopback: NetworkAction,
     ) -> ExecutionRequest {
-        use crate::wxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
 
         let mut request = base_request();
         request.network_enforcement_compatibility = compatibility;

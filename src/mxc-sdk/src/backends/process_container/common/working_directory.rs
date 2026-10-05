@@ -14,7 +14,7 @@
 //! inline at each launch site) means it is covered by ordinary unit tests that
 //! need no prepared host, and that the two runners cannot drift apart.
 
-use crate::wxc_common::models::{ExecutionRequest, WorkingDirectorySource};
+use crate::mxc_common::models::{ExecutionRequest, WorkingDirectorySource};
 
 /// Drive root used when neither `process.cwd` nor the filesystem policy yields
 /// a usable directory. Matches what `wxc-host-prep prepare-system-drive` grants
@@ -110,7 +110,7 @@ fn system_drive_root() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::ContainerPolicy;
+    use crate::mxc_common::models::ContainerPolicy;
 
     fn request(cwd: &str, readwrite: &[&str], readonly: &[&str]) -> ExecutionRequest {
         ExecutionRequest {

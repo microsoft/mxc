@@ -682,7 +682,7 @@ fn spawn_daemon() -> Result<()> {
 /// directory for `mxc_ffi.dll`.
 fn daemon_exe_path() -> Result<PathBuf> {
     let module =
-        crate::wxc_common::process_util::module_path_for_address(daemon_exe_path as *const ())
+        crate::mxc_common::process_util::module_path_for_address(daemon_exe_path as *const ())
             .map_err(anyhow::Error::msg)?;
     let dir = module
         .parent()
@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn daemon_exe_is_resolved_next_to_containing_module() {
         let path = daemon_exe_path().unwrap();
-        let expected_dir = crate::wxc_common::process_util::module_path_for_address(
+        let expected_dir = crate::mxc_common::process_util::module_path_for_address(
             daemon_exe_is_resolved_next_to_containing_module as *const (),
         )
         .unwrap()

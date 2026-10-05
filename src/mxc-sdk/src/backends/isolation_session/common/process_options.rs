@@ -5,7 +5,7 @@
 //! `ProcessOptions` built from an `ExecutionRequest`, then translated to the
 //! WinRT `IsoSessionProcessOptions` consumed by `RunProcessWithOptionsAsync`.
 
-use crate::wxc_common::models::ExecutionRequest;
+use crate::mxc_common::models::ExecutionRequest;
 
 use crate::isolation_session_bindings::bindings::IsoSessionProcessOptions;
 use windows_core::HSTRING;

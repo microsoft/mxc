@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use crate::wxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
 
 /// A structured diagnostic describing *why* a sandboxed process launch failed
 /// and what the user can do about it.
@@ -397,7 +397,7 @@ fn drive_root(exe_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::FailurePhase;
+    use crate::mxc_common::models::FailurePhase;
 
     // -- diagnose_missing_required_env tests --
 

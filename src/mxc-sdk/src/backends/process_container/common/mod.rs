@@ -9,7 +9,7 @@
 //! All modules are Windows-only. The crate links unconditionally so
 //! `wxc-exec` (which always targets Windows) can depend on it
 //! without feature gates, while cross-platform consumers of
-//! `wxc_common` are unaffected by AppContainer code.
+//! `mxc_common` are unaffected by AppContainer code.
 
 #[cfg(target_os = "windows")]
 pub mod appcontainer_runner;
@@ -59,10 +59,10 @@ pub use secenv::{
 
 #[cfg(target_os = "windows")]
 pub(crate) fn validate_process_container_stdio(
-    stdio: crate::wxc_common::sandbox_process::StdioMode,
-) -> Result<(), crate::wxc_common::models::ScriptResponse> {
-    if matches!(stdio, crate::wxc_common::sandbox_process::StdioMode::Pty(_)) {
-        return Err(crate::wxc_common::models::ScriptResponse::rejected(
+    stdio: crate::mxc_common::sandbox_process::StdioMode,
+) -> Result<(), crate::mxc_common::models::ScriptResponse> {
+    if matches!(stdio, crate::mxc_common::sandbox_process::StdioMode::Pty(_)) {
+        return Err(crate::mxc_common::models::ScriptResponse::rejected(
             "ProcessContainer does not support caller-controlled PTY spawning",
         ));
     }
@@ -75,17 +75,14 @@ pub(crate) fn validate_process_container_stdio(
 /// lane rather than only the Windows one.
 pub mod working_directory;
 
-/// Test-only helpers shared across this crate's unit-test modules.
-/// Mirrors the helper that previously lived in `crate::wxc_common::test_env`;
-/// kept private to each crate so each test binary has its own
-/// `ENV_LOCK` (the process-globals are only contended within a test
-/// binary).
+/// Test-only guards that use the crate-wide lock from
+/// `crate::mxc_common::test_env`.
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) mod test_env;
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
-    use crate::wxc_common::sandbox_process::{PtySize, StdioMode};
+    use crate::mxc_common::sandbox_process::{PtySize, StdioMode};
 
     #[test]
     fn process_container_rejects_pty_stdio() {

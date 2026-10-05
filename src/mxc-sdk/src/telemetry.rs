@@ -29,8 +29,8 @@
 
 use std::fmt;
 
-use crate::wxc_common::telemetry::consent as inner_consent;
-use crate::wxc_common::telemetry::policy as inner_policy;
+use crate::mxc_common::telemetry::consent as inner_consent;
+use crate::mxc_common::telemetry::policy as inner_policy;
 
 /// A stored or effective telemetry consent state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,10 +105,10 @@ pub struct ConsentPrompt {
     pub learn_more_url: &'static str,
 }
 
-impl From<&crate::wxc_common::telemetry::consent_prompt::ConsentPrompt> for ConsentPrompt {
-    fn from(value: &crate::wxc_common::telemetry::consent_prompt::ConsentPrompt) -> Self {
+impl From<&crate::mxc_common::telemetry::consent_prompt::ConsentPrompt> for ConsentPrompt {
+    fn from(value: &crate::mxc_common::telemetry::consent_prompt::ConsentPrompt) -> Self {
         fn message(
-            value: crate::wxc_common::telemetry::consent_prompt::ConsentMessage,
+            value: crate::mxc_common::telemetry::consent_prompt::ConsentMessage,
         ) -> ConsentMessage {
             ConsentMessage {
                 id: value.id,
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn canonical_prompt_facade_preserves_every_rust_owned_field() {
-        let inner = crate::wxc_common::telemetry::consent_prompt::prompt_for_locale(Some("en-US"));
+        let inner = crate::mxc_common::telemetry::consent_prompt::prompt_for_locale(Some("en-US"));
         let facade = ConsentPrompt::from(inner);
 
         assert_eq!(facade.resource_version, inner.resource_version);

@@ -12,9 +12,9 @@ MXC (Microsoft eXecution Container) is a cross-platform sandboxed code execution
 
 ## Architecture invariants
 
-- `mxc_sdk::wxc_common` is the cross-platform foundation. Do not move backend execution or enforcement into it, or add new backend implementation dependencies.
+- `mxc_sdk::mxc_common` is the cross-platform foundation. Do not move backend execution or enforcement into it, or add new backend implementation dependencies.
 - Keep implementation dependencies internal to `mxc-sdk` as Rust modules in the `mxc-sdk` crate, not as separate workspace crates.
-- Backend modules generally depend on `mxc_sdk::wxc_common`; avoid cross-dependencies between backend modules. The optional `nanvix_common` module supplies shared MicroVM data/constants rather than backend dispatch.
+- Backend modules generally depend on `mxc_sdk::mxc_common`; avoid cross-dependencies between backend modules. The optional `nanvix_common` module supplies shared MicroVM data/constants rather than backend dispatch.
 - `mxc_sdk::mxc_engine` is the single execution engine. Executor binaries and the public SDK facade delegate backend routing to it.
 - Keep `wxc`, `lxc`, and `mxc_darwin` thin. Do not add backend-selection matches to the binaries.
 - Keep build-time staging in the `mxc-sdk/build/` build modules, not runtime modules.

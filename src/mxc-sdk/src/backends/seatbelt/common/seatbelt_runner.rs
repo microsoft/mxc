@@ -29,16 +29,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
-use crate::wxc_common::sandbox_process::{
+use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
+use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
-use crate::wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use crate::wxc_common::validator::{
+use crate::mxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
+use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 
@@ -515,7 +515,7 @@ impl SeatbeltSandboxProcess {
     fn run_cleanup(&mut self) {
         // Silent buffer logger: teardown may run during `drop` (possibly on an
         // unwinding path), and the coordinator's own `Drop` is likewise silent.
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         self.proxy.stop(&mut logger);
 
         if self.cleanup.is_empty() {
@@ -992,7 +992,7 @@ fn cleanup_files(paths: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         DefaultEnvCompatibility, ExecutionRequest, NetworkAction, NetworkEgressPolicy,
         NetworkPolicy, ProxyAddress, SeatbeltConfig,
     };
@@ -1029,7 +1029,7 @@ mod tests {
 
     /// Capture what `log_generated_profile` puts into a buffering logger.
     fn logged_profile(profile: &str) -> String {
-        use crate::wxc_common::logger::Mode;
+        use crate::mxc_common::logger::Mode;
         let mut logger = Logger::new(Mode::Buffer);
         log_generated_profile(profile, &mut logger);
         logger.get_buffer().to_string()
@@ -1228,10 +1228,10 @@ mod tests {
         // `network-inbound` grant that `default: deny` withholds.
         let mut request = base_request();
         request.policy.network_egress =
-            Some(crate::wxc_common::models::NetworkEgressPolicy::default());
-        request.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
-            default: crate::wxc_common::models::NetworkAction::Deny,
-            host_loopback: crate::wxc_common::models::NetworkAction::Allow,
+            Some(crate::mxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Deny,
+            host_loopback: crate::mxc_common::models::NetworkAction::Allow,
         });
         let runner = SeatbeltScriptRunner::new();
         let response = runner.validate(&request).unwrap_err();
@@ -1248,10 +1248,10 @@ mod tests {
     fn accepts_host_loopback_deny_under_an_ingress_default_allow() {
         let mut request = base_request();
         request.policy.network_egress =
-            Some(crate::wxc_common::models::NetworkEgressPolicy::default());
-        request.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
-            default: crate::wxc_common::models::NetworkAction::Allow,
-            host_loopback: crate::wxc_common::models::NetworkAction::Deny,
+            Some(crate::mxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
+            host_loopback: crate::mxc_common::models::NetworkAction::Deny,
         });
         let runner = SeatbeltScriptRunner::new();
         assert!(runner.validate(&request).is_ok());
@@ -1264,9 +1264,9 @@ mod tests {
     /// in this module green while the backend silently stopped seeing the
     /// posture the caller asked for.
     fn validate_parsed(json: &str) -> Result<(), String> {
-        use crate::wxc_common::config_parser::load_mxc_request_from_json;
-        use crate::wxc_common::logger::Mode;
-        use crate::wxc_common::state_aware_request::MxcRequest;
+        use crate::mxc_common::config_parser::load_mxc_request_from_json;
+        use crate::mxc_common::logger::Mode;
+        use crate::mxc_common::state_aware_request::MxcRequest;
 
         let mut logger = Logger::new(Mode::Buffer);
         let parsed = load_mxc_request_from_json(json, &mut logger).expect("config parses");
@@ -1310,10 +1310,10 @@ mod tests {
     fn accepts_matching_ingress_default_and_host_loopback() {
         let mut request = base_request();
         request.policy.network_egress =
-            Some(crate::wxc_common::models::NetworkEgressPolicy::default());
-        request.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
-            default: crate::wxc_common::models::NetworkAction::Allow,
-            host_loopback: crate::wxc_common::models::NetworkAction::Allow,
+            Some(crate::mxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
+            host_loopback: crate::mxc_common::models::NetworkAction::Allow,
         });
         let runner = SeatbeltScriptRunner::new();
         assert!(runner.validate(&request).is_ok());

@@ -13,17 +13,17 @@ use std::fmt::Write;
 use std::process;
 
 use clap::Parser;
-use mxc_sdk::wxc_common::config_parser::load_one_shot_request;
-use mxc_sdk::wxc_common::logger::{Logger, Mode};
-use mxc_sdk::wxc_common::models::ExecutionRequest;
+use mxc_sdk::mxc_common::config_parser::load_one_shot_request;
+use mxc_sdk::mxc_common::logger::{Logger, Mode};
+use mxc_sdk::mxc_common::models::ExecutionRequest;
 
 #[cfg(target_os = "macos")]
-use mxc_sdk::wxc_common::models::ScriptResponse;
+use mxc_sdk::mxc_common::models::ScriptResponse;
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 
 #[cfg(target_os = "macos")]
-use mxc_sdk::wxc_common::script_runner::handle_dry_run_exit;
+use mxc_sdk::mxc_common::script_runner::handle_dry_run_exit;
 
 #[derive(Parser)]
 #[command(name = "mxc-exec-mac", about = "macOS sandbox executor for MXC")]
@@ -125,7 +125,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
-    use mxc_sdk::wxc_common::telemetry;
+    use mxc_sdk::mxc_common::telemetry;
 
     // ── Telemetry init ──────────────────────────────────────────────
     // Mirrors lxc-exec / wxc-exec. The ETW provider has no macOS backend today,
@@ -187,7 +187,7 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     // `display_script_results` only writes the error into the (buffered,
     // non-debug-suppressed) logger, so surface it on stderr here for parity
     // with lxc-exec / wxc-exec (issue #564).
-    mxc_sdk::wxc_common::script_runner::emit_backend_error_envelope(&response);
+    mxc_sdk::mxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }

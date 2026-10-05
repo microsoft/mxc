@@ -13,7 +13,7 @@
 //! supports two paths:
 //! - **Cooperative env-var proxy** (default, no privilege required): when
 //!   `network.proxy` is configured the runner launches an unprivileged HTTP
-//!   proxy via [`crate::wxc_common::unix_proxy_coordinator::UnixProxyCoordinator`]
+//!   proxy via [`crate::mxc_common::unix_proxy_coordinator::UnixProxyCoordinator`]
 //!   and the command builder injects `HTTP_PROXY` / `HTTPS_PROXY` /
 //!   `NO_PROXY` env vars into the sandbox.
 //! - **iptables firewall** (requires `CAP_NET_ADMIN` / root): when
@@ -35,16 +35,16 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
-use crate::wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ExecutionRequest, ScriptResponse};
-use crate::wxc_common::sandbox_process::{
+use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess,
     StdioMode, StreamCloser,
 };
-use crate::wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use crate::wxc_common::validator::{
+use crate::mxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
+use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 
@@ -116,7 +116,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // (deny > ro > rw). Done here, close to mount, to minimize the TOCTOU
         // window; an unresolvable path with deniedPaths present fails closed.
         let normalized;
-        let request = match crate::wxc_common::filesystem_object::normalize_object_conflicts(
+        let request = match crate::mxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
             logger,
         ) {
@@ -133,7 +133,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // Reject any policy path the invoking user cannot access, so the sandbox
         // never gains access the caller lacks. Runs after object normalization
         // so it sees the already-tightened intents.
-        if let Err(msg) = crate::wxc_common::filesystem_access::check_delegation(&request.policy) {
+        if let Err(msg) = crate::mxc_common::filesystem_access::check_delegation(&request.policy) {
             return Err(ScriptResponse::error(&msg));
         }
         // Resolve denied paths that traverse a symlink to their real host path
@@ -230,7 +230,7 @@ impl BubblewrapScriptRunner {
             .as_ref()
             .map(|address| address.to_url())
         {
-            if crate::wxc_common::proxy_env::proxy_url_has_credentials(&url) {
+            if crate::mxc_common::proxy_env::proxy_url_has_credentials(&url) {
                 // Built from the redacted form so the rejection cannot become
                 // the leak it is rejecting.
                 return Err(ScriptResponse::error(&format!(
@@ -241,7 +241,7 @@ impl BubblewrapScriptRunner {
                      user while the command runs. Use a proxy that does not require inline \
                      credentials, or supply them to the proxy itself rather than through \
                      the URL.",
-                    crate::wxc_common::proxy_env::redact_proxy_url(&url)
+                    crate::mxc_common::proxy_env::redact_proxy_url(&url)
                 )));
             }
         }
@@ -790,7 +790,7 @@ impl BubblewrapSandboxProcess {
             return;
         }
         self.teardown_done = true;
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         self.inner.cleanup(&mut logger);
     }
 
@@ -1053,7 +1053,7 @@ struct DeniedPlan {
 /// file-masked with `/dev/null` — nothing resolvable is behind it to leak, and
 /// bwrap tolerates `/dev/null` over a symlink node (whereas `--tmpfs` aborts).
 fn resolve_denied_paths(
-    policy: &crate::wxc_common::models::ContainerPolicy,
+    policy: &crate::mxc_common::models::ContainerPolicy,
     logger: &mut Logger,
 ) -> Result<DeniedPlan, String> {
     let mut changed = false;
@@ -1150,7 +1150,7 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         NetworkEnforcementCompatibility, NetworkEnforcementMode, ProxyAddress, ProxyConfig,
     };
 
@@ -1189,7 +1189,7 @@ mod tests {
     /// prevent.
     #[test]
     fn every_declared_inbound_feature_has_a_backend_refusal_behind_it() {
-        use crate::wxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
+        use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
 
         use crate::bwrap_common::bwrap_command::{
             BWRAP_HOST_LOOPBACK_ALLOW, BWRAP_INGRESS_DEFAULT_ALLOW,
@@ -1252,7 +1252,7 @@ mod tests {
     /// quietly passing for the wrong reason.
     #[test]
     fn every_network_policy_support_bit_is_a_deliberate_decision() {
-        use crate::wxc_common::models::{
+        use crate::mxc_common::models::{
             NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
         };
 
@@ -1539,12 +1539,12 @@ mod tests {
     #[test]
     fn an_ipv6_allow_warns_that_it_cannot_carry_traffic() {
         let mut req = base_request();
-        req.policy.default_network_policy = crate::wxc_common::models::NetworkPolicy::Block;
+        req.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
         req.policy.allowed_hosts = vec!["2001:db8::1".into(), "203.0.113.5".into()];
         let plan =
             network_rules::EgressPlan::for_request(&req).expect("both literals are enforceable");
 
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         warn_unreachable_v6_targets(&plan, &mut logger);
         let out = logger.warnings().join("\n");
         assert!(
@@ -1565,11 +1565,11 @@ mod tests {
 
         // Nothing unreachable, nothing to say.
         let mut v4_only = base_request();
-        v4_only.policy.default_network_policy = crate::wxc_common::models::NetworkPolicy::Block;
+        v4_only.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
         v4_only.policy.allowed_hosts = vec!["203.0.113.5".into()];
         let plan =
             network_rules::EgressPlan::for_request(&v4_only).expect("a v4 literal is enforceable");
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         warn_unreachable_v6_targets(&plan, &mut logger);
         assert!(logger.warnings().is_empty(), "no v6 allow, no warning");
     }
@@ -1605,9 +1605,9 @@ mod tests {
 
     #[test]
     fn validate_does_not_locally_gate_builtin_test_server() {
-        use crate::wxc_common::models::NetworkEgressPolicy;
+        use crate::mxc_common::models::NetworkEgressPolicy;
 
-        // The builtinTestServer gate moved to `crate::wxc_common::validator::validate_common`
+        // The builtinTestServer gate moved to `crate::mxc_common::validator::validate_common`
         // (enforced centrally for every backend). The bwrap runner must therefore no
         // longer reject it locally. Reaching the injected environment probe
         // proves this without depending on private-network tools on the host.
@@ -1633,7 +1633,7 @@ mod tests {
     /// refused at policy time -- before a proxy is started.
     #[test]
     fn validate_rejects_an_ipv6_loopback_proxy_endpoint_before_the_environment_probe() {
-        use crate::wxc_common::models::NetworkEgressPolicy;
+        use crate::mxc_common::models::NetworkEgressPolicy;
 
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
@@ -1668,7 +1668,7 @@ mod tests {
     /// policy error rather than a missing binary.
     #[test]
     fn validate_rejects_a_directional_rule_set_combined_with_a_proxy() {
-        use crate::wxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkRule};
+        use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkRule};
 
         let unhonorable = [
             NetworkEgressPolicy {
@@ -1707,7 +1707,7 @@ mod tests {
     /// so it must survive the guard above rather than being caught by it.
     #[test]
     fn validate_accepts_the_proxy_only_directional_posture() {
-        use crate::wxc_common::models::{NetworkAction, NetworkEgressPolicy};
+        use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy};
 
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
@@ -1730,7 +1730,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_a_routable_ipv6_proxy_endpoint_before_the_environment_probe() {
-        use crate::wxc_common::models::NetworkEgressPolicy;
+        use crate::mxc_common::models::NetworkEgressPolicy;
 
         // The egress rules are IPv4-only, so this endpoint could never be
         // opened -- `run` would discover that only after starting slirp.
@@ -1788,7 +1788,7 @@ mod tests {
     /// refuse the combination rather than silently hand the file back.
     #[test]
     fn validate_rejects_a_hostname_proxy_that_would_defeat_a_denied_hosts_file() {
-        use crate::wxc_common::models::NetworkEgressPolicy;
+        use crate::mxc_common::models::NetworkEgressPolicy;
 
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
@@ -1847,7 +1847,7 @@ mod tests {
     /// stays compatible -- and that is the escape hatch the message offers.
     #[test]
     fn validate_accepts_an_ip_proxy_endpoint_alongside_a_denied_hosts_file() {
-        use crate::wxc_common::models::NetworkEgressPolicy;
+        use crate::mxc_common::models::NetworkEgressPolicy;
 
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
@@ -1875,7 +1875,7 @@ mod tests {
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_enforcement_mode =
-            crate::wxc_common::models::NetworkEnforcementMode::Firewall;
+            crate::mxc_common::models::NetworkEnforcementMode::Firewall;
         req.policy.allowed_hosts = vec!["api.github.com".into()];
 
         let message = BubblewrapScriptRunner::new()
@@ -1896,7 +1896,7 @@ mod tests {
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_enforcement_mode =
-            crate::wxc_common::models::NetworkEnforcementMode::Firewall;
+            crate::mxc_common::models::NetworkEnforcementMode::Firewall;
         req.policy.allowed_hosts = vec!["203.0.113.7".into(), "10.0.0.0/8".into()];
         req.policy.blocked_hosts = vec!["2001:db8::/32".into()];
 
@@ -1917,7 +1917,7 @@ mod tests {
         // either enforcement mechanism.
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.default_network_policy = crate::wxc_common::models::NetworkPolicy::Allow;
+        req.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Allow;
 
         let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
         assert!(
@@ -1955,7 +1955,7 @@ mod tests {
         // policy ran with fully open egress on the host's namespace.
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.default_network_policy = crate::wxc_common::models::NetworkPolicy::Block;
+        req.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
         req.policy.allowed_hosts = vec!["api.github.com".into()];
         req.policy.allow_local_network = true;
 
@@ -1974,7 +1974,7 @@ mod tests {
     fn validate_rejects_block_default_blocklist_without_allowlist() {
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.default_network_policy = crate::wxc_common::models::NetworkPolicy::Block;
+        req.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
         req.policy.blocked_hosts = vec!["evil.example.com".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
@@ -2078,14 +2078,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_rewrites_symlink_to_dir() {
-        use crate::wxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real_dir");
         std::fs::create_dir(&target).unwrap();
         let link = dir.path().join("link_to_dir");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let policy = crate::wxc_common::models::ContainerPolicy {
+        let policy = crate::mxc_common::models::ContainerPolicy {
             denied_paths: vec![link.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -2107,14 +2107,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_rewrites_symlink_to_file() {
-        use crate::wxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real_file.txt");
         std::fs::write(&target, b"secret").unwrap();
         let link = dir.path().join("link_to_file");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let policy = crate::wxc_common::models::ContainerPolicy {
+        let policy = crate::mxc_common::models::ContainerPolicy {
             denied_paths: vec![link.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -2135,7 +2135,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_rewrites_ancestor_symlink() {
-        use crate::wxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let real = base.join("real");
@@ -2146,7 +2146,7 @@ mod tests {
         // Deny .../link/secret — the leaf `secret` is a real dir, `link` is the
         // symlinked ancestor.
         let denied = link.join("secret");
-        let policy = crate::wxc_common::models::ContainerPolicy {
+        let policy = crate::mxc_common::models::ContainerPolicy {
             denied_paths: vec![denied.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -2166,7 +2166,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_rewrites_ancestor_symlink_missing_leaf() {
-        use crate::wxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let real = base.join("real");
@@ -2176,7 +2176,7 @@ mod tests {
 
         // Deny .../link/newfile — `newfile` does not exist yet.
         let denied = link.join("newfile");
-        let policy = crate::wxc_common::models::ContainerPolicy {
+        let policy = crate::mxc_common::models::ContainerPolicy {
             denied_paths: vec![denied.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -2199,7 +2199,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_noop_for_non_symlinks() {
-        use crate::wxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         // Canonicalize up front so a symlinked tempdir root (e.g. via TMPDIR)
         // doesn't spuriously trigger a rewrite — we are testing symlink-free paths.
@@ -2210,7 +2210,7 @@ mod tests {
         std::fs::create_dir(&subdir).unwrap();
         let missing = base.join("does_not_exist");
 
-        let policy = crate::wxc_common::models::ContainerPolicy {
+        let policy = crate::mxc_common::models::ContainerPolicy {
             denied_paths: vec![
                 file.to_string_lossy().into_owned(),
                 subdir.to_string_lossy().into_owned(),
@@ -2233,13 +2233,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_masks_dangling_symlink_as_file() {
-        use crate::wxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let link = base.join("dangling");
         std::os::unix::fs::symlink(base.join("nonexistent_target"), &link).unwrap();
 
-        let policy = crate::wxc_common::models::ContainerPolicy {
+        let policy = crate::mxc_common::models::ContainerPolicy {
             denied_paths: vec![link.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -2260,7 +2260,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_folds_dotdot_under_symlinked_ancestor() {
-        use crate::wxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let real = base.join("real");
@@ -2271,7 +2271,7 @@ mod tests {
         // Deny .../link/missing/../secret — `missing` does not exist and the
         // `..` cancels it, so the real target is .../real/secret.
         let denied = link.join("missing").join("..").join("secret");
-        let policy = crate::wxc_common::models::ContainerPolicy {
+        let policy = crate::mxc_common::models::ContainerPolicy {
             denied_paths: vec![denied.to_string_lossy().into_owned()],
             ..Default::default()
         };

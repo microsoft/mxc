@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::wxc_common::sandbox_process::group_kill;
+use crate::mxc_common::sandbox_process::group_kill;
 
 /// Also the longest a disarmed monitor keeps its thread alive.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);

@@ -136,7 +136,7 @@ pub(crate) async fn launch(wsb_path: &Path) -> Result<()> {
     // Resolve `WindowsSandbox.exe` under the trusted System directory
     // (`GetSystemDirectoryW`, not `%SystemRoot%` or the executable search order),
     // so a binary planted in the app dir or CWD can't be launched in its place.
-    let sandbox_exe = crate::wxc_common::system_dir::system_directory().join("WindowsSandbox.exe");
+    let sandbox_exe = crate::mxc_common::system_dir::system_directory().join("WindowsSandbox.exe");
     eprintln!("[daemon] launching {:?} with {:?}", sandbox_exe, wsb_path);
 
     let status = Command::new(&sandbox_exe)

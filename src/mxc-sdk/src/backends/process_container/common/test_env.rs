@@ -8,8 +8,8 @@
 //! concurrently — observable as a race once both test families started
 //! running under the same profile (cfg(test), any profile).
 //!
-//! This module exposes a single shared `ENV_LOCK` that all test
-//! modules in this crate take before touching the relevant env vars.
+//! This module uses the crate-wide `ENV_LOCK` that all `mxc-sdk` test
+//! modules take before touching the relevant env vars.
 //! Hold the guard for the entire duration of the env-var-dependent
 //! work so the value remains stable across the call. The provided
 //! `ForceTierGuard` and `BfscfgPathGuard` types encapsulate the
@@ -17,20 +17,8 @@
 //!
 //! Compiled in only under `#[cfg(test)]`.
 
-use std::sync::{Mutex, MutexGuard};
-
-/// Process-wide serialization for tests that mutate test-seam env
-/// vars. Tests in any module in this crate should acquire this lock
-/// (typically via [`ForceTierGuard`] / [`BfscfgPathGuard`]) before
-/// reading or writing any MXC test-seam environment variable.
-pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-pub(crate) fn lock() -> MutexGuard<'static, ()> {
-    // Poison is irrelevant here: the env var is restored on Drop
-    // regardless of whether a previous holder panicked, and the lock's
-    // only purpose is to serialize accesses.
-    ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
-}
+pub(crate) use crate::mxc_common::test_env::{lock, ENV_LOCK};
+use std::sync::MutexGuard;
 
 /// RAII guard that sets `MXC_FORCE_TIER` to `value` for the lifetime
 /// of the guard and restores it on `Drop`. Acquires [`ENV_LOCK`]

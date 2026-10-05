@@ -23,7 +23,7 @@ use crate::learning_mode_core::{
     write_verbose_logging_document, AnalysisResult, DenialSummary, DenialsDocument,
     DenialsOutputPointer, ExistingOutputPolicy, VerboseLoggingDocument,
 };
-use crate::wxc_common::models::CaptureDenialsOutput;
+use crate::mxc_common::models::CaptureDenialsOutput;
 
 /// Directory name of the protected retained-ETL store. Sealed ETLs are promoted
 /// out of working storage into a per-run directory beneath a sibling directory
@@ -248,7 +248,7 @@ pub fn combine_capture_and_cleanup_results<T>(
 /// are present so a capture failure is never silently swallowed by a
 /// successful process exit. Shared by the native BaseContainer capture path
 /// and the guarded-WPR legacy-tier fallback so both surface capture failures
-/// through [`crate::wxc_common::sandbox_process::SandboxProcess::wait`] identically.
+/// through [`crate::mxc_common::sandbox_process::SandboxProcess::wait`] identically.
 ///
 /// When *both* the wait and teardown fail, the wait error kind is preserved
 /// while both messages are returned. This keeps retained-ETL paths and other

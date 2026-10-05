@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 use super::*;
-use crate::wxc_common::logger::Mode;
-use crate::wxc_common::models::NetworkEnforcementMode;
+use crate::mxc_common::logger::Mode;
+use crate::mxc_common::models::NetworkEnforcementMode;
 
 const UNOCCUPIABLE_NETNS_PID: u32 = u32::MAX;
 

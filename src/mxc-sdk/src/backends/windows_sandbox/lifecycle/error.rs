@@ -10,7 +10,7 @@
 //! specific lifecycle phase and lays the groundwork for richer typed wire
 //! errors in the state-aware backend.
 
-use crate::wxc_common::models::{FailurePhase, ScriptResponse};
+use crate::mxc_common::models::{FailurePhase, ScriptResponse};
 
 /// Failure modes of a single transient one-shot execution.
 #[derive(Debug)]

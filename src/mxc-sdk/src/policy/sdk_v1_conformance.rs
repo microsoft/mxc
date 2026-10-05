@@ -22,9 +22,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::wxc_common::logger::{Logger, Mode};
-use crate::wxc_common::models::ExecutionRequest;
-use crate::wxc_common::state_aware_request::MxcRequest;
+use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::models::ExecutionRequest;
+use crate::mxc_common::state_aware_request::MxcRequest;
 use serde::Deserialize;
 
 use crate::configs::{
@@ -414,9 +414,9 @@ fn build_from_input(name: &str, input: ConformanceInput) -> ExecutionRequest {
     request.inner
 }
 
-fn parse_one_shot(json: &str) -> Result<ExecutionRequest, crate::wxc_common::mxc_error::MxcError> {
+fn parse_one_shot(json: &str) -> Result<ExecutionRequest, crate::mxc_common::mxc_error::MxcError> {
     let mut logger = Logger::new(Mode::Buffer);
-    match crate::wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
+    match crate::mxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
         .map_err(parse_error_to_mxc)?
     {
         MxcRequest::OneShot(request) => Ok(request),
@@ -425,16 +425,16 @@ fn parse_one_shot(json: &str) -> Result<ExecutionRequest, crate::wxc_common::mxc
 }
 
 fn parse_error_to_mxc(
-    error: crate::wxc_common::config_parser::ParseError,
-) -> crate::wxc_common::mxc_error::MxcError {
-    use crate::wxc_common::config_parser::ParseError;
+    error: crate::mxc_common::config_parser::ParseError,
+) -> crate::mxc_common::mxc_error::MxcError {
+    use crate::mxc_common::config_parser::ParseError;
     match error {
         ParseError::StateAware(error) => error,
         ParseError::Decode(error)
         | ParseError::Version(error)
         | ParseError::OneShot(error)
         | ParseError::OneShotMalformed(error) => {
-            crate::wxc_common::mxc_error::MxcError::malformed_request(error.to_string())
+            crate::mxc_common::mxc_error::MxcError::malformed_request(error.to_string())
         }
     }
 }

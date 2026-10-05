@@ -53,7 +53,7 @@
 use crate::learning_mode_core::{
     AccessType, ResourceType, VerboseLoggingOutcomeReason, VerboseLoggingProvider,
 };
-use crate::wxc_common::hashing::sha256_hex;
+use crate::mxc_common::hashing::sha256_hex;
 use windows::core::GUID;
 
 /// Microsoft-Windows-Kernel-General provider.
@@ -729,7 +729,7 @@ fn is_self_access(object_name: &str, app_path: &str) -> bool {
 }
 
 fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
-    crate::wxc_common::string_util::windows_paths_equal_ignore_case(a, b)
+    crate::mxc_common::string_util::windows_paths_equal_ignore_case(a, b)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

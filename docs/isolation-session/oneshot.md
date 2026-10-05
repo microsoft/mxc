@@ -106,8 +106,8 @@ invocations, without changing the manager's interface. See
 |---|---|
 | `src/mxc-sdk/Cargo.toml` | Enable the module through the `isolation_session` feature |
 | `src/mxc-sdk/src/lib.rs` | Declare the cfg-gated IsolationSession modules |
-| `src/mxc-sdk/src/tools/wxc_common/models.rs` | Add `IsolationSession` to `ContainmentBackend` |
-| `src/mxc-sdk/src/tools/wxc_common/config_parser.rs` | Parse the `"isolation_session"` containment value |
+| `src/mxc-sdk/src/tools/mxc_common/models.rs` | Add `IsolationSession` to `ContainmentBackend` |
+| `src/mxc-sdk/src/tools/mxc_common/config_parser.rs` | Parse the `"isolation_session"` containment value |
 | `src/tools/wxc/Cargo.toml` | Add `isolation_session` Cargo feature |
 | `src/tools/wxc/src/main.rs` | Dispatch `IsolationSession`; call `CoInitializeEx(COINIT_MULTITHREADED)` at top of `main` (required for any WinRT activation, benign for other backends) |
 

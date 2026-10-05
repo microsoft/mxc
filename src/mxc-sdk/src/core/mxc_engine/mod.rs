@@ -11,7 +11,7 @@
 //! place.
 //!
 //! It depends on the `backends/*` crates (cfg-split by target), which is why
-//! it cannot live in `wxc_common` (the cross-platform foundation those backends
+//! it cannot live in `mxc_common` (the cross-platform foundation those backends
 //! build on).
 //!
 //! ## Surface
@@ -27,7 +27,7 @@
 //! - [`available_backends`] / [`AvailableBackend`] — read-only host
 //!   backend-availability probe (with effective isolation tier).
 //! - [`Error`] / [`ErrorCode`] — the crate-owned error facade over
-//!   `wxc_common`'s internal error type.
+//!   `mxc_common`'s internal error type.
 
 mod backend_registry;
 mod dispatch;
@@ -69,16 +69,16 @@ pub use state_aware::{
 #[cfg(target_os = "windows")]
 pub use verbose_telemetry::emit_verbose_telemetry;
 
-use crate::wxc_common::logger::{Logger, Mode};
-use crate::wxc_common::models::{
+use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::models::{
     ContainmentBackend, ExecutionRequest, FailurePhase, ScriptResponse,
 };
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::sandbox_process::{
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::sandbox_process::{
     NativeStdio, PtyReaderWithCloser, PtySize, SandboxProcess, StreamCloser,
 };
-use crate::wxc_common::state_aware_request::MxcRequest;
-use crate::wxc_common::telemetry;
+use crate::mxc_common::state_aware_request::MxcRequest;
+use crate::mxc_common::telemetry;
 
 /// Spawn a streaming [`SandboxProcess`] handle for a normalized
 /// [`ExecutionRequest`].
@@ -128,7 +128,7 @@ fn parse_one_shot_json(
     experimental: bool,
     logger: &mut Logger,
 ) -> Result<ExecutionRequest, Error> {
-    let mut request = match crate::wxc_common::config_parser::load_mxc_request_from_json(
+    let mut request = match crate::mxc_common::config_parser::load_mxc_request_from_json(
         request_json,
         logger,
     )
@@ -207,7 +207,7 @@ fn spawn_execution_request_with_logger_and(
 /// Spawn a sandbox attached to an MXC-owned pseudo-terminal.
 pub fn spawn_with_pty(
     request: &ExecutionRequest,
-    size: crate::wxc_common::sandbox_process::PtySize,
+    size: crate::mxc_common::sandbox_process::PtySize,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     spawn_execution_request_with_logger_and(
         request,
@@ -220,7 +220,7 @@ pub fn spawn_with_pty(
 pub fn spawn_one_shot_pty_json(
     request_json: &str,
     experimental: bool,
-    size: crate::wxc_common::sandbox_process::PtySize,
+    size: crate::mxc_common::sandbox_process::PtySize,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
@@ -436,11 +436,11 @@ impl TelemetryProcess {
             } => {
                 let outcome = match result {
                     Ok(exit_code) => Ok(
-                        crate::wxc_common::state_aware_dispatch::DispatchOutcome::ExecCompleted {
+                        crate::mxc_common::state_aware_dispatch::DispatchOutcome::ExecCompleted {
                             exit_code: *exit_code,
                         },
                     ),
-                    Err(error) => Err(crate::wxc_common::mxc_error::MxcError::backend_error(
+                    Err(error) => Err(crate::mxc_common::mxc_error::MxcError::backend_error(
                         error.to_string(),
                     )),
                 };
@@ -597,7 +597,7 @@ impl SandboxProcess for TelemetryProcess {
         merged
     }
 
-    fn output_metadata(&self) -> Option<&crate::wxc_common::models::SandboxOutputMetadata> {
+    fn output_metadata(&self) -> Option<&crate::mxc_common::models::SandboxOutputMetadata> {
         self.inner.output_metadata()
     }
 
@@ -759,7 +759,7 @@ impl SandboxProcess for ProcessWithWarnings {
         merged
     }
 
-    fn output_metadata(&self) -> Option<&crate::wxc_common::models::SandboxOutputMetadata> {
+    fn output_metadata(&self) -> Option<&crate::mxc_common::models::SandboxOutputMetadata> {
         self.inner.output_metadata()
     }
 
@@ -855,7 +855,7 @@ mod telemetry_process_tests {
         kill_fails: bool,
         finalized: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         metadata_read_before_finalization: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-        output_metadata: Option<crate::wxc_common::models::SandboxOutputMetadata>,
+        output_metadata: Option<crate::mxc_common::models::SandboxOutputMetadata>,
     }
 
     struct NativeStdioProbe {
@@ -978,7 +978,7 @@ mod telemetry_process_tests {
                 .map_err(|error| std::io::Error::new(error.kind(), error.to_string()))
         }
 
-        fn output_metadata(&self) -> Option<&crate::wxc_common::models::SandboxOutputMetadata> {
+        fn output_metadata(&self) -> Option<&crate::mxc_common::models::SandboxOutputMetadata> {
             if let (Some(finalized), Some(read_before_finalization)) =
                 (&self.finalized, &self.metadata_read_before_finalization)
             {
@@ -1267,7 +1267,7 @@ mod telemetry_process_tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn wait_error_preserves_finalized_metadata_and_reports_verbose_failure() {
-        use crate::wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
+        use crate::mxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
 
         let metadata = SandboxOutputMetadata {
             capture_denials: Some(CaptureDenialsOutput {

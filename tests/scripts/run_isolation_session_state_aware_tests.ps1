@@ -633,7 +633,7 @@ try {
                     # so here it only confirms the phase was routed and
                     # validated, NOT that the body was skipped. Skipping is
                     # pinned for all five phases by the call-counting stub tests
-                    # in wxc_common::state_aware_dispatch, which the E2E layer
+                    # in mxc_common::state_aware_dispatch, which the E2E layer
                     # cannot express.
                     Assert-True ($null -ne $dEnv -and $null -ne $dEnv.result) "$phase (--dry-run): returns a result envelope"
                     if ($phase -eq 'exec') {

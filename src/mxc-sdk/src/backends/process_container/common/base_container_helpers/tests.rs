@@ -6,14 +6,14 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 
 use crate::learning_mode_core::DenialsDocument;
-use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
-use crate::wxc_common::config_parser::load_mxc_request_from_json;
-use crate::wxc_common::logger::{Logger, Mode};
-use crate::wxc_common::models::{
+use crate::mxc_common::config_parser::load_mxc_request_from_json;
+use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::models::{
     CaptureDenialsConfig, ExecutionRequest, NetworkAction, ProxyConfig,
 };
-use crate::wxc_common::sandbox_process::{SandboxBackend, StdioMode};
-use crate::wxc_common::state_aware_request::MxcRequest;
+use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
+use crate::mxc_common::state_aware_request::MxcRequest;
+use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
 use serde_json::json;
 
 use super::{build_psec_v1_security_environment_spec, LOOPBACK_NETWORK_PEER};

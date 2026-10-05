@@ -11,8 +11,8 @@
 //! [`require_experimental_optin`], so every entry point enforces the same rule
 //! and reports the same error.
 
-use crate::wxc_common::models::ContainmentBackend;
-use crate::wxc_common::mxc_error::MxcError;
+use crate::mxc_common::models::ContainmentBackend;
+use crate::mxc_common::mxc_error::MxcError;
 
 use crate::mxc_engine::backend_registry::registration;
 
@@ -35,7 +35,7 @@ pub(crate) fn require_experimental_optin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     const EXPERIMENTAL: [ContainmentBackend; 3] = [
         ContainmentBackend::MicroVm,

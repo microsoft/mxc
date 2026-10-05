@@ -9,7 +9,7 @@
 //! Separate from [`platform_support`](crate::mxc_engine::platform_support), which answers the
 //! narrower "what can `mxc-sdk` itself launch?" question and reports no tier.
 
-use crate::wxc_common::models::ContainmentBackend;
+use crate::mxc_common::models::ContainmentBackend;
 use serde::Serialize;
 
 #[cfg(target_os = "windows")]
@@ -272,7 +272,7 @@ fn select_tier(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::ContainmentBackend;
+    use crate::mxc_common::models::ContainmentBackend;
 
     const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
         (ContainmentBackend::ProcessContainer, "processcontainer"),

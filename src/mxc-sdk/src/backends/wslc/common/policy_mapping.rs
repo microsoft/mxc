@@ -9,10 +9,10 @@
 //! has an optional I/O-backed tier (alias canonicalization) whose resolver is
 //! injected, so its logic stays testable without touching disk.
 
+use crate::mxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest};
 use crate::wslc_common::wslc_bindings::WslcContainerNetworkingMode;
-use crate::wxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ContainerPolicy, ExecutionRequest};
 
 /// A resolved volume mount ready to be passed to `WslcSetContainerSettingsVolumes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,17 +256,17 @@ impl NormalizedPath {
 /// exact-path match between a denied path and a mounted path is likewise
 /// enforceable (the path is not mounted) and is not treated as an overlap; such
 /// exact same-string conflicts are already collapsed most-restrictive-wins at
-/// parse time by `wxc_common`'s `normalize_filesystem_paths` (which runs for
+/// parse time by `mxc_common`'s `normalize_filesystem_paths` (which runs for
 /// every backend), and object-identity aliases (different spellings of the same
 /// object via symlink/hard link/bind) are additionally tightened at the runner
-/// by [`crate::wxc_common::filesystem_object::normalize_object_conflicts`].
+/// by [`crate::mxc_common::filesystem_object::normalize_object_conflicts`].
 ///
 /// This is a **two-tier** check. Tier 1 is a structural, lexical pre-check (no
 /// disk access): paths are parsed with drive prefix and root kept distinct,
 /// case-folded (full Unicode), and `.`/`..` folded, so traversal spellings
 /// (`C:\proj\sub\..`), whole-drive mounts (`C:\`, `\`), and drive-relative
 /// spellings (`C:secrets`) are caught. Tier 2 canonicalizes each path on disk
-/// ([`crate::wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail`]) to
+/// ([`crate::mxc_common::filesystem_canonical::canonicalize_allowing_absent_tail`]) to
 /// collapse symlinks, junctions, 8.3 short names, and `\\?\` prefixes, then
 /// re-runs the structural compare on the resolved forms — closing the gap where
 /// a **policy path itself** is an alias that resolves into a mounted tree. A
@@ -276,7 +276,7 @@ impl NormalizedPath {
 /// mount is still caught. With `deniedPaths` present, a path that exists but
 /// cannot be resolved **fails closed** (config rejected) rather than falling
 /// back to the weaker textual compare, matching the D6 pass
-/// ([`crate::wxc_common::filesystem_object::normalize_object_conflicts`]).
+/// ([`crate::mxc_common::filesystem_object::normalize_object_conflicts`]).
 ///
 /// **Scope / known limitations.** Tier 2 canonicalizes only the paths *listed in
 /// the policy*; it does not scan *inside* a mounted directory for reparse
@@ -319,10 +319,10 @@ pub fn validate_denied_path_overlap(
 /// The steps, in the order both paths must run them:
 /// 1. **Object-identity normalization (D6)** — tighten rw/ro/denied aliases of
 ///    the same host object to the strictest intent (deny > ro > rw) via
-///    [`crate::wxc_common::filesystem_object::normalize_object_conflicts`]. A path moved
+///    [`crate::mxc_common::filesystem_object::normalize_object_conflicts`]. A path moved
 ///    to `denied` is simply not mounted (unmounted = invisible).
 /// 2. **Delegation (D3)** — reject any path the invoking user cannot access via
-///    [`crate::wxc_common::filesystem_access::check_delegation`], evaluated against the
+///    [`crate::mxc_common::filesystem_access::check_delegation`], evaluated against the
 ///    already-tightened intents so the sandbox never gains access the caller lacks.
 /// 3. **Denied-path overlap** — reject a `denied` entry nested under a still-mounted
 ///    parent (WSLc's flat volume surface has no overlay primitive), again against
@@ -339,9 +339,9 @@ pub fn apply_provision_policy_gate(
     logger: &mut Logger,
 ) -> Result<Option<ContainerPolicy>, String> {
     let normalized =
-        crate::wxc_common::filesystem_object::normalize_object_conflicts(&request.policy, logger)?;
+        crate::mxc_common::filesystem_object::normalize_object_conflicts(&request.policy, logger)?;
     let effective = normalized.as_ref().unwrap_or(&request.policy);
-    crate::wxc_common::filesystem_access::check_delegation(effective)?;
+    crate::mxc_common::filesystem_access::check_delegation(effective)?;
     validate_denied_path_overlap(
         &effective.readwrite_paths,
         &effective.readonly_paths,
@@ -483,7 +483,7 @@ pub fn map_network_policy(is_block: bool, has_host_rules: bool) -> WslcContainer
 /// Returns true if the policy requests per-host filtering (which WSLc cannot
 /// enforce — such configs are rejected before execution).
 ///
-/// Thin wrapper over [`crate::wxc_common::models::needs_host_filtering`] so the parser
+/// Thin wrapper over [`crate::mxc_common::models::needs_host_filtering`] so the parser
 /// and this backend share one definition:
 /// - `Block` → only `allowed_hosts` matter (allowlist)
 /// - `Allow` → only `blocked_hosts` matter (blocklist)
@@ -492,7 +492,7 @@ pub fn needs_host_filtering(
     allowed_hosts: &[String],
     blocked_hosts: &[String],
 ) -> bool {
-    crate::wxc_common::models::needs_host_filtering(is_default_block, allowed_hosts, blocked_hosts)
+    crate::mxc_common::models::needs_host_filtering(is_default_block, allowed_hosts, blocked_hosts)
 }
 
 /// Validate that a host string is safe for use in an iptables command.

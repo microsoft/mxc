@@ -384,7 +384,7 @@ fn postprocess_denials_with_paths(
 /// pre-capture check. The final path comparison is case-insensitive because
 /// Windows paths are case-insensitive.
 fn same_config_target(a: &Path, b: &Path) -> bool {
-    use crate::wxc_common::filesystem_object::{
+    use crate::mxc_common::filesystem_object::{
         compare_existing_filesystem_objects, ExistingObjectComparison,
     };
 
@@ -397,7 +397,7 @@ fn same_config_target(a: &Path, b: &Path) -> bool {
 }
 
 fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
-    crate::wxc_common::string_util::windows_paths_equal_ignore_case(a, b)
+    crate::mxc_common::string_util::windows_paths_equal_ignore_case(a, b)
 }
 
 fn target_comparison_key(path: &Path) -> String {

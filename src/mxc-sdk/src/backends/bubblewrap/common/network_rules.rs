@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::wxc_common::models::{
+use crate::mxc_common::models::{
     ContainerPolicy, ExecutionRequest, NetworkAction, NetworkCidr, NetworkEgressPolicy,
     NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule,
 };
@@ -1152,11 +1152,11 @@ pub(crate) fn render_filter_payloads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::logger::{Logger, Mode};
-    use crate::wxc_common::models::{
+    use crate::mxc_common::logger::{Logger, Mode};
+    use crate::mxc_common::models::{
         ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
     };
-    use crate::wxc_common::state_aware_request::MxcRequest;
+    use crate::mxc_common::state_aware_request::MxcRequest;
 
     /// The supervisor applies payloads in shell-glob (lexical) order, so lexical
     /// order must equal numeric order for *every* count. A fixed 3-digit width
@@ -1461,7 +1461,7 @@ mod tests {
     fn plan_for_config(json: &str) -> EgressPlan {
         let mut logger = Logger::new(Mode::Buffer);
         let parsed =
-            crate::wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
+            crate::mxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
                 .expect("the config parses");
         let MxcRequest::OneShot(request) = parsed else {
             panic!("expected a one-shot request");
@@ -1537,11 +1537,11 @@ mod tests {
 
     #[test]
     fn legacy_network_fields_are_rejected_by_the_exact_0_9_parser() {
-        use crate::wxc_common::config_parser::ParseError;
-        use crate::wxc_common::error::WxcError;
+        use crate::mxc_common::config_parser::ParseError;
+        use crate::mxc_common::error::WxcError;
 
         let mut logger = Logger::new(Mode::Buffer);
-        let error = crate::wxc_common::config_parser::load_mxc_request_from_json(
+        let error = crate::mxc_common::config_parser::load_mxc_request_from_json(
             r#"{
                 "version": "0.9.0-alpha",
                 "containment": "bubblewrap",

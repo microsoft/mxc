@@ -162,7 +162,7 @@ const MAX_CAPTURED_BYTES: u64 = 8 * 1024;
 
 #[cfg(target_os = "linux")]
 fn read_to_end_on_thread(
-    reader: Option<crate::wxc_common::interruptible_reader::InterruptibleReader>,
+    reader: Option<crate::mxc_common::interruptible_reader::InterruptibleReader>,
 ) -> Option<std::thread::JoinHandle<String>> {
     reader.map(|reader| {
         std::thread::spawn(move || {
@@ -311,8 +311,8 @@ impl LxcContainer {
     /// gone, which a task wedged in uninterruptible sleep can hold open.
     #[cfg(target_os = "linux")]
     fn run_release_tool(mut cmd: std::process::Command) -> Result<(), String> {
-        use crate::wxc_common::interruptible_reader::wrap_pipe;
-        use crate::wxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
+        use crate::mxc_common::interruptible_reader::wrap_pipe;
+        use crate::mxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
         use std::process::Stdio;
 
         // Generous enough to delete a large rootfs on slow storage.
@@ -603,8 +603,8 @@ impl LxcContainer {
         timeout: Option<std::time::Duration>,
         firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
-        use crate::wxc_common::interruptible_reader::wrap_pipe;
-        use crate::wxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
+        use crate::mxc_common::interruptible_reader::wrap_pipe;
+        use crate::mxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
         use std::process::Stdio;
 
         let mut cmd = self.lxc_command("lxc-attach");
@@ -1352,7 +1352,7 @@ mod tests {
 
     #[test]
     fn proxy_disabled_keeps_caller_proxy_env_and_still_clears_inherited_env() {
-        use crate::wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
+        use crate::mxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
         let mut env = vec![
             "HTTP_PROXY=http://caller-proxy.example:9999".to_string(),
             "PATH=/usr/bin".to_string(),
@@ -1376,7 +1376,7 @@ mod tests {
 
     #[test]
     fn proxy_enabled_emits_clear_env_and_proxy_keys_in_attach_args() {
-        use crate::wxc_common::{
+        use crate::mxc_common::{
             models::{ProxyAddress, ProxyConfig},
             proxy_env::apply_proxy_env,
         };

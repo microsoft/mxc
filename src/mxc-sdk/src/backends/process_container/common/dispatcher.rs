@@ -68,6 +68,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::mxc_common::audit::{
+    sanitize_identity, AuditEvent, AuditEventName, EffectiveEnforcementLevel,
+};
+use crate::mxc_common::error::WxcError;
+use crate::mxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use crate::mxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
+use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::validator::NetworkPolicySupport;
 use crate::process_container_common::appcontainer_runner::{
     derive_sid_string, AppContainerScriptRunner, FilesystemMode,
 };
@@ -76,16 +86,6 @@ use crate::process_container_common::fallback_detector::{
     self, DegradationReason, FallbackError, IsolationTier,
 };
 use crate::process_container_common::guarded_capture::GuardedCaptureFactory;
-use crate::wxc_common::audit::{
-    sanitize_identity, AuditEvent, AuditEventName, EffectiveEnforcementLevel,
-};
-use crate::wxc_common::error::WxcError;
-use crate::wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use crate::wxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
-use crate::wxc_common::script_runner::ScriptRunner;
-use crate::wxc_common::validator::NetworkPolicySupport;
 
 #[derive(Debug, Clone, Default)]
 pub struct Degradation {
@@ -123,7 +123,7 @@ pub(crate) fn log_enforcement_degraded(
     ) {
         return;
     }
-    let telemetry_active = crate::wxc_common::telemetry::is_active();
+    let telemetry_active = crate::mxc_common::telemetry::is_active();
     let diagnostic_active = logger.has_diagnostic_sink();
     if !telemetry_active && !diagnostic_active {
         return;
@@ -131,8 +131,8 @@ pub(crate) fn log_enforcement_degraded(
     let effective_level = effective_enforcement_level(tier, degradation.needs_dacl_augmentation);
     let reason_codes = fallback_detector::reason_codes(&degradation.reasons);
     if telemetry_active {
-        let redacted_identity = crate::wxc_common::policy_identity::redact_identity(identity);
-        crate::wxc_common::telemetry::log_enforcement_degraded(
+        let redacted_identity = crate::mxc_common::policy_identity::redact_identity(identity);
+        crate::mxc_common::telemetry::log_enforcement_degraded(
             &redacted_identity,
             tier.as_str(),
             degradation.needs_dacl_augmentation,
@@ -641,7 +641,7 @@ pub struct DispatchedProcess {
 /// flat error so the caller can preserve fallback semantics: tier-selection /
 /// DACL failures map to `backend_unavailable` (as the run-to-completion path
 /// does), while a backend spawn failure preserves the backend's
-/// [`FailurePhase`](crate::wxc_common::models::FailurePhase).
+/// [`FailurePhase`](crate::mxc_common::models::FailurePhase).
 pub enum SpawnDispatchError {
     /// Tier selection or DACL application failed before the process spawned.
     /// Mirrors [`dispatch_with_fallback`]'s [`DispatchError`].
@@ -756,13 +756,13 @@ impl SandboxProcess for DaclGuardedProcess {
         self.inner.take_stdin()
     }
 
-    fn stdin_closer(&self) -> Option<Box<dyn crate::wxc_common::sandbox_process::StreamCloser>> {
+    fn stdin_closer(&self) -> Option<Box<dyn crate::mxc_common::sandbox_process::StreamCloser>> {
         self.inner.stdin_closer()
     }
 
     fn take_native_stdio(
         &mut self,
-    ) -> std::io::Result<Option<crate::wxc_common::sandbox_process::NativeStdio>> {
+    ) -> std::io::Result<Option<crate::mxc_common::sandbox_process::NativeStdio>> {
         self.inner.take_native_stdio()
     }
 
@@ -794,15 +794,15 @@ impl SandboxProcess for DaclGuardedProcess {
         self.inner.wait()
     }
 
-    fn output_metadata(&self) -> Option<&crate::wxc_common::models::SandboxOutputMetadata> {
+    fn output_metadata(&self) -> Option<&crate::mxc_common::models::SandboxOutputMetadata> {
         self.inner.output_metadata()
     }
 
-    fn stdout_closer(&self) -> Option<Box<dyn crate::wxc_common::sandbox_process::StreamCloser>> {
+    fn stdout_closer(&self) -> Option<Box<dyn crate::mxc_common::sandbox_process::StreamCloser>> {
         self.inner.stdout_closer()
     }
 
-    fn stderr_closer(&self) -> Option<Box<dyn crate::wxc_common::sandbox_process::StreamCloser>> {
+    fn stderr_closer(&self) -> Option<Box<dyn crate::mxc_common::sandbox_process::StreamCloser>> {
         self.inner.stderr_closer()
     }
 }
@@ -810,7 +810,7 @@ impl SandboxProcess for DaclGuardedProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{ContainerPolicy, ExecutionRequest, ProxyAddress, ProxyConfig};
+    use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, ProxyAddress, ProxyConfig};
     // `ForceTierGuard` lives in `crate::process_container_common::test_env` so the lock is
     // shared with the `fallback_detector::tests` module — otherwise
     // a dispatcher test and a fallback-detector test running on
@@ -1077,7 +1077,7 @@ mod tests {
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
         let req = test_request(policy);
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         let result = spawn_with_fallback(&req, &mut logger, StdioMode::Inherit, None);
         assert!(matches!(
@@ -1096,7 +1096,7 @@ mod tests {
         let (mut policy, _temporary_path) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
         let req = test_request(policy);
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(UnavailableGuardedCaptureFactory);
 
         let result = spawn_with_fallback(&req, &mut logger, StdioMode::Inherit, Some(factory));
@@ -1238,7 +1238,7 @@ mod tests {
         // Stamp an Everyone grant on td_grant via `grant_appcontainer_access`
         // and persist it for the duration of the test by holding the
         // manager. Drop at end of scope rolls it back.
-        let mut mgr = crate::wxc_common::filesystem_dacl::DaclManager::new().expect("dacl mgr");
+        let mut mgr = crate::mxc_common::filesystem_dacl::DaclManager::new().expect("dacl mgr");
         mgr.grant_appcontainer_access(
             "S-1-1-0",
             std::slice::from_ref(&td_grant.path().to_path_buf()),
@@ -1424,8 +1424,8 @@ mod tests {
     /// order, documented on the struct).
     #[test]
     fn dacl_guarded_process_delegates_to_inner() {
+        use crate::mxc_common::sandbox_process::SandboxProcess;
         use crate::process_container_common::test_env::ScopedStateDir;
-        use crate::wxc_common::sandbox_process::SandboxProcess;
         use std::io::{Read, Write};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
@@ -1437,7 +1437,7 @@ mod tests {
             stdin_taken: bool,
             native_stdio_calls: Arc<AtomicUsize>,
             killed: bool,
-            output_metadata: crate::wxc_common::models::SandboxOutputMetadata,
+            output_metadata: crate::mxc_common::models::SandboxOutputMetadata,
         }
         impl SandboxProcess for FakeProcess {
             fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
@@ -1449,7 +1449,7 @@ mod tests {
             }
             fn take_native_stdio(
                 &mut self,
-            ) -> std::io::Result<Option<crate::wxc_common::sandbox_process::NativeStdio>>
+            ) -> std::io::Result<Option<crate::mxc_common::sandbox_process::NativeStdio>>
             {
                 self.native_stdio_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(None)
@@ -1473,7 +1473,7 @@ mod tests {
             fn wait(&mut self) -> std::io::Result<i32> {
                 Ok(7)
             }
-            fn output_metadata(&self) -> Option<&crate::wxc_common::models::SandboxOutputMetadata> {
+            fn output_metadata(&self) -> Option<&crate::mxc_common::models::SandboxOutputMetadata> {
                 Some(&self.output_metadata)
             }
         }

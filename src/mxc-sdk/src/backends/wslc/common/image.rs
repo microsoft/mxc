@@ -9,9 +9,9 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::ScriptResponse;
-use crate::wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::ScriptResponse;
+use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::wslc_common::container_steps::{cstr_bytes, sdk_error};
 use crate::wslc_common::error::WslcError;
@@ -261,7 +261,7 @@ where
             let outcome = match apartment {
                 Err(e) => Err(e),
                 Ok(_apartment) => {
-                    let mut log = Logger::new(crate::wxc_common::logger::Mode::Console);
+                    let mut log = Logger::new(crate::mxc_common::logger::Mode::Console);
 
                     // SAFETY: the caller keeps both alive for as long as this runs.
                     unsafe {
@@ -1028,7 +1028,7 @@ pub unsafe fn setup_pull_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::FailurePhase;
+    use crate::mxc_common::models::FailurePhase;
     use std::io::Write;
 
     /// `E_FAIL`, which the SDK returns when it cannot reach the registry at all.

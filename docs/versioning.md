@@ -521,7 +521,7 @@ across trust-boundary parsing, common normalization, and backend execution:
   deserialization boundary and the source for authoritative schemas and
   generated exact TypeScript wire types.
 - **Common request IR**
-  (`wxc_common::common_request_ir::CommonRequestIR`) — the private common
+  (`mxc_common::common_request_ir::CommonRequestIR`) — the private common
   representation produced by version-specific adapters and consumed by shared
   semantic normalization. It is not a JSON parse or schema generation target.
 - **Runtime / domain model** (`models::ExecutionRequest` and friends) — the
@@ -539,7 +539,7 @@ pass directional network sections to shared normalization. An omitted network
 section receives directional deny defaults; shared normalization does not select
 a network format from contract provenance or legacy field presence.
 
-Reusable nested DTOs under `wxc_common::wire` help adapters share representations
+Reusable nested DTOs under `mxc_common::wire` help adapters share representations
 for common fields. They are not a whole-request deserialization boundary and do
 not generate schemas or public SDK types.
 

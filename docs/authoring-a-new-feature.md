@@ -111,13 +111,13 @@ Adding a feature may touch these files:
 | File | What to change |
 |------|----------------|
 | `src/mxc-sdk/src/core/mxc_contract/dev/` | Add the field to the authoritative closed mutable development contract |
-| `src/mxc-sdk/src/core/wxc_common/config_contract_adapters/dev/` | Adapt the exact field into private `CommonRequestIR` |
-| `src/mxc-sdk/src/core/wxc_common/wire.rs` | Add only reusable nested normalization DTOs needed by the adapter; never add a whole-request root |
+| `src/mxc-sdk/src/core/mxc_common/config_contract_adapters/dev/` | Adapt the exact field into private `CommonRequestIR` |
+| `src/mxc-sdk/src/core/mxc_common/wire.rs` | Add only reusable nested normalization DTOs needed by the adapter; never add a whole-request root |
 | `src/mxc-sdk/src/policy/exact/` | Once the field is in the SDK's published target, update that contract's typed builder (currently `v1_0.rs` for `1.0.0`) |
 | `schemas/dev/mxc-config.schema.1.1.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
 | `sdk/node/src/generated/v1_1_0_alpha/wire.ts` | **Generated exact artifact** — do not hand-edit |
-| `src/mxc-sdk/src/core/wxc_common/models.rs` | Add `GpuIsolationConfig` and an optional field on `ExecutionRequest` |
-| `src/mxc-sdk/src/core/wxc_common/config_parser.rs` | Map the new config-input field into `ExecutionRequest.gpu_isolation` |
+| `src/mxc-sdk/src/core/mxc_common/models.rs` | Add `GpuIsolationConfig` and an optional field on `ExecutionRequest` |
+| `src/mxc-sdk/src/core/mxc_common/config_parser.rs` | Map the new config-input field into `ExecutionRequest.gpu_isolation` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
 
@@ -168,7 +168,7 @@ regeneration steps are mandatory.
 
 ## Step 2: Add the runtime model field
 
-In `src/mxc-sdk/src/core/wxc_common/models.rs`, add `GpuIsolationConfig` and an optional
+In `src/mxc-sdk/src/core/mxc_common/models.rs`, add `GpuIsolationConfig` and an optional
 field directly on `ExecutionRequest`:
 
 ```rust

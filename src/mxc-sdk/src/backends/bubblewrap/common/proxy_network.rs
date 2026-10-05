@@ -15,9 +15,9 @@ use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::wxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
+use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
@@ -1039,7 +1039,7 @@ impl ProxyNetworkNamespace {
 
 impl Drop for ProxyNetworkNamespace {
     fn drop(&mut self) {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         self.stop(&mut logger);
     }
 }
@@ -2066,7 +2066,7 @@ fn terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::NetworkEnforcementCompatibility;
+    use crate::mxc_common::models::NetworkEnforcementCompatibility;
 
     /// The reported concern: a hostname proxy resolves through the host's
     /// resolver during setup, before the script timeout applies, so an
@@ -3005,7 +3005,7 @@ mod tests {
     /// A plan whose rule count is what the test cares about. Sized through the
     /// public constructor so the count matches what the supervisor installs.
     fn plan_with_rule_count(count: usize) -> EgressPlan {
-        let mut request = crate::wxc_common::models::ExecutionRequest {
+        let mut request = crate::mxc_common::models::ExecutionRequest {
             network_enforcement_compatibility: NetworkEnforcementCompatibility::Strict,
             ..Default::default()
         };
@@ -3076,7 +3076,7 @@ mod tests {
 
     #[test]
     fn skipping_the_ipv6_rules_is_a_retained_warning() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         warn_skipped_ipv6_rules(false, &mut logger);
         let out = logger.warnings().join("\n");
         assert!(
@@ -3090,7 +3090,7 @@ mod tests {
             "the warning must travel as a retained warning, not as buffer output"
         );
 
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         warn_skipped_ipv6_rules(true, &mut logger);
         assert!(
             logger.warnings().is_empty(),
@@ -4748,8 +4748,8 @@ exec sleep 30
     /// is a different policy.
     #[test]
     fn a_block_policy_accepts_only_its_allowlist_and_closes_both_families() {
-        let mut request = crate::wxc_common::models::ExecutionRequest::default();
-        request.policy.default_network_policy = crate::wxc_common::models::NetworkPolicy::Block;
+        let mut request = crate::mxc_common::models::ExecutionRequest::default();
+        request.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
         request.policy.allowed_hosts = vec!["203.0.113.7".into(), "2001:db8::/32".into()];
         let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
 
@@ -4777,8 +4777,8 @@ exec sleep 30
     /// against what reached iptables rather than against the plan alone.
     #[test]
     fn an_allow_policy_denies_its_blocklist_before_the_open_terminal() {
-        let mut request = crate::wxc_common::models::ExecutionRequest::default();
-        request.policy.default_network_policy = crate::wxc_common::models::NetworkPolicy::Allow;
+        let mut request = crate::mxc_common::models::ExecutionRequest::default();
+        request.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Allow;
         request.policy.blocked_hosts = vec!["198.51.100.0/24".into()];
         request.policy.allowed_hosts = vec!["198.51.100.9".into()];
         let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
@@ -4838,8 +4838,8 @@ exec sleep 30
     /// silent v6 exit that no rule in the config mentions.
     #[test]
     fn a_v4_only_policy_still_closes_ipv6() {
-        let mut request = crate::wxc_common::models::ExecutionRequest::default();
-        request.policy.default_network_policy = crate::wxc_common::models::NetworkPolicy::Block;
+        let mut request = crate::mxc_common::models::ExecutionRequest::default();
+        request.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
         request.policy.allowed_hosts = vec!["203.0.113.7".into()];
         let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
 

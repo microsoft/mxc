@@ -29,6 +29,29 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
+use crate::mxc_common::api_set::is_api_set_implemented;
+use crate::mxc_common::audit::{
+    sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
+};
+use crate::mxc_common::error::WxcError;
+use crate::mxc_common::log_symbols::EMOJI_SECTION;
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
+    FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+};
+use crate::mxc_common::process_util::{
+    create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
+    SendOwnedHandle,
+};
+use crate::mxc_common::sandbox_process::{
+    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
+    take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess, StdioMode,
+    StreamCloser,
+};
+use crate::mxc_common::script_runner::get_timeout_milliseconds;
+use crate::mxc_common::string_util;
+use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 use crate::process_container_common::base_container_helpers::{
     build_psec_v1_security_environment_spec, has_conflicting_proxy_identity,
     unrestricted_host_loopback_allowed,
@@ -50,29 +73,6 @@ use crate::process_container_common::secenv::{
     SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     SECURITY_ENVIRONMENT_API_SET,
 };
-use crate::wxc_common::api_set::is_api_set_implemented;
-use crate::wxc_common::audit::{
-    sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
-};
-use crate::wxc_common::error::WxcError;
-use crate::wxc_common::log_symbols::EMOJI_SECTION;
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{
-    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
-    FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
-};
-use crate::wxc_common::process_util::{
-    create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
-    SendOwnedHandle,
-};
-use crate::wxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
-    take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess, StdioMode,
-    StreamCloser,
-};
-use crate::wxc_common::script_runner::get_timeout_milliseconds;
-use crate::wxc_common::string_util;
-use crate::wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
@@ -1042,7 +1042,7 @@ impl BaseContainerRunner {
             });
         }
 
-        crate::wxc_common::telemetry::log_network_policy_applied(
+        crate::mxc_common::telemetry::log_network_policy_applied(
             sanitize_identity(&identity),
             request.policy.network_enforcement_mode.as_str(),
             request.policy.default_network_policy.as_str(),
@@ -1084,7 +1084,7 @@ impl BaseContainerRunner {
                 .bool("firewall_applied", false)
                 .str(
                     "status",
-                    crate::wxc_common::audit::OperationStatus::Success.as_str(),
+                    crate::mxc_common::audit::OperationStatus::Success.as_str(),
                 );
             logger.log_audit_event(&record);
         }
@@ -1162,7 +1162,7 @@ impl SandboxBackend for BaseContainerRunner {
         validate_network_policy_support(request, self.network_policy_support())?;
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::rejected(
-                crate::wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+                crate::mxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
         if has_conflicting_proxy_identity(&request.policy) {
@@ -1204,7 +1204,7 @@ impl SandboxBackend for BaseContainerRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        use crate::wxc_common::validator::validate_common;
+        use crate::mxc_common::validator::validate_common;
 
         crate::process_container_common::validate_process_container_stdio(stdio)?;
         validate_common(request)?;
@@ -1488,12 +1488,12 @@ impl BaseContainerSandboxProcess {
     }
 
     fn log_teardown(&mut self, capture_result: &Result<(), String>, proxy_stopped: bool) {
-        if !self.audit_enabled() && !crate::wxc_common::telemetry::is_active() {
+        if !self.audit_enabled() && !crate::mxc_common::telemetry::is_active() {
             return;
         }
         let (status, skip_reason) =
             base_container_teardown_status(capture_result.is_err(), false, self.preserve_policy);
-        crate::wxc_common::telemetry::log_sandbox_torn_down(
+        crate::mxc_common::telemetry::log_sandbox_torn_down(
             &self.identity,
             status.as_str(),
             &format!(
@@ -1540,10 +1540,10 @@ impl BaseContainerSandboxProcess {
     }
 
     fn record_kill_failure(&mut self, method: KillMethod, error: &windows::core::Error) {
-        crate::wxc_common::telemetry::log_process_event(
+        crate::mxc_common::telemetry::log_process_event(
             &self.identity,
             self.pid,
-            crate::wxc_common::telemetry::ProcessEvent::KillFailed(method.as_str(), error.code().0),
+            crate::mxc_common::telemetry::ProcessEvent::KillFailed(method.as_str(), error.code().0),
         );
         if self.audit_enabled() {
             let record = self
@@ -1555,10 +1555,10 @@ impl BaseContainerSandboxProcess {
     }
 
     fn timeout_result(&mut self) -> std::io::Result<i32> {
-        crate::wxc_common::telemetry::log_process_event(
+        crate::mxc_common::telemetry::log_process_event(
             &self.identity,
             self.pid,
-            crate::wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
+            crate::mxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
         );
         if self.audit_enabled() {
             let record = self
@@ -1842,10 +1842,10 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                     self.timeout_result()
                 } else {
                     let exit_code = code as i32;
-                    crate::wxc_common::telemetry::log_process_event(
+                    crate::mxc_common::telemetry::log_process_event(
                         &self.identity,
                         self.pid,
-                        crate::wxc_common::telemetry::ProcessEvent::Exited(exit_code),
+                        crate::mxc_common::telemetry::ProcessEvent::Exited(exit_code),
                     );
                     if self.audit_enabled() {
                         let record = self
@@ -1969,7 +1969,7 @@ fn promote_capture_for_retention(
     let retained_root = capture_root
         .join(crate::process_container_common::capture_output::RETAINED_CAPTURE_DIR_NAME);
     std::fs::create_dir_all(&retained_root)?;
-    crate::wxc_common::filesystem_dacl::set_owner_only_dacl(&retained_root, true)
+    crate::mxc_common::filesystem_dacl::set_owner_only_dacl(&retained_root, true)
         .map_err(std::io::Error::other)?;
     let directory_name = directory.file_name().ok_or_else(|| {
         std::io::Error::other("captureDenials working directory has no file name")
@@ -2003,7 +2003,7 @@ fn managed_capture_output_path_in(
                 root.display()
             ))
         })?;
-        crate::wxc_common::filesystem_dacl::set_owner_only_dacl(root, true).map_err(|error| {
+        crate::mxc_common::filesystem_dacl::set_owner_only_dacl(root, true).map_err(|error| {
             ScriptResponse::error(&format!(
                 "captureDenials failed to secure ETL root {}: {error}",
                 root.display()
@@ -2018,7 +2018,7 @@ fn managed_capture_output_path_in(
         match std::fs::create_dir(&directory) {
             Ok(()) => {
                 if let Err(error) =
-                    crate::wxc_common::filesystem_dacl::set_owner_only_dacl(&directory, true)
+                    crate::mxc_common::filesystem_dacl::set_owner_only_dacl(&directory, true)
                 {
                     let _ = std::fs::remove_dir(&directory);
                     return Err(ScriptResponse::error(&format!(
@@ -2053,20 +2053,20 @@ mod tests {
     use crate::learning_mode_core::{
         AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
     };
-    use crate::process_container_common::job_object::to_job_object_uilimit_mask;
-    use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr,
         NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig,
         UiPolicy,
     };
-    use crate::wxc_common::ui_policy::EffectiveUiRestrictions;
+    use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
+    use crate::process_container_common::job_object::to_job_object_uilimit_mask;
+    use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn enumerate_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
         request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
-        request.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Deny,
             host_loopback: NetworkAction::Deny,
         });
@@ -2075,7 +2075,7 @@ mod tests {
 
     fn host_loopback_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Allow,
         });
@@ -2176,7 +2176,7 @@ mod tests {
             Some("etl")
         );
         assert!(
-            crate::wxc_common::filesystem_dacl::owner_is_self(&first.directory)
+            crate::mxc_common::filesystem_dacl::owner_is_self(&first.directory)
                 .expect("read managed directory owner")
         );
         drop(first);
@@ -2808,7 +2808,7 @@ mod tests {
     #[test]
     fn build_process_security_environment_spec_preserves_directional_allow_egress() {
         let mut request = ExecutionRequest::default();
-        request.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Allow,
             ..Default::default()
         });
@@ -2827,7 +2827,7 @@ mod tests {
     #[test]
     fn psec_1_1_encodes_host_loopback_ingress() {
         let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Deny,
             host_loopback: NetworkAction::Allow,
         });
@@ -2907,7 +2907,7 @@ mod tests {
     #[test]
     fn psec_1_0_uses_capability_for_ingress_default_allow() {
         let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Deny,
         });
@@ -2967,7 +2967,7 @@ mod tests {
 
     fn request_with_rich_network_rules() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
-        request.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Deny,
             allow: vec![NetworkRule {
                 to: vec![
@@ -3058,7 +3058,7 @@ mod tests {
     #[test]
     fn build_process_security_environment_spec_splits_mixed_icmp_rules() {
         let mut request = ExecutionRequest::default();
-        request.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Deny,
             allow: vec![NetworkRule {
                 to: Vec::new(),
@@ -3109,7 +3109,7 @@ mod tests {
         ] {
             let (address, prefix_length) = cidr.split_once('/').unwrap();
             let mut request = ExecutionRequest::default();
-            request.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+            request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
                 default: NetworkAction::Deny,
                 allow: vec![NetworkRule {
                     to: vec![NetworkPeer {
@@ -3154,7 +3154,7 @@ mod tests {
             except: Vec::new(),
         };
         let mut request = ExecutionRequest::default();
-        request.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Deny,
             allow: vec![NetworkRule {
                 to: vec![peer.clone()],
@@ -3195,7 +3195,7 @@ mod tests {
         for allowed_proxy_peer in [false, true] {
             for host_loopback in [NetworkAction::Deny, NetworkAction::Allow] {
                 let mut policy = ContainerPolicy {
-                    network_ingress: Some(crate::wxc_common::models::NetworkIngressPolicy {
+                    network_ingress: Some(crate::mxc_common::models::NetworkIngressPolicy {
                         default: NetworkAction::Allow,
                         host_loopback,
                     }),
@@ -3221,7 +3221,7 @@ mod tests {
             ..Default::default()
         };
         request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
-        request.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Allow,
         });
@@ -3267,7 +3267,7 @@ mod tests {
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
-    use crate::wxc_common::sandbox_process::SandboxBackend;
+    use crate::mxc_common::sandbox_process::SandboxBackend;
 
     #[test]
     fn validate_runner_rejects_allowed_hosts() {

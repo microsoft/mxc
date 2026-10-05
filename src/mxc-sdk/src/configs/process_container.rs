@@ -137,13 +137,13 @@ pub enum ProcessContainerUiIsolation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mxc_common::models::{
+        CaptureDenialsMode as RuntimeCaptureDenialsMode, ContainmentBackend,
+        NetworkEnforcementCompatibility,
+    };
     use crate::policy::{
         build_request_with_containment, ContainerPolicy, Containment, NetworkAction,
         NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, NetworkRuntimeConfig,
-    };
-    use crate::wxc_common::models::{
-        CaptureDenialsMode as RuntimeCaptureDenialsMode, ContainmentBackend,
-        NetworkEnforcementCompatibility,
     };
 
     const TEST_COMMAND: &str = "echo hello";
@@ -278,7 +278,7 @@ mod tests {
                 .network_egress
                 .as_ref()
                 .map(|egress| egress.default),
-            Some(crate::wxc_common::models::NetworkAction::Deny)
+            Some(crate::mxc_common::models::NetworkAction::Deny)
         );
         assert_eq!(
             request
@@ -288,8 +288,8 @@ mod tests {
                 .as_ref()
                 .map(|ingress| (ingress.default, ingress.host_loopback)),
             Some((
-                crate::wxc_common::models::NetworkAction::Allow,
-                crate::wxc_common::models::NetworkAction::Deny
+                crate::mxc_common::models::NetworkAction::Allow,
+                crate::mxc_common::models::NetworkAction::Deny
             ))
         );
         assert_eq!(
@@ -373,9 +373,9 @@ mod tests {
             }))
             .expect("schema 0.9 request should parse");
         let mut logger =
-            crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
-        let request = crate::wxc_common::config_parser::load_one_shot_request_from_contract(
-            crate::wxc_common::config_parser::ExactOneShotContract::V0_9(Box::new(contract)),
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let request = crate::mxc_common::config_parser::load_one_shot_request_from_contract(
+            crate::mxc_common::config_parser::ExactOneShotContract::V0_9(Box::new(contract)),
             &mut logger,
         )
         .expect("default ProcessContainer should remain valid for schema 0.9");

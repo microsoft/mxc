@@ -25,7 +25,7 @@
 use std::path::Path;
 
 use crate::learning_mode_core::AnalysisResult;
-use crate::wxc_common::models::{
+use crate::mxc_common::models::{
     CaptureDenialsErrorOutput, FailurePhase, SandboxOutputMetadata, ScriptResponse,
 };
 

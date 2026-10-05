@@ -7,7 +7,7 @@
 //! Kept out of [`crate::seatbelt_common::seatbelt_runner`], which is `target_os = "macos"`, so
 //! the resolution rules are compiled and tested on every host.
 
-use crate::wxc_common::models::ExecutionRequest;
+use crate::mxc_common::models::ExecutionRequest;
 
 /// Baseline `PATH` for the sandboxed child. We always start from a cleared
 /// environment (so the host process's env — cloud creds, API tokens — never
@@ -40,17 +40,17 @@ fn default_env(working_directory: Option<&str>) -> Vec<(String, String)> {
 ///
 /// `working_directory` is the directory the runner will start the child in, as
 /// described on [`default_env`]. The state dispatch and overlay merge are
-/// shared; see [`crate::wxc_common::default_env::resolve_env`].
+/// shared; see [`crate::mxc_common::default_env::resolve_env`].
 pub fn resolved_env(request: &ExecutionRequest, working_directory: Option<&str>) -> Vec<String> {
-    crate::wxc_common::default_env::resolve_env(request, || default_env(working_directory))
+    crate::mxc_common::default_env::resolve_env(request, || default_env(working_directory))
 }
 
-pub use crate::wxc_common::default_env::env_pairs;
+pub use crate::mxc_common::default_env::env_pairs;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::DefaultEnvCompatibility;
+    use crate::mxc_common::models::DefaultEnvCompatibility;
 
     fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
         ExecutionRequest {

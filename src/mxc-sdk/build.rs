@@ -6,14 +6,14 @@ mod build_isolation_session_bindings;
 #[allow(dead_code)]
 #[path = "build/build_mxc_build_common.rs"]
 mod build_mxc_build_common;
+#[path = "build/build_mxc_common.rs"]
+mod build_mxc_common;
 #[path = "build/build_mxc_telemetry.rs"]
 mod build_mxc_telemetry;
 #[path = "build/build_nanvix_binaries.rs"]
 mod build_nanvix_binaries;
 #[path = "build/build_wslc_common.rs"]
 mod build_wslc_common;
-#[path = "build/build_wxc_common.rs"]
-mod build_wxc_common;
 // The SDK build uses the download/cache subset. Executor build scripts include
 // this same module and use its artifact-staging helpers.
 #[allow(dead_code)]
@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nanvix_build_common::stage_artifacts_next_to_exe(&bin_dir, !use_prefetched_binaries);
     }
     build_wslc_common::run();
-    build_wxc_common::run()?;
+    build_mxc_common::run()?;
     build_mxc_build_common::embed_version_info_for_binary(
         "wxc-windows-sandbox-daemon",
         "Windows Sandbox integration daemon",

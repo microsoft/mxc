@@ -26,8 +26,8 @@
 //! replace or empty. A `process.env` without `process.inheritDefaultEnv` is
 //! therefore refused wherever a process is launched: one-shot and exec.
 
-use crate::wxc_common::default_env::EnvResolution;
-use crate::wxc_common::models::{
+use crate::mxc_common::default_env::EnvResolution;
+use crate::mxc_common::models::{
     ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
 };
 
@@ -167,11 +167,11 @@ fn validate_provision_network_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         ContainerPolicy, DefaultEnvCompatibility, NetworkEgressPolicy, NetworkIngressPolicy,
         ProxyAddress, ProxyConfig, UiPolicy,
     };
-    use crate::wxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     fn assert_policy_err_contains(err: IsolationSessionError, expected: &str) {
         match err {

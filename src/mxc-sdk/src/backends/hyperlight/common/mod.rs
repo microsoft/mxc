@@ -98,12 +98,12 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{
     ExecutionRequest, HyperlightRuntime, NetworkPolicy, ScriptResponse,
 };
-use crate::wxc_common::script_runner::ScriptRunner;
-use crate::wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
+use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use hyperlight_unikraft::hyperlight_host::HyperlightError;
 use hyperlight_unikraft::{
@@ -1111,8 +1111,8 @@ mod oci {
     use std::path::Path;
     use std::time::Duration;
 
-    use crate::wxc_common::encoding::lowercase_hex;
-    use crate::wxc_common::logger::Logger;
+    use crate::mxc_common::encoding::lowercase_hex;
+    use crate::mxc_common::logger::Logger;
     use sha2::{Digest, Sha256};
 
     const MANIFEST_TYPES: &str = "application/vnd.oci.image.manifest.v1+json, \
@@ -1391,7 +1391,7 @@ impl PathRelationship {
 
 #[cfg(target_os = "windows")]
 fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
-    use crate::wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail;
+    use crate::mxc_common::filesystem_canonical::canonicalize_allowing_absent_tail;
 
     path_relationship_fallback_with(allowed, denied, canonicalize_allowing_absent_tail)
 }
@@ -1400,9 +1400,9 @@ fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
 fn path_relationship_fallback_with(
     allowed: &str,
     denied: &str,
-    resolve: impl Fn(&str) -> crate::wxc_common::filesystem_canonical::PathCanonical,
+    resolve: impl Fn(&str) -> crate::mxc_common::filesystem_canonical::PathCanonical,
 ) -> PathRelationship {
-    use crate::wxc_common::filesystem_canonical::PathCanonical;
+    use crate::mxc_common::filesystem_canonical::PathCanonical;
 
     match (resolve(allowed), resolve(denied)) {
         (PathCanonical::Canonical(allowed_resolved), PathCanonical::Canonical(denied_resolved)) => {
@@ -1655,8 +1655,8 @@ fn os_data_home() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::logger::Mode;
-    use crate::wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use crate::mxc_common::logger::Mode;
+    use crate::mxc_common::models::{ContainerPolicy, NetworkPolicy};
 
     fn runner() -> HyperlightScriptRunner {
         HyperlightScriptRunner::new()
@@ -2084,7 +2084,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn fallback_reports_indeterminate_for_unresolved_windows_paths() {
-        use crate::wxc_common::filesystem_canonical::PathCanonical;
+        use crate::mxc_common::filesystem_canonical::PathCanonical;
 
         assert_eq!(
             path_relationship_fallback_with(
@@ -2099,7 +2099,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn fallback_canonicalizes_verbatim_trailing_dot_alias_ancestors() {
-        use crate::wxc_common::filesystem_canonical::PathCanonical;
+        use crate::mxc_common::filesystem_canonical::PathCanonical;
 
         assert_eq!(
             path_relationship_fallback_with(
@@ -2122,7 +2122,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn fallback_never_separates_mixed_spelling_of_same_dotted_canonical_tree() {
-        use crate::wxc_common::filesystem_canonical::PathCanonical;
+        use crate::mxc_common::filesystem_canonical::PathCanonical;
 
         let relationship =
             path_relationship_fallback_with("C:\\link\\child", "\\\\?\\C:\\real.\\child", |path| {
@@ -2146,7 +2146,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn fallback_fails_closed_when_dotted_canonical_component_provenance_is_ambiguous() {
-        use crate::wxc_common::filesystem_canonical::PathCanonical;
+        use crate::mxc_common::filesystem_canonical::PathCanonical;
 
         assert_eq!(
             path_relationship_fallback_with(

@@ -10,8 +10,8 @@
 //! one-shot path has no structured envelope, so [`IsolationSessionError`]'s
 //! `Display` folds the same components back into one human-readable string.
 
-use crate::wxc_common::models::ScriptResponse;
-use crate::wxc_common::mxc_error::{ApiFailure, MxcError, MxcErrorCode};
+use crate::mxc_common::models::ScriptResponse;
+use crate::mxc_common::mxc_error::{ApiFailure, MxcError, MxcErrorCode};
 
 use crate::isolation_session_bindings::bindings::{IsoSessionError, IsoSessionResult};
 

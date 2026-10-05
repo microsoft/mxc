@@ -31,7 +31,7 @@ The workspace members and shared Rust dependencies are declared in
 | `wxc`, `lxc`, `mxc_darwin` | Windows, Linux, and macOS executor binaries |
 | Host helpers and tools | PLM, host preparation, diagnostics, schema generation, and test executables |
 
-Within `mxc-sdk`, `wxc_common` remains the backend-neutral foundation and
+Within `mxc-sdk`, `mxc_common` remains the backend-neutral foundation and
 `mxc_engine` owns dispatch. Backend modules depend on shared modules through
 `crate::...` paths; they are not separately published Cargo packages.
 
@@ -51,7 +51,7 @@ binary targets of the same publishable package under `src/mxc-sdk/src/bin/`:
 | NanVix | SDK common, runner, binary-staging, and build modules under `backends/nanvix/` |
 | Windows Learning Mode | `src/mxc-sdk/src/core/learning_mode_windows/` over the shared core module |
 
-Shared parsing and normalization live in the `wxc_common` module; backend-specific policy
+Shared parsing and normalization live in the `mxc_common` module; backend-specific policy
 validation and enforcement live with each backend.
 
 `mxc_engine/src/backend_registry.rs` owns backend registration metadata,
@@ -59,7 +59,7 @@ including experimental classification, keyed by the shared `ContainmentBackend`
 enum. Runtime authorization consults that registry. Exact-contract publication,
 build-feature availability, and host-capability probing remain separate; the
 registry neither dispatches workloads nor adds backend dependencies to
-`wxc_common`.
+`mxc_common`.
 
 ## Request flow
 
@@ -67,7 +67,7 @@ registry neither dispatches workloads nor adds backend dependencies to
 flowchart LR
     config["JSON or base64 configuration"]
     contract["Version-specific contract"]
-    common["Parsing and normalization<br/>mxc_sdk::wxc_common"]
+    common["Parsing and normalization<br/>mxc_sdk::mxc_common"]
     request["ExecutionRequest"]
     engine["Backend selection<br/>mxc_sdk::mxc_engine"]
     backend["Backend implementation"]
@@ -93,7 +93,7 @@ operation. See the
 | Streaming | Returns a live process handle with streams, wait, and kill operations |
 | State-aware lifecycle | Uses separate provision, start, exec, stop, and deprovision calls |
 
-The common traits are defined in `mxc_sdk::wxc_common`;
+The common traits are defined in `mxc_sdk::mxc_common`;
 `mxc_sdk::mxc_engine` dispatches each surface to the selected backend.
 
 ## SDK and binding paths
@@ -108,7 +108,7 @@ flowchart LR
     ffi["mxc_ffi"]
     sdk["mxc-sdk"]
     engine["mxc_engine"]
-    common["wxc_common<br/>exact contract parser"]
+    common["mxc_common<br/>exact contract parser"]
 
     typescript --> executor
     typescript -. exact JSON execution and request probe .-> ffi
@@ -124,7 +124,7 @@ flowchart LR
 `mxc_ffi` is the C ABI used by the Node and C# SDKs. Its generated C# P/Invoke
 file is created during the C# build. Both SDKs map their high-level requests to
 SDK-owned exact configuration JSON before calling the native execution or
-request-probe exports. The shared `wxc_common` contract parser decodes the
+request-probe exports. The shared `mxc_common` contract parser decodes the
 declared exact version before the typed engine operation runs; there is no
 private binding-request parser. The public Rust SDK exposes the
 typed `SandboxRequest` probe API. Generated TypeScript wire types come from the

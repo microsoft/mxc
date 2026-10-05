@@ -12,16 +12,16 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::wxc_common::id::mint_random_token;
-use crate::wxc_common::models::ExecutionRequest;
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::process_util::resolve_sibling_binary;
-use crate::wxc_common::script_runner::get_timeout_milliseconds;
-use crate::wxc_common::state_aware_backend::{
+use crate::mxc_common::id::mint_random_token;
+use crate::mxc_common::models::ExecutionRequest;
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::process_util::resolve_sibling_binary;
+use crate::mxc_common::script_runner::get_timeout_milliseconds;
+use crate::mxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
-use crate::wxc_common::validator::{
+use crate::mxc_common::validator::{
     validate_state_aware_network_policy_support, NetworkPolicySupport,
 };
 
@@ -778,7 +778,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         // would make the refusal a lie about what has already happened.
         if stdio == ExecStdio::Piped {
             return Err(
-                crate::wxc_common::state_aware_backend::unsupported_piped_exec("Windows Sandbox"),
+                crate::mxc_common::state_aware_backend::unsupported_piped_exec("Windows Sandbox"),
             );
         }
 
@@ -1063,8 +1063,8 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{ContainerPolicy, NetworkEgressPolicy, NetworkPolicy};
-    use crate::wxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::models::{ContainerPolicy, NetworkEgressPolicy, NetworkPolicy};
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     /// A `Piped` exec is refused before the backend looks for the daemon.
     ///

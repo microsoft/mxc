@@ -15,8 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::wxc_common::default_env::EnvResolution;
-use crate::wxc_common::models::ExecutionRequest;
+use crate::mxc_common::default_env::EnvResolution;
+use crate::mxc_common::models::ExecutionRequest;
 
 const SHELL: &str = "/bin/sh";
 
@@ -88,7 +88,7 @@ pub fn sdk_entries(scope: EnvScope, entries: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::DefaultEnvCompatibility;
+    use crate::mxc_common::models::DefaultEnvCompatibility;
 
     fn request(env: Option<Vec<&str>>, inherit_default_env: bool) -> ExecutionRequest {
         ExecutionRequest {

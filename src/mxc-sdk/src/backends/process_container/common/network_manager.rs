@@ -17,10 +17,10 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Variant::VARIANT;
 use windows_core::Interface;
 
+use crate::mxc_common::error::WxcError;
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
 use crate::process_container_common::proxy_coordinator::ProxyCoordinator;
-use crate::wxc_common::error::WxcError;
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultPolicy {
@@ -412,7 +412,7 @@ impl NetworkManager {
     }
 
     /// Returns the proxy address if a proxy is active.
-    pub fn proxy_address(&self) -> Option<&crate::wxc_common::models::ProxyAddress> {
+    pub fn proxy_address(&self) -> Option<&crate::mxc_common::models::ProxyAddress> {
         self.proxy_coordinator.address()
     }
 
@@ -694,7 +694,7 @@ mod tests {
     /// `FirewallRemoval` empty-list branch matches.
     #[test]
     fn remove_firewall_rules_with_nothing_installed_is_clean() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut manager = NetworkManager::new();
         let removal = manager.remove_firewall_rules(&mut logger).unwrap();
         assert_eq!(removal.removed, 0);
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn test_initialize_policy_firewall_mode_block() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let policy = ContainerPolicy {
             network_enforcement_mode: NetworkEnforcementMode::Firewall,
             default_network_policy: NetworkPolicy::Block,
@@ -777,7 +777,7 @@ mod tests {
             },
         ];
         for policy in cases {
-            let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let (default_policy, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
             let plan = NetworkManager::describe_policy(&policy);
             assert_eq!(default_policy, plan.default_policy, "policy: {policy:?}");
@@ -811,7 +811,7 @@ mod tests {
         assert!(plan.firewall_mode_selected);
         assert!(plan.rules_will_be_installed);
 
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let (_, use_fw) = NetworkManager::initialize_policy(&policy, &mut logger);
         assert!(use_fw, "firewall mode selection must be preserved");
         assert!(
@@ -829,7 +829,7 @@ mod tests {
     /// hand-written.
     #[test]
     fn stop_all_with_nothing_installed_reports_a_clean_teardown() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut manager = NetworkManager::new();
         let outcome = manager.stop_all(true, &mut logger);
         assert_eq!(outcome, NetworkTeardown::default());
@@ -842,7 +842,7 @@ mod tests {
     /// removal.
     #[test]
     fn stop_all_without_cleanup_reports_no_removal_failure() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut manager = NetworkManager::new();
         let outcome = manager.stop_all(false, &mut logger);
         assert!(outcome.firewall_removal_ok);
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn test_initialize_policy_capabilities_mode() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let policy = ContainerPolicy {
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             ..Default::default()
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_initialize_policy_firewall_with_allowed_hosts() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let policy = ContainerPolicy {
             network_enforcement_mode: NetworkEnforcementMode::Both,
             default_network_policy: NetworkPolicy::Allow,

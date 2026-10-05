@@ -28,7 +28,7 @@ use crate::lxc_common::network_iptables::CreatedResources;
 #[cfg(target_os = "linux")]
 use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 #[cfg(target_os = "linux")]
-use crate::wxc_common::logger::{Logger, Mode};
+use crate::mxc_common::logger::{Logger, Mode};
 
 #[derive(Default)]
 struct ActiveSandbox {
@@ -328,8 +328,8 @@ mod tests {
     #[test]
     fn a_backend_that_registers_no_container_publishes_no_ownership() {
         use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
-        use crate::wxc_common::logger::{Logger, Mode};
-        use crate::wxc_common::models::{ContainerPolicy, NetworkEnforcementMode};
+        use crate::mxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::models::{ContainerPolicy, NetworkEnforcementMode};
 
         let _watchdog = Watchdog::installed();
         let _fake = crate::lxc_common::network_iptables::test_firewall::install();

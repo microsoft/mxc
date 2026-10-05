@@ -132,7 +132,7 @@ Once you've discussed your proposed change with a team member and agreed on an a
 ### Project layout
 
 ```
-src/                Rust workspace (wxc-exec, lxc-exec, mxc-exec-mac, wxc_common, etc.)
+src/                Rust workspace (wxc-exec, lxc-exec, mxc-exec-mac, mxc_common, etc.)
 sdk/                TypeScript SDK (@microsoft/mxc-sdk)
 docs/               Schema and configuration documentation
 tests/              Test collateral (examples, configs, scripts)

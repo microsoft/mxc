@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mxc_sdk::wxc_common::models::{
+use mxc_sdk::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ExecutionRequest, ScriptResponse,
 };
 
@@ -161,10 +161,10 @@ pub fn finalize(
 }
 
 fn validate_metadata(
-    capture: &mxc_sdk::wxc_common::models::CaptureDenialsOutput,
+    capture: &mxc_sdk::mxc_common::models::CaptureDenialsOutput,
     document: &mxc_sdk::learning_mode_core::DenialsDocument,
 ) -> Result<(), String> {
-    if capture.kind != mxc_sdk::wxc_common::models::CaptureDenialsOutput::KIND
+    if capture.kind != mxc_sdk::mxc_common::models::CaptureDenialsOutput::KIND
         || capture.exit_code != document.summary.exit_code
         || capture.total_denials != document.summary.total_denials
         || capture.denied_resources_truncated != document.summary.denied_resources_truncated
@@ -197,7 +197,7 @@ struct ArtifactRelocation<'a> {
 }
 
 fn relocate_artifacts(
-    capture: &mut mxc_sdk::wxc_common::models::CaptureDenialsOutput,
+    capture: &mut mxc_sdk::mxc_common::models::CaptureDenialsOutput,
     paths: &ArtifactRelocation<'_>,
     relocate_pair: impl FnOnce(
         &str,
@@ -300,7 +300,7 @@ mod tests {
     use mxc_sdk::learning_mode_core::{
         DenialSummary, DenialsDocument, VerboseLoggingDocument, VerboseLoggingSummary,
     };
-    use mxc_sdk::wxc_common::models::{
+    use mxc_sdk::mxc_common::models::{
         CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
     };
 

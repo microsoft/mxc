@@ -3,7 +3,7 @@
 
 //! Shared ProcessContainer network-policy helpers.
 
-use crate::wxc_common::models::{
+use crate::mxc_common::models::{
     ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
 };
 
@@ -73,7 +73,7 @@ pub(crate) fn add_default_network_capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
+    use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
 
     #[test]
     fn directional_egress_default_overrides_legacy_default() {

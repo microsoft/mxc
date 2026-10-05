@@ -50,7 +50,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::wxc_common::mxc_error::MxcError;
+use crate::mxc_common::mxc_error::MxcError;
 
 /// Routing prefix for every IsolationSession `sandboxId`. The single source of
 /// truth: the `StatefulSandboxBackend::ID_PREFIX` associated const reads from
@@ -234,7 +234,7 @@ pub(super) fn decode(sandbox_id: &str) -> Result<SandboxIdPayload, MxcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     fn round_trip(agent: &str, app: Option<&str>) -> SandboxIdPayload {
         let payload = SandboxIdPayload::new(agent, app.map(str::to_string));

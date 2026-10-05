@@ -127,7 +127,7 @@ fn device_path_matches_dos_with_map(
                     .get(..letter.len())
                     .is_some_and(|dos_letter| dos_letter.eq_ignore_ascii_case(letter))
                     && dos_path.get(letter.len()..).is_some_and(|dos_rest| {
-                        crate::wxc_common::string_util::windows_paths_equal_ignore_case(
+                        crate::mxc_common::string_util::windows_paths_equal_ignore_case(
                             rest, dos_rest,
                         )
                     })

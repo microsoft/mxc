@@ -10,8 +10,8 @@
 //! Those backends expose availability separately and validate requests on
 //! their normal launch paths.
 
-use crate::wxc_common::models::ContainmentBackend;
-use crate::wxc_common::models::ExecutionRequest;
+use crate::mxc_common::models::ContainmentBackend;
+use crate::mxc_common::models::ExecutionRequest;
 
 use crate::Error;
 

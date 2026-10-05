@@ -7,8 +7,8 @@
 
 use std::process::Command;
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ContainerPolicy, NetworkAction, NetworkIngressPolicy};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ContainerPolicy, NetworkAction, NetworkIngressPolicy};
 
 use crate::lxc_common::network_iptables::{
     ingress_chain_name_for, plan_network, uses_directional_keys, HostIpv6State, Ip6tablesStatus,
@@ -811,7 +811,7 @@ impl Drop for IngressManager {
     fn drop(&mut self) {
         if self.should_cleanup_on_drop() {
             let mut logger =
-                crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+                crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let _ = self.remove_firewall_rules(&mut logger);
         }
     }
@@ -825,7 +825,7 @@ mod permissive_spec_tests;
 mod tests {
     use super::*;
     use crate::lxc_common::network_iptables::plan_network;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
     };
 
@@ -920,14 +920,14 @@ mod tests {
                 ..Default::default()
             };
             if directional {
-                policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+                policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
                     default: NetworkAction::Allow,
                     ..Default::default()
                 });
                 policy.network_ingress = Some(NetworkIngressPolicy::default());
             }
 
-            let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let mut manager = IngressManager::new("log-field-test", 1);
             let _ = manager.apply_firewall_rules(&policy, &mut logger);
             let logged = logger.get_buffer().to_string();
@@ -1570,7 +1570,7 @@ mod tests {
 
     #[test]
     fn permissive_apply_is_refused_unconditionally() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         for pid in [1u32, 42u32, 999_999u32] {
             let mut mgr = IngressManager::new("permissive-container", pid);
@@ -1597,7 +1597,7 @@ mod tests {
 
     #[test]
     fn a_lan_inbound_refusal_does_not_give_a_host_loopback_rationale() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         for (policy, field) in [
             (
@@ -1756,7 +1756,7 @@ mod tests {
         let pid = 9001u32;
         let container = "force-cleanup-container";
         let chain = IngressManager::new(container, pid).chain_name().to_string();
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         let mut runner = FakeRunner {
             calls: Vec::new(),
@@ -1863,7 +1863,7 @@ mod tests {
     fn install_resets_then_creates_then_hooks_last() {
         let pid = 4242u32;
         let container = "install-order-container";
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut mgr = IngressManager::new(container, pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
@@ -1924,7 +1924,7 @@ mod tests {
     fn reset_repeats_unhook_until_absent_then_deletes() {
         let pid = 55u32;
         let container = "reset-repeat-container";
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut mgr = IngressManager::new(container, pid);
 
         let mut d_seen = 0;
@@ -1981,7 +1981,7 @@ mod tests {
     #[test]
     fn expected_absent_teardown_outcomes_are_not_logged_as_failures() {
         let pid = 91u32;
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut mgr = IngressManager::new("quiet-reset-container", pid);
 
         let mut runner = FakeRunner {
@@ -2012,7 +2012,7 @@ mod tests {
     #[test]
     fn reset_reports_a_chain_an_earlier_run_left_behind() {
         let pid = 92u32;
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut mgr = IngressManager::new("stale-reset-container", pid);
 
         let mut runner = FakeRunner {
@@ -2037,7 +2037,7 @@ mod tests {
     #[test]
     fn a_genuine_teardown_failure_is_still_logged() {
         let pid = 93u32;
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut mgr = IngressManager::new("broken-teardown-container", pid);
 
         let mut runner = FakeRunner {
@@ -2083,7 +2083,7 @@ mod tests {
         ];
 
         for (stderr, msg) in cases {
-            let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let mut mgr = IngressManager::new("blocked-unhook-container", 94u32);
             mgr.v4_chain_created = true;
             mgr.v4_hooked = true;
@@ -2139,7 +2139,7 @@ mod tests {
     #[test]
     fn partial_body_failure_plans_flush_delete_no_unhook() {
         let pid = 7u32;
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut mgr = IngressManager::new("partial-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
@@ -2195,7 +2195,7 @@ mod tests {
     #[test]
     fn reset_spawn_failure_aborts_before_create_with_no_ownership() {
         let pid = 7u32;
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut mgr = IngressManager::new("reset-spawn-fail-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
@@ -2235,7 +2235,7 @@ mod tests {
     #[test]
     fn reset_unhook_exhaustion_aborts_before_create() {
         let pid = 7u32;
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut mgr = IngressManager::new("reset-exhaustion-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),

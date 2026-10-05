@@ -106,7 +106,7 @@ impl WslcSdk {
     /// via [`ensure_required_symbols`](Self::ensure_required_symbols).
     pub fn load() -> Result<Self, String> {
         let dll_path =
-            crate::wxc_common::process_util::module_path_for_address(Self::load as *const ())?
+            crate::mxc_common::process_util::module_path_for_address(Self::load as *const ())?
                 .parent()
                 .ok_or_else(|| "Failed to determine the MXC native module directory".to_string())?
                 .join("wslcsdk.dll");

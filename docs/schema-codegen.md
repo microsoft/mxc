@@ -39,7 +39,7 @@ artifact mutable.
 rendering, TypeScript emission, and C# wire-type emission. `mxc_schema_gen`
 uses those helpers for every renderable exact contract.
 
-`wxc_common::common_request_ir::CommonRequestIR` is the internal whole-request
+`mxc_common::common_request_ir::CommonRequestIR` is the internal whole-request
 normalization boundary that replaced the former deserializable
 `wire::MxcConfig` root. Exact contract adapters assemble it, and it may contain
 reusable nested DTOs from `wire.rs`, but it has no JSON deserialization or

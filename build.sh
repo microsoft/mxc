@@ -70,7 +70,7 @@ echo "=== Building Rust binaries ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
 # Packages to build and lint — kept in one place so build and clippy stay in
-# sync. The former lxc_common, wxc_common, and bwrap_common crates are modules
+# sync. The former lxc_common, mxc_common, and bwrap_common crates are modules
 # inside mxc-sdk.
 LXC_PACKAGES=(-p mxc-sdk -p lxc -p unix_test_proxy -p mxc_ffi)
 

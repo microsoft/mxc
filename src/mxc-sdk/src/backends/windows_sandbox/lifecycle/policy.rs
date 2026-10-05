@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use crate::wxc_common::models::{ExecutionRequest, NetworkPolicy};
+use crate::mxc_common::models::{ExecutionRequest, NetworkPolicy};
 
 use crate::windows_sandbox_lifecycle::error::OneShotError;
 use crate::windows_sandbox_lifecycle::vm::MappedFolder;
@@ -295,7 +295,7 @@ fn is_descendant(child: &[String], ancestor: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
+    use crate::mxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
 
     fn request_with(policy: ContainerPolicy) -> ExecutionRequest {
         ExecutionRequest {

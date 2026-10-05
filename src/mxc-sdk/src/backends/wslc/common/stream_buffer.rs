@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::wxc_common::sandbox_process::StreamCloser;
+use crate::mxc_common::sandbox_process::StreamCloser;
 
 #[derive(Default)]
 struct State {
@@ -130,7 +130,7 @@ pub(crate) struct StreamReader(Arc<Shared>);
 impl StreamReader {
     /// Mint a closer that EOFs this reader's `read` on demand — the
     /// [`StreamCloser`] behind
-    /// [`SandboxProcess::stdout_closer`](crate::wxc_common::sandbox_process::SandboxProcess::stdout_closer).
+    /// [`SandboxProcess::stdout_closer`](crate::mxc_common::sandbox_process::SandboxProcess::stdout_closer).
     pub(crate) fn canceller(&self) -> StreamCanceller {
         StreamCanceller(Arc::clone(&self.0))
     }

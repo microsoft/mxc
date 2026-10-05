@@ -29,10 +29,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::mxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
+use crate::mxc_common::host_is_canonical_loopback;
+use crate::mxc_common::models::{ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress};
 use crate::seatbelt_common::seatbelt_policy;
-use crate::wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
-use crate::wxc_common::host_is_canonical_loopback;
-use crate::wxc_common::models::{ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress};
 
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
 /// reachability to the resolved address supplied by the runner.
@@ -309,7 +309,7 @@ fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
     }
 
     // Emit shallow-to-deep, one rule per path, using the same ordering the
-    // Linux backends apply (`crate::wxc_common::filesystem_resolve`). Seatbelt is
+    // Linux backends apply (`crate::mxc_common::filesystem_resolve`). Seatbelt is
     // last-match-wins between rules that carry a filter, so ordering by depth
     // makes the *deepest* intent win at every path — a `readonlyPaths` entry
     // nested inside a broader `readwritePaths` subtree stays read-only rather
@@ -846,7 +846,7 @@ fn escape_for_quotes(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{NetworkAction, NetworkPolicy, SeatbeltConfig, UiPolicy};
+    use crate::mxc_common::models::{NetworkAction, NetworkPolicy, SeatbeltConfig, UiPolicy};
 
     fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
@@ -1094,7 +1094,7 @@ mod tests {
         // rule to that exact port under default-deny — not silently dropping it.
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Block;
-        r.policy.network_proxy = crate::wxc_common::models::ProxyConfig {
+        r.policy.network_proxy = crate::mxc_common::models::ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 9091)),
             builtin_test_server: false,
         };
@@ -1144,7 +1144,7 @@ mod tests {
         // its Block default under this shape and must not be read directly).
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Allow; // must be ignored
-        r.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+        r.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Deny,
             ..Default::default()
         });
@@ -1156,7 +1156,7 @@ mod tests {
     #[test]
     fn directional_egress_allow_emits_open_network_outbound() {
         let mut r = req();
-        r.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+        r.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Allow,
             ..Default::default()
         });
@@ -1170,7 +1170,7 @@ mod tests {
         // allowLocalNetwork behavior — see network_parser and validate().
         let mut r = req();
         r.policy.allow_local_network = false; // must be ignored
-        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Allow,
         });
@@ -1182,7 +1182,7 @@ mod tests {
     fn directional_ingress_default_deny_omits_inbound_rule() {
         let mut r = req();
         r.policy.allow_local_network = true; // must be ignored
-        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Deny,
             host_loopback: NetworkAction::Deny,
         });
@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     fn ingress_allow_with_host_loopback_deny_grants_inbound_without_loopback_egress() {
         let mut r = req();
-        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Deny,
         });
@@ -1209,11 +1209,11 @@ mod tests {
     #[test]
     fn ingress_allow_with_host_loopback_deny_still_closes_loopback_under_egress_allow() {
         let mut r = req();
-        r.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+        r.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Allow,
             ..Default::default()
         });
-        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+        r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Deny,
         });
@@ -1233,15 +1233,15 @@ mod tests {
     // with the egress default; the other two are already covered by the
     // baseline or by the blanket allow.
 
-    fn ingress(action: NetworkAction) -> crate::wxc_common::models::NetworkIngressPolicy {
-        crate::wxc_common::models::NetworkIngressPolicy {
+    fn ingress(action: NetworkAction) -> crate::mxc_common::models::NetworkIngressPolicy {
+        crate::mxc_common::models::NetworkIngressPolicy {
             default: action,
             host_loopback: action,
         }
     }
 
-    fn egress(action: NetworkAction) -> crate::wxc_common::models::NetworkEgressPolicy {
-        crate::wxc_common::models::NetworkEgressPolicy {
+    fn egress(action: NetworkAction) -> crate::mxc_common::models::NetworkEgressPolicy {
+        crate::mxc_common::models::NetworkEgressPolicy {
             default: action,
             ..Default::default()
         }
@@ -1362,7 +1362,7 @@ mod tests {
         // preserved when the directional shape selects deny + loopback proxy
         // (the only combination the GA schema allows with a runtime proxy).
         let mut r = req();
-        r.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+        r.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Deny,
             ..Default::default()
         });

@@ -113,7 +113,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --lib wxc_common::
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --lib mxc_common::
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --doc
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware

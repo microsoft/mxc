@@ -12,7 +12,7 @@
 //! [`start_container`](WSLContainerRunner::start_container) owns everything up
 //! to and including "container started, init process in hand" and is shared by
 //! both execution models: the run-to-completion [`ScriptRunner`] here, and the
-//! streaming [`SandboxBackend`](crate::wxc_common::sandbox_process::SandboxBackend) in
+//! streaming [`SandboxBackend`](crate::mxc_common::sandbox_process::SandboxBackend) in
 //! [`crate::sandbox`]. They differ only in where the SDK's I/O callbacks send
 //! their bytes — see [`IoSink`].
 
@@ -23,15 +23,15 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::wxc_common::logger::{Logger, Mode};
+use crate::mxc_common::logger::{Logger, Mode};
 #[cfg(test)]
-use crate::wxc_common::models::NetworkPolicy;
-use crate::wxc_common::models::{ExecutionRequest, ScriptResponse, WslcConfig};
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::sandbox_process::StdioMode;
-use crate::wxc_common::script_runner::ScriptRunner;
-use crate::wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
-use crate::wxc_common::validator::validate_network_policy_support;
+use crate::mxc_common::models::NetworkPolicy;
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse, WslcConfig};
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::sandbox_process::StdioMode;
+use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
+use crate::mxc_common::validator::validate_network_policy_support;
 
 use crate::wslc_common::container_steps::{self, sdk_error};
 use crate::wslc_common::error::WslcError;
@@ -894,7 +894,7 @@ impl WSLContainerRunner {
     /// validation, session, image, process/container settings, start, iptables,
     /// and the init-process handle. The caller decides what happens next — wait
     /// to completion ([`Self::run_internal`]) or stream
-    /// (the [`SandboxBackend`](crate::wxc_common::sandbox_process::SandboxBackend) impl
+    /// (the [`SandboxBackend`](crate::mxc_common::sandbox_process::SandboxBackend) impl
     /// in [`crate::sandbox`]).
     ///
     /// `output` selects where the SDK's output callbacks send their bytes; the
@@ -1012,7 +1012,7 @@ impl WSLContainerRunner {
         // iptables drop-floor (no CAP_NET_ADMIN, no VM-level enforcement hook),
         // so per-host policy is enforced at the proxy layer by injecting
         // HTTP(S)_PROXY (and scrubbing caller-supplied proxy vars).
-        // See crate::wxc_common::proxy_env.
+        // See crate::mxc_common::proxy_env.
         let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
             // url-only (also enforced at parse time). Fail fast rather than
             // inject an empty HTTP_PROXY= for the localhost/builtinTestServer
@@ -1038,9 +1038,9 @@ impl WSLContainerRunner {
             let _ = writeln!(
                 logger,
                 "[WSLC] Cooperative network proxy configured: {}",
-                crate::wxc_common::proxy_env::redact_proxy_url(&proxy_url)
+                crate::mxc_common::proxy_env::redact_proxy_url(&proxy_url)
             );
-            crate::wxc_common::proxy_env::apply_cooperative_proxy_env(
+            crate::mxc_common::proxy_env::apply_cooperative_proxy_env(
                 request.env_entries(),
                 &proxy_url,
             )
@@ -1674,7 +1674,7 @@ impl StartedContainer {
     }
 
     /// Signal the container's processes, for
-    /// [`SandboxProcess::kill`](crate::wxc_common::sandbox_process::SandboxProcess::kill).
+    /// [`SandboxProcess::kill`](crate::mxc_common::sandbox_process::SandboxProcess::kill).
     /// `timeout_secs` is how long the SDK waits for a graceful stop.
     pub(crate) fn stop(&self, signal: WslcSignal, timeout_secs: u32) -> Result<(), String> {
         let _com = ComApartment::enter()?;
@@ -1743,8 +1743,8 @@ mod tests {
         // non-existent paths so D6 (Absent) and delegation (unknown) pass through
         // to the overlap check.
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
                 readwrite_paths: vec![r"C:\mxc-nonexistent-parent".to_string()],
                 denied_paths: vec![r"C:\mxc-nonexistent-parent\secrets".to_string()],
                 ..Default::default()
@@ -1753,7 +1753,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
@@ -1791,8 +1791,8 @@ mod tests {
         }
 
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
                 readwrite_paths: vec![real.to_string_lossy().into_owned()],
                 denied_paths: vec![link.join("secret").to_string_lossy().into_owned()],
                 ..Default::default()
@@ -1801,7 +1801,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
@@ -1840,8 +1840,8 @@ mod tests {
         }
 
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
                 readwrite_paths: vec![real.to_string_lossy().into_owned()],
                 // `real\newsecret` never created — only reachable via the junction.
                 denied_paths: vec![link.join("newsecret").to_string_lossy().into_owned()],
@@ -1851,7 +1851,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
@@ -1870,8 +1870,8 @@ mod tests {
     fn validate_runner_rejects_allowlist_host_filtering() {
         // block default + allowlist = per-host filtering WSLc can't enforce.
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
                 default_network_policy: NetworkPolicy::Block,
                 allowed_hosts: vec!["example.com".to_string()],
                 ..Default::default()
@@ -1887,8 +1887,8 @@ mod tests {
     fn validate_runner_rejects_blocklist_host_filtering() {
         // allow default + blocklist is the other filtering shape.
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
                 default_network_policy: NetworkPolicy::Allow,
                 blocked_hosts: vec!["evil.com".to_string()],
                 ..Default::default()
@@ -1902,8 +1902,8 @@ mod tests {
     #[test]
     fn validate_runner_rejects_allow_local_network() {
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
                 allow_local_network: true,
                 ..Default::default()
             },
@@ -1921,8 +1921,8 @@ mod tests {
     #[test]
     fn both_surfaces_reject_allow_local_network_with_surface_specific_remedies() {
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
                 allow_local_network: true,
                 ..Default::default()
             },
@@ -1934,7 +1934,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             one_shot.failure_phase,
-            crate::wxc_common::models::FailurePhase::Rejected
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             one_shot.error_message.contains("portMappings"),
@@ -1946,7 +1946,7 @@ mod tests {
             crate::wslc_common::policy::validate_provision_policy(&request).unwrap_err();
         assert_eq!(
             state_aware.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
         );
         assert!(
             !state_aware.message.contains("portMappings"),
@@ -1965,11 +1965,11 @@ mod tests {
         // The shared network validator builds untagged responses; WSLc retags them
         // so callers get `policy_validation` rather than an opaque backend error.
         let mut request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             ..Default::default()
         };
-        request.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
-            default: crate::wxc_common::models::NetworkAction::Allow,
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
             ..Default::default()
         });
         let runner = WSLContainerRunner::new(&WslcConfig::default());
@@ -1977,7 +1977,7 @@ mod tests {
         assert!(err.error_message.contains("network.egress.default"));
         assert_eq!(
             err.failure_phase,
-            crate::wxc_common::models::FailurePhase::Rejected
+            crate::mxc_common::models::FailurePhase::Rejected
         );
     }
 
@@ -1986,8 +1986,8 @@ mod tests {
         // Full cutoff / full NAT (no host lists) is enforceable — must pass.
         for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
             let request = ExecutionRequest {
-                containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-                policy: crate::wxc_common::models::ContainerPolicy {
+                containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+                policy: crate::mxc_common::models::ContainerPolicy {
                     default_network_policy: policy,
                     ..Default::default()
                 },
@@ -2001,9 +2001,9 @@ mod tests {
     #[test]
     fn validate_runner_rejects_supplied_ui() {
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
-                ui: crate::wxc_common::models::UiPolicy::default(),
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
+                ui: crate::mxc_common::models::UiPolicy::default(),
                 ui_specified: true,
                 ..Default::default()
             },
@@ -2018,14 +2018,14 @@ mod tests {
         );
         assert_eq!(
             err.failure_phase,
-            crate::wxc_common::models::FailurePhase::Rejected
+            crate::mxc_common::models::FailurePhase::Rejected
         );
     }
 
     #[test]
     fn validate_runner_accepts_absent_ui() {
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             ..Default::default()
         };
         assert!(!request.policy.ui_specified);
@@ -2041,8 +2041,8 @@ mod tests {
         let runner = WSLContainerRunner::new(&WslcConfig::default());
 
         let accepted = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            lifecycle: crate::wxc_common::models::LifecycleConfig {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            lifecycle: crate::mxc_common::models::LifecycleConfig {
                 destroy_on_exit: true,
                 preserve_policy: false,
             },
@@ -2055,14 +2055,14 @@ mod tests {
 
         for (lifecycle, needle) in [
             (
-                crate::wxc_common::models::LifecycleConfig {
+                crate::mxc_common::models::LifecycleConfig {
                     destroy_on_exit: false,
                     preserve_policy: false,
                 },
                 "destroyOnExit=false",
             ),
             (
-                crate::wxc_common::models::LifecycleConfig {
+                crate::mxc_common::models::LifecycleConfig {
                     destroy_on_exit: true,
                     preserve_policy: true,
                 },
@@ -2070,7 +2070,7 @@ mod tests {
             ),
         ] {
             let request = ExecutionRequest {
-                containment: crate::wxc_common::models::ContainmentBackend::Wslc,
+                containment: crate::mxc_common::models::ContainmentBackend::Wslc,
                 lifecycle,
                 ..Default::default()
             };
@@ -2082,7 +2082,7 @@ mod tests {
             );
             assert_eq!(
                 err.failure_phase,
-                crate::wxc_common::models::FailurePhase::Rejected
+                crate::mxc_common::models::FailurePhase::Rejected
             );
         }
     }
@@ -2092,12 +2092,12 @@ mod tests {
         let runner = WSLContainerRunner::new(&WslcConfig::default());
 
         for mode in [
-            crate::wxc_common::models::NetworkEnforcementMode::Firewall,
-            crate::wxc_common::models::NetworkEnforcementMode::Both,
+            crate::mxc_common::models::NetworkEnforcementMode::Firewall,
+            crate::mxc_common::models::NetworkEnforcementMode::Both,
         ] {
             let request = ExecutionRequest {
-                containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-                policy: crate::wxc_common::models::ContainerPolicy {
+                containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+                policy: crate::mxc_common::models::ContainerPolicy {
                     network_enforcement_mode: mode.clone(),
                     ..Default::default()
                 },
@@ -2114,10 +2114,10 @@ mod tests {
         }
 
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::wxc_common::models::ContainerPolicy {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            policy: crate::mxc_common::models::ContainerPolicy {
                 network_enforcement_mode:
-                    crate::wxc_common::models::NetworkEnforcementMode::Capabilities,
+                    crate::mxc_common::models::NetworkEnforcementMode::Capabilities,
                 ..Default::default()
             },
             ..Default::default()
@@ -2130,9 +2130,9 @@ mod tests {
     #[test]
     fn validate_runner_rejects_before_any_container_work() {
         let request = ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             script_code: "echo hi".to_string(),
-            policy: crate::wxc_common::models::ContainerPolicy {
+            policy: crate::mxc_common::models::ContainerPolicy {
                 ui_specified: true,
                 ..Default::default()
             },
@@ -2142,14 +2142,14 @@ mod tests {
         let err = runner.validate_runner(&request).unwrap_err();
         assert_eq!(
             err.failure_phase,
-            crate::wxc_common::models::FailurePhase::Rejected,
+            crate::mxc_common::models::FailurePhase::Rejected,
             "a policy refusal is a rejection, not a runtime failure"
         );
     }
 
     fn request_with_cwd(cwd: &str) -> ExecutionRequest {
         ExecutionRequest {
-            containment: crate::wxc_common::models::ContainmentBackend::Wslc,
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             script_code: "pwd".to_string(),
             working_directory: cwd.to_string(),
             ..Default::default()
@@ -2168,7 +2168,7 @@ mod tests {
                 .expect_err("an unmappable cwd must be rejected");
             assert_eq!(
                 err.failure_phase,
-                crate::wxc_common::models::FailurePhase::Rejected,
+                crate::mxc_common::models::FailurePhase::Rejected,
                 "cwd {cwd:?}"
             );
             assert!(

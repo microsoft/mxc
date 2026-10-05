@@ -8,10 +8,10 @@
 use std::fmt::Write;
 use std::io::IsTerminal;
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ExecutionRequest, ScriptResponse};
-use crate::wxc_common::script_runner::ScriptRunner;
-use crate::wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
 use super::policy::{reject_unhonorable_environment, validate_provision_policy};
@@ -177,7 +177,7 @@ impl ScriptRunner for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         ContainerPolicy, LifecycleConfig, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
     };
 

@@ -8,21 +8,21 @@ use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{
     ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
     ScriptResponse,
 };
-use crate::wxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
-use crate::wxc_common::script_runner::ScriptRunner;
-use crate::wxc_common::validator::{
+use crate::mxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
+use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 
 #[cfg(target_os = "linux")]
-use crate::wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
+use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 #[cfg(target_os = "linux")]
-use crate::wxc_common::sandbox_process::{
+use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
     take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, StreamCloser, WaitError,
 };
@@ -67,7 +67,7 @@ fn start_directory(request: &ExecutionRequest) -> Option<String> {
         .filter(|dir| !dir.is_empty())
         .map(|dir| {
             if request.supplies_default_env() {
-                crate::wxc_common::models::sandbox_absolute_path(dir)
+                crate::mxc_common::models::sandbox_absolute_path(dir)
             } else {
                 dir.to_string()
             }
@@ -96,10 +96,10 @@ fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
 /// The entries the child should get, as `KEY=VALUE` strings.
 ///
 /// The state dispatch and overlay merge are shared; see
-/// [`crate::wxc_common::default_env::resolve_env`]. Below 0.9 the caller's entries are
+/// [`crate::mxc_common::default_env::resolve_env`]. Below 0.9 the caller's entries are
 /// passed through untouched and the `lxc-attach` baseline is the only default.
 fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
-    crate::wxc_common::default_env::resolve_env(request, || default_env(request))
+    crate::mxc_common::default_env::resolve_env(request, || default_env(request))
 }
 
 /// The `/etc/hosts` rewrites are short shell commands and must not inherit the script timeout.
@@ -461,7 +461,7 @@ impl LxcScriptRunner {
         logger: &mut Logger,
     ) -> Result<PreparedSandbox, ScriptResponse> {
         let normalized;
-        let request = match crate::wxc_common::filesystem_object::normalize_object_conflicts(
+        let request = match crate::mxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
             logger,
         ) {
@@ -475,7 +475,7 @@ impl LxcScriptRunner {
             Ok(None) => request,
             Err(msg) => return Err(ScriptResponse::error(&msg)),
         };
-        if let Err(msg) = crate::wxc_common::filesystem_access::check_delegation(&request.policy) {
+        if let Err(msg) = crate::mxc_common::filesystem_access::check_delegation(&request.policy) {
             return Err(ScriptResponse::error(&msg));
         }
 
@@ -499,7 +499,7 @@ impl LxcScriptRunner {
             .as_ref()
             .map(|address| address.to_url())
         {
-            if crate::wxc_common::proxy_env::proxy_url_has_credentials(&url) {
+            if crate::mxc_common::proxy_env::proxy_url_has_credentials(&url) {
                 return Err(ScriptResponse::error(&format!(
                     "LXC: network.proxy.url must not carry credentials ('{}'). LXC passes the \
                      proxy URL to lxc-attach as a --set-var command-line argument, and process \
@@ -507,7 +507,7 @@ impl LxcScriptRunner {
                      would be visible to every local user while the command runs. Use a proxy \
                      that does not require inline credentials, or supply them to the proxy \
                      itself rather than through the URL.",
-                    crate::wxc_common::proxy_env::redact_proxy_url(&url)
+                    crate::mxc_common::proxy_env::redact_proxy_url(&url)
                 )));
             }
         }
@@ -758,7 +758,7 @@ impl LxcScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
         let mut exec_env = resolved_env(request);
-        crate::wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
+        crate::mxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
 
         Ok(PreparedSandbox {
             fw_manager,
@@ -1139,7 +1139,7 @@ impl ScriptRunner for LxcScriptRunner {
 /// LXC's streaming half, which serves [`StdioMode::Pipes`] only.
 ///
 /// [`StdioMode::Inherit`] is refused, so wrapping this in
-/// [`crate::wxc_common::sandbox_process::Runner`] compiles but fails at run time;
+/// [`crate::mxc_common::sandbox_process::Runner`] compiles but fails at run time;
 /// `lxc-exec` stays on [`ScriptRunner`] for its pty.
 impl SandboxBackend for LxcScriptRunner {
     fn network_policy_support(&self) -> NetworkPolicySupport {
@@ -1340,7 +1340,7 @@ impl LxcSandboxProcess {
 
         // A failed destroy leaks a root-owned container, and neither `wait` nor
         // `Drop` has the caller's logger to report it through.
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         self.teardown_failures = self.inner.prepared.tear_down(
             self.inner.cleanup_policy,
             self.inner.destroy_on_exit,
@@ -1524,8 +1524,8 @@ fn container_firewall(egress_applied: bool, ingress_applied: bool) -> ContainerF
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::logger::Mode;
-    use crate::wxc_common::models::ContainerPolicy;
+    use crate::mxc_common::logger::Mode;
+    use crate::mxc_common::models::ContainerPolicy;
 
     fn validating_runner() -> LxcScriptRunner {
         LxcScriptRunner::new(
@@ -2148,7 +2148,7 @@ mod tests {
     /// `process.env` resolution, which schema 0.9 gave a default block.
     mod env {
         use super::*;
-        use crate::wxc_common::models::DefaultEnvCompatibility;
+        use crate::mxc_common::models::DefaultEnvCompatibility;
 
         fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
             ExecutionRequest {
@@ -2641,7 +2641,7 @@ mod tests {
         }
     }
 
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress, ProxyConfig,
     };
 
@@ -2802,7 +2802,7 @@ mod tests {
     fn a_directly_built_request_with_proxy_credentials_is_refused() {
         let runner = runner_for_guard_tests("credentials-refused");
         let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         let response = runner.run_internal(&request, &mut logger);
 
@@ -2820,7 +2820,7 @@ mod tests {
     fn the_runner_refusal_does_not_echo_the_password() {
         let runner = runner_for_guard_tests("password-not-echoed");
         let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         let response = runner.run_internal(&request, &mut logger);
 
@@ -2844,7 +2844,7 @@ mod tests {
     fn a_credential_free_proxy_url_is_not_refused_by_the_credential_guard() {
         let runner = runner_for_guard_tests("credential-free");
         let request = request_with_proxy_url("http://proxy.example.com:8080");
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         let response = runner.run_internal(&request, &mut logger);
 
@@ -2861,7 +2861,7 @@ mod tests {
     fn the_credential_refusal_happens_before_any_container_work() {
         let runner = runner_for_guard_tests("refusal-ordering");
         let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         let _ = runner.run_internal(&request, &mut logger);
 
@@ -3049,7 +3049,7 @@ mod tests {
 
     /// A policy whose `except` entry is malformed, so lowering refuses it.
     fn request_with_unlowerable_egress() -> ExecutionRequest {
-        use crate::wxc_common::models::{NetworkAction, NetworkCidr, NetworkPeer, NetworkRule};
+        use crate::mxc_common::models::{NetworkAction, NetworkCidr, NetworkPeer, NetworkRule};
 
         let mut request = ExecutionRequest::default();
         request.policy.network_egress = Some(NetworkEgressPolicy {

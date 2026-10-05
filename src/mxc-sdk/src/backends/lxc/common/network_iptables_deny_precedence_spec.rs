@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use super::*;
-use crate::wxc_common::logger::Mode;
+use crate::mxc_common::logger::Mode;
 
 const CHAIN: &str = "mxc_test_chain";
 

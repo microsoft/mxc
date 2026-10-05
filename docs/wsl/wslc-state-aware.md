@@ -52,9 +52,9 @@ against different sandboxes are serialized — correct, just not concurrent. See
 | Daemon client | `src/mxc-sdk/src/backends/wslc/common/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
 | Daemon | `src/mxc-sdk/src/bin/wslc_daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
 | Engine arm | `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | Dispatches the WSLc state-aware backend (Windows + `wslc` feature). |
-| Prefix registration | `src/mxc-sdk/src/tools/wxc_common/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
+| Prefix registration | `src/mxc-sdk/src/tools/mxc_common/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
 
-Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
+Exact adapters construct `mxc_common::models::WslcProvisionConfig` directly from
 `wslc.provision`. Engine-side checked binding preserves an absent
 config, a present empty config, and supplied `image`/`imageTarPath` values
 without reparsing JSON. An omitted image remains `None` until the backend

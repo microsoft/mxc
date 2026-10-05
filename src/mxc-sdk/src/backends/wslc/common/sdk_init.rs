@@ -5,8 +5,8 @@
 
 use std::fmt::Write;
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::ScriptResponse;
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::ScriptResponse;
 
 use crate::wslc_common::container_steps::sdk_error;
 use crate::wslc_common::error::WslcError;

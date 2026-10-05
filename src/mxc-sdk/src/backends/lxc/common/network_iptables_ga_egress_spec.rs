@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use super::*;
-use crate::wxc_common::models::NetworkEnforcementMode;
+use crate::mxc_common::models::NetworkEnforcementMode;
 
 fn directional_policy(
     default: NetworkAction,
@@ -668,7 +668,7 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
 fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<Vec<String>> {
     let fake = super::test_firewall::install();
     let mut manager = NetworkIptablesManager::new(container, EgressHookPoint::ContainerNetns(4242));
-    let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+    let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
     let _ = fake.forget_issued();
 
     let result = manager.apply_firewall_rules(policy, &mut logger);
@@ -710,11 +710,11 @@ fn opens_base_dns_exemption(rules: &[Vec<String>]) -> bool {
 }
 
 fn policy_from_json(json: &str) -> ContainerPolicy {
-    let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
-    let request = crate::wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
+    let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+    let request = crate::mxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
         .unwrap_or_else(|_| panic!("config must parse: {json}"));
     match request {
-        crate::wxc_common::state_aware_request::MxcRequest::OneShot(request) => request.policy,
+        crate::mxc_common::state_aware_request::MxcRequest::OneShot(request) => request.policy,
         _ => panic!("expected a one-shot request"),
     }
 }
@@ -970,7 +970,7 @@ fn a_peer_that_expands_past_the_block_ceiling_is_refused() {
         vec![rule(vec![peer("10.0.0.0/8", &borrowed)], Vec::new())],
         Vec::new(),
     );
-    let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+    let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
     let error =
         NetworkIptablesManager::build_policy_rules_logged("MXC-test", &policy, true, &mut logger)
@@ -1049,7 +1049,7 @@ fn an_unresolvable_directional_deny_is_fatal_under_an_allow_egress_default() {
             vec![rule(vec![unresolvable_peer()], Vec::new())],
         )
     };
-    let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+    let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
     let error = NetworkIptablesManager::build_policy_rules_logged(
         "MXC-test",
@@ -1077,7 +1077,7 @@ fn an_unresolvable_directional_deny_is_tolerated_under_a_deny_egress_default() {
             vec![rule(vec![unresolvable_peer()], Vec::new())],
         )
     };
-    let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+    let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
     NetworkIptablesManager::build_policy_rules_logged(
         "MXC-test",
@@ -1091,7 +1091,7 @@ fn an_unresolvable_directional_deny_is_tolerated_under_a_deny_egress_default() {
 }
 
 fn lowering_error(policy: &ContainerPolicy) -> String {
-    let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+    let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
     NetworkIptablesManager::build_policy_rules_logged("MXC-test", policy, true, &mut logger)
         .expect_err("expected the policy to be refused")
 }

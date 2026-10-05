@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_contract::published::v1_0_0 as contract;
-use crate::wxc_common::mxc_error::MxcError;
 
 use crate::configs::{
     CaptureDenialsMode, ProcessContainerSystemSettings, ProcessContainerUi,

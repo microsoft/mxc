@@ -15,8 +15,8 @@ use std::ptr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::wxc_common::api_set::is_api_set_implemented;
-use crate::wxc_common::string_util;
+use crate::mxc_common::api_set::is_api_set_implemented;
+use crate::mxc_common::string_util;
 use windows::Win32::Foundation::{
     GetLastError, ERROR_BUSY, ERROR_LOCK_VIOLATION, ERROR_RETRY, ERROR_SHARING_VIOLATION, HANDLE,
     HMODULE,

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! The SDK's sandbox handle â€” a crate-owned facade over the internal
-//! `wxc_common` streaming handle, so the public API never exposes the
+//! `mxc_common` streaming handle, so the public API never exposes the
 //! foundation crate's traits.
 
 use std::io::{Read, Write};
@@ -10,6 +10,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub use crate::mxc_common::models::{
+    CaptureDenialsErrorOutput as CaptureDenialsError, CaptureDenialsOutput as CaptureDenialsResult,
+    SandboxOutputMetadata as ExecutionMetadata,
+};
+use crate::mxc_common::sandbox_process::{
+    NativeStdio, SandboxProcess, StreamCloser as InnerCloser,
+};
+use crate::mxc_common::state_aware_backend::ExecOutcome;
+use crate::mxc_common::state_aware_operation::StateAwareOperation;
 use crate::options::{
     DeprovisionOptions, ProvisionOptions, SpawnInContainerOptions, SpawnInContainerWithPtyOptions,
     StartOptions, StopOptions,
@@ -18,19 +27,10 @@ use crate::state_aware_sdk::{
     lifecycle_sdk_input, ContainerId, ExecutionRequest, LifecycleResult, ProvisionRequest,
     ProvisionResult, StateAwareResult, ValidationResult,
 };
-pub use crate::wxc_common::models::{
-    CaptureDenialsErrorOutput as CaptureDenialsError, CaptureDenialsOutput as CaptureDenialsResult,
-    SandboxOutputMetadata as ExecutionMetadata,
-};
-use crate::wxc_common::sandbox_process::{
-    NativeStdio, SandboxProcess, StreamCloser as InnerCloser,
-};
-use crate::wxc_common::state_aware_backend::ExecOutcome;
-use crate::wxc_common::state_aware_operation::StateAwareOperation;
 use crate::Error;
 
 fn run_typed_state_aware(
-    input: crate::wxc_common::sdk_input::SdkStateAwareInput,
+    input: crate::mxc_common::sdk_input::SdkStateAwareInput,
     experimental: bool,
     dry_run: bool,
 ) -> Result<StateAwareResult, Error> {
@@ -675,7 +675,7 @@ pub struct MxcPtySize {
 impl MxcPtySize {
     /// Validate dimensions against the supported PTY backend range.
     pub fn validate(self) -> Result<(), Error> {
-        crate::wxc_common::sandbox_process::PtySize::from(self)
+        crate::mxc_common::sandbox_process::PtySize::from(self)
             .validate()
             .map_err(Error::from)
     }
@@ -692,7 +692,7 @@ impl Default for MxcPtySize {
     }
 }
 
-impl From<MxcPtySize> for crate::wxc_common::sandbox_process::PtySize {
+impl From<MxcPtySize> for crate::mxc_common::sandbox_process::PtySize {
     fn from(size: MxcPtySize) -> Self {
         Self {
             rows: size.rows,
@@ -703,8 +703,8 @@ impl From<MxcPtySize> for crate::wxc_common::sandbox_process::PtySize {
     }
 }
 
-impl From<crate::wxc_common::sandbox_process::PtySize> for MxcPtySize {
-    fn from(size: crate::wxc_common::sandbox_process::PtySize) -> Self {
+impl From<crate::mxc_common::sandbox_process::PtySize> for MxcPtySize {
+    fn from(size: crate::mxc_common::sandbox_process::PtySize) -> Self {
         Self {
             rows: size.rows,
             cols: size.cols,

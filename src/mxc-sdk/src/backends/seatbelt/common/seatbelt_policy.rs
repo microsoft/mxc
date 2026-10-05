@@ -10,8 +10,8 @@
 //! Each check returns the caller-facing message; the backend wraps it as a
 //! `ScriptResponse`.
 
-use crate::wxc_common::host_is_canonical_loopback;
-use crate::wxc_common::models::{
+use crate::mxc_common::host_is_canonical_loopback;
+use crate::mxc_common::models::{
     ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
 };
 
@@ -188,7 +188,7 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{ProxyAddress, ProxyConfig, SeatbeltConfig};
+    use crate::mxc_common::models::{ProxyAddress, ProxyConfig, SeatbeltConfig};
 
     #[test]
     fn host_loopback_allowed_is_none_for_the_legacy_shape() {
@@ -208,7 +208,7 @@ mod tests {
             (NetworkAction::Allow, Some(true)),
             (NetworkAction::Deny, Some(false)),
         ] {
-            p.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+            p.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
                 default: action,
                 host_loopback: action,
             });

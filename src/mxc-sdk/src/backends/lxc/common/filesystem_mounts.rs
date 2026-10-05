@@ -3,9 +3,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::wxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::ContainerPolicy;
+use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::ContainerPolicy;
 
 use crate::lxc_common::lxc_bindings::{
     LxcContainer, MASK_DIR, MASK_DIR_HOLDING_MOUNTPOINTS, MASK_FILE, MOUNT_READONLY,

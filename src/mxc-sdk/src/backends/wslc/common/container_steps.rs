@@ -40,9 +40,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{PortMapping, ScriptResponse};
-use crate::wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{PortMapping, ScriptResponse};
+use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::wslc_common::daemon_protocol::ExecTerminal;
 

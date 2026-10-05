@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 //! The SDK's own error type — a crate-owned facade over the internal
-//! `wxc_common` error, so the public API never exposes the foundation crate.
+//! `mxc_common` error, so the public API never exposes the foundation crate.
 
-use crate::wxc_common::mxc_error::{MxcError, MxcErrorCode};
+use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 
 /// Closed set of error codes the SDK can return. Mirrors the wire-format codes
 /// (serialised as snake_case strings) one-for-one.
@@ -153,7 +153,7 @@ impl From<MxcError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
+    use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
 
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.

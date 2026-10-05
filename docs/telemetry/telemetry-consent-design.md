@@ -28,7 +28,7 @@ collection but can never opt a user in.
 
 The immutable, versioned authoring resource is
 `src/mxc-sdk/resources/telemetry/consent/en-US.json`. The build embeds
-it in `wxc_common::telemetry::consent_prompt`. Every EXE and SDK presenter must
+it in `mxc_common::telemetry::consent_prompt`. Every EXE and SDK presenter must
 show every supplied field verbatim. Hosts control layout, accessibility, and
 native UI, but may not substitute wording.
 

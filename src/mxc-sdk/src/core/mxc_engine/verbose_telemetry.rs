@@ -9,9 +9,9 @@ use std::path::Path;
 use crate::learning_mode_core::{
     verbose_logging_sibling_path, VerboseLoggingDocument, VerboseLoggingProvider,
 };
-use crate::wxc_common::hashing::sha256_hex;
-use crate::wxc_common::models::{ContainmentBackend, ScriptResponse};
-use crate::wxc_common::telemetry::{self, VerboseEvent};
+use crate::mxc_common::hashing::sha256_hex;
+use crate::mxc_common::models::{ContainmentBackend, ScriptResponse};
+use crate::mxc_common::telemetry::{self, VerboseEvent};
 
 /// Leaves room for TraceLogging metadata beneath ETW's approximately 64 KiB
 /// event limit.
@@ -213,7 +213,7 @@ mod tests {
         VerboseLoggingAggregate, VerboseLoggingDocumentSummary, VerboseLoggingOutcomeReason,
         VerboseLoggingProvider, VerboseLoggingSignature,
     };
-    use crate::wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
+    use crate::mxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
 
     fn aggregate(event_id: u16, value: &str) -> VerboseLoggingAggregate {
         VerboseLoggingAggregate {

@@ -370,7 +370,7 @@ compare(
 
 const rustProbeFull = read("src", "mxc-sdk", "src", "core", "mxc_engine", "probe.rs");
 const rustProbe = rustProbeFull.split("#[cfg(test)]")[0];
-const rustModels = read("src", "mxc-sdk", "src", "core", "wxc_common", "models.rs");
+const rustModels = read("src", "mxc-sdk", "src", "core", "mxc_common", "models.rs");
 const managedDiscovery = read(
   "sdk",
   "dotnet",
@@ -495,7 +495,7 @@ const rustDispatch = read(
   "mxc-sdk",
   "src",
   "core",
-  "wxc_common",
+  "mxc_common",
   "state_aware_dispatch.rs"
 );
 const managedLifecycle = read(

@@ -18,7 +18,7 @@
 
 use std::fmt;
 
-use crate::wxc_common::models::{FailurePhase, ScriptResponse};
+use crate::mxc_common::models::{FailurePhase, ScriptResponse};
 
 use crate::wslc_common::wslc_bindings::HRESULT;
 

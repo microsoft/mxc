@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use crate::configs::{CaptureDenials, CaptureDenialsMode};
 use crate::configs::{ProcessContainerConfig, WslcConfig};
 #[cfg(test)]
-use crate::wxc_common::logger::{Logger, Mode};
-use crate::wxc_common::models::{ExecutionRequest, TelemetryConfig};
+use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::models::{ExecutionRequest, TelemetryConfig};
 pub use network::{
     NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy,
     NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig,
@@ -446,7 +446,7 @@ fn has_all_application_packages_access(directory: &str) -> bool {
             output.contains("ALL APPLICATION PACKAGES") || output.contains("S-1-15-2-1")
         }
         Err(error) => {
-            crate::wxc_common::logger::Logger::inherit_thread_diagnostic_sink().warning_line(
+            crate::mxc_common::logger::Logger::inherit_thread_diagnostic_sink().warning_line(
                 &format!("Tool-policy ACL inspection failed; retaining directory: {error}"),
             );
             false
@@ -1055,10 +1055,10 @@ mod tests {
             )
             .unwrap();
         let mut logger =
-            crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
-        let execution = crate::wxc_common::config_parser::load_one_shot_request_from_contract(
-            crate::wxc_common::config_parser::ExactOneShotContract::V0_9(Box::new(request)),
+        let execution = crate::mxc_common::config_parser::load_one_shot_request_from_contract(
+            crate::mxc_common::config_parser::ExactOneShotContract::V0_9(Box::new(request)),
             &mut logger,
         )
         .unwrap();
@@ -1069,7 +1069,7 @@ mod tests {
         );
         assert_eq!(
             execution.network_enforcement_compatibility,
-            crate::wxc_common::models::NetworkEnforcementCompatibility::Strict
+            crate::mxc_common::models::NetworkEnforcementCompatibility::Strict
         );
         assert_eq!(execution.script_code, "echo hello");
     }
@@ -1397,7 +1397,7 @@ mod tests {
     #[test]
     fn build_request_preserves_clipboard_policy() {
         use super::ClipboardPolicy as P;
-        use crate::wxc_common::models::ClipboardPolicy as Wire;
+        use crate::mxc_common::models::ClipboardPolicy as Wire;
 
         for (input, expected) in [
             (P::None, Wire::None),
@@ -1544,7 +1544,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn capture_denials_reaches_the_container_policy() {
-        use crate::wxc_common::models::CaptureDenialsMode as DomainMode;
+        use crate::mxc_common::models::CaptureDenialsMode as DomainMode;
 
         // `build_request` validates that the parent directory exists, so anchor
         // the path somewhere guaranteed to be present.
@@ -1671,11 +1671,11 @@ mod tests {
         let mut logger = super::Logger::new(super::Mode::Buffer);
         let json = serde_json::to_string(&config).unwrap();
         let request =
-            match crate::wxc_common::config_parser::load_mxc_request_from_json(&json, &mut logger)
+            match crate::mxc_common::config_parser::load_mxc_request_from_json(&json, &mut logger)
                 .expect("captureDenials alongside network.proxy satisfies the exact contract")
             {
-                crate::wxc_common::state_aware_request::MxcRequest::OneShot(request) => request,
-                crate::wxc_common::state_aware_request::MxcRequest::StateAware(_) => {
+                crate::mxc_common::state_aware_request::MxcRequest::OneShot(request) => request,
+                crate::mxc_common::state_aware_request::MxcRequest::StateAware(_) => {
                     panic!("expected a one-shot request")
                 }
             };
@@ -1693,7 +1693,7 @@ mod tests {
     // The end-to-end counterpart of the contract test above: the typed policy
     // emits both sections and the parser accepts the result unchanged.
     use super::{build_request_with_containment, Containment, ProcessContainerConfig, WslcConfig};
-    use crate::wxc_common::models::ContainmentBackend;
+    use crate::mxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> ContainerPolicy {
         ContainerPolicy::default()
@@ -1881,7 +1881,7 @@ mod tests {
         .expect("build request");
         assert_eq!(
             request.inner.containment,
-            crate::wxc_common::models::ContainmentBackend::IsolationSession
+            crate::mxc_common::models::ContainmentBackend::IsolationSession
         );
         assert!(request.inner.test_feature.is_none());
         assert!(request.inner.windows_sandbox.is_none());

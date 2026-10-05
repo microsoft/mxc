@@ -269,7 +269,7 @@ mod tests {
     };
     #[cfg(target_os = "linux")]
     use crate::bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
-    use crate::wxc_common::models::ContainmentBackend;
+    use crate::mxc_common::models::ContainmentBackend;
 
     const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
         (ContainmentBackend::ProcessContainer, "processcontainer"),

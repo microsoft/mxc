@@ -14,8 +14,8 @@
 
 use std::io::Read;
 
-use crate::wxc_common::error::WxcError;
-use crate::wxc_common::process_util::{InterruptiblePipeReader, OwnedHandle, PipeReadCanceller};
+use crate::mxc_common::error::WxcError;
+use crate::mxc_common::process_util::{InterruptiblePipeReader, OwnedHandle, PipeReadCanceller};
 
 use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
@@ -260,9 +260,9 @@ pub(super) unsafe fn create_relay_thread_with_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::process_util::{create_std_pipes, read_from_pipe, SendOwnedHandle};
-    use crate::wxc_common::sandbox_process::StreamCloser;
-    use crate::wxc_common::string_util;
+    use crate::mxc_common::process_util::{create_std_pipes, read_from_pipe, SendOwnedHandle};
+    use crate::mxc_common::sandbox_process::StreamCloser;
+    use crate::mxc_common::string_util;
     use windows::Win32::Foundation::WAIT_TIMEOUT;
     use windows::Win32::System::Pipes::CreatePipe;
     use windows::Win32::System::Threading::{

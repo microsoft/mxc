@@ -4,13 +4,13 @@
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::process::Command;
 
-use crate::wxc_common::hashing::sha256;
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{
+use crate::mxc_common::hashing::sha256;
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{
     ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPolicy,
     NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyHostPin,
 };
-use crate::wxc_common::network_blocks::{self, AddressBlock, IpFamily, MAX_EGRESS_ENTRIES};
+use crate::mxc_common::network_blocks::{self, AddressBlock, IpFamily, MAX_EGRESS_ENTRIES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkPlan {
@@ -603,7 +603,7 @@ impl NetworkIptablesManager {
     }
 
     fn host_is_ipv6_literal(host: &str) -> bool {
-        let candidate = crate::wxc_common::models::unbracket_host(host);
+        let candidate = crate::mxc_common::models::unbracket_host(host);
         matches!(candidate.parse::<IpAddr>(), Ok(IpAddr::V6(_)))
     }
 
@@ -817,7 +817,7 @@ impl NetworkIptablesManager {
         uses_directional_keys: bool,
     ) -> FirewallRuleArgs {
         let mut logger =
-            crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
         Self::build_policy_rules_logged(chain_name, policy, uses_directional_keys, &mut logger)
             .expect(
                 "test policy should not pair an accepting default with an unresolvable block entry",
@@ -1742,7 +1742,7 @@ impl Drop for NetworkIptablesManager {
     fn drop(&mut self) {
         if self.rules_applied && !self.preserve_policy {
             let mut logger =
-                crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+                crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let _ = self.remove_firewall_rules(&mut logger);
         }
     }
@@ -1871,8 +1871,8 @@ pub(crate) mod test_firewall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::logger::{Logger, Mode};
-    use crate::wxc_common::models::{
+    use crate::mxc_common::logger::{Logger, Mode};
+    use crate::mxc_common::models::{
         ContainerPolicy, NetworkEnforcementMode, ProxyAddress, ProxyConfig,
     };
     use std::io::{Error, ErrorKind};
@@ -2926,7 +2926,7 @@ mod tests {
             ..policy_with_hosts(&["0.0.0.0/0"], &[UNRESOLVABLE_HOST])
         };
         let mut logger =
-            crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         let err =
             NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
@@ -2945,7 +2945,7 @@ mod tests {
             ..policy_with_hosts(&["::/0"], &[UNRESOLVABLE_HOST])
         };
         let mut logger =
-            crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect_err("a v6 catch-all allow accepts the unresolved deny just as a v4 one does");
@@ -2958,7 +2958,7 @@ mod tests {
             ..policy_with_hosts(&["192.0.2.10"], &[UNRESOLVABLE_HOST])
         };
         let mut logger =
-            crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect("a bounded allow leaves the closing DROP covering the unresolved deny");
@@ -2971,7 +2971,7 @@ mod tests {
             ..policy_with_hosts(&["192.0.2.0/24"], &[UNRESOLVABLE_HOST])
         };
         let mut logger =
-            crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect("a /24 allow covers a bounded set, so it proves nothing about the deny");
@@ -2984,7 +2984,7 @@ mod tests {
             ..policy_with_hosts(&["allowed.invalid"], &[UNRESOLVABLE_HOST])
         };
         let mut logger =
-            crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect("an allow that programs no rule cannot accept the unresolved deny");
@@ -3451,7 +3451,7 @@ mod tests {
     fn a_v08_request_naming_no_network_fields_is_given_no_interface() {
         let policy = ContainerPolicy {
             network_egress: Some(NetworkEgressPolicy::default()),
-            network_ingress: Some(crate::wxc_common::models::NetworkIngressPolicy::default()),
+            network_ingress: Some(crate::mxc_common::models::NetworkIngressPolicy::default()),
             ..Default::default()
         };
 
@@ -3478,7 +3478,7 @@ mod tests {
     fn an_admitted_inbound_peer_keeps_the_interface() {
         let policy = ContainerPolicy {
             network_egress: Some(NetworkEgressPolicy::default()),
-            network_ingress: Some(crate::wxc_common::models::NetworkIngressPolicy {
+            network_ingress: Some(crate::mxc_common::models::NetworkIngressPolicy {
                 host_loopback: NetworkAction::Allow,
                 ..Default::default()
             }),
@@ -3560,7 +3560,7 @@ mod tests {
                                 ..Default::default()
                             }),
                             network_ingress: ingress.map(|(default, host_loopback)| {
-                                crate::wxc_common::models::NetworkIngressPolicy {
+                                crate::mxc_common::models::NetworkIngressPolicy {
                                     default,
                                     host_loopback,
                                 }

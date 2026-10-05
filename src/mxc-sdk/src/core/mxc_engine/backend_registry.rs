@@ -7,7 +7,7 @@
 //! build features, and host availability. Probing and dispatch stay in their
 //! existing engine modules; wire names stay on the shared backend enum.
 
-use crate::wxc_common::models::ContainmentBackend;
+use crate::mxc_common::models::ContainmentBackend;
 
 #[derive(Debug)]
 pub(crate) struct BackendRegistration {

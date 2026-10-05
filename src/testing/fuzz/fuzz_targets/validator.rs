@@ -16,12 +16,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mxc_sdk::wxc_common::config_parser::load_mxc_request;
-use mxc_sdk::wxc_common::logger::{Logger, Mode};
-use mxc_sdk::wxc_common::models::ContainmentBackend;
-use mxc_sdk::wxc_common::script_runner::ScriptRunner;
-use mxc_sdk::wxc_common::state_aware_request::MxcRequest;
-use mxc_sdk::wxc_common::validator::validate_common;
+use mxc_sdk::mxc_common::config_parser::load_mxc_request;
+use mxc_sdk::mxc_common::logger::{Logger, Mode};
+use mxc_sdk::mxc_common::models::ContainmentBackend;
+use mxc_sdk::mxc_common::script_runner::ScriptRunner;
+use mxc_sdk::mxc_common::state_aware_request::MxcRequest;
+use mxc_sdk::mxc_common::validator::validate_common;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else {

@@ -9,27 +9,27 @@
 //! can shrink to a thin CLI shell.
 //!
 //! Backends whose `StatefulSandboxBackend` impl lives in a `backends/*` crate
-//! (which depends on `wxc_common`, so the construction can't live inside
-//! `wxc_common` without a cycle) are constructed here — the engine already
+//! (which depends on `mxc_common`, so the construction can't live inside
+//! `mxc_common` without a cycle) are constructed here — the engine already
 //! depends on those crates. Anything without a state-aware impl falls back to
-//! [`crate::wxc_common::state_aware_dispatch::run_state_aware`], which surfaces the
+//! [`crate::mxc_common::state_aware_dispatch::run_state_aware`], which surfaces the
 //! `unsupported_phase` envelope.
 
 use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::wxc_common::logger::{Logger, Mode};
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::sandbox_process::{PtySize, SandboxProcess};
-use crate::wxc_common::sdk_input::SdkStateAwareInput;
-use crate::wxc_common::state_aware_backend::ExecOutcome;
+use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
+use crate::mxc_common::sdk_input::SdkStateAwareInput;
+use crate::mxc_common::state_aware_backend::ExecOutcome;
 #[cfg(target_os = "windows")]
-use crate::wxc_common::state_aware_dispatch::TypedDispatchOutcome;
-use crate::wxc_common::state_aware_dispatch::{
+use crate::mxc_common::state_aware_dispatch::TypedDispatchOutcome;
+use crate::mxc_common::state_aware_dispatch::{
     resolve_backend, run_state_aware as run_state_aware_fallback, DispatchOutcome,
 };
-use crate::wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
-use crate::wxc_common::telemetry;
+use crate::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use crate::mxc_common::telemetry;
 
 use crate::mxc_engine::error::Error;
 use crate::mxc_engine::{wrap_state_aware_telemetry_process_with_kind, TelemetryRegistration};
@@ -114,39 +114,39 @@ pub fn run_state_aware(
     )?;
     match backend {
         #[cfg(target_os = "windows")]
-        crate::wxc_common::models::ContainmentBackend::WindowsSandbox => {
-            let bound = crate::wxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
             let mut runner = crate::windows_sandbox_lifecycle::WindowsSandboxRunner::new();
-            crate::wxc_common::state_aware_dispatch::dispatch_state_aware(
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
                 &mut runner,
                 bound,
                 dry_run,
             )
         }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        crate::wxc_common::models::ContainmentBackend::IsolationSession => {
-            let bound = crate::wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = crate::mxc_common::state_aware_binding::bind_isolation_session(parsed)?;
             let mut runner = crate::isolation_session_common::IsolationSessionRunner::new();
-            crate::wxc_common::state_aware_dispatch::dispatch_state_aware(
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
                 &mut runner,
                 bound,
                 dry_run,
             )
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
-        crate::wxc_common::models::ContainmentBackend::Wslc => {
-            let bound = crate::wxc_common::state_aware_binding::bind_wslc(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::Wslc => {
+            let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
             let mut runner = crate::wslc_common::WslcStateAwareRunner::new();
-            crate::wxc_common::state_aware_dispatch::dispatch_state_aware(
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
                 &mut runner,
                 bound,
                 dry_run,
             )
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
-        crate::wxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
+        crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
-        crate::wxc_common::models::ContainmentBackend::IsolationSession => {
+        crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
         _ => run_state_aware_fallback(parsed, dry_run),
@@ -267,10 +267,10 @@ fn run_state_aware_typed(
     )?;
     match backend {
         #[cfg(target_os = "windows")]
-        crate::wxc_common::models::ContainmentBackend::WindowsSandbox => {
-            let bound = crate::wxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
             let mut runner = crate::windows_sandbox_lifecycle::WindowsSandboxRunner::new();
-            let outcome = crate::wxc_common::state_aware_dispatch::dispatch_state_aware_typed(
+            let outcome = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_typed(
                 &mut runner,
                 bound,
                 dry_run,
@@ -278,10 +278,10 @@ fn run_state_aware_typed(
             typed_dispatch_result(outcome, no_provision_metadata)
         }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        crate::wxc_common::models::ContainmentBackend::IsolationSession => {
-            let bound = crate::wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = crate::mxc_common::state_aware_binding::bind_isolation_session(parsed)?;
             let mut runner = crate::isolation_session_common::IsolationSessionRunner::new();
-            let outcome = crate::wxc_common::state_aware_dispatch::dispatch_state_aware_typed(
+            let outcome = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_typed(
                 &mut runner,
                 bound,
                 dry_run,
@@ -295,10 +295,10 @@ fn run_state_aware_typed(
             })
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
-        crate::wxc_common::models::ContainmentBackend::Wslc => {
-            let bound = crate::wxc_common::state_aware_binding::bind_wslc(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::Wslc => {
+            let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
             let mut runner = crate::wslc_common::WslcStateAwareRunner::new();
-            let outcome = crate::wxc_common::state_aware_dispatch::dispatch_state_aware_typed(
+            let outcome = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_typed(
                 &mut runner,
                 bound,
                 dry_run,
@@ -306,9 +306,9 @@ fn run_state_aware_typed(
             typed_dispatch_result(outcome, no_provision_metadata)
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
-        crate::wxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
+        crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
-        crate::wxc_common::models::ContainmentBackend::IsolationSession => {
+        crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
         _ => {
@@ -337,46 +337,46 @@ pub fn exec_state_aware(
     )?;
     match backend {
         #[cfg(target_os = "windows")]
-        crate::wxc_common::models::ContainmentBackend::WindowsSandbox => {
-            let bound = crate::wxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
             let mut runner = crate::windows_sandbox_lifecycle::WindowsSandboxRunner::new();
-            let handle = crate::wxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
                 &mut runner,
                 bound,
             )?;
             Ok(Box::new(
-                crate::wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
 
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        crate::wxc_common::models::ContainmentBackend::IsolationSession => {
-            let bound = crate::wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = crate::mxc_common::state_aware_binding::bind_isolation_session(parsed)?;
             let mut runner = crate::isolation_session_common::IsolationSessionRunner::new();
-            let handle = crate::wxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
                 &mut runner,
                 bound,
             )?;
             Ok(Box::new(
-                crate::wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
-        crate::wxc_common::models::ContainmentBackend::Wslc => {
-            let bound = crate::wxc_common::state_aware_binding::bind_wslc(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::Wslc => {
+            let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
             let mut runner = crate::wslc_common::WslcStateAwareRunner::new();
-            let handle = crate::wxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
                 &mut runner,
                 bound,
             )?;
             Ok(Box::new(
-                crate::wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
-        crate::wxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
+        crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
-        crate::wxc_common::models::ContainmentBackend::IsolationSession => {
+        crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
         _ => Err(MxcError::unsupported_phase(format!(
@@ -399,17 +399,17 @@ pub fn exec_state_aware_pty(
     )?;
     match backend {
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        crate::wxc_common::models::ContainmentBackend::IsolationSession => {
-            let bound = crate::wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
+        crate::mxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = crate::mxc_common::state_aware_binding::bind_isolation_session(parsed)?;
             let mut runner = crate::isolation_session_common::IsolationSessionRunner::new();
-            crate::wxc_common::state_aware_dispatch::dispatch_state_aware_exec_pty(
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec_pty(
                 &mut runner,
                 bound,
                 size,
             )
         }
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
-        crate::wxc_common::models::ContainmentBackend::IsolationSession => {
+        crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
         _ => Err(MxcError::unsupported_phase(format!(
@@ -431,7 +431,7 @@ fn parse_state_aware(
     experimental: bool,
     logger: &mut Logger,
 ) -> Result<ParsedStateAwareRequest, Error> {
-    match crate::wxc_common::config_parser::load_mxc_request_from_json(request_json, logger) {
+    match crate::mxc_common::config_parser::load_mxc_request_from_json(request_json, logger) {
         Ok(MxcRequest::StateAware(mut parsed)) => {
             parsed.set_experimental_enabled(experimental);
             Ok(parsed)
@@ -444,22 +444,22 @@ fn parse_state_aware(
 }
 
 fn normalize_sdk_state_aware(
-    input: crate::wxc_common::sdk_input::SdkStateAwareInput,
+    input: crate::mxc_common::sdk_input::SdkStateAwareInput,
     experimental: bool,
     logger: &mut Logger,
 ) -> Result<ParsedStateAwareRequest, Error> {
     let mut parsed =
-        crate::wxc_common::config_parser::normalize_sdk_state_aware_request(input, logger)
+        crate::mxc_common::config_parser::normalize_sdk_state_aware_request(input, logger)
             .map_err(|error| Error::from(MxcError::malformed_request(error.to_string())))?;
     parsed.set_experimental_enabled(experimental);
     Ok(parsed)
 }
 
-/// Map a [`config_parser::ParseError`](crate::wxc_common::config_parser::ParseError) to
+/// Map a [`config_parser::ParseError`](crate::mxc_common::config_parser::ParseError) to
 /// an [`MxcError`]. The state-aware arm already carries one; the decode,
 /// version, and one-shot arms carry a `WxcError` that maps to `malformed_request`.
-pub(crate) fn parse_error_to_mxc(e: crate::wxc_common::config_parser::ParseError) -> MxcError {
-    use crate::wxc_common::config_parser::ParseError;
+pub(crate) fn parse_error_to_mxc(e: crate::mxc_common::config_parser::ParseError) -> MxcError {
+    use crate::mxc_common::config_parser::ParseError;
     match e {
         ParseError::StateAware(err) => err,
         ParseError::Decode(err)
@@ -949,18 +949,18 @@ pub fn exec_state_aware_pty_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_contract::ContractVersion;
-    use crate::wxc_common::mxc_error::MxcErrorCode;
-    use crate::wxc_common::sdk_input::{
+    use crate::mxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::sdk_input::{
         SdkFilesystemInput, SdkNetworkAction, SdkNetworkEgressInput, SdkNetworkIngressInput,
         SdkNetworkInput, SdkNetworkPeerInput, SdkNetworkPortInput, SdkNetworkProtocol,
         SdkNetworkRuleInput, SdkProcessInput, SdkRuntimeConfigInput, SdkStateAwareInput,
     };
-    use crate::wxc_common::state_aware_operation::{
+    use crate::mxc_common::state_aware_operation::{
         StateAwareOperation, StateAwareProvision as RuntimeProvision,
     };
-    use crate::wxc_common::state_aware_request::Phase;
-    use crate::wxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
+    use crate::mxc_common::state_aware_request::Phase;
+    use crate::mxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
+    use crate::mxc_contract::ContractVersion;
 
     fn sdk_input(operation: StateAwareOperation) -> SdkStateAwareInput {
         SdkStateAwareInput::new(ContractVersion::V1_0_0, operation).unwrap()
@@ -974,7 +974,7 @@ mod tests {
         let config = if image.is_none() && image_tar_path.is_none() {
             None
         } else {
-            Some(crate::wxc_common::models::WslcProvisionConfig {
+            Some(crate::mxc_common::models::WslcProvisionConfig {
                 image,
                 image_tar_path,
             })
@@ -992,7 +992,7 @@ mod tests {
     ) -> SdkStateAwareInput {
         let config =
             app_id.map(
-                |app_id| crate::wxc_common::models::IsolationSessionProvisionConfig {
+                |app_id| crate::mxc_common::models::IsolationSessionProvisionConfig {
                     app_id: Some(app_id),
                 },
             );
@@ -1417,7 +1417,7 @@ mod tests {
         .unwrap();
 
         assert!(crate::mxc_engine::experimental::require_experimental_optin(
-            &crate::wxc_common::models::ContainmentBackend::IsolationSession,
+            &crate::mxc_common::models::ContainmentBackend::IsolationSession,
             parsed.request().experimental_enabled
         )
         .is_ok());
@@ -1866,8 +1866,8 @@ mod tests {
     ///     expected `FailureReason` (the actual shared classifier).
     #[test]
     fn engine_state_aware_error_codes_classify_via_shared_helper() {
+        use crate::mxc_common::telemetry::FailureReason;
         use crate::mxc_engine::error::ErrorCode;
-        use crate::wxc_common::telemetry::FailureReason;
 
         // Malformed JSON — the JSON decoder rejects it, `parse_state_aware`
         // wraps it as `MalformedRequest`, and the classifier maps that to

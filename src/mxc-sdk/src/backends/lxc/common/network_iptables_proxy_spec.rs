@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 use super::*;
-use crate::wxc_common::logger::{Logger, Mode};
-use crate::wxc_common::models::{
+use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::models::{
     ContainerPolicy, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ProxyConfig,
 };
 

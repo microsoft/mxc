@@ -176,6 +176,8 @@ pub use core_modules::learning_mode_core;
 #[doc(hidden)]
 pub use core_modules::learning_mode_windows;
 #[doc(hidden)]
+pub use core_modules::mxc_common;
+#[doc(hidden)]
 pub use core_modules::mxc_contract;
 #[doc(hidden)]
 pub use core_modules::mxc_engine;
@@ -189,8 +191,6 @@ pub use core_modules::mxc_telemetry;
 pub use core_modules::plm;
 #[doc(hidden)]
 pub use core_modules::process_security_environment_spec;
-#[doc(hidden)]
-pub use core_modules::wxc_common;
 
 mod configs;
 mod options;
@@ -489,7 +489,7 @@ pub mod __ffi {
 
     /// Run an exact-JSON lifecycle execution request attached to this process's stdio.
     fn exec_attached_json(request_json: &str, experimental: bool) -> Result<WaitResult, Error> {
-        use crate::wxc_common::state_aware_backend::ExecOutcome;
+        use crate::mxc_common::state_aware_backend::ExecOutcome;
         crate::mxc_engine::exec_state_aware_attached(request_json, experimental).map(|outcome| {
             match outcome {
                 ExecOutcome::Exited(code) => WaitResult::Exited(code),

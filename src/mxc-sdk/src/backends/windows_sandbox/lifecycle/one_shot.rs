@@ -10,10 +10,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
-use crate::wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
-use crate::wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use crate::mxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::windows_sandbox_lifecycle::control_plane::{self, HostVmLock};
 use crate::windows_sandbox_lifecycle::error::OneShotError;

@@ -13,9 +13,9 @@
 
 use serde::Serialize;
 
+use crate::mxc_common::models::ExecutionRequest;
+use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
 use crate::process_container_common::fallback_detector::{self, FallbackError};
-use crate::wxc_common::models::ExecutionRequest;
-use crate::wxc_common::ui_policy::EffectiveUiRestrictions;
 
 /// JSON output emitted by `wxc-exec --probe`.
 #[derive(Serialize, Debug)]
@@ -228,11 +228,11 @@ pub fn to_json_pretty(output: &ProbeOutput) -> Result<String, serde_json::Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process_container_common::fallback_detector::IsolationTier;
-    use crate::process_container_common::test_env::{CaptureCapabilityGuard, ForceTierGuard};
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         ContainerPolicy, ExecutionRequest, NetworkAction, NetworkIngressPolicy,
     };
+    use crate::process_container_common::fallback_detector::IsolationTier;
+    use crate::process_container_common::test_env::{CaptureCapabilityGuard, ForceTierGuard};
 
     fn all_ui_capabilities() -> UiCapabilitySupport {
         UiCapabilitySupport {

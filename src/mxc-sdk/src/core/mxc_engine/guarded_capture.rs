@@ -81,7 +81,7 @@ fn confirm_guardian_release_after_discard_failure(
 /// this resolver only locates the co-located binary at runtime.
 fn plm_exe_path() -> Result<std::path::PathBuf, String> {
     let module =
-        crate::wxc_common::process_util::module_path_for_address(plm_exe_path as *const ())?;
+        crate::mxc_common::process_util::module_path_for_address(plm_exe_path as *const ())?;
     let dir = module
         .parent()
         .ok_or_else(|| "the MXC native module has no parent directory".to_string())?;
@@ -250,7 +250,7 @@ fn start_with_plm_path(
 /// Build the guarded-capture factory to hand to the dispatcher for `request`,
 /// or `None` when `captureDenials` isn't requested.
 pub(crate) fn factory_for_request(
-    request: &crate::wxc_common::models::ExecutionRequest,
+    request: &crate::mxc_common::models::ExecutionRequest,
 ) -> Option<std::sync::Arc<dyn GuardedCaptureFactory>> {
     if request.policy.capture_denials.is_some() {
         Some(std::sync::Arc::new(PlmGuardedCaptureFactory))
@@ -305,20 +305,20 @@ mod tests {
 
     #[test]
     fn factory_for_request_is_none_without_capture_denials() {
-        let request = crate::wxc_common::models::ExecutionRequest::default();
+        let request = crate::mxc_common::models::ExecutionRequest::default();
         assert!(factory_for_request(&request).is_none());
     }
 
     #[test]
     fn factory_for_request_is_some_with_capture_denials() {
-        let mut request = crate::wxc_common::models::ExecutionRequest::default();
+        let mut request = crate::mxc_common::models::ExecutionRequest::default();
         request.policy.capture_denials = Some(Default::default());
         assert!(factory_for_request(&request).is_some());
     }
 
     #[test]
     fn plm_factory_supports_requested_trace_transfer() {
-        let mut request = crate::wxc_common::models::ExecutionRequest::default();
+        let mut request = crate::mxc_common::models::ExecutionRequest::default();
         request.policy.capture_denials = Some(Default::default());
 
         assert!(factory_for_request(&request)
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn resolver_locates_the_current_native_module() {
-        let module = crate::wxc_common::process_util::module_path_for_address(
+        let module = crate::mxc_common::process_util::module_path_for_address(
             resolver_locates_the_current_native_module as *const (),
         )
         .expect("test module path should resolve");

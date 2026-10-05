@@ -18,10 +18,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkAction};
 use crate::process_container_common::base_container_runner::{
     BaseContainerRequestDecision, BaseContainerRunner,
 };
-use crate::wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkAction};
 
 /// Declares [`IsolationTier`] together with its variant↔string mapping in one
 /// place, so [`ALL`](IsolationTier::ALL), [`as_str`](IsolationTier::as_str), and
@@ -84,7 +84,7 @@ isolation_tiers! {
 /// vocabulary.
 ///
 /// Used by the `mxc.EnforcementDegraded` audit record
-/// ([`crate::wxc_common::audit::AuditEventName::EnforcementDegraded`]).
+/// ([`crate::mxc_common::audit::AuditEventName::EnforcementDegraded`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DegradationReason {
     /// BaseContainer was preferred and usable, but the OS does not advertise
@@ -407,10 +407,10 @@ pub(crate) fn choose_backend_tier(
     // Denied paths always require `WRITE_DAC` because well-known SID
     // grants don't help us subtract access.
     for p in &policy.readwrite_paths {
-        ensure_path_grantable_for_ac(Path::new(p), crate::wxc_common::filesystem_dacl::RW_MASK)?;
+        ensure_path_grantable_for_ac(Path::new(p), crate::mxc_common::filesystem_dacl::RW_MASK)?;
     }
     for p in &policy.readonly_paths {
-        ensure_path_grantable_for_ac(Path::new(p), crate::wxc_common::filesystem_dacl::RO_MASK)?;
+        ensure_path_grantable_for_ac(Path::new(p), crate::mxc_common::filesystem_dacl::RO_MASK)?;
     }
     verify_write_dac_all(&policy.denied_paths)?;
 
@@ -497,9 +497,9 @@ fn system_drive_root() -> std::path::PathBuf {
 fn system_drive_prepared() -> bool {
     let root = system_drive_root();
     HOST_PREP_AC_SIDS.iter().all(|sid| {
-        match crate::wxc_common::filesystem_dacl::scan_explicit_aces_for_sid(&root, sid) {
+        match crate::mxc_common::filesystem_dacl::scan_explicit_aces_for_sid(&root, sid) {
             Ok(priors) => priors.iter().any(|p| {
-                p.ace_type == crate::wxc_common::filesystem_dacl::AceType::Allow
+                p.ace_type == crate::mxc_common::filesystem_dacl::AceType::Allow
                     && p.access_mask == SYSTEM_DRIVE_STAT_MASK
                     && p.inherit_flags == 0
             }),
@@ -515,20 +515,20 @@ fn system_drive_prepared() -> bool {
 /// Read-only and best-effort: an unreadable DACL yields `false`, so the
 /// caller surfaces the recommendation.
 fn null_device_prepared() -> bool {
-    crate::wxc_common::filesystem_dacl::null_device_appcontainer_grants().unwrap_or(false)
+    crate::mxc_common::filesystem_dacl::null_device_appcontainer_grants().unwrap_or(false)
 }
 
 /// Returns `Ok(true)` if a per-run ACE on `path` is unnecessary because
 /// the path's existing DACL already grants `needed_mask` (or a
 /// superset) to the well-known AppContainer SIDs that every
 /// AppContainer process inherits. See
-/// [`crate::wxc_common::filesystem_dacl::compute_appcontainer_effective_access`].
+/// [`crate::mxc_common::filesystem_dacl::compute_appcontainer_effective_access`].
 ///
 /// Always returns `Ok(false)` for paths that don't exist or that fail
 /// the DACL lookup — the caller will fall through to the `WRITE_DAC`
 /// check, which produces a path-specific error.
 pub(crate) fn appcontainer_already_grants(path: &Path, needed_mask: u32) -> bool {
-    match crate::wxc_common::filesystem_dacl::compute_appcontainer_effective_access(path) {
+    match crate::mxc_common::filesystem_dacl::compute_appcontainer_effective_access(path) {
         Ok(effective) => (effective & needed_mask) == needed_mask,
         Err(_) => false,
     }
@@ -751,7 +751,7 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
     let path_str = path
         .to_str()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 path"))?;
-    let wide = crate::wxc_common::string_util::to_wide(path_str);
+    let wide = crate::mxc_common::string_util::to_wide(path_str);
 
     // SAFETY: `wide` lives for the duration of the call and is null-
     // terminated by `to_wide`. CreateFileW is documented to accept directory
@@ -802,7 +802,7 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{ContainerPolicy, ExecutionRequest};
+    use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest};
     // Shared ENV_LOCK + guards live in `crate::process_container_common::test_env` so they're
     // honored uniformly across the dispatcher and fallback_detector
     // test modules. A per-module lock would let cross-module test
@@ -1203,8 +1203,8 @@ mod tests {
     /// matching grant for `ALL APPLICATION PACKAGES`.
     #[test]
     fn appcontainer_already_grants_respects_explicit_grant() {
+        use crate::mxc_common::filesystem_dacl::DaclManager;
         use crate::process_container_common::test_env::ScopedStateDir;
-        use crate::wxc_common::filesystem_dacl::DaclManager;
         use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 
         let _scope = ScopedStateDir::new();
@@ -1278,7 +1278,7 @@ mod tests {
     /// host-dependent so we only assert it returns.
     #[test]
     fn null_device_grants_probe_smoke() {
-        let _ = crate::wxc_common::filesystem_dacl::null_device_appcontainer_grants();
+        let _ = crate::mxc_common::filesystem_dacl::null_device_appcontainer_grants();
     }
 
     /// With `tier2_bfs` compiled out, an empty policy on a host where

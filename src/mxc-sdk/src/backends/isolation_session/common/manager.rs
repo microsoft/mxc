@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
-use crate::wxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::process_util::{OwnedHandle, PipeReadCanceller};
-use crate::wxc_common::sandbox_process::StreamCloser;
-use crate::wxc_common::state_aware_backend::{ExecHandle, ExecOutcome};
+use crate::mxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::process_util::{OwnedHandle, PipeReadCanceller};
+use crate::mxc_common::sandbox_process::StreamCloser;
+use crate::mxc_common::state_aware_backend::{ExecHandle, ExecOutcome};
 
 use crate::isolation_session_bindings::bindings::{
     IsoSessionFeature, IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult,
@@ -384,7 +384,7 @@ impl IsolationSessionManager {
             stdout,
             stderr,
             stdin,
-            identity: crate::wxc_common::policy_identity::redact_identity(
+            identity: crate::mxc_common::policy_identity::redact_identity(
                 &self.agent_user_name.to_string(),
             ),
             audit_logger: std::sync::Mutex::new(
@@ -706,11 +706,11 @@ pub fn log_sandbox_torn_down(
     phase: &str,
     outcome: TeardownOutcome,
 ) {
-    if !logger.has_diagnostic_sink() && !crate::wxc_common::telemetry::is_active() {
+    if !logger.has_diagnostic_sink() && !crate::mxc_common::telemetry::is_active() {
         return;
     }
-    let identity = crate::wxc_common::policy_identity::redact_identity(identity);
-    crate::wxc_common::telemetry::log_sandbox_torn_down(
+    let identity = crate::mxc_common::policy_identity::redact_identity(identity);
+    crate::mxc_common::telemetry::log_sandbox_torn_down(
         &identity,
         outcome.status().as_str(),
         &format!(
@@ -761,10 +761,10 @@ impl StartedProcess {
     }
 
     fn record_exited(&self, exit_code: i32) {
-        crate::wxc_common::telemetry::log_process_event(
+        crate::mxc_common::telemetry::log_process_event(
             &self.identity,
             0,
-            crate::wxc_common::telemetry::ProcessEvent::Exited(exit_code),
+            crate::mxc_common::telemetry::ProcessEvent::Exited(exit_code),
         );
         let mut logger = self.audit_logger.lock().unwrap_or_else(|e| e.into_inner());
         logger.log_audit_event(
@@ -775,10 +775,10 @@ impl StartedProcess {
     }
 
     fn record_timed_out(&self, timeout_ms: u32) {
-        crate::wxc_common::telemetry::log_process_event(
+        crate::mxc_common::telemetry::log_process_event(
             &self.identity,
             0,
-            crate::wxc_common::telemetry::ProcessEvent::TimedOut(timeout_ms as u64),
+            crate::mxc_common::telemetry::ProcessEvent::TimedOut(timeout_ms as u64),
         );
         let mut logger = self.audit_logger.lock().unwrap_or_else(|e| e.into_inner());
         logger.log_audit_event(
@@ -789,10 +789,10 @@ impl StartedProcess {
     }
 
     fn record_kill_failed(&self, error_code: i32) {
-        crate::wxc_common::telemetry::log_process_event(
+        crate::mxc_common::telemetry::log_process_event(
             &self.identity,
             0,
-            crate::wxc_common::telemetry::ProcessEvent::KillFailed(
+            crate::mxc_common::telemetry::ProcessEvent::KillFailed(
                 KillMethod::TerminateProcess.as_str(),
                 error_code,
             ),

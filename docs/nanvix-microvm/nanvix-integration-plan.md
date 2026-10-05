@@ -110,7 +110,7 @@ mxc/src/
 ├── wxc/
 │   ├── Cargo.toml                    # UNCHANGED
 │   └── src/main.rs                   # Add NanVix match arm (2 lines)
-├── wxc_common/
+├── mxc_common/
 │   ├── Cargo.toml                    # UNCHANGED
 │   └── src/
 │       ├── lib.rs                    # Add: pub mod nanvix_runner (1 line)

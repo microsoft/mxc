@@ -33,6 +33,6 @@ fn pty_entry_points_take_dimensions_from_operation_options() {
         },
         ..Default::default()
     };
-    let native_size: mxc_sdk::wxc_common::sandbox_process::PtySize = options.size.into();
+    let native_size: mxc_sdk::mxc_common::sandbox_process::PtySize = options.size.into();
     assert_eq!((native_size.rows, native_size.cols), (40, 120));
 }

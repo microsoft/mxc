@@ -32,11 +32,11 @@
 //! describe the backend rather than a phase, so the one-shot `validate_runner`
 //! calls them too.
 
-use crate::wxc_common::models::{
+use crate::mxc_common::models::{
     ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
 };
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::validator::NetworkPolicySupport;
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::validator::NetworkPolicySupport;
 
 use crate::wslc_common::policy_mapping::validate_denied_path_overlap;
 use crate::wslc_common::process_env::EnvScope;
@@ -207,7 +207,7 @@ pub(crate) fn reject_proxy_credentials_in_argv(request: &ExecutionRequest) -> Re
     }
 
     match exec_proxy_url(request) {
-        Some(url) if crate::wxc_common::proxy_env::proxy_url_has_credentials(url) => {
+        Some(url) if crate::mxc_common::proxy_env::proxy_url_has_credentials(url) => {
             Err(MxcError::policy_validation(ERR_PROXY_CREDENTIALS_IN_ARGV))
         }
         _ => Ok(()),
@@ -297,10 +297,10 @@ fn reject_post_provision_network_mode(request: &ExecutionRequest) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         ContainerPolicy, NetworkPolicy, ProxyAddress, ProxyConfig, UiPolicy,
     };
-    use crate::wxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {
         ExecutionRequest {
@@ -364,14 +364,14 @@ mod tests {
     }
 
     fn parsed(source: &str) -> ExecutionRequest {
-        let request = crate::wxc_common::config_parser::load_mxc_request_from_json(
+        let request = crate::mxc_common::config_parser::load_mxc_request_from_json(
             source,
-            &mut crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer),
+            &mut crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer),
         )
         .unwrap();
         match request {
-            crate::wxc_common::state_aware_request::MxcRequest::OneShot(request) => request,
-            crate::wxc_common::state_aware_request::MxcRequest::StateAware(request) => {
+            crate::mxc_common::state_aware_request::MxcRequest::OneShot(request) => request,
+            crate::mxc_common::state_aware_request::MxcRequest::StateAware(request) => {
                 request.into_request()
             }
         }
@@ -424,7 +424,7 @@ mod tests {
         assert!(request.policy.runtime_network_proxy_specified);
         assert!(request.policy.network_egress.is_none());
         assert!(request.policy.network_ingress.is_none());
-        crate::wxc_common::validator::validate_state_aware_network_policy_support(
+        crate::mxc_common::validator::validate_state_aware_network_policy_support(
             &request,
             network_policy_support(),
         )

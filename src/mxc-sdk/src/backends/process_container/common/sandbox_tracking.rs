@@ -31,8 +31,8 @@ use windows_core::PCWSTR;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_VOLATILE};
 use winreg::RegKey;
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::string_util;
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::string_util;
 
 /// Registry base path for sandbox tracking entries.
 const TRACKING_BASE: &str = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\ProcessSandboxes\\Mappings";
@@ -318,7 +318,7 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> windows_core::BOOL {
             // implemented), so the Ctrl+C handler is a no-op beyond consuming
             // the active slot to prevent double-fire.
             let mut logger =
-                crate::wxc_common::logger::Logger::new(crate::wxc_common::logger::Mode::Buffer);
+                crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
             let _ = std::fmt::Write::write_str(
                 &mut logger,
                 "ctrl handler: skipping cleanup (child process tracking not yet implemented)\n",
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn empty_sid_never_targets_shared_tracking_root() {
-        let mut logger = Logger::new(crate::wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
         mark_cleanup_deferred("", "test", &mut logger);
         remove_tracking_entry("", &mut logger);

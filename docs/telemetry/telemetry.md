@@ -15,7 +15,7 @@ C++ shim, WIL, or FFI is required.
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  wxc_common::telemetry                               │
+│  mxc_common::telemetry                               │
 │  (Rust — config resolution, sanitisation, types)     │
 │                                                      │
 │  init() / log_execution() / log_error() /             │

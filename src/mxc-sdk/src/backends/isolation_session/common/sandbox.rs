@@ -19,18 +19,18 @@ use std::os::windows::io::{BorrowedHandle, IntoRawHandle, RawHandle};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::process_util::{
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::process_util::{
     InterruptiblePipeReader, OwnedHandle as ProcessOwnedHandle, PipeReadCanceller,
 };
-use crate::wxc_common::sandbox_process::{
+use crate::mxc_common::sandbox_process::{
     NativeStdio, OwnedPipe, PtySize, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
-use crate::wxc_common::script_runner::ScriptRunner;
-use crate::wxc_common::state_aware_backend::ExecOutcome;
-use crate::wxc_common::validator::validate_common;
+use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::state_aware_backend::ExecOutcome;
+use crate::mxc_common::validator::validate_common;
 
 use super::error::{lifecycle_err, IsolationSessionError};
 use super::manager::{
@@ -333,7 +333,7 @@ fn spawn_piped(
         }
     };
 
-    let inner = match crate::wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle) {
+    let inner = match crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle) {
         Ok(inner) => inner,
         Err(e) => {
             session.reclaim("adapter");
@@ -452,7 +452,7 @@ impl Drop for OwnedSession {
 /// workload, and stopping the session is what ends it.
 struct OneShotSandboxProcess {
     session: OwnedSession,
-    inner: crate::wxc_common::exec_stream::ExecSandboxProcess,
+    inner: crate::mxc_common::exec_stream::ExecSandboxProcess,
 }
 
 impl OneShotSandboxProcess {
@@ -500,7 +500,7 @@ impl SandboxProcess for OneShotSandboxProcess {
 
     fn take_native_stdio(
         &mut self,
-    ) -> std::io::Result<Option<crate::wxc_common::sandbox_process::NativeStdio>> {
+    ) -> std::io::Result<Option<crate::mxc_common::sandbox_process::NativeStdio>> {
         self.inner.take_native_stdio()
     }
 
@@ -812,7 +812,7 @@ impl Drop for IsolationPtyProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     /// A launch failure that also failed to clean up keeps its own
     /// classification, so a caller still branches on the real cause.

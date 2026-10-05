@@ -56,10 +56,10 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
-use crate::wxc_common::script_runner::ScriptRunner;
-use crate::wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
+use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 /// Multi-binary initrd (daemons + CPython) loaded by NanVix at warm start.
 const INITRD_BINARY: &str = crate::nanvix_common::INITRD_BINARY;
@@ -207,7 +207,7 @@ impl NanVixError {
 
 /// Returns the directory containing the current executable.
 ///
-/// Inlined (rather than reusing `crate::wxc_common::process_util::exe_dir`) because
+/// Inlined (rather than reusing `crate::mxc_common::process_util::exe_dir`) because
 /// `process_util` is gated to `target_os = "windows"`.
 fn exe_dir() -> Result<PathBuf, NanVixError> {
     std::env::current_exe()
@@ -1002,11 +1002,11 @@ impl ScriptRunner for NanVixScriptRunner {
         // Build staging directory with script and filesystem policy paths.
         let staging_root = std::env::temp_dir().join("mxc-microvm");
         // Sweep orphaned staging dirs from previous crashed runs (older than 1 hour).
-        crate::wxc_common::microvm_staging::sweep_orphaned_staging_dirs(
+        crate::mxc_common::microvm_staging::sweep_orphaned_staging_dirs(
             &staging_root,
             std::time::Duration::from_secs(ORPHAN_SWEEP_MAX_AGE_SECS),
         );
-        let mut staging = match crate::wxc_common::microvm_staging::StagingDir::new(
+        let mut staging = match crate::mxc_common::microvm_staging::StagingDir::new(
             staging_root,
             &request.script_code,
             &request.policy.readwrite_paths,
@@ -1101,8 +1101,8 @@ impl ScriptRunner for NanVixScriptRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::logger::{Logger, Mode};
-    use crate::wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use crate::mxc_common::logger::{Logger, Mode};
+    use crate::mxc_common::models::{ContainerPolicy, NetworkPolicy};
 
     #[test]
     fn total_timeout_adds_boot_staging_and_script() {
@@ -1130,12 +1130,12 @@ mod tests {
     ) -> ExecutionRequest {
         ExecutionRequest {
             policy: ContainerPolicy {
-                network_egress: Some(crate::wxc_common::models::NetworkEgressPolicy {
+                network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
                     default: egress,
                     allow: Vec::new(),
                     deny: Vec::new(),
                 }),
-                network_ingress: Some(crate::wxc_common::models::NetworkIngressPolicy {
+                network_ingress: Some(crate::mxc_common::models::NetworkIngressPolicy {
                     default: ingress,
                     host_loopback,
                 }),
@@ -1226,9 +1226,9 @@ mod tests {
             );
             let mut logger = Logger::new(Mode::Buffer);
             let parsed =
-                crate::wxc_common::config_parser::load_mxc_request_from_json(&source, &mut logger)
+                crate::mxc_common::config_parser::load_mxc_request_from_json(&source, &mut logger)
                     .unwrap();
-            let crate::wxc_common::state_aware_request::MxcRequest::OneShot(request) = parsed
+            let crate::mxc_common::state_aware_request::MxcRequest::OneShot(request) = parsed
             else {
                 panic!("expected one-shot");
             };
@@ -1252,9 +1252,9 @@ mod tests {
         ] {
             let mut logger = Logger::new(Mode::Buffer);
             let parsed =
-                crate::wxc_common::config_parser::load_mxc_request_from_json(source, &mut logger)
+                crate::mxc_common::config_parser::load_mxc_request_from_json(source, &mut logger)
                     .unwrap();
-            let crate::wxc_common::state_aware_request::MxcRequest::OneShot(request) = parsed
+            let crate::mxc_common::state_aware_request::MxcRequest::OneShot(request) = parsed
             else {
                 panic!("expected one-shot");
             };
@@ -1652,8 +1652,8 @@ mod tests {
         let request = ExecutionRequest {
             script_code: "echo test".to_string(),
             policy: ContainerPolicy {
-                network_proxy: crate::wxc_common::models::ProxyConfig {
-                    address: Some(crate::wxc_common::models::ProxyAddress::new(
+                network_proxy: crate::mxc_common::models::ProxyConfig {
+                    address: Some(crate::mxc_common::models::ProxyAddress::new(
                         "127.0.0.1".to_string(),
                         8080,
                     )),

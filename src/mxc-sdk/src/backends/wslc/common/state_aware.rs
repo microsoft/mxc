@@ -21,16 +21,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 use std::sync::Arc;
 
-use crate::wxc_common::logger::{Logger, Mode};
+use crate::mxc_common::logger::{Logger, Mode};
 #[cfg(test)]
-use crate::wxc_common::models::NetworkPolicy;
-use crate::wxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::state_aware_backend::{
+use crate::mxc_common::models::NetworkPolicy;
+use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
-use crate::wxc_common::validator::validate_state_aware_network_policy_support;
+use crate::mxc_common::validator::validate_state_aware_network_policy_support;
 
 use crate::wslc_common::container_steps::OutStream;
 use crate::wslc_common::daemon_client::{
@@ -437,7 +437,7 @@ fn exec_config(
     // the non-`url` form before we get here, so a `None` here means the proxy
     // is disabled, not malformed.
     let env = match exec_proxy_url(request) {
-        Some(proxy_url) => split_env(&crate::wxc_common::proxy_env::apply_cooperative_proxy_env(
+        Some(proxy_url) => split_env(&crate::mxc_common::proxy_env::apply_cooperative_proxy_env(
             request.env_entries(),
             proxy_url,
         )),
@@ -616,7 +616,7 @@ fn map_network(request: &ExecutionRequest) -> NetworkMode {
 /// Split `"KEY=VALUE"` env entries into `(name, value)` pairs (the daemon's
 /// `ExecConfig.env` shape). An entry naming no variable is dropped.
 fn split_env(env: &[String]) -> Vec<(String, String)> {
-    crate::wxc_common::default_env::env_pairs(env)
+    crate::mxc_common::default_env::env_pairs(env)
         .into_iter()
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect()
@@ -625,7 +625,7 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wxc_common::models::{
+    use crate::mxc_common::models::{
         ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkEgressPolicy,
         NetworkIngressPolicy, ProxyAddress, ProxyConfig,
     };
@@ -637,7 +637,7 @@ mod tests {
         let error = truncated_run_error(3);
         assert_eq!(
             error.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::BackendError
+            crate::mxc_common::mxc_error::MxcErrorCode::BackendError
         );
         assert_eq!(
             error.details.as_ref().and_then(|d| d.get("exitCode")),
@@ -677,7 +677,7 @@ mod tests {
         let err = validate_sandbox_id("iso:0123456789abcdef0123456789abcdef").unwrap_err();
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::MalformedId
+            crate::mxc_common::mxc_error::MxcErrorCode::MalformedId
         );
     }
 
@@ -755,7 +755,7 @@ mod tests {
             let err = result.expect_err(&format!("{phase} must reject a supplied ui"));
             assert_eq!(
                 err.code,
-                crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+                crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
             );
             assert!(
                 err.message.contains("ui section is not supported"),
@@ -782,7 +782,7 @@ mod tests {
             (
                 ContainerPolicy {
                     network_enforcement_mode:
-                        crate::wxc_common::models::NetworkEnforcementMode::Firewall,
+                        crate::mxc_common::models::NetworkEnforcementMode::Firewall,
                     ..Default::default()
                 },
                 "enforcementMode",
@@ -797,7 +797,7 @@ mod tests {
                 .expect_err(&format!("provision must reject {needle}"));
             assert_eq!(
                 err.code,
-                crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+                crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
             );
             assert!(err.message.contains(needle), "got: {}", err.message);
         }
@@ -814,7 +814,7 @@ mod tests {
                 "explicit capabilities enforcement mode",
                 ContainerPolicy {
                     network_enforcement_mode:
-                        crate::wxc_common::models::NetworkEnforcementMode::Capabilities,
+                        crate::mxc_common::models::NetworkEnforcementMode::Capabilities,
                     ..Default::default()
                 },
             ),
@@ -969,7 +969,7 @@ mod tests {
         let err = build_provision_config(&req, None).unwrap_err();
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
         );
         assert!(err.message.contains("deniedPaths"), "got: {}", err.message);
     }
@@ -1005,7 +1005,7 @@ mod tests {
         let err = build_daemon_volumes(&req).unwrap_err();
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
         );
     }
 
@@ -1091,7 +1091,7 @@ mod tests {
         let err = normalize_and_check_delegation(&req).unwrap_err();
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
         );
     }
 
@@ -1249,7 +1249,7 @@ mod tests {
         });
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::NotProvisioned
+            crate::mxc_common::mxc_error::MxcErrorCode::NotProvisioned
         );
     }
 
@@ -1261,7 +1261,7 @@ mod tests {
         });
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::NotStarted
+            crate::mxc_common::mxc_error::MxcErrorCode::NotStarted
         );
     }
 
@@ -1273,7 +1273,7 @@ mod tests {
         });
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::BackendError
+            crate::mxc_common::mxc_error::MxcErrorCode::BackendError
         );
     }
 
@@ -1285,7 +1285,7 @@ mod tests {
         });
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::BackendUnavailable
+            crate::mxc_common::mxc_error::MxcErrorCode::BackendUnavailable
         );
     }
 
@@ -1297,7 +1297,7 @@ mod tests {
         });
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
         );
     }
 
@@ -1309,7 +1309,7 @@ mod tests {
         });
         assert_eq!(
             err.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::BackendError
+            crate::mxc_common::mxc_error::MxcErrorCode::BackendError
         );
     }
 }

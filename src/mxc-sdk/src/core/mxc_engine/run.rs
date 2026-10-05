@@ -12,7 +12,7 @@
 //!
 //! - [`resolve_runner`] performs backend selection only, returning a
 //!   [`ResolvedRunner`] (the boxed runner plus, on Windows, an optional
-//!   [`DaclManager`](crate::wxc_common::filesystem_dacl::DaclManager) guard for the
+//!   [`DaclManager`](crate::mxc_common::filesystem_dacl::DaclManager) guard for the
 //!   ProcessContainer fallback tiers, whose `Drop` restores host ACEs).
 //!   Callers that must manage the guard's lifetime across signal / audit
 //!   machinery (`wxc-exec`) use this and own the guard themselves.
@@ -26,12 +26,12 @@
 //! mirrors `lxc-exec` (Bubblewrap / LXC / experimental); the macOS body always
 //! resolves to Seatbelt.
 
-use crate::wxc_common::logger::Logger;
+use crate::mxc_common::logger::Logger;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-use crate::wxc_common::models::ContainmentBackend;
-use crate::wxc_common::models::{ExecutionRequest, ScriptResponse};
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::models::ContainmentBackend;
+use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::script_runner::ScriptRunner;
 
 use crate::mxc_engine::error::Error;
 
@@ -49,7 +49,7 @@ pub struct ResolvedRunner {
     /// Guard restoring host ACEs applied by the ProcessContainer DACL-fallback
     /// tier; `None` for every other tier and backend. Windows only.
     #[cfg(target_os = "windows")]
-    pub dacl_manager: Option<crate::wxc_common::filesystem_dacl::DaclManager>,
+    pub dacl_manager: Option<crate::mxc_common::filesystem_dacl::DaclManager>,
 }
 
 impl ResolvedRunner {
@@ -103,17 +103,17 @@ pub fn resolve_runner(
 /// Record `mxc.PolicyHash`: the canonical identity of the effective policy this
 /// run is about to be launched under, plus the config schema version.
 pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut Logger) {
-    use crate::wxc_common::audit::{AuditEvent, AuditEventName};
+    use crate::mxc_common::audit::{AuditEvent, AuditEventName};
 
-    if !logger.has_diagnostic_sink() && !crate::wxc_common::telemetry::is_active() {
+    if !logger.has_diagnostic_sink() && !crate::mxc_common::telemetry::is_active() {
         return;
     }
 
-    let policy_hash = crate::wxc_common::policy_identity::policy_hash(request);
+    let policy_hash = crate::mxc_common::policy_identity::policy_hash(request);
     let config_schema_version = config_schema_version(request);
-    if crate::wxc_common::telemetry::is_active() {
+    if crate::mxc_common::telemetry::is_active() {
         let identity = policy_hash_identity(&request.container_id);
-        crate::wxc_common::telemetry::log_policy_hash(
+        crate::mxc_common::telemetry::log_policy_hash(
             &identity,
             &policy_hash,
             config_schema_version,
@@ -136,20 +136,20 @@ fn policy_hash_identity(container_id: &str) -> String {
     } else {
         container_id
     };
-    crate::wxc_common::policy_identity::redact_identity(identity)
+    crate::mxc_common::policy_identity::redact_identity(identity)
 }
 
 #[cfg(test)]
 mod attribution_tests {
     use super::config_schema_version;
-    use crate::wxc_common::logger::{Logger, Mode};
-    use crate::wxc_common::models::{ExecutionRequest, NetworkEnforcementCompatibility};
-    use crate::wxc_common::state_aware_request::MxcRequest;
+    use crate::mxc_common::logger::{Logger, Mode};
+    use crate::mxc_common::models::{ExecutionRequest, NetworkEnforcementCompatibility};
+    use crate::mxc_common::state_aware_request::MxcRequest;
 
     #[test]
     fn telemetry_attributes_exact_json_but_not_typed_sdk_requests() {
         let mut logger = Logger::new(Mode::Buffer);
-        let parsed = crate::wxc_common::config_parser::load_mxc_request_from_json(
+        let parsed = crate::mxc_common::config_parser::load_mxc_request_from_json(
             r#"{
                 "version": "0.9.0-alpha",
                 "process": {"commandLine": "echo exact"}
@@ -312,7 +312,7 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Hyperlight => resolve_hyperlight(),
         ContainmentBackend::WindowsSandbox => {
             if let Some(ws) = &request.windows_sandbox {
-                let default = crate::wxc_common::models::WindowsSandboxConfig::default();
+                let default = crate::mxc_common::models::WindowsSandboxConfig::default();
                 if ws.idle_timeout_ms != default.idle_timeout_ms
                     || ws.daemon_pipe_name != default.daemon_pipe_name
                 {
@@ -355,7 +355,7 @@ fn resolve_runner_inner(
     request: &ExecutionRequest,
     _logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
-    use crate::wxc_common::sandbox_process::Runner;
+    use crate::mxc_common::sandbox_process::Runner;
 
     match request.containment {
         ContainmentBackend::Hyperlight => resolve_hyperlight(),
@@ -400,7 +400,7 @@ fn resolve_runner_inner(
     request: &ExecutionRequest,
     _logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
-    use crate::wxc_common::sandbox_process::Runner;
+    use crate::mxc_common::sandbox_process::Runner;
 
     if request.containment != ContainmentBackend::Seatbelt {
         return Err(MxcError::unsupported_containment(format!(
@@ -416,7 +416,7 @@ fn resolve_runner_inner(
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
     use super::*;
-    use crate::wxc_common::logger::Mode;
+    use crate::mxc_common::logger::Mode;
 
     #[test]
     fn cross_platform_backend_is_rejected_instead_of_falling_back_to_lxc() {
@@ -433,7 +433,7 @@ mod linux_tests {
 
         assert_eq!(
             error.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
+            crate::mxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
         );
         assert!(error.message.contains("seatbelt"));
     }
@@ -442,7 +442,7 @@ mod linux_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod macos_tests {
     use super::*;
-    use crate::wxc_common::logger::Mode;
+    use crate::mxc_common::logger::Mode;
 
     #[test]
     fn cross_platform_backend_is_rejected_instead_of_falling_back_to_seatbelt() {
@@ -459,7 +459,7 @@ mod macos_tests {
 
         assert_eq!(
             error.code,
-            crate::wxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
+            crate::mxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
         );
         assert!(error.message.contains("lxc"));
     }
@@ -519,8 +519,8 @@ fn resolve_hyperlight() -> Result<ResolvedRunner, MxcError> {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
-    use crate::wxc_common::logger::Mode;
-    use crate::wxc_common::models::WindowsSandboxConfig;
+    use crate::mxc_common::logger::Mode;
+    use crate::mxc_common::models::WindowsSandboxConfig;
 
     fn windows_sandbox_request(config: Option<WindowsSandboxConfig>) -> ExecutionRequest {
         ExecutionRequest {

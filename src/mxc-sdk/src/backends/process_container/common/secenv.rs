@@ -35,8 +35,8 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::OnceLock;
 
-use crate::wxc_common::api_set::is_api_set_implemented;
-use crate::wxc_common::string_util;
+use crate::mxc_common::api_set::is_api_set_implemented;
+use crate::mxc_common::string_util;
 use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, HMODULE};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,

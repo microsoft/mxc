@@ -5,16 +5,16 @@
 
 use std::fmt;
 
-use crate::mxc_contract::ContractVersion;
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::sdk_input::{
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::sdk_input::{
     SdkFilesystemInput, SdkNetworkAction, SdkNetworkEgressInput, SdkNetworkIngressInput,
     SdkNetworkInput, SdkNetworkPeerInput, SdkNetworkPortInput, SdkNetworkProtocol,
     SdkNetworkRuleInput, SdkProcessInput, SdkRuntimeConfigInput, SdkStateAwareInput,
 };
-use crate::wxc_common::state_aware_operation::{
+use crate::mxc_common::state_aware_operation::{
     StateAwareOperation as RuntimeOperation, StateAwareProvision as RuntimeProvision,
 };
+use crate::mxc_contract::ContractVersion;
 
 use crate::policy::{
     FilesystemPolicy, NetworkAction, NetworkPeerPolicy, NetworkPolicy, NetworkPortPolicy,
@@ -40,7 +40,7 @@ impl ProvisionContainment {
         RuntimeOperation::Provision(match self {
             Self::IsolationSession { app_id } => {
                 RuntimeProvision::IsolationSession(app_id.clone().map(|app_id| {
-                    crate::wxc_common::models::IsolationSessionProvisionConfig {
+                    crate::mxc_common::models::IsolationSessionProvisionConfig {
                         app_id: Some(app_id),
                     }
                 }))
@@ -52,7 +52,7 @@ impl ProvisionContainment {
                 let config = if image.is_none() && image_tar_path.is_none() {
                     None
                 } else {
-                    Some(crate::wxc_common::models::WslcProvisionConfig {
+                    Some(crate::mxc_common::models::WslcProvisionConfig {
                         image: image.clone(),
                         image_tar_path: image_tar_path.clone(),
                     })
@@ -513,13 +513,13 @@ fn map_protocol(value: NetworkProtocol) -> SdkNetworkProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::NetworkEgressPolicy;
-    use crate::wxc_common::config_parser::{
+    use crate::mxc_common::config_parser::{
         load_mxc_request_from_json, normalize_sdk_state_aware_request,
     };
-    use crate::wxc_common::logger::{Logger, Mode};
-    use crate::wxc_common::mxc_error::MxcErrorCode;
-    use crate::wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
+    use crate::mxc_common::logger::{Logger, Mode};
+    use crate::mxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
+    use crate::policy::NetworkEgressPolicy;
 
     type LifecyclePhase = (&'static str, fn(String) -> RuntimeOperation);
 

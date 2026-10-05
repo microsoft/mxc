@@ -61,7 +61,7 @@ updating the parser's single-backend-section enforcement so it is allowed.
 
 ### 2. Rust Model Changes
 
-**File:** `src/mxc-sdk/src/tools/wxc_common/models.rs`
+**File:** `src/mxc-sdk/src/tools/mxc_common/models.rs`
 
 ```rust
 // Add to ContainmentBackend enum:
@@ -109,7 +109,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wxc_common = { workspace = true }
+mxc_common = { workspace = true }
 lxc_common = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
@@ -337,15 +337,15 @@ policy gap is a design decision, not an implementation challenge.
 - `src/tools/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
 - `src/mxc-sdk/src/core/mxc_contract/dev/one_shot.rs` — add the external
   `Bubblewrap` containment value and any backend-specific request fields
-- `src/mxc-sdk/src/tools/wxc_common/config_contract_adapters/dev/one_shot.rs` — adapt
+- `src/mxc-sdk/src/tools/mxc_common/config_contract_adapters/dev/one_shot.rs` — adapt
   the exact request into `CommonRequestIR`
-- `src/mxc-sdk/src/tools/wxc_common/common_request_ir.rs` — carry any new normalized
+- `src/mxc-sdk/src/tools/mxc_common/common_request_ir.rs` — carry any new normalized
   backend fields
-- `src/mxc-sdk/src/tools/wxc_common/models.rs` — add the `Bubblewrap` variant and, if
+- `src/mxc-sdk/src/tools/mxc_common/models.rs` — add the `Bubblewrap` variant and, if
   needed, a `BubblewrapConfig` field on `ExecutionRequest`
-- `src/mxc-sdk/src/tools/wxc_common/wire.rs` — add the internal normalized
+- `src/mxc-sdk/src/tools/mxc_common/wire.rs` — add the internal normalized
   `Bubblewrap` containment variant
-- `src/mxc-sdk/src/tools/wxc_common/config_parser.rs` — map the normalized containment
+- `src/mxc-sdk/src/tools/mxc_common/config_parser.rs` — map the normalized containment
   value in `map_wire_containment`
 
 ### Schema (modify)

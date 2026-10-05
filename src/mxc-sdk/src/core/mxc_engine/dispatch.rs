@@ -4,9 +4,9 @@
 //! Streaming backend dispatch for the `mxc-sdk` library.
 //!
 //! Spawns the right [`SandboxProcess`] for the request's containment backend.
-//! It lives here — rather than in `wxc_common` — because constructing a
+//! It lives here — rather than in `mxc_common` — because constructing a
 //! backend runner requires depending on the `backends/*` crates, and
-//! `wxc_common` must not (it is the cross-platform foundation those backends
+//! `mxc_common` must not (it is the cross-platform foundation those backends
 //! build on).
 //!
 //! Only the backends with a streaming path are handled here: ProcessContainer
@@ -21,10 +21,10 @@
 //! run-to-completion path will, in a later increment, also route through this
 //! engine).
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use crate::wxc_common::mxc_error::MxcError;
-use crate::wxc_common::sandbox_process::{PtySize, SandboxProcess};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
 
 /// `Err` when the host OS has no MXC sandbox backend. Checked before backend
 /// selection so an unsupported platform reports a clear message rather than a
@@ -113,7 +113,7 @@ pub fn spawn_pty_runner(
 /// `extended_error` detail into the message — rather than flattening
 /// everything to a generic `BackendError`.
 fn map_spawn_error(resp: ScriptResponse) -> MxcError {
-    use crate::wxc_common::models::FailurePhase;
+    use crate::mxc_common::models::FailurePhase;
 
     let mut message = resp.error_message;
     if !resp.extended_error.is_empty() {
@@ -136,7 +136,7 @@ fn spawn_bubblewrap(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
     let mut runner = crate::bwrap_common::bwrap_runner::BubblewrapScriptRunner::new();
     runner
         .spawn(request, logger, StdioMode::Pipes)
@@ -160,7 +160,7 @@ fn spawn_lxc(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
     let mut runner = crate::lxc_common::lxc_runner::LxcScriptRunner::new(
         &request.lxc_config,
         &request.container_id,
@@ -186,7 +186,7 @@ fn spawn_seatbelt(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
     let mut runner = crate::seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new();
     runner
         .spawn(request, logger, StdioMode::Pipes)
@@ -208,10 +208,10 @@ fn spawn_process_container(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use crate::mxc_common::sandbox_process::StdioMode;
     use crate::process_container_common::dispatcher::{
         spawn_with_fallback, DispatchError, SpawnDispatchError,
     };
-    use crate::wxc_common::sandbox_process::StdioMode;
     use std::fmt::Write;
 
     // ProcessContainer resolves to a concrete backend + isolation tier purely
@@ -286,7 +286,7 @@ fn spawn_wslc(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
     let config = request.wslc.clone().unwrap_or_default();
     let mut runner = crate::wslc_common::WSLContainerRunner::new(&config);
@@ -389,10 +389,10 @@ fn spawn_isolation_session_pty(
 #[cfg(test)]
 mod tests {
     use super::{ensure_host_supported, map_spawn_error, spawn_pty_runner, spawn_runner};
-    use crate::wxc_common::logger::{Logger, Mode};
-    use crate::wxc_common::models::{ContainmentBackend, ExecutionRequest};
-    use crate::wxc_common::mxc_error::MxcErrorCode;
-    use crate::wxc_common::sandbox_process::PtySize;
+    use crate::mxc_common::logger::{Logger, Mode};
+    use crate::mxc_common::models::{ContainmentBackend, ExecutionRequest};
+    use crate::mxc_common::mxc_error::MxcErrorCode;
+    use crate::mxc_common::sandbox_process::PtySize;
 
     fn minimal_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -402,9 +402,9 @@ mod tests {
     }
 
     fn spawn_failure(
-        phase: crate::wxc_common::models::FailurePhase,
-    ) -> crate::wxc_common::models::ScriptResponse {
-        crate::wxc_common::models::ScriptResponse {
+        phase: crate::mxc_common::models::FailurePhase,
+    ) -> crate::mxc_common::models::ScriptResponse {
+        crate::mxc_common::models::ScriptResponse {
             error_message: "wslc rejected the request".to_string(),
             failure_phase: phase,
             ..Default::default()
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn rejected_phase_maps_to_policy_validation() {
-        use crate::wxc_common::models::FailurePhase;
+        use crate::mxc_common::models::FailurePhase;
 
         let err = map_spawn_error(spawn_failure(FailurePhase::Rejected));
         assert_eq!(err.code, MxcErrorCode::PolicyValidation);
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn unavailable_and_unset_phases_keep_their_codes() {
-        use crate::wxc_common::models::FailurePhase;
+        use crate::mxc_common::models::FailurePhase;
 
         // `None` is the default, so an unclassified failure must stay a generic
         // backend error rather than being mistaken for a rejection.
@@ -508,7 +508,7 @@ mod tests {
         // over pipes — the backend must reject it rather than drop the GUI cap.
         let mut request = minimal_request();
         request.containment = ContainmentBackend::Seatbelt;
-        request.seatbelt = Some(crate::wxc_common::models::SeatbeltConfig {
+        request.seatbelt = Some(crate::mxc_common::models::SeatbeltConfig {
             gui_access: true,
             ..Default::default()
         });

@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use crate::wxc_common::logger::Logger;
-use crate::wxc_common::process_util::{OwnedHandle, SendOwnedHandle};
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::process_util::{OwnedHandle, SendOwnedHandle};
 
 use windows::Win32::Foundation::{ERROR_NO_TOKEN, HANDLE};
 use windows::Win32::Security::{
@@ -131,7 +131,7 @@ fn duplicate_thread_token() -> windows_core::Result<Option<SendOwnedHandle>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::wxc_common::logger::Mode;
+    use crate::mxc_common::logger::Mode;
 
     use windows::Win32::Security::{
         CreateRestrictedToken, CreateWellKnownSid, GetTokenInformation, ImpersonateSelf,

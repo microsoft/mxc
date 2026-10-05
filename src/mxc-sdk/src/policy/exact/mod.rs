@@ -3,9 +3,9 @@
 
 use std::num::NonZeroU16;
 
-use crate::wxc_common::config_parser::{load_one_shot_request_from_contract, ExactOneShotContract};
-use crate::wxc_common::logger::{Logger, Mode};
-use crate::wxc_common::mxc_error::MxcError;
+use crate::mxc_common::config_parser::{load_one_shot_request_from_contract, ExactOneShotContract};
+use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::mxc_error::MxcError;
 
 use crate::configs::{LxcConfig, ProcessContainerConfig, SeatbeltConfig};
 
@@ -61,7 +61,7 @@ fn selected_lxc(containment: &Containment) -> Option<LxcConfig> {
 fn container_id(container_name: Option<&str>) -> String {
     container_name
         .map(str::to_string)
-        .unwrap_or_else(crate::wxc_common::id::mint_random_token)
+        .unwrap_or_else(crate::mxc_common::id::mint_random_token)
 }
 
 pub(super) fn build_request(

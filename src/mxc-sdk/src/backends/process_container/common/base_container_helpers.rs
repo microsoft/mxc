@@ -3,6 +3,10 @@
 
 //! BaseContainer configuration and policy helpers.
 
+use crate::mxc_common::models::{
+    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy,
+    NetworkPort, NetworkProtocol, NetworkRule,
+};
 use crate::process_security_environment_spec::process_security_environment_layout::{
     finish_process_security_environment_buffer, DestinationRuleT as PsecDestinationRuleT,
     EndpointPolicyT as PsecEndpointPolicy, EndpointRuleT as PsecEndpointRuleT,
@@ -10,10 +14,6 @@ use crate::process_security_environment_spec::process_security_environment_layou
     IpProtocol as PsecIpProtocol, IpSubnetT as PsecIpSubnetT, NetworkPolicyT as PsecNetworkPolicy,
     PortRuleT as PsecPortRuleT, ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment,
     ProxyInfoT as PsecProxyInfo, SchemaVersionT,
-};
-use crate::wxc_common::models::{
-    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy,
-    NetworkPort, NetworkProtocol, NetworkRule,
 };
 
 use crate::process_container_common::network_policy_helpers::{
@@ -45,7 +45,7 @@ pub(super) fn build_psec_v1_security_environment_spec(
         ensure_capability(&mut capabilities, "networkLoopback");
     }
     let ui_restrictions = crate::process_container_common::job_object::to_job_object_uilimit_mask(
-        &crate::wxc_common::ui_policy::resolve_ui_restrictions(
+        &crate::mxc_common::ui_policy::resolve_ui_restrictions(
             &request.policy.ui,
             &request.policy.base_process_ui,
         ),

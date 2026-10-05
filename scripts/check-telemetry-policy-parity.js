@@ -7,11 +7,11 @@ const { join } = require("path");
 
 const root = join(__dirname, "..");
 const protocol = readFileSync(
-  join(root, "src", "mxc-sdk", "src", "core", "wxc_common", "telemetry", "consent_protocol.rs"),
+  join(root, "src", "mxc-sdk", "src", "core", "mxc_common", "telemetry", "consent_protocol.rs"),
   "utf8"
 );
 const policy = readFileSync(
-  join(root, "src", "mxc-sdk", "src", "core", "wxc_common", "telemetry", "policy.rs"),
+  join(root, "src", "mxc-sdk", "src", "core", "mxc_common", "telemetry", "policy.rs"),
   "utf8"
 );
 const csharp = readFileSync(
