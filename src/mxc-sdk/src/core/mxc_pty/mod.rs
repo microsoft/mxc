@@ -1781,6 +1781,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         terminal.finish_native_bridge();
+        drop(terminal);
 
         let mut text = String::new();
         output.read_to_string(&mut text).expect("read output");

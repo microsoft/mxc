@@ -394,17 +394,19 @@ fn write_scalar<T: serde::Serialize + ?Sized>(value: &T, out: &mut Vec<u8>) {
 
 /// Render a sandbox identity so it is safe to write to a diagnostic log file.
 ///
-/// Two distinct hazards are handled:
+/// Three distinct hazards are handled:
 ///
-/// 1. **UPN-shaped identities.** For `isolation_session` Entra sandboxes the
-///    `provisionId` **is the user's UPN** (`state_aware.rs::provision` sets
-///    `provision_id = user.upn`). A UPN must never be written to a file that is
-///    routinely attached to a bug report.
-/// 2. **Caller-supplied identities.** On the ProcessContainer path the identity
+/// 1. **IsolationSession identities.** The state-aware `iso:` payload carries
+///    the OS account name used to address later lifecycle phases. Even though
+///    the payload is encoded, it is reversible and must not reach diagnostics.
+/// 2. **UPN-shaped identities.** For Entra sandboxes the `provisionId` is the
+///    user's UPN. A UPN must never be written to a file routinely attached to a
+///    bug report.
+/// 3. **Caller-supplied identities.** On the ProcessContainer path the identity
 ///    is the AppContainer profile name, i.e. the config's `containerId`. That is
 ///    a config value and is handled by [`crate::mxc_common::audit::sanitize_identity`].
 ///
-/// For (1) this function emits the bounded marker `"entra-upn"` and **no
+/// For (1) and (2), this function emits bounded constant markers and **no
 /// account-derived value at all**.
 ///
 /// > A truncated SHA-256 of a UPN was considered and rejected. A UPN is
@@ -420,8 +422,14 @@ pub fn redact_identity(identity: &str) -> String {
     if is_upn_shaped(identity) {
         return ENTRA_UPN_MARKER.to_string();
     }
+    if identity.starts_with("iso:") {
+        return ISOLATION_SESSION_MARKER.to_string();
+    }
     crate::mxc_common::audit::sanitize_identity(identity).to_string()
 }
+
+/// Marker written in place of an IsolationSession state-aware identity.
+pub const ISOLATION_SESSION_MARKER: &str = "isolation-session";
 
 /// Marker written in place of a UPN-derived identity. Bounded and constant, so
 /// it discloses only the *kind* of identity, never the account.
@@ -430,8 +438,8 @@ pub const ENTRA_UPN_MARKER: &str = "entra-upn";
 /// Whether `identity` looks like a UPN (or a `<prefix>:<upn>` sandbox id).
 ///
 /// An `@` is the discriminator: none of the identity shapes MXC mints itself
-/// (`sandbox-<hex>`, `wxc-<token>`, `wsb:<hex>`, `iso:wxc-<token>`) contains one,
-/// and every UPN does.
+/// (`sandbox-<hex>`, `wxc-<token>`, `wsb:<hex>`) contains one, and every UPN
+/// does.
 fn is_upn_shaped(identity: &str) -> bool {
     identity.contains('@')
 }
@@ -787,14 +795,18 @@ mod tests {
 
     #[test]
     fn mxc_minted_identities_pass_through_unredacted() {
-        for id in [
-            "sandbox-a3f1c8e40029bd17",
-            "iso:wxc-abcd1234",
-            "wsb:deadbeef",
-            "CLI",
-            "",
-        ] {
+        for id in ["sandbox-a3f1c8e40029bd17", "wsb:deadbeef", "CLI", ""] {
             assert_eq!(redact_identity(id), id);
+        }
+    }
+
+    #[test]
+    fn isolation_session_identities_never_reach_the_log() {
+        for id in [
+            "iso:wxc-abcd1234",
+            "iso:eyJhZ2VudFVzZXJOYW1lIjoid3hjLWFiY2QxMjM0In0",
+        ] {
+            assert_eq!(redact_identity(id), ISOLATION_SESSION_MARKER);
         }
     }
 

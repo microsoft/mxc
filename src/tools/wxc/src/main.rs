@@ -609,6 +609,10 @@ fn run_state_aware_main(
     let _diag_sink_guard = logger.install_thread_diagnostic_sink();
     let outcome = mxc_sdk::mxc_engine::run_state_aware(parsed, dry_run);
     drop(_diag_sink_guard);
+    // Post-dispatch records can contain backend lifecycle identities. Keep
+    // those values confined to the auxiliary diagnostic sinks rather than
+    // associating them with the primary stderr buffer.
+    let mut diagnostic_logger = logger.clone_diagnostic_sink();
     let elapsed = started.elapsed();
 
     // Persist (provision) or forget (deprovision) this lifecycle's
@@ -643,7 +647,7 @@ fn run_state_aware_main(
                 &mxc_sdk::mxc_common::policy_identity::redact_identity(&sandbox_id),
             )
             .str_opt("phase", phase);
-        logger.log_audit_event(&record);
+        diagnostic_logger.log_audit_event(&record);
     }
 
     // Emit lifecycle telemetry (and shut the provider down) before flushing the
@@ -652,7 +656,7 @@ fn run_state_aware_main(
         if let Some(reason) = config_rejection_reason_for(error) {
             let message = error.message.as_str();
             log_config_rejected(
-                logger,
+                &mut diagnostic_logger,
                 reason,
                 backend,
                 offending_field_from_message(message),
@@ -677,7 +681,7 @@ fn run_state_aware_main(
     // / diagnostic pipe), so the envelope written below is the single
     // client-facing copy of the error.
     if let Err(error) = &outcome {
-        log_state_aware_dispatch_error(logger, error);
+        log_state_aware_dispatch_error(&mut diagnostic_logger, error);
     }
     for warning in logger.take_warnings() {
         eprintln!("{warning}");
