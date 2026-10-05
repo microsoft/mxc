@@ -534,6 +534,10 @@ The exact contract rejects structural errors first. Version-specific adapters
 then perform structural conversion into `CommonRequestIR`.
 `normalize_common_request_ir` applies shared defaults and semantic validation
 and constructs the runtime model.
+The registered contracts admit only directional networking, so their adapters
+pass directional network sections to shared normalization. An omitted network
+section receives directional deny defaults; shared normalization does not select
+a network format from contract provenance or legacy field presence.
 
 Reusable nested DTOs under `wxc_common::wire` help adapters share representations
 for common fields. They are not a whole-request deserialization boundary and do
