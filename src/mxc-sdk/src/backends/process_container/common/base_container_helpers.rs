@@ -17,7 +17,7 @@ use crate::process_security_environment_spec::process_security_environment_layou
 };
 
 use crate::process_container_common::network_policy_helpers::{
-    add_default_network_capabilities, ensure_capability,
+    add_default_network_capabilities, ensure_capability, INTERNET_CLIENT_CAPABILITY,
 };
 use crate::process_container_common::secenv::SecurityEnvironmentVersion;
 
@@ -37,7 +37,7 @@ pub(super) fn build_psec_v1_security_environment_spec(
         "build_psec_v1_security_environment_spec only supports PSEC major version 1"
     );
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let mut capabilities = effective_capabilities(&request.policy);
+    let mut capabilities = effective_capabilities(request);
     if request.policy.network_proxy.is_enabled()
         && unrestricted_host_loopback_allowed(&request.policy)
     {
@@ -73,7 +73,8 @@ pub(super) fn build_psec_v1_security_environment_spec(
     builder.finished_data().to_vec()
 }
 
-fn effective_capabilities(policy: &ContainerPolicy) -> Vec<String> {
+fn effective_capabilities(request: &ExecutionRequest) -> Vec<String> {
+    let policy = &request.policy;
     let mut capabilities: Vec<_> = policy
         .capabilities
         .iter()
@@ -81,6 +82,15 @@ fn effective_capabilities(policy: &ContainerPolicy) -> Vec<String> {
         .cloned()
         .collect();
     add_default_network_capabilities(policy, &mut capabilities);
+    if policy.capture_denials.is_some()
+        && policy.network_egress.is_some()
+        && !policy.network_proxy.is_enabled()
+    {
+        // Let outbound attempts pass the capability gate so Tessera's egress
+        // policy makes and records the decision. Proxy mode must remain direct-
+        // egress denied and therefore deliberately omits internetClient.
+        ensure_capability(&mut capabilities, INTERNET_CLIENT_CAPABILITY);
+    }
     capabilities
 }
 
