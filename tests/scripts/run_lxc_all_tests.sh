@@ -95,6 +95,7 @@ run_test "LXC Network Extra Interface Isolation" "$SCRIPT_DIR/run_lxc_network_ex
 run_test "LXC Network Deny-All Loopback" "$SCRIPT_DIR/run_lxc_network_deny_all_loopback_test.sh"
 run_test "LXC Network Deny Precedence" "$SCRIPT_DIR/run_lxc_network_deny_precedence_test.sh"
 run_test "LXC Network Proxy Rejection" "$SCRIPT_DIR/run_lxc_network_proxy_rejection_test.sh"
+run_test "LXC Network Proxy Credentials" "$SCRIPT_DIR/run_lxc_network_proxy_credentials_test.sh"
 run_test "LXC Network Preserve Policy" "$SCRIPT_DIR/run_lxc_network_preserve_policy_test.sh"
 run_test "LXC Network Reuse Tightening" "$SCRIPT_DIR/run_lxc_network_reuse_tighten_test.sh"
 run_test "LXC Network Reuse Loosening" "$SCRIPT_DIR/run_lxc_network_reuse_loosen_test.sh"
