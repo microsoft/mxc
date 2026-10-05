@@ -135,10 +135,10 @@ struct NativeBridge {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl NativeBridge {
     fn shutdown(self) {
-        self.input_canceller.close();
-        self.output_canceller.close();
         self.input_shutdown.cancel();
         self.output_shutdown.cancel();
+        self.input_canceller.close();
+        self.output_canceller.close();
         let _ = self.input_thread.join();
         let _ = self.output_thread.join();
     }
@@ -147,8 +147,8 @@ impl NativeBridge {
         const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
         const OUTPUT_DRAIN_POLL: Duration = Duration::from_millis(10);
 
-        self.input_canceller.close();
         self.input_shutdown.cancel();
+        self.input_canceller.close();
         let _ = self.input_thread.join();
 
         let deadline = std::time::Instant::now() + OUTPUT_DRAIN_TIMEOUT;
@@ -202,6 +202,10 @@ impl BridgeShutdown {
                 )
             };
         }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
     }
 
     fn wait_writable(&self, fd: std::os::fd::RawFd) -> std::io::Result<bool> {
@@ -546,7 +550,11 @@ impl LivePty {
                     loop {
                         let count = match reader.read(&mut buffer) {
                             Ok(0) => {
-                                let _ = writer.send_eof_until_shutdown(&input_shutdown);
+                                if input_shutdown.is_cancelled() {
+                                    writer.abandon_eof();
+                                } else {
+                                    let _ = writer.send_eof_until_shutdown(&input_shutdown);
+                                }
                                 return;
                             }
                             Err(_) => {
@@ -774,7 +782,9 @@ impl PtyWriter {
         self.eof_sent = true;
         let eof = match self.eof {
             PtyEof::CurrentCanonical => self.writer.as_ref().and_then(terminal_eof_byte),
-            PtyEof::Forwarded(discipline) => Some(discipline.eof),
+            PtyEof::Forwarded(discipline) => {
+                control_enabled(discipline.eof).then_some(discipline.eof)
+            }
         }?;
         let count = if self.literal_next {
             3
@@ -872,13 +882,21 @@ impl PtyWriter {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn canonical_line_limit(writer: &std::fs::File) -> usize {
-    // SAFETY: `writer` owns a live terminal descriptor and `fpathconf` only
-    // queries its canonical input limit.
-    let limit = unsafe { libc::fpathconf(writer.as_raw_fd(), libc::_PC_MAX_CANON) };
-    usize::try_from(limit)
-        .ok()
-        .filter(|limit| *limit > 0)
-        .unwrap_or(4096)
+    #[cfg(target_os = "linux")]
+    {
+        let _ = writer;
+        4095
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: `writer` owns a live terminal descriptor and `fpathconf` only
+        // queries its canonical input limit.
+        let limit = unsafe { libc::fpathconf(writer.as_raw_fd(), libc::_PC_MAX_CANON) };
+        usize::try_from(limit)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .unwrap_or(4096)
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -936,6 +954,9 @@ fn write_all_until_shutdown(
     shutdown: &BridgeShutdown,
 ) -> std::io::Result<()> {
     while !buffer.is_empty() {
+        if shutdown.is_cancelled() {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
         match writer.write(buffer) {
             Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
             Ok(count) => buffer = &buffer[count..],
@@ -1001,6 +1022,7 @@ fn terminal_eof_byte(file: &std::fs::File) -> Option<u8> {
         .ok()
         .filter(|discipline| discipline.canonical)
         .map(|discipline| discipline.eof)
+        .filter(|eof| control_enabled(*eof))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1028,7 +1050,12 @@ fn terminal_discipline(fd: &impl std::os::fd::AsFd) -> std::io::Result<PtyDiscip
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn control_matches(byte: u8, control: u8) -> bool {
-    control != 0 && control != u8::MAX && byte == control
+    control_enabled(control) && byte == control
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn control_enabled(control: u8) -> bool {
+    control != libc::_POSIX_VDISABLE
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1133,14 +1160,9 @@ fn create_cloexec_fifo() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::
     if unsafe { libc::mkfifo(path.fifo.as_ptr(), 0o600) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let read_path = path.fifo.clone();
-    let read_thread = std::thread::Builder::new()
-        .name("mxc-pty-fifo-open".to_string())
-        .spawn(move || open_fifo_endpoint(&read_path, libc::O_RDONLY))?;
+    let read = open_fifo_endpoint(&path.fifo, libc::O_RDONLY | libc::O_NONBLOCK)?;
     let write = open_fifo_endpoint(&path.fifo, libc::O_WRONLY)?;
-    let read = read_thread
-        .join()
-        .map_err(|_| std::io::Error::other("PTY FIFO reader setup panicked"))??;
+    set_blocking(read.as_raw_fd())?;
 
     // SAFETY: open descriptors retain the FIFO after its directory entry is removed.
     if unsafe { libc::unlink(path.fifo.as_ptr()) } != 0 {
@@ -1192,6 +1214,20 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
     }
     // SAFETY: `fd` remains open and `flags | O_NONBLOCK` is valid for F_SETFL.
     if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_blocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    // SAFETY: `fd` is a valid open descriptor; these commands only update its flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` remains open and clearing O_NONBLOCK is valid for F_SETFL.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
@@ -1789,6 +1825,70 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    fn boxed_writer_tracks_input_beyond_posix_max_canon() {
+        let mut input = vec![b'x'; 300];
+        input.extend(std::iter::repeat_n(127, 255));
+        assert_canonical_eof_after_input("stty -echo erase '^?'", &input, false);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_writer_tracks_input_beyond_posix_max_canon() {
+        let mut input = vec![b'x'; 300];
+        input.extend(std::iter::repeat_n(127, 255));
+        assert_canonical_eof_after_input("stty -echo erase '^?'", &input, true);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn assert_disabled_eof_does_not_inject_input(native: bool) {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(
+            "stty -echo eof undef; printf ready; dd bs=1 count=1 2>/dev/null; printf injected",
+        );
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+
+        if native {
+            let stdio = terminal.take_native_stdio().expect("take native stdio");
+            let mut output = std::fs::File::from(stdio.stdout);
+            let mut ready = [0_u8; 5];
+            output.read_exact(&mut ready).expect("read readiness");
+            assert_eq!(&ready, b"ready");
+            drop(stdio.stdin);
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(child.try_wait().expect("poll child").is_none());
+            let _ = child.kill();
+            let _ = child.wait();
+            terminal.finish_native_bridge();
+        } else {
+            let mut output = terminal.try_clone_reader().expect("clone reader");
+            let mut ready = [0_u8; 5];
+            output.read_exact(&mut ready).expect("read readiness");
+            assert_eq!(&ready, b"ready");
+            drop(terminal.take_writer().expect("take writer"));
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(child.try_wait().expect("poll child").is_none());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn boxed_writer_skips_disabled_eof() {
+        assert_disabled_eof_does_not_inject_input(false);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_writer_skips_disabled_eof() {
+        assert_disabled_eof_does_not_inject_input(true);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
     fn canonical_tracking_is_bounded() {
         let (master, _slave) = open_pty(None).expect("open PTY");
         let file: std::fs::File = master.into();
@@ -1944,6 +2044,36 @@ mod tests {
         let mut text = String::new();
         output.read_to_string(&mut text).expect("read output");
         assert!(text.contains("done"), "got: {text:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_bridge_cancellation_does_not_inject_eof() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("(read value; printf eof-injected) & printf 'done\\n'");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        let session = child.id() as libc::pid_t;
+        drop(command);
+        let stdio = terminal.take_native_stdio().expect("take native stdio");
+        let input = stdio.stdin;
+
+        assert!(child.wait().expect("wait child").success());
+        terminal.finish_native_bridge();
+        drop(input);
+        // SAFETY: the child created its own session with its PID as the process-group ID.
+        unsafe {
+            libc::kill(-session, libc::SIGKILL);
+        }
+
+        let mut output = std::fs::File::from(stdio.stdout);
+        let mut text = String::new();
+        output.read_to_string(&mut text).expect("read output");
+        assert!(text.contains("done"), "got: {text:?}");
+        assert!(!text.contains("eof-injected"), "got: {text:?}");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
