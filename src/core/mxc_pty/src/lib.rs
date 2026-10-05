@@ -459,7 +459,13 @@ impl LivePty {
 
         let input_primary = self.primary.try_clone()?;
         let (input_read_fd, input_write_fd) = create_pipe()?;
+        #[cfg(target_os = "linux")]
         let input_reader = InterruptibleReader::new(input_read_fd)?;
+        #[cfg(target_os = "macos")]
+        let input_reader = InterruptibleReader::new_with_periodic_eof_probe(
+            input_read_fd,
+            std::time::Duration::from_millis(50),
+        )?;
         let input_canceller = input_reader.canceller();
         let input_shutdown = BridgeShutdown::new()?;
 
