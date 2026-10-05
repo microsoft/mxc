@@ -39,6 +39,13 @@ fn available_from(probe: Result<i32, HRESULT>) -> bool {
 }
 
 fn probe_feature_level() -> Result<i32, HRESULT> {
+    // Report unavailable if the framework runtime is not verified, so callers
+    // never attempt a session they cannot complete.
+    #[cfg(feature = "lifted_msi")]
+    if super::regfree::verify_framework().is_err() {
+        return Err(REGDB_E_CLASSNOTREG);
+    }
+
     #[cfg(feature = "lifted_msi")]
     let ops = match super::regfree::activate_from_adjacent_shim::<IsoSessionOps>() {
         Some(result) => result.map_err(|error| {

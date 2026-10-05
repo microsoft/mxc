@@ -14,9 +14,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use windows::core::{s, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{GetLastError, REGDB_E_CLASSNOTREG};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::core::{s, HSTRING, PCSTR, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{GetLastError, ERROR_NOT_SUPPORTED, REGDB_E_CLASSNOTREG, S_OK};
+use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
@@ -30,6 +30,48 @@ type DllGetActivationFactory =
     unsafe extern "system" fn(*mut std::ffi::c_void, *mut *mut std::ffi::c_void) -> HRESULT;
 
 static GET_ACTIVATION_FACTORY: OnceLock<DllGetActivationFactory> = OnceLock::new();
+
+/// Flat-C export on the staged shim that answers whether the matching
+/// IsolationSession runtime is installed and loadable on this machine. The
+/// out-param receives an owned, ready-to-display remediation string (which the
+/// caller frees) when it is not; it is left null on success.
+type VerifyIsoSessionFramework = unsafe extern "system" fn(*mut *mut u16) -> HRESULT;
+
+/// Resolved by name, so the name is the contract.
+const VERIFY_FRAMEWORK_EXPORT: PCSTR = s!("VerifyIsoSessionFramework");
+
+/// Verified once per process: the install state cannot change under us.
+static FRAMEWORK_STATUS: OnceLock<Result<(), FrameworkRefusal>> = OnceLock::new();
+
+/// Why framework verification refused, split to match the wire error fields.
+///
+/// `message` is a concise problem statement (what is wrong); `remediation` is
+/// the shim's own ready-to-display fix text, present only when the shim
+/// supplied one. A synthetic refusal (verification unsupported, or a bare
+/// failure status) carries no remediation.
+#[derive(Debug, Clone)]
+pub(crate) struct FrameworkRefusal {
+    pub(crate) message: String,
+    pub(crate) remediation: Option<String>,
+}
+
+impl FrameworkRefusal {
+    /// A problem statement with no accompanying fix text.
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            remediation: None,
+        }
+    }
+
+    /// A problem statement paired with the shim's ready-to-display fix text.
+    fn with_remediation(message: impl Into<String>, remediation: String) -> Self {
+        Self {
+            message: message.into(),
+            remediation: Some(remediation),
+        }
+    }
+}
 
 /// Activates `T` through the lifted shim staged beside the current executable.
 ///
@@ -52,6 +94,107 @@ where
     };
 
     Some(activate_from_factory(factory))
+}
+
+/// Confirms the IsolationSession runtime is installed before any session work.
+///
+/// `Ok(())` means proceed; `Err(refusal)` means block, carrying the text to
+/// show the user. The result is cached for the process.
+///
+/// Only `S_OK` from the shim proceeds; every other outcome is fail-closed. If
+/// the shim itself is not staged beside the host, there is nothing to check
+/// here and activation raises its own "payload missing" error, so this returns
+/// `Ok(())`.
+pub(crate) fn verify_framework() -> Result<(), FrameworkRefusal> {
+    FRAMEWORK_STATUS.get_or_init(run_framework_check).clone()
+}
+
+fn run_framework_check() -> Result<(), FrameworkRefusal> {
+    let Some(directory) = adjacent_runtime_directory() else {
+        return Ok(());
+    };
+
+    // The shim is staged beside us, so it must expose the verification entry
+    // point. If it cannot be loaded, the payload is broken — block.
+    let shim_verify_fn = resolve_verify_framework(&directory.join(SHIM_NAME)).map_err(|error| {
+        FrameworkRefusal::new(format!(
+            "the IsolationSession framework verification entry point could not be loaded: {error}"
+        ))
+    })?;
+
+    let mut remediation: *mut u16 = std::ptr::null_mut();
+    // SAFETY: the out-param is a valid pointer; per the export's contract we
+    // own any returned string and must free it with `CoTaskMemFree`.
+    let hresult = unsafe { shim_verify_fn(&mut remediation) };
+    classify_framework_status(hresult, take_cotaskmem_string(remediation))
+}
+
+/// Pure decision split from the FFI call so it is unit-testable without the
+/// shim. When the shim supplies its own fix text, that becomes the refusal's
+/// remediation and the message is a concise problem statement; otherwise the
+/// message stands alone.
+fn classify_framework_status(
+    hresult: HRESULT,
+    remediation: Option<String>,
+) -> Result<(), FrameworkRefusal> {
+    if hresult == S_OK {
+        return Ok(());
+    }
+    if let Some(remediation) = remediation {
+        return Err(FrameworkRefusal::with_remediation(
+            "the IsolationSession framework runtime is not installed",
+            remediation,
+        ));
+    }
+    if hresult == HRESULT::from_win32(ERROR_NOT_SUPPORTED.0) {
+        return Err(FrameworkRefusal::new(
+            "the installed IsolationSession framework does not support runtime verification, \
+             so MXC cannot confirm the required runtime is present",
+        ));
+    }
+    Err(FrameworkRefusal::new(format!(
+        "IsolationSession framework verification failed (0x{:08X})",
+        hresult.0 as u32
+    )))
+}
+
+fn resolve_verify_framework(
+    dll_path: &std::path::Path,
+) -> windows_core::Result<VerifyIsoSessionFramework> {
+    let source: Vec<u16> = dll_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // Same absolute-path, constrained-search load used for activation.
+    let module = unsafe {
+        LoadLibraryExW(
+            PCWSTR(source.as_ptr()),
+            None,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    }?;
+    let export = unsafe { GetProcAddress(module, VERIFY_FRAMEWORK_EXPORT) }.ok_or_else(|| {
+        windows_core::Error::from_hresult(HRESULT::from_win32(unsafe { GetLastError().0 }))
+    })?;
+
+    // The module intentionally stays loaded; the process only verifies once.
+    let shim_verify_fn: VerifyIsoSessionFramework = unsafe { std::mem::transmute(export) };
+    Ok(shim_verify_fn)
+}
+
+/// Reads a shim-allocated wide string into an owned `String`, then frees it
+/// with `CoTaskMemFree` as the contract requires. A null pointer yields `None`.
+fn take_cotaskmem_string(pointer: *mut u16) -> Option<String> {
+    if pointer.is_null() {
+        return None;
+    }
+    // SAFETY: the contract hands back a NUL-terminated wide string; we read it
+    // and then release it with the matching allocator.
+    let text = unsafe { PWSTR(pointer).to_string() }.ok();
+    unsafe { CoTaskMemFree(Some(pointer as *const std::ffi::c_void)) };
+    text
 }
 
 fn load_activation_factory<T>(
@@ -184,4 +327,52 @@ where
         );
         error
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::ERROR_MOD_NOT_FOUND;
+
+    #[test]
+    fn ok_status_proceeds() {
+        assert!(classify_framework_status(S_OK, None).is_ok());
+    }
+
+    #[test]
+    fn remediation_text_is_surfaced_verbatim() {
+        // The shim returns this fix text when the runtime is missing; it lands
+        // in the refusal's remediation, with a concise problem statement.
+        let fix = "IsoSession isn't found; download from aka.ms/foo".to_string();
+        let refusal = classify_framework_status(
+            HRESULT::from_win32(ERROR_MOD_NOT_FOUND.0),
+            Some(fix.clone()),
+        )
+        .unwrap_err();
+        assert_eq!(refusal.remediation.as_deref(), Some(fix.as_str()));
+        assert!(refusal.message.contains("not installed"));
+    }
+
+    #[test]
+    fn not_supported_is_fail_closed() {
+        // No fix text accompanies this status; MXC still blocks, message-only.
+        let refusal = classify_framework_status(HRESULT::from_win32(ERROR_NOT_SUPPORTED.0), None)
+            .unwrap_err();
+        assert!(
+            refusal.message.contains("does not support"),
+            "expected the verification-unsupported wording"
+        );
+        assert_eq!(refusal.remediation, None);
+    }
+
+    #[test]
+    fn bare_failure_without_remediation_still_blocks() {
+        // Any other failure with no shim text falls back to a synthetic message.
+        let refusal = classify_framework_status(HRESULT(0x8000_4005u32 as i32), None).unwrap_err();
+        assert!(
+            refusal.message.contains("verification failed"),
+            "expected the synthetic failure wording"
+        );
+        assert_eq!(refusal.remediation, None);
+    }
 }
