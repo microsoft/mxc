@@ -1085,7 +1085,6 @@ fn create_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)
 #[cfg(target_os = "macos")]
 fn create_cloexec_fifo() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
     use std::ffi::{CStr, CString};
-    use std::os::fd::FromRawFd;
 
     struct FifoPath {
         directory: CString,
@@ -1128,32 +1127,14 @@ fn create_cloexec_fifo() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::
     if unsafe { libc::mkfifo(path.fifo.as_ptr(), 0o600) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let anchor_flags = libc::O_NONBLOCK | libc::O_CLOEXEC;
-    // Keep both sides present while opening the final endpoints. Darwin can
-    // retain hangup readiness when a FIFO reader is opened before any writer.
-    // SAFETY: opening the private FIFO atomically applies CLOEXEC.
-    let anchor = unsafe { libc::open(path.fifo.as_ptr(), libc::O_RDWR | anchor_flags) };
-    if anchor < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `open` returned a new owned descriptor.
-    let anchor = unsafe { std::os::fd::OwnedFd::from_raw_fd(anchor) };
-    // SAFETY: opening the FIFO read endpoint atomically applies CLOEXEC.
-    let read = unsafe { libc::open(path.fifo.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-    if read < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `open` returned a new owned descriptor.
-    let read = unsafe { std::os::fd::OwnedFd::from_raw_fd(read) };
-    // SAFETY: the read endpoint is already open, so opening the nonblocking
-    // write endpoint succeeds without waiting for another process.
-    let write = unsafe { libc::open(path.fifo.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
-    if write < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `open` returned a new owned descriptor.
-    let write = unsafe { std::os::fd::OwnedFd::from_raw_fd(write) };
-    drop(anchor);
+    let read_path = path.fifo.clone();
+    let read_thread = std::thread::Builder::new()
+        .name("mxc-pty-fifo-open".to_string())
+        .spawn(move || open_fifo_endpoint(&read_path, libc::O_RDONLY))?;
+    let write = open_fifo_endpoint(&path.fifo, libc::O_WRONLY)?;
+    let read = read_thread
+        .join()
+        .map_err(|_| std::io::Error::other("PTY FIFO reader setup panicked"))??;
 
     // SAFETY: open descriptors retain the FIFO after its directory entry is removed.
     if unsafe { libc::unlink(path.fifo.as_ptr()) } != 0 {
@@ -1165,6 +1146,28 @@ fn create_cloexec_fifo() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::
     }
     path.created = false;
     Ok((read, write))
+}
+
+#[cfg(target_os = "macos")]
+fn open_fifo_endpoint(
+    path: &std::ffi::CStr,
+    access: libc::c_int,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+
+    loop {
+        // SAFETY: `path` is a valid FIFO path and O_CLOEXEC is applied as part
+        // of descriptor creation.
+        let fd = unsafe { libc::open(path.as_ptr(), access | libc::O_CLOEXEC) };
+        if fd >= 0 {
+            // SAFETY: `open` returned a new owned descriptor.
+            return Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
