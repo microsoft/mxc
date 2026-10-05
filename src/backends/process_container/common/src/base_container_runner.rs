@@ -248,7 +248,7 @@ impl BaseContainerRunner {
 
     #[cfg(test)]
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
-        let version = Self::choose_min_required_psec_version_for_request(request);
+        let version = Self::choose_min_required_psec_version_for_request(request, false);
         build_psec_v1_security_environment_spec(
             request,
             version,
@@ -316,10 +316,36 @@ impl BaseContainerRunner {
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress)
     }
 
+    // Temporary compatibility for explicit identity-less proxies on PSEC 1.0-only
+    // hosts. Remove once those hosts support PSEC 1.1; keep loopback allow opt-in.
+    fn psec_1_0_proxy_loopback_workaround(
+        request: &ExecutionRequest,
+        mut supports_version: impl FnMut(
+            SecurityEnvironmentVersion,
+        )
+            -> Result<bool, learning_mode_windows::LearningModeError>,
+    ) -> Result<bool, learning_mode_windows::LearningModeError> {
+        let policy = &request.policy;
+        if !policy.runtime_network_proxy_specified
+            || !policy.network_proxy.is_enabled()
+            || policy.allowed_proxy_peer.is_some()
+            || !unrestricted_host_loopback_allowed(policy)
+        {
+            return Ok(false);
+        }
+        // A 1.1+ host must keep using the advertised ingress support flag,
+        // even if it also accepts a 1.0 payload.
+        if supports_version(SecurityEnvironmentVersion::V1_1)? {
+            return Ok(false);
+        }
+        supports_version(SecurityEnvironmentVersion::V1_0)
+    }
+
     /// The single PSEC version-selection point: start at 1.0 and raise it to
     /// the highest version required by any requested native feature.
     fn choose_min_required_psec_version_for_request(
         request: &ExecutionRequest,
+        proxy_loopback_workaround: bool,
     ) -> SecurityEnvironmentVersion {
         let mut version = SecurityEnvironmentVersion::V1_0;
         if !request.policy.denied_paths.is_empty() {
@@ -329,7 +355,7 @@ impl BaseContainerRunner {
             version =
                 version.max(SecurityEnvironmentSupport::FileSystemEnumerate.required_version());
         }
-        if unrestricted_host_loopback_allowed(&request.policy) {
+        if unrestricted_host_loopback_allowed(&request.policy) && !proxy_loopback_workaround {
             version = version.max(SecurityEnvironmentSupport::NetworkIngress.required_version());
         }
         version
@@ -374,7 +400,10 @@ impl BaseContainerRunner {
         if unrestricted_host_loopback_allowed(&request.policy)
             && !Self::supports_ingress_host_loopback_allow()
         {
-            return BaseContainerRequestDecision::IngressUnsupported;
+            match Self::psec_1_0_proxy_loopback_workaround(request, secenv::supports_version) {
+                Ok(true) => {}
+                Ok(false) | Err(_) => return BaseContainerRequestDecision::IngressUnsupported,
+            }
         }
         BaseContainerRequestDecision::Serviceable
     }
@@ -405,7 +434,24 @@ impl BaseContainerRunner {
             logger,
         );
 
-        let psec_version = Self::choose_min_required_psec_version_for_request(request);
+        let proxy_loopback_workaround =
+            Self::psec_1_0_proxy_loopback_workaround(request, secenv::supports_version).map_err(
+                |error| ScriptResponse {
+                    failure_phase: FailurePhase::BackendUnavailable,
+                    ..ScriptResponse::error(&format!(
+                        "failed to query PSEC proxy compatibility support: {error}"
+                    ))
+                },
+            )?;
+        if proxy_loopback_workaround {
+            let _ = writeln!(
+                logger,
+                "warning: using PSEC 1.0 proxy loopback compatibility; the proxy is \
+                 identified only by its endpoint, not by its host process identity"
+            );
+        }
+        let psec_version =
+            Self::choose_min_required_psec_version_for_request(request, proxy_loopback_workaround);
         let version_supported =
             secenv::supports_version(psec_version).map_err(|error| ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -2836,7 +2882,10 @@ mod tests {
     #[test]
     fn required_psec_contract_uses_v1_1_for_enumeration() {
         assert_eq!(
-            BaseContainerRunner::choose_min_required_psec_version_for_request(&enumerate_request()),
+            BaseContainerRunner::choose_min_required_psec_version_for_request(
+                &enumerate_request(),
+                false
+            ),
             SecurityEnvironmentVersion::V1_1
         );
     }
@@ -2845,7 +2894,8 @@ mod tests {
     fn required_psec_contract_uses_v1_1_for_host_loopback() {
         assert_eq!(
             BaseContainerRunner::choose_min_required_psec_version_for_request(
-                &host_loopback_request()
+                &host_loopback_request(),
+                false
             ),
             SecurityEnvironmentVersion::V1_1
         );
@@ -2855,9 +2905,142 @@ mod tests {
     fn required_psec_contract_defaults_to_v1_0() {
         assert_eq!(
             BaseContainerRunner::choose_min_required_psec_version_for_request(
-                &ExecutionRequest::default()
+                &ExecutionRequest::default(),
+                false
             ),
             SecurityEnvironmentVersion::V1_0
+        );
+    }
+
+    fn psec_1_0_proxy_request() -> ExecutionRequest {
+        let mut request = host_loopback_request();
+        request.policy.runtime_network_proxy_specified = true;
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        request
+    }
+
+    #[test]
+    fn psec_1_0_proxy_workaround_requires_a_1_0_only_host() {
+        let request = psec_1_0_proxy_request();
+        for (supports_1_0, supports_1_1, expected) in [
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let mut queried = Vec::new();
+            let workaround =
+                BaseContainerRunner::psec_1_0_proxy_loopback_workaround(&request, |version| {
+                    queried.push(version);
+                    Ok(if version == SecurityEnvironmentVersion::V1_1 {
+                        supports_1_1
+                    } else {
+                        supports_1_0
+                    })
+                })
+                .unwrap();
+            assert_eq!(workaround, expected);
+            assert_eq!(
+                queried,
+                if supports_1_1 {
+                    vec![SecurityEnvironmentVersion::V1_1]
+                } else {
+                    vec![
+                        SecurityEnvironmentVersion::V1_1,
+                        SecurityEnvironmentVersion::V1_0,
+                    ]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn psec_1_0_proxy_workaround_requires_explicit_identity_less_proxy_and_loopback_allow() {
+        for case in 0..4 {
+            let mut request = psec_1_0_proxy_request();
+            match case {
+                0 => request.policy.runtime_network_proxy_specified = false,
+                1 => request.policy.network_proxy = ProxyConfig::default(),
+                2 => request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string()),
+                3 => {
+                    request
+                        .policy
+                        .network_ingress
+                        .as_mut()
+                        .unwrap()
+                        .host_loopback = NetworkAction::Deny;
+                }
+                _ => unreachable!(),
+            }
+            assert!(!BaseContainerRunner::psec_1_0_proxy_loopback_workaround(
+                &request,
+                |_| panic!("ineligible policy must not query the OS"),
+            )
+            .unwrap());
+        }
+    }
+
+    #[test]
+    fn psec_1_0_proxy_workaround_propagates_version_query_errors() {
+        let request = psec_1_0_proxy_request();
+        for failing_version in [
+            SecurityEnvironmentVersion::V1_0,
+            SecurityEnvironmentVersion::V1_1,
+        ] {
+            let result =
+                BaseContainerRunner::psec_1_0_proxy_loopback_workaround(&request, |version| {
+                    if version == failing_version {
+                        Err(learning_mode_windows::LearningModeError::HResultCall {
+                            function: "IsProcessSecurityEnvironmentVersionSupported",
+                            code: E_NOTIMPL.0,
+                        })
+                    } else {
+                        Ok(false)
+                    }
+                });
+            assert!(matches!(
+                result,
+                Err(learning_mode_windows::LearningModeError::HResultCall { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn psec_1_0_proxy_workaround_encodes_existing_loopback_capability_and_peer() {
+        let request = psec_1_0_proxy_request();
+        let version =
+            BaseContainerRunner::choose_min_required_psec_version_for_request(&request, true);
+        assert_eq!(version, SecurityEnvironmentVersion::V1_0);
+        let bytes = build_psec_v1_security_environment_spec(&request, version, false);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let network = spec.network_policy().unwrap();
+        assert_eq!(spec.version().minor(), 0);
+        assert!(spec
+            .capabilities()
+            .unwrap()
+            .split(',')
+            .any(|capability| capability == "networkLoopback"));
+        assert_eq!(
+            network.allowed_appcontainer_peer(),
+            Some(crate::base_container_helpers::LOOPBACK_NETWORK_PEER)
+        );
+        assert_eq!(
+            network.proxy().unwrap().url(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert!(network.ingress().is_none());
+        assert!(network.egress().is_none());
+    }
+
+    #[test]
+    fn psec_1_0_proxy_workaround_does_not_lower_enumeration_requirement() {
+        let mut request = psec_1_0_proxy_request();
+        request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
+        assert_eq!(
+            BaseContainerRunner::choose_min_required_psec_version_for_request(&request, true),
+            SecurityEnvironmentVersion::V1_1
         );
     }
 
