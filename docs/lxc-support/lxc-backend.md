@@ -215,7 +215,7 @@ const request: ContainerRequest = {
 const child = spawn(request);
 child.standardOutput?.on('data', (data) => process.stdout.write(data));
 try {
-    const outcome = await child.waitAsync();
+    const outcome = await child.wait();
     console.log('Exit:', outcome.exitCode);
 } finally {
     child.dispose();

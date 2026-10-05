@@ -4,14 +4,14 @@
 import type { TelemetryConfig } from './types.js';
 import type { MxcPtySize } from './mxc-pty-process.js';
 
-/** Invocation controls for run and runAsync. */
+/** Invocation controls for run. */
 export interface RunOptions {
   experimental?: boolean;
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
 }
 
-/** Invocation controls for spawn and spawnAsync. */
+/** Invocation controls for spawn. */
 export interface SpawnOptions {
   experimental?: boolean;
   /** Per-invocation telemetry opt-in, subject to consent and policy. */

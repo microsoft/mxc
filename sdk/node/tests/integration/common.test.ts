@@ -20,17 +20,8 @@ describe('Platform support', () => {
       timeoutMs: 30000,
     };
 
-    it('rejects unsupported dry-run before dispatching a synchronous operation', () => {
+    it('rejects unsupported dry-run before dispatching an operation', async () => {
       for (const operation of [sdk.spawn, sdk.run]) {
-        assert.throws(
-          () => operation(request, { dryRun: true } as never),
-          /does not support dryRun/,
-        );
-      }
-    });
-
-    it('rejects unsupported dry-run before dispatching an asynchronous operation', async () => {
-      for (const operation of [sdk.spawnAsync, sdk.runAsync]) {
         await assert.rejects(
           operation(request, { dryRun: true } as never),
           /does not support dryRun/,

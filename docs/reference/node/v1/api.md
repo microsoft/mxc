@@ -9,9 +9,9 @@ Callers do not supply JSON or a schema version.
 
 | Output | Create and run a container | Run in an existing container | Result |
 |---|---|---|---|
-| Capture stdout and stderr | `run` / `runAsync` | `runInContainer` / `runInContainerAsync` | `ExecutionResult` |
-| Live standard pipes | `spawn` / `spawnAsync` | `spawnInContainer` / `spawnInContainerAsync` | `MxcProcess` |
-| Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `MxcPtyProcess` |
+| Capture stdout and stderr | `run` | `runInContainer` | `Promise<ExecutionResult>` |
+| Live standard pipes | `spawn` | `spawnInContainer` | `Promise<MxcProcess>` |
+| Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `Promise<MxcPtyProcess>` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
@@ -120,96 +120,60 @@ export async function provisionContainer<C extends LifecycleContainmentKind>(req
 ```
 
 
-## `@microsoft/mxc-sdk/v1::getTelemetryConsentStatusAsync`
+## `@microsoft/mxc-sdk/v1::getTelemetryConsentStatus`
 
 Read persisted/effective consent and policy without blocking the event loop.
 
 ```typescript
-export async function getTelemetryConsentStatusAsync(): Promise<TelemetryConsentStatus>;
+export async function getTelemetryConsentStatus(): Promise<TelemetryConsentStatus>;
 ```
 
 
-## `@microsoft/mxc-sdk/v1::requestTelemetryConsentAsync`
+## `@microsoft/mxc-sdk/v1::requestTelemetryConsent`
 
 Request consent with the versioned canonical consent resource.
 
 ```typescript
-export async function requestTelemetryConsentAsync(presenter: TelemetryConsentPresenter, locale?: string): Promise<TelemetryConsentOutcome>;
+export async function requestTelemetryConsent(presenter: TelemetryConsentPresenter, locale?: string): Promise<TelemetryConsentOutcome>;
 ```
 
 
 ## `@microsoft/mxc-sdk/v1::run`
 
-Run a container request synchronously and capture its output.
-
-```typescript
-export function run(request: ContainerRequest, options: RunOptions = {}): ExecutionResult;
-```
-
-
-## `@microsoft/mxc-sdk/v1::runAsync`
-
 Run a container request asynchronously and capture its output.
 
 ```typescript
-export async function runAsync(request: ContainerRequest, options: RunOptions = {}): Promise<ExecutionResult>;
+export async function run(request: ContainerRequest, options: RunOptions = {}): Promise<ExecutionResult>;
 ```
 
 
 ## `@microsoft/mxc-sdk/v1::runInContainer`
 
 Execute in an existing IsolationSession or WSLC container and capture output.
-Blocks Node's event loop until native execution completes; the native SDK drains
-stdout and stderr concurrently. Dispatch failures throw `MxcError`; workload
-exit codes and timeouts are returned in `ExecutionResult`.
+Dispatch failures reject with `MxcError`; workload exit codes and timeouts are
+returned in `ExecutionResult`.
 
 ```typescript
-export function runInContainer<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options?: RunInContainerOptions): ExecutionResult;
-```
-
-
-## `@microsoft/mxc-sdk/v1::runInContainerAsync`
-
-Buffered execution convenience.
-
-```typescript
-export async function runInContainerAsync<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options?: RunInContainerOptions): Promise<ExecutionResult>;
+export async function runInContainer<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options?: RunInContainerOptions): Promise<ExecutionResult>;
 ```
 
 
 ## `@microsoft/mxc-sdk/v1::spawn`
 
-Create a container request and return its live pipe-backed process.
+Create a container request and asynchronously return its live process.
 
 ```typescript
-export function spawn(request: ContainerRequest, options: SpawnOptions = {}): MxcProcess;
-```
-
-
-## `@microsoft/mxc-sdk/v1::spawnAsync`
-
-Asynchronously create a container request and return its live process.
-
-```typescript
-export async function spawnAsync(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;
+export async function spawn(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;
 ```
 
 
 ## `@microsoft/mxc-sdk/v1::spawnInContainer`
 
-Streams a script execution inside a started IsolationSession or WSLC container over Node pipes, returning an owning MxcProcess for waiting, termination, stream access, and disposal.
+Spawn a workload asynchronously inside a started IsolationSession or WSLC
+container with live standard pipes.
 
 ```typescript
-export function spawnInContainer<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): MxcProcess;
-```
-
-
-## `@microsoft/mxc-sdk/v1::spawnInContainerAsync`
-
-Spawn a workload asynchronously with live standard pipes.
-
-```typescript
-export async function spawnInContainerAsync<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
+export async function spawnInContainer<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
 ```
 
 
@@ -218,7 +182,7 @@ export async function spawnInContainerAsync<C extends PipedExecuteBackend>(conta
 Execute a request in an existing container with an MXC-owned PTY.
 
 ```typescript
-export function spawnInContainerWithPty<C extends LifecycleContainmentKind>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerWithPtyOptions = {}): Promise<MxcPtyProcess>;
+export async function spawnInContainerWithPty<C extends LifecycleContainmentKind>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerWithPtyOptions = {}): Promise<MxcPtyProcess>;
 ```
 
 
@@ -227,7 +191,7 @@ export function spawnInContainerWithPty<C extends LifecycleContainmentKind>(cont
 Create a container request attached to an MXC-owned pseudo-terminal.
 
 ```typescript
-export function spawnWithPty(request: ContainerRequest, options: SpawnWithPtyOptions = {}): Promise<MxcPtyProcess>;
+export async function spawnWithPty(request: ContainerRequest, options: SpawnWithPtyOptions = {}): Promise<MxcPtyProcess>;
 ```
 
 
@@ -296,10 +260,10 @@ export async function validateStop<C extends LifecycleContainmentKind>(container
 ```
 
 
-## `@microsoft/mxc-sdk/v1::withdrawTelemetryConsentAsync`
+## `@microsoft/mxc-sdk/v1::withdrawTelemetryConsent`
 
 Idempotently withdraw telemetry consent without blocking the event loop.
 
 ```typescript
-export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentOutcome>;
+export async function withdrawTelemetryConsent(): Promise<TelemetryConsentOutcome>;
 ```

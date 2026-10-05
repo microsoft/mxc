@@ -56,10 +56,8 @@ export type {
 
 export {
   spawn,
-  spawnAsync,
   spawnWithPty,
   run,
-  runAsync,
 } from './container.js';
 export { MxcProcess } from './container-process.js';
 export type { WaitResult } from './container-process.js';
@@ -86,12 +84,10 @@ export type { ProcessNetworkConfig } from './lifecycle-types.js';
 
 export {
   spawnInContainer,
-  spawnInContainerAsync,
   provisionContainer,
   startContainer,
   spawnInContainerWithPty,
   runInContainer,
-  runInContainerAsync,
   stopContainer,
   deprovisionContainer,
   validateProvision,
@@ -150,7 +146,7 @@ export {
   TelemetryConsentPresenter,
   TelemetryConsentStatus,
   TelemetryPolicyState,
-  requestTelemetryConsentAsync,
-  getTelemetryConsentStatusAsync,
-  withdrawTelemetryConsentAsync,
+  requestTelemetryConsent,
+  getTelemetryConsentStatus,
+  withdrawTelemetryConsent,
 } from './telemetry.js';

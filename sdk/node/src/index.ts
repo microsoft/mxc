@@ -24,10 +24,10 @@
  * @example
  * ```typescript
  * import { getPlatformSupport } from '@microsoft/mxc-sdk/v1';
- * import { runAsync } from '@microsoft/mxc-sdk/v1';
+ * import { run } from '@microsoft/mxc-sdk/v1';
  *
  * if (getPlatformSupport().isSupported) {
- *   const output = await runAsync({
+ *   const output = await run({
  *     network: { egress: { default: 'allow' } },
  *     command: 'python -c "print(\'Hello from sandbox\')"',
  *   });

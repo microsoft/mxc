@@ -6,9 +6,9 @@ import assert from 'node:assert';
 import { EventEmitter } from 'node:events';
 
 import {
-  getTelemetryConsentStatusAsync,
-  requestTelemetryConsentAsync,
-  withdrawTelemetryConsentAsync,
+  getTelemetryConsentStatus,
+  requestTelemetryConsent,
+  withdrawTelemetryConsent,
   _resetTelemetryFailureReporting,
   _setTelemetryPlatform,
   type TelemetryConsentPrompt,
@@ -92,7 +92,7 @@ describe('telemetry consent', () => {
   });
 
   it('parses typed stored/effective status from a consistent native snapshot', async () => {
-    assert.deepStrictEqual(await getTelemetryConsentStatusAsync(), {
+    assert.deepStrictEqual(await getTelemetryConsentStatus(), {
       state: 'granted',
       storedState: 'granted',
       effectiveState: 'granted',
@@ -106,7 +106,7 @@ describe('telemetry consent', () => {
       readConsentStatusJson: async () => '{"storedState":"granted"}',
     });
 
-    const query = await getTelemetryConsentStatusAsync();
+    const query = await getTelemetryConsentStatus();
     assert.deepStrictEqual({
       ...query,
       error: undefined,
@@ -132,8 +132,8 @@ describe('telemetry consent', () => {
         readConsentStatusJson: async () =>
           call++ === 0 ? 'not json' : '{"storedState":1}',
       });
-      assert.strictEqual((await getTelemetryConsentStatusAsync()).effectiveState, 'undetermined');
-      assert.strictEqual((await getTelemetryConsentStatusAsync()).effectiveState, 'undetermined');
+      assert.strictEqual((await getTelemetryConsentStatus()).effectiveState, 'undetermined');
+      assert.strictEqual((await getTelemetryConsentStatus()).effectiveState, 'undetermined');
     } finally {
       console.warn = originalWarn;
     }
@@ -149,7 +149,7 @@ describe('telemetry consent', () => {
       return worker;
     });
 
-    const promise = requestTelemetryConsentAsync((value) => {
+    const promise = requestTelemetryConsent((value) => {
       assert.deepStrictEqual(value, prompt);
       return 'yes';
     }, 'en-US');
@@ -183,7 +183,7 @@ describe('telemetry consent', () => {
       return worker;
     });
 
-    const promise = requestTelemetryConsentAsync(() => 'maybe' as unknown as 'yes');
+    const promise = requestTelemetryConsent(() => 'maybe' as unknown as 'yes');
     await waitFor(() => requestData !== undefined);
     const decision = new Int32Array(requestData!.decisionShared);
 
@@ -205,15 +205,15 @@ describe('telemetry consent', () => {
       return new FakeWorker();
     });
     await assert.rejects(
-      requestTelemetryConsentAsync(() => 'yes', 'en-US\0dev'),
+      requestTelemetryConsent(() => 'yes', 'en-US\0dev'),
       /embedded NUL/,
     );
     assert.strictEqual(called, false);
   });
 
   it('parses and withdraws through the native binding', async () => {
-    assert.strictEqual((await getTelemetryConsentStatusAsync()).effectiveState, 'granted');
-    assert.deepStrictEqual(await withdrawTelemetryConsentAsync(), {
+    assert.strictEqual((await getTelemetryConsentStatus()).effectiveState, 'granted');
+    assert.deepStrictEqual(await withdrawTelemetryConsent(), {
       action: 'withdraw',
       result: 'withdrawn',
       storedState: 'denied',
@@ -228,7 +228,7 @@ describe('telemetry consent', () => {
       withdrawConsentJson: async () =>
         '{"result":"status","storedState":"denied","effectiveState":"denied","reason":null,"policy":"blocked"}',
     });
-    await assert.rejects(withdrawTelemetryConsentAsync(), /unrecognised telemetry consent output/);
+    await assert.rejects(withdrawTelemetryConsent(), /unrecognised telemetry consent output/);
   });
 
   it('preserves typed native withdrawal failures', async () => {
@@ -244,7 +244,7 @@ describe('telemetry consent', () => {
     });
 
     await assert.rejects(
-      withdrawTelemetryConsentAsync(),
+      withdrawTelemetryConsent(),
       (error) => error === nativeError,
     );
   });
@@ -276,7 +276,7 @@ describe('telemetry consent is Windows-only', () => {
         return new FakeWorker();
       });
 
-      const request = await requestTelemetryConsentAsync(
+      const request = await requestTelemetryConsent(
         () => {
           called = true;
           return 'yes';
@@ -284,8 +284,8 @@ describe('telemetry consent is Windows-only', () => {
         'en-US\0dev',
       );
       assert.strictEqual(request.result, 'notApplicable');
-      assert.strictEqual((await getTelemetryConsentStatusAsync()).state, 'not-applicable');
-      assert.strictEqual((await withdrawTelemetryConsentAsync()).result, 'notApplicable');
+      assert.strictEqual((await getTelemetryConsentStatus()).state, 'not-applicable');
+      assert.strictEqual((await withdrawTelemetryConsent()).result, 'notApplicable');
       assert.strictEqual(called, false);
     });
   }

@@ -450,7 +450,7 @@ export class MxcProcess {
   get standardError(): Readable | null;
   get warnings(): readonly string[];
   get outputMetadata(): ExecutionMetadata | undefined;
-  waitAsync(): Promise<WaitResult>;
+  wait(): Promise<WaitResult>;
   kill(): void;
   dispose(): void;
 }
@@ -712,7 +712,7 @@ export interface RunInContainerOptions {
 
 ## `@microsoft/mxc-sdk/v1::RunOptions`
 
-Invocation controls for run and runAsync.
+Invocation controls for run.
 
 ```typescript
 export interface RunOptions {
@@ -784,7 +784,7 @@ export interface SpawnInContainerWithPtyOptions {
 
 ## `@microsoft/mxc-sdk/v1::SpawnOptions`
 
-Invocation controls for spawn and spawnAsync.
+Invocation controls for spawn.
 
 ```typescript
 export interface SpawnOptions {

@@ -215,11 +215,11 @@ prepare a machine that will run offline — warm the cache first:
 
 ### TypeScript SDK
 
-Create a V1 `ContainerRequest` with WSLC configuration and use `spawnAsync`
+Create a V1 `ContainerRequest` with WSLC configuration and use `spawn`
 for live output:
 
 ```typescript
-import { spawnAsync, type ContainerRequest } from '@microsoft/mxc-sdk/v1';
+import { spawn, type ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
 const request: ContainerRequest = {
   containment: {
@@ -234,11 +234,11 @@ const request: ContainerRequest = {
   timeoutMs: 30_000,
 };
 
-const child = await spawnAsync(request);
+const child = await spawn(request);
 try {
   child.standardOutput?.on('data', (data) => process.stdout.write(data));
   child.standardError?.on('data', (data) => process.stderr.write(data));
-  console.log(await child.waitAsync());
+  console.log(await child.wait());
 } finally {
   child.dispose();
 }

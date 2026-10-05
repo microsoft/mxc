@@ -22,7 +22,7 @@ import {
 import {
   deprovisionContainer,
   spawnInContainer,
-  runInContainerAsync,
+  runInContainer,
   provisionContainer,
   startContainer,
   stopContainer,
@@ -76,21 +76,21 @@ describe('WSLC state-aware lifecycle E2E', {
         started = true;
 
         const marker = `NODE_WSLC_WARM_${Date.now()}`;
-        const writeResult = await runInContainerAsync(containerId, { command: `printf '${marker}' > /tmp/mxc-node-wslc-marker` });
+        const writeResult = await runInContainer(containerId, { command: `printf '${marker}' > /tmp/mxc-node-wslc-marker` });
         assert.equal(writeResult.exitCode, 0);
 
-        const readResult = await runInContainerAsync(containerId, { command: 'cat /tmp/mxc-node-wslc-marker' });
+        const readResult = await runInContainer(containerId, { command: 'cat /tmp/mxc-node-wslc-marker' });
         assert.equal(readResult.exitCode, 0);
         assert.equal(readResult.stdout, marker);
         assert.equal(readResult.stderr, '');
 
-        const buffered = await runInContainerAsync(containerId, { command: "printf 'NODE_WSLC_STDOUT\\n'; printf 'NODE_WSLC_STDERR\\n' >&2; exit 7" });
+        const buffered = await runInContainer(containerId, { command: "printf 'NODE_WSLC_STDOUT\\n'; printf 'NODE_WSLC_STDERR\\n' >&2; exit 7" });
         assert.equal(buffered.exitCode, 7);
         assert.match(buffered.stdout, /NODE_WSLC_STDOUT/);
         assert.match(buffered.stderr, /NODE_WSLC_STDERR/);
 
         let firstChunkAt: number | undefined;
-        const streamed = spawnInContainer(containerId, { command: 'echo NODE_WSLC_STREAM_FIRST; sleep 2; ' +
+        const streamed = await spawnInContainer(containerId, { command: 'echo NODE_WSLC_STREAM_FIRST; sleep 2; ' +
               'echo NODE_WSLC_STREAM_LAST; echo NODE_WSLC_STREAM_ERR >&2' });
         try {
           assert.equal(
@@ -108,7 +108,7 @@ describe('WSLC state-aware lifecycle E2E', {
           });
           const stderrPromise = collect(streamed.standardError);
           const [result, stdout, stderr] = await Promise.all([
-            streamed.waitAsync(),
+            streamed.wait(),
             stdoutPromise,
             stderrPromise,
           ]);
@@ -129,10 +129,10 @@ describe('WSLC state-aware lifecycle E2E', {
         }
 
         const timeoutStart = performance.now();
-        const timed = spawnInContainer(containerId, { command: 'sleep 10',
+        const timed = await spawnInContainer(containerId, { command: 'sleep 10',
 timeoutMs: 750 });
         try {
-          const result = await timed.waitAsync();
+          const result = await timed.wait();
           assert.equal(result.timedOut, true);
           const timeoutElapsed = performance.now() - timeoutStart;
           assert.ok(

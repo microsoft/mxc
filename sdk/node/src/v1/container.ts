@@ -16,14 +16,13 @@ import { diagLog } from '../diagnostic.js';
 import { MxcError } from './errors.js';
 import { prepareOneShotRequest } from '../bindings/one-shot.js';
 import {
-  runOneShotJson,
   runOneShotJsonAsync,
   type BindingRunResult,
 } from '../bindings/run.js';
 import {
   spawnBindingSandboxProcess,
-  spawnBindingSandboxProcessSync,
 } from '../bindings/streaming.js';
+import type { MxcProcess } from './container-process.js';
 import { spawnBindingSandboxWithPty } from '../bindings/pty.js';
 import type { MxcPtyProcess } from './mxc-pty-process.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
@@ -426,21 +425,12 @@ function toExecutionResult(result: BindingRunResult): ExecutionResult {
   return output;
 }
 
-/** Create a container request and return its live pipe-backed process. */
-export function spawn(request: ContainerRequest, options: SpawnOptions = {}) {
-  validateOperationOptions('spawn', options, false);
-  return spawnBindingSandboxProcessSync(
-    prepareContainerRequest(request, options.telemetry),
-    options.experimental === true,
-  );
-}
-
-/** Asynchronously create a container request and return its live process. */
-export async function spawnAsync(
+/** Create a container request and asynchronously return its live process. */
+export async function spawn(
   request: ContainerRequest,
   options: SpawnOptions = {},
-) {
-  validateOperationOptions('spawnAsync', options, false);
+): Promise<MxcProcess> {
+  validateOperationOptions('spawn', options, false);
   return spawnBindingSandboxProcess(
     prepareContainerRequest(request, options.telemetry),
     options.experimental === true,
@@ -448,7 +438,7 @@ export async function spawnAsync(
 }
 
 /** Create a container request attached to an MXC-owned pseudo-terminal. */
-export function spawnWithPty(
+export async function spawnWithPty(
   request: ContainerRequest,
   options: SpawnWithPtyOptions = {},
 ): Promise<MxcPtyProcess> {
@@ -475,24 +465,12 @@ export function spawnWithPty(
   );
 }
 
-/** Run a container request synchronously and capture its output. */
-export function run(
-  request: ContainerRequest,
-  options: RunOptions = {},
-): ExecutionResult {
-  validateOperationOptions('run', options, false);
-  return toExecutionResult(runOneShotJson(
-    prepareContainerRequest(request, options.telemetry),
-    options.experimental === true,
-  ));
-}
-
 /** Run a container request asynchronously and capture its output. */
-export async function runAsync(
+export async function run(
   request: ContainerRequest,
   options: RunOptions = {},
 ): Promise<ExecutionResult> {
-  validateOperationOptions('runAsync', options, false);
+  validateOperationOptions('run', options, false);
   return toExecutionResult(await runOneShotJsonAsync(
     prepareContainerRequest(request, options.telemetry),
     options.experimental === true,

@@ -41,7 +41,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
   skip: !isLinuxRoot ? 'Linux Bubblewrap tests require Linux with root privileges (sudo npm test)' : undefined,
 }, () => {
   it('should default to Bubblewrap when containment is omitted (silent default)', async () => {
-    // runAsync routes through abstract `containment: 'process'`,
+    // run routes through abstract `containment: 'process'`,
     // which on Linux resolves to Bubblewrap in the binary.
     const result = await sdk.runRequestForTest(
       BWRAP_PROBE,

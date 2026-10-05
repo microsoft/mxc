@@ -24,7 +24,6 @@ import {
 import {
   spawnInContainer,
   runInContainer,
-  runInContainerAsync,
   provisionContainer,
   deprovisionContainer,
   startContainer,
@@ -86,23 +85,23 @@ const policyValidationSkipReason =
   platformSkipReason ?? (await probeIsolationSessionFeature());
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
-  it('captures synchronous output, nonzero exits, concurrent large streams, and timeout', async () => {
+  it('captures output, nonzero exits, concurrent large streams, and timeout', async () => {
     const { containerId } = await provisionContainer(
       { containment: 'isolation_session', network: isolationSessionNetwork },
     );
     try {
       await startContainer(containerId);
-      const result = runInContainer(containerId, {
-        command: 'cmd /c "echo SYNC_OUT& echo SYNC_ERR 1>&2& exit /b 7"',
+      const result = await runInContainer(containerId, {
+        command: 'cmd /c "echo RUN_OUT& echo RUN_ERR 1>&2& exit /b 7"',
       });
       assert.strictEqual(result.exitCode, 7);
       assert.strictEqual(result.timedOut, false);
-      assert.match(result.stdout, /SYNC_OUT/);
-      assert.match(result.stderr, /SYNC_ERR/);
+      assert.match(result.stdout, /RUN_OUT/);
+      assert.match(result.stderr, /RUN_ERR/);
       assert.ok(Array.isArray(result.warnings));
 
       const count = 131072;
-      const large = runInContainer(containerId, {
+      const large = await runInContainer(containerId, {
         command: `powershell.exe -NoProfile -NonInteractive -Command "[Console]::Out.Write(('O' * ${count})); [Console]::Error.Write(('E' * ${count}))"`,
         timeoutMs: 30000,
       });
@@ -111,7 +110,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       assert.strictEqual(large.stdout, 'O'.repeat(count));
       assert.strictEqual(large.stderr, 'E'.repeat(count));
 
-      const timedOut = runInContainer(containerId, {
+      const timedOut = await runInContainer(containerId, {
         command: 'powershell.exe -NoProfile -NonInteractive -Command "[Console]::Out.WriteLine(\'BEFORE_TIMEOUT\'); Start-Sleep -Seconds 30"',
         timeoutMs: 2000,
       });
@@ -157,7 +156,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       const started = await startContainer(sandboxId, {});
       assert.ok(Array.isArray(started.warnings));
 
-      const result = await runInContainerAsync(
+      const result = await runInContainer(
         sandboxId,
         { command: 'cmd /c echo hello' },
       );
@@ -184,14 +183,14 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 
     try {
       await startContainer(sandboxId, {});
-      const sandboxProcess = spawnInContainer(
+      const sandboxProcess = await spawnInContainer(
         sandboxId,
         { command: 'cmd /c echo streamed' },
       );
       try {
         const stdout = readStreamText(sandboxProcess.standardOutput);
         const stderr = readStreamText(sandboxProcess.standardError);
-        const result = await sandboxProcess.waitAsync();
+        const result = await sandboxProcess.wait();
         assert.strictEqual(result.exitCode, 0);
         assert.strictEqual(result.timedOut, false);
         assert.ok((await stdout).includes('streamed'));
@@ -226,7 +225,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       // a *usable* path a consumer can share files through, not just a non-empty
       // string.
       fs.writeFileSync(path.join(ws, 'caller_to_session.txt'), 'from-caller', 'ascii');
-      const readResult = await runInContainerAsync(
+      const readResult = await runInContainer(
         sandboxId,
         { command: `cmd /c type "${ws}\\caller_to_session.txt"` },
       );
@@ -242,7 +241,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 
       // Session -> caller: the session writes into its workspace and the caller
       // reads it back on the host.
-      const writeResult = await runInContainerAsync(
+      const writeResult = await runInContainer(
         sandboxId,
         { command: `cmd /c echo from-session> "${ws}\\session_to_caller.txt"` },
       );
@@ -274,7 +273,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     try {
       await startContainer(sandboxId, {});
 
-      const result = await runInContainerAsync(
+      const result = await runInContainer(
         sandboxId,
         { command: 'cmd /c exit 7' },
       );

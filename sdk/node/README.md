@@ -18,7 +18,7 @@ or later.
 
 ```typescript
 import { getPlatformSupport } from '@microsoft/mxc-sdk/v1';
-import { runAsync } from '@microsoft/mxc-sdk/v1';
+import { run } from '@microsoft/mxc-sdk/v1';
 import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
 if (!getPlatformSupport().isSupported) {
@@ -32,36 +32,35 @@ const request: ContainerRequest = {
   command: 'node -e "console.log(\'hello from container\')"',
 };
 
-const output = await runAsync(request);
+const output = await run(request);
 console.log(output.stdout, output.exitCode);
 
 ```
 
-`run` / `runAsync` capture stdout and stderr in an `ExecutionResult`. `run`
-blocks Node's event loop until execution finishes; use `runAsync` to await it.
+`run` returns a `Promise<ExecutionResult>` containing captured stdout, stderr,
+the workload exit code, timeout state, warnings, and optional output metadata.
 
 ## Spawn with streaming output
 
 ```typescript
-import { spawnAsync } from '@microsoft/mxc-sdk/v1';
+import { spawn } from '@microsoft/mxc-sdk/v1';
 
-const processHandle = await spawnAsync({
+const processHandle = await spawn({
   command: 'node -e "console.log(\'hello from container\')"',
   timeoutMs: 30_000,
 });
 try {
   processHandle.standardOutput?.on('data', (chunk) => process.stdout.write(chunk));
   processHandle.standardError?.on('data', (chunk) => process.stderr.write(chunk));
-  console.log(await processHandle.waitAsync());
+  console.log(await processHandle.wait());
 } finally {
   processHandle.dispose();
 }
 ```
 
-`spawn` / `spawnAsync` return an `MxcProcess` with standard pipes, wait,
-termination, and disposal operations. Access output streams before awaiting
-completion; any untaken streams are drained internally to avoid pipe-buffer
-deadlocks.
+`spawn` returns a `Promise<MxcProcess>` with standard pipes, wait, termination,
+and disposal operations. Access output streams before awaiting completion; any
+untaken streams are drained internally to avoid pipe-buffer deadlocks.
 Each operation accepts its own optional options type: `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`. `experimental` authorizes native
 experimental features; it does not change the SDK-owned wire contract.
@@ -96,7 +95,7 @@ const terminal = await spawnWithPty({
 try {
   terminal.output.on('data', (chunk) => process.stdout.write(chunk));
   terminal.input.end('echo hello from terminal\r\nexit\r\n');
-  console.log(await terminal.waitAsync());
+  console.log(await terminal.wait());
 } finally {
   terminal.dispose();
 }
@@ -118,7 +117,7 @@ without inspecting its runtime string.
 ```typescript
 import {
   deprovisionContainer,
-  runInContainerAsync,
+  runInContainer,
   provisionContainer,
   startContainer,
   stopContainer,
@@ -134,7 +133,7 @@ const { containerId } = await provisionContainer({
 try {
   await startContainer(containerId);
   try {
-    const result = await runInContainerAsync(containerId, {
+    const result = await runInContainer(containerId, {
       command: 'echo hello from lifecycle',
       timeoutMs: 30_000,
     });
@@ -147,10 +146,8 @@ try {
 }
 ```
 
-`spawnInContainer` / `spawnInContainerAsync` return a live pipe-backed
-`MxcProcess`; `runInContainer` / `runInContainerAsync` return captured
-`ExecutionResult` values. The synchronous form blocks Node's event loop while
-the native SDK drains both output streams and waits for completion.
+`spawnInContainer` returns a `Promise<MxcProcess>` with live standard pipes;
+`runInContainer` returns a `Promise<ExecutionResult>` with captured output.
 `spawnInContainerWithPty(containerId, request, options?)` starts an
 IsolationSession exec with a caller-driven terminal and returns a
 `Promise<MxcPtyProcess>`. Set `options.size` for initial dimensions; it defaults
@@ -244,10 +241,10 @@ Omission leaves telemetry disabled; `enabled: false` explicitly disables it.
 Opt-in remains subject to MXC's persisted user consent and administrative policy. Telemetry consent
 APIs and `getPlatformSupport` are exported from `@microsoft/mxc-sdk/v1`.
 
-`getTelemetryConsentStatusAsync` reads stored/effective consent and policy.
-`requestTelemetryConsentAsync` accepts an application-owned presenter;
-`withdrawTelemetryConsentAsync` withdraws consent. These operations are
-Windows-only and report `not-applicable` on other platforms.
+`getTelemetryConsentStatus` reads stored/effective consent and policy,
+`requestTelemetryConsent` accepts an application-owned presenter, and
+`withdrawTelemetryConsent` withdraws consent. Each returns a Promise. These
+operations are Windows-only and report `not-applicable` on other platforms.
 
 `getAvailableBackends()` reads native host availability, isolation tiers,
 capabilities, and warnings through in-process `mxc_ffi`. It returns

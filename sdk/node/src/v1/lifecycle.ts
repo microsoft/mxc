@@ -8,11 +8,9 @@ import {
   runBindingStateAwareRequestAsync,
 } from '../bindings/state-aware.js';
 import {
-  spawnStateAwareBindingSandboxProcess,
   spawnStateAwareBindingSandboxProcessAsync,
 } from '../bindings/streaming.js';
 import { execStateAwareBindingSandboxWithPty } from '../bindings/pty.js';
-import { runStateAwareExecJson } from '../bindings/run.js';
 import type { MxcPtyProcess } from './mxc-pty-process.js';
 import {
   LifecycleResult,
@@ -146,10 +144,10 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
   request: ExecutionRequest<C>,
   options: SpawnInContainerOptions,
   apiName: string,
-): MxcProcess {
+): Promise<MxcProcess> {
   assertStateAwareOptions(apiName, options);
   assertPipedExecBackend(apiName, sandboxId);
-  return spawnStateAwareBindingSandboxProcess(
+  return spawnStateAwareBindingSandboxProcessAsync(
     JSON.stringify(buildExecEnvelope(sandboxId, request, options.telemetry)),
     options.experimental === true,
     request.timeoutMs,
@@ -242,11 +240,11 @@ export async function startContainer<C extends LifecycleContainmentKind>(
  * pipes, returning an owning `MxcProcess` for waiting, termination,
  * stream access, and disposal.
  */
-export function spawnInContainer<C extends PipedExecuteBackend>(
+export async function spawnInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
   request: ExecutionRequest<C>,
   options: SpawnInContainerOptions = {},
-): MxcProcess {
+): Promise<MxcProcess> {
   assertStateAwareStreamingOptions('spawnInContainer', options);
   return spawnStateAwareExecProcess(
     containerId,
@@ -256,23 +254,8 @@ export function spawnInContainer<C extends PipedExecuteBackend>(
   );
 }
 
-/** Spawn a workload asynchronously with live standard pipes. */
-export async function spawnInContainerAsync<C extends PipedExecuteBackend>(
-  containerId: ContainerId<C>,
-  request: ExecutionRequest<C>,
-  options: SpawnInContainerOptions = {},
-): Promise<MxcProcess> {
-  assertStateAwareStreamingOptions('spawnInContainerAsync', options);
-  assertPipedExecBackend('spawnInContainerAsync', containerId);
-  return spawnStateAwareBindingSandboxProcessAsync(
-    JSON.stringify(buildExecEnvelope(containerId, request, options.telemetry)),
-    options.experimental === true,
-    request.timeoutMs,
-  );
-}
-
 /** Execute a request in an existing container with an MXC-owned PTY. */
-export function spawnInContainerWithPty<C extends LifecycleContainmentKind>(
+export async function spawnInContainerWithPty<C extends LifecycleContainmentKind>(
   containerId: ContainerId<C>,
   request: ExecutionRequest<C>,
   options: SpawnInContainerWithPtyOptions = {},
@@ -302,44 +285,26 @@ export function spawnInContainerWithPty<C extends LifecycleContainmentKind>(
 }
 
 /**
- * Execute synchronously in an existing IsolationSession or WSLC container and
- * capture output. Blocks Node's event loop until native execution finishes.
- */
-export function runInContainer<C extends PipedExecuteBackend>(
-  containerId: ContainerId<C>,
-  request: ExecutionRequest<C>,
-  options: RunInContainerOptions = {},
-): ExecutionResult {
-  assertStateAwareStreamingOptions('runInContainer', options);
-  assertPipedExecBackend('runInContainer', containerId);
-  const { outputMetadata, ...result } = runStateAwareExecJson(
-    JSON.stringify(buildExecEnvelope(containerId, request, options.telemetry)),
-    options.experimental === true,
-  );
-  return outputMetadata === undefined ? result : { ...result, outputMetadata };
-}
-
-/**
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
  * on script completion. Native dispatch failures reject with `MxcError`;
  * workload failures are returned through the process exit code and streams.
  */
-export async function runInContainerAsync<C extends PipedExecuteBackend>(
+export async function runInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
   request: ExecutionRequest<C>,
   options?: RunInContainerOptions,
 ): Promise<ExecutionResult>;
-export async function runInContainerAsync<C extends PipedExecuteBackend>(
+export async function runInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
   request: ExecutionRequest<C>,
   options: RunInContainerOptions = {},
 ): Promise<ExecutionResult> {
-  assertStateAwareStreamingOptions('runInContainerAsync', options);
-  assertPipedExecBackend('runInContainerAsync', containerId);
-  const proc = await spawnInContainerAsync(containerId, request, options);
+  assertStateAwareStreamingOptions('runInContainer', options);
+  assertPipedExecBackend('runInContainer', containerId);
+  const proc = await spawnInContainer(containerId, request, options);
   const stdoutPromise = collectStream(proc.standardOutput);
   const stderrPromise = collectStream(proc.standardError);
-  const waitPromise = Promise.all([proc.waitAsync(), stdoutPromise, stderrPromise]);
+  const waitPromise = Promise.all([proc.wait(), stdoutPromise, stderrPromise]);
   let failed = false;
   try {
     const [result, stdout, stderr] = await waitPromise;
