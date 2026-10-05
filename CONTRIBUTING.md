@@ -247,8 +247,8 @@ npm test
 npm run test:integration
 
 # Rust end-to-end tests against the built binaries (from src/)
-cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
-cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests
+cargo test -p mxc-sdk --test 'wxc_e2e_tests_*'              # Invokes MXC binaries directly
+cargo test -p mxc-sdk --test 'wxc_e2e_tests_*' -- --ignored # Include stress tests
 ```
 
 PowerShell and shell helper scripts that drive the executor end-to-end live under `tests/scripts/` and require a local build. See the [README](./README.md) and the [SDK README](./sdk/node/README.md) for more.
