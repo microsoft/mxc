@@ -103,10 +103,10 @@ stays enforced:
    `captureDenials.mode: "allow"` for permissive application-driven capture.
    It is a compatibility wrapper over `captureDenials.mode: "allow"` with ETL
    retention forced on, and injects `permissiveLearningMode`. The selected
-   ProcessContainer capture backend owns the trace lifecycle: complete PSEC/V2
-   hosts use native capture without PLM or UAC, while legacy or incompatible
-   tiers use the session-scoped guarded-WPR fallback and elevate only its
-   fixed-operation guardian. The CLI consumes the returned JSON and ETL paths,
+   ProcessContainer capture backend owns the trace lifecycle: compatible PSEC
+   hosts use native capture without PLM or UAC, while incompatible tiers use
+   the session-scoped guarded-WPR fallback and elevate only its fixed-operation
+   guardian. The CLI consumes the returned JSON and ETL paths,
    relocates the policy output, its verbose logging sibling, and the trace to
    `denials.json`, `denials.verbose.json`, and `trace.etl`, and generates the
    source snapshot and `Adjusted_*.json` from the policy denials without decoding
@@ -136,13 +136,17 @@ Windows-only `captureDenials` config switch drives collecting those events and
 surfacing the resulting denials to the caller. Its `mode` selects how each
 ungranted access is handled while it is recorded:
 
-> **Host selection.** MXC prefers native capture on a feature-enabled Windows
-> build exposing the complete official V2 API set:
-> `StartLearningModeTrace`, `StopLearningModeTrace`,
+> **Host selection.** MXC uses native capture when Windows exposes the PSEC
+> lifecycle plus a compatible Learning Mode lifecycle. It prefers
+> `StartLearningModeTraceWithOptions`, which requests `ACCESS | NETWORK`, and
+> falls back to access-only `StartLearningModeTrace` when the option-aware
+> export is absent. Both paths require `StopLearningModeTrace`,
 > `CloseLearningModeTrace`, `CreateProcessSecurityEnvironment`,
 > `QueryProcessSecurityEnvironmentSupport`, and
-> `CloseProcessSecurityEnvironment`. When that set is unavailable or cannot
-> fully honor the requested policy, MXC retains the highest compatible legacy
+> `CloseProcessSecurityEnvironment`. If the option-aware export exists but its
+> call fails, MXC reports the failure rather than silently downgrading. When
+> native capture is unavailable or cannot fully honor the requested policy,
+> MXC retains the highest compatible legacy
 > AppContainer containment tier (AppContainer+BFS or AppContainer+DACL) and pairs it
 > with the guarded WPR capture provider. Unsupported hosts return
 > `backend_unavailable` only when neither path can preserve the full policy.
@@ -228,6 +232,63 @@ sandbox policy:
   not carry a stable capability identifier.
 - `filetime` is a decimal string containing the Windows `FILETIME` value, so
   JavaScript consumers retain all 64 bits without numeric precision loss.
+
+### Network denial sources
+
+Feature-enabled Windows builds can add WFP decisions to the managed Learning
+Mode ETL through the manifested
+`Microsoft-Windows-LearningMode-NetworkDecision` provider
+(`{71237669-21C3-4101-BD2F-FF38945D725A}`). MXC accepts event ID `1`,
+`NetworkDecisionV1`, with schema version `1`. The OS Learning Mode broker owns
+the WFP subscription, runtime-filter lookup, subject scoping, event
+normalization, queue draining, and ETW flush before the trace is sealed.
+MXC requests both `ACCESS` and `NETWORK` sources when it starts native capture;
+a failed combined start fails the trace rather than retrying with partial
+access-only collection. MXC does not coordinate with WFP directly.
+
+MXC currently recognizes two normalized source domains:
+
+- App Isolation missing-capability decisions map capability IDs `0`, `1`, and
+  `2` to `internetClient`, `internetClientServer`, and
+  `privateNetworkClientServer`.
+- Tessera direct-network default-deny decisions map a complete remote endpoint
+  to a `network` resource such as `tcp://203.0.113.10:443` or
+  `udp://[2001:db8::1]:53`.
+
+`NetworkDecisionV1` retains its original 24-property event ID/version `1`
+schema. Tessera attribution is carried only in the existing `Reason` field:
+
+| Reason | Meaning |
+|---:|---|
+| `100` | Direct default deny |
+| `101` | Authored explicit deny |
+| `102` | Exclusion from an allow rule |
+| `103` | Proxy-containment baseline |
+
+The internal WFP provider-data format used to produce the reason is not part of
+the ETW contract. MXC does not parse provider data or require additional policy
+model, rule-kind, or rule-ordinal fields.
+
+Tessera explicit denies, allow exclusions, and proxy-containment decisions are
+intentional authored policy rather than missing grants. They are retained in
+the verbose logging artifact but are not emitted as policy recommendations;
+recommending a direct allow for proxy containment could bypass the proxy.
+Malformed events, unknown reasons, identity mismatches, and incomplete
+endpoints are also verbose-only.
+Reason `65535` remains `unknownNetworkReason`.
+
+Actionable network records include an additive `details` object with
+`kind: "network"` and the normalized source, reason, direction, protocol,
+endpoint, application ID, and runtime filter ID. The WFP event does not provide
+a reliable workload PID, so these records use `pid: 0`; the broker-provided
+package, user, and application identities remain available to the decoder for
+validation and diagnostics. `filetime` is the original WFP event timestamp
+carried in the normalized payload, not the later ETW emission time.
+
+This source is available only through native managed broker capture. The
+guarded-WPR fallback filters ETW by exact workload process generations, while
+the normalized network event's ETW header identifies the broker process, so
+guarded-WPR analysis intentionally excludes it.
 
 ### Verbose logging event signatures
 
@@ -370,13 +431,13 @@ so CLI callers can locate the deliverable without scanning the filesystem:
 The pointer echoes the policy file's `summary`; that file is the authoritative
 record of denials. In-process Rust callers receive the same summary information through
 `Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
-C# SDK exposes `ExecutionMetadata` through `ExecutionResult.OutputMetadata` and
-`MxcProcess.OutputMetadata`.
+C# SDK exposes it through `RunResult.OutputMetadata` and
+`MxcSandboxProcess.OutputMetadata`.
 
 By default, the intermediate ETW `.etl` trace is an internal, runner-managed
 file in a protected per-run temporary directory that MXC deletes after
 analysis. Set `captureDenials.retainEtl` to `true` to preserve the sealed trace
-for diagnostics after a terminal wait. Both native PSEC/V2 capture and the
+for diagnostics after a terminal wait. Both native PSEC capture and the
 guarded-WPR fallback honor retention. Native retention begins under
 `%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and moves to a protected
 per-run directory under `capture-denials\retained` only after sealing
