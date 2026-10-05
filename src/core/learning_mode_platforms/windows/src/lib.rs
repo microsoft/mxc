@@ -5,7 +5,8 @@
 //! **Learning Mode trace API** exported by `processmodel.dll`.
 //!
 //! Supported Windows builds expose a privileged, per-client learning-mode
-//! ETW trace behind three official flat C exports in `processmodel.dll`:
+//! ETW trace behind flat C exports in `processmodel.dll`. MXC prefers the
+//! option-aware start export:
 //!
 //! ```c
 //! HRESULT StartLearningModeTraceWithOptions(
@@ -14,6 +15,15 @@
 //!     HLEARNINGMODE_TRACE* trace);
 //! HRESULT StopLearningModeTrace(HLEARNINGMODE_TRACE trace, PCWSTR outputEtlPath);
 //! void CloseLearningModeTrace(HLEARNINGMODE_TRACE trace);
+//! ```
+//!
+//! When `StartLearningModeTraceWithOptions` is absent, MXC can use the legacy
+//! access-only start export with the same Stop and Close lifecycle:
+//!
+//! ```c
+//! HRESULT StartLearningModeTrace(
+//!     HPROCESS_SECURITY_ENVIRONMENT environment,
+//!     HLEARNINGMODE_TRACE* trace);
 //! ```
 //!
 //! The broker collects and filters the trace to the caller's user SID and the

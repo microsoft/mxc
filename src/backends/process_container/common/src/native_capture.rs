@@ -8,7 +8,8 @@
 //! The ordering the OS requires is:
 //!
 //! 1. `CreateProcessSecurityEnvironment(spec)` → env handle
-//! 2. `StartLearningModeTraceWithOptions(env, ACCESS | NETWORK)` → trace handle
+//! 2. `StartLearningModeTraceWithOptions(env, ACCESS | NETWORK)`, or the
+//!    legacy access-only `StartLearningModeTrace(env)`, → trace handle
 //!    (**before** the child launches, so no early denials are missed)
 //! 3. attach `env` as `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`, then call
 //!    `CreateProcessW` (**runner's job**; the session exposes the handle via
@@ -56,9 +57,9 @@ impl CaptureSession {
     ///
     /// # Errors
     /// - [`LearningModeError::HResultCall`] if `CreateProcessSecurityEnvironment` fails.
-    /// - [`LearningModeError::HResultCall`] if `StartLearningModeTraceWithOptions`
-    ///   fails — in which case the just-created environment is closed before
-    ///   returning so it is not leaked.
+    /// - [`LearningModeError::HResultCall`] if the selected Learning Mode start
+    ///   export fails — in which case the just-created environment is closed
+    ///   before returning so it is not leaked.
     pub fn begin(
         secenv_api: SecurityEnvironmentApi,
         learning_mode_api: LearningModeApi,

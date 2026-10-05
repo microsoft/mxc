@@ -405,8 +405,8 @@ impl BaseContainerRunner {
     ///
     /// The successful probe session is dropped immediately, which closes and discards the trace.
     pub fn is_capture_denials_usable() -> bool {
-        // Do not cache: StartLearningModeTraceWithOptions can fail transiently,
-        // so later probes must retry.
+        // Do not cache: the selected Learning Mode start export can fail
+        // transiently, so later probes must retry.
         if !Self::is_process_security_environment_usable() {
             return false;
         }

@@ -61,17 +61,20 @@ The PSEC probe requires:
 - `QueryProcessSecurityEnvironmentSupport`
 - `CloseProcessSecurityEnvironment`
 
-When `processContainer.captureDenials` is present, MXC treats PSEC plus the
-official V2 Learning Mode exports as one native capture capability set:
+When `processContainer.captureDenials` is present, MXC treats PSEC plus a
+compatible Learning Mode export set as one native capture capability:
 
-- `StartLearningModeTraceWithOptions`
+- `StartLearningModeTraceWithOptions` (preferred) or `StartLearningModeTrace`
 - `StopLearningModeTrace`
 - `CloseLearningModeTrace`
 
-When that complete set is available, MXC uses PSEC with native V2 capture.
+The option-aware start requests `ACCESS | NETWORK`. The legacy start captures
+access events only and therefore produces no WFP network decisions. A failing
+option-aware start does not retry through the legacy export. When a compatible
+start plus Stop and Close is available, MXC uses PSEC with native capture.
 Otherwise it retains the highest AppContainer containment tier that can fully
-honor the request (AppContainer+BFS or AppContainer+DACL) and pairs it with
-the guarded WPR capture provider. The elevated guardian filters the host-wide
+honor the request (AppContainer+BFS or AppContainer+DACL) and pairs it with the
+guarded WPR capture provider. The elevated guardian filters the host-wide
 trace to OS-observed process lifetime windows: before the suspended sandbox
 child resumes, the authenticated owner sends its job and still-owned root
 process HANDLE values. The guardian duplicates both from that authenticated
