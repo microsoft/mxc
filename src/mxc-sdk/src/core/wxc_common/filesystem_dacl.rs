@@ -1554,7 +1554,7 @@ pub fn scan_explicit_aces_for_sid(
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = ptr::null_mut();
         let gace = unsafe { GetAce(existing_dacl, i, &mut ace_ptr) };
-        if gace.is_err() {
+        if gace.is_err() || ace_ptr.is_null() {
             continue;
         }
         let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
@@ -1667,7 +1667,7 @@ pub fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclErr
     let mut denied: u32 = 0;
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = ptr::null_mut();
-        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
+        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() || ace_ptr.is_null() {
             continue;
         }
         let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
@@ -1826,7 +1826,7 @@ pub fn null_device_appcontainer_grants() -> Option<bool> {
     let mut granted = [false; 2];
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = ptr::null_mut();
-        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
+        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() || ace_ptr.is_null() {
             continue;
         }
         let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
@@ -1995,7 +1995,7 @@ fn replace_explicit_aces_for_sid_inner(
         let inherited_bit = INHERITED_ACE.0 as u8;
         for i in 0..info.AceCount {
             let mut ace_ptr: *mut c_void = ptr::null_mut();
-            if unsafe { GetAce(existing_dacl, i, &mut ace_ptr) }.is_err() {
+            if unsafe { GetAce(existing_dacl, i, &mut ace_ptr) }.is_err() || ace_ptr.is_null() {
                 continue;
             }
             let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
@@ -2624,7 +2624,7 @@ mod tests {
             let inherited_bit = INHERITED_ACE.0 as u8;
             for i in 0..info.AceCount {
                 let mut ace_ptr: *mut c_void = ptr::null_mut();
-                if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
+                if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() || ace_ptr.is_null() {
                     continue;
                 }
                 let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };

@@ -38,16 +38,19 @@ pub(crate) fn run() {
         return;
     };
 
-    // Read the actual windows crate version from Cargo.lock. The workspace root
-    // (and its Cargo.lock) is at <repo>/src, three `..` up from this crate.
-    let lock_path = std::path::Path::new(&manifest_dir)
-        .join("..")
-        .join("..")
-        .join("Cargo.lock");
+    // Cargo packages include Cargo.lock at the crate root, while repository
+    // builds use the workspace lockfile one directory above mxc-sdk.
+    let manifest_dir = std::path::Path::new(&manifest_dir);
+    let lock_path = [
+        manifest_dir.join("Cargo.lock"),
+        manifest_dir.join("../Cargo.lock"),
+    ]
+    .into_iter()
+    .find(|path| path.exists());
 
-    if !lock_path.exists() {
+    let Some(lock_path) = lock_path else {
         return;
-    }
+    };
 
     let lock_contents = std::fs::read_to_string(&lock_path).unwrap_or_default();
 

@@ -110,5 +110,3 @@ async fn run_netsh(args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.

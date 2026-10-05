@@ -131,5 +131,3 @@ mod tests {
         let _ = job.assign(pid);
     }
 }
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
