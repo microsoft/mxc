@@ -87,6 +87,7 @@ function Invoke-NetworkProxyAssertions {
     if ($psec) {
         $out = $envRun.Result.Stdout
         $ran = [bool]($out -match '(?im)^SystemRoot=')
+        $compatibilityAvailable = $Script:Caps.BaseContainerSupportsProxyLoopbackCompatibility
         # PSEC 1.0-only hosts use the explicit identity-less proxy workaround.
         # PSEC 1.1+ still requires the ingress support flag. A bare OS error
         # is never a valid substitute for successful execution or rejection.
@@ -95,11 +96,13 @@ function Invoke-NetworkProxyAssertions {
             -Pass ($ran -or $rejectedCleanly) `
             -Detail ("ran=$ran; rejectedAtValidation=$rejectedCleanly; exit=$($envRun.Result.ExitCode); " +
                      "stderr=$(Format-Snippet $envRun.Result.Stderr)")
-        if ($envRun.Log -match 'using PSEC 1\.0 proxy loopback compatibility') {
-            Record-Result -Phase 'P8e' -Name 'PSEC 1.0 proxy workaround launches the workload' `
-                -Pass $ran -Detail "exit=$($envRun.Result.ExitCode); ran=$ran"
+        if ($compatibilityAvailable) {
+            $compatibilityLogged = [bool]($envRun.Log -match 'using PSEC 1\.0 proxy loopback compatibility')
+            Record-Result -Phase 'P8e' -Name 'PSEC 1.0-capable host launches and logs the proxy workaround' `
+                -Pass ($ran -and $compatibilityLogged) `
+                -Detail "exit=$($envRun.Result.ExitCode); ran=$ran; compatibilityLogged=$compatibilityLogged"
         }
-        if ($ran) {
+        if ($ran -or $compatibilityAvailable) {
             foreach ($v in @('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')) {
                 # cmd.exe `set` upper-cases nothing, but Windows env lookup is
                 # case-insensitive and duplicate-insensitive, so a variable set

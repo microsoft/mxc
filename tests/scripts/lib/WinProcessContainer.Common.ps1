@@ -387,6 +387,7 @@ function Get-HostCapabilities {
         # denied tests auto-enable when it ships.
         SupportsDeniedPaths            = (($tier -eq 'appcontainer-dacl') -or $denyBit)
         BaseContainerSupportsEnumeratePaths = $enumBit
+        BaseContainerSupportsProxyLoopbackCompatibility = [bool]$p.probes.baseContainerSupportsProxyLoopbackCompatibility
         # enumeratePaths has NO fallback: it needs PSEC 1.1 plus
         # PSE_SUPPORT_FS_ENUMERATE, and the detector refuses the request
         # outright on every AppContainer tier (FallbackError::
