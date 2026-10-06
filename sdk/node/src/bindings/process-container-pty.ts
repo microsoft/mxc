@@ -35,7 +35,7 @@ function asError(error: unknown): Error {
 }
 
 class NodePtyLifecycleDriver implements NativeLifecycleDriver {
-  readonly id = 0;
+  readonly id: number;
   readonly standardInput: Writable;
   readonly standardOutput = new PassThrough();
   readonly standardError = null;
@@ -51,6 +51,7 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
   private resolveExit!: (result: WaitResult) => void;
 
   constructor(private readonly pty: IPty) {
+    this.id = pty.pid;
     this.standardInput = new Writable({
       write: (chunk: Buffer, _encoding, callback) => {
         try {
@@ -95,6 +96,7 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
   }
 
   warnings(): readonly string[] {
+    // The legacy executor-backed IPty contract merges diagnostics into output.
     return [];
   }
 
@@ -127,13 +129,11 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
 /** @internal Creates the public process wrapper around a node-pty handle. */
 export function createNodePtyProcess(
   pty: IPty,
-  timeoutMs: number | undefined,
 ): MxcPtyProcess {
   const driver = new NodePtyLifecycleDriver(pty);
   return new MxcPtyProcess(
     driver,
     ({ rows, columns }) => pty.resize(columns, rows),
-    timeoutMs,
   );
 }
 
@@ -174,7 +174,7 @@ async function spawnWithWxcExecutablePty(
       env: process.env,
       useConpty: true,
     });
-    return createNodePtyProcess(pty, request.process.timeout);
+    return createNodePtyProcess(pty);
   } catch (error) {
     if (pty !== undefined) {
       try {

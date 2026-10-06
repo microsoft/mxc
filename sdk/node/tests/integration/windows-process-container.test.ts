@@ -92,7 +92,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
       timeoutMs: 30000,
     });
     try {
-      assert.strictEqual(terminal.id, 0);
+      assert.ok(terminal.id > 0);
       const output = (async (): Promise<string> => {
         let text = '';
         for await (const chunk of terminal.output) text += chunk.toString();

@@ -79,10 +79,10 @@ class FakePty implements IPty {
 describe('ProcessContainer node-pty binding', () => {
   it('wraps IPty input, output, resize, wait, and kill operations', async () => {
     const pty = new FakePty();
-    const terminal = createNodePtyProcess(pty, undefined);
+    const terminal = createNodePtyProcess(pty);
     const output = once(terminal.output, 'data');
 
-    assert.strictEqual(terminal.id, 0);
+    assert.strictEqual(terminal.id, pty.pid);
     terminal.input.write('echo hello\r\n');
     pty.emitData('hello\r\n');
     terminal.resize({ rows: 40, columns: 120 });
