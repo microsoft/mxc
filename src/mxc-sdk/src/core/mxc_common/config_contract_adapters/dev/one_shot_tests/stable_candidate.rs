@@ -399,8 +399,6 @@ fn process_container_request_maps_expected_wire_fields() {
     assert_eq!(fallback.allow_dacl_mutation, Some(true));
 
     let network = wire.network.expect("network should be populated");
-    assert!(network.default_policy.is_none());
-    assert!(network.proxy.is_none());
     assert!(matches!(
         network.egress.unwrap().default,
         Some(super::wire::NetworkAction::Deny)
@@ -498,8 +496,6 @@ fn lxc_request_maps_expected_wire_fields() {
     );
 
     let network = wire.network.expect("network should be populated");
-    assert!(network.default_policy.is_none());
-    assert!(network.enforcement_mode.is_none());
     assert!(matches!(
         network.egress.unwrap().default,
         Some(super::wire::NetworkAction::Allow)
@@ -508,7 +504,6 @@ fn lxc_request_maps_expected_wire_fields() {
         network.ingress.unwrap().default,
         Some(super::wire::NetworkAction::Allow)
     ));
-    assert!(network.proxy.is_none());
 
     let ui = wire.ui.expect("ui should be populated");
     assert_eq!(ui.disable, Some(true));
@@ -567,8 +562,6 @@ fn seatbelt_request_maps_expected_wire_fields() {
     );
 
     let network = wire.network.expect("network should be populated");
-    assert!(network.default_policy.is_none());
-    assert!(network.enforcement_mode.is_none());
     assert!(matches!(
         network.egress.unwrap().default,
         Some(super::wire::NetworkAction::Allow)
@@ -577,7 +570,6 @@ fn seatbelt_request_maps_expected_wire_fields() {
         network.ingress.unwrap().default,
         Some(super::wire::NetworkAction::Allow)
     ));
-    assert!(network.proxy.is_none());
 
     let seatbelt = wire.seatbelt.expect("seatbelt should be populated");
     assert_eq!(
@@ -611,12 +603,8 @@ fn empty_optional_sections_map_to_present_empty_wire_sections() {
     assert!(fallback.allow_dacl_mutation.is_none());
 
     let network = wire.network.expect("network should be populated");
-    assert!(network.default_policy.is_none());
-    assert!(network.enforcement_mode.is_none());
-    assert!(network.allow_local_network.is_none());
-    assert!(network.allowed_hosts.is_none());
-    assert!(network.blocked_hosts.is_none());
-    assert!(network.proxy.is_none());
+    assert!(network.egress.is_none());
+    assert!(network.ingress.is_none());
 
     let ui = wire.ui.expect("ui should be populated");
     assert!(ui.disable.is_none());
@@ -1023,11 +1011,6 @@ fn directional_network_request_maps_expected_wire_fields() {
         ingress.host_loopback,
         Some(super::wire::NetworkAction::Allow)
     ));
-
-    // The legacy fields stay absent when only directional policy is supplied.
-    assert!(network.default_policy.is_none());
-    assert!(network.enforcement_mode.is_none());
-    assert!(network.proxy.is_none());
 }
 #[test]
 fn every_network_action_maps_to_the_expected_wire_value() {

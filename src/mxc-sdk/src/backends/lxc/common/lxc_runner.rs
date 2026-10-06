@@ -59,8 +59,7 @@ const DEFAULT_TERM: &str = "xterm-256color";
 /// different directories — `lxc-attach` starts at the container root, so a
 /// relative `process.cwd` would otherwise leave `HOME` naming a different
 /// directory than the one the child landed in. Normalizing against the
-/// container root is what makes them agree, so it is gated on the schema that
-/// introduced `HOME`; below 0.9 the caller's spelling reaches `cd` untouched.
+/// container root is what makes them agree for every supported contract.
 ///
 /// A policy grant is deliberately *not* consulted: with `process.cwd` omitted
 /// the child starts at the container root, so treating a grant as the start
@@ -68,13 +67,7 @@ const DEFAULT_TERM: &str = "xterm-256color";
 fn start_directory(request: &ExecutionRequest) -> Option<String> {
     Some(request.working_directory.as_str())
         .filter(|dir| !dir.is_empty())
-        .map(|dir| {
-            if request.supplies_default_env() {
-                crate::mxc_common::models::sandbox_absolute_path(dir)
-            } else {
-                dir.to_string()
-            }
-        })
+        .map(crate::mxc_common::models::sandbox_absolute_path)
 }
 
 /// The default environment, from schema 0.9: `PATH`, `TERM`, and -- when one
@@ -2330,13 +2323,8 @@ mod tests {
     /// `process.env` resolution, which schema 0.9 gave a default block.
     mod env {
         use super::*;
-        use crate::mxc_common::models::DefaultEnvCompatibility;
-
-        fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
-            ExecutionRequest {
-                default_env_compatibility: compatibility,
-                ..Default::default()
-            }
+        fn request() -> ExecutionRequest {
+            ExecutionRequest::default()
         }
 
         fn value<'a>(entries: &'a [String], key: &str) -> Option<&'a str> {
@@ -2355,7 +2343,7 @@ mod tests {
 
         #[test]
         fn an_omitted_env_gets_the_default_block() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = None;
             r.working_directory = "/workspace".into();
             let entries = resolved_env(&r);
@@ -2376,21 +2364,21 @@ mod tests {
 
         #[test]
         fn an_explicitly_empty_env_stays_empty() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = Some(vec![]);
             assert!(resolved_env(&r).is_empty());
         }
 
         #[test]
         fn a_supplied_env_is_used_verbatim() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = Some(vec!["FOO=bar".into()]);
             assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
         }
 
         #[test]
         fn inherit_default_env_layers_over_the_default_block() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
             r.inherit_default_env = true;
             let entries = resolved_env(&r);
@@ -2408,7 +2396,7 @@ mod tests {
 
         #[test]
         fn home_follows_the_directory_the_child_starts_in() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = None;
             r.working_directory = "/workspace".into();
             assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
@@ -2422,7 +2410,7 @@ mod tests {
                 ("a/../b", "/b"),
                 ("/x/../y/./z", "/y/z"),
             ] {
-                let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+                let mut r = request();
                 r.env = None;
                 r.working_directory = cwd.into();
                 assert_eq!(value(&resolved_env(&r), "HOME"), Some(expected));
@@ -2436,7 +2424,7 @@ mod tests {
         /// `HOME`.
         #[test]
         fn a_policy_grant_alone_does_not_become_home() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = None;
             r.working_directory = String::new();
             // A real directory, so the shared resolver's `is_dir` probe would
@@ -2452,7 +2440,7 @@ mod tests {
         #[test]
         fn home_and_the_attach_directory_agree() {
             for cwd in ["", "/workspace", "work", "./work", "a/../b", "/x/../y/./z"] {
-                let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+                let mut r = request();
                 r.env = None;
                 r.working_directory = cwd.into();
                 assert_eq!(
@@ -2465,7 +2453,7 @@ mod tests {
 
         #[test]
         fn a_caller_entry_without_a_value_is_dropped_by_the_merge() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = Some(vec!["FEATURE_FLAG".into(), "FOO=bar".into()]);
 
             // Verbatim: carried through, dropped when `lxc-attach` args build.

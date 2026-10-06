@@ -1065,10 +1065,6 @@ mod tests {
             execution.source_contract,
             Some(crate::mxc_contract::ContractVersion::V0_9_0Alpha)
         );
-        assert_eq!(
-            execution.network_enforcement_compatibility,
-            crate::mxc_common::models::NetworkEnforcementCompatibility::Strict
-        );
         assert_eq!(execution.script_code, "echo hello");
     }
 

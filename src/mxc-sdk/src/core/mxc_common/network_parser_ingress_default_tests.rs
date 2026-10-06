@@ -3,9 +3,8 @@
 
 //! Tests the resolved value of an omitted `network.ingress.hostLoopback`.
 //!
-//! Contract source: `docs/containment-configuration/0.8.0/networking/networking.md`
-//! ("Host Loopback and Inbound Policy") and `docs/containment-configuration/0.8.0/policy.md`:
-//! both ingress controls default to `deny`, and `hostLoopback` resolves
+//! Contract source: `docs/schema.md` ("Directional networking"): both
+//! ingress controls default to `deny`, and `hostLoopback` resolves
 //! independently of `ingress.default` rather than inheriting it.
 //!
 //! The inherit reading and the deny reading agree everywhere except under
@@ -17,12 +16,6 @@ use super::*;
 fn sections(ingress: Option<wire::NetworkIngress>, network_present: bool) -> NetworkSections {
     NetworkSections {
         network: network_present.then_some(wire::Network {
-            default_policy: None,
-            enforcement_mode: None,
-            allow_local_network: None,
-            allowed_hosts: None,
-            blocked_hosts: None,
-            proxy: None,
             egress: Some(wire::NetworkEgress {
                 default: Some(wire::NetworkAction::Allow),
                 allow: None,

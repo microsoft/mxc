@@ -318,15 +318,6 @@ impl NetworkPolicy {
     }
 }
 
-impl From<crate::mxc_common::wire::NetworkPolicy> for NetworkPolicy {
-    fn from(p: crate::mxc_common::wire::NetworkPolicy) -> Self {
-        match p {
-            crate::mxc_common::wire::NetworkPolicy::Allow => Self::Allow,
-            crate::mxc_common::wire::NetworkPolicy::Block => Self::Block,
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkEnforcementMode {
@@ -426,16 +417,6 @@ pub struct NetworkEgressPolicy {
 pub struct NetworkIngressPolicy {
     pub default: NetworkAction,
     pub host_loopback: NetworkAction,
-}
-
-impl From<crate::mxc_common::wire::NetworkEnforcement> for NetworkEnforcementMode {
-    fn from(m: crate::mxc_common::wire::NetworkEnforcement) -> Self {
-        match m {
-            crate::mxc_common::wire::NetworkEnforcement::Capabilities => Self::Capabilities,
-            crate::mxc_common::wire::NetworkEnforcement::Firewall => Self::Firewall,
-            crate::mxc_common::wire::NetworkEnforcement::Both => Self::Both,
-        }
-    }
 }
 
 /// A hostname-to-IP mapping that makes a sandbox resolve the proxy to exactly
@@ -1042,11 +1023,7 @@ pub struct ExecutionRequest {
     /// Direct typed SDK construction has no external contract attribution.
     #[serde(serialize_with = "serialize_source_contract")]
     pub source_contract: Option<crate::mxc_contract::ContractVersion>,
-    /// Whether backends preserve pre-v0.8 network compatibility behavior or
-    /// enforce the current strict posture.
-    pub network_enforcement_compatibility: NetworkEnforcementCompatibility,
     /// Whether backends supply the default `process.env` block.
-    pub default_env_compatibility: DefaultEnvCompatibility,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).
@@ -1070,18 +1047,16 @@ pub struct ExecutionRequest {
     ///   process's variables must merge them in themselves, or set
     ///   [`ExecutionRequest::inherit_default_env`].
     ///
-    /// The Windows process container honors the distinction at every schema
-    /// version; LXC, Bubblewrap, Seatbelt, and WSLc honor it from 0.9, and
-    /// below 0.9 treat `None` and `Some(vec![])` alike. IsolationSession starts
-    /// every process from the agent user's default environment, so it rejects
-    /// `Some` without [`ExecutionRequest::inherit_default_env`].
+    /// IsolationSession starts every process from the agent user's default
+    /// environment, so it rejects `Some` without
+    /// [`ExecutionRequest::inherit_default_env`].
     pub env: Option<Vec<String>>,
 
     /// Layer [`ExecutionRequest::env`] on top of the backend's default
     /// environment instead of replacing it (from `process.inheritDefaultEnv`).
     ///
     /// Only meaningful when `env` is `Some`: with `None` the child already gets
-    /// the default. Rejected below schema 0.9 by the config parser.
+    /// the default.
     pub inherit_default_env: bool,
     pub script_code: String,
     pub working_directory: String,
@@ -1119,25 +1094,6 @@ pub struct ExecutionRequest {
     pub dry_run: bool,
 }
 
-/// Backend network behavior after exact contract normalization.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum NetworkEnforcementCompatibility {
-    /// Enforce the current network posture.
-    #[default]
-    Strict,
-}
-
-/// Backend `process.env` behavior for registered contracts and typed requests.
-/// Every supported request uses the default block.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DefaultEnvCompatibility {
-    /// Supply the default block and keep the four states of `process.env` distinct.
-    #[default]
-    DefaultBlock,
-}
-
 fn serialize_source_contract<S>(
     value: &Option<crate::mxc_contract::ContractVersion>,
     serializer: S,
@@ -1148,15 +1104,6 @@ where
     value
         .map(crate::mxc_contract::ContractVersion::as_str)
         .serialize(serializer)
-}
-
-impl NetworkEnforcementCompatibility {
-    /// Stable diagnostic spelling for policy identity and tests.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Strict => "strict",
-        }
-    }
 }
 
 /// Where a [`ResolvedWorkingDirectory`] came from.
@@ -1211,21 +1158,14 @@ impl ExecutionRequest {
             .unwrap_or_default()
     }
 
-    /// Whether this request's contract supplies the backend default
-    /// environment block, introduced by `0.9.0-alpha`.
-    pub fn supplies_default_env(&self) -> bool {
-        self.default_env_compatibility == DefaultEnvCompatibility::DefaultBlock
-    }
-
     /// The caller's environment entries, with "not supplied" and "supplied but
     /// empty" flattened to the same empty slice.
     ///
-    /// Only for backends that have no default environment to distinguish them
-    /// against — every backend below schema 0.9. A backend with a default block
-    /// must match on [`ExecutionRequest::env`] directly, since `None` means
-    /// "give the child the default" and `Some(vec![])` means "give the child
-    /// nothing". A backend whose default MXC cannot enumerate takes the state
-    /// from `env` and the entries from here: WSLc, whose default is the
+    /// Backends with an enumerable default must match on
+    /// [`ExecutionRequest::env`] directly, since `None` means "give the child
+    /// the default" and `Some(vec![])` means "give the child nothing". A
+    /// backend whose default MXC cannot enumerate takes the state from `env`
+    /// and the entries from here: WSLc, whose default is the
     /// container image's `ENV`, and IsolationSession, which starts every
     /// process from the agent user's default environment.
     pub fn env_entries(&self) -> &[String] {

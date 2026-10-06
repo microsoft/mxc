@@ -214,7 +214,7 @@ remain on the selected containment configuration.
 | Host consent presenter | `TelemetryConsentPresenter` |
 
 Network policy details are in the
-[networking guide](https://github.com/microsoft/mxc/blob/main/docs/containment-configuration/0.8.0/networking/networking.md);
+[networking guide](https://github.com/microsoft/mxc/blob/main/docs/schema.md#directional-networking-supported-contracts)
 host-specific behavior and supported capabilities are documented in the
 backend guides under [`docs/`](https://github.com/microsoft/mxc/tree/main/docs).
 See the [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md)

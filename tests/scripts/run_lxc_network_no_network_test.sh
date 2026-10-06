@@ -2,9 +2,8 @@
 # LXC omitted-network-section test
 #
 # Proves that a request with the `network` section omitted entirely receives
-# the directional deny defaults stated in the contract: the workload cannot reach
-# the network.  The contract is docs/containment-configuration/0.8.0/policy.md: "A schema
-# 0.8 policy with no network fields selects directional deny defaults."
+# the directional deny defaults in docs/schema.md: the workload cannot reach
+# the network.
 #
 # The first run is the positive control.  It sends the same workload and probe
 # with an explicit egress allow rule.  If that run cannot reach the destination,
@@ -112,7 +111,7 @@ run_config "positive control: request with explicit egress allow to $PROBE_ADDRE
 assert_allowed "an explicitly allowed destination was unreachable on the positive control.  The second run's blocked result would prove nothing, so this test fails rather than proceeding."
 
 run_config "case under test: request with network section omitted entirely" "$OMIT_CONFIG"
-assert_blocked "the workload reached $PROBE_ADDRESS under a request with no network section.  The contract (docs/containment-configuration/0.8.0/policy.md) states that omitted permissions remain denied and a 0.8 policy with no network fields selects directional deny defaults."
+assert_blocked "the workload reached $PROBE_ADDRESS under a request with no network section.  The supported contract (docs/schema.md) states that omitted network policy selects directional deny defaults."
 
 echo "PASS: a request with the network section omitted cannot reach the network."
 echo "LXC omitted-network-section test complete."

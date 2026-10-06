@@ -1293,8 +1293,6 @@ fn normalize_common_request_ir(
     let present_backend_sections = present_backend_sections(&cfg);
 
     let source_contract = cfg.source_contract;
-    let network_enforcement_compatibility = cfg.network_enforcement_compatibility;
-    let default_env_compatibility = cfg.default_env_compatibility;
     let container_id = cfg.container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
@@ -1626,8 +1624,6 @@ fn normalize_common_request_ir(
 
     Ok(ExecutionRequest {
         source_contract: Some(source_contract),
-        network_enforcement_compatibility,
-        default_env_compatibility,
         container_id,
         env,
         inherit_default_env,
@@ -1747,16 +1743,11 @@ mod tests {
     fn assert_exact_contract_bridge(
         request: ExactOneShotContract,
         expected_contract: ContractVersion,
-        expected_compatibility: crate::mxc_common::models::NetworkEnforcementCompatibility,
     ) {
         let mut logger = test_logger();
         let execution = load_one_shot_request_from_contract(request, &mut logger).unwrap();
 
         assert_eq!(execution.source_contract, Some(expected_contract));
-        assert_eq!(
-            execution.network_enforcement_compatibility,
-            expected_compatibility
-        );
         assert_eq!(
             execution.source_contract_version(),
             expected_contract.as_str()
@@ -2146,10 +2137,6 @@ mod tests {
         match parse_exact_for_test(json).unwrap() {
             MxcRequest::OneShot(request) => {
                 assert_eq!(request.source_contract, Some(ContractVersion::V1_1_0Alpha));
-                assert_eq!(
-                    request.network_enforcement_compatibility,
-                    crate::mxc_common::models::NetworkEnforcementCompatibility::Strict
-                );
                 assert_eq!(request.script_code, "echo dev");
             }
             MxcRequest::StateAware(_) => panic!("expected one-shot request"),
@@ -2776,7 +2763,6 @@ mod tests {
         assert_exact_contract_bridge(
             ExactOneShotContract::V0_9(Box::new(v0_9)),
             ContractVersion::V0_9_0Alpha,
-            crate::mxc_common::models::NetworkEnforcementCompatibility::Strict,
         );
 
         let v1_0 = serde_json::from_str::<crate::mxc_contract::published::v1_0_0::OneShotRequest>(
@@ -2789,7 +2775,6 @@ mod tests {
         assert_exact_contract_bridge(
             ExactOneShotContract::V1_0(Box::new(v1_0)),
             ContractVersion::V1_0_0,
-            crate::mxc_common::models::NetworkEnforcementCompatibility::Strict,
         );
 
         let dev = serde_json::from_str::<crate::mxc_contract::dev::OneShotRequest>(
@@ -2802,7 +2787,6 @@ mod tests {
         assert_exact_contract_bridge(
             ExactOneShotContract::Dev(Box::new(dev)),
             ContractVersion::V1_1_0Alpha,
-            crate::mxc_common::models::NetworkEnforcementCompatibility::Strict,
         );
     }
 

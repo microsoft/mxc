@@ -1013,7 +1013,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::default())?;
         policy::plan_policy(request)
             .map(|_| ())
             .map_err(map_policy_error)

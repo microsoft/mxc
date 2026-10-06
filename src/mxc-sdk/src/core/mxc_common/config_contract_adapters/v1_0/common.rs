@@ -123,12 +123,6 @@ fn convert_network_ingress(value: contract::NetworkIngress) -> wire::NetworkIngr
 pub(super) fn convert_network(value: contract::Network) -> wire::Network {
     let contract::Network { egress, ingress } = value;
     wire::Network {
-        default_policy: None,
-        enforcement_mode: None,
-        allow_local_network: None,
-        allowed_hosts: None,
-        blocked_hosts: None,
-        proxy: None,
         egress: egress.into_option().map(convert_network_egress),
         ingress: ingress.into_option().map(convert_network_ingress),
     }

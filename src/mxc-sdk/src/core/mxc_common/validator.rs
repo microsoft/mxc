@@ -13,9 +13,6 @@ use crate::mxc_common::mxc_error::MxcError;
 pub struct NetworkPolicySupport(u8);
 
 impl NetworkPolicySupport {
-    /// Support for the legacy network policy without additive 0.8 features.
-    pub const LEGACY: Self = Self(0);
-
     /// Support for the outbound network default policy.
     pub const EGRESS_DEFAULT: Self = Self(1 << 4);
 
@@ -404,7 +401,7 @@ mod tests {
                 ..Default::default()
             };
 
-            for support in [NetworkPolicySupport::LEGACY, NetworkPolicySupport::ALL] {
+            for support in [NetworkPolicySupport::default(), NetworkPolicySupport::ALL] {
                 assert!(
                     validate_network_policy_support(&request, support).is_ok(),
                     "valid legacy host-list policy was rejected for support {support:?}"
@@ -447,7 +444,7 @@ mod tests {
                 ..Default::default()
             };
 
-            for support in [NetworkPolicySupport::LEGACY, NetworkPolicySupport::ALL] {
+            for support in [NetworkPolicySupport::default(), NetworkPolicySupport::ALL] {
                 let error = validate_network_policy_support(&request, support).unwrap_err();
                 assert_eq!(error.error_message, expected);
             }
@@ -463,7 +460,7 @@ mod tests {
         request.policy.allowed_hosts = vec!["203.0.113.7".to_string()];
 
         let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
+            validate_network_policy_support(&request, NetworkPolicySupport::default()).unwrap_err();
         assert_eq!(
             error.error_message,
             "network.egress.default is not supported by the selected backend"
@@ -478,7 +475,7 @@ mod tests {
             ..Default::default()
         });
         let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
+            validate_network_policy_support(&request, NetworkPolicySupport::default()).unwrap_err();
         assert!(error.error_message.contains("network.egress.default"));
 
         let mut request = ExecutionRequest::default();
@@ -590,7 +587,7 @@ mod tests {
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
         request.policy.default_network_policy = NetworkPolicy::Allow;
         let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
+            validate_network_policy_support(&request, NetworkPolicySupport::default()).unwrap_err();
         assert!(error.error_message.contains("legacy outbound policy"));
 
         let mut request = ExecutionRequest::default();
@@ -612,12 +609,12 @@ mod tests {
     }
 
     #[test]
-    fn network_support_accepts_implicit_directional_defaults_for_legacy_backends() {
+    fn network_support_accepts_implicit_directional_defaults_without_declared_features() {
         let mut request = ExecutionRequest::default();
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
         request.policy.network_ingress = Some(NetworkIngressPolicy::default());
 
-        assert!(validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).is_ok());
+        assert!(validate_network_policy_support(&request, NetworkPolicySupport::default()).is_ok());
     }
 
     #[test]
@@ -641,7 +638,7 @@ mod tests {
         });
 
         let error =
-            validate_state_aware_network_policy_support(&request, NetworkPolicySupport::LEGACY)
+            validate_state_aware_network_policy_support(&request, NetworkPolicySupport::default())
                 .unwrap_err();
 
         assert_eq!(error.code, MxcErrorCode::PolicyValidation);

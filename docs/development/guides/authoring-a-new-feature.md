@@ -18,8 +18,8 @@
 
 Read these in order:
 
-1. [Containment configuration spec](../../containment-configuration/0.7.0/policy.md): what
-Policy and ContainerConfig are, design principles.
+1. [Configuration schema](../../schema.md): supported policy fields and their
+   default behavior.
 2. [Versioning Design](../architecture/versioning.md): how policy/schema/SDK
 versions relate and when to bump.
 
@@ -101,8 +101,7 @@ If your feature touches SandboxPolicy, update
 If your feature adds policy or config fields, you will need
 to plumb them through `createConfigFromPolicy()` in
 `sdk/node/src/sandbox.ts`. See the
-[worked example in the containment configuration spec](../../containment-configuration/0.7.0/policy.md#10-worked-example-ui-policy)
-for a walkthrough.
+[UI policy section](../../schema.md#ui-policy) for the supported request shape.
 
 ---
 

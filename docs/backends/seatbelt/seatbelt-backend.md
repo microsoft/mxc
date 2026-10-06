@@ -183,8 +183,8 @@ Anything it hasn't declared is rejected up front.
 ### Fields (supported schema 0.9+)
 
 This is the cross-backend directional shape accepted by the registered exact
-contracts. The original [0.8 networking design](../../containment-configuration/0.8.0/networking/networking.md)
-is historical; schema 0.8 is no longer accepted.
+contracts. Schema 0.8 is no longer accepted; see the
+[supported network fields](../../schema.md#directional-networking-supported-contracts).
 
 > **Omitting `network` entirely denies all IP networking.** Every field below
 > defaults to `deny`, so a config with no `network` block behaves exactly like

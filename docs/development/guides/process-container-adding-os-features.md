@@ -5,9 +5,9 @@
 This guide covers adding new OS-level features that flow through MXC's Windows
 process container pipeline.
 
-Exact v0.9 networking uses directional egress/ingress,
-`runtimeConfig.networkProxy`, and ProcessContainer proxy-peer identity. Legacy
-networking fields remain available under their published contracts. Backend
+Supported networking uses directional egress/ingress,
+`runtimeConfig.networkProxy`, and ProcessContainer proxy-peer identity. Retired
+networking fields are rejected by every registered contract. Backend
 selection depends on host capability and requested policy, not schema version.
 
 For which policy aspects this backend can enforce on each Windows 11 release,
@@ -15,8 +15,8 @@ see [Windows OS-version policy support](../../backends/process-container/os-vers
 
 ## Prerequisites
 
-1. Read the [containment configuration spec](../../containment-configuration/0.7.0/policy.md) to
-   understand how `SandboxPolicy` maps to `ContainerConfig`.
+1. Read the [supported configuration schema](../../schema.md) for policy and
+   request fields.
 2. Read [authoring-a-new-feature.md](authoring-a-new-feature.md), especially
    Step 1 (feature spec) and Step 2 (OS changes).
 3. Submit a feature spec so reviewers understand the end-to-end flow.

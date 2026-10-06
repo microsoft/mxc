@@ -143,7 +143,7 @@ fn policy_hash_identity(container_id: &str) -> String {
 mod attribution_tests {
     use super::config_schema_version;
     use crate::mxc_common::logger::{Logger, Mode};
-    use crate::mxc_common::models::{ExecutionRequest, NetworkEnforcementCompatibility};
+    use crate::mxc_common::models::ExecutionRequest;
     use crate::mxc_common::state_aware_request::MxcRequest;
 
     #[test]
@@ -161,10 +161,6 @@ mod attribution_tests {
             panic!("expected one-shot request");
         };
         assert_eq!(config_schema_version(&exact), "0.9.0-alpha");
-        assert_eq!(
-            exact.network_enforcement_compatibility,
-            NetworkEnforcementCompatibility::Strict
-        );
 
         let direct = ExecutionRequest {
             script_code: "echo direct".to_string(),
@@ -172,10 +168,6 @@ mod attribution_tests {
         };
         assert_eq!(config_schema_version(&direct), "");
         assert_eq!(direct.source_contract, None);
-        assert_eq!(
-            direct.network_enforcement_compatibility,
-            NetworkEnforcementCompatibility::Strict
-        );
     }
 }
 

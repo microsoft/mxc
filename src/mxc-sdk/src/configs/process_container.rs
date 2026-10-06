@@ -139,7 +139,6 @@ mod tests {
     use super::*;
     use crate::mxc_common::models::{
         CaptureDenialsMode as RuntimeCaptureDenialsMode, ContainmentBackend,
-        NetworkEnforcementCompatibility,
     };
     use crate::policy::{
         build_request_with_containment, ContainerPolicy, Containment, NetworkAction,
@@ -191,10 +190,6 @@ mod tests {
 
         let inner = &request.inner;
         assert_eq!(inner.source_contract, None);
-        assert_eq!(
-            inner.network_enforcement_compatibility,
-            NetworkEnforcementCompatibility::Strict
-        );
         assert_eq!(inner.containment, ContainmentBackend::ProcessContainer);
         assert!(!inner.policy.least_privilege_mode);
         assert!(inner

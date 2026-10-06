@@ -639,8 +639,10 @@ Excluded, and why:
 | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
 | `experimental_enabled` | Authorizes selecting an experimental backend, not enforcement; changing it leaves policy identity unchanged. |
 
-`network_enforcement_compatibility` is included because it changes how the
-normalized network policy is interpreted and enforced.
+The retired network compatibility marker is no longer part of the projection.
+Hashes from builds that included it can differ even when the supported
+effective policy is unchanged; compare policy hashes across builds only with
+that projection change in mind.
 
 Enforcement-relevant backend configuration is hashed from
 `ExecutionRequest.windows_sandbox` and `ExecutionRequest.wslc`. The canonical
