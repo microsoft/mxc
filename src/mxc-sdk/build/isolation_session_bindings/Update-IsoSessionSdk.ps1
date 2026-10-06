@@ -11,7 +11,7 @@
     tracked files when the package is incomplete or internally inconsistent.
 
 .PARAMETER PackagePath
-    Path to Microsoft.Windows.AI.IsolationSession.SDK.<version>.nupkg.
+    Path to Microsoft.AI.IsolationSession.SDK.<version>.nupkg.
 
 .PARAMETER DestinationDirectory
     MXC's external\windows-sdk\isolation-session directory. Defaults to the
@@ -126,7 +126,7 @@ try {
     [xml] $nuspec = Convert-BytesToText -Bytes $nuspecBytes
     $packageId = [string] $nuspec.package.metadata.id
     $packageVersion = [string] $nuspec.package.metadata.version
-    if ($packageId -ne 'Microsoft.Windows.AI.IsolationSession.SDK') {
+    if ($packageId -ne 'Microsoft.AI.IsolationSession.SDK') {
         throw "Unexpected package id '$packageId'."
     }
     if ($packageVersion -notmatch '^0\.(20\d{2})(0[1-9]|1[0-2])\.(\d+)$') {

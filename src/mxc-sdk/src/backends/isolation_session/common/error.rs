@@ -325,7 +325,7 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
          version-pin mismatch: the Preview WinMD wxc-exec was built against and the \
          MSI-installed IsolationSession runtime were produced from different OS versions, so \
          their interface IIDs differ. Rebuild the MSI and the \
-         Microsoft.Windows.AI.IsolationSession.SDK nuget from the same OS commit."
+         Microsoft.AI.IsolationSession.SDK NuGet from the same OS commit."
                 .to_string()
         } else {
             format!("IsolationSession runtime API activation failed: {detail}")
@@ -375,7 +375,7 @@ pub(super) fn lifted_payload_missing(operation: &str) -> IsolationSessionError {
                 .to_string(),
         ),
         Some(
-            "Rebuild against the Microsoft.Windows.AI.IsolationSession.SDK NuGet so \
+            "Rebuild against the Microsoft.AI.IsolationSession.SDK NuGet so \
              IsoSessionApp.dll and its stamped IsoSession.manifest are staged beside the host, \
              and install the matching runtime MSI (`winget install Microsoft.AI.IsolationSession`)."
                 .to_string(),

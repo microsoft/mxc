@@ -17,10 +17,10 @@ pub mod isolation_session_sdk {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    pub const PACKAGE_ID: &str = "Microsoft.Windows.AI.IsolationSession.SDK";
-    pub const PACKAGE_VERSION: &str = "0.202609.0";
+    pub const PACKAGE_ID: &str = "Microsoft.AI.IsolationSession.SDK";
+    pub const PACKAGE_VERSION: &str = "0.202610.5";
     pub const PACKAGE_SHA256: &str =
-        "2ce0c920f55b879eec3f3841e286d4be8f53b1a5ee42d5f16f997c6e24a09397";
+        "b387c9d11808bf8864d3d7e4d6924f79bdcd6e7c4c54c4e2e49ab0e3525b3d2e";
     pub const PACKAGE_PATH_ENV: &str = "ISOLATION_SESSION_SDK_PACKAGE";
 
     const APP_DLL: &str = "IsoSessionApp.dll";
@@ -313,22 +313,22 @@ pub mod isolation_session_sdk {
 <assembly>
   <assemblyIdentity name=\"IsoSession.Runtime\" />
   <file name=\"IsoSessionApp.dll\" />
-  <iso:instance name=\"2026.09\" />
+  <iso:instance name=\"2026.10\" />
 </assembly>";
 
         #[test]
         fn package_version_maps_to_runtime_instance() {
-            assert_eq!(package_runtime_instance().unwrap(), "2026.09");
+            assert_eq!(package_runtime_instance().unwrap(), "2026.10");
         }
 
         #[test]
         fn completed_runtime_manifest_is_accepted() {
-            validate_runtime_manifest(MANIFEST.as_bytes(), "2026.09").unwrap();
+            validate_runtime_manifest(MANIFEST.as_bytes(), "2026.10").unwrap();
         }
 
         #[test]
         fn mismatched_runtime_manifest_is_rejected() {
-            let error = validate_runtime_manifest(MANIFEST.as_bytes(), "2026.10").unwrap_err();
+            let error = validate_runtime_manifest(MANIFEST.as_bytes(), "2026.11").unwrap_err();
             assert!(error.contains("does not identify runtime instance"));
         }
 

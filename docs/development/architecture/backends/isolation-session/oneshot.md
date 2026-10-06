@@ -238,7 +238,7 @@ MXC supports two explicit metadata paths:
   `bindings.rs` and normal inbox WinRT activation. The private source WinMD is
   not committed; its provenance is recorded in `GENERATION_INFO.toml`.
 - **Lifted mode (`isolation_session_lifted`)** resolves the pinned
-  `Microsoft.Windows.AI.IsolationSession.SDK` package, generates Rust bindings
+  `Microsoft.AI.IsolationSession.SDK` package, generates Rust bindings
   from its Preview WinMD at build time, and stages the package's activation
   shim and manifest. The package itself is not committed.
 
