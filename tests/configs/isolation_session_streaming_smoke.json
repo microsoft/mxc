@@ -4,7 +4,7 @@
   "containerId": "isolation-session-streaming-smoke",
   "containment": "isolation_session",
   "process": {
-    "commandLine": "echo line_1 & ping -n 2 127.0.0.1 >nul & echo line_2 & ping -n 2 127.0.0.1 >nul & echo line_3",
+    "commandLine": "echo line_1 & ping -n 6 127.0.0.1 >nul & echo line_2 & ping -n 6 127.0.0.1 >nul & echo line_3",
     "timeout": 30000
   },
   "network": {

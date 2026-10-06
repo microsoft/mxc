@@ -47,6 +47,30 @@ expect_marker "the nested-denied probe ran" "FS_PROBE_DONE"
 expect_absent "a denied path nested in a readwrite grant stays denied" "FS_NESTED_DENIED_READ_SUCCEEDED"
 expect_absent "a nested denied path leaks no content" "FS_SECRET_CONTENT"
 
+run_config "$(render seatbelt_fs_denied_write.json TESTDIR "$TESTDIR")"
+expect_marker "the nested-denied-write probe ran" "FS_PROBE_DONE"
+expect_marker "the same run writes the enclosing readwrite grant" "FS_RW_WRITE_CREATED"
+expect_absent "a denied path nested in a readwrite grant is not writable" "FS_NESTED_DENIED_WRITE_SUCCEEDED"
+[ ! -f "$TESTDIR/rw/nested/written.txt" ] || fail "a nested denied write created a file on the host"
+pass "a nested denied write left no file behind"
+
+# Seatbelt has no masking primitive: a denied entry stays *visible* in a
+# granted parent and every operation on it is refused instead. Pinning the
+# visibility matters as much as the refusals -- a reader who assumes the entry
+# disappears will mis-size what a denial actually conceals.
+run_config "$(render seatbelt_fs_denied_metadata.json TESTDIR "$TESTDIR")"
+expect_marker "the denied-metadata probe ran" "FS_PROBE_DONE"
+grep -q 'FS_PARENT_ENTRIES=.*nested' <<<"$OUT" ||
+    fail "a denied entry stays visible in its granted parent" "$OUT"
+pass "a denied entry stays visible in its granted parent"
+expect_absent "a denied directory cannot be enumerated" "FS_DENIED_LIST_SUCCEEDED"
+expect_absent "a denied path's metadata cannot be read" "FS_DENIED_STAT_SUCCEEDED"
+expect_absent "a denied path cannot be deleted" "FS_DENIED_DELETE_SUCCEEDED"
+expect_absent "a denied path cannot be renamed out of its subtree" "FS_DENIED_RENAME_SUCCEEDED"
+[ -f "$TESTDIR/rw/nested/secret.txt" ] || fail "a denied file was deleted from the host"
+[ ! -f "$TESTDIR/rw/moved.txt" ] || fail "a denied file was renamed into a readwrite grant"
+pass "the denied subtree is unchanged on the host"
+
 run_config "$(render seatbelt_fs_ungranted_denied.json TESTDIR "$TESTDIR")"
 expect_marker "the ungranted-read probe ran" "FS_PROBE_DONE"
 expect_absent "an ungranted path is denied by default" "FS_UNGRANTED_READ_SUCCEEDED"

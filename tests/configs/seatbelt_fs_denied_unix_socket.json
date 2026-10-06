@@ -1,0 +1,18 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 -c \"import socket\ndef probe(tag, path, op):\n    s = socket.socket(socket.AF_UNIX)\n    try:\n        getattr(s, op)(path)\n        print(tag + '_SUCCEEDED')\n    except OSError as e:\n        print(tag + '_REFUSED', e.errno)\n    s.close()\nprobe('UNIX_GRANTED_CONNECT', '{{TESTDIR}}/rw/open/agent.sock', 'connect')\nprobe('UNIX_DENIED_CONNECT', '{{TESTDIR}}/rw/nested/agent.sock', 'connect')\nprobe('UNIX_DENIED_BIND', '{{TESTDIR}}/rw/nested/new.sock', 'bind')\nprint('UNIX_PROBE_DONE')\"",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": ["{{DEVDIR}}"],
+        "readwritePaths": ["{{TESTDIR}}/rw"],
+        "deniedPaths": ["{{TESTDIR}}/rw/nested"]
+    },
+    "network": {
+        "egress": { "default": "allow" },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
+    }
+}

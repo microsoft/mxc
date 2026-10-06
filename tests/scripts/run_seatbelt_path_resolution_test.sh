@@ -40,6 +40,18 @@ run_config "$(render seatbelt_path_alias_conflict.json TESTDIR "$TESTDIR" TESTDI
 expect_marker "an aliased readonly/readwrite pair still grants read" "PATH_SECRET_CONTENT"
 expect_absent "an aliased readonly/readwrite pair resolves to read-only" "PATH_ALIAS_WRITE_SUCCEEDED"
 
+# deniedPaths is emitted after the allow rules so it outranks them regardless
+# of depth, but that only holds if the alias resolution runs first: here the
+# deny is written as /tmp/... while the grants name /private/tmp/... and a
+# redundant spelling of it.
+run_config "$(render seatbelt_path_alias_denied.json TESTDIR "$TESTDIR" TESTDIR_TMP "$TESTDIR_TMP")"
+expect_marker "the aliased-denied probe ran" "PATH_PROBE_DONE"
+expect_absent "an aliased deny outranks a readonly grant" "PATH_ALIAS_DENIED_READ_SUCCEEDED"
+expect_absent "an aliased deny leaks no content" "PATH_SECRET_CONTENT"
+expect_absent "an aliased deny outranks a readwrite grant" "PATH_ALIAS_DENIED_WRITE_SUCCEEDED"
+[ ! -f "$TESTDIR/alias/d.txt" ] || fail "an aliased deny was written through on the host"
+pass "an aliased deny left no file behind"
+
 run_config "$(render seatbelt_path_readonly_nested_in_readwrite.json TESTDIR "$TESTDIR")"
 expect_marker "a readonly path nested in a readwrite grant is readable" "PATH_SECRET_CONTENT"
 expect_absent "a readonly path nested in a readwrite grant stays read-only" "PATH_NESTED_RO_WRITE_SUCCEEDED"

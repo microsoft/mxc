@@ -1,0 +1,13 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "(echo denied > {{TESTDIR}}/rw/nested/written.txt && echo FS_NESTED_DENIED_WRITE_SUCCEEDED); (echo denied > {{TESTDIR}}/rw/sibling.txt && echo FS_RW_WRITE_CREATED); echo FS_PROBE_DONE",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["{{TESTDIR}}/rw"],
+        "deniedPaths": ["{{TESTDIR}}/rw/nested"]
+    }
+}

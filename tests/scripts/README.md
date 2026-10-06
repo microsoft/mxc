@@ -65,6 +65,11 @@ must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`
 publishes the suite context into the calling script's scope, which only works
 because dot-sourcing merges scopes.
 
+The IsolationSession suites dot-source `tests/scripts/lib/LoopbackAnchor.ps1`
+for their positive network oracle: a host loopback listener an isolated session
+can reach, so the assertion covers the session's network posture rather than
+the runner's outbound internet access.
+
 T2 (`appcontainer-bfs`) is out of scope: it is off by default behind the
 `tier2_bfs` Cargo feature and is not in use, so the suite records no assertions
 about it. The remaining `bfscfg` checks are guards, not coverage — invoking

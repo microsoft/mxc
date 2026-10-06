@@ -1,0 +1,19 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-network-egress-deny-rules-rejected",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo WSLC_EGRESS_RULES_SHOULD_NOT_RUN"
+  },
+  "network": {
+    "egress": {
+      "default": "allow",
+      "deny": [{ "to": [{ "cidr": "10.0.0.0/8" }] }]
+    },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
+  "wslc": {
+    "image": "alpine:latest"
+  }
+}

@@ -1,0 +1,13 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo FS_PARENT_ENTRIES=$(ls {{TESTDIR}}/rw | tr '\\n' ','); (ls {{TESTDIR}}/rw/nested >/dev/null 2>&1 && echo FS_DENIED_LIST_SUCCEEDED); (/usr/bin/stat -f %z {{TESTDIR}}/rw/nested/secret.txt >/dev/null 2>&1 && echo FS_DENIED_STAT_SUCCEEDED); (rm {{TESTDIR}}/rw/nested/secret.txt 2>/dev/null && echo FS_DENIED_DELETE_SUCCEEDED); (mv {{TESTDIR}}/rw/nested/secret.txt {{TESTDIR}}/rw/moved.txt 2>/dev/null && echo FS_DENIED_RENAME_SUCCEEDED); echo FS_PROBE_DONE",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["{{TESTDIR}}/rw"],
+        "deniedPaths": ["{{TESTDIR}}/rw/nested"]
+    }
+}

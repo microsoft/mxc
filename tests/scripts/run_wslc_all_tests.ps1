@@ -349,7 +349,26 @@ $null = $results.Add(@{
 })
 
 Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
-$null = $results.Add((Run-WslcTest "wslc_network_isolated.json"))
+# The pair is the oracle. Both fixtures run the same raw-IP TCP connect, so the
+# only difference between a reached and a blocked verdict is the posture --
+# a probe that cannot resolve DNS or has no interpreter reports neither.
+$null = $results.Add((Run-WslcTest "wslc_network_isolated.json" `
+    -OutputContains "NET_EGRESS_BLOCKED" -OutputNotContains "NET_EGRESS_REACHED"))
+$null = $results.Add((Run-WslcTest "wslc_network_bridged.json" `
+    -OutputContains "NET_EGRESS_REACHED"))
+# WSLc networking is all-or-nothing: it has no CAP_NET_ADMIN for in-container
+# rules, so a per-destination egress rule must be refused rather than quietly
+# widened to the posture's default.
+foreach ($ruleConfig in @("wslc_network_egress_rules_rejected.json", "wslc_network_egress_deny_rules_rejected.json")) {
+    $null = $results.Add((Run-WslcTest $ruleConfig -ExpectedExit -1 `
+        -OutputContains "network.egress allow/deny rules" `
+        -OutputNotContains "WSLC_EGRESS_RULES_SHOULD_NOT_RUN"))
+}
+# `process.env` without `inheritDefaultEnv` is launched through `env -i NAME=VALUE`,
+# which puts the injected proxy URL in argv and therefore in /proc/<pid>/cmdline.
+$null = $results.Add((Run-WslcTest "wslc_network_proxy_credentials_rejected.json" -ExpectedExit -1 `
+    -OutputContains "must not carry credentials" `
+    -OutputNotContains "WSLC_PROXY_CREDENTIALS_SHOULD_NOT_RUN"))
 # Delegate the cooperative proxy fixture to its owning script, which asserts
 # HTTP_PROXY injection/scrub, NO_PROXY neutralization, and attacker-value
 # removal -- assertions the marker-only Run-WslcTest path cannot make. Both

@@ -46,6 +46,11 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
+# Host-side loopback anchor used by the positive network oracle. It serves from
+# a background runspace so the harness can sit blocked on an exec while the
+# session connects back to it.
+. (Join-Path $PSScriptRoot 'lib\LoopbackAnchor.ps1')
+
 # ---------------- Locate wxc-exec.exe ----------------
 
 $HostTarget = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
@@ -300,6 +305,101 @@ function Invoke-StateAware {
     } finally {
         Remove-Item $stdoutFile -ErrorAction SilentlyContinue
         Remove-Item $stderrFile -ErrorAction SilentlyContinue
+    }
+}
+
+# Reads a redirect file that wxc-exec still holds open for writing. Get-Content
+# takes an exclusive-ish share and fails against a live writer, so open the
+# file explicitly with FileShare.ReadWrite instead. Returns '' when the file is
+# not readable yet.
+function Read-LiveFile {
+    param([string]$Path)
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite)
+        try {
+            $reader = New-Object System.IO.StreamReader($stream)
+            [string]$reader.ReadToEnd()
+        } finally { $stream.Dispose() }
+    } catch { '' }
+}
+
+# Same invocation as Invoke-StateAware, but returns while wxc-exec is still
+# running so the caller can observe output as it arrives or kill the process
+# mid-phase. The caller must pass the returned handle to
+# Complete-StateAwareAsync, which collects the final streams and deletes the
+# redirect files.
+function Start-StateAwareAsync {
+    param(
+        [hashtable]$Request,
+        [string]$ConfigFile,
+        [string]$SandboxId
+    )
+
+    $invocation = ConvertTo-StateAwareInvocation `
+        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId
+
+    $argList = @('--operation', $invocation.Operation)
+    if ($invocation.Operation -ne 'provision') {
+        $argList += @('--container-id', $invocation.SandboxId)
+    }
+    $argList += @('--config-base64', $invocation.ConfigBase64)
+
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+    $proc = Start-Process -FilePath $WxcExec -ArgumentList $argList `
+        -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile `
+        -NoNewWindow -PassThru
+    @{
+        Process    = $proc
+        StdoutFile = $stdoutFile
+        StderrFile = $stderrFile
+    }
+}
+
+# Polls the live stdout of an async invocation until $Pattern appears, the
+# process exits, or $TimeoutSeconds elapses. Returns $true only if the pattern
+# was seen while the process was still running.
+function Wait-AsyncStdoutPattern {
+    param(
+        [hashtable]$Async,
+        [string]$Pattern,
+        [int]$TimeoutSeconds = 30
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline -and -not $Async.Process.HasExited) {
+        if ((Read-LiveFile $Async.StdoutFile) -match $Pattern) { return $true }
+        Start-Sleep -Milliseconds 200
+    }
+    $false
+}
+
+# Waits for an async invocation to finish (killing it past the deadline so a
+# hang cannot stall the suite) and returns the same shape as Invoke-StateAware.
+function Complete-StateAwareAsync {
+    param(
+        [hashtable]$Async,
+        [int]$TimeoutSeconds = 120
+    )
+    try {
+        if (-not $Async.Process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $Async.Process.Kill() } catch { }
+            $null = $Async.Process.WaitForExit(5000)
+        }
+        $stdoutText = Read-LiveFile $Async.StdoutFile
+        $stderrText = Read-LiveFile $Async.StderrFile
+        $exitCode = try { $Async.Process.ExitCode } catch { $null }
+        @{
+            ExitCode = $exitCode
+            Stdout   = $stdoutText
+            Stderr   = $stderrText
+        }
+    } finally {
+        Remove-Item $Async.StdoutFile -ErrorAction SilentlyContinue
+        Remove-Item $Async.StderrFile -ErrorAction SilentlyContinue
     }
 }
 
@@ -824,6 +924,28 @@ try {
         Assert-True ($msg -match 'unknown field `ui`') "error.message reports the closed ui field (got '$msg')"
     } | Out-Null
 
+    # UI policy is excluded from every post-provision root too, so a caller
+    # cannot smuggle it past provision by attaching it to a later phase.
+    foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+        Run-StateAwareTest "$phase (ui policy rejected structurally)" {
+            $req = @{
+                phase     = $phase
+                sandboxId = 'iso:unused'
+                ui        = @{ enabled = $true }
+            }
+            if ($phase -eq 'exec') {
+                $req.process = @{ commandLine = 'cmd /c echo ui_should_not_run'; timeout = 30000 }
+            }
+            $r = Invoke-StateAware -Request $req -DryRun
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'unknown field `ui`') "error.message reports the closed ui field (got '$msg')"
+        } | Out-Null
+    }
+
     # Test 2: start succeeds against the provisioned sandbox. Exercises the
     # multi-invocation pattern -- provision was a separate wxc-exec process;
     # this is a fresh wxc-exec process consuming the same sandbox_id.
@@ -1191,6 +1313,41 @@ try {
             Assert-True (-not $msg.Contains('IsoSessionOps.')) `
                 "error.message does not repeat the operation (got '$msg')"
         } | Out-Null
+    }
+
+    # Test 11b: stale_id breadth. Every non-provision phase resolves the agent
+    # user from the sandbox id, so a deprovisioned id must read as stale on all
+    # of them -- not just the `stop` asserted above. `operation` is checked for
+    # shape rather than an exact value here: which API call first reports
+    # ERROR_NOT_FOUND depends on the OS-side capability set, and test 11 already
+    # pins one exact constant.
+    if ($deprovisionedOk) {
+        foreach ($phase in @('start', 'exec', 'deprovision')) {
+            Run-StateAwareTest "stale_id ($phase on previously-deprovisioned sandbox)" {
+                $req = @{
+                    phase     = $phase
+                    sandboxId = $script:sandboxId
+                }
+                if ($phase -eq 'exec') {
+                    $req.process = @{ commandLine = 'cmd /c echo stale_should_not_run'; timeout = 30000 }
+                }
+                $r = Invoke-StateAware -Request $req
+                Assert-True ($r.ExitCode -ne 0) "exit code is non-zero ($phase on a stale sandbox failed as expected)"
+                $envObj = Parse-Envelope -Stdout $r.Stdout
+                if ($null -eq $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
+                Assert-True ($null -ne $envObj) "the failure is a parseable envelope"
+                $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+                Assert-True ($code -eq 'stale_id') "error.code is 'stale_id' (got '$code')"
+                $operation = if ($envObj) { [string]$envObj.error.operation } else { '' }
+                Assert-True ($operation.StartsWith('IsoSessionOps.')) `
+                    "error.operation names the failing API call (got '$operation')"
+                $nativeCode = if ($envObj) { [string]$envObj.error.nativeCode } else { '' }
+                Assert-True ($nativeCode -eq '0x80070490') `
+                    "error.nativeCode is '0x80070490' (got '$nativeCode')"
+                Assert-True (-not ($r.Stdout -match 'stale_should_not_run')) `
+                    "no workload ran against the stale sandbox"
+            } | Out-Null
+        }
     }
 
 } finally {
@@ -1632,6 +1789,262 @@ try {
                 $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $entry.obj.SandboxId
             } catch { }
         }
+    }
+}
+
+
+# ---------------- Lifecycle G: Runtime behaviour of a live session ----------------
+#
+# Lifecycles A-F cover the request/response contract. This group covers what a
+# running session actually does:
+#   - the mandated all-allow network posture really carries traffic,
+#   - exec output reaches the caller while the command is still running,
+#   - `process.timeout` ends a long command and leaves the session usable,
+#   - a caller killed mid-exec does not take the sandbox with it,
+#   - repeating a lifecycle call never corrupts the sandbox,
+#   - the agent account named in the provision metadata is created and removed.
+
+# Provision a sandbox and capture the full provision metadata.
+function Provision-LifecycleGSandbox {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json'
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    if ((Envelope-Arm $envObj) -ne 'result') {
+        Write-Host "  G provision arm: $(Envelope-Arm $envObj)" -ForegroundColor Red
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+        return $null
+    }
+    $meta = $envObj.result.metadata
+    $obj = @{
+        SandboxId = [string]$envObj.result.sandboxId
+        UserName  = if ($meta) { [string]$meta.agentUserName } else { '' }
+        Sid       = if ($meta) { [string]$meta.agentUserSid } else { '' }
+        Workspace = if ($meta) { [string]$meta.ephemeralWorkspacePath } else { '' }
+    }
+    Write-Host "  G provisioned: sandboxId=$($obj.SandboxId) user=$($obj.UserName)" -ForegroundColor DarkGray
+    return $obj
+}
+
+$script:gSandbox = $null
+$script:gAnchor = $null
+$gStarted = $false
+$gDeprov = $false
+$gAccountsBefore = @((Get-LocalUser -ErrorAction SilentlyContinue).Name)
+
+try {
+    # G1: the metadata names the account that was really created. Deprovision
+    # auditing and orphan cleanup both key off agentUserName, so it has to be
+    # the real local account name rather than a display label.
+    Run-StateAwareTest "Lifecycle G: provision creates the agent account named in the metadata" {
+        $script:gSandbox = Provision-LifecycleGSandbox
+        Assert-True ($null -ne $script:gSandbox) "provision returned a result envelope"
+        if ($null -ne $script:gSandbox) {
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:gSandbox.UserName)) "agentUserName is present"
+            Assert-True (-not [string]::IsNullOrWhiteSpace($script:gSandbox.Sid)) "agentUserSid is present"
+            Assert-True ($script:gSandbox.Sid -match '^S-1-5-21-') "agentUserSid is a machine-local account SID"
+            Assert-True ($gAccountsBefore -notcontains $script:gSandbox.UserName) "no account of that name existed before provision"
+            $account = Get-LocalUser -Name $script:gSandbox.UserName -ErrorAction SilentlyContinue
+            Assert-True ($null -ne $account) "a local account now exists under agentUserName"
+            if ($null -ne $account) {
+                Assert-True ($account.SID.Value -eq $script:gSandbox.Sid) "the local account's SID matches agentUserSid"
+            }
+        }
+    } | Out-Null
+
+    if ($null -ne $script:gSandbox) {
+        $gStarted = Run-StateAwareTest "Lifecycle G: start" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:gSandbox.SandboxId
+            Assert-True ($r.ExitCode -eq 0) "start exit 0"
+        }
+    }
+
+    if ($gStarted) {
+        # G2: positive network oracle. Provision mandates an all-allow posture
+        # (egress + ingress + hostLoopback); every other network test here is a
+        # rejection, so nothing yet proved the session can actually reach
+        # anything. The host-side anchor keeps this hermetic -- it does not
+        # depend on the runner having outbound internet access -- and the
+        # harness fetches it first with the same tool, so an anchor that never
+        # came up is distinguishable from a session that cannot reach it.
+        Run-StateAwareTest "Lifecycle G: the session reaches a host loopback listener" {
+            $script:gAnchor = Start-LoopbackAnchor
+            Assert-True ($null -ne $script:gAnchor) "the host anchor bound a loopback port"
+            if ($null -ne $script:gAnchor) {
+                # `Stop` turns curl's stderr into a terminating error once 2>&1
+                # merges it into the output stream, so a failed fetch would read
+                # as a harness crash instead of a network verdict.
+                $prevPref = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                $hostProbe = & curl.exe --silent --show-error --max-time 15 $script:gAnchor.Url 2>&1 | Out-String
+                $ErrorActionPreference = $prevPref
+                Assert-True ("$hostProbe" -match [regex]::Escape($script:gAnchor.Body)) `
+                    "the harness itself reaches the anchor (the oracle is live)"
+
+                $command = Get-LoopbackAnchorCommand -Url $script:gAnchor.Url
+                $r = Exec-InSession -SandboxId $script:gSandbox.SandboxId -CommandLine $command
+                Assert-True ($r.ExitCode -eq 0) "the session's fetch exits 0 (got $($r.ExitCode))"
+                Assert-True ($r.Stdout -match [regex]::Escape($script:gAnchor.Body)) `
+                    "the session received the anchor's body (got '$($r.Stdout)')"
+            }
+        } | Out-Null
+
+        # G3: streaming. Reading the first line off the live redirect file while
+        # wxc-exec is still running is what separates streamed output from a
+        # single burst at exit; inspecting the finished output cannot tell them
+        # apart.
+        Run-StateAwareTest "Lifecycle G: exec output reaches the caller before the command exits" {
+            $req = @{
+                phase     = 'exec'
+                sandboxId = $script:gSandbox.SandboxId
+                process   = @{
+                    commandLine = 'echo stream_line_1 & ping -n 8 127.0.0.1 >nul & echo stream_line_2'
+                    timeout     = 60000
+                }
+            }
+            $async = Start-StateAwareAsync -Request $req
+            $sawEarly = Wait-AsyncStdoutPattern -Async $async -Pattern 'stream_line_1' -TimeoutSeconds 20
+            $r = Complete-StateAwareAsync -Async $async
+            Assert-True ($r.ExitCode -eq 0) "exec exit 0"
+            Assert-True ($r.Stdout -match 'stream_line_1') "stream_line_1 reached the caller"
+            Assert-True ($r.Stdout -match 'stream_line_2') "stream_line_2 reached the caller"
+            Assert-True $sawEarly "stream_line_1 was readable while the command was still running"
+        } | Out-Null
+
+        # G4: process.timeout. Only the one-shot path had a timeout test; the
+        # state-aware exec deadline was unexercised, as was the question of
+        # whether a timed-out exec consumes the sandbox.
+        Run-StateAwareTest "Lifecycle G: exec honours process.timeout and leaves the session usable" {
+            $req = @{
+                phase     = 'exec'
+                sandboxId = $script:gSandbox.SandboxId
+                process   = @{
+                    commandLine = 'echo timeout_probe_started & ping -n 60 127.0.0.1 >nul & echo timeout_probe_finished'
+                    timeout     = 3000
+                }
+            }
+            $startedAt = Get-Date
+            $r = Invoke-StateAware -Request $req
+            $elapsed = ((Get-Date) - $startedAt).TotalSeconds
+            Assert-True ($r.ExitCode -ne 0) "a timed-out exec reports failure"
+            # The positive marker keeps the negative one honest: without it,
+            # an exec that never started would also satisfy "did not finish".
+            Assert-True ($r.Stdout -match 'timeout_probe_started') "the command did start"
+            Assert-True (-not ($r.Stdout -match 'timeout_probe_finished')) `
+                "the command was terminated rather than allowed to finish"
+            # The command would take ~59s; anything well under that proves the
+            # deadline, not the command, ended the run.
+            Assert-True ($elapsed -lt 45) "the deadline ended the run early (took $([int]$elapsed)s)"
+
+            $after = Exec-InSession -SandboxId $script:gSandbox.SandboxId -CommandLine 'cmd /c echo after_timeout_marker'
+            Assert-True ($after.ExitCode -eq 0) "a later exec against the same sandbox exits 0"
+            Assert-True ($after.Stdout -match 'after_timeout_marker') "the sandbox survives a timed-out exec"
+        } | Out-Null
+
+        # G5: recovery. The sandbox outlives the process that created it, so a
+        # caller dying mid-exec must not strand or tear down the session.
+        Run-StateAwareTest "Lifecycle G: a caller killed mid-exec leaves the sandbox usable" {
+            $req = @{
+                phase     = 'exec'
+                sandboxId = $script:gSandbox.SandboxId
+                process   = @{
+                    commandLine = 'echo crash_probe_started & ping -n 30 127.0.0.1 >nul & echo crash_probe_finished'
+                    timeout     = 120000
+                }
+            }
+            $async = Start-StateAwareAsync -Request $req
+            # Kill only once the workload is demonstrably running, so the kill
+            # lands mid-exec rather than during dispatch.
+            $running = Wait-AsyncStdoutPattern -Async $async -Pattern 'crash_probe_started' -TimeoutSeconds 30
+            Assert-True $running "the exec reached the session before the caller was killed"
+            try { $async.Process.Kill() } catch { }
+            $r = Complete-StateAwareAsync -Async $async -TimeoutSeconds 30
+            Assert-True (-not ($r.Stdout -match 'crash_probe_finished')) "the killed exec did not run to completion"
+
+            $after = Exec-InSession -SandboxId $script:gSandbox.SandboxId -CommandLine 'cmd /c echo recovered_marker'
+            Assert-True ($after.ExitCode -eq 0) "a later exec against the same sandbox exits 0"
+            Assert-True ($after.Stdout -match 'recovered_marker') "the sandbox is still usable after its caller died"
+        } | Out-Null
+
+        # G6: repeated start. MXC forwards start/stop straight to the OS service
+        # and does not normalise the repeat outcome, so the assertable contract
+        # is that repeating the call is *safe*: it answers in a well-formed way
+        # and the sandbox still works afterwards. A hang, a crash, unparseable
+        # output, or a bricked session all fail this.
+        Run-StateAwareTest "Lifecycle G: repeating start is safe" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:gSandbox.SandboxId
+            if ($r.ExitCode -eq 0) {
+                Write-Host "  repeat start succeeded" -ForegroundColor DarkGray
+            } else {
+                $envObj = Parse-Envelope -Stdout $r.Stdout
+                if ($null -eq $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
+                Assert-True ((Envelope-Arm $envObj) -eq 'error') "a refused repeat start is a well-formed error envelope"
+                Write-Host "  repeat start refused with '$(if ($envObj) { $envObj.error.code } else { '<none>' })'" -ForegroundColor DarkGray
+            }
+            $after = Exec-InSession -SandboxId $script:gSandbox.SandboxId -CommandLine 'cmd /c echo after_repeat_start_marker'
+            Assert-True ($after.ExitCode -eq 0) "the sandbox still execs after a repeated start"
+            Assert-True ($after.Stdout -match 'after_repeat_start_marker') "the repeated start did not corrupt the sandbox"
+        } | Out-Null
+    }
+
+    if ($gStarted) {
+        $gStoppedOk = Run-StateAwareTest "Lifecycle G: stop" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:gSandbox.SandboxId
+            Assert-True ($r.ExitCode -eq 0) "stop exit 0"
+        }
+
+        # G7: repeated stop. Same contract as the repeated start: whatever the
+        # OS reports, the sandbox must remain deprovisionable (asserted by G8
+        # running immediately after this).
+        if ($gStoppedOk) {
+            Run-StateAwareTest "Lifecycle G: repeating stop is safe" {
+                $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:gSandbox.SandboxId
+                if ($r.ExitCode -eq 0) {
+                    Write-Host "  repeat stop succeeded" -ForegroundColor DarkGray
+                } else {
+                    $envObj = Parse-Envelope -Stdout $r.Stdout
+                    if ($null -eq $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
+                    Assert-True ((Envelope-Arm $envObj) -eq 'error') "a refused repeat stop is a well-formed error envelope"
+                    $code = if ($envObj) { [string]$envObj.error.code } else { '<none>' }
+                    Assert-True ($code -ne 'stale_id') "a stopped-but-provisioned sandbox is not reported as stale (got '$code')"
+                }
+            } | Out-Null
+        }
+    }
+
+    # G8: deprovision removes the local account, and repeating it reads as
+    # stale rather than succeeding a second time.
+    if ($null -ne $script:gSandbox) {
+        $gDeprovPassed = Run-StateAwareTest "Lifecycle G: deprovision removes the agent account" {
+            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:gSandbox.SandboxId
+            Assert-True ($r.ExitCode -eq 0) "deprovision exit 0"
+            if ($r.ExitCode -eq 0) {
+                $account = Get-LocalUser -Name $script:gSandbox.UserName -ErrorAction SilentlyContinue
+                Assert-True ($null -eq $account) "the agent's local account is gone after deprovision"
+                $accountsAfter = @((Get-LocalUser -ErrorAction SilentlyContinue).Name)
+                Assert-True ($accountsAfter -notcontains $script:gSandbox.UserName) `
+                    "the agent account is absent from the machine's account list"
+            }
+        }
+        if ($gDeprovPassed) {
+            $gDeprov = $true
+            Run-StateAwareTest "Lifecycle G: repeating deprovision reports a stale sandbox" {
+                $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:gSandbox.SandboxId
+                Assert-True ($r.ExitCode -ne 0) "a second deprovision does not report success"
+                $envObj = Parse-Envelope -Stdout $r.Stdout
+                if ($null -eq $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
+                $code = if ($envObj) { [string]$envObj.error.code } else { '<no envelope>' }
+                Assert-True ($code -eq 'stale_id') "error.code is 'stale_id' (got '$code')"
+            } | Out-Null
+        }
+    }
+} finally {
+    Stop-LoopbackAnchor -Anchor $script:gAnchor
+    if ($null -ne $script:gSandbox -and -not $gDeprov) {
+        Write-Host ""
+        Write-Host "[cleanup] best-effort deprovision of Lifecycle G sandbox ($($script:gSandbox.SandboxId))" -ForegroundColor DarkGray
+        try {
+            $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:gSandbox.SandboxId
+        } catch { }
     }
 }
 

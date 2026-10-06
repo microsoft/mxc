@@ -1,0 +1,14 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "(cat {{TESTDIR}}/alias/secret.txt && echo PATH_ALIAS_DENIED_READ_SUCCEEDED); (echo x > {{TESTDIR}}/alias/d.txt && echo PATH_ALIAS_DENIED_WRITE_SUCCEEDED); echo PATH_PROBE_DONE",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "deniedPaths": ["{{TESTDIR_TMP}}/alias"],
+        "readonlyPaths": ["{{TESTDIR}}/alias"],
+        "readwritePaths": ["{{TESTDIR}}/./alias/"]
+    }
+}

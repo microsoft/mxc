@@ -1,13 +1,14 @@
 {
   "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
   "version": "1.0.0",
-  "containerId": "wslc-network-isolated",
+  "containerId": "wslc-network-bridged",
   "containment": "wslc",
   "process": {
     "commandLine": "python3 -c \"import socket\ns = socket.socket(); s.settimeout(8)\ntry:\n    s.connect(('1.1.1.1', 443)); print('NET_EGRESS_REACHED')\nexcept OSError as e:\n    print('NET_EGRESS_BLOCKED', e.errno)\nprint('NET_PROBE_DONE')\""
   },
   "network": {
-    "egress": { "default": "deny" }
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "wslc": {
     "image": "python:3.12-alpine"

@@ -30,12 +30,10 @@
       - isolation_session_stderr.json --separate stderr in non-ConPTY mode
       - isolation_session_stdout_stderr_interleaved.json --interleaved streams
       - isolation_session_timeout.json --timeout enforcement
+      - isolation_session_streaming_smoke.json --output arrives incrementally
+        rather than as a burst at exit
 
     Manual smoke configs (NOT asserted --observe the output yourself):
-      - isolation_session_streaming_smoke.json --output appears with delays
-        rather than a burst at exit; verifies Commit 1 streaming.
-        Run from cmd.exe directly (not redirected) so wxc-exec sees a TTY:
-            wxc-exec.exe isolation_session_streaming_smoke.json
       - isolation_session_powershell_interactive.json --launches
         powershell.exe in the isolation session; type commands at the prompt
         (e.g. `Get-Date`, `whoami`, `exit 7`) and verify input forwarding +
@@ -62,6 +60,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+# Host-side loopback anchor used by the positive network oracle.
+. (Join-Path $PSScriptRoot 'lib\LoopbackAnchor.ps1')
 
 if (-not $ConfigDir) {
     $ConfigDir = Join-Path $RepoRoot "tests\configs"
@@ -202,6 +203,22 @@ if ($probeResult.Status -ne 'available') {
     Write-Host "  $($probeResult.Detail)" -ForegroundColor Red
     Write-Host "  This is an infrastructure failure, not an unsupported host, so it is not a skip." -ForegroundColor Red
     exit 1
+}
+
+# Peek at a file a child process still holds open for writing. FileShare.ReadWrite
+# is required: the default share mode fails against a live writer. Returns ''
+# when the file is absent or not yet readable.
+function Read-LiveFile {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return '' }
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            [string]$sr.ReadToEnd()
+        } finally { $fs.Close() }
+    } catch { '' }
 }
 
 # Helper: run one IsolationSession test config.
@@ -515,25 +532,17 @@ function Start-ConcurrentWxc {
 }
 
 # Block until "X-started" appears in $LogPath (the agent's own log file,
-# not the wxc-exec stdout capture). Reading with FileShare.ReadWrite lets
-# us peek while the agent's PowerShell holds the file open for Add-Content.
+# not the wxc-exec stdout capture), peeking while the agent's PowerShell
+# still holds the file open for Add-Content.
 function Wait-AgentLogStart {
     param([string]$Label, [string]$LogPath, [int]$TimeoutSeconds = 30)
     $pattern = [regex]::new("\b$Label-started\b")
     $start = Get-Date
     while (((Get-Date) - $start).TotalSeconds -lt $TimeoutSeconds) {
-        if (Test-Path $LogPath) {
-            try {
-                $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                $sr = New-Object System.IO.StreamReader($fs)
-                $text = $sr.ReadToEnd()
-                $sr.Close(); $fs.Close()
-                if ($pattern.IsMatch($text)) {
-                    $elapsed = ((Get-Date) - $start).TotalMilliseconds
-                    Write-Host "  $Label-started in log after $([int]$elapsed) ms" -ForegroundColor DarkGray
-                    return $true
-                }
-            } catch { }
+        if ($pattern.IsMatch((Read-LiveFile $LogPath))) {
+            $elapsed = ((Get-Date) - $start).TotalMilliseconds
+            Write-Host "  $Label-started in log after $([int]$elapsed) ms" -ForegroundColor DarkGray
+            return $true
         }
         Start-Sleep -Milliseconds 100
     }
@@ -658,6 +667,138 @@ try {
 }
 
 
+# ---------------- Positive network oracle ----------------
+#
+# Every other network test here is a rejection, so nothing proved the mandated
+# all-allow posture actually carries traffic. The anchor runs on host loopback,
+# which an isolated session can reach because it is a separate logon session on
+# the same machine -- so this asserts the session's posture rather than the
+# runner's outbound internet access. The harness fetches the anchor first with
+# the same tool, making "the anchor never came up" distinguishable from "the
+# session could not reach it".
+
+Write-Host ""
+Write-Host "--- Network ---" -ForegroundColor Cyan
+
+$anchor = Start-LoopbackAnchor
+try {
+    $anchorLive = $false
+    if ($null -eq $anchor) {
+        $null = $results.Add(@{ Name = 'network: host loopback anchor'; Pass = $false; Skipped = $false
+            Reason = 'Could not bind a host loopback anchor port' })
+    } else {
+        # `Stop` turns curl's stderr into a terminating error once 2>&1 merges
+        # it into the output stream, so flip it for the fetch.
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $hostProbe = & curl.exe --silent --show-error --max-time 15 $anchor.Url 2>&1 | Out-String
+        $ErrorActionPreference = $prevPref
+        $anchorLive = "$hostProbe" -match [regex]::Escape($anchor.Body)
+        if (-not $anchorLive) {
+            $null = $results.Add(@{ Name = 'network: host loopback anchor'; Pass = $false; Skipped = $false
+                Reason = "The anchor did not answer the harness itself: $hostProbe" })
+        }
+    }
+
+    if ($anchorLive) {
+        $anchorRequest = @{
+            version     = '1.0.0'
+            containment = 'isolation_session'
+            process     = @{
+                commandLine = (Get-LoopbackAnchorCommand -Url $anchor.Url)
+                timeout     = 60000
+            }
+            network     = @{
+                egress  = @{ default = 'allow' }
+                ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+            }
+        }
+        $null = $results.Add((Run-IsolationSessionTest "network reaches the host loopback anchor" `
+            -Request $anchorRequest -OutputContains @($anchor.Body)))
+    }
+} finally {
+    Stop-LoopbackAnchor -Anchor $anchor
+}
+
+
+# ---------------- Streaming ----------------
+#
+# The streaming config was previously observed by hand. Reading the first line
+# off the live capture file while wxc-exec is still running is what separates
+# streamed output from a single burst at exit, so the assertion has to peek at
+# a running process rather than inspect its final output.
+
+Write-Host ""
+Write-Host "--- Streaming ---" -ForegroundColor Cyan
+
+$streamingRoot = Join-Path $env:TEMP 'mxc_oneshot_streaming'
+Remove-Item -Recurse -Force $streamingRoot -ErrorAction SilentlyContinue
+New-Item -Path $streamingRoot -ItemType Directory -Force | Out-Null
+$streamingStdout = Join-Path $streamingRoot 'stdout.txt'
+$streamingStderr = Join-Path $streamingRoot 'stderr.txt'
+$streamingConfig = Join-Path $ConfigDir 'isolation_session_streaming_smoke.json'
+
+Write-Host "  isolation_session_streaming_smoke.json ... " -NoNewline
+if (-not (Test-Path $streamingConfig)) {
+    Write-Host "SKIP (file not found)" -ForegroundColor Yellow
+    $null = $results.Add(@{ Name = 'streaming'; Pass = $true; Skipped = $true; Reason = 'File not found' })
+} else {
+    # Routed through cmd.exe with cmd-managed redirects, matching the
+    # concurrent launcher above. Deliberately without --debug: the Logger
+    # echoes the command line, and that echo contains line_1/2/3 itself, which
+    # would satisfy both the early-read and the ordering checks without any
+    # streaming happening.
+    $streamingCmd = "/c $WxcExec $streamingConfig 1>$streamingStdout 2>$streamingStderr"
+    $streamingProc = Start-Process -FilePath cmd.exe -ArgumentList $streamingCmd `
+        -WindowStyle Hidden -PassThru
+
+    # The config prints line_1, waits, prints line_2, waits, prints line_3.
+    # line_1 must be readable long before the process exits.
+    $sawEarly = $false
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline -and -not $streamingProc.HasExited) {
+        if ((Read-LiveFile $streamingStdout) -match 'line_1') { $sawEarly = $true; break }
+        Start-Sleep -Milliseconds 50
+    }
+    if (-not $streamingProc.WaitForExit(60000)) {
+        try { $streamingProc.Kill() } catch { }
+        $null = $streamingProc.WaitForExit(5000)
+    }
+
+    $streamingOutput = Read-LiveFile $streamingStdout
+    $streamingPass = $true
+    $streamingReason = ''
+    if ($streamingProc.ExitCode -ne 0) {
+        $streamingPass = $false
+        $streamingReason = "Expected exit 0, got $($streamingProc.ExitCode)"
+    } elseif (-not $sawEarly) {
+        $streamingPass = $false
+        $streamingReason = "line_1 was not readable before the command exited (output buffered to exit)"
+    } else {
+        # Ordering as well as presence: a relay that reorders or drops a stream
+        # chunk is a streaming bug even when every line eventually arrives.
+        $i1 = $streamingOutput.IndexOf('line_1')
+        $i2 = $streamingOutput.IndexOf('line_2')
+        $i3 = $streamingOutput.IndexOf('line_3')
+        if ($i1 -lt 0 -or $i2 -lt 0 -or $i3 -lt 0) {
+            $streamingPass = $false
+            $streamingReason = "Output missing one of line_1/line_2/line_3"
+        } elseif (-not ($i1 -lt $i2 -and $i2 -lt $i3)) {
+            $streamingPass = $false
+            $streamingReason = "Output lines arrived out of order"
+        }
+    }
+
+    if ($streamingPass) {
+        Write-Host "PASS" -ForegroundColor Green
+    } else {
+        Write-Host "FAIL" -ForegroundColor Red
+        Write-Host "    Reason: $streamingReason" -ForegroundColor Red
+    }
+    $null = $results.Add(@{ Name = 'streaming (incremental delivery)'; Pass = $streamingPass; Skipped = $false; Reason = $streamingReason })
+}
+
+
 # Summary -- wrap each filtered pipeline in @(...) to force array context.
 # Without @(), a Where-Object that returns a single hashtable is unwrapped
 # to the bare hashtable; calling .Count on a single hashtable returns its
@@ -686,8 +827,11 @@ if (Test-Path 'C:\mxc_workdir_test') { $scratchLeft += 'C:\mxc_workdir_test' }
 if ($failed -eq 0) {
     Remove-Item -Recurse -Force $concurrentTempRoot -ErrorAction SilentlyContinue
     if (Test-Path $concurrentTempRoot) { $scratchLeft += $concurrentTempRoot }
+    Remove-Item -Recurse -Force $streamingRoot -ErrorAction SilentlyContinue
+    if (Test-Path $streamingRoot) { $scratchLeft += $streamingRoot }
 } else {
     Write-Host "  (concurrent stdout/stderr preserved at: $concurrentTempRoot)" -ForegroundColor DarkGray
+    Write-Host "  (streaming stdout/stderr preserved at: $streamingRoot)" -ForegroundColor DarkGray
 }
 foreach ($leftover in $scratchLeft) {
     Write-Host "FAILED: could not remove scratch directory $leftover" -ForegroundColor Red
