@@ -1,0 +1,17 @@
+{
+  "name": "mxc-sample-run-with-io-stdio-streaming",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/main.js"
+  },
+  "dependencies": {
+    "@microsoft/mxc-sdk": "file:../../../sdk/node"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.3.3"
+  }
+}

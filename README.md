@@ -53,6 +53,7 @@ For which filesystem, network, and UI-restriction policy aspects the Windows `pr
 ```
 src/        Rust workspace (native binaries + shared library crates)
 sdk/        TypeScript SDK (@microsoft/mxc-sdk npm package)
+samples/    Scenario-based Rust, .NET, and Node SDK samples
 schemas/    JSON configuration schemas (stable + dev)
 docs/       Documentation (schema reference, backend guides, design docs)
 tests/      Test collateral (configs, examples, scripts)
@@ -147,6 +148,8 @@ Host-dependent backend suites and their prerequisites are documented in
 ## Usage
 
 MXC uses a JSON configuration to define execution parameters. See the [schema documentation](docs/schema.md) for full reference.
+
+For typed SDK examples, see the [Rust, .NET, and Node samples](samples/README.md).
 
 ### Native Binary
 

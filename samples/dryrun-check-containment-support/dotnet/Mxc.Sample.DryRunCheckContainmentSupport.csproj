@@ -5,12 +5,11 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>Microsoft.Mxc.Sdk.Sample</RootNamespace>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj" />
+    <ProjectReference Include="..\..\..\sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj" />
   </ItemGroup>
 
 </Project>

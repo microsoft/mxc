@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "dryrun-check-containment-support/rust",
+    "run-in-persisted-container/rust",
+    "run-in-transient-container/rust",
+    "run-with-containment-of-filesystem/rust",
+    "run-with-containment-of-network/rust",
+    "run-with-logging-access-denied/rust",
+    "run-with-io-captured/rust",
+    "run-with-io-pty-interactive/rust",
+    "run-with-io-stdio-streaming/rust",
+    "run-with-telemetry/rust",
+]
+resolver = "2"
