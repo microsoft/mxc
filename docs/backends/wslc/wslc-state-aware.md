@@ -146,17 +146,30 @@ the streaming path reports it through its wait result.
 
 The daemon admits up to eight exec streams at once, one per container. A second
 exec naming a container that already has one in flight is refused with `busy`
-before any admission reaches the client, rather than queued behind a workload of
-unknown duration; the outward SDK error is `backend_error`. The bound of eight
-comes from memory: each in-flight exec owns a bounded live-output queue, so the
-persistent per-user daemon stays near 128 MB of live output even against clients
-that never drain. Up to eight additional control connections can be serviced
-while every exec slot is occupied; connections beyond the daemon's bounded
-client capacity are refused.
+before any admission reaches the client; the outward SDK error is
+`backend_error`. The bound of eight comes from memory: a streaming exec's output
+lives only in its bounded live-output queue, so the persistent per-user daemon
+stays near 128 MB of live output even against clients that never drain. An
+exec's slot is held until the run reports back, so a client that disconnects
+mid-run keeps counting against that bound while its process is still going.
+
+Two conditions surface as `busy`, and both reach an SDK caller as
+`backend_error`:
+
+| Condition | Message | Retry |
+| --- | --- | --- |
+| The daemon's eight exec slots are all occupied | `WSLc daemon exec capacity is exhausted` | Succeeds once any exec finishes |
+| The named container already has an exec in flight | `sandbox <id> already has an exec in flight` | Succeeds once that container's run finishes |
+
+Up to eight additional control connections can be serviced while every exec slot
+is occupied. Beyond that, a connection is admitted only to cancel: cancellation
+is the one request that never waits on the worker, and the only way to end a run
+with no timeout, so it keeps capacity of its own that lifecycle work cannot
+consume. Anything else arriving on that lane is refused with `busy`.
 
 `start` / `stop` / `deprovision` naming a container with an exec in flight
-**wait** rather than being refused, because deleting the container would free a
-handle the run is still using.
+**wait** for that run, because deleting the container would free a handle the
+run is still using.
 
 Each exec carries an internal ID and per-run token. A duplicate live ID is
 rejected, and cancellation must match both values so a delayed cancellation
@@ -320,12 +333,11 @@ fixtures **through the harness**, not by pointing `wxc-exec --config` at them di
   flight waits for that run; commands for other sandboxes proceed independently. A caller cannot
   infer that work on one sandbox completed because work on another did.
 
-- **`busy` collapses to `backend_error` (deferred).** A second exec on a container that already has
-  one is refused rather than queued, but the refusal reaches an SDK caller as a generic
-  `backend_error` with no indication that retrying would succeed. A retryable wire code needs a new
-  `MxcErrorCode` variant, which is a closed set matching the SDK `ErrorCode` union one-for-one, so
-  it spans Rust, Node, .NET, the versioned references, and schema regeneration. This is tracked as
-  follow-up work.
+- **`busy` collapses to `backend_error` (deferred).** A refused exec reaches an SDK caller as a
+  generic `backend_error` with no indication that retrying would succeed. A retryable wire code
+  needs a new `MxcErrorCode` variant, which is a closed set matching the SDK `ErrorCode` union
+  one-for-one, so it spans Rust, Node, .NET, the versioned references, and schema regeneration.
+  This is tracked as follow-up work.
 
 - **No typed SDK can set port mappings yet.** The Rust, Node, and .NET v1 SDKs
   all pin the published stable contract `1.0.0`, which does not declare the

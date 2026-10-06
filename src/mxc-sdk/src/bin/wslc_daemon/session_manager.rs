@@ -187,6 +187,12 @@ pub enum WorkerCommand {
     Shutdown { reply: oneshot::Sender<()> },
 }
 
+/// A resource the admitting client handler holds on an exec's behalf, released
+/// when the run reports back.
+///
+/// Opaque so the worker never names the control server's permit type.
+pub type ExecSlotGuard = Box<dyn Send>;
+
 /// Everything an admitted exec needs, kept together so it travels as one value
 /// from the pipe handler to the run thread.
 pub struct ExecRequest {
@@ -200,6 +206,11 @@ pub struct ExecRequest {
     pub(crate) registration: Arc<ExecRegistration>,
     pub admit: oneshot::Sender<Result<(), WorkerError>>,
     pub done: oneshot::Sender<Result<ExecTerminal, WorkerError>>,
+
+    /// Counts this run against the daemon's exec capacity until it reports
+    /// back, so a disconnecting client does not free the slot while its run
+    /// thread and container process are still going.
+    pub slot: Option<ExecSlotGuard>,
 }
 
 /// What an off-worker exec thread hands back, already classified.
@@ -526,7 +537,11 @@ impl SessionHandle {
     /// frames as bytes arrive. Admission and
     /// the claim on the container are atomic on the worker thread, so no
     /// lifecycle command can invalidate the checked state before the run starts.
-    pub async fn exec(&self, config: ExecConfig) -> Result<ExecStream, WorkerError> {
+    pub async fn exec(
+        &self,
+        config: ExecConfig,
+        slot: Option<ExecSlotGuard>,
+    ) -> Result<ExecStream, WorkerError> {
         let (admit, admit_rx) = oneshot::channel();
         let (done, done_rx) = oneshot::channel();
         let (stream_tx, output) = mpsc::channel::<OutputChunk>(LIVE_OUTPUT_CHANNEL_CAPACITY);
@@ -558,6 +573,7 @@ impl SessionHandle {
             registration: Arc::clone(&registration),
             admit,
             done,
+            slot,
         })))?;
         admit_rx.await.map_err(worker_gone)??;
         Ok(ExecStream {
@@ -669,9 +685,10 @@ pub(crate) enum ContainerWork {
     /// a thread of its own. The two replies make admission **atomic** with the
     /// claim on the container: the worker validates, claims the container's
     /// in-flight slot, answers `admit` and starts the run thread without
-    /// yielding, and every later command naming that container parks behind the
-    /// claim, so none can interleave with the run. `admit` carries the pre-run
-    /// decision (so an unknown/not-started sandbox is a pre-admission typed
+    /// yielding. A later lifecycle command naming that container parks behind
+    /// the claim and a later `Exec` is refused with `Busy`, so none can
+    /// interleave with the run. `admit` carries the pre-run decision (so an
+    /// unknown, not-started or already-busy sandbox is a pre-admission typed
     /// error, never a post-admission stream `Error`); `done` carries the run's
     /// exit code once [`WorkerCommand::ExecFinished`] lands.
     Exec(ExecRequest),
@@ -725,6 +742,9 @@ struct InFlightExec {
 
     /// Held only so the exec id stays reserved for as long as the run lasts.
     _registration: Arc<ExecRegistration>,
+
+    /// Held only so the run counts against exec capacity until it reports back.
+    _slot: Option<ExecSlotGuard>,
     parked: Vec<ContainerWork>,
 }
 
@@ -1105,6 +1125,7 @@ impl Worker {
             registration,
             admit,
             done,
+            slot,
         } = request;
 
         let container = match self.validate_exec(&config.sandbox_id) {
@@ -1159,6 +1180,7 @@ impl Worker {
                 container,
                 done,
                 _registration: registration,
+                _slot: slot,
                 parked: Vec::new(),
             },
         );
@@ -1821,16 +1843,19 @@ mod tests {
     async fn exec_unknown_sandbox_errors() {
         let handle = spawn().unwrap();
         let err = handle
-            .exec(ExecConfig {
-                exec_id: "unknown-1".to_string(),
-                run_token: "run-unknown-1".to_string(),
-                sandbox_id: "wslc:does-not-exist".to_string(),
-                script_code: "echo hi".to_string(),
-                working_directory: String::new(),
-                env: Vec::new(),
-                env_scope: EnvScope::Merge,
-                timeout_ms: 0,
-            })
+            .exec(
+                ExecConfig {
+                    exec_id: "unknown-1".to_string(),
+                    run_token: "run-unknown-1".to_string(),
+                    sandbox_id: "wslc:does-not-exist".to_string(),
+                    script_code: "echo hi".to_string(),
+                    working_directory: String::new(),
+                    env: Vec::new(),
+                    env_scope: EnvScope::Merge,
+                    timeout_ms: 0,
+                },
+                None,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown sandbox"));
@@ -1881,16 +1906,19 @@ mod tests {
     async fn exec_unknown_sandbox_admission_is_not_provisioned() {
         let handle = spawn().unwrap();
         let err = handle
-            .exec(ExecConfig {
-                exec_id: "unknown-2".to_string(),
-                run_token: "run-unknown-2".to_string(),
-                sandbox_id: "wslc:does-not-exist".to_string(),
-                script_code: "echo hi".to_string(),
-                working_directory: String::new(),
-                env: Vec::new(),
-                env_scope: EnvScope::Merge,
-                timeout_ms: 0,
-            })
+            .exec(
+                ExecConfig {
+                    exec_id: "unknown-2".to_string(),
+                    run_token: "run-unknown-2".to_string(),
+                    sandbox_id: "wslc:does-not-exist".to_string(),
+                    script_code: "echo hi".to_string(),
+                    working_directory: String::new(),
+                    env: Vec::new(),
+                    env_scope: EnvScope::Merge,
+                    timeout_ms: 0,
+                },
+                None,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.kind(), ErrKind::NotProvisioned);
@@ -2099,6 +2127,7 @@ mod tests {
                 container: std::ptr::dangling_mut(),
                 done,
                 _registration: registration,
+                _slot: None,
                 parked: Vec::new(),
             },
             done_rx,
@@ -2138,6 +2167,7 @@ mod tests {
                 registration,
                 admit,
                 done,
+                slot: None,
             }),
             admit: admit_rx,
             done: done_rx,
@@ -2276,6 +2306,70 @@ mod tests {
             .expect("the parked deprovision must be answered")
             .is_ok());
         assert!(!worker.containers.contains_key("wslc:busy"));
+    }
+
+    /// A disconnected client leaves its run going, so the slot it claimed must
+    /// travel to the worker and stay claimed until that run reports back.
+    #[tokio::test]
+    async fn an_exec_slot_outlives_the_client_that_admitted_it() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = SessionHandle {
+            tx,
+            active_execs: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let limiter = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&limiter).try_acquire_owned().unwrap();
+
+        let exec = tokio::spawn(async move {
+            handle
+                .exec(
+                    ExecConfig {
+                        exec_id: "slotted".to_string(),
+                        run_token: "slotted-run".to_string(),
+                        sandbox_id: "wslc:busy".to_string(),
+                        script_code: "echo hi".to_string(),
+                        working_directory: String::new(),
+                        env: Vec::new(),
+                        env_scope: EnvScope::Merge,
+                        timeout_ms: 0,
+                    },
+                    Some(Box::new(permit)),
+                )
+                .await
+        });
+
+        let Some(WorkerCommand::Container(ContainerWork::Exec(request))) = rx.recv().await else {
+            panic!("the exec never reached the worker");
+        };
+        assert!(
+            request.slot.is_some(),
+            "the admitting client's exec slot must reach the worker"
+        );
+
+        // Stand in for the worker: claim the slot for the run, then drop the
+        // client's end as a disconnect would.
+        let (mut worker, _done) = worker_with_exec_in_flight();
+        worker.exec_in_flight.get_mut("wslc:busy").unwrap()._slot = request.slot;
+        let _ = request.admit.send(Ok(()));
+        exec.await.unwrap().unwrap();
+        assert_eq!(
+            limiter.available_permits(),
+            0,
+            "a client that disconnected mid-run must not free its exec slot"
+        );
+
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        worker.finish_exec(
+            "wslc:busy",
+            ExecReport::Finished(Ok(ExecTerminal::Exited(0))),
+            &worker_tx,
+        );
+
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "the slot must be released once the run reports back"
+        );
     }
 
     #[test]
@@ -2738,16 +2832,19 @@ mod tests {
             .unwrap();
 
         let mut exec = handle
-            .exec(ExecConfig {
-                exec_id: "full-lifecycle".to_string(),
-                run_token: "full-lifecycle-run".to_string(),
-                sandbox_id: id.clone(),
-                script_code: "echo hi".to_string(),
-                working_directory: String::new(),
-                env: Vec::new(),
-                env_scope: EnvScope::Merge,
-                timeout_ms: 30_000,
-            })
+            .exec(
+                ExecConfig {
+                    exec_id: "full-lifecycle".to_string(),
+                    run_token: "full-lifecycle-run".to_string(),
+                    sandbox_id: id.clone(),
+                    script_code: "echo hi".to_string(),
+                    working_directory: String::new(),
+                    env: Vec::new(),
+                    env_scope: EnvScope::Merge,
+                    timeout_ms: 30_000,
+                },
+                None,
+            )
             .await
             .unwrap();
         // Drain the live output stream, then await the exit code.
@@ -2805,16 +2902,19 @@ mod tests {
         let queued_id = id.clone();
         let queued = tokio::spawn(async move {
             queued_handle
-                .exec(ExecConfig {
-                    exec_id: "cancelled-queued".to_string(),
-                    run_token: "cancelled-queued-run".to_string(),
-                    sandbox_id: queued_id,
-                    script_code: "touch /tmp/mxc-cancelled-queued-marker".to_string(),
-                    working_directory: String::new(),
-                    env: Vec::new(),
-                    env_scope: EnvScope::Merge,
-                    timeout_ms: 30_000,
-                })
+                .exec(
+                    ExecConfig {
+                        exec_id: "cancelled-queued".to_string(),
+                        run_token: "cancelled-queued-run".to_string(),
+                        sandbox_id: queued_id,
+                        script_code: "touch /tmp/mxc-cancelled-queued-marker".to_string(),
+                        working_directory: String::new(),
+                        env: Vec::new(),
+                        env_scope: EnvScope::Merge,
+                        timeout_ms: 30_000,
+                    },
+                    None,
+                )
                 .await
         });
 
@@ -2844,16 +2944,19 @@ mod tests {
         assert_eq!(queued.done.await.unwrap().unwrap(), ExecTerminal::Cancelled);
 
         let marker_check = handle
-            .exec(ExecConfig {
-                exec_id: "marker-check".to_string(),
-                run_token: "marker-check-run".to_string(),
-                sandbox_id: id.clone(),
-                script_code: "test ! -e /tmp/mxc-cancelled-queued-marker".to_string(),
-                working_directory: String::new(),
-                env: Vec::new(),
-                env_scope: EnvScope::Merge,
-                timeout_ms: 30_000,
-            })
+            .exec(
+                ExecConfig {
+                    exec_id: "marker-check".to_string(),
+                    run_token: "marker-check-run".to_string(),
+                    sandbox_id: id.clone(),
+                    script_code: "test ! -e /tmp/mxc-cancelled-queued-marker".to_string(),
+                    working_directory: String::new(),
+                    env: Vec::new(),
+                    env_scope: EnvScope::Merge,
+                    timeout_ms: 30_000,
+                },
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -2879,19 +2982,25 @@ mod tests {
         let handle = spawn().unwrap();
         let id = provisioned_and_started(&handle).await;
 
-        let first = handle.exec(sleep_exec("busy-first", &id, 3)).await.unwrap();
+        let first = handle
+            .exec(sleep_exec("busy-first", &id, 3), None)
+            .await
+            .unwrap();
 
         let refused = handle
-            .exec(ExecConfig {
-                exec_id: "busy-second".to_string(),
-                run_token: "busy-second-run".to_string(),
-                sandbox_id: id.clone(),
-                script_code: "echo hi".to_string(),
-                working_directory: String::new(),
-                env: Vec::new(),
-                env_scope: EnvScope::Merge,
-                timeout_ms: 30_000,
-            })
+            .exec(
+                ExecConfig {
+                    exec_id: "busy-second".to_string(),
+                    run_token: "busy-second-run".to_string(),
+                    sandbox_id: id.clone(),
+                    script_code: "echo hi".to_string(),
+                    working_directory: String::new(),
+                    env: Vec::new(),
+                    env_scope: EnvScope::Merge,
+                    timeout_ms: 30_000,
+                },
+                None,
+            )
             .await
             .unwrap_err();
         assert_eq!(refused.kind(), ErrKind::Busy);
@@ -2912,11 +3021,11 @@ mod tests {
 
         let started = Instant::now();
         let first = handle
-            .exec(sleep_exec("overlap-first", &first_id, 3))
+            .exec(sleep_exec("overlap-first", &first_id, 3), None)
             .await
             .unwrap();
         let second = handle
-            .exec(sleep_exec("overlap-second", &second_id, 3))
+            .exec(sleep_exec("overlap-second", &second_id, 3), None)
             .await
             .unwrap();
         assert_eq!(first.done.await.unwrap().unwrap(), ExecTerminal::Exited(0));
@@ -2957,16 +3066,19 @@ mod tests {
             .unwrap();
 
         let mut exec = handle
-            .exec(ExecConfig {
-                exec_id: "deprovision-overlap".to_string(),
-                run_token: "deprovision-overlap-run".to_string(),
-                sandbox_id: id.clone(),
-                script_code: "sleep 5; echo survived".to_string(),
-                working_directory: String::new(),
-                env: Vec::new(),
-                env_scope: EnvScope::Merge,
-                timeout_ms: 30_000,
-            })
+            .exec(
+                ExecConfig {
+                    exec_id: "deprovision-overlap".to_string(),
+                    run_token: "deprovision-overlap-run".to_string(),
+                    sandbox_id: id.clone(),
+                    script_code: "sleep 5; echo survived".to_string(),
+                    working_directory: String::new(),
+                    env: Vec::new(),
+                    env_scope: EnvScope::Merge,
+                    timeout_ms: 30_000,
+                },
+                None,
+            )
             .await
             .unwrap();
 

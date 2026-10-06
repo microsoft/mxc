@@ -52,18 +52,31 @@ use crate::session_manager::{ExecStream, SessionHandle, WorkerError};
 /// queued behind a workload of unknown duration.
 ///
 /// Each admitted exec owns a bounded live-output queue of
-/// `LIVE_OUTPUT_CHANNEL_CAPACITY` x `LIVE_OUTPUT_MAX_CHUNK_BYTES`, so this
-/// bound holds the persistent per-user daemon near 128 MB of live output
-/// against clients that never drain.
+/// `LIVE_OUTPUT_CHANNEL_CAPACITY` x `LIVE_OUTPUT_MAX_CHUNK_BYTES`, and a
+/// streaming exec captures nothing alongside it, so this bound holds the
+/// persistent per-user daemon near 128 MB of live output against clients that
+/// never drain.
 const MAX_CONCURRENT_EXECS: usize = 8;
 
-/// Capacity reserved for cancellation and lifecycle requests while all exec
-/// stream slots are occupied.
-const CONTROL_CLIENT_RESERVE: usize = 8;
+/// Client capacity beyond the exec cap, so lifecycle work is still serviced
+/// while every exec slot is occupied.
+///
+/// A lifecycle command naming a container with a run in flight parks on the
+/// worker and holds its slot for the whole wait, so this bounds how many such
+/// waits can be outstanding.
+const CONTROL_CLIENT_HEADROOM: usize = 8;
 
 /// Upper bound on concurrently-serviced client connections. Connections beyond
 /// this bound are refused without blocking the accept loop.
-const MAX_CONCURRENT_CLIENTS: usize = MAX_CONCURRENT_EXECS + CONTROL_CLIENT_RESERVE;
+const MAX_CONCURRENT_CLIENTS: usize = MAX_CONCURRENT_EXECS + CONTROL_CLIENT_HEADROOM;
+
+/// Connections admitted for cancellation alone once [`MAX_CONCURRENT_CLIENTS`]
+/// is reached, one per exec that could need cancelling.
+///
+/// Cancellation is the only way to end a run with no timeout, and the one
+/// request that never waits on the worker, so it keeps capacity that lifecycle
+/// work cannot consume.
+const CANCEL_LANE_SLOTS: usize = MAX_CONCURRENT_EXECS;
 
 /// Deadline for a freshly-connected client to send its first (request) frame. A
 /// client that connects and then stalls must not pin a handler task — and a
@@ -117,6 +130,7 @@ pub async fn run(
     } = signals;
     let mut server = first_instance;
     let client_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+    let cancel_limiter = Arc::new(Semaphore::new(CANCEL_LANE_SLOTS));
     let exec_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_EXECS));
     let mut clients: JoinSet<()> = JoinSet::new();
 
@@ -170,6 +184,7 @@ pub async fn run(
                 spawn_client_handler(
                     &mut clients,
                     &client_limiter,
+                    &cancel_limiter,
                     &exec_limiter,
                     &session,
                     &active_clients,
@@ -209,18 +224,27 @@ pub async fn run(
 }
 
 /// Spawn a bounded task to service one accepted client connection.
+///
+/// A connection that arrives once the general bound is reached is admitted into
+/// the cancellation lane instead, where it is serviced only if it carries a
+/// [`DaemonRequest::CancelExec`].
 fn spawn_client_handler(
     clients: &mut JoinSet<()>,
     client_limiter: &Arc<Semaphore>,
+    cancel_limiter: &Arc<Semaphore>,
     exec_limiter: &Arc<Semaphore>,
     session: &SessionHandle,
     active_clients: &Arc<AtomicUsize>,
     connected: NamedPipeServer,
 ) {
-    let Ok(permit) = client_limiter.clone().try_acquire_owned() else {
-        // The connection is already accepted, so dropping it is the only
-        // bounded refusal path that cannot stall the accept loop.
-        return;
+    let (permit, cancel_only) = match client_limiter.clone().try_acquire_owned() {
+        Ok(permit) => (permit, false),
+        Err(_) => match cancel_limiter.clone().try_acquire_owned() {
+            Ok(permit) => (permit, true),
+            // The connection is already accepted, so dropping it is the only
+            // bounded refusal path that cannot stall the accept loop.
+            Err(_) => return,
+        },
     };
 
     let session = session.clone();
@@ -229,7 +253,7 @@ fn spawn_client_handler(
     active.fetch_add(1, Ordering::SeqCst);
     clients.spawn(async move {
         let _permit = permit;
-        if let Err(e) = handle_client(connected, session, exec_limiter).await {
+        if let Err(e) = handle_client(connected, session, exec_limiter, cancel_only).await {
             eprintln!("[wslc-daemon] client connection error: {e:#}");
         }
         active.fetch_sub(1, Ordering::SeqCst);
@@ -449,10 +473,15 @@ where
 }
 
 /// Service exactly one request on a freshly-connected pipe instance.
+///
+/// `cancel_only` marks a connection admitted into the cancellation lane because
+/// the general client bound was reached; anything other than a
+/// [`DaemonRequest::CancelExec`] is refused there.
 async fn handle_client<S>(
     mut pipe: S,
     session: SessionHandle,
     exec_limiter: Arc<Semaphore>,
+    cancel_only: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -462,6 +491,17 @@ where
     let request: DaemonRequest = timeout(FIRST_FRAME_TIMEOUT, read_frame(&mut pipe))
         .await
         .context("timed out waiting for the client's first frame")??;
+    if cancel_only && !matches!(request, DaemonRequest::CancelExec(_)) {
+        write_frame(
+            &mut pipe,
+            &DaemonResponse::Err {
+                kind: mxc_sdk::wslc_common::daemon_protocol::ErrKind::Busy,
+                message: "WSLc daemon client capacity is exhausted".to_string(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
     match request {
         DaemonRequest::Ping => {
             write_frame(&mut pipe, &DaemonResponse::Pong).await?;
@@ -518,10 +558,15 @@ where
 /// written, and — critically — admission is **atomic** with the claim the
 /// worker takes on the container (see [`SessionHandle::exec`]): the worker
 /// validates, claims the container and hands the run to a thread of its own
-/// without yielding, and every later command naming that container parks behind
-/// the claim, so no `Stop`/`Deprovision` can invalidate the checked state. An
-/// unknown/not-started sandbox therefore comes back as a pre-admission typed
+/// without yielding. A later `Stop`/`Deprovision` naming that container parks
+/// behind the claim and a later `Exec` is refused with `Busy`, so neither can
+/// invalidate the checked state. An unknown, not-started or already-busy
+/// sandbox therefore comes back as a pre-admission typed
 /// [`DaemonResponse::Err`] rather than a post-admission stream `Error` frame.
+///
+/// The exec permit travels into the worker, which releases it when the run
+/// reports back: a client that disconnects mid-run leaves its thread and
+/// container process going, and they must keep counting against exec capacity.
 ///
 /// Output streaming (process -> `Stdout`/`Stderr`) is live. Client `Stdin`
 /// frames are NOT forwarded: the WSLc SDK consumes all process IO handles once
@@ -534,7 +579,7 @@ async fn handle_exec<S>(
     mut pipe: S,
     session: SessionHandle,
     config: mxc_sdk::wslc_common::daemon_protocol::ExecConfig,
-    _exec_permit: tokio::sync::OwnedSemaphorePermit,
+    exec_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -544,12 +589,12 @@ where
 
     // Await the worker's admission decision before writing anything: a rejected
     // exec is a pre-admission typed error, never a post-admission stream frame.
-    let delivered = write_exec_result(&mut pipe, session.exec(config).await).await;
+    let admission = session.exec(config, Some(Box::new(exec_permit))).await;
+    let delivered = write_exec_result(&mut pipe, admission).await;
 
     if delivered.is_err() {
-        // The run outlives this handler on a thread of its own, and the permit
-        // that bounds exec capacity is released as this returns. Without a kill
-        // a client could disconnect in a loop and leave runs going unbounded.
+        // The run outlives this handler on a thread of its own, so without a
+        // kill a client could disconnect in a loop and leave runs going.
         session.cancel_exec(&exec_id, &run_token);
     }
 
@@ -722,15 +767,98 @@ mod tests {
         Arc::new(register_exec(&active_execs, "test-exec", "test-run", &cancellation).unwrap())
     }
 
-    /// Each admitted exec owns a bounded live-output queue, so the cap is what
-    /// holds the daemon's worst-case live-output memory down.
+    /// A streaming exec's output memory is its live-output queue alone, so the
+    /// cap is what holds the daemon's worst case down.
     #[test]
     fn the_exec_cap_bounds_worst_case_live_output_memory() {
-        let worst_case =
-            MAX_CONCURRENT_EXECS * LIVE_OUTPUT_CHANNEL_CAPACITY * LIVE_OUTPUT_MAX_CHUNK_BYTES;
+        let per_exec = LIVE_OUTPUT_CHANNEL_CAPACITY * LIVE_OUTPUT_MAX_CHUNK_BYTES;
+        let worst_case = MAX_CONCURRENT_EXECS * per_exec;
 
+        assert_eq!(per_exec, 16 * 1024 * 1024);
         assert_eq!(worst_case, 128 * 1024 * 1024);
         assert_eq!(MAX_CONCURRENT_CLIENTS, 16);
+    }
+
+    /// Cancellation is the only way to end a run with no timeout, so it must
+    /// survive a client bound that parked lifecycle work has filled.
+    #[tokio::test]
+    async fn the_cancel_lane_outlives_exhausted_client_capacity() {
+        let session = spawn().unwrap();
+        let client_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+        let cancel_limiter = Arc::new(Semaphore::new(CANCEL_LANE_SLOTS));
+
+        // Every general slot taken, as when each exec has a lifecycle command
+        // parked behind it.
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_CLIENTS {
+            held.push(client_limiter.clone().try_acquire_owned().unwrap());
+        }
+        assert!(client_limiter.clone().try_acquire_owned().is_err());
+
+        // Every in-flight exec must stay cancellable, so the requirement is the
+        // exec cap.
+        let mut lane = Vec::new();
+        for _ in 0..MAX_CONCURRENT_EXECS {
+            lane.push(
+                cancel_limiter
+                    .clone()
+                    .try_acquire_owned()
+                    .expect("every in-flight exec must still be cancellable"),
+            );
+        }
+
+        for permit in lane {
+            let (mut client, server) = duplex(64 * 1024);
+            write_frame(
+                &mut client,
+                &DaemonRequest::CancelExec(CancelExecConfig {
+                    exec_id: "stuck".to_string(),
+                    run_token: "stuck-run".to_string(),
+                }),
+            )
+            .await
+            .unwrap();
+
+            handle_client(server, session.clone(), Arc::new(Semaphore::new(0)), true)
+                .await
+                .unwrap();
+
+            let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+            assert_eq!(response, DaemonResponse::Ok);
+            drop(permit);
+        }
+
+        session.shutdown().await.unwrap();
+    }
+
+    /// The cancel lane carries cancellations only; anything else is refused
+    /// with a typed error.
+    #[tokio::test]
+    async fn the_cancel_lane_refuses_non_cancel_requests() {
+        let session = spawn().unwrap();
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(
+            &mut client,
+            &DaemonRequest::Stop(mxc_sdk::wslc_common::daemon_protocol::StopConfig {
+                sandbox_id: "wslc:test".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        handle_client(server, session.clone(), Arc::new(Semaphore::new(0)), true)
+            .await
+            .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(
+            response,
+            DaemonResponse::Err {
+                kind: ErrKind::Busy,
+                message: "WSLc daemon client capacity is exhausted".to_string(),
+            }
+        );
+        session.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -755,7 +883,7 @@ mod tests {
         .await
         .unwrap();
 
-        handle_client(server, session.clone(), exec_limiter)
+        handle_client(server, session.clone(), exec_limiter, false)
             .await
             .unwrap();
 
@@ -923,7 +1051,7 @@ mod tests {
         .unwrap();
         drop(client);
 
-        let outcome = handle_client(server, session.clone(), exec_limiter).await;
+        let outcome = handle_client(server, session.clone(), exec_limiter, false).await;
         assert!(
             outcome.is_err(),
             "an undelivered reply must not be reported as a served request"
@@ -950,7 +1078,7 @@ mod tests {
         .await
         .unwrap();
 
-        handle_client(server, session.clone(), exec_limiter)
+        handle_client(server, session.clone(), exec_limiter, false)
             .await
             .unwrap();
 
