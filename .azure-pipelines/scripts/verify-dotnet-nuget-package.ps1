@@ -43,6 +43,25 @@ try {
         throw "NuGet package is missing required files:`n  $($missing -join "`n  ")"
     }
 
+    $nuspecEntries = @($archive.Entries | Where-Object { $_.FullName -like '*.nuspec' })
+    if ($nuspecEntries.Count -ne 1) {
+        throw "Expected exactly one .nuspec file in the NuGet package, found $($nuspecEntries.Count)"
+    }
+
+    $reader = [System.IO.StreamReader]::new($nuspecEntries[0].Open())
+    try {
+        [xml]$nuspec = $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+
+    $expectedCopyright = "$([char]0x00A9) Microsoft Corporation. All rights reserved."
+    $actualCopyright = [string]$nuspec.package.metadata.copyright
+    if ($actualCopyright -cne $expectedCopyright) {
+        throw "NuGet package copyright metadata must be '$expectedCopyright', found '$actualCopyright'"
+    }
+
     Write-Host "Verified $($required.Count) required files in $PackagePath"
 }
 finally {
