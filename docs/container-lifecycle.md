@@ -84,5 +84,5 @@ author typed SDK requests.
 - [Rust SDK](../src/mxc-sdk/README.md)
 - [.NET SDK](../sdk/dotnet/README.md)
 - [Node SDK](../sdk/node/README.md)
-- [IsolationSession TypeScript architecture](development/architecture/backend-isolation-session/state-aware-typescript.md)
-- [WSLC lifecycle guide](backend-wslc/wslc-state-aware.md)
+- [IsolationSession TypeScript architecture](development/architecture/backends/isolation-session/state-aware-typescript.md)
+- [WSLC lifecycle guide](backends/wslc/wslc-state-aware.md)

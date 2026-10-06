@@ -9,7 +9,7 @@ and `network.ingress`. LXC rejects `runtimeConfig.networkProxy`, so a v0.9 LXC
 request has no proxy surface at all — see [Proxy](#proxy) below.
 Legacy host lists and enforcement-mode fields in older examples are not
 accepted. Do not relabel an old request as v0.9 without migrating its policy.
-See [the schema migration reference](../schema.md).
+See [the schema migration reference](../../schema.md).
 
 ## Overview
 

@@ -22,7 +22,7 @@ explicitly to allow short names.
 The key sits under `SOFTWARE\Policies`, which only administrators can write, so
 a standard user cannot widen the list. It is the same key the telemetry policy
 uses; see
-[`telemetry.md`](../telemetry.md).
+[`telemetry.md`](../../telemetry.md).
 
 ### Values
 
@@ -91,4 +91,4 @@ the SDK is asked to pull at all.
 ## See also
 
 - [`wsl-container-getting-started.md`](wsl-container-getting-started.md) — running WSLC workloads
-- [`telemetry.md`](../telemetry.md) — the other policy under the same key
+- [`telemetry.md`](../../telemetry.md) — the other policy under the same key

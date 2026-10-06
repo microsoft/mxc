@@ -192,7 +192,7 @@ JSON vocabulary. The exact cutover does not silently translate directional
 rules into this weaker contract.
 
 Legacy `defaultPolicy` and host-list interactions follow the
-[backend-agnostic network policy semantics](../schema.md#legacy-network-host-list-semantics).
+[backend-agnostic network policy semantics](../../schema.md#legacy-network-host-list-semantics).
 Invalid legacy combinations are rejected by shared policy validation:
 `blockedHosts` requires an `allowedHosts` exception set under a block default,
 and `allowedHosts` cannot be used under an allow default.

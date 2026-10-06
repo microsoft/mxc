@@ -14,7 +14,7 @@ requiring root privileges or a container runtime.
 > Versions before `0.9.0-alpha` are rejected; changing only the version of an
 > old config does not migrate its policy. Legacy `defaultPolicy`,
 > `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy`
-> are not accepted. See [schema migration](../schema.md).
+> are not accepted. See [schema migration](../../schema.md).
 
 ## Prerequisites
 

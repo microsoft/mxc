@@ -803,7 +803,7 @@ mod platform {
     /// Per-user (not `%ProgramData%`) because consent is a personal choice —
     /// multiple people sharing one machine each control their own, with no
     /// elevation required to change it (mirrors `wxc-exec.exe` never
-    /// self-elevating; see `docs/host-prep.md`).
+    /// self-elevating; see `docs/backends/process-container/host-prep.md`).
     fn consent_file_path() -> Option<PathBuf> {
         local_app_data_dir().map(|dir| dir.join("mxc").join("telemetry-consent.json"))
     }

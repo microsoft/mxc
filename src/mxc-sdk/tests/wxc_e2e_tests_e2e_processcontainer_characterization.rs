@@ -9,7 +9,7 @@
 //! lands. They assert what the code does **today**.
 //!
 //! ProcessContainer execution requires an elevated, host-prepped Windows host
-//! (see `docs/host-prep.md`). Standard CI runners are **not** capable, so these
+//! (see `docs/backends/process-container/host-prep.md`). Standard CI runners are **not** capable, so these
 //! tests skip unless a prepared lane sets `MXC_E2E_HOST_PREPPED=1`
 //! (`host_prepped_optin()`), and additionally skip if `wxc-exec.exe` has not
 //! been built or the host is missing process prerequisites. They therefore

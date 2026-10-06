@@ -157,8 +157,8 @@ IsolationSession exec with a caller-driven terminal and returns a
 to 24 rows by 80 columns.
 IsolationSession provision requires an explicit unrestricted directional
 network posture; WSLC network posture is fixed at provision. See the
-[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backend-isolation-session/state-aware-typescript.md) and
-[WSLC](https://github.com/microsoft/mxc/blob/main/docs/backend-wslc/wslc-state-aware.md) guides for backend and phase
+[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-typescript.md) and
+[WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides for backend and phase
 requirements.
 
 Provisioning takes a discriminated `ProvisionRequest` and optional

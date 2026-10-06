@@ -38,7 +38,7 @@ backends** (`windows_sandbox`, `microvm`, and `hyperlight`) require
 `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI
 flag.
 
-For which filesystem, network, and UI-restriction policy aspects the Windows `processcontainer` backend can enforce on each Windows 11 release (23H2 / 24H2 / 25H2 / 25H2+), see [Windows OS-version policy support](./docs/backend-process-container/os-version-support.md).
+For which filesystem, network, and UI-restriction policy aspects the Windows `processcontainer` backend can enforce on each Windows 11 release (23H2 / 24H2 / 25H2 / 25H2+), see [Windows OS-version policy support](./docs/backends/process-container/os-version-support.md).
 
 
 ### Requirements
@@ -322,8 +322,7 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 
 ## Documentation
 
-Start with the [MXC documentation index](docs/README.md). Repository contributors
-can browse the [development documentation](docs/development/README.md).
+Repository contributors can browse the [development documentation](docs/development/README.md).
 
 | Document | Description |
 |----------|-------------|
@@ -333,15 +332,15 @@ can browse the [development documentation](docs/development/README.md).
 | [docs/examples.md](docs/examples.md) | Annotated configuration examples |
 | [CI validation infrastructure](docs/development/build-and-test/ci-validation-infrastructure.md) | Scheduled backend validation matrix and CI dispatch |
 | [tests/scripts/README.md](tests/scripts/README.md) | Local and CI backend test suites |
-| [docs/host-prep.md](docs/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
+| [Host preparation](docs/backends/process-container/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
 | [Diagnostics](docs/development/guides/diagnostics.md) | Diagnostic logging and ETW |
 | [Containment configuration 0.7.0](docs/containment-configuration/0.7.0/policy.md) | Containment configuration 0.7.0 specification |
 | [Adding ProcessContainer OS features](docs/development/guides/process-container-adding-os-features.md) | Windows AppContainer / BaseContainer developer guide |
-| [docs/backend-lxc/lxc-backend.md](docs/backend-lxc/lxc-backend.md) | LXC backend (Linux) |
-| [docs/backend-bwrap/bubblewrap-backend.md](docs/backend-bwrap/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
-| [docs/backend-seatbelt/seatbelt-backend.md](docs/backend-seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |
-| [docs/backend-windows-sandbox/windows-sandbox.md](docs/backend-windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
-| [docs/backend-hyperlight/hyperlight-backend.md](docs/backend-hyperlight/hyperlight-backend.md) | Hyperlight backend (Linux, Windows) |
+| [docs/backends/lxc/lxc-backend.md](docs/backends/lxc/lxc-backend.md) | LXC backend (Linux) |
+| [docs/backends/bwrap/bubblewrap-backend.md](docs/backends/bwrap/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
+| [docs/backends/seatbelt/seatbelt-backend.md](docs/backends/seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |
+| [docs/backends/windows-sandbox/windows-sandbox.md](docs/backends/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
+| [docs/backends/hyperlight/hyperlight-backend.md](docs/backends/hyperlight/hyperlight-backend.md) | Hyperlight backend (Linux, Windows) |
 | [Container lifecycle](docs/container-lifecycle.md) | Public container lifecycle API |
 | [Telemetry architecture](docs/development/architecture/telemetry.md) | TraceLogging telemetry architecture |
 | [Telemetry consent design](docs/development/architecture/telemetry-consent-design.md) | Telemetry consent contract |

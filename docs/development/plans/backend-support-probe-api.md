@@ -67,7 +67,7 @@ Example results:
 > **"Stock Windows"** here means a clean Windows install with only the default
 > optional features enabled (no BaseContainer, Windows Sandbox, etc.), so the
 > process-container backend falls to its `appcontainer-dacl` floor. See
-> [`docs/backend-process-container/os-version-support.md`](../../backend-process-container/os-version-support.md)
+> [`docs/backends/process-container/os-version-support.md`](../../backends/process-container/os-version-support.md)
 > for the per-release policy-support matrix that determines the reachable tier.
 
 | Host | Result |

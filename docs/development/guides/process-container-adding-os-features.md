@@ -11,7 +11,7 @@ networking fields remain available under their published contracts. Backend
 selection depends on host capability and requested policy, not schema version.
 
 For which policy aspects this backend can enforce on each Windows 11 release,
-see [Windows OS-version policy support](../../backend-process-container/os-version-support.md).
+see [Windows OS-version policy support](../../backends/process-container/os-version-support.md).
 
 ## Prerequisites
 

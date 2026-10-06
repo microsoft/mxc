@@ -9,7 +9,7 @@ document are Windows 11**, and the minimum considered here is Windows 11 23H2.
 
 For the enforcement mechanisms themselves see the
 [UI policy schema](./UIPolicy_Schema.md) and the
-[containment configuration spec](../containment-configuration/0.7.0/policy.md).
+[containment configuration spec](../../containment-configuration/0.7.0/policy.md).
 
 ## Windows 11 releases
 
@@ -20,8 +20,8 @@ For the enforcement mechanisms themselves see the
 | 25H2 | 26200 |
 | 25H2+ | 26600+ |
 
-> **Product floor:** the [README](../../README.md#platforms) and
-> [SDK README](../../sdk/node/README.md) state that `processcontainer`'s **minimum
+> **Product floor:** the [README](../../../README.md#platforms) and
+> [SDK README](../../../sdk/node/README.md) state that `processcontainer`'s **minimum
 > supported build is 26100 (24H2)**. The Rust code build-gates individual
 > capabilities down to 23H2 (build 22631); the **23H2** column below therefore
 > describes *what the code can enforce if run there* — it is below the
@@ -198,5 +198,5 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
   `MIN_BUILD_FOR_INJECTION_LIMIT`, `supported_ui_limit_mask_for_build`):
   `src/mxc-sdk/src/backends/process_container/common/job_object.rs`
 - FlatBuffer contract: `external/windows-sdk/ProcessSecurityEnvironment.fbs`
-- Product support floor: [README](../../README.md#platforms),
-  [SDK README](../../sdk/node/README.md)
+- Product support floor: [README](../../../README.md#platforms),
+  [SDK README](../../../sdk/node/README.md)

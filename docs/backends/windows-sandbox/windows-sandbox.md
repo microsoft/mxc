@@ -216,4 +216,4 @@ Both suites require a Windows host with the Windows Sandbox optional feature.
 ## Further Reading
 
 - [Windows Sandbox backend reference](windows-sandbox-reference.md)
-- [Container lifecycle architecture](../development/architecture/container-lifecycle.md)
+- [Container lifecycle architecture](../../development/architecture/container-lifecycle.md)

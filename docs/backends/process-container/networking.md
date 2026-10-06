@@ -7,7 +7,7 @@ and `network.ingress` policy plus `runtimeConfig.networkProxy` and
 `processContainer.network.allowedProxyPeer` configuration.
 
 Implementation companion to the parent
-[MXC Network Configuration, GA design](../containment-configuration/0.8.0/networking/networking.md)
+[MXC Network Configuration, GA design](../../containment-configuration/0.8.0/networking/networking.md)
 doc. The parent owns the shared policy schema, connectivity models, and GA goal.
 This doc covers only how the Windows ProcessContainer backend enforces them.
 
@@ -128,7 +128,7 @@ complete implementation of the shared bidirectional `hostLoopback: "allow"` cont
 
 #### Identity-scoped proxy
 
-Use the [supported proxy-policy example](../schema.md#directional-networking-supported-contracts),
+Use the [supported proxy-policy example](../../schema.md#directional-networking-supported-contracts),
 which shows `runtimeConfig.networkProxy`,
 `processContainer.network.allowedProxyPeer`, and their relationship in one place.
 Use the installed Package Family Name for a packaged proxy, regardless of whether it has AppContainer isolation. Use

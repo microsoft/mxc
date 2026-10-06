@@ -373,10 +373,10 @@ fn extern_spawn_json_failure_returns_no_handle_and_an_owned_error() {
 }
 
 /// A real run requires a host backend; on Windows that means an elevated,
-/// host-prepped host (see docs/host-prep.md), so this is `#[ignore]`d.
+/// host-prepped host (see docs/backends/process-container/host-prep.md), so this is `#[ignore]`d.
 #[cfg(target_os = "windows")]
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
+#[ignore = "requires an elevated, host-prepped Windows host (see docs/backends/process-container/host-prep.md)"]
 fn extern_run_executes_command() {
     let container_id = format!(
         "ffi-json-{}-{}",

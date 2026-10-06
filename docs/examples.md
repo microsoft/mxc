@@ -65,7 +65,7 @@ writable directory.
 
 The destination is numeric because directional rules accept IP/CIDR, not
 hostnames. It must be reachable from the host to demonstrate the allow rule;
-see the [ProcessContainer networking guide](backend-process-container/networking.md)
+see the [ProcessContainer networking guide](backends/process-container/networking.md)
 for host requirements and enforcement limits.
 
 ### Directional Network Policy (schema 0.9+)
@@ -138,7 +138,7 @@ configured proxy address and port, but does not verify which process owns that
 endpoint. It requires native PSEC 1.1 ingress/host-loopback support; unsupported
 hosts reject the request. For production ProcessContainer deployments, identify
 a packaged proxy through `processContainer.network.allowedProxyPeer` instead; see
-[proxy deployment choices](backend-process-container/networking.md#proxy-deployment-choices).
+[proxy deployment choices](backends/process-container/networking.md#proxy-deployment-choices).
 Bubblewrap and Seatbelt also support a caller-managed loopback proxy, but
 their supported ingress policies differ. See their backend guides.
 

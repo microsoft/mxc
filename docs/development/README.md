@@ -3,8 +3,8 @@
 > **Audience:** MXC developers
 
 This section covers MXC architecture, implementation, validation, and planned
-work. Consumer documentation remains under the parent [`docs`](../README.md)
-directory.
+work. Consumer documentation remains under `docs/`; start with the
+[project README](../../README.md).
 
 ## Architecture
 
@@ -13,9 +13,9 @@ directory.
 - [Versioning design](architecture/versioning.md)
 - [Telemetry architecture](architecture/telemetry.md)
 - [Telemetry consent design](architecture/telemetry-consent-design.md)
-- [IsolationSession one-shot architecture](architecture/backend-isolation-session/oneshot.md)
-- [IsolationSession state-aware Rust architecture](architecture/backend-isolation-session/state-aware-rust.md)
-- [IsolationSession state-aware TypeScript architecture](architecture/backend-isolation-session/state-aware-typescript.md)
+- [IsolationSession one-shot architecture](architecture/backends/isolation-session/oneshot.md)
+- [IsolationSession state-aware Rust architecture](architecture/backends/isolation-session/state-aware-rust.md)
+- [IsolationSession state-aware TypeScript architecture](architecture/backends/isolation-session/state-aware-typescript.md)
 
 ## Build and test
 

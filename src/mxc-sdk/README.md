@@ -105,8 +105,8 @@ Use `v1::container::spawn_in_container` for live piped execution.
 terminal; PTY support is currently available for IsolationSession.
 Attached execution is not exposed by the Rust SDK. Lifecycle operations and
 existing-container execution are synchronous in Rust. Backend support and phase-specific requirements are described in the
-[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backend-isolation-session/state-aware-rust.md) and
-[WSLC](https://github.com/microsoft/mxc/blob/main/docs/backend-wslc/wslc-state-aware.md) guides.
+[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
+[WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides.
 
 Lifecycle calls use distinct `ProvisionOptions`, `StartOptions`, `StopOptions`,
 and `DeprovisionOptions`. Existing-container execution uses

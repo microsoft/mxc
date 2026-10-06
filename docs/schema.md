@@ -284,8 +284,8 @@ use:
 |---------|----------------------------------------|
 | Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
-| Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backend-bwrap/bubblewrap-backend.md`](backend-bwrap/bubblewrap-backend.md). |
-| LXC / WSL Container | The container root — see [`docs/backend-lxc/lxc-backend.md`](backend-lxc/lxc-backend.md). |
+| Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
+| LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
 | MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
@@ -296,7 +296,7 @@ Windows drive path, which is mapped under `/mnt/<drive>` (for example
 `C:\work` becomes `/mnt/c/work`); any other value is rejected before the
 container is created. WSL Container state-aware `exec` takes an absolute
 in-container path instead. See
-[`docs/backend-wslc/wsl-container-getting-started.md`](backend-wslc/wsl-container-getting-started.md).
+[`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md).
 
 ### Environment
 
@@ -326,7 +326,7 @@ launch.
 What the default block contains is backend-specific; see the backend's guide.
 On the WSL Container backend it is the container image's own `ENV`, which MXC
 neither authors nor enumerates — see
-[`docs/backend-wslc/wsl-container-getting-started.md`](backend-wslc/wsl-container-getting-started.md#environment).
+[`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md#environment).
 
 ### Filesystem Policy
 
@@ -390,7 +390,7 @@ documentation before relying on the default.
 
 **Per-backend support.** `ui` is enforced by the Windows ProcessContainer
 backend (via job-object UI restrictions plus the Win32k mitigation — see
-[`backend-process-container/UIPolicy_Schema.md`](backend-process-container/UIPolicy_Schema.md))
+[`backends/process-container/UIPolicy_Schema.md`](backends/process-container/UIPolicy_Schema.md))
 and by the macOS Seatbelt backend (via the generated sandbox profile). Other
 backends do not implement UI restrictions; each backend's documentation states
 whether it applies, rejects, or ignores the section. **IsolationSession and WSLc
@@ -398,9 +398,9 @@ refuse any supplied `ui` at every phase on both surfaces**, and each accepts an
 omitted one without applying any UI restriction — so the section's default-deny
 reading does not hold on either. The reasons differ: no `ui` posture is truthful
 for a session-isolated sandbox (see
-[IsolationSession state-aware Rust architecture](development/architecture/backend-isolation-session/state-aware-rust.md)),
+[IsolationSession state-aware Rust architecture](development/architecture/backends/isolation-session/state-aware-rust.md)),
 while WSLc has no mechanism to enforce UI restrictions on a container (see
-[`backend-wslc/wslc-state-aware.md`](backend-wslc/wslc-state-aware.md)).
+[`backends/wslc/wslc-state-aware.md`](backends/wslc/wslc-state-aware.md)).
 The Windows `processContainer.ui` sub-block carries the ProcessContainer-only
 fields `isolation`, `desktopSystemControl`, `systemSettings`, and `ime`.
 `processContainer.filesystem` carries `enumeratePaths`. Both sub-blocks are
@@ -440,8 +440,8 @@ force a particular backend.
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session. Dual-mode: one-shot and state-aware. |
-| `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backend-seatbelt/seatbelt-backend.md`](backend-seatbelt/seatbelt-backend.md). |
-| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/backend-bwrap/bubblewrap-backend.md`](backend-bwrap/bubblewrap-backend.md). |
+| `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |
+| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 
 Only the backend section matching the selected `containment` value is accepted;
 a config that also carries an unrelated backend's section is **rejected** with a

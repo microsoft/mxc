@@ -4,7 +4,7 @@
 
 > For a per-release policy-support matrix (filesystem, network, and UI
 > restrictions across Windows 11 23H2 / 24H2 / 25H2 / 25H2+), see
-> [Windows OS-version policy support](../../docs/backend-process-container/os-version-support.md).
+> [Windows OS-version policy support](../../docs/backends/process-container/os-version-support.md).
 
 ## Platform Support
 

@@ -25,7 +25,7 @@ Initialize-WpcContext @PSBoundParameters
 
 # Phase 8b — model 3 has three spellings and they must be identical.
 #
-# docs/backend-process-container/networking.md §Model 3 states that an explicit
+# docs/backends/process-container/networking.md §Model 3 states that an explicit
 # deny-everything block, an omitted `network` key, and `"network": {}` are
 # equivalent. This is exactly the kind of property that rots silently: a
 # parser change that makes an absent section mean "inherit" rather than
