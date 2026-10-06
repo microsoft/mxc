@@ -5,7 +5,6 @@
 mod audit;
 #[cfg(target_os = "windows")]
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -18,7 +17,7 @@ use wxc_common::config_parser::{LoadOptions, ParseError, RequestInputError};
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::error::WxcError;
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, FailurePhase, ScriptResponse};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
@@ -39,10 +38,6 @@ struct Cli {
     /// Base64-encoded JSON config
     #[arg(long = "config-base64")]
     config_base64: Option<String>,
-
-    /// Internal structured completion channel used by SDK-owned launchers.
-    #[arg(long = "sdk-result-file", hide = true)]
-    sdk_result_file: Option<PathBuf>,
 
     /// Enable debug/console output
     #[arg(long)]
@@ -291,30 +286,6 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
     if !response.error_message.is_empty() {
         let _ = writeln!(logger, "Error: {}", response.error_message);
     }
-}
-
-fn sdk_result_value(response: &ScriptResponse, warnings: &[String]) -> serde_json::Value {
-    serde_json::json!({
-        "exitCode": response.exit_code,
-        "timedOut": response.failure_phase == FailurePhase::Timeout,
-        "warnings": warnings,
-        "outputMetadata": response.output_metadata,
-        "errorCode": response.failure_phase.error_code().as_str(),
-        "errorMessage": response.error_message,
-        "extendedError": response.extended_error,
-        "failurePhase": response.failure_phase,
-    })
-}
-
-fn write_sdk_result(
-    path: &Path,
-    response: &ScriptResponse,
-    warnings: &[String],
-) -> Result<(), String> {
-    let bytes = serde_json::to_vec(&sdk_result_value(response, warnings))
-        .map_err(|error| format!("failed to serialize SDK result: {error}"))?;
-    std::fs::write(path, bytes)
-        .map_err(|error| format!("failed to write SDK result to {}: {error}", path.display()))
 }
 
 fn apply_permissive_learning_mode(capabilities: &mut Vec<String>) -> bool {
@@ -1734,10 +1705,8 @@ fn main() {
     // writes to a terminal they own. wxc-exec *does* own its terminal, so it
     // opts in here. Messages carry their own banner; print them verbatim.
     // Emitted before the dry-run branch below, which exits the process.
-    if cli.sdk_result_file.is_none() {
-        for warning in logger.warnings() {
-            eprintln!("{warning}");
-        }
+    for warning in logger.warnings() {
+        eprintln!("{warning}");
     }
 
     #[cfg(target_os = "windows")]
@@ -1764,15 +1733,6 @@ fn main() {
         handle_dry_run_exit(&response, &mut logger);
     }
 
-    if let Some(path) = cli.sdk_result_file.as_deref() {
-        if let Err(error) = write_sdk_result(path, &response, logger.warnings()) {
-            eprintln!("error: {error}");
-            response.exit_code = -1;
-            response.error_message = error;
-            response.failure_phase = FailurePhase::PostLaunchFailed;
-        }
-    }
-
     display_script_results(&response, &mut logger);
 
     // Close diagnostic pipe.
@@ -1786,25 +1746,22 @@ fn main() {
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
-    if cli.sdk_result_file.is_none() {
-        if let Some(pointer) = response
-            .output_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.capture_denials.as_ref())
-        {
-            match serde_json::to_string(pointer) {
-                Ok(line) => eprintln!("{line}"),
-                Err(error) => {
-                    eprintln!("failed to serialize captureDenials output pointer: {error}")
-                }
-            }
+    if let Some(pointer) = response
+        .output_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.capture_denials.as_ref())
+    {
+        match serde_json::to_string(pointer) {
+            Ok(line) => eprintln!("{line}"),
+            Err(error) => eprintln!("failed to serialize captureDenials output pointer: {error}"),
         }
-
-        // Emit a structured JSON error envelope on stderr for CLI callers when
-        // the runner produced an error message. SDK launchers receive the same
-        // information through the result file instead of the workload stream.
-        wxc_common::script_runner::emit_backend_error_envelope(&response);
     }
+
+    // Emit a structured JSON error envelope on stderr for SDK/caller consumption
+    // when the runner produced an error message (one-shot flows only).
+    // In PTY mode stderr is merged into the PTY output stream, so the envelope
+    // appears inline -- callers (e.g. copilot) can parse it from the output.
+    wxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }
@@ -1844,45 +1801,6 @@ mod tests {
 
     fn encoded_policy(json: &str) -> String {
         base64_encode(json.as_bytes())
-    }
-
-    #[test]
-    fn sdk_result_preserves_structured_completion_data() {
-        let response = ScriptResponse {
-            exit_code: -1,
-            error_message: "sandbox execution timed out".to_string(),
-            extended_error: "cleanup completed".to_string(),
-            failure_phase: FailurePhase::Timeout,
-            output_metadata: Some(Box::default()),
-            ..Default::default()
-        };
-        let warnings = vec!["security warning".to_string()];
-
-        let result = sdk_result_value(&response, &warnings);
-
-        assert_eq!(result["exitCode"], -1);
-        assert_eq!(result["timedOut"], true);
-        assert_eq!(result["warnings"][0], "security warning");
-        assert!(result["outputMetadata"].is_object());
-        assert_eq!(result["errorCode"], "backend_error");
-        assert_eq!(result["errorMessage"], "sandbox execution timed out");
-        assert_eq!(result["extendedError"], "cleanup completed");
-        assert_eq!(result["failurePhase"], "Timeout");
-    }
-
-    #[test]
-    fn sdk_result_file_option_is_hidden_but_parseable() {
-        let cli = parse_cli(&[
-            "wxc-exec",
-            "--config-base64",
-            "e30=",
-            "--sdk-result-file",
-            "result.json",
-        ]);
-
-        assert_eq!(cli.sdk_result_file, Some(PathBuf::from("result.json")));
-        let help = Cli::command().render_long_help().to_string();
-        assert!(!help.contains("sdk-result-file"));
     }
 
     #[test]
