@@ -31,17 +31,8 @@ try
     var result = await terminal.WaitAsync();
     await output;
     inputCancellation.Cancel();
-    try
-    {
-        await input;
-    }
-    catch (OperationCanceledException)
-    {
-    }
-    catch (IOException)
-    {
-        // The PTY input closes when the contained shell exits.
-    }
+    terminal.Input.Close();
+    ObserveInputRelay(input);
 
     foreach (var warning in terminal.Warnings)
     {
@@ -59,4 +50,20 @@ catch (MxcException error)
 {
     Console.Error.WriteLine($"MXC error [{error.Code}]: {error.Message}");
     return 1;
+}
+
+static void ObserveInputRelay(Task input)
+{
+    _ = input.ContinueWith(
+        static task =>
+        {
+            var error = task.Exception?.GetBaseException();
+            if (error is not (OperationCanceledException or IOException or ObjectDisposedException))
+            {
+                Console.Error.WriteLine($"input relay failed: {error?.Message}");
+            }
+        },
+        CancellationToken.None,
+        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+        TaskScheduler.Default);
 }
