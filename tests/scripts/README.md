@@ -61,6 +61,8 @@ tests\scripts\run_processcontainer_network_proxy_test.ps1 -RequireTier base-cont
 When the host probe reports `baseContainerSupportsProxyLoopbackCompatibility`,
 the proxy area requires workload launch, the compatibility log, and a successful
 proxied fetch. A clean policy rejection is a failure on these hosts.
+Older binaries that omit this probe fact do not enable the compatibility-specific
+assertions; the existing proxy assertions still apply.
 
 Shared helpers live in `tests/scripts/lib/WinProcessContainer.Common.ps1`. It
 must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`
