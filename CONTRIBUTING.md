@@ -107,16 +107,21 @@ Human-facing Markdown documentation includes one visible audience marker immedia
 
 Do not add these markers to legal text, GitHub templates or workflow prompts, or agent instruction files.
 
+Place developer-only documentation under the appropriate `docs/development/`
+subdirectory. Keep consumer and mixed-audience documentation in the main
+`docs/` tree, and keep implementation-specific READMEs beside the code or tests
+they describe.
+
 ### Experimental features
 
 New, in-development features use their permanent JSON locations in the mutable
 development contract. They may still require the binary's `--experimental`
 runtime authorization until graduation; that gate is independent of JSON
 placement. If you're adding a new feature, follow the step-by-step checklist in
-[`docs/authoring-a-new-feature.md`](./docs/authoring-a-new-feature.md), which
+[`docs/development/guides/authoring-a-new-feature.md`](./docs/development/guides/authoring-a-new-feature.md), which
 walks through the schema, Rust, and test-config changes required. The schema
 versioning model and promotion path from experimental to stable are described
-in [`docs/versioning.md`](./docs/versioning.md).
+in [`docs/development/architecture/versioning.md`](./docs/development/architecture/versioning.md).
 
 ### Help Wanted
 
@@ -269,7 +274,7 @@ PowerShell and shell helper scripts that drive the executor end-to-end live unde
 
 When the change is ready, mark the Draft PR as **Ready for Review**. The PR template asks you to confirm CLA acceptance and to update [`.github/copilot-instructions.md`](./.github/copilot-instructions.md) if your change affects build commands, project architecture, or key conventions.
 
-PR builds don't run automatically — Microsoft ADO policy requires a Microsoft employee to comment `/azp run` to start the `MXC-PR-Build` pipeline. See [`docs/pull-requests.md`](./docs/pull-requests.md) for details.
+PR builds don't run automatically — Microsoft ADO policy requires a Microsoft employee to comment `/azp run` to start the `MXC-PR-Build` pipeline. See [pull request builds](./docs/development/build-and-test/pull-requests.md) for details.
 
 Reviewers will look for:
 

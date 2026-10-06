@@ -4,7 +4,7 @@
 
 cargo-fuzz harnesses for the MXC config-parsing surface. Continuous fuzzing
 runs daily under [OneFuzz](https://aka.ms/onefuzz) on Windows x64 with
-AddressSanitizer. See [`docs/fuzzing.md`](../../docs/fuzzing.md) for the
+AddressSanitizer. See [fuzzing](../../../docs/development/build-and-test/fuzzing.md) for the
 full reference.
 
 ## Targets

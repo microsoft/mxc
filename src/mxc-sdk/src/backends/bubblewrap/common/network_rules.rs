@@ -13,7 +13,7 @@
 //!
 //! # Addresses are IP literals and CIDRs, never names
 //!
-//! The 0.8 networking contract (`docs/sandbox-policy/0.8.0/networking`, D3)
+//! The 0.8 networking contract (`docs/containment-configuration/0.8.0/networking`, D3)
 //! makes rule addresses IPv4/IPv6 literals or CIDRs and rejects DNS names at
 //! validation time: a name is bypassable and non-deterministic, since the
 //! sandbox can resolve it itself and the answer varies by resolver, TTL and

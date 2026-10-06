@@ -25,9 +25,9 @@ MXC (Microsoft eXecution Container) is a cross-platform sandboxed code execution
 See:
 
 - [`docs/schema.md`](../docs/schema.md)
-- [`docs/versioning.md`](../docs/versioning.md)
-- [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
-- [`docs/ci-validation-infrastructure.md`](../docs/ci-validation-infrastructure.md)
+- [`docs/development/architecture/versioning.md`](../docs/development/architecture/versioning.md)
+- [`docs/development/architecture/container-lifecycle.md`](../docs/development/architecture/container-lifecycle.md)
+- [`docs/development/build-and-test/ci-validation-infrastructure.md`](../docs/development/build-and-test/ci-validation-infrastructure.md)
 - The relevant backend guide under `docs/`
 
 ## Build and validation
@@ -71,7 +71,7 @@ npm run test:integration
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 
-Prefer the smallest test command covering the change. Host-dependent backend suites live under `tests/scripts/`; use the applicable backend guide and `docs/ci-validation-infrastructure.md` before running or changing them.
+Prefer the smallest test command covering the change. Host-dependent backend suites live under `tests/scripts/`; use the applicable backend guide and `docs/development/build-and-test/ci-validation-infrastructure.md` before running or changing them.
 
 ## Schema and policy rules
 
@@ -94,7 +94,7 @@ Prefer the smallest test command covering the change. Host-dependent backend sui
   serialize/deserialize check to `Microsoft.Mxc.Sdk.AotSmokeTest`; its CI AOT
   publish gate fails on any reflection-dependent path.
 
-See [`docs/schema-codegen.md`](../docs/schema-codegen.md) for regeneration commands.
+See [`docs/development/build-and-test/schema-codegen.md`](../docs/development/build-and-test/schema-codegen.md) for regeneration commands.
 
 ## Error and security behavior
 
@@ -102,26 +102,26 @@ See [`docs/schema-codegen.md`](../docs/schema-codegen.md) for regeneration comma
 - Preserve panic containment across `mxc_ffi`; no panic may unwind through the C ABI.
 - Preserve exact resource ownership and cleanup contracts, especially for processes, jobs, traces, sessions, and native handles.
 - Do not weaken validation or convert failures into success-shaped fallbacks.
-- Telemetry is Windows-only, requires explicit user consent, and fails closed. Administrative policy may restrict consent but may never grant it. See [`docs/telemetry/`](../docs/telemetry/).
+- Telemetry is Windows-only, requires explicit user consent, and fails closed. Administrative policy may restrict consent but may never grant it. See [`docs/telemetry.md`](../docs/telemetry.md).
 
 ## Documentation
 
 Update documentation in the same change when behavior changes:
 
 - Schema or config fields: `docs/schema.md` and the applicable generated development artifacts.
-- Experimental features: `docs/authoring-a-new-feature.md`.
-- Versioning or promotion: `docs/versioning.md`.
+- Experimental features: `docs/development/guides/authoring-a-new-feature.md`.
+- Versioning or promotion: `docs/development/architecture/versioning.md`.
 - Backend behavior: the corresponding guide under `docs/`.
-- SDK APIs: the affected SDK README and versioned references under `docs/reference/{rust,dotnet,node}/v*/`.
-- Telemetry: `docs/telemetry/`.
-- CI validation: `docs/ci-validation-infrastructure.md`.
+- SDK APIs: the affected SDK README and versioned references under `docs/api-reference/{rust,dotnet,node}/v*/`.
+- Telemetry: `docs/telemetry.md`.
+- CI validation: `docs/development/build-and-test/ci-validation-infrastructure.md`.
 
 Do not duplicate detailed backend behavior here. Keep the canonical explanation in the subsystem documentation.
 
 ## SDK API consistency
 
 - Publish every SDK operation, type, probe, discovery API, telemetry API, and helper only through a supported versioned (V*) namespace/module/entrypoint.
-- Before adding or changing an API or type, compare the corresponding Rust, .NET, and Node references under `docs/reference/`. Align names, field meanings, defaults, optional-field presence, input order, and result/ownership semantics across SDKs.
+- Before adding or changing an API or type, compare the corresponding Rust, .NET, and Node references under `docs/api-reference/`. Align names, field meanings, defaults, optional-field presence, input order, and result/ownership semantics across SDKs.
 - Use language-idiomatic spelling and construction: Rust snake_case and enums, .NET PascalCase and closed SDK-owned classes, and TypeScript camelCase and discriminated unions. Do not force identical syntax or add convenience abstractions merely to imitate another language.
 - Keep authoring requests as typed data. Use consistent policy and backend configuration names; native adapters own wire mapping and the native engine owns semantic validation.
 - Keep API-specific controls in the API-specific options type. Creation takes request then options; existing-container execution takes identity, request, then options; .NET cancellation tokens come last.
