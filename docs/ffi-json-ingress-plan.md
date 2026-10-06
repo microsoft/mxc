@@ -21,6 +21,9 @@ public raw API direction. It supersedes the package-root placement of raw
 functions in sections 4.6, 6, and 7.4 with `v1.dev` in Rust, .NET, and Node.
 For public names, types, and placement, merged main after #1385 and #1398
 is authoritative over the older target vocabulary in section 7.
+The first V1.Dev .NET PTY methods will be synchronous
+(`SpawnWithPtyJson` and `SpawnInContainerWithPtyJson`), superseding the
+`SpawnInContainerWithPtyJsonAsync` example in section 7.4.
 It also stages an initial implementation on the existing FFI, except for
 Node ProcessContainer PTY, which sends the caller's unmodified JSON to
 `wxc-exec` via `--config-base64`. Node/.NET FFI capture remains lossy text
