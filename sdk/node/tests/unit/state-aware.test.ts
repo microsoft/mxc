@@ -5,14 +5,19 @@ import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { PassThrough } from 'node:stream';
 import {
-  deprovisionSandbox,
-  execInSandbox,
-  execInSandboxAsync,
-  provisionSandbox,
-  type StateAwareStreamingOptions,
-  startSandbox,
-  stopSandbox,
-} from '../../src/state-aware.js';
+  deprovisionContainer,
+  spawnInContainer,
+  runInContainer,
+  spawnInContainerWithPty,
+  provisionContainer,
+  startContainer,
+  stopContainer,
+  validateProvision,
+  validateProcess,
+  validateStart,
+  validateStop,
+  validateDeprovision,
+} from '../../src/v1/lifecycle.js';
 import {
   buildStateAwareEnvelope,
   parseNonExecResponse,
@@ -22,13 +27,13 @@ import {
   type BindingStateAwareRequest,
 } from '../../src/bindings/state-aware.js';
 import { _setStateAwareBindingSandboxProcessFactory } from '../../src/bindings/streaming.js';
-import { MxcError, type MxcErrorFields } from '../../src/errors.js';
-import { SandboxId } from '../../src/state-aware-types.js';
+import { MxcError, type MxcErrorFields } from '../../src/v1/errors.js';
+import { ContainerId } from '../../src/v1/lifecycle-types.js';
 import {
-  MxcSandboxProcess,
+  MxcProcess,
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
-} from '../../src/sandbox-process.js';
+} from '../../src/v1/container-process.js';
 
 function requestEnvelope(request: BindingStateAwareRequest): Record<string, unknown> {
   return JSON.parse(request.requestJson) as Record<string, unknown>;
@@ -140,7 +145,7 @@ function installStateAwareExecBinding(
     experimental = allowExperimental;
     timeoutMs = timeout;
     binding = createBinding();
-    return new MxcSandboxProcess(binding, timeout);
+    return new MxcProcess(binding, timeout);
   });
   return {
     binding: () => {
@@ -148,7 +153,7 @@ function installStateAwareExecBinding(
       return binding;
     },
     request: () => {
-      assert.ok(requestJson, 'expected a state-aware exec request');
+      assert.ok(requestJson, 'expected a state-aware execution request');
       return JSON.parse(requestJson) as Record<string, unknown>;
     },
     experimental: () => experimental,
@@ -173,37 +178,169 @@ function readStreamText(stream: NodeJS.ReadableStream | null): Promise<string> {
 afterEach(() => _setBindingStateAwareAsyncImplementation());
 afterEach(() => _setStateAwareBindingSandboxProcessFactory());
 
+describe('lifecycle execution options', () => {
+  it('rejects supplied dryRun on asynchronous execution and lifecycle operations', async () => {
+    _setBindingStateAwareAsyncImplementation(async () => {
+      assert.fail('invalid options must not reach native execution');
+    });
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    for (const dryRun of [true, false, undefined]) {
+      const options = { dryRun } as never;
+      for (const operation of [
+        () => provisionContainer({
+          containment: 'isolation_session',
+          network: {
+            egress: { default: 'allow' },
+            ingress: { default: 'allow', hostLoopback: 'allow' },
+          },
+        }, options),
+        () => startContainer(id, options),
+        () => stopContainer(id, options),
+        () => deprovisionContainer(id, options),
+        () => runInContainer(id, { command: 'echo hello' }, options),
+        () => spawnInContainer(id, { command: 'echo hello' }, options),
+      ]) {
+        await assert.rejects(
+          async () => operation(),
+          (error: unknown) => error instanceof MxcError
+            && error.code === 'malformed_request'
+            && /does not support dryRun/.test(error.message),
+        );
+      }
+      await assert.rejects(
+        spawnInContainerWithPty(id, { command: 'echo hello' }, options),
+        /does not support dryRun/,
+      );
+    }
+  });
+});
+
+describe('validation results', () => {
+  const id = 'iso:validation' as ContainerId<'isolation_session'>;
+  const calls = [
+    () => validateProvision({ containment: 'wslc' }, { experimental: true, telemetry: { enabled: false } }),
+    () => validateStart(id, { experimental: true, telemetry: { enabled: false } }),
+    () => validateStop(id, { experimental: true, telemetry: { enabled: false } }),
+    () => validateDeprovision(id, { experimental: true, telemetry: { enabled: false } }),
+    () => validateProcess(id, { command: 'echo validation' }, { experimental: true, telemetry: { enabled: false } }),
+  ];
+
+  it('preserves warnings for every phase without executing a workload', async () => {
+    _setStateAwareBindingSandboxProcessFactory(() => {
+      throw new Error('validation must not spawn');
+    });
+    for (const call of calls) {
+      const request = installStateAwareReply('{"result":{"warnings":["policy warning","telemetry warning"]}}');
+      assert.deepStrictEqual(await call(), { warnings: ['policy warning', 'telemetry warning'] });
+      assert.strictEqual(request().dryRun, true);
+      assert.strictEqual(request().experimental, true);
+      assert.deepStrictEqual(requestEnvelope(request()).telemetry, { enabled: false });
+    }
+  });
+
+  describe('lifecycle results', () => {
+    const id = 'iso:results' as ContainerId<'isolation_session'>;
+    const calls = [
+      () => startContainer(id),
+      () => stopContainer(id),
+      () => deprovisionContainer(id),
+    ];
+
+    it('preserves warnings across lifecycle operations and provision', async () => {
+      installStateAwareReply('{"result":{"sandboxId":"wslc:results","warnings":["policy warning","cleanup warning"]}}');
+      for (const call of calls) {
+        assert.deepStrictEqual(await call(), { warnings: ['policy warning', 'cleanup warning'] });
+      }
+      const provision = await provisionContainer({ containment: 'wslc' });
+      assert.deepStrictEqual(provision.warnings, ['policy warning', 'cleanup warning']);
+      assert.strictEqual(provision.containerId, 'wslc:results');
+    });
+
+    it('defaults omitted warnings to empty arrays', async () => {
+      installStateAwareReply('{"result":{"sandboxId":"wslc:results"}}');
+      for (const call of calls) assert.deepStrictEqual(await call(), { warnings: [] });
+      assert.deepStrictEqual((await provisionContainer({ containment: 'wslc' })).warnings, []);
+    });
+
+    it('rejects malformed warnings and result objects', async () => {
+      for (const result of [null, [], 42, { warnings: null }, { warnings: [null] }, { warnings: [1] }]) {
+        installStateAwareReply(JSON.stringify({ result }));
+        for (const call of calls) {
+          await assert.rejects(call, (error: unknown) => error instanceof MxcError && error.code === 'backend_error');
+        }
+        const provisionResult = typeof result === 'object' && result !== null && !Array.isArray(result)
+          ? { ...result, sandboxId: 'wslc:results' } : result;
+        installStateAwareReply(JSON.stringify({ result: provisionResult }));
+        await assert.rejects(() => provisionContainer({ containment: 'wslc' }),
+          (error: unknown) => error instanceof MxcError && error.code === 'backend_error');
+      }
+    });
+
+    it('rejects missing or malformed provision metadata fields', async () => {
+      const request = {
+        containment: 'isolation_session',
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
+      } as const;
+      for (const metadata of [{}, { agentUserName: null, agentUserSid: 'sid', ephemeralWorkspacePath: 'path' }]) {
+        installStateAwareReply(JSON.stringify({ result: { sandboxId: id, metadata } }));
+        await assert.rejects(() => provisionContainer(request),
+          (error: unknown) => error instanceof MxcError && error.code === 'backend_error');
+      }
+    });
+  });
+
+  it('returns an empty warning list when native warnings are omitted or empty', async () => {
+    for (const reply of ['{"result":{}}', '{"result":{"warnings":[]}}']) {
+      installStateAwareReply(reply);
+      for (const call of calls) assert.deepStrictEqual(await call(), { warnings: [] });
+    }
+  });
+
+  it('rejects malformed results rather than treating them as successful validation', async () => {
+    for (const result of [null, [], 42, { warnings: null }, { warnings: 'warning' }, { warnings: [1] }]) {
+      installStateAwareReply(JSON.stringify({ result }));
+      for (const call of calls) {
+        await assert.rejects(call, (error: unknown) =>
+          error instanceof MxcError && error.code === 'backend_error');
+      }
+    }
+  });
+});
+
 describe('buildStateAwareEnvelope', () => {
   it('lifts telemetry to the top-level envelope', () => {
     const env = buildStateAwareEnvelope({
       phase: 'start',
-      backendKey: 'windows_sandbox',
-      sandboxId: 'wsb:01234567',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:01234567',
       config: { telemetry: { enabled: true } },
     });
     assert.deepEqual(env.telemetry, { enabled: true });
-    assert.equal(env.version, '0.10.0-alpha');
+    assert.equal(env.version, '1.0.0');
     assert.equal(env.experimental, undefined);
   });
 
-  it('rejects an explicitly older schema version when telemetry is present', () => {
+  it('rejects any caller-selected schema version', () => {
     assert.throws(
       () => buildStateAwareEnvelope({
         phase: 'start',
-        backendKey: 'windows_sandbox',
-        sandboxId: 'wsb:01234567',
-        config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+        backendKey: 'isolation_session',
+        sandboxId: 'iso:01234567',
+        config: { version: '1.0.0', telemetry: { enabled: true } },
       }),
       (error: unknown) =>
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
         error.message.includes(
-          "State-aware windows_sandbox requests require schema version '0.10.0-alpha'",
+          'State-aware high-level requests do not accept a caller-selected version',
         ),
     );
   });
 
-  it('selects schema 0.9 when WSLC exec inherits the backend environment', () => {
+  it('selects stable schema 1.0 when WSLC exec inherits the backend environment', () => {
     const env = buildStateAwareEnvelope({
       phase: 'exec',
       backendKey: 'wslc',
@@ -215,21 +352,21 @@ describe('buildStateAwareEnvelope', () => {
         },
       },
     });
-    assert.equal(env.version, '0.9.0-alpha');
+    assert.equal(env.version, '1.0.0');
     assert.deepEqual(env.process, {
       commandLine: 'echo hi',
       inheritDefaultEnv: true,
     });
   });
 
-  it('rejects an explicitly older schema version when the environment is inherited', () => {
+  it('rejects a caller-selected version when the environment is inherited', () => {
     assert.throws(
       () => buildStateAwareEnvelope({
         phase: 'exec',
         backendKey: 'wslc',
         sandboxId: 'wslc:abc',
         config: {
-          version: '0.8.0-alpha',
+          version: '1.0.0',
           process: {
             commandLine: 'echo hi',
             inheritDefaultEnv: true,
@@ -240,7 +377,7 @@ describe('buildStateAwareEnvelope', () => {
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
         error.message.includes(
-          "State-aware wslc requests require schema version '0.9.0-alpha'",
+          'State-aware high-level requests do not accept a caller-selected version',
         ),
     );
   });
@@ -251,7 +388,6 @@ describe('buildStateAwareEnvelope', () => {
       backendKey: 'isolation_session',
       containment: 'isolation_session',
       config: {
-        version: '0.9.0-alpha',
         network: {
           egress: { default: 'allow' },
           ingress: { default: 'allow', hostLoopback: 'allow' },
@@ -315,7 +451,7 @@ describe('buildStateAwareEnvelope', () => {
       }),
       (err: unknown) => err instanceof MxcError &&
         err.code === 'malformed_request' &&
-        /require schema version '0\.9\.0-alpha'/.test(err.message),
+        /do not accept a caller-selected version/.test(err.message),
     );
   });
 
@@ -382,7 +518,7 @@ describe('buildStateAwareEnvelope', () => {
       config: { telemetry: { enabled: true } },
     });
     assert.deepStrictEqual(env.telemetry, { enabled: true });
-    assert.strictEqual(env.version, '0.9.0-alpha');
+    assert.strictEqual(env.version, '1.0.0');
     assert.strictEqual(env.experimental, undefined);
   });
 
@@ -471,9 +607,9 @@ describe('parseNonExecResponse', () => {
   });
 });
 
-describe('provisionSandbox', () => {
+describe('provisionContainer', () => {
   // The unrestricted-network posture is a required member of
-  // IsolationSessionProvisionConfig, so `provisionSandbox` will not accept an
+  // IsolationSessionProvisionConfig, so `provisionContainer` will not accept an
   // omitted config for this backend. Tests below that are not about the config
   // itself use this minimal valid value.
   const ACK = {
@@ -483,21 +619,17 @@ describe('provisionSandbox', () => {
     },
   } as const;
 
-  it('builds a provision envelope and unwraps the SandboxId from the response', async () => {
+  it('builds a provision envelope and unwraps the ContainerId from the response', async () => {
     const request = installStateAwareReply(
       '{"result":{"sandboxId":"iso:reg-abc:prov-1","metadata":{"agentUserName":"agent\\\\u1","agentUserSid":"S-1-5-21-1001","ephemeralWorkspacePath":"C:\\\\ProgramData\\\\ws"}}}',
     );
-    const result = await provisionSandbox(
-      'isolation_session',
-      {
-        network: {
+    const result = await provisionContainer(
+      { containment: 'isolation_session', network: {
           egress: { default: 'allow' },
           ingress: { default: 'allow', hostLoopback: 'allow' },
-        },
-        appId: 'example.app.id',
-      },
+        }, appId: 'example.app.id' },
     );
-    assert.strictEqual(result.sandboxId, 'iso:reg-abc:prov-1');
+    assert.strictEqual(result.containerId, 'iso:reg-abc:prov-1');
     assert.strictEqual(result.metadata?.agentUserName, 'agent\\u1');
     assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
     assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
@@ -516,59 +648,41 @@ describe('provisionSandbox', () => {
     });
   });
 
-  it('throws an MxcError carrying backend_unavailable when mxc_state_aware reports it', async () => {
+  it('throws an MxcError carrying backend_unavailable when mxc_run_state_aware_json reports it', async () => {
     installStateAwareError({
       code: 'backend_unavailable',
       message: 'isolation session API not available on this host',
     });
     await assert.rejects(
-      () => provisionSandbox('isolation_session', ACK),
+      () => provisionContainer({ containment: 'isolation_session', ...ACK }),
       (err: unknown) => err instanceof MxcError && err.code === 'backend_unavailable',
     );
   });
 
   it('rejects unsupported options', async () => {
     await assert.rejects(
-      () => provisionSandbox('isolation_session', ACK, {
+      () => provisionContainer({ containment: 'isolation_session', ...ACK }, {
         executablePath: 'wxc-exec.exe',
-      }),
+      } as never),
       (err: unknown) => err instanceof MxcError && err.message.includes("does not support option 'executablePath'"),
     );
   });
 
-  it('rejects on abort and deprovisions a late provision result', async () => {
-    const ac = new AbortController();
-    const requests: BindingStateAwareRequest[] = [];
-    let completeProvision!: (responseJson: string) => void;
-    _setBindingStateAwareAsyncImplementation((request) => {
-      requests.push(request);
-      if (requests.length === 1) {
-        return new Promise((resolve) => {
-          completeProvision = resolve;
-        });
-      }
-      return Promise.resolve('{"result":{}}');
+  it('forwards experimental authorization for explicit provision validation', async () => {
+    const request = installStateAwareReply('{"result":{}}');
+    await validateProvision({ containment: 'isolation_session', ...ACK }, {
+      experimental: true,
     });
-    const promise = provisionSandbox(
-      'isolation_session',
-      ACK,
-      { signal: ac.signal },
-    );
-    ac.abort();
-    await assert.rejects(promise);
-    completeProvision('{"result":{"sandboxId":"iso:cleanup-me"}}');
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.strictEqual(requests.length, 2);
-    assert.strictEqual(requestEnvelope(requests[1]!).phase, 'deprovision');
-    assert.strictEqual(requestEnvelope(requests[1]!).sandboxId, 'iso:cleanup-me');
+    assert.strictEqual(request().experimental, true);
+    assert.strictEqual(request().dryRun, true);
   });
 });
 
-describe('startSandbox', () => {
+describe('startContainer', () => {
   it('infers backend from sandboxId prefix and sends no per-phase start config', async () => {
     const request = installStateAwareReply('{"result":{}}');
-    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id);
+    const id = 'iso:reg-abc:prov-1' as ContainerId<'isolation_session'>;
+    await startContainer(id);
     const wire = requestEnvelope(request());
     assert.strictEqual(wire.phase, 'start');
     assert.strictEqual(wire.sandboxId, 'iso:reg-abc:prov-1');
@@ -581,28 +695,38 @@ describe('startSandbox', () => {
 
   it('does not serialize correlationVector onto the start envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
-    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id);
+    const id = 'iso:reg-abc:prov-1' as ContainerId<'isolation_session'>;
+    await startContainer(id);
     assert.strictEqual(requestEnvelope(request()).correlationVector, undefined);
+  });
+
+  it('rejects Windows Sandbox identities in the stable lifecycle API', async () => {
+    await assert.rejects(
+      () => startContainer('wsb:prov-1' as ContainerId<'isolation_session'>),
+      (err: unknown) =>
+        err instanceof MxcError &&
+        err.code === 'unsupported_containment' &&
+        err.message.includes('Windows Sandbox identities are experimental'),
+    );
   });
 
   it('relays stable telemetry from phase config onto the start envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
-    const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
-    await startSandbox(id, { telemetry: { enabled: false } });
+    const id = 'iso:reg-abc:prov-1' as ContainerId<'isolation_session'>;
+    await startContainer(id, { telemetry: { enabled: false } });
     const envelope = requestEnvelope(request());
     assert.deepStrictEqual(envelope.telemetry, { enabled: false });
-    assert.strictEqual(envelope.version, '0.9.0-alpha');
+    assert.strictEqual(envelope.version, '1.0.0');
     assert.strictEqual(envelope.experimental, undefined);
   });
 
 });
 
-describe('stopSandbox', () => {
+describe('stopContainer', () => {
   it('builds a minimal stop envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await stopSandbox(id);
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    await stopContainer(id);
     const envelope = requestEnvelope(request());
     assert.strictEqual(envelope.phase, 'stop');
     assert.strictEqual(envelope.sandboxId, 'iso:abc');
@@ -611,28 +735,28 @@ describe('stopSandbox', () => {
 
   it('rejects with malformed_id when sandboxId has no recognised prefix', async () => {
     await assert.rejects(
-      () => stopSandbox('not-a-real-id' as SandboxId<'isolation_session'>),
+      () => stopContainer('not-a-real-id' as ContainerId<'isolation_session'>),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
     );
     await assert.rejects(
-      () => stopSandbox('unknownprefix:abc' as SandboxId<'isolation_session'>),
+      () => stopContainer('unknownprefix:abc' as ContainerId<'isolation_session'>),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_id',
     );
   });
 
   it('does not serialize correlationVector onto the stop envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await stopSandbox(id);
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    await stopContainer(id);
     assert.strictEqual(requestEnvelope(request()).correlationVector, undefined);
   });
 });
 
-describe('deprovisionSandbox', () => {
+describe('deprovisionContainer', () => {
   it('builds a minimal deprovision envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await deprovisionSandbox(id);
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    await deprovisionContainer(id);
     const envelope = requestEnvelope(request());
     assert.strictEqual(envelope.phase, 'deprovision');
     assert.strictEqual(envelope.sandboxId, 'iso:abc');
@@ -640,25 +764,27 @@ describe('deprovisionSandbox', () => {
 
   it('does not serialize correlationVector onto the deprovision envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await deprovisionSandbox(id);
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    await deprovisionContainer(id);
     assert.strictEqual(requestEnvelope(request()).correlationVector, undefined);
   });
 });
 
-describe('execInSandboxAsync', () => {
+describe('runInContainer', () => {
   it('does not require experimental authorization for stable backends', async () => {
     installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(16, 'stable\n', ''),
     );
-    const result = await execInSandboxAsync(
-      'iso:abc' as SandboxId<'isolation_session'>,
-      { process: { commandLine: 'echo stable' } },
+    const result = await runInContainer(
+      'iso:abc' as ContainerId<'isolation_session'>,
+      { command: 'echo stable' },
     );
     assert.deepStrictEqual(result, {
       stdout: 'stable\n',
       stderr: '',
       exitCode: 0,
+      timedOut: false,
+      warnings: [],
     });
   });
 
@@ -666,61 +792,83 @@ describe('execInSandboxAsync', () => {
     const exec = installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(17, 'hello\n', '', 1, { exitCode: 0, timedOut: false }),
     );
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const result = await execInSandboxAsync(
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    const result = await runInContainer(
       id,
-      { process: { commandLine: 'echo hello', timeout: 250 } },
+      { command: 'echo hello',
+timeoutMs: 250 },
     );
-    assert.deepStrictEqual(result, { stdout: 'hello\n', stderr: '', exitCode: 0 });
+    assert.deepStrictEqual(result, {
+      stdout: 'hello\n',
+      stderr: '',
+      exitCode: 0,
+      timedOut: false,
+      warnings: [],
+    });
     assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello', timeout: 250 });
     assert.strictEqual(exec.request().correlationVector, undefined);
     assert.strictEqual(exec.timeout(), 250);
     assert.strictEqual(exec.binding().freed, true);
   });
 
+  it('forwards experimental authorization to state-aware streaming exec', async () => {
+    const exec = installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(17, '', ''),
+    );
+    const result = await runInContainer(
+      'iso:abc' as ContainerId<'isolation_session'>,
+      { command: 'echo experimental' },
+      { experimental: true },
+    );
+    assert.strictEqual(result.exitCode, 0);
+    assert.strictEqual(exec.experimental(), true);
+  });
+
   it('returns ExecResult on script exit != 0 when stdout is plain script output (not an error envelope)', async () => {
     installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(18, 'oops\n', 'err\n', 0, { exitCode: 7, timedOut: false }),
     );
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const result = await execInSandboxAsync(
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    const result = await runInContainer(
       id,
-      { process: { commandLine: 'fail' } },
+      { command: 'fail' },
     );
-    assert.deepStrictEqual(result, { stdout: 'oops\n', stderr: 'err\n', exitCode: 7 });
+    assert.deepStrictEqual(result, {
+      stdout: 'oops\n',
+      stderr: 'err\n',
+      exitCode: 7,
+      timedOut: false,
+      warnings: [],
+    });
   });
 
   it('throws the typed MxcError on dispatch failure before a process is returned', async () => {
     _setStateAwareBindingSandboxProcessFactory(() => {
       throw new MxcError('stale_id', 'id expired');
     });
-    const id = 'iso:prov-1' as SandboxId<'isolation_session'>;
+    const id = 'iso:prov-1' as ContainerId<'isolation_session'>;
     await assert.rejects(
-      () => execInSandboxAsync(
+      () => runInContainer(
         id,
-        { process: { commandLine: 'echo' } },
-        { experimental: true },
+        { command: 'echo' },
+        {},
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'stale_id',
     );
   });
 
-  it('returns the dry-run response envelope instead of spawning a live process', async () => {
+  it('validates a process without spawning or fabricating execution output', async () => {
     const request = installStateAwareReply('{"result":{"validated":true}}');
     _setStateAwareBindingSandboxProcessFactory(() => {
       throw new Error('dry-run should not create a live process');
     });
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const result = await execInSandboxAsync(
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    const result = await validateProcess(
       id,
-      { process: { commandLine: 'cat' } },
-      { dryRun: true },
+      { command: 'cat' },
     );
-    assert.deepStrictEqual(result, {
-      stdout: '{"result":{"validated":true}}',
-      stderr: '',
-      exitCode: 0,
-    });
+    assert.deepStrictEqual(result, { warnings: [] });
+    assert.strictEqual(request().dryRun, true);
     assert.strictEqual(requestEnvelope(request()).phase, 'exec');
   });
 
@@ -728,13 +876,12 @@ describe('execInSandboxAsync', () => {
     installStateAwareReply(
       '{"error":{"code":"policy_validation","message":"invalid exec policy"}}',
     );
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
 
     await assert.rejects(
-      () => execInSandboxAsync(
+      () => validateProcess(
         id,
-        { process: { commandLine: 'cat' } },
-        { dryRun: true },
+        { command: 'cat' },
       ),
       (error: unknown) =>
         error instanceof MxcError &&
@@ -742,109 +889,18 @@ describe('execInSandboxAsync', () => {
     );
   });
 
-  it('does not dispatch when AbortSignal is already aborted', async () => {
-    const ac = new AbortController();
-    ac.abort(new Error('cancelled before dispatch'));
-    let dispatchCount = 0;
-    _setStateAwareBindingSandboxProcessFactory(() => {
-      dispatchCount += 1;
-      throw new Error('must not dispatch');
-    });
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-
-    await assert.rejects(
-      () => execInSandboxAsync(
-        id,
-        { process: { commandLine: 'echo hi' } },
-        { signal: ac.signal },
-      ),
-      /cancelled before dispatch/,
-    );
-    assert.strictEqual(dispatchCount, 0);
-  });
-
-  it('kills and disposes the live process when AbortSignal fires', async () => {
-    const ac = new AbortController();
-    const reason = new Error('cancelled by caller');
-    const exec = installStateAwareExecBinding(
-      () => new FakeStateAwareExecBinding(19, '', '', Number.MAX_SAFE_INTEGER),
-    );
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const promise = execInSandboxAsync(
-      id,
-      { process: { commandLine: 'echo hi' } },
-      { signal: ac.signal },
-    );
-    ac.abort(reason);
-    await assert.rejects(promise, (error: unknown) => error === reason);
-    assert.strictEqual(exec.binding().killed, true);
-    assert.strictEqual(exec.binding().killCount, 1);
-    assert.strictEqual(exec.binding().freed, true);
-  });
-
-  it('cancels while stdout and stderr are still active', async () => {
-    const ac = new AbortController();
-    const exec = installStateAwareExecBinding(
-      () => new FakeStateAwareExecBinding(
-        20,
-        '',
-        '',
-        Number.MAX_SAFE_INTEGER,
-        { exitCode: 0, timedOut: false },
-        [],
-        false,
-      ),
-    );
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const promise = execInSandboxAsync(
-      id,
-      { process: { commandLine: 'echo hi' } },
-      { signal: ac.signal },
-    );
-
-    ac.abort();
-    await assert.rejects(promise);
-    assert.strictEqual(exec.binding().standardOutput.destroyed, true);
-    assert.strictEqual(exec.binding().standardError.destroyed, true);
-    assert.strictEqual(exec.binding().killed, true);
-    assert.strictEqual(exec.binding().freed, true);
-  });
-
-  it('preserves the abort reason when native cancellation cleanup fails', async () => {
-    const ac = new AbortController();
-    const reason = new Error('cancelled by caller');
-    const binding = new FakeStateAwareExecBinding(
-      21,
-      '',
-      '',
-      Number.MAX_SAFE_INTEGER,
-    );
-    binding.killError = new Error('native kill failed');
-    const exec = installStateAwareExecBinding(() => binding);
-    const promise = execInSandboxAsync(
-      'iso:abc' as SandboxId<'isolation_session'>,
-      { process: { commandLine: 'echo hi' } },
-      { signal: ac.signal },
-    );
-
-    ac.abort(reason);
-    await assert.rejects(promise, (error: unknown) => error === reason);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.strictEqual(exec.binding().killCount, 2);
-    assert.strictEqual(exec.binding().freed, true);
-  });
-
   it('rejects unsupported options', async () => {
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
     for (const [option, value] of [
       ['executablePath', 'wxc-exec.exe'],
       ['skipPlatformCheck', true],
       ['inheritDefaultEnv', true],
+      ['signal', new AbortController().signal],
     ] as const) {
       await assert.rejects(
-        () => execInSandboxAsync(
+        () => runInContainer(
           id,
-          { process: { commandLine: 'echo hi' } },
+          { command: 'echo hi' },
           { [option]: value },
         ),
         (err: unknown) =>
@@ -855,22 +911,23 @@ describe('execInSandboxAsync', () => {
   });
 });
 
-describe('execInSandbox', () => {
-  it('returns a live MxcSandboxProcess backed by the shared FFI controller', async () => {
+describe('spawnInContainer', () => {
+  it('returns a live MxcProcess backed by the shared FFI controller', async () => {
     const exec = installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(22, 'live\n', '', 0, { exitCode: 0, timedOut: false }, ['warning']),
     );
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const proc = execInSandbox(
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    const proc = await spawnInContainer(
       id,
-      { process: { commandLine: 'echo live', timeout: 123 } },
+      { command: 'echo live',
+timeoutMs: 123 },
     );
 
     try {
       assert.strictEqual(proc.id, 22);
       assert.deepStrictEqual(proc.warnings, ['warning']);
       assert.strictEqual(await readStreamText(proc.standardOutput), 'live\n');
-      assert.deepStrictEqual(await proc.waitAsync(), { exitCode: 0, timedOut: false });
+      assert.deepStrictEqual(await proc.wait(), { exitCode: 0, timedOut: false });
       assert.deepStrictEqual(exec.request().process, { commandLine: 'echo live', timeout: 123 });
       assert.strictEqual(exec.experimental(), false);
       assert.strictEqual(exec.timeout(), 123);
@@ -879,174 +936,85 @@ describe('execInSandbox', () => {
     }
   });
 
-  it('forwards experimental authorization for experimental backends', () => {
+  describe('spawnInContainerWithPty', () => {
+    const config = { command: 'powershell.exe' };
+
+    it('rejects invalid terminal dimensions before loading native bindings', async () => {
+      await assert.rejects(
+        spawnInContainerWithPty(
+          'iso:abc' as ContainerId<'isolation_session'>,
+          config,
+          { size: { rows: 0, columns: 80 } },
+        ),
+        (error: unknown) => error instanceof MxcError
+          && error.code === 'malformed_request'
+          && /rows and columns/.test(error.message),
+      );
+    });
+  });
+
+  it('forwards experimental authorization for live exec', async () => {
     const exec = installStateAwareExecBinding(
-      () => new FakeStateAwareExecBinding(23, '', '', Number.MAX_SAFE_INTEGER),
+      () => new FakeStateAwareExecBinding(22, '', ''),
     );
-    const proc = execInSandbox(
-      'iso:abc' as SandboxId<'isolation_session'>,
-      { process: { commandLine: 'echo live' } },
+    const proc = await spawnInContainer(
+      'iso:abc' as ContainerId<'isolation_session'>,
+      { command: 'echo live' },
       { experimental: true },
     );
-    try {
-      assert.strictEqual(exec.experimental(), true);
-    } finally {
-      proc.dispose();
+    assert.strictEqual(exec.experimental(), true);
+    proc.dispose();
+  });
+  it('rejects any supplied dryRun because no live process exists', async () => {
+    const id = 'iso:abc' as ContainerId<'isolation_session'>;
+    for (const dryRun of [true, false, undefined]) {
+      await assert.rejects(
+        spawnInContainer(
+          id,
+          { command: 'echo live' },
+          { dryRun } as never,
+        ),
+        (err: unknown) => err instanceof MxcError && err.code === 'malformed_request' && /does not support dryRun/.test(err.message),
+      );
     }
   });
 
-  it('rejects dryRun because no live process exists', () => {
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    assert.throws(
-      () => execInSandbox(
-        id,
-        { process: { commandLine: 'echo live' } },
-        { dryRun: true } as StateAwareStreamingOptions,
-      ),
-      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request' && /does not support dryRun/.test(err.message),
-    );
-  });
-
-  it('rejects AbortSignal because callers own the live process', () => {
-    const controller = new AbortController();
-    assert.throws(
-      () => execInSandbox(
-        'iso:abc' as SandboxId<'isolation_session'>,
-        { process: { commandLine: 'echo done' } },
-        {
-          signal: controller.signal,
-        } as StateAwareStreamingOptions,
+  it('rejects unsupported execution options', async () => {
+    await assert.rejects(
+      spawnInContainer(
+        'iso:abc' as ContainerId<'isolation_session'>,
+        { command: 'echo done' },
+        { signal: new AbortController().signal } as never,
       ),
       (err: unknown) => err instanceof MxcError
         && err.code === 'malformed_request'
-        && /call kill\(\)/.test(err.message),
+        && /does not support option 'signal'/.test(err.message),
     );
-  });
-});
-
-describe('windows_sandbox state-aware lifecycle', () => {
-  it('buildStateAwareEnvelope lifts filesystem (incl. deniedPaths) and emits no experimental block', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'windows_sandbox',
-      containment: 'windows_sandbox',
-      config: {
-        version: '0.10.0-alpha',
-        filesystem: {
-          readwritePaths: ['C:\\workspace'],
-          readonlyPaths: ['C:\\inputs'],
-          deniedPaths: ['C:\\secrets'],
-        },
-      },
-    });
-    assert.strictEqual(env.phase, 'provision');
-    assert.strictEqual(env.containment, 'windows_sandbox');
-    assert.deepStrictEqual(env.filesystem, {
-      readwritePaths: ['C:\\workspace'],
-      readonlyPaths: ['C:\\inputs'],
-      deniedPaths: ['C:\\secrets'],
-    });
-    assert.strictEqual(env.experimental, undefined);
-  });
-
-  describe('round-trip via the typed API', () => {
-    it('provisionSandbox builds a windows_sandbox envelope and routes back via the wsb: prefix', async () => {
-      const request = installStateAwareReply('{"result":{"sandboxId":"wsb:prov-1"}}');
-      const result = await provisionSandbox(
-        'windows_sandbox',
-        { filesystem: { readonlyPaths: ['C:\\inputs'] } },
-        { experimental: true },
-      );
-      assert.strictEqual(result.sandboxId, 'wsb:prov-1');
-      const envelope = requestEnvelope(request());
-      assert.strictEqual(envelope.phase, 'provision');
-      assert.strictEqual(envelope.containment, 'windows_sandbox');
-      assert.deepStrictEqual(envelope.filesystem, { readonlyPaths: ['C:\\inputs'] });
-      assert.strictEqual(envelope.experimental, undefined);
-    });
-
-    it('startSandbox infers windows_sandbox from the wsb: prefix', async () => {
-      const request = installStateAwareReply('{"result":{}}');
-      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      await startSandbox(id, undefined, { experimental: true });
-      const envelope = requestEnvelope(request());
-      assert.strictEqual(envelope.phase, 'start');
-      assert.strictEqual(envelope.sandboxId, 'wsb:prov-1');
-      assert.strictEqual(envelope.experimental, undefined);
-    });
-
-    it('execInSandboxAsync rejects live execution for a wsb: id', async () => {
-      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      await assert.rejects(
-        () => execInSandboxAsync(
-          id as unknown as SandboxId<'isolation_session'>,
-          { process: { commandLine: 'echo hello-from-wsb' } },
-          { experimental: true },
-        ),
-        (error: unknown) =>
-          error instanceof MxcError &&
-          error.code === 'unsupported_containment',
-      );
-    });
-
-    it('execInSandboxAsync rejects dry-run execution for a wsb: id', async () => {
-      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      if (false) {
-        void execInSandboxAsync(
-          // @ts-expect-error Windows Sandbox cannot execute through this API, including dry-run.
-          id,
-          { process: { commandLine: 'echo hello-from-wsb' } },
-          { dryRun: true, experimental: true },
-        );
-      }
-      await assert.rejects(
-        () => execInSandboxAsync(
-          id as unknown as SandboxId<'isolation_session'>,
-          { process: { commandLine: 'echo hello-from-wsb' } },
-          { dryRun: true, experimental: true },
-        ),
-        (error: unknown) =>
-          error instanceof MxcError &&
-          error.code === 'unsupported_containment',
-      );
-    });
-
-    it('stopSandbox and deprovisionSandbox build minimal envelopes for a wsb: id', async () => {
-      for (const phase of ['stop', 'deprovision'] as const) {
-        const request = installStateAwareReply('{"result":{}}');
-        const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-        const call = phase === 'stop' ? stopSandbox : deprovisionSandbox;
-        await call(id, undefined, { experimental: true });
-        const envelope = requestEnvelope(request());
-        assert.strictEqual(envelope.phase, phase);
-        assert.strictEqual(envelope.sandboxId, 'wsb:prov-1');
-      }
-    });
   });
 });
 
 describe('wslc state-aware lifecycle', () => {
-  it('defaults the version to the published 0.9.0-alpha contract', () => {
+  it('targets the SDK-owned stable 1.0.0 contract', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
       config: { image: 'alpine:latest' },
     });
-    assert.strictEqual(env.version, '0.9.0-alpha');
+    assert.strictEqual(env.version, '1.0.0');
   });
 
-  it('rejects a caller-supplied version without a registered wslc state-aware contract', () => {
+  it('rejects a caller-supplied version', () => {
     assert.throws(
       () => buildStateAwareEnvelope({
         phase: 'provision',
         backendKey: 'wslc',
         containment: 'wslc',
-        config: { version: '0.8.1-alpha', image: 'alpine:latest' },
+        config: { version: '1.0.0', image: 'alpine:latest' },
       }),
       (err: unknown) => err instanceof MxcError &&
         err.code === 'malformed_request' &&
-        /require schema version '0\.9\.0-alpha'/.test(err.message),
+        /do not accept a caller-selected version/.test(err.message),
     );
   });
 
@@ -1103,69 +1071,85 @@ describe('wslc state-aware lifecycle', () => {
       sandboxId: 'wslc:abc',
       config: {
         process: { commandLine: 'echo hi' },
-        runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' },
+        network: { runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' } },
       },
     });
     assert.deepStrictEqual(env.process, { commandLine: 'echo hi' });
     assert.deepStrictEqual(env.runtimeConfig, {
       networkProxy: 'http://127.0.0.1:8888',
     });
+    assert.strictEqual(env.network, undefined);
     assert.strictEqual(env.experimental, undefined);
   });
 
+  it('rejects state-aware runtime config outside network.runtimeConfig', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'exec',
+        backendKey: 'wslc',
+        sandboxId: 'wslc:abc',
+        config: {
+          process: { commandLine: 'echo hi' },
+          runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' },
+        },
+      }),
+      (err: unknown) => err instanceof MxcError
+        && err.code === 'malformed_request'
+        && /network\.runtimeConfig/.test(err.message),
+    );
+  });
+
   describe('round-trip via the typed API', () => {
-    it('provisionSandbox builds a wslc envelope and routes back via the wslc: prefix', async () => {
+    it('provisionContainer builds a wslc envelope and routes back via the wslc: prefix', async () => {
       const request = installStateAwareReply('{"result":{"sandboxId":"wslc:0123abcd"}}');
-      const result = await provisionSandbox(
-        'wslc',
-        {
-          image: 'alpine:latest',
-          network: {
+      const result = await provisionContainer(
+        { containment: 'wslc', image: 'alpine:latest', network: {
             egress: { default: 'deny' },
             ingress: { default: 'deny', hostLoopback: 'deny' },
-          },
-        },
+          } },
       );
-      assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
+      assert.strictEqual(result.containerId, 'wslc:0123abcd');
       const envelope = requestEnvelope(request());
       assert.strictEqual(envelope.phase, 'provision');
       assert.strictEqual(envelope.containment, 'wslc');
-      assert.strictEqual(envelope.version, '0.9.0-alpha');
+      assert.strictEqual(envelope.version, '1.0.0');
     });
 
-    it('startSandbox infers wslc from the wslc: prefix', async () => {
+    it('startContainer infers wslc from the wslc: prefix', async () => {
       const request = installStateAwareReply('{"result":{}}');
-      const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
-      await startSandbox(id);
+      const id = 'wslc:0123abcd' as ContainerId<'wslc'>;
+      await startContainer(id);
       const envelope = requestEnvelope(request());
       assert.strictEqual(envelope.phase, 'start');
       assert.strictEqual(envelope.sandboxId, 'wslc:0123abcd');
       assert.strictEqual(envelope.experimental, undefined);
     });
 
-    it('execInSandboxAsync runs live execution for a wslc: id', async () => {
+    it('runInContainer runs live execution for a wslc: id', async () => {
       const exec = installStateAwareExecBinding(
         () => new FakeStateAwareExecBinding(31, 'hello-from-wslc\n', ''),
       );
-      const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
-      const result = await execInSandboxAsync(
+      const id = 'wslc:0123abcd' as ContainerId<'wslc'>;
+      const result = await runInContainer(
         id,
-        { process: { commandLine: 'echo hello-from-wslc' } },
+        { command: 'echo hello-from-wslc' },
       );
       assert.deepStrictEqual(result, {
         stdout: 'hello-from-wslc\n',
         stderr: '',
         exitCode: 0,
+        timedOut: false,
+        warnings: [],
       });
       assert.strictEqual(exec.request().phase, 'exec');
       assert.strictEqual(exec.request().sandboxId, 'wslc:0123abcd');
     });
 
-    it('stopSandbox and deprovisionSandbox build minimal envelopes for a wslc: id', async () => {
+    it('stopContainer and deprovisionContainer build minimal envelopes for a wslc: id', async () => {
       for (const phase of ['stop', 'deprovision'] as const) {
         const request = installStateAwareReply('{"result":{}}');
-        const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
-        const call = phase === 'stop' ? stopSandbox : deprovisionSandbox;
+        const id = 'wslc:0123abcd' as ContainerId<'wslc'>;
+        const call = phase === 'stop' ? stopContainer : deprovisionContainer;
         await call(id);
         const envelope = requestEnvelope(request());
         assert.strictEqual(envelope.phase, phase);

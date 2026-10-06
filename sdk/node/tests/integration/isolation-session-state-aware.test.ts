@@ -19,13 +19,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
 import {
-  execInSandbox,
-  execInSandboxAsync,
   MxcError,
-  provisionSandbox,
-  startSandbox,
-  stopSandbox,
-} from '@microsoft/mxc-sdk';
+} from '@microsoft/mxc-sdk/v1';
+import {
+  spawnInContainer,
+  runInContainer,
+  provisionContainer,
+  deprovisionContainer,
+  startContainer,
+  stopContainer,
+} from '@microsoft/mxc-sdk/v1';
 import {
   isolationSessionNetwork,
   probeIsolationSessionFeature,
@@ -82,45 +85,80 @@ const policyValidationSkipReason =
   platformSkipReason ?? (await probeIsolationSessionFeature());
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
+  it('captures output, nonzero exits, concurrent large streams, and timeout', async () => {
+    const { containerId } = await provisionContainer(
+      { containment: 'isolation_session', network: isolationSessionNetwork },
+    );
+    try {
+      await startContainer(containerId);
+      const result = await runInContainer(containerId, {
+        command: 'cmd /c "echo RUN_OUT& echo RUN_ERR 1>&2& exit /b 7"',
+      });
+      assert.strictEqual(result.exitCode, 7);
+      assert.strictEqual(result.timedOut, false);
+      assert.match(result.stdout, /RUN_OUT/);
+      assert.match(result.stderr, /RUN_ERR/);
+      assert.ok(Array.isArray(result.warnings));
+
+      const count = 131072;
+      const large = await runInContainer(containerId, {
+        command: `powershell.exe -NoProfile -NonInteractive -Command "[Console]::Out.Write(('O' * ${count})); [Console]::Error.Write(('E' * ${count}))"`,
+        timeoutMs: 30000,
+      });
+      assert.strictEqual(large.exitCode, 0);
+      assert.strictEqual(large.timedOut, false);
+      assert.strictEqual(large.stdout, 'O'.repeat(count));
+      assert.strictEqual(large.stderr, 'E'.repeat(count));
+
+      const timedOut = await runInContainer(containerId, {
+        command: 'powershell.exe -NoProfile -NonInteractive -Command "[Console]::Out.WriteLine(\'BEFORE_TIMEOUT\'); Start-Sleep -Seconds 30"',
+        timeoutMs: 2000,
+      });
+      assert.strictEqual(timedOut.timedOut, true);
+      assert.strictEqual(timedOut.exitCode, -1);
+      assert.match(timedOut.stdout, /BEFORE_TIMEOUT/);
+      await stopContainer(containerId);
+    } finally {
+      await safeDeprovision(containerId);
+    }
+  });
+
   it('runs full lifecycle: provision -> start -> exec -> stop -> deprovision', async () => {
-    const provisionResult = await provisionSandbox(
-      'isolation_session',
-      {
-        network: {
+    const provisionResult = await provisionContainer(
+      { containment: 'isolation_session', network: {
           egress: { default: 'allow' },
           ingress: { default: 'allow', hostLoopback: 'allow' },
-        },
-      },
+        } },
     );
-    const sandboxId = provisionResult.sandboxId;
-    assert.ok(
-      sandboxId.startsWith('iso:'),
-      `Expected sandboxId to start with 'iso:', got '${sandboxId}'`,
-    );
-
-    // Provision now returns the agent SID and the shared ephemeral workspace
-    // path alongside the agent user name.
-    const metadata = provisionResult.metadata;
-    assert.ok(metadata, 'provision result carries metadata');
-    assert.ok(
-      (metadata?.agentUserName?.length ?? 0) > 0,
-      `metadata.agentUserName is non-empty: ${JSON.stringify(metadata)}`,
-    );
-    assert.ok(
-      (metadata?.agentUserSid?.length ?? 0) > 0,
-      `metadata.agentUserSid is non-empty: ${JSON.stringify(metadata)}`,
-    );
-    assert.ok(
-      (metadata?.ephemeralWorkspacePath?.length ?? 0) > 0,
-      `metadata.ephemeralWorkspacePath is non-empty: ${JSON.stringify(metadata)}`,
-    );
-
+    const sandboxId = provisionResult.containerId;
     try {
-      await startSandbox(sandboxId, {});
+      assert.ok(Array.isArray(provisionResult.warnings));
+      assert.ok(
+        sandboxId.startsWith('iso:'),
+        `Expected sandboxId to start with 'iso:', got '${sandboxId}'`,
+      );
 
-      const result = await execInSandboxAsync(
+      const metadata = provisionResult.metadata;
+      assert.ok(metadata, 'provision result carries metadata');
+      assert.ok(
+        (metadata?.agentUserName?.length ?? 0) > 0,
+        `metadata.agentUserName is non-empty: ${JSON.stringify(metadata)}`,
+      );
+      assert.ok(
+        (metadata?.agentUserSid?.length ?? 0) > 0,
+        `metadata.agentUserSid is non-empty: ${JSON.stringify(metadata)}`,
+      );
+      assert.ok(
+        (metadata?.ephemeralWorkspacePath?.length ?? 0) > 0,
+        `metadata.ephemeralWorkspacePath is non-empty: ${JSON.stringify(metadata)}`,
+      );
+
+      const started = await startContainer(sandboxId, {});
+      assert.ok(Array.isArray(started.warnings));
+
+      const result = await runInContainer(
         sandboxId,
-        { process: { commandLine: 'cmd /c echo hello' } },
+        { command: 'cmd /c echo hello' },
       );
 
       assert.strictEqual(result.exitCode, 0, `exec exit code: stdout=${result.stdout}, stderr=${result.stderr}`);
@@ -129,29 +167,30 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
         `stdout did not contain 'hello': ${result.stdout}`,
       );
 
-      await stopSandbox(sandboxId, undefined);
+      const stopped = await stopContainer(sandboxId, undefined);
+      assert.ok(Array.isArray(stopped.warnings));
     } finally {
-      await safeDeprovision(sandboxId);
+      const deprovisioned = await deprovisionContainer(sandboxId);
+      assert.ok(Array.isArray(deprovisioned.warnings));
     }
   });
 
-  it('streams exec through MxcSandboxProcess', async () => {
-    const provisionResult = await provisionSandbox(
-      'isolation_session',
-      { network: isolationSessionNetwork },
+  it('streams exec through MxcProcess', async () => {
+    const provisionResult = await provisionContainer(
+      { containment: 'isolation_session', network: isolationSessionNetwork },
     );
-    const sandboxId = provisionResult.sandboxId;
+    const sandboxId = provisionResult.containerId;
 
     try {
-      await startSandbox(sandboxId, {});
-      const sandboxProcess = execInSandbox(
+      await startContainer(sandboxId, {});
+      const sandboxProcess = await spawnInContainer(
         sandboxId,
-        { process: { commandLine: 'cmd /c echo streamed' } },
+        { command: 'cmd /c echo streamed' },
       );
       try {
         const stdout = readStreamText(sandboxProcess.standardOutput);
         const stderr = readStreamText(sandboxProcess.standardError);
-        const result = await sandboxProcess.waitAsync();
+        const result = await sandboxProcess.wait();
         assert.strictEqual(result.exitCode, 0);
         assert.strictEqual(result.timedOut, false);
         assert.ok((await stdout).includes('streamed'));
@@ -159,18 +198,17 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       } finally {
         sandboxProcess.dispose();
       }
-      await stopSandbox(sandboxId, undefined);
+      await stopContainer(sandboxId, undefined);
     } finally {
       await safeDeprovision(sandboxId);
     }
   });
 
   it('shares files with the session through the ephemeral workspace', async () => {
-    const provisionResult = await provisionSandbox(
-      'isolation_session',
-      { network: isolationSessionNetwork },
+    const provisionResult = await provisionContainer(
+      { containment: 'isolation_session', network: isolationSessionNetwork },
     );
-    const sandboxId = provisionResult.sandboxId;
+    const sandboxId = provisionResult.containerId;
     const workspace = provisionResult.metadata?.ephemeralWorkspacePath;
     assert.ok(
       workspace && workspace.length > 0,
@@ -180,16 +218,16 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     const ws = workspace as string;
 
     try {
-      await startSandbox(sandboxId, {});
+      await startContainer(sandboxId, {});
 
       // Caller -> session: the test (the calling user) stages a file into the
       // shared workspace and the session reads it back. Proves the SDK surfaces
       // a *usable* path a consumer can share files through, not just a non-empty
       // string.
       fs.writeFileSync(path.join(ws, 'caller_to_session.txt'), 'from-caller', 'ascii');
-      const readResult = await execInSandboxAsync(
+      const readResult = await runInContainer(
         sandboxId,
-        { process: { commandLine: `cmd /c type "${ws}\\caller_to_session.txt"` } },
+        { command: `cmd /c type "${ws}\\caller_to_session.txt"` },
       );
       assert.strictEqual(
         readResult.exitCode,
@@ -203,9 +241,9 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 
       // Session -> caller: the session writes into its workspace and the caller
       // reads it back on the host.
-      const writeResult = await execInSandboxAsync(
+      const writeResult = await runInContainer(
         sandboxId,
-        { process: { commandLine: `cmd /c echo from-session> "${ws}\\session_to_caller.txt"` } },
+        { command: `cmd /c echo from-session> "${ws}\\session_to_caller.txt"` },
       );
       assert.strictEqual(
         writeResult.exitCode,
@@ -220,30 +258,29 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
         'caller could not read the session output',
       );
 
-      await stopSandbox(sandboxId, undefined);
+      await stopContainer(sandboxId, undefined);
     } finally {
       await safeDeprovision(sandboxId);
     }
   });
 
   it('exec surfaces a non-zero script exit as ExecResult.exitCode', async () => {
-    const provisionResult = await provisionSandbox(
-      'isolation_session',
-      { network: isolationSessionNetwork },
+    const provisionResult = await provisionContainer(
+      { containment: 'isolation_session', network: isolationSessionNetwork },
     );
-    const sandboxId = provisionResult.sandboxId;
+    const sandboxId = provisionResult.containerId;
 
     try {
-      await startSandbox(sandboxId, {});
+      await startContainer(sandboxId, {});
 
-      const result = await execInSandboxAsync(
+      const result = await runInContainer(
         sandboxId,
-        { process: { commandLine: 'cmd /c exit 7' } },
+        { command: 'cmd /c exit 7' },
       );
 
       assert.strictEqual(result.exitCode, 7, `expected exit 7, got ${result.exitCode}`);
 
-      await stopSandbox(sandboxId, undefined);
+      await stopContainer(sandboxId, undefined);
     } finally {
       await safeDeprovision(sandboxId);
     }
@@ -280,7 +317,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
     config: unknown,
     options: unknown,
   ) => Promise<unknown>;
-  const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
+  const provisionUntyped = provisionContainer as unknown as UntypedProvision;
 
   it('exact contract rejects a provision that omits the network acknowledgment', async () => {
     await assert.rejects(
@@ -322,12 +359,8 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
   // independent of the order in which the backend runs its validations.
   it('a policy rejection reaches the SDK with no failing-call detail', async () => {
     await assert.rejects(
-      () => provisionSandbox(
-        'isolation_session',
-        {
-          network: isolationSessionNetwork,
-          appId: 'x'.repeat(257),
-        },
+      () => provisionContainer(
+        { containment: 'isolation_session', network: isolationSessionNetwork, appId: 'x'.repeat(257) },
       ),
       (err: unknown) => {
         assert.ok(err instanceof MxcError, `expected MxcError, got ${String(err)}`);
@@ -353,7 +386,7 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
     config: unknown,
     options: unknown,
   ) => Promise<unknown>;
-  const startUntyped = startSandbox as unknown as UntypedStart;
+  const startUntyped = startContainer as unknown as UntypedStart;
 
   it('exact contract rejects a provision that supplies a ui policy', async () => {
     await assert.rejects(

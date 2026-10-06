@@ -56,15 +56,6 @@ expect_absent() {
     pass "$label"
 }
 
-# Nonzero exit, the reason named, and no workload output.
-expect_rejected() {
-    local label="$1" reason="$2" sentinel="$3"
-    [ "$RC" != 0 ] || fail "$label (exit 0, expected nonzero)" "$OUT"
-    grep -qF "$reason" <<<"$OUT" || fail "$label (missing '$reason')" "$OUT"
-    ! grep -qF "$sentinel" <<<"$OUT" || fail "$label (workload ran)" "$OUT"
-    pass "$label"
-}
-
 DEFAULT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Exported here rather than set by a config: the guarantee is unconditional, so
@@ -85,7 +76,7 @@ export MXC_LEAK_PROBE="BWRAP_HOST_ENV_LEAKED"
 # `a_supplied_env_is_used_verbatim` in `bwrap_command.rs`, which reads the env
 # MXC builds instead of the child's.
 
-run_config bwrap_env_09_default_block.json
+run_config bwrap_env_default_block.json
 expect_ok "an omitted env gets the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "an omitted env gets HOME" "HOME=[/tmp]"
 expect_ok "an omitted env gets TERM" "TERM=[xterm-256color]"
@@ -94,18 +85,18 @@ expect_absent "the host value itself does not appear" "BWRAP_HOST_ENV_LEAKED"
 
 # No `process.cwd` resolves no directory, so no HOME -- policy mounts land
 # after `--tmpfs /tmp`, so /tmp is not guaranteed private.
-run_config bwrap_env_09_no_cwd.json
+run_config bwrap_env_no_cwd.json
 expect_ok "an unresolved working directory leaves HOME unset" "HOME=[]"
 expect_ok "the rest of the default block still applies" "PATH=[$DEFAULT_PATH]"
 expect_ok "an unset HOME is not the host's" "LEAK=[]"
 
-run_config bwrap_env_09_empty.json
+run_config bwrap_env_empty.json
 expect_ok "an empty env runs" "ENV_PROBE_DONE"
 expect_ok "an empty env suppresses HOME" "HOME=[]"
 expect_absent "an empty env adds no default TERM" "TERM=[xterm-256color]"
 expect_ok "an empty env inherits nothing from the host" "LEAK=[]"
 
-run_config bwrap_env_09_verbatim.json
+run_config bwrap_env_verbatim.json
 expect_ok "a supplied env is honored" "FOO=[bar]"
 expect_ok "a supplied env adds no default HOME" "HOME=[]"
 expect_absent "a supplied env adds no default TERM" "TERM=[xterm-256color]"
@@ -115,15 +106,10 @@ expect_absent "a supplied env adds no default TERM" "TERM=[xterm-256color]"
 expect_ok "a supplied PATH is used verbatim" "PATH=[/mxc-probe/bin:/usr/bin:/bin]"
 expect_absent "a supplied PATH is not merged with the default" "PATH=[$DEFAULT_PATH"
 
-run_config bwrap_env_09_inherit.json
+run_config bwrap_env_inherit.json
 expect_ok "inheritDefaultEnv keeps the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "inheritDefaultEnv keeps the default HOME" "HOME=[/tmp]"
 expect_ok "inheritDefaultEnv adds the caller's variable" "FOO=[bar]"
 expect_ok "a caller entry overrides the same-named default" "TERM=[vt100]"
-
-# inheritDefaultEnv is a 0.9 field, so the 0.8 contract rejects the document.
-run_config bwrap_env_08_inherit_rejected.json
-expect_rejected "sub-0.9 inheritDefaultEnv is rejected" \
-    "unknown field \`inheritDefaultEnv\`" "INHERIT_08_SHOULD_NOT_RUN"
 
 echo "All $PASS_COUNT Bubblewrap environment assertions passed."

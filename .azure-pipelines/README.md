@@ -39,17 +39,15 @@ runs `cargo publish --dry-run` from any ref after creating the release archives.
 Publishing through ESRP requires an immutable `refs/tags/v*` tag and explicitly
 setting `dryRun` to `false`.
 
-- All release crates use the workspace version, an `mxc-` package name, and
-  complete crates.io metadata.
-- `Invoke-CratePackage.ps1` enforces those rules, derives dependency order, and
-  packages each crate into its own artifact folder.
-- Azure Pipelines packages `mxc-sdk` and its internal dependencies once using
-  the private Rust toolchain and dependency feed.
-- The publish template owns the dependency-ordered crate list; release operators
-  cannot override it at queue time. GitHub CI rejects any difference from
-  Cargo's computed order.
+- `mxc-sdk` uses the workspace version and complete crates.io metadata.
+- `Invoke-CratePackage.ps1` verifies that `mxc-sdk` is the only Rust release
+  crate and packages it into the release artifact.
+- Azure Pipelines packages `mxc-sdk` once using the private Rust toolchain and
+  dependency feed.
+- The publish template owns the crate list; release operators cannot override
+  it at queue time. GitHub CI rejects any difference from the validated list.
 - Every release runs Cargo's crates.io dry run before the publish job submits
-  and waits for one ESRP release per crate.
+  the package through ESRP.
 
 ### PR Pipelines
 - GitHub Actions runs the PR validation build automatically on every pull

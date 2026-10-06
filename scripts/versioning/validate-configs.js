@@ -37,7 +37,13 @@ for (const required of [schemaVer.min, schemaVer.maxSupported]) {
 }
 
 // Directories whose *.json files (recursively) are configs we expect to validate.
-const CONFIG_DIRS = [join("tests", "examples"), join("tests", "configs")];
+// `tests/policy/sdk-v1/expected` holds the exact documents every SDK must emit
+// for the shared v1 policy goldens.
+const CONFIG_DIRS = [
+  join("tests", "examples"),
+  join("tests", "configs"),
+  join("tests", "policy", "sdk-v1", "expected"),
+];
 
 // Files that are intentionally invalid (negative tests) and must NOT validate.
 const exemptionsPath = join(repoRoot, "scripts", "versioning", "config-validation-exemptions.json");

@@ -8,11 +8,17 @@
 # are supposed to ALLOW an operation.
 #
 # Expectations come from `resolve_ui_restrictions`
-# (src/core/wxc_common/src/ui_policy.rs), whose rule is "the named thing is
+# (src/mxc-sdk/src/core/mxc_common/ui_policy.rs), whose rule is "the named thing is
 # the thing you keep": clipboard=read allows reading and blocks writing.
 #
 # Allow-direction coverage matters: a flag wired to the wrong bit, or set
-# unconditionally, still passes every blocked-direction assertion in 4b.
+# unconditionally, still passes every blocked-direction assertion in 4b. It is
+# only decidable where the host can actually perform the operation: a permissive
+# knob omits the matching UILIMIT bit, it does not grant the capability, and the
+# rest of the process-container security environment may still deny it
+# (docs/process-container/UIPolicy_Schema.md). Measure-UiGrantable establishes
+# which capabilities are reachable at all, and the cases below skip the allow
+# direction for the rest.
 #
 # SAFETY: EXITWINDOWS is never probed where it is expected to be allowed —
 # that would be a real logoff of the operator's session. Those cases record an
@@ -38,40 +44,52 @@ Set-StrictMode -Version Latest
 
 Initialize-WpcContext @PSBoundParameters
 
+# Probe tag -> whether a fully permissive UI policy could exercise it on this
+# host. Tags Measure-UiGrantable does not cover are absent and stay strict.
+$Script:UiGrantable = @{}
 
-# Assert the documented floor: with every UI knob permissive, a contained
-# process gets every UI capability.
-#
-# UIPolicy_Schema.md:95 maps clipboard="all" to no UILIMIT flags and "Allowed"
-# for both directions; os-version-support.md:185 marks clipboard, systemSettings
-# and desktopSystemControl supported on every build. No doc says containment
-# removes them. So anything still denied here is a real defect, not a quirk of
-# the test host, and it is reported as one -- it also explains at a glance why
-# the individual allow cases below went red.
-function Measure-UiReachable {
+
+# Measure which UI capabilities a contained process can exercise when every UI
+# knob is permissive. This is a host measurement, not an assertion: a permissive
+# value only omits the matching UILIMIT bit, so a capability the host denies
+# anyway is undecidable in the allow direction. Reachable capabilities keep both
+# directions strict.
+function Measure-UiGrantable {
     $tags = @('READCLIPBOARD', 'WRITECLIPBOARD', 'SYSTEMPARAMETERS', 'DISPLAYSETTINGS', 'DESKTOP')
     $cfg = New-Config -Name 'ui-policy-baseline' -CommandLine "`"$UiProbeDebug`" $($tags -join ' ')" `
         -ReadWrite @((Join-Path $ScratchRoot 'rw')) -Env (Get-ProbeEnvWithDestructive) `
         -UiDisable $false -Clipboard 'all' -BpUiSystemSettings 'all' -BpUiDesktopControl $true `
         -BpUiIsolation 'desktop'
     $log = Join-Path $ScratchRoot 'logs\ui-policy-baseline.log'
+    Set-UiProbeClipboardSeed
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
 
-    $verdicts = @([regex]::Matches($r.Stdout, '(?m)^[A-Z][A-Z0-9_]*=(?:PASS|FAIL|INCONCLUSIVE)\s*$'))
-    if ($r.ExitCode -ne 0 -or $verdicts.Count -eq 0) {
-        Record-Result -Phase 'P4e' -Name 'baseline: a fully permissive UI policy grants every UI capability' -Pass $false `
-            -Detail "the baseline case did not run (exit=$($r.ExitCode); verdicts=$($verdicts.Count))"
+    $verdicts = @{}
+    foreach ($line in ($r.Stdout -split "`r?`n")) {
+        if ($line -match '^(?<k>[A-Z][A-Z0-9_]*)=(?<v>PASS|FAIL|INCONCLUSIVE)\s*$') {
+            $verdicts[$matches['k']] = $matches['v']
+        }
+    }
+    $absent = @($tags | Where-Object { -not $verdicts.ContainsKey($_) })
+    if ($r.ExitCode -ne 0 -or $absent.Count) {
+        # Leaving the map empty keeps every case below strict rather than
+        # silently dropping allow-direction coverage.
+        Record-Result -Phase 'P4e' -Name 'baseline: the fully permissive UI policy case reports every tag' -Pass $false `
+            -Detail "exit=$($r.ExitCode); missing=$(if ($absent.Count) { $absent -join ', ' } else { '<none>' })"
         return
     }
 
     # FAIL from the probe means the operation succeeded, i.e. the capability is
-    # granted -- which is what a permissive policy must produce.
-    $denied = @($tags | Where-Object { $r.Stdout -notmatch "(?m)^$_=FAIL\s*$" })
+    # reachable with no UILIMIT bit in the way.
+    foreach ($tag in $tags) {
+        $Script:UiGrantable[$tag] = ($verdicts[$tag] -eq 'FAIL')
+    }
 
-    $shown = if ($denied.Count) { $denied -join ', ' } else { '<none>' }
-    Record-Result -Phase 'P4e' -Name 'baseline: a fully permissive UI policy grants every UI capability' `
-        -Pass ($denied.Count -eq 0) `
-        -Detail "still denied: $shown (UIPolicy_Schema.md:95 and os-version-support.md:185 document these as allowed)"
+    $reachable = @($tags | Where-Object { $Script:UiGrantable[$_] })
+    $denied    = @($tags | Where-Object { -not $Script:UiGrantable[$_] })
+    Record-Result -Phase 'P4e' -Name 'baseline: UI capabilities reachable under a fully permissive policy' -Status 'skip' `
+        -Detail ("reachable: $(if ($reachable.Count) { $reachable -join ', ' } else { '<none>' }); " +
+                 "denied by this host regardless of policy: $(if ($denied.Count) { $denied -join ', ' } else { '<none>' })")
 }
 
 
@@ -110,6 +128,9 @@ function Invoke-UiPolicyCase {
 
     $cfg = New-Config @cfgArgs
     $log = Join-Path $ScratchRoot "logs\ui-policy-$($Case.Name).log"
+    if ($tags -contains 'READCLIPBOARD') {
+        Set-UiProbeClipboardSeed
+    }
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
 
     $matrix = @{}
@@ -126,6 +147,9 @@ function Invoke-UiPolicyCase {
         $got  = if ($matrix.ContainsKey($tag)) { $matrix[$tag] } else { '<missing>' }
         $gotV = Format-Verdict $got 'blocked' 'allowed'
         $name = "$($Case.Label) -> $tag=$want"
+        # Measured tags only; anything Measure-UiGrantable does not cover (such
+        # as HANDLES, which has its own negative control) stays strict.
+        $hostDenies = ($Script:UiGrantable.ContainsKey($tag) -and -not $Script:UiGrantable[$tag])
 
         # INJECTION is the one tag whose verdict is not a clean two-state.
         # Mirror Phase 4b: an unsupported build or a lost foreground race is a
@@ -148,13 +172,18 @@ function Invoke-UiPolicyCase {
         }
 
         if ($got -eq 'INCONCLUSIVE') {
-            $diag = if ($r.Stdout -match "(?m)^$tag=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '<no diag>' }
+            $diag = if ($r.Stdout -match "(?m)^$([regex]::Escape($tag))=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '<no diag>' }
             # ui.disable=true engages the Win32k mitigation, which stops user32
             # from loading. Losing the GUI subsystem outright is strictly
             # stronger than the individual limit, so it satisfies "blocked".
             if ($Case.ContainsKey('GuiGoneIsBlocked') -and $want -eq 'blocked' -and $diag -match 'user32') {
                 Record-Result -Phase $Phase -Name $name -Pass $true `
                     -Detail "expected=blocked; GUI subsystem unavailable (Win32k mitigation); diag=$diag"
+                continue
+            }
+            if ($hostDenies) {
+                Record-Result -Phase $Phase -Name $name -Status 'skip' `
+                    -Detail "expected=$want; this host denies $tag even under a fully permissive UI policy, so the probe cannot exercise the UILIMIT mapping; diag=$diag"
                 continue
             }
             # Nothing documents the probe being unable to run here, so this is a
@@ -164,14 +193,40 @@ function Invoke-UiPolicyCase {
             continue
         }
 
-        # A contained process still gets the documented capability when the knob
-        # is permissive (UIPolicy_Schema.md:95, os-version-support.md:185).
-        # Measure-UiReachable reports the contradiction once; the per-knob cases
-        # below stay red so a real regression is never hidden behind a skip.
+        # A permissive knob omits the UILIMIT bit; it does not grant the
+        # operation. Where the host denies the capability regardless of policy,
+        # the allow direction carries no information about the mapping. The
+        # block direction stays strict: a succeeded operation is a real leak.
+        if ($hostDenies -and $want -eq 'allowed') {
+            Record-Result -Phase $Phase -Name $name -Status 'skip' `
+                -Detail "this host denies $tag even under a fully permissive UI policy; got=$gotV; full=$summaryV"
+            continue
+        }
 
         $expectToken = if ($want -eq 'blocked') { 'PASS' } else { 'FAIL' }
+        $diag = if ($r.Stdout -match "(?m)^$([regex]::Escape($tag))=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '' }
+        $diagPart = if ($diag) { "; diag=$diag" } else { '' }
+
+        # Where the policy also permits writing, the probe can seed the
+        # clipboard it reads, so "the limit did not refuse" is too weak: it
+        # still holds when the data comes back unreadable. Demand the round
+        # trip, which is the only assertion that covers the read path itself.
+        if ($got -eq $expectToken -and $tag -eq 'READCLIPBOARD' -and $Case['RequireClipboardRoundTrip']) {
+            if ($diag -match 'in-process seed failed') {
+                # The WRITECLIPBOARD assertion owns a refused seed; with nothing
+                # on the clipboard there is no round trip to require.
+                Record-Result -Phase $Phase -Name $name -Status 'skip' `
+                    -Detail "expected=$want; the probe could not seed the clipboard, so the read path was not exercised$diagPart; full=$summaryV"
+                continue
+            }
+            if ($diag -notmatch 'returned the seeded text') {
+                Record-Result -Phase $Phase -Name $name -Pass $false `
+                    -Detail "expected=$want with a readable round trip; the limit did not refuse the call but the seeded text did not come back$diagPart; full=$summaryV"
+                continue
+            }
+        }
         Record-Result -Phase $Phase -Name $name -Pass ($got -eq $expectToken) `
-            -Detail "expected=$want; got=$gotV; full=$summaryV"
+            -Detail "expected=$want; got=$gotV$diagPart; full=$summaryV"
     }
 }
 
@@ -183,7 +238,7 @@ function Invoke-UiPolicyCase {
 function Phase-UiPolicyMatrix {
     Section 'Phase 4e: UI policy resolution matrix (every documented value)'
 
-    Measure-UiReachable
+    Measure-UiGrantable
 
     # The HANDLES probe needs a USER handle owned by a process OUTSIDE the
     # job. Created once and shared by every case; harmless for the rest.
@@ -197,6 +252,7 @@ function Phase-UiPolicyMatrix {
         # "the named thing is the thing you keep": read => reading survives.
         $cases = @(
             @{ Name = 'clip-all';   Label = 'ui.clipboard=all';   Clipboard = 'all'
+               RequireClipboardRoundTrip = $true
                Expect = @{ READCLIPBOARD = 'allowed'; WRITECLIPBOARD = 'allowed' } }
             @{ Name = 'clip-read';  Label = 'ui.clipboard=read';  Clipboard = 'read'
                Expect = @{ READCLIPBOARD = 'allowed'; WRITECLIPBOARD = 'blocked' } }
@@ -240,8 +296,10 @@ function Phase-UiPolicyMatrix {
                Expect = @{ SYSTEMPARAMETERS = 'blocked'; DISPLAYSETTINGS = 'blocked' } }
 
             # --- processContainer.ui.desktopSystemControl -----------------
-            # true unblocks BOTH desktop switching and logoff. Only DESKTOP is
-            # probed: CreateDesktopW is reversible, ExitWindowsEx is not.
+            # true omits the DESKTOP and EXITWINDOWS limits for both desktop
+            # switching and logoff; it does not enable either operation. Only
+            # DESKTOP is probed: CreateDesktopW is reversible, ExitWindowsEx
+            # is not.
             @{ Name = 'deskctl-on';  Label = 'pcUi.desktopSystemControl=true'; BpUiDesktopControl = $true
                Expect = @{ DESKTOP = 'allowed' } }
             @{ Name = 'deskctl-off'; Label = 'pcUi.desktopSystemControl=false'; BpUiDesktopControl = $false

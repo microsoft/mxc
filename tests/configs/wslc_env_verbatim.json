@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-Env-verbatim",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo \"PYVER=[$PYTHON_VERSION]\"; echo \"FOO=[$FOO]\"; echo ENV_PROBE_DONE",
+    "timeout": 30000,
+    "env": ["FOO=bar"]
+  },
+  "network": {
+    "egress": { "default": "deny" }
+  },
+  "wslc": {
+    "image": "python:3.12-alpine"
+  }
+}

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
@@ -22,7 +23,7 @@ internal static class IsolationSessionHost
     // Evaluated once: this answer decides failure versus skip, so it has to be
     // the same for every test that consults it.
     private static readonly Lazy<bool> Available = new(() =>
-        MxcSandbox.GetAvailableBackends()
+        MxcPlatform.GetAvailableBackends()
             .Any(b => b.Backend == ContainmentBackend.IsolationSession));
 
     // Without this, a run in which everything skipped is indistinguishable from

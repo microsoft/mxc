@@ -112,7 +112,16 @@ jobs:
         working-directory: src
         env:
           MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
-        run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p wxc_e2e_tests --test e2e_lxc_network_capability
+        run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p mxc-sdk --test wxc_e2e_tests_e2e_lxc_network_capability
+
+      # These create and start a container, so they need this lane's root and
+      # its LXC install. `sdk_helpers` rides along because this is the only lane
+      # where `platform_support()` sees a host with LXC.
+      - name: Run LXC streaming SDK tests
+        working-directory: src
+        env:
+          MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
+        run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p mxc-sdk --test streaming_lxc --test sdk_helpers
 
       - name: Show leftover firewall state on failure
         if: failure()
@@ -123,6 +132,8 @@ jobs:
           echo "--- MXC chains ---"
           sudo iptables -S | grep -E '^-N MXC-' || echo "none"
           sudo ip6tables -S | grep -E '^-N MXC-' || echo "none"
+          echo "--- leftover containers ---"
+          sudo lxc-ls -f || echo "none"
 
       - name: Upload logs on failure
         if: failure() || cancelled()

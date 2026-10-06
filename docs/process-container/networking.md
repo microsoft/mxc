@@ -1,10 +1,11 @@
 # Process Container Networking Configuration, GA
 
-Schema 0.8.0 ProcessContainer networking uses the shared `network.egress` and `network.ingress` policy plus
-the `runtimeConfig.networkProxy` and `processContainer.network.allowedProxyPeer` configuration.
+Supported exact contracts from `0.9.0-alpha` use the shared `network.egress`
+and `network.ingress` policy plus `runtimeConfig.networkProxy` and
+`processContainer.network.allowedProxyPeer` configuration.
 
 Implementation companion to the parent
-[MXC Network Configuration, GA](../sandbox-policy/0.8.0/networking/networking.md)
+[MXC Network Configuration, GA design](../sandbox-policy/0.8.0/networking/networking.md)
 doc. The parent owns the shared policy schema, connectivity models, and GA goal.
 This doc covers only how the Windows ProcessContainer backend enforces them.
 
@@ -23,7 +24,7 @@ section 2 and is not equivalent to these guarantees.
   list and does not carry the proxy endpoint. The containment boundary is the absence of direct internet capability.
   Private-network traffic remains available in both directions when `ingress.default` is `"allow"`.
 
-The examples below use the schema 0.8 network shape.
+The examples below use the supported directional network shape.
 
 Windows exposes `privateNetworkClientServer` as one bidirectional AppContainer capability. ProcessContainer therefore
 requires `ingress.default: "allow"` before the container can communicate with private-network addresses. Enabling it
@@ -125,8 +126,9 @@ complete implementation of the shared bidirectional `hostLoopback: "allow"` cont
 
 #### Identity-scoped proxy
 
-Use the canonical [ProcessContainer schema 0.8 configuration](examples/0.8.0-schema.md), which shows
-`runtimeConfig.networkProxy`, `processContainer.network.allowedProxyPeer`, and their relationship in one place.
+Use the [supported proxy-policy example](../schema.md#directional-networking-supported-contracts),
+which shows `runtimeConfig.networkProxy`,
+`processContainer.network.allowedProxyPeer`, and their relationship in one place.
 Use the installed Package Family Name for a packaged proxy, regardless of whether it has AppContainer isolation. Use
 the AppContainer profile name for an unpackaged AppContainer proxy.
 
@@ -167,10 +169,10 @@ MXC also sets the standard proxy environment variables for libraries that use co
 traffic that bypasses the proxy is blocked. On an enforcing BaseContainer path, per-container WFP permits egress only to
 the configured loopback proxy address and port and blocks direct public and private destinations.
 
-Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. When `allowedProxyPeer` names a package or
-AppContainer profile, MXC authorizes only that peer and `ingress.hostLoopback` remains denied. An identity-less host
-proxy omits `allowedProxyPeer` and requires `ingress.hostLoopback: "allow"`. Direct egress allow and deny rules do not
-apply when `runtimeConfig.networkProxy` is present.
+Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. When a non-blank `allowedProxyPeer` names a
+package or AppContainer profile, MXC authorizes only that peer and `ingress.hostLoopback` remains denied. An
+identity-less host proxy omits `allowedProxyPeer` and requires `ingress.hostLoopback: "allow"`. Direct egress allow and
+deny rules do not apply when `runtimeConfig.networkProxy` is present.
 
 The proxy endpoint is runtime metadata, not shared network policy. MXC configures the per-container WinHTTP proxy,
 applies WFP endpoint scoping, and grants the private-network capability selected by `ingress.default`.
@@ -202,7 +204,7 @@ middle rows provide different protections and are not ordered relative to each o
 
 For identity-scoped proxies, the scoped peer rule and `privateNetworkClientServer` do not bypass Windows
 Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
-declaration shown in the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
+declaration shown in the [historical schema 0.8 manifest example](examples/0.8.0-schema.md); its application entry uses
 `uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
 requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID, proxy
 executable, and configured port.
@@ -252,22 +254,23 @@ Do not infer otherwise from the schema:
 
 See the parent doc on the last 4.
 
-## 2. Schema 0.8 selection and downlevel behavior
+## 2. Supported-contract selection and downlevel behavior
 
 Both WFP filter writes and per-container WinHTTP proxy configuration require a
-privileged context. Schema 0.8 selects the strongest
+privileged context. Supported exact contracts select the strongest
 usable process-creation contract through runtime probing.
 
 **Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
-probe succeed. PSEC is the only ProcessContainer path that receives schema 0.8 egress filters, proxy peer identity, or
+probe succeed. PSEC is the only ProcessContainer path that receives directional egress filters, proxy peer identity, or
 host-loopback configuration because it owns the corresponding policy lifetime through workload completion. When PSEC
 is unavailable or incompatible, selection continues to AppContainer, where unsupported policy is rejected.
 
 **Downlevel behavior:** When PSEC is unavailable, compatible requests use the AppContainer fallback.
 `egress.default: "allow"` grants `internetClient`; `ingress.default: "allow"` grants the bidirectional
 `privateNetworkClientServer` capability. This is the documented ProcessContainer mapping on every tier, not a
-downlevel weakening. Legacy proxy requests retain their existing compatibility behavior; schema 0.8 runtime proxy
-requests do not fall back because AppContainer cannot preserve their peer or host-loopback requirements.
+downlevel weakening. Retired `network.proxy` requests fail at exact-version
+dispatch. Supported runtime-proxy requests do not fall back when AppContainer
+cannot preserve their peer or host-loopback requirements.
 
 The AppContainer fallback is selected only when its capability mapping preserves the request. Explicit egress rules,
 proxy peer identity, and host-loopback allow fail with a typed unsupported-policy error when PSEC cannot enforce them.
@@ -275,7 +278,7 @@ proxy peer identity, and host-loopback allow fail with a typed unsupported-polic
 ## 3. WFP enforcement
 
 PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. AppContainer fallback does not
-install schema 0.8 WFP filters.
+install directional WFP filters.
 
 WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.
 `privateNetworkClientServer`, selected through `ingress.default`, is the prerequisite for private-network access and

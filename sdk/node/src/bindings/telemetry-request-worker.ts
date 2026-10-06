@@ -4,7 +4,7 @@
 // Main-thread bridge for the blocking native consent presenter callback.
 
 import { Worker } from 'node:worker_threads';
-import { MxcError, type MxcErrorFields } from '../errors.js';
+import { MxcError, type MxcErrorFields } from '../v1/errors.js';
 import { TELEMETRY_CONSENT_PRESENTER_ERROR } from './telemetry.js';
 
 export interface TelemetryRequestWorkerData {

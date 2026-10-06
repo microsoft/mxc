@@ -1,6 +1,6 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
-  "version": "0.9.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
   "containerId": "CLI-Linux-Process-Default",
   "process": {
     "commandLine": "PID1=$(cat /proc/1/comm 2>/dev/null || echo unknown); MOUNTS=$(wc -l </proc/self/mountinfo); echo 'Hello from default Linux process sandbox'; id; cat /etc/os-release | head -2; echo '--- backend probe ---'; echo \"pid1=$PID1 mountinfo_lines=$MOUNTS\"; [ \"$PID1\" = \"bwrap\" ] || { echo \"FAIL: not under bubblewrap (pid1=$PID1)\"; exit 1; }; echo 'OK: under bubblewrap (pid1=bwrap)'"

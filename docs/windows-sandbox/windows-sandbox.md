@@ -43,11 +43,11 @@ WindowsSandbox.exe
 
 | Component | Location | Purpose |
 |---|---|---|
-| Execution engine | `src/core/mxc_engine/` | Selects one-shot and state-aware backends |
-| Lifecycle crate | `src/backends/windows_sandbox/lifecycle/` | Policy, launch, bridge, records, ownership, and teardown |
-| Host daemon | `src/backends/windows_sandbox/daemon/` | State-aware VM and guest-connection owner |
-| Shared protocol | `src/backends/windows_sandbox/common/` | Nonce authentication and control framing |
-| Guest agent | `src/backends/windows_sandbox/guest/` | Runs commands and bridges stdio inside the VM |
+| Execution engine module | `src/mxc-sdk/src/core/mxc_engine/` | Selects one-shot and state-aware backends |
+| Lifecycle module | `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/` | Policy, launch, bridge, records, ownership, and teardown |
+| Host daemon | `src/mxc-sdk/src/bin/windows_sandbox_daemon/` | State-aware VM and guest-connection owner |
+| Shared protocol module | `src/mxc-sdk/src/backends/windows_sandbox/common/` | Nonce authentication and control framing |
+| Guest agent | `src/mxc-sdk/src/bin/windows_sandbox_guest/` | Runs commands and bridges stdio inside the VM |
 
 ## One-Shot Execution
 
@@ -70,7 +70,7 @@ reuses a warm VM.
 The state-aware surface keeps the VM alive across separate `wxc-exec
 --operation` processes. Raw SDK/FFI requests carry `phase` and, after
 provision, `sandboxId` in JSON. Direct executor calls omit those routing fields
-from JSON and pass them as `--operation` and `--sandbox-id`. The backend is
+from JSON and pass them as `--operation` and `--container-id`. The backend is
 inferred from the `wsb:` sandbox ID after provision.
 
 | Phase | Behaviour |
@@ -100,7 +100,7 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 
 ```json
 {
-  "version": "0.10.0-alpha",
+  "version": "1.1.0-alpha",
   "containment": "windows_sandbox",
   "process": {
     "commandLine": "powershell -NoProfile -Command \"Write-Output 'hello'\"",
@@ -115,7 +115,7 @@ The raw SDK/FFI provision request is:
 
 ```json
 {
-  "version": "0.10.0-alpha",
+  "version": "1.1.0-alpha",
   "phase": "provision",
   "containment": "windows_sandbox",
   "filesystem": {
@@ -133,7 +133,7 @@ wxc-exec.exe config.json --operation provision
 
 Subsequent raw SDK/FFI phases carry the returned `sandboxId` in JSON. Direct
 executor calls remove `phase` and `sandboxId` from JSON and pass
-`--operation <phase> --sandbox-id <id>`.
+`--operation <phase> --container-id <id>`.
 
 The legacy `windowsSandbox.idleTimeoutMs`, `idleTimeout`, and
 `daemonPipeName` fields remain parseable for schema compatibility but do not

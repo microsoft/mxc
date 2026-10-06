@@ -1,0 +1,28 @@
+{
+  "description": "Filesystem lists, retained policy, cross-platform UI, and a timeout.",
+  "policy": {
+    "filesystem": {
+      "readwritePaths": [
+        "work"
+      ],
+      "readonlyPaths": [
+        "tools"
+      ],
+      "deniedPaths": [
+        "secrets"
+      ],
+      "clearPolicyOnExit": false
+    },
+    "ui": {
+      "disable": false,
+      "clipboard": "read",
+      "allowInputInjection": false
+    },
+    "timeoutMs": 30000
+  },
+  "containment": {
+    "kind": "process"
+  },
+  "command": "echo golden",
+  "containerName": "golden-process-filesystem-ui-timeout"
+}

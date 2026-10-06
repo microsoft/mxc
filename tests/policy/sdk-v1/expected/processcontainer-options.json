@@ -1,0 +1,25 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-processcontainer-options",
+  "containment": "processcontainer",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "timeout": 0
+  },
+  "filesystem": {
+    "readwritePaths": [],
+    "readonlyPaths": [],
+    "deniedPaths": []
+  },
+  "processContainer": {
+    "leastPrivilege": false,
+    "learningMode": true,
+    "capabilities": [
+      "registryRead"
+    ]
+  }
+}

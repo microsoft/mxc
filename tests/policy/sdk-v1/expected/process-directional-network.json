@@ -1,0 +1,59 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-process-directional-network",
+  "containment": "process",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "timeout": 0
+  },
+  "filesystem": {
+    "readwritePaths": [],
+    "readonlyPaths": [],
+    "deniedPaths": []
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "10.0.0.0/8",
+              "except": [
+                "10.1.0.0/16"
+              ]
+            }
+          ],
+          "ports": [
+            {
+              "protocol": "tcp",
+              "port": 443
+            },
+            {
+              "protocol": "udp",
+              "port": 5000,
+              "endPort": 5100
+            }
+          ]
+        }
+      ],
+      "deny": [
+        {
+          "to": [
+            {
+              "cidr": "10.2.0.0/16"
+            }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "deny"
+    }
+  }
+}

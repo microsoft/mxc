@@ -106,11 +106,17 @@ Ingress has two allow/deny controls and no rule arrays:
 - `ingress.hostLoopback` controls host-loopback connectivity in both directions: container-to-host and
   host-to-container, except for the single outbound proxy endpoint named by `runtimeConfig.networkProxy`.
 
-The specific `hostLoopback` value overrides `default` for the host-loopback
-path. For example, `default: deny` with `hostLoopback: allow` permits
-bidirectional host-loopback connectivity while denying other inbound traffic.
-A backend that cannot enforce both directions must reject `hostLoopback: allow`
-rather than accept it with partial enforcement.
+Both controls default to `deny` when omitted. `hostLoopback` resolves
+independently of `ingress.default` and never inherits it: omitting
+`hostLoopback` denies host-loopback connectivity even under
+`ingress.default: allow`. Host-loopback access must therefore be requested
+explicitly.
+
+An explicit `hostLoopback` value is independent of `default` for the
+host-loopback path. For example, `default: deny` with `hostLoopback: allow`
+permits bidirectional host-loopback connectivity while denying other inbound
+traffic. A backend that cannot enforce both directions must reject
+`hostLoopback: allow` rather than accept it with partial enforcement.
 
 When `runtimeConfig.networkProxy` is present, `hostLoopback: deny` remains valid
 and blocks every host-loopback path other than outbound connections to that
@@ -416,7 +422,7 @@ they cannot preserve either posture.
 **Connectivity models:**
 
 - **Model 2 (recommended):** Grants no `internetClient`, so direct internet traffic is blocked. Any packaged proxy,
-  with or without AppContainer isolation, uses its Package Family Name in `allowedProxyPeer`; an unpackaged
+  with or without AppContainer isolation, uses its Package Family Name in a non-blank `allowedProxyPeer`; an unpackaged
   AppContainer proxy uses its profile name. Windows requires `ingress.default: "allow"` to grant the bidirectional
   `privateNetworkClientServer` capability. With `allowedProxyPeer`, proxy reachability remains scoped to that peer and
   endpoint and `ingress.hostLoopback` stays `"deny"`. An identity-less host proxy cannot use peer scoping and is the
@@ -505,7 +511,8 @@ limit it hit; neither is silently truncated, and no partial policy is installed.
 > the host's own loopback, and a drop for it is lowered *ahead* of every caller
 > rule so that a broad allow — including a bare `0.0.0.0/0` — cannot reopen it
 > on the first-match chain. An omitted `ingress` section enforces the same deny,
-> since that is the schema's default rather than an absence of policy. IPv4
+> since this contract resolves both ingress controls to `deny` when they are
+> absent rather than treating them as an absence of policy. IPv4
 > only — slirp gives the sandbox no IPv6 route to the host.
 >
 > **Proxy mode is the defined exception.** A runtime proxy is reached at the

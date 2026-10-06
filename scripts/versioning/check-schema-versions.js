@@ -40,6 +40,7 @@ const {
   stableLatest,
   sdkMajorTargets,
 } = schemaVer;
+const sdkV1Target = sdkMajorTargets["1"];
 
 // Assert a regex captures exactly `expected` in `text`.
 function expectConst(file, text, label, regex, expected) {
@@ -55,7 +56,7 @@ function expectConst(file, text, label, regex, expected) {
   }
 }
 
-// -- Exact Rust contract registry (mxc_config_contract) --
+// -- Exact Rust contract registry (mxc_contract) --
 let registry = [];
 let registryByVersion = new Map();
 try {
@@ -109,58 +110,40 @@ for (const [label, version, requiredRoot] of [
   }
 }
 
-// -- SDK (sandbox.ts, state-aware-types.ts, state-aware-helper.ts) --
-const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
+// -- SDK (shared V1 target, high-level builder, state-aware types) --
+const contractVersionTs = read("sdk", "node", "src", "v1", "contract-version.ts");
 expectConst(
-  "sandbox.ts",
-  sandboxTs,
-  "SUPPORTED_VERSION",
-  /const SUPPORTED_VERSION\s*=\s*'([^']+)'/,
-  maxSupported
+  "contract-version.ts",
+  contractVersionTs,
+  "SDK_CONTRACT_VERSION",
+  /const SDK_CONTRACT_VERSION\s*=\s*'([^']+)'/,
+  sdkV1Target
 );
-expectConst(
-  "sandbox.ts",
-  sandboxTs,
-  "MIN_VERSION",
-  /const MIN_VERSION\s*=\s*'([^']+)'/,
-  min
-);
-const stateAwareTs = read("sdk", "node", "src", "state-aware-types.ts");
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "STATE_AWARE_VERSION",
-  /const STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAware
-);
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "WINDOWS_SANDBOX_STATE_AWARE_VERSION",
-  /const WINDOWS_SANDBOX_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAwareWindowsSandbox
-);
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "WSLC_STATE_AWARE_VERSION",
-  /const WSLC_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAwareWslc
-);
-// -- C# SDK (sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs) --
+const containerTs = read("sdk", "node", "src", "v1", "container.ts");
+if (
+  !/import\s*\{\s*SDK_CONTRACT_VERSION\s*\}\s*from\s*['"]\.\/contract-version\.js['"]/.test(containerTs) ||
+  !/export\s*\{\s*SDK_CONTRACT_VERSION\s*\}/.test(containerTs)
+) {
+  errors.push("container.ts: SDK_CONTRACT_VERSION must import and re-export the shared contract-version.ts target");
+}
+const lifecycleTs = read("sdk", "node", "src", "v1", "lifecycle-types.ts");
+if (
+  !/export\s*\{\s*SDK_CONTRACT_VERSION\s*\}\s*from\s*['"]\.\/contract-version\.js['"]/.test(lifecycleTs)
+) {
+  errors.push("lifecycle-types.ts: SDK_CONTRACT_VERSION must re-export the shared contract-version.ts target");
+}
+// -- C# SDK (sdk/dotnet/Microsoft.Mxc.Sdk/V1/SchemaVersions.cs) --
 const schemaVersionsCs = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
+  "V1",
   "SchemaVersions.cs"
 );
 for (const [label, expected] of [
   ["Minimum", min],
   ["MaximumSupported", maxSupported],
   ["LatestStable", stableLatest],
-  ["StateAware", stateAware],
-  ["WindowsSandboxStateAware", stateAwareWindowsSandbox],
-  ["WslcStateAware", stateAwareWslc],
 ]) {
   expectConst(
     "SchemaVersions.cs",
@@ -168,6 +151,30 @@ for (const [label, expected] of [
     label,
     new RegExp(`const string ${label}\\s*=\\s*"([^"]+)"`),
     expected
+  );
+}
+const sdkContractMatch =
+  /const string SdkContract\s*=\s*(LatestStable|"([^"]+)")/.exec(
+    schemaVersionsCs
+  );
+if (!sdkContractMatch) {
+  errors.push("SchemaVersions.cs: could not find SdkContract");
+} else {
+  const sdkContract =
+    sdkContractMatch[1] === "LatestStable"
+      ? stableLatest
+      : sdkContractMatch[2];
+  if (sdkContract !== sdkV1Target) {
+    errors.push(
+      `SchemaVersions.cs: SdkContract resolves to "${sdkContract}" but canonical sdkMajorTargets[1] expects "${sdkV1Target}"`
+    );
+  }
+}
+if (
+  !/const string StateAware\s*=\s*SdkContract\s*;/.test(schemaVersionsCs)
+) {
+  errors.push(
+    "SchemaVersions.cs: StateAware must alias the high-level SdkContract"
   );
 }
 

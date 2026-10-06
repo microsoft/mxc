@@ -1,13 +1,12 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# Publishes mxc-sdk and its internal dependencies to crates.io through ESRP
-# Release under the microsoft-oss-releases account. Consumes the
-# mxc-crates-package artifact.
+# Publishes mxc-sdk to crates.io through ESRP Release under the
+# microsoft-oss-releases account. Consumes the mxc-crates-package artifact.
 #
 # Dry runs invoke Cargo against the checked-out workspace. Real releases submit
 # one packaged crate per ESRP task; each task waits for completion before the
-# next crate is submitted. CI keeps the ordered crate parameter synchronized.
+# crate is submitted. CI keeps the crate parameter synchronized.
 #
 # The pool enforces 1ES network isolation (CFSClean), so this job performs no
 # crates.io reads.
@@ -21,28 +20,6 @@ parameters:
     # override the Cargo-validated publication order at queue time.
     default:
       # BEGIN MXC-SDK PUBLISH CRATES
-      - mxc-pty
-      - mxc-config-contract
-      - mxc-nanvix-common
-      - mxc-telemetry
-      - mxc-wxc-common
-      - mxc-lxc-common
-      - mxc-bwrap-common
-      - mxc-hyperlight-common
-      - mxc-isolation-session-bindings
-      - mxc-isolation-session-common
-      - mxc-learning-mode-core
-      - mxc-nanvix-runner
-      - mxc-build-common
-      - mxc-learning-mode-windows
-      - mxc-plm
-      - mxc-process-security-environment-spec
-      - mxc-process-container-common
-      - mxc-seatbelt-common
-      - mxc-windows-sandbox-common
-      - mxc-windows-sandbox-lifecycle
-      - mxc-wslc-common
-      - mxc-engine
       - mxc-sdk
       # END MXC-SDK PUBLISH CRATES
   - name: dryRun
@@ -73,8 +50,6 @@ jobs:
 
       - task: 1ES.Build.Rust.Setup@1
 
-      # Cargo needs the complete set in one invocation so unpublished
-      # workspace dependencies are available in its temporary overlay.
       - pwsh: |
           $ErrorActionPreference = 'Stop'
           $crates = [string[]] ($env:PUBLISH_CRATES_JSON | ConvertFrom-Json)

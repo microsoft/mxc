@@ -41,7 +41,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wxc_common::filesystem_dacl::{
+use mxc_sdk::mxc_common::filesystem_dacl::{
     apply_explicit_ace, revoke_specific_aces_for_sid, scan_explicit_aces_for_sid, AceType,
     DaclError,
 };
@@ -444,7 +444,7 @@ mod tests {
     fn revoke_preserves_non_matching_ace_for_same_sid() {
         // A sysadmin previously ran
         // `icacls <path> /grant "ALL APPLICATION PACKAGES":(R)` and
-        // we must not nuke that ACE.
+        // we must not remove that ACE.
         let tmp = tempfile::tempdir().unwrap();
         let _g = OverrideGuard::set(tmp.path());
 

@@ -110,7 +110,7 @@ mxc/src/
 ├── wxc/
 │   ├── Cargo.toml                    # UNCHANGED
 │   └── src/main.rs                   # Add NanVix match arm (2 lines)
-├── wxc_common/
+├── mxc_common/
 │   ├── Cargo.toml                    # UNCHANGED
 │   └── src/
 │       ├── lib.rs                    # Add: pub mod nanvix_runner (1 line)
@@ -124,8 +124,8 @@ mxc/src/
 │       ├── script_runner.rs          # UNCHANGED
 │       └── ...                       # All other modules UNCHANGED
 ├── wxc_test_driver/                  # UNCHANGED
-├── wxc_windows_sandbox_guest/        # UNCHANGED
-└── wxc_windows_sandbox_daemon/       # UNCHANGED
+├── mxc-sdk/src/bin/windows_sandbox_guest/   # UNCHANGED
+└── mxc-sdk/src/bin/windows_sandbox_daemon/  # UNCHANGED
 
 mxc/docs/nanvix-microvm/
 └── nanvix-integration-plan.md        # NEW — this document
@@ -351,18 +351,11 @@ Python 3.12.3 (tags/0715636-nanvix-03bba66:0715636) on nanvix
 
 ### SDK Usage (After Phase 2)
 
-```typescript
-import { spawnSandboxAsync } from '@microsoft/mxc-sdk';
-
-const result = await spawnSandboxAsync(
-  "print('Hello from NanVix!')",
-  {},  // no policy needed — NanVix is isolated by design
-  { containment: 'microvm' }
-);
-
-console.log(result.stdout);  // "Hello from NanVix!"
-console.log(result.exitCode); // 0
-```
+MicroVM is an experimental backend and is not exposed by the Node V1 typed
+containment choices. Use the executor with an exact development-contract
+configuration and explicit experimental opt-in. A Node SDK example requires a
+supported versioned API for MicroVM; the existing V1 `spawn` API does not accept
+this containment.
 
 
 ## Testing Strategy

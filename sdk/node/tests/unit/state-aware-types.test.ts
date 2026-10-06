@@ -4,29 +4,25 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
+  ProcessNetworkConfig,
   ConfigsForBackend,
   DeprovisionConfigFor,
-  ExecConfigFor,
+  ExecuteConfigFor,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
-  ProvisionMetadataFor,
+  ProvisionMetadata,
   ProvisionResult,
-  SandboxId,
-  StartMetadataFor,
-  STATE_AWARE_VERSION,
-  StateAwareContainmentBackend,
-  StateAwareSchemaVersion,
+  ContainerId,
+  LifecycleResult,
+  SDK_CONTRACT_VERSION,
+  LifecycleContainmentKind,
   StopConfigFor,
-  WindowsSandboxProvisionConfig,
-  WindowsSandboxStartConfig,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
   WslcProvisionConfig,
   WslcStartConfig,
-  WslcExecConfig,
+  WslcExecuteConfig,
   WslcStopConfig,
   WslcDeprovisionConfig,
-  WSLC_STATE_AWARE_VERSION,
-} from '../../src/state-aware-types.js';
+} from '../../src/v1/lifecycle-types.js';
 import { backendForSandboxId } from '../../src/state-aware-helper.js';
 
 // These tests are primarily compile-time checks. Lines marked with
@@ -35,34 +31,84 @@ import { backendForSandboxId } from '../../src/state-aware-helper.js';
 // The runtime assertions are minimal placeholders so node:test sees a
 // passing test for each scenario.
 
-describe('SandboxId<C> brand', () => {
-  it('rejects bare strings where SandboxId is expected', () => {
-    function takesIsolationSessionId(_id: SandboxId<'isolation_session'>): void {
+describe('ContainerId<C> brand', () => {
+  it('exports captured execution with piped-backend and request restrictions', async () => {
+    const { runInContainer } = await import('../../src/v1/index.js');
+    const isolation = 'iso:abc' as ContainerId<'isolation_session'>;
+    const wslc = 'wslc:abc' as ContainerId<'wslc'>;
+    const valid = async () => {
+      const result = runInContainer(isolation, { command: 'echo' });
+      const exitCode: number = (await result).exitCode;
+      runInContainer(wslc, { command: 'echo', network: {} });
+      return exitCode;
+    };
+    const invalid = () => {
+      // @ts-expect-error Captured execution requires piped streams, not LXC's attached execution.
+      runInContainer('lxc:abc' as ContainerId<'lxc'>, { command: 'echo' });
+      // @ts-expect-error Caller-supplied wire versions are not part of ExecutionRequest.
+      runInContainer(isolation, { command: 'echo', version: '1.0.0' });
+    };
+    assert.strictEqual(typeof valid, 'function');
+    assert.strictEqual(typeof invalid, 'function');
+  });
+
+  it('infers provision metadata by backend and supports the default backend union', () => {
+    const metadata: ProvisionMetadata<'isolation_session'> = {
+      agentUserName: 'agent',
+      agentUserSid: 'S-1-5-21',
+      ephemeralWorkspacePath: 'C:\\workspace',
+    };
+    const result: ProvisionResult<'isolation_session'> = {
+      warnings: [],
+      containerId: 'iso:test' as ContainerId<'isolation_session'>,
+      metadata,
+    };
+    const anyBackend: ProvisionMetadata = result.metadata;
+    assert.strictEqual(anyBackend?.agentUserName, 'agent');
+    const wslc: ProvisionResult<'wslc'> = {
+      warnings: [],
+      containerId: 'wslc:test' as ContainerId<'wslc'>,
+      // @ts-expect-error WSLC does not return provision metadata.
+      metadata,
+    };
+    assert.ok(wslc);
+  });
+
+  it('rejects bare strings where ContainerId is expected', () => {
+    function takesIsolationSessionId(_id: ContainerId<'isolation_session'>): void {
       // body unused
     }
-    // @ts-expect-error — bare string is not a branded SandboxId.
+    // @ts-expect-error — bare string is not a branded ContainerId.
     takesIsolationSessionId('iso:abcd');
     assert.ok(true);
   });
 
   it('runtime value is a string', () => {
-    const id = 'iso:abcd' as SandboxId<'isolation_session'>;
+    const id = 'iso:abcd' as ContainerId<'isolation_session'>;
     assert.strictEqual(typeof id, 'string');
   });
 });
 
-describe('StateAwareSchemaVersion', () => {
-  it('contains every backend-specific runtime constant', () => {
-    const versions: StateAwareSchemaVersion[] = [
-      STATE_AWARE_VERSION,
-      WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-      WSLC_STATE_AWARE_VERSION,
-    ];
-    assert.deepStrictEqual(versions, [
-      '0.9.0-alpha',
-      '0.10.0-alpha',
-      '0.9.0-alpha',
-    ]);
+describe('SDK_CONTRACT_VERSION', () => {
+  it('targets the SDK-owned stable v1 contract', () => {
+    assert.strictEqual(SDK_CONTRACT_VERSION, '1.0.0');
+  });
+});
+
+describe('LifecycleContainmentKind', () => {
+  it('excludes Windows Sandbox from the typed high-level lifecycle', async () => {
+    // @ts-expect-error — Windows Sandbox lifecycle is raw exact 1.1 only.
+    const unsupported: LifecycleContainmentKind = 'windows_sandbox';
+    const { provisionContainer } = await import('../../src/v1/lifecycle.js');
+    // @ts-expect-error — Windows Sandbox is not a high-level lifecycle backend.
+    const provision = () => provisionContainer({ containment: 'windows_sandbox' });
+
+    assert.ok(unsupported);
+    assert.ok(provision);
+    assert.throws(
+      () => backendForSandboxId('wsb:prov-1'),
+      /Windows Sandbox identities are experimental/,
+    );
   });
 });
 
@@ -79,74 +125,53 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.strictEqual(directional.network.egress.default, 'allow');
 
     const oldVersion: IsolationSessionProvisionConfig = {
-      // @ts-expect-error — no state-aware contract is registered for 0.8.
-      version: '0.8.0-alpha',
+      // @ts-expect-error — high-level lifecycle configs are V1 contract-mapped.
+      version: '0.9.0-alpha',
       network: directionalNetwork,
     };
     assert.ok(oldVersion);
 
     // @ts-expect-error — network is required; provision must acknowledge the unrestricted network.
-    const missing: IsolationSessionProvisionConfig = { version: '0.9.0-alpha' };
+    const missing: IsolationSessionProvisionConfig = {};
     assert.ok(missing);
   });
 
-  describe('backend-specific state-aware versions', () => {
-    it('accepts only the registered version for each backend config', () => {
-      const isolation: IsolationSessionStartConfig = { version: '0.9.0-alpha' };
-      const windowsSandbox: WindowsSandboxStartConfig = { version: '0.10.0-alpha' };
-      const wslc: WslcStartConfig = { version: '0.9.0-alpha' };
-
-      const wrongIsolation: IsolationSessionStartConfig = {
-        // @ts-expect-error — IsolationSession is registered at v0.9.
-        version: '0.10.0-alpha',
+  describe('V1 lifecycle configs without caller-supplied schema versions', () => {
+    it('rejects caller-selected versions for each typed backend', () => {
+      const isolation: IsolationSessionStartConfig = {
+        // @ts-expect-error — the v1 SDK owns the exact contract target.
+        version: '1.0.0',
       };
-      const wrongWindowsSandbox: WindowsSandboxStartConfig = {
-        // @ts-expect-error — Windows Sandbox is registered at v0.10.
-        version: '0.9.0-alpha',
-      };
-      const wrongWslc: WslcStartConfig = {
-        // @ts-expect-error — WSLC is registered at v0.9.
-        version: '0.10.0-alpha',
+      const wslc: WslcStartConfig = {
+        // @ts-expect-error — the v1 SDK owns the exact contract target.
+        version: '1.0.0',
       };
 
       assert.ok(isolation);
-      assert.ok(windowsSandbox);
       assert.ok(wslc);
-      assert.ok(wrongIsolation);
-      assert.ok(wrongWindowsSandbox);
-      assert.ok(wrongWslc);
     });
   });
 
   it('cannot be skipped by omitting the config argument entirely', async () => {
-    // Declaring `network` required on the config type is only a real guarantee
-    // if the call signature also refuses an omitted config — otherwise the
-    // requirement is bypassable by passing nothing at all. `provisionSandbox`
-    // takes a conditional parameter tuple so the config is mandatory exactly
-    // for backends whose provision config has a required member.
-    const { provisionSandbox } = await import('../../src/state-aware.js');
+    // IsolationSession's request requires its explicit network posture.
+    const { provisionContainer } = await import('../../src/v1/lifecycle.js');
 
     // @ts-expect-error — isolation_session provision requires a config.
-    const skipped = () => provisionSandbox('isolation_session');
+    const skipped = () => provisionContainer({ containment: 'isolation_session' });
     assert.ok(skipped);
 
     // Backends whose provision config is entirely optional stay skippable.
-    const optional = () => provisionSandbox('windows_sandbox');
+    const optional = () => provisionContainer({ containment: 'wslc' });
     assert.ok(optional);
   });
 
   it('cannot be skipped by widening the backend to the union', async () => {
-    // A caller holding a variable typed as the whole backend union — rather
-    // than a literal — instantiates the conditional tuple with that union. If
-    // optionality were decided over the *union of configs*, the all-optional
-    // WindowsSandbox member would satisfy it and make the config optional for
-    // every backend, silently re-opening the hole the test above closes.
-    // A union backend must behave like its strictest member.
-    const { provisionSandbox } = await import('../../src/state-aware.js');
-    const wide = 'isolation_session' as StateAwareContainmentBackend;
+    // Widening the discriminator must not bypass a required request field.
+    const { provisionContainer } = await import('../../src/v1/lifecycle.js');
+    const wide = 'isolation_session' as LifecycleContainmentKind;
 
     // @ts-expect-error — the union includes a backend that requires a config.
-    const widened = () => provisionSandbox(wide);
+    const widened = () => provisionContainer({ containment: wide });
     assert.ok(widened);
   });
 
@@ -257,7 +282,7 @@ describe('IsolationSessionStartConfig', () => {
     assert.ok(cfg);
   });
 
-  it('rejects a backend-specific field (start takes only version)', () => {
+  it('rejects a backend-specific field (start takes only telemetry)', () => {
     const cfg: IsolationSessionStartConfig = {
       // @ts-expect-error — start accepts no backend-specific config.
       unsupportedSetting: { nested: true },
@@ -266,22 +291,22 @@ describe('IsolationSessionStartConfig', () => {
   });
 });
 
-describe('IsolationSessionExecConfig', () => {
+describe('IsolationSessionExecuteConfig', () => {
   it('requires process', () => {
-    const cfg: ExecConfigFor<'isolation_session'> = {
+    const cfg: ExecuteConfigFor<'isolation_session'> = {
       process: { commandLine: 'echo hi' },
     };
     assert.strictEqual(cfg.process.commandLine, 'echo hi');
 
-    // @ts-expect-error — exec config requires process.
-    const missing: ExecConfigFor<'isolation_session'> = {};
+    // @ts-expect-error — execution config requires process.
+    const missing: ExecuteConfigFor<'isolation_session'> = {};
     assert.ok(missing);
   });
 });
 
 describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () => {
-  it('only carry version', () => {
-    const stopCfg: StopConfigFor<'isolation_session'> = { version: '0.9.0-alpha' };
+  it('only carry telemetry', () => {
+    const stopCfg: StopConfigFor<'isolation_session'> = {};
     const deprovCfg: DeprovisionConfigFor<'isolation_session'> = {};
 
     const wrongStop: StopConfigFor<'isolation_session'> = {
@@ -298,7 +323,6 @@ describe('ConfigsForBackend', () => {
   it('selects the IsolationSession bundle for the isolation_session backend', () => {
     const bundle: ConfigsForBackend<'isolation_session'> = {
       provision: {
-        version: '0.9.0-alpha',
         network: {
           egress: { default: 'allow' },
           ingress: { default: 'allow', hostLoopback: 'allow' },
@@ -312,118 +336,17 @@ describe('ConfigsForBackend', () => {
     assert.strictEqual(bundle.exec.process.commandLine, 'echo');
   });
 
-  it('selects the WindowsSandbox bundle for the windows_sandbox backend', () => {
-    const bundle: ConfigsForBackend<'windows_sandbox'> = {
-      provision: { version: '0.10.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
-      start: {},
-      exec: { process: { commandLine: 'echo' } },
-      stop: {},
-      deprovision: {},
-    };
-    assert.strictEqual(bundle.provision.filesystem?.readwritePaths?.[0], 'C:\\workspace');
-  });
 });
 
-describe('WindowsSandboxProvisionConfig', () => {
-  it('accepts version and filesystem (incl. deniedPaths)', () => {
-    const cfg: WindowsSandboxProvisionConfig = {
-      version: '0.10.0-alpha',
-      filesystem: {
-        readwritePaths: ['C:\\workspace'],
-        readonlyPaths: ['C:\\inputs'],
-        deniedPaths: ['C:\\secrets'],
-      },
-    };
-    assert.deepStrictEqual(cfg.filesystem?.deniedPaths, ['C:\\secrets']);
-  });
-
-  it('rejects an undeclared backend-specific field', () => {
-    const cfg: WindowsSandboxProvisionConfig = {
-      // @ts-expect-error — windows_sandbox provision declares no such field.
-      unsupportedSetting: { nested: true },
-    };
-    assert.ok(cfg);
-  });
-
-  it('rejects network and ui at provision', () => {
-    const withNetwork: WindowsSandboxProvisionConfig = {
-      // @ts-expect-error — network is not exposed on the windows_sandbox provision config.
-      network: { defaultPolicy: 'block' },
-    };
-    const withUi: WindowsSandboxProvisionConfig = {
-      // @ts-expect-error — ui is not exposed on the windows_sandbox provision config.
-      ui: { disable: true, clipboard: 'none', injection: false },
-    };
-    assert.ok(withNetwork);
-    assert.ok(withUi);
-  });
-});
-
-describe('WindowsSandboxStartConfig', () => {
-  it('carries only version (no configurationId, no backend-specific fields)', () => {
-    const ok: WindowsSandboxStartConfig = { version: '0.10.0-alpha' };
-    assert.strictEqual(ok.version, '0.10.0-alpha');
-
-    const withConfigurationId: WindowsSandboxStartConfig = {
-      // @ts-expect-error — windows_sandbox start has no configurationId.
-      configurationId: 'small',
-    };
-    assert.ok(withConfigurationId);
-
-    const withExtra: WindowsSandboxStartConfig = {
-      // @ts-expect-error — windows_sandbox start declares no backend-specific field.
-      unsupportedSetting: { nested: true },
-    };
-    assert.ok(withExtra);
-  });
-});
-
-describe('WindowsSandbox SandboxId<C> brand', () => {
-  it('runtime value is a string and brands distinctly from isolation_session', () => {
-    const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-    assert.strictEqual(typeof id, 'string');
-
-    function takesWsbId(_id: SandboxId<'windows_sandbox'>): void {
-      // body unused
-    }
-    // @ts-expect-error — an isolation_session id is not a windows_sandbox id.
-    takesWsbId('iso:abcd' as SandboxId<'isolation_session'>);
-    assert.ok(true);
-  });
-});
-
-describe('WindowsSandbox metadata resolves to undefined for every phase', () => {
-  it('typed metadata accessors are undefined and ProvisionResult carries no metadata', () => {
-    // These assignments only compile if the *MetadataFor<'windows_sandbox'>
-    // aliases resolve to `undefined` (not `never` / not an object).
-    const provMeta: ProvisionMetadataFor<'windows_sandbox'> = undefined;
-    const startMeta: StartMetadataFor<'windows_sandbox'> = undefined;
-    assert.strictEqual(provMeta, undefined);
-    assert.strictEqual(startMeta, undefined);
-
-    const result: ProvisionResult<'windows_sandbox'> = {
-      sandboxId: 'wsb:prov-1' as SandboxId<'windows_sandbox'>,
-    };
-    assert.strictEqual(result.metadata, undefined);
-
-    const withBogusMetadata: ProvisionResult<'windows_sandbox'> = {
-      sandboxId: 'wsb:prov-1' as SandboxId<'windows_sandbox'>,
-      // @ts-expect-error — WindowsSandbox provision returns no metadata object.
-      metadata: { agentUserName: 'nope' },
-    };
-    assert.ok(withBogusMetadata);
-  });
-});
-
-describe('SandboxId<C> brand is compile-time only; prefix is the runtime routing authority', () => {
-  it('routes a force-cast wsb id to windows_sandbox despite the iso brand', () => {
+describe('ContainerId<C> brand is compile-time only; prefix is the runtime routing authority', () => {
+  it('routes a force-cast wslc id to wslc despite the iso brand', () => {
     // A caller can defeat the compile-time brand with a forced cast. Routing
-    // must still follow the *runtime* prefix (`wsb:`), not the (wrong) brand —
+    // must still follow the *runtime* prefix (`wslc:`), not the (wrong) brand —
     // pinning that the brand is advisory and the prefix is authoritative.
-    const misbranded = 'wsb:prov-1' as unknown as SandboxId<'isolation_session'>;
-    assert.strictEqual(backendForSandboxId(misbranded), 'windows_sandbox');
+    const misbranded = 'wslc:prov-1' as unknown as ContainerId<'isolation_session'>;
+    assert.strictEqual(backendForSandboxId(misbranded), 'wslc');
 
-    const isoId = 'iso:abcd' as SandboxId<'isolation_session'>;
+    const isoId = 'iso:abcd' as ContainerId<'isolation_session'>;
     assert.strictEqual(backendForSandboxId(isoId), 'isolation_session');
   });
 });
@@ -431,7 +354,8 @@ describe('SandboxId<C> brand is compile-time only; prefix is the runtime routing
 describe('ProvisionResult<C>', () => {
   it('carries backend-typed metadata for isolation_session', () => {
     const result: ProvisionResult<'isolation_session'> = {
-      sandboxId: 'iso:abcd' as SandboxId<'isolation_session'>,
+      warnings: [],
+      containerId: 'iso:abcd' as ContainerId<'isolation_session'>,
       metadata: {
         agentUserName: 'iso\\agent',
         agentUserSid: 'S-1-5-21-1001',
@@ -445,9 +369,8 @@ describe('ProvisionResult<C>', () => {
 });
 
 describe('WslcProvisionConfig', () => {
-  it('accepts version, filesystem, network, and the backend-specific image knobs', () => {
+  it('accepts filesystem, network, and the backend-specific image knobs', () => {
     const cfg: WslcProvisionConfig = {
-      version: '0.9.0-alpha',
       filesystem: { readwritePaths: ['C:\\ws\\rw'], readonlyPaths: ['C:\\ws\\ro'] },
       network: {
         egress: { default: 'allow' },
@@ -484,11 +407,11 @@ describe('WslcProvisionConfig', () => {
 });
 
 describe('WslcStartConfig / WslcStopConfig / WslcDeprovisionConfig', () => {
-  it('carry only version', () => {
-    const start: WslcStartConfig = { version: '0.9.0-alpha' };
+  it('carry only telemetry', () => {
+    const start: WslcStartConfig = {};
     const stop: WslcStopConfig = {};
     const deprov: WslcDeprovisionConfig = {};
-    assert.strictEqual(start.version, '0.9.0-alpha');
+    assert.ok(start);
     assert.ok(stop);
     assert.ok(deprov);
 
@@ -500,17 +423,26 @@ describe('WslcStartConfig / WslcStopConfig / WslcDeprovisionConfig', () => {
   });
 });
 
-describe('WslcExecConfig', () => {
+describe('WslcExecuteConfig', () => {
   it('requires process and accepts an optional cooperative proxy', () => {
-    const cfg: WslcExecConfig = {
+    const cfg: WslcExecuteConfig = {
       process: { commandLine: 'echo hi' },
-      runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' },
+      network: { runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' } },
     };
     assert.strictEqual(cfg.process.commandLine, 'echo hi');
 
-    // @ts-expect-error — exec config requires process.
-    const missing: WslcExecConfig = {
+    const runtimeOnly: ProcessNetworkConfig = {
       runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' },
+    };
+    assert.ok(runtimeOnly.runtimeConfig);
+
+    // @ts-expect-error — existing-container exec cannot change provision policy.
+    const policyChange: ProcessNetworkConfig = { egress: { default: 'deny' } };
+    assert.ok(policyChange);
+
+    // @ts-expect-error — execution config requires process.
+    const missing: WslcExecuteConfig = {
+      network: { runtimeConfig: { networkProxy: 'http://127.0.0.1:8888' } },
     };
     assert.ok(missing);
   });
@@ -518,26 +450,27 @@ describe('WslcExecConfig', () => {
 
 describe('Wslc metadata resolves to undefined for every phase', () => {
   it('ProvisionResult carries no metadata and the id brands distinctly', () => {
-    const provMeta: ProvisionMetadataFor<'wslc'> = undefined;
-    const startMeta: StartMetadataFor<'wslc'> = undefined;
+    const provMeta: ProvisionMetadata<'wslc'> = undefined;
+    const lifecycle: LifecycleResult = { warnings: ['cleanup warning'] };
     assert.strictEqual(provMeta, undefined);
-    assert.strictEqual(startMeta, undefined);
+    assert.deepStrictEqual(lifecycle.warnings, ['cleanup warning']);
 
     const result: ProvisionResult<'wslc'> = {
-      sandboxId: 'wslc:abcd' as SandboxId<'wslc'>,
+      warnings: [],
+      containerId: 'wslc:abcd' as ContainerId<'wslc'>,
     };
     assert.strictEqual(result.metadata, undefined);
 
-    function takesWslcId(_id: SandboxId<'wslc'>): void {
+    function takesWslcId(_id: ContainerId<'wslc'>): void {
       // body unused
     }
     // @ts-expect-error — an isolation_session id is not a wslc id.
-    takesWslcId('iso:abcd' as SandboxId<'isolation_session'>);
+    takesWslcId('iso:abcd' as ContainerId<'isolation_session'>);
     assert.ok(true);
   });
 
   it('routes a wslc: id to the wslc backend by prefix', () => {
-    const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
+    const id = 'wslc:0123abcd' as ContainerId<'wslc'>;
     assert.strictEqual(backendForSandboxId(id), 'wslc');
   });
 });

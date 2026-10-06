@@ -1,9 +1,10 @@
 [package]
 name = "mxc_ffi"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "C ABI over the MXC public Rust SDK (mxc-sdk) for language bindings (e.g. the C# SDK)."
+description = "C ABI over MXC typed APIs for language bindings (e.g. the C# SDK)."
 
 [lib]
 name = "mxc_ffi"
@@ -17,7 +18,6 @@ mxc-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ignored = "0.1"
 serde_json = { workspace = true }
-
 
 [features]
 # WSL Container backend (Windows only). Both sidecars resolve beside the loaded
@@ -40,7 +40,7 @@ test-support = ["mxc-sdk/test-support"]
 # Gives the FFI tests the policy-key redirector, so they can assert the exact
 # string this layer marshals for each administrative policy state rather than
 # accepting whatever the host machine's real policy happens to produce.
-wxc_common = { workspace = true, features = ["test-support"] }
+mxc-sdk = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 
 [[example]]

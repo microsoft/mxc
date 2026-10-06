@@ -1,0 +1,961 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! `StatefulSandboxBackend` impl for `IsolationSessionRunner`. Per-phase
+//! methods + validation hooks. Each phase constructs a fresh
+//! `IsolationSessionManager` because the OS service may idle-restart
+//! between caller invocations.
+
+use std::io::IsTerminal;
+
+use serde::Serialize;
+
+use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
+use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
+use crate::mxc_common::state_aware_backend::{
+    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
+    StatefulSandboxBackend, StopResult,
+};
+use crate::mxc_common::validator::{
+    validate_state_aware_network_policy_support, NetworkPolicySupport,
+};
+
+use windows::Win32::Foundation::HANDLE;
+
+use super::error::map_lifecycle_error;
+use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
+use super::policy::{
+    reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
+};
+use super::process_options::{build_process_options, with_service_timeout_grace};
+use super::sandbox::spawn_existing_session_pty;
+use super::sandbox_id::{self, SandboxIdPayload};
+use super::IsolationSessionRunner;
+
+/// Provision-phase metadata surfaced to the caller: the OS-assigned agent
+/// account name, the agent user's SID, and the shared ephemeral workspace
+/// path. All are diagnostic/metadata — the addressing key remains the
+/// `sandboxId` tail (the agent user name).
+///
+/// `pub` is required because the trait associated type slot
+/// (`StatefulSandboxBackend::ProvisionMetadata`) reaches public callers via
+/// the trait's `provision` method.
+#[derive(Debug, Clone, Serialize)]
+pub struct IsolationSessionProvisionMetadata {
+    #[serde(rename = "agentUserName")]
+    pub agent_user_name: String,
+    #[serde(rename = "agentUserSid")]
+    pub agent_user_sid: String,
+    #[serde(rename = "ephemeralWorkspacePath")]
+    pub ephemeral_workspace_path: String,
+}
+
+/// Parses a state-aware sandbox_id into its decoded payload, returning the
+/// `agentUserName` — the opaque, OS-assigned account name minted at provision
+/// and the addressing key for every post-provision phase. Format mismatches
+/// surface as `MxcError::MalformedId`; see [`super::sandbox_id`] for the
+/// format and its rationale.
+fn extract_agent_user_name(sandbox_id: &str) -> Result<String, MxcError> {
+    Ok(sandbox_id::decode(sandbox_id)?.agent_user_name)
+}
+
+/// Whether this exec should ask the OS API to set up a ConPTY.
+///
+/// `host_is_terminal` is a **closure**, not a value, and that is load-bearing:
+/// Rust evaluates arguments eagerly, so passing the probe's result would run the
+/// probe on the `Piped` path too — contradicting the contract this function
+/// exists to enforce. Taking a closure makes "never probes under `Piped`" a
+/// property of the code rather than a claim in a comment, and one a test can
+/// actually observe.
+///
+/// The rule itself: only [`ExecStdio::Relayed`] may consult the host. Under
+/// `Piped` an embedded host's stdout says nothing about the sandbox, and
+/// allocating a pseudo-console would both merge stderr into stdout — destroying
+/// the separate streams the caller asked for — and touch console state the
+/// caller owns.
+fn wants_interactive_console(stdio: ExecStdio, host_is_terminal: impl FnOnce() -> bool) -> bool {
+    match stdio {
+        ExecStdio::Relayed => host_is_terminal(),
+        ExecStdio::Piped => false,
+    }
+}
+
+impl StatefulSandboxBackend for IsolationSessionRunner {
+    const ID_PREFIX: &'static str = sandbox_id::ID_PREFIX;
+    const BACKEND_KEY: &'static str = "isolation_session";
+
+    type ProvisionConfig = IsolationSessionProvisionConfig;
+    type StartConfig = ();
+    type ExecConfig = ();
+    type StopConfig = ();
+    type DeprovisionConfig = ();
+    type ProvisionMetadata = IsolationSessionProvisionMetadata;
+    type StartMetadata = ();
+    type StopMetadata = ();
+    type DeprovisionMetadata = ();
+
+    fn provision(
+        &mut self,
+        _request: &ExecutionRequest,
+        config: Option<IsolationSessionProvisionConfig>,
+    ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
+        let config = config.unwrap_or_default();
+        // The manager is discarded here — each post-provision phase builds its
+        // own from the `sandboxId`. Taking it anyway keeps a single provisioning
+        // path with `one_shot`, and proves the service instance that minted the
+        // user is live rather than re-activating to find out.
+        //
+        // The caller-supplied `appId` is passed through verbatim. The in-proc
+        // isolation-session client resolves the default (an empty or absent id)
+        // to the calling process's PFN itself, so MXC does no PFN detection of
+        // its own; a non-empty id is used as-is.
+        let (provisioned, _manager) = IsolationSessionManager::add_user(config.app_id.as_deref())
+            .map_err(map_lifecycle_error)?;
+
+        // `appId` rides inside the id so later phases can recover exactly what
+        // the caller supplied at provision. Metadata deliberately does not echo
+        // it; the id is the single carrier.
+        let sandbox_id = sandbox_id::encode(&SandboxIdPayload::new(
+            provisioned.agent_user_name.clone(),
+            config.app_id,
+        ))?;
+
+        Ok(ProvisionResult {
+            sandbox_id,
+            metadata: Some(IsolationSessionProvisionMetadata {
+                agent_user_name: provisioned.agent_user_name,
+                agent_user_sid: provisioned.agent_user_sid,
+                ephemeral_workspace_path: provisioned.ephemeral_workspace_path,
+            }),
+        })
+    }
+
+    fn start(
+        &mut self,
+        sandbox_id: &str,
+        _request: &ExecutionRequest,
+        _config: Option<()>,
+    ) -> Result<StartResult<()>, MxcError> {
+        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let manager =
+            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+        manager.start_session().map_err(map_lifecycle_error)?;
+        Ok(StartResult { metadata: None })
+    }
+
+    fn stop(
+        &mut self,
+        sandbox_id: &str,
+        _request: &ExecutionRequest,
+        _config: Option<()>,
+    ) -> Result<StopResult<()>, MxcError> {
+        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let manager =
+            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+        let stopped = manager.stop_session();
+        log_sandbox_torn_down(
+            &mut Logger::inherit_thread_diagnostic_sink(),
+            "stop",
+            TeardownOutcome {
+                session_stopped: Some(stopped.is_ok()),
+                ..Default::default()
+            },
+        );
+        stopped.map_err(map_lifecycle_error)?;
+        Ok(StopResult { metadata: None })
+    }
+
+    /// Removes the agent user.
+    fn deprovision(
+        &mut self,
+        sandbox_id: &str,
+        _request: &ExecutionRequest,
+        _config: Option<()>,
+    ) -> Result<DeprovisionResult<()>, MxcError> {
+        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let manager =
+            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+        let deprovisioned = manager.deprovision_agent_user();
+        log_sandbox_torn_down(
+            &mut Logger::inherit_thread_diagnostic_sink(),
+            "deprovision",
+            TeardownOutcome {
+                agent_user_deprovisioned: Some(deprovisioned.is_ok()),
+                ..Default::default()
+            },
+        );
+        deprovisioned.map_err(map_lifecycle_error)?;
+        Ok(DeprovisionResult { metadata: None })
+    }
+
+    // Filesystem rw/ro/denied paths are rejected at every phase: the backend
+    // has no host-folder-sharing primitive. Network policy is honesty-gated —
+    // the backend cannot filter or deny the container network, so provision
+    // requires the canonical unrestricted-network acknowledgment, and every
+    // post-provision phase rejects a supplied network policy (the posture is
+    // fixed at provision) while inheriting an absent one. Proxy policy is
+    // rejected at every phase. Anything rejected produces a `policy_validation`
+    // envelope rather than silent ignore.
+
+    fn validate_provision(
+        &self,
+        request: &ExecutionRequest,
+        config: Option<&IsolationSessionProvisionConfig>,
+    ) -> Result<(), MxcError> {
+        validate_state_aware_network_policy_support(
+            request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK,
+        )?;
+        // Structural only — MXC does not judge what a valid application
+        // identity looks like.
+        if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
+            sandbox_id::validate_app_id(app_id)?;
+        }
+        validate_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_start(
+        &self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        // Decode to reject a malformed id before any OS call.
+        extract_agent_user_name(sandbox_id)?;
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    // Every id-consuming phase decodes in its validation hook, so a malformed
+    // id is refused uniformly — and, critically, `--dry-run` (which
+    // stops after validation) agrees with a real invocation about which ids are
+    // acceptable. Validating on only some phases would let a dry run report
+    // success for a request the real call then rejects.
+
+    fn validate_exec(
+        &self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        extract_agent_user_name(sandbox_id)?;
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)?;
+        reject_unhonorable_environment(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_stop(
+        &self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        extract_agent_user_name(sandbox_id)?;
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    fn validate_deprovision(
+        &self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        extract_agent_user_name(sandbox_id)?;
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+    }
+
+    /// Executes the workload inside the running isolation session.
+    ///
+    /// **The two topologies get different shapes, deliberately** — see
+    /// [`ExecStdio`]. Under `Relayed` this keeps the backend's own relay:
+    /// `create_process` blocks, bridging the guest's pipes to the calling
+    /// process's stdio
+    /// through internal threads that also manage the ConPTY, the raw-VT console
+    /// mode, the viewport size and stdin. None of that exists in the
+    /// dispatcher's generic relay — which since the relay landed does not
+    /// forward stdin at all — so handing it real handles here would regress the
+    /// interactive shell. The returned `ExecHandle` therefore carries sentinel
+    /// handles plus a waiter yielding the already-captured exit code, and the
+    /// dispatcher's relay stays a call-through.
+    ///
+    /// Under `Piped` the caller drives the streams, so this starts the process
+    /// without waiting and hands back its real pipe handles, a waiter that
+    /// blocks on exit, and a terminator that actually kills. It performs **no**
+    /// console probe: an embedded host's stdout says nothing about the sandbox,
+    /// and touching console state would mutate something the caller owns.
+    ///
+    /// # Coverage
+    ///
+    /// The `Piped` branch is exercised end-to-end by `mxc-sdk`'s
+    /// `tests/isolation_session.rs` — streaming, exit-code propagation and
+    /// termination — on a host running the OS-side service, which CI and most
+    /// dev machines do not have, so those tests skip elsewhere.
+    ///
+    /// Pinned host-independently: the topology split itself
+    /// (`wants_interactive_console`), and — in `mxc_common` — that
+    /// `ExecSandboxProcess::wait` drains streams the caller did not take, which
+    /// is the deadlock this branch would otherwise arm.
+    fn exec(
+        &mut self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<()>,
+        stdio: ExecStdio,
+    ) -> Result<ExecHandle, MxcError> {
+        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let manager =
+            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+
+        match stdio {
+            ExecStdio::Relayed => {
+                let options = build_process_options(
+                    request,
+                    wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
+                );
+
+                let mut logger = Logger::inherit_thread_diagnostic_sink();
+                let exit_code = manager
+                    .create_process(&options, Some(&mut logger))
+                    .map_err(map_lifecycle_error)?;
+
+                // The output relay completed inside `create_process`. The
+                // dispatcher sees zero pipe handles, skips its own relay setup,
+                // and gets the exit code from the waiter closure.
+                let null = HANDLE(std::ptr::null_mut());
+                Ok(ExecHandle {
+                    stdout: null,
+                    stderr: null,
+                    stdin: null,
+                    stdin_closer: None,
+                    // `Exited`, never `TimedOut`: a backend serving
+                    // `ExecStdio::Relayed` reports an exit code, and the
+                    // relay rejects anything else.
+                    waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+                    // Nothing to terminate: `create_process` returned only once
+                    // the process was gone.
+                    terminator: Box::new(|| Ok(())),
+                })
+            }
+            ExecStdio::Piped => {
+                let options = build_process_options(
+                    request,
+                    wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
+                );
+                let timeout_ms = options.timeout_ms;
+                let options = with_service_timeout_grace(options);
+
+                manager
+                    .piped_exec_handle(&options, timeout_ms, None)
+                    .map_err(map_lifecycle_error)
+            }
+        }
+    }
+
+    fn exec_pty(
+        &mut self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<()>,
+        size: PtySize,
+    ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let manager =
+            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+        spawn_existing_session_pty(manager, request, size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mxc_common::models::{
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
+        ProxyConfig,
+    };
+    use crate::mxc_common::mxc_error::MxcErrorCode;
+
+    // ====== Wire-format constants ======
+
+    // Checked binding verifies BACKEND_KEY before delivering configuration.
+    // ====== Stdio topology ======
+
+    /// A piped exec must never get a ConPTY — **including on a host whose
+    /// stdout is a terminal**, which is the only case that can distinguish a
+    /// correct implementation from one that always follows the host.
+    ///
+    /// Allocating one here would be doubly wrong: a pseudo-console merges
+    /// stderr into stdout, so the caller would silently lose the separate
+    /// stream it asked for, and setting it up touches console state the caller
+    /// owns.
+    #[test]
+    fn a_piped_exec_never_gets_an_interactive_console() {
+        let mut probed = false;
+        assert!(
+            !wants_interactive_console(ExecStdio::Piped, || {
+                probed = true;
+                true
+            }),
+            "a terminal host must not leak a console into the piped path"
+        );
+        assert!(
+            !probed,
+            "the piped path must not even evaluate the host probe -- passing the \
+             probe's value rather than a closure would run it eagerly"
+        );
+    }
+
+    /// The relayed path is the only one allowed to act on the probe, and it
+    /// must actually follow it rather than hardcoding either answer.
+    ///
+    /// Both host answers are asserted, so hardcoding `true` *or* `false` fails.
+    #[test]
+    fn a_relayed_exec_follows_the_host() {
+        assert!(
+            wants_interactive_console(ExecStdio::Relayed, || true),
+            "a terminal host must still get an interactive console"
+        );
+        assert!(
+            !wants_interactive_console(ExecStdio::Relayed, || false),
+            "a piped host must not get one"
+        );
+    }
+
+    #[test]
+    fn backend_key_matches_wire_format() {
+        assert_eq!(
+            <IsolationSessionRunner as StatefulSandboxBackend>::BACKEND_KEY,
+            "isolation_session"
+        );
+    }
+
+    // `ID_PREFIX` is the `<prefix>:<agentUserName>` tag the dispatcher
+    // matches against in `backend_from_prefix`. Indirectly covered by
+    // every `extract_agent_user_name_*` test that uses an `"iso:..."`
+    // literal; pinned explicitly here so the dependence is visible.
+    #[test]
+    fn id_prefix_matches_wire_format() {
+        assert_eq!(
+            <IsolationSessionRunner as StatefulSandboxBackend>::ID_PREFIX,
+            "iso"
+        );
+    }
+
+    // Provision metadata must serialize to exactly the three camelCase wire
+    // keys the SDK's `IsolationSessionProvisionMetadata` reads. A missing or
+    // misnamed field would silently strip provision data from the result.
+    #[test]
+    fn provision_metadata_serializes_all_fields() {
+        let meta = IsolationSessionProvisionMetadata {
+            agent_user_name: "agent-1".to_string(),
+            agent_user_sid: "S-1-5-21-1001".to_string(),
+            ephemeral_workspace_path: "C:\\ProgramData\\ws\\agent-1".to_string(),
+        };
+        let v = serde_json::to_value(&meta).unwrap();
+        assert_eq!(v["agentUserName"], "agent-1");
+        assert_eq!(v["agentUserSid"], "S-1-5-21-1001");
+        assert_eq!(v["ephemeralWorkspacePath"], "C:\\ProgramData\\ws\\agent-1");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            3,
+            "unexpected fields in provision metadata: {v}"
+        );
+    }
+
+    #[test]
+    fn phases_without_a_config_reject_a_payload() {
+        type StartConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StartConfig;
+        type StopConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StopConfig;
+        type DeprovisionConfig =
+            <IsolationSessionRunner as StatefulSandboxBackend>::DeprovisionConfig;
+        type ExecConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ExecConfig;
+
+        // These are `()`, which deserializes only from null, so any object in
+        // the slot is a hard error at dispatch. `start` belongs to this group:
+        // it takes no per-phase config at all.
+        let payload = serde_json::json!({ "anything": true });
+        assert!(
+            serde_json::from_value::<StartConfig>(payload.clone()).is_err(),
+            "start accepted a config payload"
+        );
+        assert!(
+            serde_json::from_value::<StopConfig>(payload.clone()).is_err(),
+            "stop accepted a config payload"
+        );
+        assert!(
+            serde_json::from_value::<DeprovisionConfig>(payload.clone()).is_err(),
+            "deprovision accepted a config payload"
+        );
+        assert!(
+            serde_json::from_value::<ExecConfig>(payload).is_err(),
+            "exec accepted a config payload"
+        );
+    }
+
+    #[test]
+    fn provision_config_preserves_the_runtime_app_id() {
+        type ProvisionConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ProvisionConfig;
+
+        let provision = ProvisionConfig {
+            app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".to_string()),
+        };
+        assert_eq!(
+            provision.app_id.as_deref(),
+            Some("PFN:Contoso.App_8wekyb3d8bbwe"),
+            "provision dropped the normalized app id"
+        );
+    }
+
+    fn request_with_filesystem_policy() -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\workspace".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn request_with_canonical_network() -> ExecutionRequest {
+        // The one network form the provision phase accepts (see policy.rs):
+        // unrestricted outbound + inbound, no host rules, no proxy.
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
+                network_ingress: Some(NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: NetworkAction::Allow,
+                }),
+                network_specified: true,
+                network_mode_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    // ====== sandbox_id parsing ======
+
+    /// A structurally valid sandbox id for the phase-routing tests below.
+    /// Those tests care about policy validation, not the id, so they need a
+    /// well-formed one rather than a literal. The codec's own behaviour is
+    /// covered exhaustively in `sandbox_id`.
+    fn valid_sandbox_id() -> String {
+        sandbox_id::encode(&SandboxIdPayload::new("wxc-abcd1234", None)).unwrap()
+    }
+
+    #[test]
+    fn extract_agent_user_name_recovers_the_encoded_agent_user_name() {
+        let id = sandbox_id::encode(&SandboxIdPayload::new("wxc-abcd1234", None)).unwrap();
+        assert_eq!(extract_agent_user_name(&id).unwrap(), "wxc-abcd1234");
+    }
+
+    #[test]
+    fn extract_agent_user_name_recovers_a_name_containing_a_colon() {
+        let id = sandbox_id::encode(&SandboxIdPayload::new("has:a:colon", None)).unwrap();
+        assert_eq!(extract_agent_user_name(&id).unwrap(), "has:a:colon");
+    }
+
+    #[test]
+    fn extract_agent_user_name_rejects_other_prefix() {
+        let err = extract_agent_user_name("wsb:abc").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_agent_user_name_rejects_missing_colon() {
+        let err = extract_agent_user_name("no-colon").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn extract_agent_user_name_rejects_empty_payload() {
+        let err = extract_agent_user_name("iso:").unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn every_id_consuming_hook_rejects_a_malformed_id() {
+        // All four hooks must agree, so `--dry-run` (which stops after
+        // validation) cannot report success for an id the real call rejects.
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_canonical_network();
+        let undecodable = "iso:not-a-valid-payload";
+        let cases: Vec<(&str, Result<(), MxcError>)> = vec![
+            ("start", runner.validate_start(undecodable, &req, None)),
+            ("exec", runner.validate_exec(undecodable, &req, None)),
+            ("stop", runner.validate_stop(undecodable, &req, None)),
+            (
+                "deprovision",
+                runner.validate_deprovision(undecodable, &req, None),
+            ),
+        ];
+        for (phase, result) in cases {
+            let err = result.expect_err(&format!("{phase} must reject an undecodable id"));
+            assert_eq!(err.code, MxcErrorCode::MalformedId, "phase {phase}");
+        }
+    }
+
+    #[test]
+    fn every_id_consuming_hook_accepts_a_well_formed_id() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest::default();
+        let id = valid_sandbox_id();
+        runner.validate_start(&id, &req, None).unwrap();
+        runner.validate_exec(&id, &req, None).unwrap();
+        runner.validate_stop(&id, &req, None).unwrap();
+        runner.validate_deprovision(&id, &req, None).unwrap();
+    }
+
+    // ====== validation-hook phase routing ======
+
+    #[test]
+    fn validate_provision_hook_rejects_filesystem_policy() {
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_filesystem_policy();
+        let err = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_provision_hook_rejects_denied_paths() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                denied_paths: vec!["C:\\secret".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_reject_filesystem_policy() {
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_filesystem_policy();
+
+        let s = runner
+            .validate_start(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(s.code, MxcErrorCode::PolicyValidation);
+
+        let e = runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(e.code, MxcErrorCode::PolicyValidation);
+
+        let st = runner
+            .validate_stop(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(st.code, MxcErrorCode::PolicyValidation);
+
+        let d = runner
+            .validate_deprovision(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(d.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_provision_hook_accepts_canonical_network() {
+        let runner = IsolationSessionRunner::new();
+        let req = request_with_canonical_network();
+        runner.validate_provision(&req, None).unwrap();
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_accept_absent_network() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest::default();
+
+        runner
+            .validate_start(&valid_sandbox_id(), &req, None)
+            .unwrap();
+        runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap();
+        runner
+            .validate_stop(&valid_sandbox_id(), &req, None)
+            .unwrap();
+        runner
+            .validate_deprovision(&valid_sandbox_id(), &req, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_reject_specified_network() {
+        // A network policy supplied on a post-provision phase is fixed at
+        // provision and refused (mapped to policy_validation at the boundary).
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let s = runner
+            .validate_start(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(s.code, MxcErrorCode::PolicyValidation);
+
+        let e = runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(e.code, MxcErrorCode::PolicyValidation);
+
+        let st = runner
+            .validate_stop(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(st.code, MxcErrorCode::PolicyValidation);
+
+        let d = runner
+            .validate_deprovision(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(d.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_post_provision_hooks_reject_runtime_proxy() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_proxy: ProxyConfig {
+                    address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+                    builtin_test_server: false,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        for (label, result) in [
+            (
+                "start",
+                runner.validate_start(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "exec",
+                runner.validate_exec(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "stop",
+                runner.validate_stop(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "deprovision",
+                runner.validate_deprovision(&valid_sandbox_id(), &req, None),
+            ),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation, "phase {label}");
+            assert!(error.message.contains("proxy"), "phase {label}: {error:?}");
+        }
+    }
+
+    // ====== process.env is checked where a process is launched ======
+
+    const ENV_REFUSAL: &str = "process.env without process.inheritDefaultEnv=true is not supported";
+
+    #[test]
+    fn validate_exec_rejects_env_without_inherit_default_env() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            ..Default::default()
+        };
+        let err = runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains(ENV_REFUSAL), "got {}", err.message);
+    }
+
+    #[test]
+    fn validate_exec_accepts_env_with_inherit_default_env() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            inherit_default_env: true,
+            ..Default::default()
+        };
+        runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_exec_reports_a_network_refusal_before_the_environment() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            policy: ContainerPolicy {
+                network_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert!(
+            err.message.contains("network policy is fixed at provision"),
+            "got {}",
+            err.message
+        );
+    }
+
+    // ====== UI policy is refused on every phase ======
+
+    #[test]
+    fn every_validate_hook_rejects_supplied_ui() {
+        // The backend has no UI-restriction primitive at any phase, so all five
+        // hooks refuse a supplied `ui` rather than accepting and dropping it.
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                ui_specified: true,
+                ..request_with_canonical_network().policy
+            },
+            ..Default::default()
+        };
+
+        let p = runner.validate_provision(&req, None).unwrap_err();
+        assert_eq!(p.code, MxcErrorCode::PolicyValidation);
+        assert!(p.message.contains("UI policy"), "got {}", p.message);
+
+        for (label, err) in [
+            (
+                "start",
+                runner.validate_start(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "exec",
+                runner.validate_exec(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "stop",
+                runner.validate_stop(&valid_sandbox_id(), &req, None),
+            ),
+            (
+                "deprovision",
+                runner.validate_deprovision(&valid_sandbox_id(), &req, None),
+            ),
+        ] {
+            let err = err.unwrap_err();
+            assert_eq!(err.code, MxcErrorCode::PolicyValidation, "phase {label}");
+            assert!(
+                err.message.contains("UI policy"),
+                "phase {label}: got {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_hooks_accept_absent_ui() {
+        // Guard against over-rejection.
+        let runner = IsolationSessionRunner::new();
+        runner
+            .validate_provision(&request_with_canonical_network(), None)
+            .unwrap();
+        let req = ExecutionRequest::default();
+        runner
+            .validate_start(&valid_sandbox_id(), &req, None)
+            .unwrap();
+        runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap();
+        runner
+            .validate_stop(&valid_sandbox_id(), &req, None)
+            .unwrap();
+        runner
+            .validate_deprovision(&valid_sandbox_id(), &req, None)
+            .unwrap();
+    }
+
+    // ====== appId validation at the provision hook ======
+
+    fn provision_config_with_app_id(app_id: &str) -> IsolationSessionProvisionConfig {
+        IsolationSessionProvisionConfig {
+            app_id: Some(app_id.to_string()),
+        }
+    }
+
+    #[test]
+    fn validate_provision_accepts_an_absent_app_id() {
+        let runner = IsolationSessionRunner::new();
+        let cfg = IsolationSessionProvisionConfig::default();
+        runner
+            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_provision_accepts_a_well_formed_app_id() {
+        let runner = IsolationSessionRunner::new();
+        let cfg = provision_config_with_app_id("PFN:Contoso.App_8wekyb3d8bbwe");
+        runner
+            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_provision_accepts_an_empty_app_id() {
+        // Empty is a legal, distinct value — MXC must not reject it, because a
+        // future OS API may assign it meaning.
+        let runner = IsolationSessionRunner::new();
+        let cfg = provision_config_with_app_id("");
+        runner
+            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_provision_rejects_an_oversized_app_id() {
+        let runner = IsolationSessionRunner::new();
+        let cfg = provision_config_with_app_id(&"a".repeat(257));
+        let err = runner
+            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains("appId"), "got {}", err.message);
+    }
+
+    #[test]
+    fn validate_provision_rejects_a_control_character_in_app_id() {
+        let runner = IsolationSessionRunner::new();
+        let cfg = provision_config_with_app_id("has\u{0}nul");
+        let err = runner
+            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_provision_checks_app_id_before_touching_the_os() {
+        // The hook runs before `provision`, so a bad appId must never reach a
+        // lifecycle call. Asserting the policy code (not a backend error) is
+        // what pins that ordering.
+        let runner = IsolationSessionRunner::new();
+        let cfg = provision_config_with_app_id("bad\u{1}");
+        let err = runner
+            .validate_provision(&request_with_canonical_network(), Some(&cfg))
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_start_accepts_a_well_formed_id() {
+        let runner = IsolationSessionRunner::new();
+        runner
+            .validate_start(&valid_sandbox_id(), &ExecutionRequest::default(), None)
+            .unwrap();
+    }
+}

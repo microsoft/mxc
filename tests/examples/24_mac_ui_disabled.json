@@ -1,15 +1,17 @@
 {
-    "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
-    "version": "0.7.0-alpha",
-    "containment": "seatbelt",
-    "process": {
-        "commandLine": "/bin/sh -c 'echo sandbox_clip_test | /usr/bin/pbcopy && echo PBCOPY_OK || echo PBCOPY_DENIED; /usr/bin/pbpaste && echo PBPASTE_OK || echo PBPASTE_DENIED'",
-        "timeout": 10000
-    },
-    "network": {
-        "defaultPolicy": "block"
-    },
-    "ui": {
-        "disable": true
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "/bin/sh -c 'echo sandbox_clip_test | /usr/bin/pbcopy && echo PBCOPY_OK || echo PBCOPY_DENIED; /usr/bin/pbpaste && echo PBPASTE_OK || echo PBPASTE_DENIED'",
+    "timeout": 10000
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
     }
+  },
+  "ui": {
+    "disable": true
+  }
 }

@@ -5,7 +5,7 @@
 //! the C# SDK binds to — ending in an interactive shell attached to this
 //! console.
 //!
-//! What this proves that no test can: that `mxc_state_aware_exec_attached`
+//! What this proves that no test can: that `mxc_exec_state_aware_attached_json`
 //! reaches a real workload and relays it onto the caller's console. That needs
 //! the OS-side service and a real terminal, so it has no unattended oracle.
 //!
@@ -25,7 +25,7 @@
 use std::ffi::{CStr, CString};
 
 use mxc_ffi::{
-    mxc_error_detail_free, mxc_state_aware, mxc_state_aware_exec_attached,
+    mxc_error_detail_free, mxc_exec_state_aware_attached_json, mxc_run_state_aware_json,
     mxc_state_aware_result_free, MxcErrorDetail, MxcExecOutcome, MxcStateAwareResult,
 };
 
@@ -42,7 +42,7 @@ fn phase(request: &str) -> String {
 
     // SAFETY: valid NUL-terminated request, and `result` is live writable
     // storage holding no detail yet.
-    let status = unsafe { mxc_state_aware(json.as_ptr(), 0, 1, &mut result) };
+    let status = unsafe { mxc_run_state_aware_json(json.as_ptr(), 0, 1, &mut result) };
     if status != 0 {
         let message = if result.error.message_utf8.is_null() {
             String::from("(no message)")
@@ -135,7 +135,7 @@ fn run() -> i32 {
     // SAFETY: valid request string; both out-parameters are live writable
     // storage holding no detail yet. Blocks until the workload exits.
     let status =
-        unsafe { mxc_state_aware_exec_attached(exec.as_ptr(), 1, &mut outcome, &mut error) };
+        unsafe { mxc_exec_state_aware_attached_json(exec.as_ptr(), 1, &mut outcome, &mut error) };
 
     if status == 0 {
         println!(

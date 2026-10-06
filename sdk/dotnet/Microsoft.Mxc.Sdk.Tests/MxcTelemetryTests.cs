@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
@@ -19,7 +20,7 @@ public sealed class MxcTelemetryCollectionDefinition
 
 /// <summary>
 /// Redirects the debug-build-only <c>MXC_TEST_LOCALAPPDATA_OVERRIDE</c>
-/// environment variable (read by <c>wxc_common::telemetry::consent</c> in
+/// environment variable (read by <c>mxc_common::telemetry::consent</c> in
 /// place of the real <c>LOCALAPPDATA</c> — see that module for the security
 /// rationale; a release-profile native build compiles this override out
 /// entirely and always resolves the real per-user known-folder path) to a
@@ -89,16 +90,13 @@ public sealed class MxcTelemetryTests : IDisposable
     }
 
     [Fact]
-    public void SandboxPolicy_TelemetrySerializesCanonically()
+    public void CreationOptions_TelemetrySerializesCanonically()
     {
-        var policy = new SandboxPolicy
-        {
-            Version = SchemaVersions.MaximumSupported,
-            Telemetry = new TelemetrySettings { Enabled = true },
-        };
+        var request = new ContainerRequest("echo telemetry");
+        var options = new RunOptions { Telemetry = new TelemetryConfig { Enabled = true } };
 
-        var json = System.Text.Json.JsonSerializer.Serialize(policy);
-        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        using var doc = System.Text.Json.JsonDocument.Parse(
+            MxcContainer.SerializeRequest(request, options.Telemetry));
 
         Assert.True(doc.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
     }

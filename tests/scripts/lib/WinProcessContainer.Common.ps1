@@ -119,9 +119,9 @@ function Test-Preflight {
             # winhttp-proxy-shim backs the legacy proxy path. Absent, those
             # areas fail as launch errors rather than policy results, so build
             # them here for the same reason CI stages them.
-            & cargo build -p wxc -p mxc-plm -p wxc_winhttp_proxy_shim 2>&1 | Out-Host
+            & cargo build -p wxc -p plm -p wxc_winhttp_proxy_shim 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build (debug) failed" }
-            & cargo build -p wxc -p mxc-plm -p wxc_winhttp_proxy_shim --release 2>&1 | Out-Host
+            & cargo build -p wxc -p plm -p wxc_winhttp_proxy_shim --release 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build (release) failed" }
             & cargo build -p wxc_ui_probe 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build wxc_ui_probe (debug) failed" }
@@ -148,7 +148,7 @@ function Assert-Sidecars {
         foreach ($sidecar in 'plm.exe', 'winhttp-proxy-shim.exe') {
             $path = Join-Path $dir $sidecar
             if (-not (Test-Path $path)) {
-                throw "$sidecar not found beside $exe. Build it with ``cargo build -p mxc-plm -p wxc_winhttp_proxy_shim`` (add --release for the release lane) or drop -SkipBuild."
+                throw "$sidecar not found beside $exe. Build it with ``cargo build -p plm -p wxc_winhttp_proxy_shim`` (add --release for the release lane) or drop -SkipBuild."
             }
         }
     }
@@ -357,6 +357,19 @@ function Get-HostCapabilities {
         $p.probes.uiCapabilities.PSObject.Properties['canBlockInputInjection']) {
         $canInject = [bool]$p.probes.uiCapabilities.canBlockInputInjection
     }
+    # Guarded capture resolves plm.exe next to the loaded module, so the release
+    # sidecar's trust result does not answer for the binary these tests run.
+    $pd = Invoke-Probe -Wxc $WxcDebug -Phase 'P0' -Name 'host-capabilities (capture providers)'
+    $nativeCapture = $false
+    $guardedCapture = $false
+    if ($pd -and $pd.PSObject.Properties['probes']) {
+        if ($pd.probes.PSObject.Properties['nativeCaptureAvailable']) {
+            $nativeCapture = [bool]$pd.probes.nativeCaptureAvailable
+        }
+        if ($pd.probes.PSObject.Properties['guardedCaptureAvailable']) {
+            $guardedCapture = [bool]$pd.probes.guardedCaptureAvailable
+        }
+    }
     return [pscustomobject]@{
         BaselineTier                   = $tier
         BaseContainerUsable            = ($tier -eq 'base-container')
@@ -380,6 +393,12 @@ function Get-HostCapabilities {
         # EnumeratePathsUnsupported). So it is available only where the host
         # both selects base-container and advertises the capability.
         SupportsEnumeratePaths         = (($tier -eq 'base-container') -and $enumBit)
+        # Native capture is reachable only on base-container; every AppContainer
+        # tier needs the guarded WPR fallback. With neither, a captureDenials
+        # request fails before the sandbox exists (docs/schema.md).
+        NativeCaptureAvailable         = $nativeCapture
+        GuardedCaptureAvailable        = $guardedCapture
+        CaptureDenialsUsable           = ((($tier -eq 'base-container') -and $nativeCapture) -or $guardedCapture)
     }
 }
 
@@ -462,16 +481,8 @@ function Record-UiTelemetryResult {
     Record-Result -Phase $Phase -Name $Name -Pass ($actual -eq $Expected) -Detail $Detail
 }
 
-# Default schema version for generated configs. Everything the 0.8 stable
-# schema can express is authored at 0.8; the legacy network fields stay at 0.7
-# (the legacy area builds those via -RawNetwork + -SchemaVersion), because 0.8
-# is where the directional egress/ingress shape became the documented way to
-# express network intent and no doc describes mixing the two in one config.
-$Script:SchemaVersion       = '0.8.0-alpha'
-$Script:LegacySchemaVersion = '0.7.0-alpha'
-# processContainer.filesystem.enumeratePaths landed at 0.9; the 0.8 contract is
-# closed, so authoring it at the suite default is itself a rejection case.
-$Script:EnumerateSchemaVersion = '0.9.0-alpha'
+# Default schema version for generated configs.
+$Script:SchemaVersion = '1.0.0'
 
 # Write a config object verbatim. Used by the rejection phase for shapes the
 # typed generator deliberately cannot produce (an explicitly empty `to: []`,
@@ -542,8 +553,7 @@ function New-Config {
         # telemetry.enabled — the config kill-switch (one of three independent
         # terms; it can only ever subtract from consent, never grant).
         [Nullable[bool]]$TelemetryEnabled   = $null,
-        # Override the emitted schema version. Only for version-gating cases:
-        # the default follows the legacy/directional split below.
+        # Override the emitted schema version for version-gating cases.
         [string]$SchemaVersion              = $null,
         # `process` is the intent alias that must resolve to the concrete
         # Windows backend; `processcontainer` is the concrete name.
@@ -554,15 +564,14 @@ function New-Config {
         [Nullable[bool]]$LeastPrivilege     = $null,
         [Nullable[bool]]$LearningMode       = $null,
         # processContainer.filesystem.enumeratePaths — enumeration-only access
-        # (FindFirstFile/FindNextFile) without content read. Supplying it
-        # defaults the schema version to 0.9, where the field was introduced.
+        # (FindFirstFile/FindNextFile) without content read.
         [string[]]$EnumeratePaths           = @(),
         # processContainer.captureDenials.*
         [ValidateSet('block', 'allow')] [string]$CaptureDenialsMode = $null,
         [string]$CaptureDenialsOutputPath   = $null,
         [Nullable[bool]]$CaptureDenialsRetainEtl = $null,
 
-        # --- schema 0.8 directional network (network.egress / network.ingress)
+        # --- directional network (network.egress / network.ingress)
         # Supplying ANY of these emits a `network` block. Leave them all unset
         # for the "no network key at all" model-3 form.
         [ValidateSet('allow', 'deny')] [string]$EgressDefault  = $null,
@@ -575,20 +584,14 @@ function New-Config {
 
         # --- runtime (not policy)
         [string]$NetworkProxy    = $null,   # runtimeConfig.networkProxy
-        [string]$AllowedProxyPeer = $null,  # processContainer.network.allowedProxyPeer
-        # Verbatim `network` block, for shapes the directional parameters above
-        # cannot express -- the legacy 0.7 fields in particular. Pair it with
-        # -SchemaVersion; it replaces the whole block rather than merging.
-        [System.Collections.Specialized.OrderedDictionary]$RawNetwork = $null
+        [string]$AllowedProxyPeer = $null   # processContainer.network.allowedProxyPeer
     )
 
-    $hasEnumerate = ($null -ne $EnumeratePaths -and $EnumeratePaths.Count -gt 0)
-    $defaultVersion = if ($hasEnumerate) { $Script:EnumerateSchemaVersion } else { $Script:SchemaVersion }
     $obj = [ordered]@{
-        version     = $(if ($SchemaVersion) { $SchemaVersion } else { $defaultVersion })
+        version     = $(if ($SchemaVersion) { $SchemaVersion } else { $Script:SchemaVersion })
         containerId = "MxcWinPC-$Name"
-        # `appcontainer` is not in the stable containment enum at 0.7 or 0.8;
-        # `processcontainer` is the concrete Windows backend on both.
+        # `appcontainer` is not in the stable containment enum; `processcontainer`
+        # is the concrete Windows backend.
         containment = $Containment
         process     = [ordered]@{
             commandLine = $CommandLine
@@ -622,9 +625,7 @@ function New-Config {
     }
 
     # --- network -------------------------------------------------------
-    if ($null -ne $RawNetwork) {
-        $obj['network'] = $RawNetwork
-    } elseif ($EmptyNetwork) {
+    if ($EmptyNetwork) {
         $obj['network'] = [ordered]@{}
     } elseif ($EgressDefault -or $IngressDefault -or $HostLoopback -or
               $EgressAllow.Count -gt 0 -or $EgressDeny.Count -gt 0) {
@@ -660,7 +661,9 @@ function New-Config {
     if ($PSBoundParameters.ContainsKey('Capabilities')) { $pc['capabilities'] = @($Capabilities) }
     if ($null -ne $LeastPrivilege)  { $pc['leastPrivilege'] = [bool]$LeastPrivilege }
     if ($null -ne $LearningMode)    { $pc['learningMode']   = [bool]$LearningMode }
-    if ($hasEnumerate) { $pc['filesystem'] = [ordered]@{ enumeratePaths = @($EnumeratePaths) } }
+    if ($null -ne $EnumeratePaths -and $EnumeratePaths.Count -gt 0) {
+        $pc['filesystem'] = [ordered]@{ enumeratePaths = @($EnumeratePaths) }
+    }
     if ($CaptureDenialsMode -or $CaptureDenialsOutputPath -or $null -ne $CaptureDenialsRetainEtl) {
         $cd = [ordered]@{}
         if ($CaptureDenialsMode)       { $cd['mode']       = $CaptureDenialsMode }
@@ -799,7 +802,7 @@ function Assert-RequiredTier {
 # Network test infrastructure
 
 # Documented in docs/process-container/networking.md §2: PSEC is the only
-# ProcessContainer path that receives schema 0.8 egress filters, proxy peer
+# ProcessContainer path that receives directional egress filters, proxy peer
 # identity, or host-loopback configuration. The probe does not name the
 # process-creation contract, so the tier stands in for it — `base-container`
 # is the only tier that can be on PSEC.
@@ -1063,7 +1066,7 @@ function Get-LoopbackFetchCommand {
 }
 
 
-# Phase 8 — schema 0.8 directional network policy.
+# Phase 8 — directional network policy.
 #
 # Asserts the documented contract (docs/process-container/networking.md and
 # docs/sandbox-policy/0.8.0/networking/networking.md), not the current code, so
@@ -1244,10 +1247,11 @@ function Initialize-WpcContext {
     }
 
     if ($Fresh) {
-        Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4} supportsDeniedPaths={5} supportsEnumeratePaths={6}" -f `
+        Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4} supportsDeniedPaths={5} supportsEnumeratePaths={6} captureDenialsUsable={7} (native={8} guarded={9})" -f `
             $Script:Caps.BaselineTier, $Script:Caps.BaseContainerUsable, $Script:Caps.BaseContainerApiPresent, `
             $Script:Caps.BfscfgPresent, $Script:Caps.BfsCompiledIn, $Script:Caps.SupportsDeniedPaths, `
-            $Script:Caps.SupportsEnumeratePaths) -ForegroundColor Cyan
+            $Script:Caps.SupportsEnumeratePaths, $Script:Caps.CaptureDenialsUsable, `
+            $Script:Caps.NativeCaptureAvailable, $Script:Caps.GuardedCaptureAvailable) -ForegroundColor Cyan
     }
 }
 

@@ -40,9 +40,9 @@ function Phase-NetworkRejections {
 
     # Shapes the typed generator deliberately cannot produce, authored raw.
     $rawBase = {
-        param($id, $network, $extra)
+        param($id, $network, $extra, $version)
         $o = [ordered]@{
-            version     = $Script:SchemaVersion
+            version     = $(if ($version) { $version } else { $Script:SchemaVersion })
             containerId = "MxcWinPC-$id"
             containment = 'processcontainer'
             process     = [ordered]@{ commandLine = $cmd; timeout = 20000 }
@@ -92,12 +92,12 @@ function Phase-NetworkRejections {
             Why    = 'MXC must reject a networkProxy endpoint that is not loopback'
         },
         @{
-            Name   = 'mixing legacy defaultPolicy with directional egress is rejected'
+            Name   = 'retired defaultPolicy is rejected alongside directional egress'
             Config = (New-RawConfig -Name 'rej-mixed-shapes' -Object (& $rawBase 'rej-mixed-shapes' ([ordered]@{
                         defaultPolicy = 'block'
                         egress        = [ordered]@{ default = 'allow' }
-                     }) $null))
-            Why    = 'the legacy and directional shapes are alternatives; combining them has no defined meaning'
+                     }) $null '0.9.0-alpha'))
+            Why    = 'the minimum supported contract has no legacy network fields'
         }
     )
 
@@ -133,4 +133,3 @@ function Phase-NetworkRejections {
 
 Invoke-WpcPhase -Key 'NetworkRejections' -Body { Phase-NetworkRejections }
 Complete-WpcChild
-

@@ -1,0 +1,16 @@
+{
+  "description": "Working directory, layered environment, and telemetry opt-in.",
+  "policy": {},
+  "containment": {
+    "kind": "process"
+  },
+  "command": "echo golden",
+  "containerName": "golden-invocation-options",
+  "workingDirectory": "work",
+  "environment": {
+    "A": "1",
+    "B": "2"
+  },
+  "inheritDefaultEnv": true,
+  "telemetry": true
+}

@@ -28,7 +28,7 @@ For the enforcement mechanisms themselves see the
 ## Enforcement tiers
 
 The Windows backend selects one of three isolation tiers at runtime
-(`src/backends/process_container/common/src/fallback_detector.rs`). Which tiers are
+(`src/mxc-sdk/src/backends/process_container/common/fallback_detector.rs`). Which tiers are
 available bounds what policy can be enforced.
 
 | Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
@@ -160,7 +160,7 @@ available there to block private-network egress.
 
 UI restrictions map to Job Object `JOB_OBJECT_UILIMIT_*` flags plus the
 `disallowWin32kSystemCalls` process mitigation. They are applied in **both** T1
-and T3 (`src/backends/process_container/common/src/job_object.rs`), so they are
+and T3 (`src/mxc-sdk/src/backends/process_container/common/job_object.rs`), so they are
 available regardless of tier — subject to per-flag build gating. The effective
 mask is always `requested & supported`, so the kernel is never handed a flag it
 would reject; `wxc-exec --probe` reports what a host can enforce.
@@ -175,6 +175,10 @@ would reject; `wxc-exec --probe` reports what a host can enforce.
 | `injection` — INJECTION (`0x200`, ≥ 26100) | ❌ | ✅ | ✅ | ✅ |
 | `disable` — `disallowWin32kSystemCalls` mitigation | ✅ | ✅ | ✅ | ✅ |
 
+✅ here means the host can set the flag, not that the permissive value grants
+the operation. Omitting a limit never enables anything; see
+[UI policy schema](UIPolicy_Schema.md).
+
 The single UI differentiator for 23H2 is **`injection`**
 (`JOB_OBJECT_UILIMIT_INJECTION`), which the kernel accepts only on build 26100
 and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
@@ -183,14 +187,14 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
 
 ## Sources
 
-- Tier selection: `src/backends/process_container/common/src/fallback_detector.rs`,
-  `src/backends/process_container/common/src/dispatcher.rs`
+- Tier selection: `src/mxc-sdk/src/backends/process_container/common/fallback_detector.rs`,
+  `src/mxc-sdk/src/backends/process_container/common/dispatcher.rs`
 - BaseContainer PSEC capability probing and specification construction:
-  `src/backends/process_container/common/src/base_container_runner.rs`,
-  `src/backends/process_container/common/src/base_container_helpers.rs`
+  `src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs`,
+  `src/mxc-sdk/src/backends/process_container/common/base_container_helpers.rs`
 - UI-limit build gating (`MIN_BUILD_FOR_IME_LIMIT`,
   `MIN_BUILD_FOR_INJECTION_LIMIT`, `supported_ui_limit_mask_for_build`):
-  `src/backends/process_container/common/src/job_object.rs`
+  `src/mxc-sdk/src/backends/process_container/common/job_object.rs`
 - FlatBuffer contract: `external/windows-sdk/ProcessSecurityEnvironment.fbs`
 - Product support floor: [README](../../README.md#platforms),
   [SDK README](../../sdk/node/README.md)

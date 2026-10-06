@@ -1,0 +1,29 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-process-filesystem-ui-timeout",
+  "containment": "process",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": true
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "timeout": 30000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "work"
+    ],
+    "readonlyPaths": [
+      "tools"
+    ],
+    "deniedPaths": [
+      "secrets"
+    ]
+  },
+  "ui": {
+    "disable": false,
+    "clipboard": "read",
+    "injection": false
+  }
+}

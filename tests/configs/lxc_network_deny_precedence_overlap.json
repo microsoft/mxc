@@ -1,6 +1,6 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
-  "version": "0.7.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-LXC-Net-DenyWins",
   "containment": "lxc",
   "process": {
@@ -14,9 +14,40 @@
     "release": "3.23"
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["0.0.0.0/0", "::/0"],
-    "blockedHosts": ["0.0.0.0/0", "::/0"]
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "0.0.0.0/0"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "::/0"
+            }
+          ]
+        }
+      ],
+      "deny": [
+        {
+          "to": [
+            {
+              "cidr": "0.0.0.0/0"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "::/0"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

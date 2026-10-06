@@ -129,4 +129,21 @@
         HarnessArguments = "Default"
         Destructive = $false
     }
+    "1245" = @{
+        FriendlyName = "desktopSystemControl Policy"
+        Script = "test_cases\Invoke-Issue1245-desktopSystemControl.ps1"
+        ExpectedTierSupport = @("base-container-psec")
+        Prerequisites = @("wxc-exec", "PSEC BaseContainer-capable host", "interactive desktop")
+        CapabilityPreflight = $true
+        HarnessArguments = "Default"
+        Destructive = $false
+    }
+    "1246" = @{
+        FriendlyName = "Tier 1 Clipboard Policy Matrix"
+        Script = "test_cases\Invoke-Issue1246-Tier1ClipboardRestrictions.ps1"
+        ExpectedTierSupport = @("base-container-psec")
+        Prerequisites = @("wxc-exec", "BaseContainer-capable host", "Windows PowerShell 5.1", "interactive desktop with host clipboard access")
+        HarnessArguments = "Default"
+        Destructive = $false
+    }
 }

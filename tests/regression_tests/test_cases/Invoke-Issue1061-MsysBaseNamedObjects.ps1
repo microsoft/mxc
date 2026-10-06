@@ -22,7 +22,7 @@ $gitRoot = Split-Path -Parent (Split-Path -Parent $BashExe)
 # Config
 $configJson = @"
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "cwd": $($gitRoot | ConvertTo-Json -Compress),

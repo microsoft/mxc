@@ -6,6 +6,7 @@ import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { describe, it } from 'node:test';
 import {
   createStateAwareStreamingDriver,
+  createStateAwareStreamingDriverAsync,
   createStreamingDriver,
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
@@ -22,6 +23,15 @@ class FakeNative implements StreamingNativeFacade {
   readonly freedStrings: unknown[] = [];
   closeFailureHandle: number | bigint | undefined;
   spawnStatus = 0;
+  spawnRequest: string | undefined;
+  spawnExperimental: number | undefined;
+  spawnCount = 0;
+  deferSpawn = false;
+  spawnFailure: Error | undefined;
+  readonly pendingSpawns: Array<{
+    outHandle: unknown[];
+    completion: (error: Error | null, status: number) => void;
+  }> = [];
   takeStatus = 0;
   killCount = 0;
   timeoutKillCount = 0;
@@ -44,20 +54,72 @@ class FakeNative implements StreamingNativeFacade {
   stateAwareRequest: string | undefined;
   stateAwareExperimental: number | undefined;
 
-  spawn(_request: string, outHandle: unknown[], _error: unknown): number {
+  spawnSync(
+    _request: string,
+    _experimental: number,
+    outHandle: unknown[],
+    _error: unknown,
+  ): number {
     outHandle[0] = this.handle;
     return this.spawnStatus;
+  }
+
+  spawn(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    _error: unknown,
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.spawnRequest = request;
+    this.spawnExperimental = experimental;
+    this.spawnCount += 1;
+    if (this.spawnFailure !== undefined) {
+      const failure = this.spawnFailure;
+      queueMicrotask(() => completion(failure, 0));
+      return;
+    }
+
+    if (this.deferSpawn) {
+      this.pendingSpawns.push({ outHandle, completion });
+      return;
+    }
+    queueMicrotask(() => {
+      outHandle[0] = this.handle;
+      completion(null, this.spawnStatus);
+    });
+  }
+
+  completeSpawn(index = 0, handle: unknown = this.handle): void {
+    const pending = this.pendingSpawns[index];
+    assert.notStrictEqual(pending, undefined);
+    this.pendingSpawns.splice(index, 1);
+    pending.outHandle[0] = handle;
+    pending.completion(null, this.spawnStatus);
+  }
+
+  stateAwareExecAsync(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.stateAwareRequest = request;
+    this.stateAwareExperimental = experimental;
+    this.spawn(request, experimental, outHandle, error, completion);
   }
 
   stateAwareExec(
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    _error: unknown,
   ): number {
     this.stateAwareRequest = request;
     this.stateAwareExperimental = experimental;
-    return this.spawn('', outHandle, error);
+    outHandle[0] = this.handle;
+    return this.spawnStatus;
   }
 
   id(): number {
@@ -186,6 +248,64 @@ class FakeStreams implements NativeStreamFactory {
 }
 
 describe('native streaming binding ownership', () => {
+  it('awaits native state-aware spawn without using synchronous dispatch', async () => {
+    const native = new FakeNative();
+    native.deferSpawn = true;
+    const requestJson = '{"phase":"exec","sandboxId":"iso:abc"}';
+    const pending = createStateAwareStreamingDriverAsync(
+      requestJson,
+      true,
+      native,
+      new FakeStreams(),
+    );
+
+    assert.strictEqual(native.pendingSpawns.length, 1);
+    assert.strictEqual(native.stateAwareRequest, requestJson);
+    assert.strictEqual(native.stateAwareExperimental, 1);
+    native.completeSpawn();
+
+    const driver = await pending;
+    assert.strictEqual(driver.id, 23);
+    await driver.free();
+    assert.strictEqual(native.freeCount, 1);
+  });
+
+  it('propagates native asynchronous state-aware spawn failures', async () => {
+    const native = new FakeNative();
+    native.spawnFailure = new Error('async native dispatch failed');
+    await assert.rejects(
+      createStateAwareStreamingDriverAsync(
+        '{"phase":"exec","sandboxId":"iso:abc"}',
+        false,
+        native,
+        new FakeStreams(),
+      ),
+      /async native dispatch failed/,
+    );
+    assert.strictEqual(native.freeCount, 0);
+  });
+
+  it('passes exact one-shot JSON to asynchronous native spawn', async () => {
+    const native = new FakeNative();
+    const request = {
+      version: '1.0.0' as const,
+      containment: 'process' as const,
+      sandboxId: 'node-exact-spawn',
+      process: { commandLine: 'echo exact-json' },
+    };
+
+    const driver = await createStreamingDriver(
+      request,
+      native,
+      new FakeStreams(),
+    );
+
+    assert.strictEqual(native.spawnRequest, JSON.stringify(request));
+    assert.strictEqual(native.spawnExperimental, 0);
+    assert.strictEqual(native.spawnCount, 1);
+    await driver.free();
+  });
+
   it('dispatches state-aware exec through the native entry point', async () => {
     const native = new FakeNative();
     const streams = new FakeStreams();
@@ -245,7 +365,7 @@ describe('native streaming binding ownership', () => {
     native.stderrHandle = 0x100000003n;
     const streams = new FakeStreams('win32');
 
-    const driver = createStreamingDriver(
+    const driver = await createStreamingDriver(
       {} as never,
       native,
       streams,
@@ -264,7 +384,7 @@ describe('native streaming binding ownership', () => {
     const native = new FakeNative();
     const streams = new FakeStreams();
 
-    const driver = createStreamingDriver(
+    const driver = await createStreamingDriver(
       {} as never,
       native,
       streams,
@@ -281,7 +401,7 @@ describe('native streaming binding ownership', () => {
   it('waits off-thread and returns the native terminal result', async () => {
     const native = new FakeNative();
     native.deferWait = true;
-    const driver = createStreamingDriver(
+    const driver = await createStreamingDriver(
       {} as never,
       native,
       new FakeStreams(),
@@ -304,7 +424,7 @@ describe('native streaming binding ownership', () => {
     unixNative.stdinHandle = -1;
     unixNative.stderrHandle = -1n;
     const unixStreams = new FakeStreams();
-    const unixDriver = createStreamingDriver(
+    const unixDriver = await createStreamingDriver(
       {} as never,
       unixNative,
       unixStreams,
@@ -319,7 +439,7 @@ describe('native streaming binding ownership', () => {
     windowsNative.stdinHandle = 0n;
     windowsNative.stderrHandle = 0;
     const windowsStreams = new FakeStreams('win32');
-    const windowsDriver = createStreamingDriver(
+    const windowsDriver = await createStreamingDriver(
       {} as never,
       windowsNative,
       windowsStreams,
@@ -336,8 +456,8 @@ describe('native streaming binding ownership', () => {
     const streams = new FakeStreams();
     streams.failHandle = 12;
 
-    assert.throws(
-      () => createStreamingDriver({} as never, native, streams),
+    await assert.rejects(
+      createStreamingDriver({} as never, native, streams),
       /readable construction failed/,
     );
 
@@ -353,8 +473,8 @@ describe('native streaming binding ownership', () => {
     const streams = new FakeStreams();
     streams.failHandle = 12;
 
-    assert.throws(
-      () => createStreamingDriver({} as never, native, streams),
+    await assert.rejects(
+      createStreamingDriver({} as never, native, streams),
       /rollback was incomplete/,
     );
 
@@ -368,8 +488,8 @@ describe('native streaming binding ownership', () => {
     const native = new FakeNative();
     native.takeStatus = 12;
 
-    assert.throws(
-      () => createStreamingDriver(
+    await assert.rejects(
+      createStreamingDriver(
         {} as never,
         native,
         new FakeStreams(),
@@ -381,12 +501,12 @@ describe('native streaming binding ownership', () => {
     assert.strictEqual(native.freeCount, 1);
   });
 
-  it('frees native error detail when spawn fails', () => {
+  it('frees native error detail when spawn fails', async () => {
     const native = new FakeNative();
     native.spawnStatus = 12;
 
-    assert.throws(
-      () => createStreamingDriver(
+    await assert.rejects(
+      createStreamingDriver(
         {} as never,
         native,
         new FakeStreams(),
@@ -398,11 +518,68 @@ describe('native streaming binding ownership', () => {
     assert.strictEqual(native.freeCount, 0);
   });
 
+  it('spawns off-thread so the event loop keeps running', async () => {
+    const native = new FakeNative();
+    native.deferSpawn = true;
+
+    let settled = false;
+    const pending = createStreamingDriver(
+      {} as never,
+      native,
+      new FakeStreams(),
+    ).then((driver) => {
+      settled = true;
+      return driver;
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(native.spawnCount, 1);
+    assert.strictEqual(settled, false);
+
+    native.completeSpawn();
+    const driver = await pending;
+    assert.strictEqual(driver.id, 23);
+    await driver.free();
+  });
+
+  it('surfaces a rejected native spawn invocation', async () => {
+    const native = new FakeNative();
+    native.spawnFailure = new Error('native invocation failed');
+
+    await assert.rejects(
+      createStreamingDriver({} as never, native, new FakeStreams()),
+      /native invocation failed/,
+    );
+
+    assert.strictEqual(native.freeErrorCount, 0);
+    assert.strictEqual(native.freeCount, 0);
+  });
+
+  it('keeps concurrent spawns on their own handles when they finish out of order', async () => {
+    const native = new FakeNative();
+    native.deferSpawn = true;
+
+    const first = createStreamingDriver({} as never, native, new FakeStreams());
+    const second = createStreamingDriver({} as never, native, new FakeStreams());
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(native.spawnCount, 2);
+
+    native.completeSpawn(1, {});
+    native.completeSpawn(0, native.handle);
+
+    const secondDriver = await second;
+    const firstDriver = await first;
+    assert.strictEqual(secondDriver.id, 23);
+    assert.strictEqual(firstDriver.id, 23);
+    await Promise.all([firstDriver.free(), secondDriver.free()]);
+    assert.strictEqual(native.freeCount, 2);
+  });
+
   it('surfaces native process-data read failures', async () => {
     const native = new FakeNative();
     native.warningsStatus = 12;
     native.outputMetadataStatus = 12;
-    const driver = createStreamingDriver(
+    const driver = await createStreamingDriver(
       {} as never,
       native,
       new FakeStreams(),

@@ -10,7 +10,7 @@
 
 .DESCRIPTION
     Each test invokes wxc-exec.exe with lifecycle routing in --operation /
-    --sandbox-id and a base64-encoded phase-specific request payload, parses
+    --container-id and a base64-encoded phase-specific request payload, parses
     the JSON response on stdout, and asserts on the envelope's `result` or
     `error` fields. The corpus covers lifecycle, process execution,
     sandbox-internal persistence, and validation errors.
@@ -193,7 +193,7 @@ function ConvertTo-StateAwareInvocation {
     } elseif ($Request) {
         $requestObject = $Request.Clone()
         if (-not $Request.ContainsKey('version')) {
-            $requestObject['version'] = '0.9.0-alpha'
+            $requestObject['version'] = '1.0.0'
         }
     } else {
         throw "State-aware invocation requires either -Request or -ConfigFile"
@@ -271,7 +271,7 @@ function Invoke-StateAware {
 
     $argList = @('--operation', $invocation.Operation)
     if ($invocation.Operation -ne 'provision') {
-        $argList += @('--sandbox-id', $invocation.SandboxId)
+        $argList += @('--container-id', $invocation.SandboxId)
     }
     if ($DryRun.IsPresent) { $argList += '--dry-run' }
     $argList += @('--config-base64', $invocation.ConfigBase64)
@@ -573,7 +573,11 @@ try {
 
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -ne 0) "$phase (real): exit code is non-zero"
-            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $envObj = if ($phase -eq 'exec') {
+                Parse-StderrEnvelope -Stderr $r.Stderr
+            } else {
+                Parse-Envelope -Stdout $r.Stdout
+            }
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_id') "$phase (real): error.code is 'malformed_id' (got '$code')"
 
@@ -629,7 +633,7 @@ try {
                     # so here it only confirms the phase was routed and
                     # validated, NOT that the body was skipped. Skipping is
                     # pinned for all five phases by the call-counting stub tests
-                    # in wxc_common::state_aware_dispatch, which the E2E layer
+                    # in mxc_common::state_aware_dispatch, which the E2E layer
                     # cannot express.
                     Assert-True ($null -ne $dEnv -and $null -ne $dEnv.result) "$phase (--dry-run): returns a result envelope"
                     if ($phase -eq 'exec') {
@@ -941,6 +945,27 @@ try {
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
             Assert-True ($msg -match 'network policy is fixed at provision') `
                 "error.message identifies the immutable post-provision network policy (got '$msg')"
+        } | Out-Null
+    }
+
+    # Test 3d: exec rejects a process.env supplied without inheritDefaultEnv, and
+    # the command does not run.
+    if ($execedOk) {
+        Run-StateAwareTest "exec (process.env without inheritDefaultEnv rejected)" {
+            $req = @{
+                phase     = 'exec'
+                sandboxId = $script:sandboxId
+                process   = @{ commandLine = 'echo MUST_NOT_RUN'; env = @('FOO=bar') }
+            }
+            $r = Invoke-StateAware -Request $req
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'process\.env without process\.inheritDefaultEnv=true is not supported') `
+                "error.message identifies the unsupported environment (got '$msg')"
+            Assert-True ($r.Stdout -notmatch 'MUST_NOT_RUN') "the command did not run"
         } | Out-Null
     }
 

@@ -137,7 +137,7 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 # stdout and stderr are captured SEPARATELY. Merging them would let any stderr
 # line corrupt the JSON, and stderr is not hypothetical here: wxc-exec runs a
 # best-effort DACL-recovery pass BEFORE the `--probe` arm and reports it on
-# stderr (`core/wxc/src/main.rs`), so a host carrying leftover state from a
+# stderr (`tools/wxc/src/main.rs`), so a host carrying leftover state from a
 # crashed prior run would emit unparseable output and be judged "unavailable"
 # while being perfectly capable. That failure mode is inverted with respect to
 # risk — the dirtier the host, the likelier the false skip — which is exactly
@@ -390,7 +390,7 @@ $legacyNetworkFields = [ordered]@{
 }
 foreach ($field in $legacyNetworkFields.Keys) {
     $request = @{
-        version = '0.9.0-alpha'
+        version = '1.0.0'
         containment = 'isolation_session'
         process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
         network = @{ $field = $legacyNetworkFields[$field] }
@@ -401,7 +401,7 @@ foreach ($field in $legacyNetworkFields.Keys) {
 }
 
 $legacyNetworkRequest = @{
-    version = '0.9.0-alpha'
+    version = '1.0.0'
     containment = 'isolation_session'
     process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
     network = [ordered]@{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
@@ -427,6 +427,10 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_ui_re
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_lifecycle_rejected.json" `
     -ExpectedExit -1 `
     -OutputContains @("lifecycle.destroyOnExit=false")))
+
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_env_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("process.env without process.inheritDefaultEnv=true is not supported")))
 
 # ---------------- Concurrent one-shot test ----------------
 #

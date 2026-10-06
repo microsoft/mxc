@@ -26,16 +26,6 @@ expect_rejected "non-empty egress.deny rules are refused" \
     "seatbelt_reject_egress_deny_rules.json" \
     "network.egress allow/deny rules are not supported" "$S"
 
-expect_rejected "blockedHosts is refused" \
-    "seatbelt_reject_blocked_hosts.json" \
-    "does not support per-host network filtering" "$S"
-
-# Could only degrade to allow-all or deny-all, either of which misrepresents
-# the request.
-expect_rejected "allowedHosts under defaultPolicy=block is refused" \
-    "seatbelt_reject_allowed_hosts_under_block.json" \
-    "allowedHosts cannot be combined with defaultPolicy='block'" "$S"
-
 # --- Network: the inbound half of hostLoopback is not expressible -----------
 
 expect_rejected "hostLoopback=allow under ingress.default=deny is refused" \
@@ -53,25 +43,6 @@ expect_rejected "a runtime proxy under egress.default=allow is refused" \
 expect_rejected "a non-loopback runtime proxy endpoint is refused" \
     "seatbelt_reject_proxy_remote_host.json" \
     "must use localhost, 127.0.0.1, or [::1]" "$S"
-
-# Seatbelt cannot express reachability to a remote host, so the proxy would be
-# unreachable and nothing could connect at all.
-expect_rejected "a remote legacy proxy under defaultPolicy=block is refused" \
-    "seatbelt_reject_legacy_remote_proxy_block.json" \
-    "remote network.proxy (non-loopback host) cannot be combined" "$S"
-
-# macOS has no packet-filter layer for MXC to enforce with.
-expect_rejected "a proxy combined with enforcementMode=firewall is refused" \
-    "seatbelt_reject_proxy_with_firewall.json" \
-    "cannot be combined with network.enforcementMode" "$S"
-
-# --- Schema gating ----------------------------------------------------------
-
-# The declared version selects a closed 0.7 contract with no `egress` field, so
-# this is refused at deserialization rather than by a Seatbelt rule.
-expect_rejected "a directional network section before 0.8 is refused" \
-    "seatbelt_reject_directional_pre08.json" \
-    "Invalid configuration at \`network.egress\`" "$S"
 
 # Documented as rejected because peer identity pinning is unsupported. In
 # practice the shared multi-backend guard fires first, since processContainer

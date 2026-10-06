@@ -1,5 +1,5 @@
 #!/bin/bash
-# Seatbelt directional network policy (schema 0.8 `egress` / `ingress`).
+# Seatbelt directional network policy (`egress` / `ingress`).
 #
 # The headline case is the documented `hostLoopback` trap: `egress.default:
 # "allow"` with no `ingress` section reaches the whole internet but *not* the

@@ -1,24 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
+import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './v1/errors.js';
 import {
   Phase,
-  STATE_AWARE_VERSION,
-  StateAwareContainmentBackend,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-  WSLC_STATE_AWARE_VERSION,
-} from './state-aware-types.js';
-import { TelemetryConfig } from './types.js';
+  SDK_CONTRACT_VERSION,
+  LifecycleContainmentKind,
+} from './v1/lifecycle-types.js';
+import { TelemetryConfig } from './v1/types.js';
 
 export {
-  STATE_AWARE_VERSION,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-  WSLC_STATE_AWARE_VERSION,
+  SDK_CONTRACT_VERSION,
 };
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
-// Anything else on a per-(backend, phase) Config is backend-specific and is
+// Runtime proxy authoring is normalized from WSLC exec `network.runtimeConfig`
+// before these fields are lifted. Remaining config is backend-specific and is
 // nested under `<backendSection>.<phase>`.
 export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'runtimeConfig', 'ui', 'process', 'telemetry'] as const;
 
@@ -27,36 +24,25 @@ export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'runtimeConfig', '
 // `sandboxId` produced by that backend. Each future state-aware backend
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
-export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 export const WSLC_ID_PREFIX = 'wslc';
+export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 
-// Per-backend default schema version stamped onto an envelope when the caller
-// supplies none. Each backend's state-aware surface was promoted at its own
-// schema version, so the default is backend-specific rather than a single
-// global constant.
-const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> = {
-  isolation_session: STATE_AWARE_VERSION,
-  windows_sandbox: WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-  wslc: WSLC_STATE_AWARE_VERSION,
-};
-
-// Exhaustive backend→prefix map. Typed `Record<StateAwareContainmentBackend,
+// Exhaustive backend→prefix map. Typed `Record<LifecycleContainmentKind,
 // string>` so adding a backend to the union without registering a prefix here
 // is a compile error — the same exhaustiveness guarantee the config, metadata,
 // and default-version registries carry. Without it a new backend would compile
 // with no prefix and fail every non-provision call at runtime with
 // `malformed_id`.
-export const BACKEND_TO_PREFIX: Record<StateAwareContainmentBackend, string> = {
+export const BACKEND_TO_PREFIX: Record<LifecycleContainmentKind, string> = {
   isolation_session: ISOLATION_SESSION_ID_PREFIX,
-  windows_sandbox: WINDOWS_SANDBOX_ID_PREFIX,
   wslc: WSLC_ID_PREFIX,
 };
 
 // Reverse lookup (prefix → backend), derived from the exhaustive map above so
 // the two can never drift. Used to route a sandboxId's leading prefix segment
 // to its wire-format backend key.
-export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = Object.fromEntries(
-  (Object.entries(BACKEND_TO_PREFIX) as [StateAwareContainmentBackend, string][]).map(
+export const PREFIX_TO_BACKEND: Record<string, LifecycleContainmentKind> = Object.fromEntries(
+  (Object.entries(BACKEND_TO_PREFIX) as [LifecycleContainmentKind, string][]).map(
     ([backend, prefix]) => [prefix, backend],
   ),
 );
@@ -64,14 +50,23 @@ export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = O
 /**
  * Resolves the wire-format backend key for a sandbox id by reading its
  * leading prefix segment. Throws an `MxcError` with `code: 'malformed_id'`
- * when the id has no recognised prefix.
+ * when the id has no recognised prefix, and `code: 'unsupported_containment'`
+ * for a Windows Sandbox (`wsb:`) id, which the stable API does not accept.
  */
-export function backendForSandboxId(sandboxId: string): StateAwareContainmentBackend {
+export function backendForSandboxId(sandboxId: string): LifecycleContainmentKind {
   const colon = sandboxId.indexOf(':');
   if (colon < 0) {
     throw mxcErrorFromCode('malformed_id', `sandboxId must carry a backend prefix: ${sandboxId}`);
   }
   const prefix = sandboxId.slice(0, colon);
+  if (prefix === WINDOWS_SANDBOX_ID_PREFIX) {
+    throw mxcErrorFromCode(
+      'unsupported_containment',
+      'Windows Sandbox identities are experimental and are not accepted by ' +
+      'the stable high-level lifecycle API; use raw JSON with experimental ' +
+      'authorization.',
+    );
+  }
   const backend = PREFIX_TO_BACKEND[prefix];
   if (!backend) {
     throw mxcErrorFromCode('malformed_id', `sandboxId prefix '${prefix}' does not match a known state-aware backend`);
@@ -81,8 +76,8 @@ export function backendForSandboxId(sandboxId: string): StateAwareContainmentBac
 
 export interface BuildEnvelopeArgs {
   phase: Phase;
-  backendKey: StateAwareContainmentBackend;
-  containment?: StateAwareContainmentBackend; // provision only
+  backendKey: LifecycleContainmentKind;
+  containment?: LifecycleContainmentKind; // provision only
   sandboxId?: string;                        // non-provision only
   config?: Record<string, unknown>;
 }
@@ -105,36 +100,45 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes <backendSection>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
-  const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
-  const requestedVersion = backendSpecific.version;
-  if (requestedVersion !== undefined && requestedVersion !== defaultVersion) {
+  if ('version' in backendSpecific) {
     throw mxcErrorFromCode(
       'malformed_request',
-      `State-aware ${backendKey} requests require schema version '${defaultVersion}', ` +
-      `got '${String(requestedVersion)}'.`,
+      `State-aware high-level requests do not accept a caller-selected version; ` +
+      `the v1 SDK targets exact contract ${SDK_CONTRACT_VERSION}.`,
     );
   }
-  const version = defaultVersion;
-  delete backendSpecific.version;
+  const version = SDK_CONTRACT_VERSION;
 
   const fail = (message: string): never => {
     throw mxcErrorFromCode('malformed_request', message);
   };
+  if ('runtimeConfig' in backendSpecific) {
+    fail('runtimeConfig must be authored as network.runtimeConfig on WSLC exec.');
+  }
   const network = backendSpecific.network;
   if (network !== undefined) {
-    if (phase !== 'provision' || (backendKey !== 'wslc' && backendKey !== 'isolation_session')) {
-      fail(`network is not accepted on ${backendKey} ${phase}; WSLC exec uses runtimeConfig.networkProxy.`);
+    const isProvisionNetwork = phase === 'provision'
+      && (backendKey === 'wslc' || backendKey === 'isolation_session');
+    const isWslcExecNetwork = phase === 'exec' && backendKey === 'wslc';
+    if (!isProvisionNetwork && !isWslcExecNetwork) {
+      fail(`network is not accepted on ${backendKey} ${phase}.`);
     }
     if (network === null || typeof network !== 'object' || Array.isArray(network)) {
       fail('network must be an object.');
     }
     for (const key of Object.keys(network as object)) {
-      if (key !== 'egress' && key !== 'ingress') {
-        fail(`Schema ${version} no longer supports network.${key}; use network.egress/network.ingress, or runtimeConfig.networkProxy on WSLC exec.`);
+      const validKey = isWslcExecNetwork
+        ? key === 'runtimeConfig'
+        : key === 'egress' || key === 'ingress';
+      if (!validKey) {
+        fail(`Schema ${version} does not support network.${key} on ${backendKey} ${phase}.`);
       }
     }
-    if (backendKey === 'isolation_session') {
+    if (isWslcExecNetwork) {
+      backendSpecific.runtimeConfig = (network as { runtimeConfig?: unknown }).runtimeConfig;
+      delete backendSpecific.network;
+    } else if (backendKey === 'isolation_session') {
       const directional = network as {
         egress?: { default?: unknown; allow?: unknown; deny?: unknown };
         ingress?: { default?: unknown; hostLoopback?: unknown };
@@ -153,27 +157,27 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   const runtime = backendSpecific.runtimeConfig;
   if (runtime !== undefined) {
     if (backendKey !== 'wslc' || phase !== 'exec') {
-      fail(`runtimeConfig is accepted only on WSLC exec, not ${backendKey} ${phase}.`);
+      fail(`network.runtimeConfig is accepted only on WSLC exec, not ${backendKey} ${phase}.`);
     }
     if (runtime === null || typeof runtime !== 'object' || Array.isArray(runtime)) {
-      fail('runtimeConfig must be an object.');
+      fail('network.runtimeConfig must be an object.');
     }
     for (const [key, value] of Object.entries(runtime as object)) {
       if (key !== 'networkProxy') {
-        fail(`Unknown runtimeConfig.${key}.`);
+        fail(`Unknown network.runtimeConfig.${key}.`);
       }
       if (value === undefined) continue;
       if (typeof value !== 'string' || value.trim() !== value || !value) {
-        fail('runtimeConfig.networkProxy must be an HTTP/S URL string.');
+        fail('network.runtimeConfig.networkProxy must be an HTTP/S URL string.');
       }
       let url!: URL;
       try {
         url = new URL(value as string);
       } catch {
-        fail('runtimeConfig.networkProxy must be an HTTP/S URL string.');
+        fail('network.runtimeConfig.networkProxy must be an HTTP/S URL string.');
       }
       if (!['http:', 'https:'].includes(url.protocol)) {
-        fail('runtimeConfig.networkProxy must use HTTP or HTTPS.');
+        fail('network.runtimeConfig.networkProxy must use HTTP or HTTPS.');
       }
     }
   }
@@ -199,7 +203,6 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   if (Object.keys(backendSpecific).length > 0) {
     const backendSection = {
       isolation_session: 'isolationSession',
-      windows_sandbox: 'windowsSandbox',
       wslc: 'wslc',
     }[backendKey];
     envelope[backendSection] = { [phase]: backendSpecific };

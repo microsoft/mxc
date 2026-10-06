@@ -23,22 +23,22 @@ const errors = [];
 const RUST_TERMS = [
   {
     label: "bwrap --version probe",
-    file: join(repoRoot, "src", "backends", "bubblewrap", "common", "src", "bwrap_version.rs"),
+    file: join(repoRoot, "src", "mxc-sdk", "src", "backends", "bubblewrap", "common", "bwrap_version.rs"),
     constant: "BWRAP_VERSION_TIMEOUT",
   },
   {
     label: "proxy-enforcement dependency walk",
-    file: join(repoRoot, "src", "backends", "bubblewrap", "common", "src", "proxy_network.rs"),
+    file: join(repoRoot, "src", "mxc-sdk", "src", "backends", "bubblewrap", "common", "proxy_network.rs"),
     constant: "PRE_FLIGHT_BUDGET",
   },
   {
     label: "lxc availability probe",
-    file: join(repoRoot, "src", "backends", "lxc", "common", "src", "availability.rs"),
+    file: join(repoRoot, "src", "mxc-sdk", "src", "backends", "lxc", "common", "availability.rs"),
     constant: "PROBE_TIMEOUT",
   },
 ];
 
-const PLATFORM_TS = join(repoRoot, "sdk", "node", "src", "platform.ts");
+const PLATFORM_TS = join(repoRoot, "sdk", "node", "src", "v1", "platform.ts");
 
 function read(path) {
   try {
@@ -96,7 +96,7 @@ if (platform !== null) {
       if (declared !== nativeTotalMs) {
         errors.push(
           `NATIVE_PROBE_WORST_CASE_MS is ${declared}ms but the Rust constants now sum to ${nativeTotalMs}ms ` +
-            `[${breakdown.join(", ")}]. Update sdk/node/src/platform.ts.`
+            `[${breakdown.join(", ")}]. Update sdk/node/src/v1/platform.ts.`
         );
       }
     }

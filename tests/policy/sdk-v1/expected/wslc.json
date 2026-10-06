@@ -1,0 +1,31 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-wslc",
+  "containment": "wslc",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "timeout": 0
+  },
+  "filesystem": {
+    "readwritePaths": [],
+    "readonlyPaths": [],
+    "deniedPaths": []
+  },
+  "wslc": {
+    "image": "python:3.12",
+    "cpuCount": 2,
+    "memoryMb": 1024,
+    "gpu": false,
+    "portMappings": [
+      {
+        "windowsPort": 8080,
+        "containerPort": 80,
+        "protocol": "tcp"
+      }
+    ]
+  }
+}

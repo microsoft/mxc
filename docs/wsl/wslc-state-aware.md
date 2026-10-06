@@ -10,9 +10,11 @@ It complements:
 - [`wslc-sdk-bindings.md`](wslc-sdk-bindings.md) — regenerating the SDK bindings.
 - [`../state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
 
-The WSLc state-aware surface is part of published schema `0.9.0-alpha` and does
-not require a runtime experimental opt-in. Native builds still require the
-`wslc` feature (`build.bat --with-wslc`).
+The raw WSLc state-aware surface is available in published exact schemas
+beginning with `0.9.0-alpha`. The Rust, .NET, and Node high-level v1 lifecycle
+APIs are V1 contract-mapped and emit stable exact `1.0.0`; callers do not
+supply a schema version. Neither path requires a runtime experimental opt-in.
+Native builds still require the `wslc` feature (`build.bat --with-wslc`).
 
 ## Why a daemon
 
@@ -30,7 +32,8 @@ or `deprovision` in a different process.
 > evaluated; the daemon remains the supported design.
 
 To keep the session (VM) and container **warm** across phases, WSLc uses a **persistent per-user
-daemon** (`wxc-wslc-daemon.exe`, crate `wxc_wslc_daemon` at `src/backends/wslc/daemon/`) that owns
+daemon** (`wxc-wslc-daemon.exe`, an `mxc-sdk` binary target at
+`src/mxc-sdk/src/bin/wslc_daemon/`) that owns
 the live SDK handles. Each phase process is a thin client that contacts the daemon over a named
 pipe; the daemon performs the actual SDK calls and streams stdio back. This mirrors the Windows
 Sandbox daemon pattern.
@@ -44,14 +47,14 @@ against different sandboxes are serialized — correct, just not concurrent. See
 
 | Component | Location | Role |
 |-----------|----------|------|
-| State-aware backend | `src/backends/wslc/common/src/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
-| Policy honor matrix | `src/backends/wslc/common/src/policy.rs` | Per-phase validation of which policy fields are honored vs rejected. |
-| Daemon client | `src/backends/wslc/common/src/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
-| Daemon | `src/backends/wslc/daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
-| Engine arm | `src/core/mxc_engine/src/state_aware.rs` | Dispatches the WSLc state-aware backend (Windows + `wslc` feature). |
-| Prefix registration | `src/core/wxc_common/src/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
+| State-aware backend | `src/mxc-sdk/src/backends/wslc/common/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
+| Policy honor matrix | `src/mxc-sdk/src/backends/wslc/common/policy.rs` | Per-phase validation of which policy fields are honored vs rejected. |
+| Daemon client | `src/mxc-sdk/src/backends/wslc/common/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
+| Daemon | `src/mxc-sdk/src/bin/wslc_daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
+| Engine arm | `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | Dispatches the WSLc state-aware backend (Windows + `wslc` feature). |
+| Prefix registration | `src/mxc-sdk/src/tools/mxc_common/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
 
-Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
+Exact adapters construct `mxc_common::models::WslcProvisionConfig` directly from
 `wslc.provision`. Engine-side checked binding preserves an absent
 config, a present empty config, and supplied `image`/`imageTarPath` values
 without reparsing JSON. An omitted image remains `None` until the backend
@@ -64,7 +67,7 @@ deserialization DTO.
 `provision` mints an id of the form `wslc:<32 lowercase hex>` (`wslc:` + a UUID simple form).
 Raw SDK/FFI requests carry this id in `sandboxId` for every post-provision phase
 (`start` / `exec` / `stop` / `deprovision`). Direct `wxc-exec` calls omit it from JSON and pass it
-as `--sandbox-id`; the dispatcher derives the backend from the `wslc:` prefix (later operations do
+as `--container-id`; the dispatcher derives the backend from the `wslc:` prefix (later operations do
 **not** repeat `containment`).
 
 ## Phase → WSLc SDK mapping
@@ -80,15 +83,14 @@ as `--sandbox-id`; the dispatcher derives the backend from the `wslc:` prefix (l
 ### exec output semantics
 
 `provision` / `start` / `stop` / `deprovision` return a JSON `{result | error}` envelope on stdout.
-For attached execution, a **successful** `exec` relays the script's raw stdout/stderr live from
-daemon frames and exits with the script's own exit code — it does **not** wrap the result in an
-envelope. Piped execution writes those same live frames into separate anonymous stdout/stderr
-pipes returned to the in-process SDK caller; no stdin pipe is returned. An attached dispatch
-**failure** writes its `{error}` envelope to stderr, because the script's output may already own
-stdout by the time the failure is known — so stdout carries the script's output either way, and a
-caller reads the typed error from stderr. A timeout on the attached relay surfaces as a backend
-error because that path cannot return a typed timeout; the piped path reports it through its wait
-result.
+For `wxc-exec` CLI execution, a **successful** `exec` relays the script's raw stdout/stderr live
+from daemon frames and exits with the script's own exit code — it does **not** wrap the result in
+an envelope. A CLI dispatch **failure** writes its `{error}` envelope to stderr, because the
+script's output may already own stdout by the time the failure is known. In-process SDK execution
+uses the supported streaming APIs, which return separate stdout/stderr pipes; no stdin pipe is
+returned. Rust and .NET SDKs do not expose attached exec as a public operation. A timeout on the
+CLI attached relay surfaces as a backend error because that path cannot return a typed timeout;
+the streaming path reports it through its wait result.
 
 ### exec admission, cancellation, and failure containment
 
@@ -153,7 +155,8 @@ acknowledges that WSLC cannot independently restrict those directions.
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
 | `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 
-The exact `0.9.0-alpha` request root is selected before backend dispatch.
+For a raw `0.9.0-alpha` request, that exact request root is selected before
+backend dispatch. High-level v1 SDK calls select exact `1.0.0` internally.
 Fields absent from that phase's closed root fail structurally with
 `malformed_request`: provision excludes `ui`, start / stop / deprovision admit
 no filesystem, network, UI, or process policy, and exec excludes filesystem and
@@ -223,7 +226,7 @@ it can observe idle-teardown within seconds.
 ## Testing
 
 `tests/scripts/run_wslc_state_aware_tests.ps1` is the multi-invocation E2E harness (requires a WSL2
-host with the image pre-pulled and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
+host that can reach a registry or already has the image cached, and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
 core lifecycle, warm-reuse (a marker written by one `exec` is read back by a separate `exec`
 process — only possible if the container stayed warm), filesystem volumes, bridged networking +
 proxy, validation rejections, and idle teardown. Fixtures live in
@@ -246,7 +249,7 @@ run individually or in an arbitrary order:
 
 `run_wslc_state_aware_tests.ps1` handles both concerns automatically (it drives the phases in order
 and does the `{{SANDBOX_ID}}` substitution from each provision's output). It then removes `phase`
-and `sandboxId` from the JSON and passes them as `--operation` and `--sandbox-id`. Exercise these
+and `sandboxId` from the JSON and passes them as `--operation` and `--container-id`. Exercise these
 fixtures **through the harness**, not by pointing `wxc-exec --config` at them directly.
 
 ## Known limitations

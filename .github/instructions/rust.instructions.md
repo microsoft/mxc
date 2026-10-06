@@ -92,7 +92,7 @@ Eagerly implement common traits where appropriate:
 
 ### Future Proofing
 - Use sealed traits to protect against downstream implementations
-- Structs should have private fields
+- Resource-owning handles should have private fields. Passive SDK authoring requests may expose public typed fields; preserve optional-field presence and leave semantic policy validation to the native engine.
 - Functions should validate their arguments
 - All public types must implement `Debug`
 
@@ -131,5 +131,5 @@ Before publishing or reviewing Rust code, ensure:
 - [ ] **Safety**: No unnecessary `unsafe` code, proper error handling
 - [ ] **Performance**: Efficient use of iterators, minimal allocations
 - [ ] **API Design**: Functions are predictable, flexible, and type-safe
-- [ ] **Future Proofing**: Private fields in structs, sealed traits where appropriate
+- [ ] **Future Proofing**: Private resource-handle fields, intentional typed request fields, sealed traits where appropriate
 - [ ] **Tooling**: Code passes `cargo fmt`, `cargo clippy`, and `cargo test`

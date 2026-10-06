@@ -674,7 +674,7 @@ function Initialize-WslcHost {
 # Minimum WSL runtime for WSLC, read from the pinned SDK version so the two
 # cannot drift. The SDK's own runtime error names this same version.
 function Get-RequiredWslVersion {
-    $buildScript = Join-Path $PSScriptRoot '..\..\src\backends\wslc\common\build.rs'
+    $buildScript = Join-Path $PSScriptRoot '..\..\src\mxc-sdk\build\build_wslc_common.rs'
     if (-not (Test-Path $buildScript)) {
         Write-Host "WARNING: $buildScript not found; skipping the WSL version gate."
         return $null

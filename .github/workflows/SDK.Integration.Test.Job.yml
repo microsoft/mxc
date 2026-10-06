@@ -200,11 +200,20 @@ jobs:
 
       # Linux needs root for Bubblewrap unprivileged-userns paths; `sudo -E`
       # preserves the env vars above.
+      #
+      # `sudo` resets PATH from its own `secure_path`, which picks the image's
+      # Node ahead of the one setup-node installed, so the suite would run on a
+      # different major than this matrix selected. `env "PATH=$PATH"` carries
+      # the chosen toolchain through.
+      #
+      # This lane installs LXC and starts lxc-net specifically so the LXC
+      # backend is covered, so MXC_LXC_TESTS_REQUIRE_EXECUTION turns an LXC
+      # skip into a failure here rather than a green job that tested nothing.
       - name: npm test
         shell: bash
         run: |
           if [ "${{ matrix.os_label }}" = "linux" ]; then
-            sudo -E npm test
+            sudo -E env "PATH=$PATH" MXC_LXC_TESTS_REQUIRE_EXECUTION=1 npm test
           else
             npm test
           fi

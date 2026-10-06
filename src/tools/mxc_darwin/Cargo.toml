@@ -1,0 +1,18 @@
+[package]
+name = "mxc_darwin"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mxc-exec-mac"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+mxc-sdk.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
+winresource.workspace = true

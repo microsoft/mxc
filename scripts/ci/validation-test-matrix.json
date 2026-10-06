@@ -68,6 +68,7 @@
           "pool": "1es-mxc-windows-prerelease-26h1-x64",
           "backends": [
             "process-t1",
+            "isolation-session",
             "wslc",
             "windows-sandbox",
             "microvm"
@@ -78,7 +79,8 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-windows-prerelease-26h1-arm64",
           "backends": [
-            "process-t1"
+            "process-t1",
+            "isolation-session"
           ]
         }
       }
@@ -323,6 +325,7 @@
         "os": "windows-prerelease-26h1",
         "backends": [
           "process-t1",
+          "isolation-session",
           "wslc"
         ]
       },

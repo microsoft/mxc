@@ -6,9 +6,8 @@ For exact `0.9.0-alpha`, networking is directional-only: use `network.egress`
 and `network.ingress`. LXC rejects `runtimeConfig.networkProxy`, so a v0.9 LXC
 request has no proxy surface at all — see [Proxy](#proxy) below.
 Legacy host lists and enforcement-mode fields in older examples are not
-accepted in v0.9. Preserve their original published contract when reproducing
-legacy behavior; do not relabel an old request as v0.9 without migrating its
-policy. See [the schema migration reference](../schema.md).
+accepted. Do not relabel an old request as v0.9 without migrating its policy.
+See [the schema migration reference](../schema.md).
 
 ## Overview
 
@@ -35,12 +34,29 @@ sudo apt install lxc lxc-utils liblxc-dev
 
 **Fedora/RHEL:**
 ```bash
-sudo dnf install lxc lxc-devel
+sudo dnf install lxc lxc-templates dnsmasq lxc-devel
 ```
+RHEL needs EPEL enabled first, and a few more steps besides — see
+[Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup) for the whole
+process.
 
 **Arch Linux:**
 ```bash
 sudo pacman -S lxc
+```
+
+### Container networking
+
+A policy that permits any network needs `lxcbr0` to hand the container an IPv4
+lease, so the bridge has to be up before a run: `sudo systemctl start lxc-net`.
+
+On a host running firewalld, which is the default on Fedora and RHEL, the bridge
+also has to sit in a zone that permits the traffic. The default zone rejects
+IPv4 DHCP while permitting router advertisement, so the container configures
+itself an IPv6 address, never receives a lease, and the run fails:
+
+```bash
+sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
 ```
 
 ## Configuration
@@ -49,7 +65,7 @@ Note the required field lxc.
 
 ```json
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containerId": "my-sandbox",
     "containment": "lxc",
     "process": {
@@ -68,10 +84,14 @@ Note the required field lxc.
         "deniedPaths": ["/etc/shadow"]
     },
     "network": {
-        "defaultPolicy": "block",
-        "enforcementMode": "firewall",
-        "allowedHosts": ["api.github.com"],
-        "blockedHosts": ["notapi.example.com"]
+        "egress": {
+            "default": "deny",
+            "allow": [{
+                "to": [{ "cidr": "140.82.112.0/20" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }]
+        },
+        "ingress": { "default": "deny", "hostLoopback": "deny" }
     }
 }
 ```
@@ -129,38 +149,27 @@ not reachable through `process.env`.
 
 ## Network Policy
 
-A legacy deny-default policy that names `allowedHosts` opens port 53
-unconditionally, so it cannot block DNS.  The directional `network.egress`
-rules carry no such exemption and govern port 53 like any other destination.
+Directional `network.egress` rules govern port 53 like any other destination;
+there is no implicit DNS exemption.
 
 `preservePolicy` leaves the inbound and outbound chains in place after the run.
 The chains live in the container's network namespace, so they last only as long
 as the container keeps running; stopping or destroying it takes them with it.  A
 partially installed chain from a failed run is torn down regardless.
 
-If using the legacy network shape, `enforcementMode` cannot be `capabilities`.
-
 ### Proxy
 
 **LXC does not support proxied egress (`runtimeConfig.networkProxy`) today.**
 A request carrying that field is rejected at validation, before any container is
-created, with an error naming the field and the backend. The field exists only
-in schema 0.8 and later; on 0.6 and 0.7 it is not part of the contract, so a
-request carrying it is rejected earlier as an unknown field.
+created, with an error naming the field and the backend.
 
 The field must name a loopback endpoint, and an LXC container has its own
 network namespace, so `127.0.0.1` there is the container rather than the host.
 MXC ships no component that relays a host loopback proxy into that namespace.
 
-On schemas 0.6 through 0.8, LXC accepts the legacy `network.proxy.url` form
-pointed at an address routable from inside the container, such as the bridge
-address `http://10.0.3.1:3128`. The loopback spellings of that field are
-rejected by the parser for the reason above: `network.proxy.localhost`,
-`network.proxy.builtinTestServer`, and a `network.proxy.url` naming
-`127.0.0.0/8`, `::1`, or `localhost`. Schema 0.9 removes the legacy
-`network.proxy` property entirely, which leaves v0.9 with no proxy path.
-
-The `url` must not carry credentials.
+The legacy `network.proxy` fields also have no supported exact contract.
+Choose a backend that supports a loopback proxy if the workload needs one;
+relabeling a retired LXC proxy request as v0.9 cannot make its policy enforceable.
 
 ### No network at all
 
@@ -187,23 +196,62 @@ A request that permits nothing and names no proxy keeps its own loopback and rea
 ### SDK
 
 ```typescript
-import { spawnSandbox, SandboxPolicy } from '@microsoft/mxc-sdk';
+import { spawn } from '@microsoft/mxc-sdk/v1';
+import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
-const policy: SandboxPolicy = {
+const request: ContainerRequest = {
+    command: 'echo hello',
+    containment: { type: 'lxc' },
     filesystem: {
         readwritePaths: ['/tmp/output'],
         readonlyPaths: ['/opt/tools'],
     },
     network: {
-        allowOutbound: false,
+        egress:  { default: 'deny' },
+        ingress: { default: 'deny', hostLoopback: 'deny' },
     },
 };
 
-// On Linux, this automatically uses lxc-exec
-const pty = spawnSandbox('echo hello', policy);
-pty.onData((data) => console.log(data));
-pty.onExit((e) => console.log('Exit:', e.exitCode));
+const child = spawn(request);
+child.standardOutput?.on('data', (data) => process.stdout.write(data));
+try {
+    const outcome = await child.wait();
+    console.log('Exit:', outcome.exitCode);
+} finally {
+    child.dispose();
+}
 ```
+
+Select LXC explicitly: the default `process` intent resolves to Bubblewrap on
+Linux. SDK execution uses the in-process native library, not `lxc-exec`.
+
+## Streaming
+
+LXC implements `SandboxBackend`, so `mxc_sdk::v1::spawn`, `mxc_sdk::v1::run`,
+and every SDK built on `mxc_spawn_json` / `mxc_run_json` reach it
+in-process. The handle serves live stdin, stdout, and stderr, plus `wait` and
+`kill`.
+
+Ordinary streaming uses pipes, so `isatty()` is false. `spawn_with_pty` returns
+a caller-controlled terminal with merged output, writable input, resize, wait, and
+kill. `StdioMode::Inherit` remains unsupported.
+
+**`kill()` stops the container,** not just the workload: the workload runs under
+container init, where nothing aimed at the host `lxc-attach` process reaches it.
+
+**One live sandbox per container name, per process.** A second sandbox naming a
+`containerId` this process already holds is refused rather than queued, because
+LXC reads a run's network section only when the container starts. Omit
+`containerId` for a generated name. The claim is released when the handle drops.
+
+**Teardown is owed on every terminal path,** including a drop without `wait`:
+the proxy pin and the network chains come down, and the container is released.
+A teardown failure is reported through `Sandbox::warnings`, which a bare drop
+leaves no handle to read.
+
+**The container stays up for as long as the handle lives.** `lxc-exec` is
+short-lived by comparison. Weigh that against the threat model before embedding
+streaming in a long-lived service.
 
 ## Building
 
@@ -217,6 +265,56 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 # Rust only
 ./build.sh --rust-only
 ```
+
+## Red Hat Enterprise Linux setup
+
+1. **Enable EPEL.** LXC ships in EPEL.
+
+   ```bash
+   sudo subscription-manager repos --enable "codeready-builder-for-rhel-10-$(arch)-rpms"
+   sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
+   ```
+   Substitute `9` for `10` on RHEL 9.
+
+2. **Install LXC and the pieces it needs at runtime.**
+   ```bash
+   sudo dnf install -y lxc lxc-templates dnsmasq iptables
+   ```
+
+   Add `lxc-devel` as well if you are building MXC against liblxc rather than
+   running a released binary.
+
+3. **Start the bridge.**
+
+   ```bash
+   sudo systemctl enable --now lxc-net
+   ip -4 addr show lxcbr0
+   ```
+
+4. **Move the bridge into a firewalld zone that permits its traffic.**
+   firewalld is running by default on RHEL, and its default `public` zone
+   admits `ssh`, `cockpit` and `dhcpv6-client` but not IPv4 DHCP. Containers
+   therefore configure an IPv6 address from the router advertisement, never
+   receive a lease, and every run that asks for network fails:
+
+   ```bash
+   sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
+   ```
+
+   `<ZONE>` has to admit DHCP and DNS from the bridge, since dnsmasq answers
+   both on the bridge address.
+
+   Add `--permanent` and reload to keep the assignment across reboots. 
+
+### Verifying the host
+
+```bash
+sudo lxc-checkconfig
+ip -4 addr show lxcbr0
+sudo firewall-cmd --get-zone-of-interface=lxcbr0
+```
+
+The zone query should answer the zone you assigned.
 
 ## Limitations
 
@@ -250,5 +348,10 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
   host that provides one.
 - **No proxied egress.** See [Proxy](#proxy).
-- **No state-aware lifecycle.** LXC implements `ScriptRunner` only (one-shot),
-  not `StatefulSandboxBackend`. A state-aware request is rejected.
+- **No state-aware lifecycle.** LXC implements `ScriptRunner` (one-shot) and
+  `SandboxBackend` (streaming over pipes or a caller-controlled PTY), not
+  `StatefulSandboxBackend`. A
+  state-aware request is rejected.
+- **Inherited stdio is unavailable.** Use ordinary pipe streaming or
+  `spawn_with_pty`; the in-process API never takes over the host application's
+  own terminal. See [Streaming](#streaming).

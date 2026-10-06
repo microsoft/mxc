@@ -28,7 +28,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 | --- | --- | --- | --- |
 | Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | — |
-| macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
+| macOS ARM64 / x64 (schema `0.9.0-alpha`+) | `seatbelt` | — | — |
 
 
 The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`,
@@ -118,11 +118,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # Linux Rust (from src/; matches build.sh's platform-compatible crate set)
 
-cargo clippy -p lxc -p mxc-lxc-common -p mxc-wxc-common -p mxc-bwrap-common -p unix_test_proxy --all-targets -- -D warnings
+cargo clippy -p lxc -p mxc-sdk -p unix_test_proxy --all-targets -- -D warnings
 
 # macOS Rust (from src/)
 
-cargo clippy -p mxc_darwin -p mxc-seatbelt-common --all-targets -- -D warnings
+cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings
 ```
 
 ### Tests
@@ -130,8 +130,8 @@ cargo clippy -p mxc_darwin -p mxc-seatbelt-common --all-targets -- -D warnings
 ```bash
 # Rust unit tests (from src/)
 cargo test --workspace
-cargo test -p mxc-wxc-common                      # Single crate
-cargo test -p mxc-wxc-common -- config_parser     # Filter by test name
+cargo test -p mxc-sdk --lib                   # Consolidated library unit tests
+cargo test -p mxc-sdk --lib -- config_parser  # Filter by test name
 
 # SDK (from sdk/node/)
 npm test                     # Unit tests
@@ -186,10 +186,9 @@ npm install @microsoft/mxc-sdk
 
 ```typescript
 import {
-  spawnSandboxFromConfig, createConfigFromPolicy,
-  getAvailableToolsPolicy, getTemporaryFilesPolicy,
-  getPlatformSupport,
-} from '@microsoft/mxc-sdk';
+  getPlatformSupport, spawn, getAvailableToolsPolicy, getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk/v1';
+import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
 if (!getPlatformSupport().isSupported) {
   throw new Error('MXC not available on this host');
@@ -198,29 +197,36 @@ if (!getPlatformSupport().isSupported) {
 const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
-const config = createConfigFromPolicy({
-  version: '0.6.0-alpha',
+const request: ContainerRequest = {
+  command: 'python -c "print(\'hello from container\')"',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
   },
-  network: { allowOutbound: false },
+  network: {
+    egress:  { default: 'deny' },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
+  },
   timeoutMs: 30_000,
-});
-config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
+};
 
-const child = spawnSandboxFromConfig(config, { usePty: false });
-child.stdout!.on('data', (d) => process.stdout.write(d));
-child.on('close', (code) => console.log('exit:', code));
+const child = spawn(request);
+child.standardOutput?.on('data', (data) => process.stdout.write(data));
+try {
+  const outcome = await child.waitAsync();
+  console.log('exit:', outcome.exitCode);
+} finally {
+  child.dispose();
+}
 ```
 
-The SDK also provides a **state-aware lifecycle** API for long-lived sandboxes:
+The SDK also provides a **lifecycle** API for persistent containers:
 
 ```typescript
 import {
-  provisionSandbox, startSandbox, execInSandboxAsync,
-  stopSandbox, deprovisionSandbox,
-} from '@microsoft/mxc-sdk';
+  provisionContainer, startContainer, runInContainerAsync,
+  stopContainer, deprovisionContainer,
+} from '@microsoft/mxc-sdk/v1';
 ```
 
 See the [SDK README](sdk/node/README.md) for full API documentation.
@@ -242,6 +248,15 @@ wxc-exec.exe --debug config.json
 ```
 
 See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
+
+### Request-aware ProcessContainer probe
+
+On Windows, `wxc-exec --probe [config.json]`, Node.js
+`probeSandboxSupport(config?)`, and .NET `MxcSandbox.Probe(request?)` use the
+shared engine probe to report the ProcessContainer tier and host facts for a
+specific request. The SDK calls use the structured `mxc_ffi` C ABI in process;
+they do not create a sandbox, and preserve native, parse, and unsupported
+containment errors.
 
 ### Audit Mode (Permissive Learning Mode)
 

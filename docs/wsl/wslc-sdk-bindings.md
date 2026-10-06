@@ -11,8 +11,8 @@ undefined behavior**.
 
 | File | Role |
 |---|---|
-| `src/backends/wslc/common/src/wslcsdk_sys.rs` | **Generated** by bindgen. The single source of ABI truth: opaque settings structs + size consts, handle types, enums, data structs, callback typedefs, and the runtime-loaded `WslcSdk` function table with compile-time size/offset asserts. **Do not hand-edit.** |
-| `src/backends/wslc/common/src/wslc_bindings.rs` | Thin ergonomic **facade** over the generated module. Re-exports the generated surface (`pub use crate::wslcsdk_sys::*;`) and adds only what bindgen cannot generate: the `S_OK` COM sentinel, `WslcSdk::load()` (anti-hijack DLL loading from the executable's own directory), the RAII guards (`WslcSessionGuard` / `WslcContainerGuard` / `WslcProcessGuard`), `check_hresult`, and `WslcComponentFlags::any_missing`. |
+| `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs` | **Generated** by bindgen. The single source of ABI truth: opaque settings structs + size consts, handle types, enums, data structs, callback typedefs, and the runtime-loaded `WslcSdk` function table with compile-time size/offset asserts. **Do not hand-edit.** |
+| `src/mxc-sdk/src/backends/wslc/common/wslc_bindings.rs` | Thin ergonomic **facade** over the generated module. Re-exports the generated surface (`pub use crate::wslcsdk_sys::*;`) and adds only what bindgen cannot generate: the `S_OK` COM sentinel, `WslcSdk::load()` (anti-hijack DLL loading from the executable's own directory), the RAII guards (`WslcSessionGuard` / `WslcContainerGuard` / `WslcProcessGuard`), `check_hresult`, and `WslcComponentFlags::any_missing`. |
 | `scripts/generate-wslc-bindings.ps1` | Regenerates `wslcsdk_sys.rs` from the header vendored in the SDK `.nupkg`. Run this on every WSLC SDK version bump. |
 
 The generated file is **committed** to the repo. Normal builds (including CI and
@@ -54,7 +54,7 @@ Do all of the following in a **single commit** so the checked-in bindings always
 match the pinned SDK.
 
 1. **Bump the pinned version.** Update `WSLC_SDK_VERSION` in
-   `src/backends/wslc/common/build.rs`.
+   `src/mxc-sdk/build/build_wslc_common.rs`.
 
 2. **Pin the new package hash.** Add a match arm for the new version in
    `expected_sha256()` in `build.rs` with the new `.nupkg`'s lowercase-hex
@@ -63,7 +63,7 @@ match the pinned SDK.
    `WSLC_SDK_SHA256` via env to discover the hash, but the final commit must
    pin it in `expected_sha256()`.
 
-3. **Refresh the vendored package** *(only while the `external/wslc-sdk/`
+3. **Refresh the vendored package** *(only while the `src/mxc-sdk/build/wslc_common/`
    fallback is still in use)* — replace the vendored `.nupkg` with the new
    version so offline/fallback builds match.
 
@@ -74,13 +74,13 @@ match the pinned SDK.
    ```
 
    This extracts `include/wslcsdk.h` from the new `.nupkg` and rewrites
-   `src/backends/wslc/common/src/wslcsdk_sys.rs`.
+   `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs`.
 
 5. **Build — this is where drift surfaces.**
 
    ```powershell
    cd src
-   cargo build -p mxc-wslc-common
+   cargo build -p wslc_common
    ```
 
    If the header changed struct layout, sizes, signatures, or enum names, one of
@@ -98,9 +98,9 @@ match the pinned SDK.
 
    ```powershell
    cd src
-   cargo test -p mxc-wslc-common      # includes ABI size/enum asserts
-   cargo fmt -p mxc-wslc-common -- --check
-   cargo clippy -p mxc-wslc-common --all-targets -- -D warnings
+   cargo test -p wslc_common      # includes ABI size/enum asserts
+   cargo fmt -p wslc_common -- --check
+   cargo clippy -p wslc_common --all-targets -- -D warnings
    ```
 
 7. **Run the WSLC E2E suite on a live WSL host** (cannot run in GitHub Actions —
@@ -112,7 +112,7 @@ match the pinned SDK.
    .\tests\scripts\run_wslc_all_tests.ps1
    ```
 
-   Expect all configs to pass (the `quay.io` pre-pull and the two tar-import
+   Expect all configs to pass (the `quay.io` custom registry test and the two tar-import
    tests are environment-dependent and may skip).
 
 8. **Commit** the regenerated `wslcsdk_sys.rs` **together with** the

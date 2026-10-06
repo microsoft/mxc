@@ -7,23 +7,23 @@ const { join } = require("path");
 
 const root = join(__dirname, "..");
 const protocol = readFileSync(
-  join(root, "src", "core", "wxc_common", "src", "telemetry", "consent_protocol.rs"),
+  join(root, "src", "mxc-sdk", "src", "core", "mxc_common", "telemetry", "consent_protocol.rs"),
   "utf8"
 );
 const policy = readFileSync(
-  join(root, "src", "core", "wxc_common", "src", "telemetry", "policy.rs"),
+  join(root, "src", "mxc-sdk", "src", "core", "mxc_common", "telemetry", "policy.rs"),
   "utf8"
 );
 const csharp = readFileSync(
-  join(root, "sdk", "dotnet", "Microsoft.Mxc.Sdk", "MxcTelemetry.cs"),
+  join(root, "sdk", "dotnet", "Microsoft.Mxc.Sdk", "V1", "MxcTelemetry.cs"),
   "utf8"
 );
 const rustSdk = readFileSync(
-  join(root, "src", "core", "mxc-sdk", "src", "telemetry.rs"),
+  join(root, "src", "mxc-sdk", "src", "telemetry.rs"),
   "utf8"
 );
 const typescript = readFileSync(
-  join(root, "sdk", "node", "src", "telemetry.ts"),
+  join(root, "sdk", "node", "src", "v1", "telemetry.ts"),
   "utf8"
 );
 const errors = [];

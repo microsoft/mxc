@@ -3,8 +3,7 @@
 #
 # MXC Crates.io Release Pipeline (ESRP)
 #
-# Packages mxc-sdk and its internal dependencies and submits them to crates.io
-# through ESRP.
+# Packages mxc-sdk and submits it to crates.io through ESRP.
 #
 # Crate versions come from src/Cargo.toml at that ref.
 #

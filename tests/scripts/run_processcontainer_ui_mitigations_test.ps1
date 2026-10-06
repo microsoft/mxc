@@ -68,12 +68,13 @@ function Phase-UiMitigationMatrix {
             -BpUiIme $false `
             -Env (Get-ProbeEnvWithDestructive)
         $logA = Join-Path $ScratchRoot 'logs\ui-matrix-A.log'
+        Set-UiProbeClipboardSeed
         $rA = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgA -LogPath $logA
         $logContentA = Read-Log $logA
 
         $matrixA = @{}
         foreach ($line in ($rA.Stdout -split "`r?`n")) {
-            if ($line -match '^(?<k>READCLIPBOARD|WRITECLIPBOARD|SYSTEMPARAMETERS|DISPLAYSETTINGS|DESKTOP|EXITWINDOWS|HANDLES|INJECTION|WIN32K)=(?<v>PASS|FAIL)\s*$') {
+            if ($line -match '^(?<k>READCLIPBOARD|WRITECLIPBOARD|SYSTEMPARAMETERS|DISPLAYSETTINGS|DESKTOP|EXITWINDOWS|HANDLES|INJECTION|WIN32K)=(?<v>PASS|FAIL|INCONCLUSIVE)\s*$') {
                 $matrixA[$matches['k']] = $matches['v']
             }
         }
@@ -88,6 +89,17 @@ function Phase-UiMitigationMatrix {
             $got = if ($matrixA.ContainsKey($tag)) { $matrixA[$tag] } else { '<missing>' }
             $gotV  = Format-Verdict $got 'blocked' 'allowed'
             $fullV = Format-VerdictSummary $summaryA 'blocked' 'allowed'
+            # INCONCLUSIVE means the probe never reached the operation the limit
+            # governs -- the surrounding security environment refused a
+            # precondition -- so the verdict says nothing about the UILIMIT bit.
+            # A missing tag still fails: the probe was asked for it and produced
+            # nothing at all.
+            if ($got -eq 'INCONCLUSIVE') {
+                $diag = if ($rA.Stdout -match "(?m)^$([regex]::Escape($tag))=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '<no diag>' }
+                Record-Result -Phase 'P4b' -Name "scenarioA: $tag" -Status 'skip' `
+                    -Detail "expected=blocked; the probe could not exercise $tag on this host; diag=$diag; full=$fullV"
+                continue
+            }
             Record-Result -Phase 'P4b' -Name "scenarioA: $tag" -Pass ($got -eq 'PASS') -Detail "expected=blocked; got=$gotV; full=$fullV"
         }
 
@@ -177,4 +189,3 @@ function Phase-UiMitigationMatrix {
 
 Invoke-WpcPhase -Key 'UiMitigationMatrix' -Body { Phase-UiMitigationMatrix }
 Complete-WpcChild
-

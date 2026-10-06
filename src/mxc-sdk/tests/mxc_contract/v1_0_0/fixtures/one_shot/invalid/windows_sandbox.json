@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "containment": "windows_sandbox",
+  "process": {
+    "commandLine": "echo hello"
+  },
+  "windowsSandbox": {}
+}

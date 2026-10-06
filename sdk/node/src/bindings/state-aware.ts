@@ -4,7 +4,7 @@
 // Async native binding for state-aware lifecycle phases that run to completion.
 
 import koffi from 'koffi';
-import { MxcError } from '../errors.js';
+import { MxcError } from '../v1/errors.js';
 import { loadMxcFfi } from '../native-library.js';
 import { bindNativeFunction } from './native-function.js';
 import {
@@ -39,7 +39,6 @@ type StateAwareFunction = (
   result: StateAwareNativeResult,
 ) => number;
 type FreeFunction = (result: StateAwareNativeResult) => void;
-
 type StateAwareCompletion = (error: Error | null, status: number) => void;
 
 export interface StateAwareNativeFacade {
@@ -57,7 +56,7 @@ function bindStateAwareNativeFacade(
   native: ReturnType<typeof loadMxcFfi>,
 ): StateAwareNativeFacade {
   const run = bindNativeFunction<StateAwareFunction>(native.handle, {
-    symbol: 'mxc_state_aware',
+    symbol: 'mxc_run_state_aware_json',
     result: 'int32_t',
     parameters: [
       'const char *',

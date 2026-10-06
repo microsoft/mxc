@@ -1,6 +1,6 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
-  "version": "0.7.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-BaseContainer-Network-Deny",
   "containment": "processcontainer",
   "process": {
@@ -13,8 +13,9 @@
     ]
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "capabilities"
+    "egress": {
+      "default": "deny"
+    }
   },
   "ui": {
     "disable": false

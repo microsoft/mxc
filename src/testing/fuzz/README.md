@@ -9,9 +9,9 @@ full reference.
 
 | Target           | What it fuzzes                                                    |
 | ---------------- | ----------------------------------------------------------------- |
-| `config_parser`  | `wxc_common::config_parser::load_mxc_request`, `is_base64 = false` |
+| `config_parser`  | `mxc_common::config_parser::load_mxc_request`, `is_base64 = false` |
 | `base64_decode`  | Same entry point with `is_base64 = true` (covers base64 + JSON + conversion) |
-| `validator`      | Parse + `wxc_common::validator::validate_common` on one-shot requests |
+| `validator`      | Parse + `mxc_common::validator::validate_common` on one-shot requests |
 
 ## Running locally (Windows)
 

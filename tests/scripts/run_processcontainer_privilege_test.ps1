@@ -69,24 +69,37 @@ function Phase-LeastPrivilege {
 
     # Documented in docs/schema.md: "Native PSEC/V2 capture cannot combine
     # with leastPrivilege or network.proxy. Hosts without that complete native
-    # set retain an eligible legacy containment tier and use guarded WPR."
+    # set retain an eligible legacy containment tier and use guarded WPR. If
+    # guarded-WPR prerequisites are unavailable, the request fails before MXC
+    # creates the sandbox."
     #
-    # So the combination is a tier constraint, not a rejection: the run should
-    # still be accepted and fall back. Asserting a rejection here would encode
-    # the opposite of the documented behavior.
+    # So the combination is never a validation error; which outcome applies
+    # depends on the host, and both arms are asserted positively so neither
+    # passes on a run that simply fell over.
     $cfg = New-Config -Name 'priv-lpac-capture' -CommandLine $Script:PrivCmd -ReadWrite @($rw) `
         -LeastPrivilege $true -CaptureDenialsMode 'block'
     $log = Join-Path $ScratchRoot 'logs\priv-lpac-capture.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
     $logText = Read-Log $log
-    $rejected = Test-WasRejected -Run $r -Log $logText
     # Test-WasRejected is false for backend_error, runner_unavailable and any
     # unexplained launch failure, so negating it alone proves no fallback ran.
+    $rejected = Test-WasRejected -Run $r -Log $logText
     $ran = [bool]("$($r.Stdout)" -match $Script:PrivMarker)
-    Record-Result -Phase 'P15a' -Name 'leastPrivilege + captureDenials falls back rather than being rejected' `
-        -Pass ((-not $rejected) -and $ran) `
-        -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; workloadRan=$ran; " +
-                 'documented as a tier constraint (guarded WPR fallback), not a validation error')
+    if ($Script:Caps.GuardedCaptureAvailable) {
+        Record-Result -Phase 'P15a' -Name 'leastPrivilege + captureDenials falls back to guarded WPR rather than being rejected' `
+            -Pass ((-not $rejected) -and $ran) `
+            -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; workloadRan=$ran; " +
+                     'guarded WPR is available on this host, so the documented tier constraint applies')
+    } else {
+        # Matching the dispatcher's own wording distinguishes the documented
+        # fail-closed from any other launch failure, which looks identical.
+        $all = "$logText`n$($r.Stderr)"
+        $m = [regex]::Match($all, '(?is)captureDenials.{0,160}?(is unavailable|does not support denial capture)')
+        Record-Result -Phase 'P15a' -Name 'leastPrivilege + captureDenials fails before sandbox creation when guarded WPR is unavailable' `
+            -Pass ($m.Success -and -not $ran) `
+            -Detail ("exit=$($r.ExitCode); workloadRan=$ran; " +
+                     "reason=$(if ($m.Success) { $m.Value -replace '\s+', ' ' } else { '<no capture-unavailable error found>' })")
+    }
 }
 
 
@@ -122,82 +135,6 @@ function Phase-LearningMode {
 }
 
 
-# Phase 15c -- the legacy 0.7 network.proxy shapes
-#
-# Three mutually exclusive spellings of network.proxy, none previously
-# exercised, all pinned to 0.7 because the directional 0.8 shape replaced
-# them with runtimeConfig.networkProxy.
-#
-# These are acceptance assertions. Whether the proxy is reachable is the
-# proxy area's job; what is asserted here is that each legacy spelling still
-# parses on the schema version that defines it, and that the 0.8 replacement
-# has not quietly broken the older shape.
-function Phase-LegacyProxyShapes {
-    Section 'Phase 15c: legacy 0.7 network.proxy shapes'
-
-    if ($SkipNetwork) {
-        Record-Result -Phase 'P15c' -Name 'legacy proxy shapes' -Status 'skip' `
-            -Detail '-SkipNetwork was requested'
-        return
-    }
-
-    $rw = Join-Path $ScratchRoot 'rw'
-
-    $cases = @(
-        @{ Name = 'legacy network.proxy.url is accepted on 0.7'
-           Net  = [ordered]@{ proxy = [ordered]@{ url = 'http://127.0.0.1:8888' } } }
-        @{ Name = 'legacy network.proxy.localhost (port form) is accepted on 0.7'
-           Net  = [ordered]@{ proxy = [ordered]@{ localhost = 8888 } } }
-        @{ Name = 'legacy network.proxy.builtinTestServer is accepted on 0.7'
-           Net  = [ordered]@{ proxy = [ordered]@{ builtinTestServer = $true } } }
-        @{ Name = 'legacy allowLocalNetwork=true is accepted on 0.7'
-           Net  = [ordered]@{ defaultPolicy = 'allow'; allowLocalNetwork = $true } }
-        @{ Name = 'legacy allowLocalNetwork=false is accepted on 0.7'
-           Net  = [ordered]@{ defaultPolicy = 'allow'; allowLocalNetwork = $false } }
-    )
-
-    foreach ($case in $cases) {
-        $slug = ($case.Name -replace '[^a-zA-Z0-9]+', '-').Trim('-').ToLowerInvariant()
-        $cfg = New-Config -Name "priv-legacy-$slug" -CommandLine $Script:PrivCmd `
-            -ReadWrite @($rw) -SchemaVersion $Script:LegacySchemaVersion -RawNetwork $case.Net
-        $log = Join-Path $ScratchRoot "logs\priv-legacy-$slug.log"
-        $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
-        $rejected = Test-WasRejected -Run $r -Log (Read-Log $log)
-        Record-Result -Phase 'P15c' -Name $case.Name -Pass (-not $rejected) `
-            -Detail "exit=$($r.ExitCode); rejectedAtValidation=$rejected"
-    }
-
-    # `network.proxy` survives into the 0.8 schema alongside the directional
-    # keys, so it is NOT rejected there. The thing worth asserting is that the
-    # older spelling still parses on the newer version rather than being
-    # quietly dropped -- a dropped proxy runs unproxied, which is the failure
-    # a caller would not notice.
-    $raw = [ordered]@{
-        version     = $Script:SchemaVersion
-        containerId = 'MxcWinPC-priv-legacy-on-08'
-        containment = 'processcontainer'
-        process     = [ordered]@{ commandLine = $Script:PrivCmd; timeout = 30000 }
-        filesystem  = [ordered]@{ readwritePaths = @($rw) }
-        network     = [ordered]@{ proxy = [ordered]@{ url = 'http://127.0.0.1:8888' } }
-        ui          = [ordered]@{ disable = $false }
-    }
-    $cfg = New-RawConfig -Name 'priv-legacy-on-08' -Object $raw
-    $log = Join-Path $ScratchRoot 'logs\priv-legacy-on-08.log'
-    $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
-    $logText = Read-Log $log
-    $rejected = Test-WasRejected -Run $r -Log $logText
-    # The runner announces the proxy it will apply. Matched against the log
-    # with the config echo stripped, so this sees the runner's decision rather
-    # than the config being read back.
-    $applied = [bool]((Remove-ConfigEcho $logText) -match '(?i)network_proxy:\s*enabled')
-    Record-Result -Phase 'P15c' -Name 'legacy network.proxy is still honored on schema 0.8' `
-        -Pass ((-not $rejected) -and $applied) `
-        -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; runnerAppliedProxy=$applied; " +
-                 '0.8 keeps `proxy` alongside the directional keys; a silently dropped proxy runs unproxied')
-}
-
-
 Invoke-WpcPhase -Key 'LeastPrivilege'    -Body { Phase-LeastPrivilege }
 Invoke-WpcPhase -Key 'LearningMode'      -Body { Phase-LearningMode }
-Invoke-WpcPhase -Key 'LegacyProxyShapes' -Body { Phase-LegacyProxyShapes }
 Complete-WpcChild

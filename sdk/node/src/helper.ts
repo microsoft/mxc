@@ -6,11 +6,26 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger.js';
-import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends, LegacyContainmentAliases } from './types.js';
-import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
-import { SandboxSpawnOptions } from './sandbox.js';
+import {
+  ContainerConfig,
+  ContainmentBackend,
+  ContainmentTypes,
+  ExperimentalBackends,
+  LegacyContainmentAliases,
+  legacyConfigAliasUnsupportedReason,
+} from './v1/types.js';
+import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './v1/platform.js';
 import { diagLog } from './diagnostic.js';
-import { mxcErrorFromCode } from './errors.js';
+import { mxcErrorFromCode } from './v1/errors.js';
+
+interface SandboxSpawnOptions {
+  debug?: boolean;
+  experimental?: boolean;
+  executablePath?: string;
+  skipPlatformCheck?: boolean;
+  dryRun?: boolean;
+  logDir?: string;
+}
 
 /** SDK version read from package.json at module load time. */
 export const SDK_VERSION: string = (() => {
@@ -218,6 +233,11 @@ export function resolveExecutableAndArgs(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
 ): { executablePath: string; args: string[] } {
+  const unsupportedAlias = legacyConfigAliasUnsupportedReason(config);
+  if (unsupportedAlias !== undefined) {
+    throw new Error(unsupportedAlias);
+  }
+
   const legacyExperimental = (config as ContainerConfig & {
     experimental?: unknown;
   }).experimental;
@@ -234,14 +254,9 @@ export function resolveExecutableAndArgs(
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
 
-  // Resolve deprecated wire values (e.g. "appcontainer" → "processcontainer",
-  // "macos_sandbox" → "seatbelt") once, and drive every containment check
-  // from the resolved value. The native binary accepts both spellings via
-  // serde aliases, so the wire payload is forwarded unchanged below — this
-  // resolution is purely for SDK-side validation. Without it, legacy values
-  // bypass the experimental-mode gate (because they are not in
-  // ExperimentalBackends under their alias) and produce a confusing
-  // "not available on this platform" error instead.
+  // Resolve aliases accepted by the selected registered contract once, and
+  // drive every containment check from the canonical value. The wire payload
+  // remains unchanged so the matching exact Rust parser performs normalization.
   const rawContainment = config.containment;
   const effectiveContainment = rawContainment
     ? (LegacyContainmentAliases[rawContainment] ?? rawContainment)
@@ -292,28 +307,7 @@ export function resolveExecutableAndArgs(
     }
   }
 
-  // `network.proxy.builtinTestServer` is testing-only, deliberately-permissive
-  // scaffolding that the native binary gates behind `--allow-testing-features`.
-  // Mirror that fail-closed posture at the SDK boundary: the caller must opt in
-  // explicitly via `allowTestingFeatures` (a distinct axis from `experimental`).
-  // Forwarding the flag automatically whenever the policy used the feature would
-  // make the gate meaningless — requesting the dangerous feature would silently
-  // enable the gate that is supposed to guard it.
-  const proxy = config.network?.proxy as { builtinTestServer?: boolean } | undefined;
-  const usesBuiltinTestServer = proxy?.builtinTestServer === true;
-  if (usesBuiltinTestServer && !options.allowTestingFeatures) {
-    throw new Error(
-      "network.proxy.builtinTestServer is a testing-only feature. Set " +
-      "'allowTestingFeatures: true' in SandboxSpawnOptions to enable it. For " +
-      "production, point network.proxy at a real HTTP proxy via 'localhost' or 'url'.",
-    );
-  }
-
-  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(config), options);
-  if (usesBuiltinTestServer) {
-    resolved.args.push('--allow-testing-features');
-  }
-  return resolved;
+  return resolveBinaryAndCommonArgs(JSON.stringify(config), options);
 }
 
 /**

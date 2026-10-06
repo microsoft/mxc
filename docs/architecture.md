@@ -8,13 +8,12 @@ in the corresponding guides under `docs/`.
 
 | Path | Contents |
 |------|----------|
-| `src/core/` | Shared models, versioned contracts, execution engine, Rust SDK, and executors |
-| `src/backends/` | Containment backends and backend-specific support |
+| `src/mxc-sdk/src/core/` | Engine, exact contracts, shared runtime, telemetry, and cross-backend support modules |
+| `src/mxc-sdk/src/backends/` | Backend validation, policy, bindings, and execution modules |
 | `src/ffi/` | Native interfaces used by language bindings |
 | `src/host/` | Host preparation and helper processes |
-| `src/mxc_telemetry/` | Cross-platform telemetry facade |
 | `src/testing/` | Rust E2E infrastructure, drivers, proxies, and probes |
-| `src/tools/` | Developer and diagnostic tools |
+| `src/tools/` | Thin executors and developer tools |
 | `sdk/` | TypeScript and C# SDKs |
 | `schemas/` | Released and development configuration schemas |
 | `tests/` | Configurations, examples, and host-dependent test scripts |
@@ -23,43 +22,44 @@ in the corresponding guides under `docs/`.
 The workspace members and shared Rust dependencies are declared in
 `src/Cargo.toml`.
 
-## Main Rust crates
+## Main Rust packages
 
-| Crate | Role |
+| Package | Role |
 |-------|------|
-| `wxc_common` | Runtime models, parsing, errors, validation helpers, logging, and backend-neutral traits |
-| `mxc_config_contract` | Closed request types for registered schema versions |
-| `mxc_engine` | Backend selection, execution, lifecycle dispatch, host discovery, and policy construction |
-| `mxc-sdk` | Public Rust API over `mxc_engine` |
+| `mxc-sdk` | Public Rust API and the internal engine, exact contracts, shared runtime, backend implementations, telemetry, build support, and schema support |
+| `mxc_ffi` | C ABI shared/static library used by language SDKs |
 | `wxc`, `lxc`, `mxc_darwin` | Windows, Linux, and macOS executor binaries |
-| `learning_mode_core` | Cross-platform denial models, analysis interfaces, and output artifacts |
-| `mxc_schema_support` | Schema and TypeScript generation support |
-| `mxc_telemetry` | ETW TraceLogging provider and non-Windows no-op implementation; consent and policy gating live in `wxc_common` |
-| `mxc_build_common` | Windows binary metadata generation |
-| `mxc_pty` | Shared pseudo-terminal support |
+| Host helpers and tools | PLM, host preparation, diagnostics, schema generation, and test executables |
 
-`wxc_common` provides the backend-neutral foundation. Backend crates generally
-depend on it, while `mxc_engine` depends on the platform backends and owns
-dispatch. The existing optional `wxc_common` dependency on `nanvix_common`
-provides shared MicroVM data and constants.
+Within `mxc-sdk`, `mxc_common` remains the backend-neutral foundation and
+`mxc_engine` owns dispatch. Backend modules depend on shared modules through
+`crate::...` paths; they are not separately published Cargo packages.
 
 ## Backend layout
 
-Most backends have a `common` crate containing their validation and execution
-logic. Backends with additional processes use several crates:
+Backend validation and execution logic lives in modules under
+`src/mxc-sdk/src/backends/`. Required daemon and guest process boundaries are
+binary targets of the same publishable package under `src/mxc-sdk/src/bin/`:
 
 | Area | Structure |
 |------|-----------|
-| ProcessContainer | `backends/process_container/common/` |
-| Bubblewrap, LXC, Seatbelt, Hyperlight | `backends/<backend>/common/` |
-| Windows Sandbox | `common/`, `lifecycle/`, `daemon/`, and `guest/` |
-| WSLC | `common/` and `daemon/` |
-| IsolationSession | bindings and `common/` |
-| NanVix | common data, build support, binaries, and runner crates |
-| Windows Learning Mode | Windows implementation over `learning_mode_core` |
+| ProcessContainer | `src/mxc-sdk/src/backends/process_container/common/` |
+| Bubblewrap, LXC, Seatbelt, Hyperlight | Corresponding folders under `src/mxc-sdk/src/backends/` |
+| Windows Sandbox | SDK common/lifecycle modules plus `src/mxc-sdk/src/bin/windows_sandbox_{daemon,guest}/` |
+| WSLC | `src/mxc-sdk/src/backends/wslc/common/` plus `src/mxc-sdk/src/bin/wslc_daemon/` |
+| IsolationSession | SDK bindings and runtime modules under `backends/isolation_session/` |
+| NanVix | SDK common, runner, binary-staging, and build modules under `backends/nanvix/` |
+| Windows Learning Mode | `src/mxc-sdk/src/core/learning_mode_windows/` over the shared core module |
 
-Shared parsing and normalization live in `wxc_common`; backend-specific policy
+Shared parsing and normalization live in the `mxc_common` module; backend-specific policy
 validation and enforcement live with each backend.
+
+`mxc_engine/src/backend_registry.rs` owns backend registration metadata,
+including experimental classification, keyed by the shared `ContainmentBackend`
+enum. Runtime authorization consults that registry. Exact-contract publication,
+build-feature availability, and host-capability probing remain separate; the
+registry neither dispatches workloads nor adds backend dependencies to
+`mxc_common`.
 
 ## Request flow
 
@@ -67,9 +67,9 @@ validation and enforcement live with each backend.
 flowchart LR
     config["JSON or base64 configuration"]
     contract["Version-specific contract"]
-    common["Parsing and normalization<br/>wxc_common"]
+    common["Parsing and normalization<br/>mxc_sdk::mxc_common"]
     request["ExecutionRequest"]
-    engine["Backend selection<br/>mxc_engine"]
+    engine["Backend selection<br/>mxc_sdk::mxc_engine"]
     backend["Backend implementation"]
 
     config --> contract --> common --> request --> engine --> backend
@@ -93,8 +93,8 @@ operation. See the
 | Streaming | Returns a live process handle with streams, wait, and kill operations |
 | State-aware lifecycle | Uses separate provision, start, exec, stop, and deprovision calls |
 
-The common traits are defined in `wxc_common`; `mxc_engine` dispatches each
-surface to the selected backend.
+The common traits are defined in `mxc_sdk::mxc_common`;
+`mxc_sdk::mxc_engine` dispatches each surface to the selected backend.
 
 ## SDK and binding paths
 
@@ -108,24 +108,33 @@ flowchart LR
     ffi["mxc_ffi"]
     sdk["mxc-sdk"]
     engine["mxc_engine"]
+    common["mxc_common<br/>exact contract parser"]
 
     typescript --> executor
+    typescript -. exact JSON execution and request probe .-> ffi
     cli --> executor
     csharp --> ffi --> sdk
+    ffi -. exact config decoding .-> common
+    ffi -. exact request probe .-> engine
     rust --> sdk
     executor --> engine
     sdk --> engine
 ```
 
-`mxc_ffi` is the C ABI used by the C# SDK. Its generated C# P/Invoke file is
-created during the C# build. Generated TypeScript wire types come from the
+`mxc_ffi` is the C ABI used by the Node and C# SDKs. Its generated C# P/Invoke
+file is created during the C# build. Both SDKs map their high-level requests to
+SDK-owned exact configuration JSON before calling the native execution or
+request-probe exports. The shared `mxc_common` contract parser decodes the
+declared exact version before the typed engine operation runs; there is no
+private binding-request parser. The public Rust SDK exposes the
+typed `SandboxRequest` probe API. Generated TypeScript wire types come from the
 schema tooling.
 
 ## Tests
 
 | Test area | Location |
 |-----------|----------|
-| Rust unit and contract tests | Alongside their crates |
-| Executor E2E tests | `src/testing/wxc_e2e_tests/` |
+| Rust unit and contract tests | Under `src/mxc-sdk/src/` and `src/mxc-sdk/tests/` |
+| Executor E2E tests | `src/mxc-sdk/tests/wxc_e2e_tests_*` |
 | Host-dependent backend suites | [`tests/scripts/`](../tests/scripts/README.md) |
 | Scheduled backend validation | [CI validation infrastructure](ci-validation-infrastructure.md) |

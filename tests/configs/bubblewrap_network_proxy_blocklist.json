@@ -1,14 +1,26 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
-  "version": "0.7.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Network-Proxy-Blocklist",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "set -e; curl -fsSL --max-time 15 http://mxc-test.invalid/ | grep -q MXC_TEST_ORIGIN_OK && echo SENTINEL_OK; if curl -fsS --max-time 5 http://mxc-blocked.invalid/ > /dev/null 2>&1; then echo SENTINEL_BAD_LEAK; exit 1; else echo BLOCKED_OK; fi"
   },
   "network": {
-    "defaultPolicy": "allow",
-    "proxy": { "builtinTestServer": true },
-    "blockedHosts": ["mxc-blocked.invalid"]
+    "egress": {
+      "default": "allow",
+      "deny": [
+        {
+          "to": [
+            {
+              "cidr": "mxc-blocked.invalid"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
   }
 }

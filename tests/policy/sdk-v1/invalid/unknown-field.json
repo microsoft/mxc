@@ -1,0 +1,12 @@
+{
+  "description": "Exact contracts are closed.",
+  "errorCode": "malformed_request",
+  "messageContains": "unknown field `experimental`",
+  "document": {
+    "version": "1.0.0",
+    "process": {
+      "commandLine": "echo golden"
+    },
+    "experimental": true
+  }
+}

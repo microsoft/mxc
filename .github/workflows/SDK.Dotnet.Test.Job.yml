@@ -62,6 +62,63 @@ jobs:
           }
           Write-Host "$($Matches[1]) tests passed"
 
+      # LXC creates, starts, and attaches to a system container, so the suite
+      # above can only skip it. This installs the substrate and reruns just
+      # those tests as root.
+      - name: Install LXC
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Runner images can carry package indexes referencing versions the
+          # mirrors have already dropped, so a single update is a flaky gate.
+          for attempt in 1 2 3; do
+            if sudo apt-get -o Acquire::Retries=3 update; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to refresh Linux package indexes after $attempt attempts"
+              exit 1
+            fi
+            sleep 5
+          done
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y \
+            lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
+
+      # The policy these tests use permits no network, so the container starts
+      # with no interface and the runner's Docker-set FORWARD policy cannot
+      # reach them.
+      #
+      # MXC_LXC_TESTS_REQUIRE_EXECUTION turns an honest skip into a failure:
+      # this step exists to execute them, so a skip means a prerequisite
+      # disappeared and the gate would go green having tested nothing. The
+      # count is checked for the same reason: a filter that selects no test
+      # also exits 0.
+      - name: Test the LXC backend
+        if: matrix.os_label == 'linux'
+        shell: bash
+        env:
+          MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/dotnet-test-lxc.log"
+          sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME,DOTNET_ROOT \
+            "$(command -v dotnet)" test \
+            --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj \
+            --no-build --no-restore -- --filter-method '*MxcContainerLxcE2ETests*' 2>&1 | tee "$log"
+          # `tee` succeeds even when the run beneath it fails, and a partially
+          # passing run still prints a non-zero succeeded count, so the run's
+          # own status has to be read before the summary is trusted.
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::error::dotnet test exited $status"
+            exit "$status"
+          fi
+          if ! grep -qE 'succeeded: *[1-9]' "$log"; then
+            echo '::error::The filter selected no LXC test, so this gate verified nothing.'
+            exit 1
+          fi
+
       # Exercise the opt-in backends as one complete native unit. The managed
       # tests dry-run both backends and verify WSLC's daemon + SDK DLL were
       # propagated into the application output.
@@ -107,3 +164,30 @@ jobs:
             throw 'Expected both backend-switch tests to run and pass with none skipped. The optional-backend lane is no longer verifying the enabled branch.'
           }
           Write-Host 'Optional backend switches verified against native availability.'
+
+      # Native AOT publish gate for the SDK's JSON layer, on every OS matrix job.
+      - name: AOT publish gate (SDK JSON layer)
+        shell: pwsh
+        run: |
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+          if ($IsLinux) {
+            sudo apt-get update
+            sudo apt-get install -y clang zlib1g-dev
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to install Native AOT prerequisites (clang, zlib1g-dev).' }
+            $rid = "linux-$arch"; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest'
+          }
+          elseif ($IsMacOS) { $rid = "osx-$arch"; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest' }
+          else { $rid = "win-$arch"; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest.exe' }
+          $log = Join-Path $env:RUNNER_TEMP 'dotnet-aot-publish.log'
+          $pub = Join-Path $env:RUNNER_TEMP 'aot-smoke-publish'
+          dotnet publish Microsoft.Mxc.Sdk.AotSmokeTest -c Release -r $rid -o $pub --nologo 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { throw "AOT publish exited $LASTEXITCODE" }
+          $out = Get-Content -LiteralPath $log -Raw
+          if ($out -match 'warning IL|AOT analysis|Trim analysis') {
+            throw 'AOT publish emitted an IL/AOT/trim warning. The SDK JSON layer is no longer reflection-free.'
+          }
+          $exe = Join-Path $pub $exeName
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Published AOT executable not found: $exe" }
+          & $exe
+          if ($LASTEXITCODE -ne 0) { throw "AOT smoke test exited $LASTEXITCODE" }
+          Write-Host "AOT publish gate passed on ${rid}: reflection-free JSON layer verified."

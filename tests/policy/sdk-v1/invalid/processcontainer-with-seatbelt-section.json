@@ -1,0 +1,15 @@
+{
+  "description": "A backend section must match the selected containment.",
+  "errorCode": "malformed_request",
+  "messageContains": "unrelated backend section(s): seatbelt",
+  "document": {
+    "version": "1.0.0",
+    "containment": "processcontainer",
+    "process": {
+      "commandLine": "echo golden"
+    },
+    "seatbelt": {
+      "guiAccess": true
+    }
+  }
+}

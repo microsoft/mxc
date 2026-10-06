@@ -1,6 +1,6 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
-  "version": "0.9.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
   "containerId": "isolation-session-hello",
   "containment": "isolation_session",
   "network": {
@@ -11,6 +11,7 @@
     "commandLine": "echo USERNAME=%USERNAME% & echo MYVAR=%MYVAR% & echo CWD=%CD% & whoami",
     "cwd": "C:\\mxc_workdir_test",
     "env": ["MYVAR=IsolationSessionTest"],
+    "inheritDefaultEnv": true,
     "timeout": 30000
   }
 }

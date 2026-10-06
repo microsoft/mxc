@@ -12,172 +12,31 @@
  * On Linux, `getPlatformSupport()` reports failures for individual backends
  * through `PlatformSupport.unavailableReasons`, including when none is usable.
  *
- * Schema `0.8.0-alpha` policies may use directional
- * `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
- * `processContainer.network.allowedProxyPeer` through `createConfigFromPolicy`.
- * These fields cannot be mixed with legacy network fields.
- * Schema `0.9.0-alpha` requires directional networking; explicit legacy
- * inputs (including false and empty lists) produce migration errors.
- * WSLC state-aware exec uses top-level `runtimeConfig.networkProxy` without
- * restating network posture. IsolationSession provision requires
+ * V1 request APIs live in `@microsoft/mxc-sdk/v1` and use directional
+ * `network.egress` / `network.ingress`; explicit legacy network inputs produce
+ * migration errors. The versioned V1 request and execution APIs are available
+ * from `@microsoft/mxc-sdk/v1`.
+ * One-shot proxy authoring uses `network.runtimeConfig.networkProxy`; WSLC
+ * state-aware exec uses the same authoring path and maps it to the unchanged
+ * top-level wire `runtimeConfig`. IsolationSession provision requires
  * directional egress, ingress, and host-loopback defaults set to `allow`.
  *
  * @example
  * ```typescript
- * import { spawnSandbox, spawnSandboxWithPty, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
+ * import { getPlatformSupport } from '@microsoft/mxc-sdk/v1';
+ * import { run } from '@microsoft/mxc-sdk/v1';
  *
  * if (getPlatformSupport().isSupported) {
- *   const policy: SandboxPolicy = {
- *     version: '0.6.0-alpha',
- *     network: { allowOutbound: true },
- *   };
- *
- *   const ptyProcess = spawnSandboxWithPty('python -c "print(\'Hello from sandbox\')"', policy);
- *   ptyProcess.onData((data) => console.log(data));
- *   ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
+ *   const output = await run({
+ *     network: { egress: { default: 'allow' } },
+ *     command: 'python -c "print(\'Hello from sandbox\')"',
+ *   });
+ *   console.log('Execution output:', output.stdout);
+ *   console.log('Exit code:', output.exitCode);
  * }
  * ```
  *
  * @packageDocumentation
  */
 
-// Export types
-export {
-  SandboxPolicy,
-  SandboxingMethod,
-  IsolationTier,
-  ContainmentType,
-  ContainmentTypes,
-  ContainmentBackend,
-  ExperimentalBackends,
-  ContainerConfig,
-  ProcessContainerConfig,
-  NetworkAction,
-  NetworkProtocol,
-  NetworkPeerConfig,
-  NetworkPortConfig,
-  NetworkRuleConfig,
-  NetworkEgressConfig,
-  NetworkIngressConfig,
-  DirectionalNetworkConfig,
-  RuntimeConfig,
-  PlatformSupport,
-  UiCapabilitySupport,
-  BubblewrapNetworkSupport,
-} from './types.js';
-
-// Export platform detection functions
-export {
-  getPlatformSupport,
-} from './platform.js';
-
-// Export sandbox spawning functions
-export {
-  createConfigFromPolicy,
-  spawnSandbox,
-  spawnSandboxAsync,
-  spawnSandboxFromConfig,
-  buildSandboxPayload,
-  SandboxSpawnOptions,
-} from './sandbox.js';
-
-// Export policy discovery functions
-export {
-  getAvailableToolsPolicy,
-  getUserProfilePolicy,
-  getTemporaryFilesPolicy,
-  FilesystemPolicyResult,
-  ToolsPolicyOptions,
-} from './policy.js';
-
-// Export typed wire-format errors.
-//
-// `WireError` and `mxcErrorFromEnvelope` are deliberately NOT re-exported:
-// they exist so the SDK's own envelope-parsing sites share one widening
-// point, and keeping them module-internal leaves the wire-parsing internals
-// free to change. `MxcErrorFields` *is* exported because it is the parameter
-// type of a public `MxcError` constructor overload — hiding the name would
-// leave the type usable via an object literal but impossible to name.
-export {
-  ErrorCode,
-  MxcError,
-  MxcErrorFields,
-  mxcErrorFromCode,
-} from './errors.js';
-
-// Export state-aware lifecycle types
-export {
-  Phase,
-  STATE_AWARE_VERSION,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-  WSLC_STATE_AWARE_VERSION,
-  StateAwareContainmentBackend,
-  StateAwareSchemaVersion,
-  SandboxId,
-  IsolationSessionNetworkConfig,
-  IsolationSessionProvisionConfig,
-  IsolationSessionStartConfig,
-  IsolationSessionExecConfig,
-  IsolationSessionStopConfig,
-  IsolationSessionDeprovisionConfig,
-  IsolationSessionProvisionMetadata,
-  WindowsSandboxProvisionConfig,
-  WindowsSandboxStartConfig,
-  WindowsSandboxExecConfig,
-  WindowsSandboxStopConfig,
-  WindowsSandboxDeprovisionConfig,
-  WslcProvisionConfig,
-  WslcStartConfig,
-  WslcExecConfig,
-  WslcStopConfig,
-  WslcDeprovisionConfig,
-  ConfigsForBackend,
-  ProvisionConfigFor,
-  StartConfigFor,
-  ExecConfigFor,
-  StopConfigFor,
-  DeprovisionConfigFor,
-  StateAwareMetadata,
-  ProvisionMetadataFor,
-  StartMetadataFor,
-  StopMetadataFor,
-  DeprovisionMetadataFor,
-  ProvisionResult,
-  StartResult,
-  StopResult,
-  DeprovisionResult,
-  ExecResult,
-} from './state-aware-types.js';
-
-// Export state-aware lifecycle functions
-export {
-  type StateAwareStreamingOptions,
-  provisionSandbox,
-  startSandbox,
-  execInSandbox,
-  execInSandboxAsync,
-  stopSandbox,
-  deprovisionSandbox,
-} from './state-aware.js';
-
-export { MxcSandboxProcess } from './sandbox-process.js';
-
-// Export telemetry consent functions and types
-export {
-  TelemetryConfig,
-} from './types.js';
-
-export {
-  TelemetryConsentMessage,
-  TelemetryConsentResult,
-  TelemetryConsentState,
-  TelemetryConsentPrompt,
-  TelemetryConsentDecision,
-  TelemetryConsentOutcome,
-  TelemetryConsentPresenter,
-  TelemetryConsentQuery,
-  TelemetryPolicyState,
-  requestTelemetryConsent,
-  queryTelemetryConsentAsync,
-  withdrawTelemetryConsentAsync,
-} from './telemetry.js';
+export {};

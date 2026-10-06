@@ -9,11 +9,8 @@
 # namespace -- and a host-execution bug of precisely that shape has already
 # happened once in this file's history.
 #
-# Two configs are exercised:
-#   * lxc_inbound_default_deny.json          -- the implemented default-deny path
-#   * lxc_inbound_permissive_unsupported.json -- allowLocalNetwork: true, which
-#     must fail closed with a not-yet-implemented error rather than installing
-#     an over-broad accept.
+# The directional ingress default-deny and unsupported allow postures are
+# exercised; an unsupported allow must fail closed before running a workload.
 #
 # Assertions are on rule programming and namespace containment, not on whether
 # a remote peer can reach the container: reachability depends on the host's
@@ -58,12 +55,10 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 DENY_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_default_deny.json"
-PERMISSIVE_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_permissive_unsupported.json"
-DIRECTIONAL_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_v08_permissive_ingress.json"
-V08_DENY_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_v08_deny_ingress.json"
+DIRECTIONAL_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_permissive_ingress.json"
+DENY_INGRESS_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_deny_ingress.json"
 
 [ -f "$DENY_CONFIG" ] || skip "missing config $DENY_CONFIG."
-[ -f "$PERMISSIVE_CONFIG" ] || skip "missing config $PERMISSIVE_CONFIG."
 [ -f "$DIRECTIONAL_CONFIG" ] || skip "missing config $DIRECTIONAL_CONFIG."
 
 fail() {
@@ -111,7 +106,7 @@ MXC_BEFORE_V4="$(mxc_egress_chains iptables)"
 MXC_BEFORE_V6="$(mxc_egress_chains ip6tables)"
 
 # ---------------------------------------------------------------------------
-# Case 1: default-deny (allowLocalNetwork absent, so false)
+# Case 1: explicit directional default-deny
 # ---------------------------------------------------------------------------
 
 echo "Running LXC inbound default-deny test..."
@@ -146,7 +141,7 @@ if [ -n "$EGRESS_CHAIN" ] && [ "$EGRESS_CHAIN" = "$INBOUND_CHAIN" ]; then
     fail "inbound and egress share chain name '$INBOUND_CHAIN'."
 fi
 
-if ! grep -Fq "Inbound (allowLocalNetwork) policy: DROP new inbound connections (default-deny)" <<<"$OUTPUT"; then
+if ! grep -Fq "Inbound (network.ingress) policy: DROP new inbound connections (default-deny)" <<<"$OUTPUT"; then
     fail "the inbound policy was not the default-deny decision."
 fi
 
@@ -171,46 +166,18 @@ assert_no_new_chains ip6tables "$MXC_BEFORE_V6" mxc_egress_chains "egress chain(
 echo "PASS: inbound default-deny installed in the container namespace."
 
 # ---------------------------------------------------------------------------
-# Case 2: allowLocalNetwork: true must fail closed, not install a broad accept
+# Case 2: directional permissive ingress must fail closed
 # ---------------------------------------------------------------------------
 
-echo "Running LXC inbound permissive-path refusal test..."
-
-PERMISSIVE_OUTPUT=$("$LXC_EXEC" --debug "$PERMISSIVE_CONFIG" 2>&1 || true)
-echo "$PERMISSIVE_OUTPUT"
-
-if ! grep -Fq "not yet implemented" <<<"$PERMISSIVE_OUTPUT"; then
-    fail "allowLocalNetwork: true did not report a not-yet-implemented refusal."
-fi
-
-# The refusal must abort the run. If the workload echoed, the sandbox started
-# with inbound enforcement silently absent -- the exact fail-open the refusal
-# exists to prevent.
-if grep -Fq "this-should-never-run" <<<"$PERMISSIVE_OUTPUT"; then
-    fail "the workload executed despite an unenforceable inbound policy."
-fi
-
-# A refused run must leave nothing behind in either namespace's tables.
-assert_no_new_chains iptables "$MXCI_BEFORE_V4" mxci_chains "inbound chain(s)"
-assert_no_new_chains ip6tables "$MXCI_BEFORE_V6" mxci_chains "inbound chain(s)"
-assert_no_new_chains iptables "$MXC_BEFORE_V4" mxc_egress_chains "egress chain(s) left behind"
-assert_no_new_chains ip6tables "$MXC_BEFORE_V6" mxc_egress_chains "egress chain(s) left behind"
-
-echo "PASS: permissive inbound path refused and rolled back."
-
-# ---------------------------------------------------------------------------
-# Case 3: the same refusal reached through the 0.8 ingress section
-# ---------------------------------------------------------------------------
-
-echo "Running LXC 0.8 permissive-ingress refusal test..."
+echo "Running LXC directional permissive-ingress refusal test..."
 
 DIRECTIONAL_OUTPUT=$("$LXC_EXEC" --debug "$DIRECTIONAL_CONFIG" 2>&1 || true)
 echo "$DIRECTIONAL_OUTPUT"
 
-# The refusal has to name the field the operator wrote. A 0.8 author who never
+# The refusal has to name the field the operator wrote. A directional-contract author who never
 # typed `allowLocalNetwork` cannot act on a message about it.
 if ! grep -Fq "network.ingress.default" <<<"$DIRECTIONAL_OUTPUT"; then
-    fail "the refusal did not name network.ingress.default, so a 0.8 author is told to change a field their config does not contain."
+    fail "the refusal did not name network.ingress.default, so a directional-contract author is told to change a field their config does not contain."
 fi
 
 if ! grep -Fq "not yet implemented" <<<"$DIRECTIONAL_OUTPUT"; then
@@ -226,38 +193,38 @@ assert_no_new_chains ip6tables "$MXCI_BEFORE_V6" mxci_chains "inbound chain(s)"
 assert_no_new_chains iptables "$MXC_BEFORE_V4" mxc_egress_chains "egress chain(s) left behind"
 assert_no_new_chains ip6tables "$MXC_BEFORE_V6" mxc_egress_chains "egress chain(s) left behind"
 
-echo "PASS: 0.8 permissive ingress refused and rolled back."
+echo "PASS: directional permissive ingress refused and rolled back."
 
 # ---------------------------------------------------------------------------
-# Case 4: a 0.8 deny ingress installs the chain and reports its own field
+# Case 3: a directional deny ingress installs the chain and reports its own field
 # ---------------------------------------------------------------------------
 
-echo "Running LXC 0.8 deny-ingress enforcement test..."
+echo "Running LXC directional deny-ingress enforcement test..."
 
 MXCI_BEFORE_V4="$(mxci_chains iptables)"
 MXCI_BEFORE_V6="$(mxci_chains ip6tables)"
 MXC_BEFORE_V4="$(mxc_egress_chains iptables)"
 MXC_BEFORE_V6="$(mxc_egress_chains ip6tables)"
 
-V08_DENY_OUTPUT=$("$LXC_EXEC" --debug "$V08_DENY_CONFIG" 2>&1 || true)
-echo "$V08_DENY_OUTPUT"
+DENY_INGRESS_OUTPUT=$("$LXC_EXEC" --debug "$DENY_INGRESS_CONFIG" 2>&1 || true)
+echo "$DENY_INGRESS_OUTPUT"
 
-if ! grep -Fq "MXC_WORKLOAD_RAN" <<<"$V08_DENY_OUTPUT"; then
-    fail "a 0.8 deny ingress did not run the workload; the enforceable posture was refused."
+if ! grep -Fq "MXC_WORKLOAD_RAN" <<<"$DENY_INGRESS_OUTPUT"; then
+    fail "a directional deny ingress did not run the workload; the enforceable posture was refused."
 fi
 
-# A 0.8 author has no allowLocalNetwork to change, so reporting one sends them
+# A directional-contract author has no allowLocalNetwork to change, so reporting one sends them
 # looking for a field their schema does not define.
-if ! grep -Fq "Inbound (network.ingress) policy: DROP new inbound connections (default-deny)" <<<"$V08_DENY_OUTPUT"; then
+if ! grep -Fq "Inbound (network.ingress) policy: DROP new inbound connections (default-deny)" <<<"$DENY_INGRESS_OUTPUT"; then
     fail "the inbound decision was not reported against network.ingress."
 fi
 
-if grep -Fq "Inbound (allowLocalNetwork)" <<<"$V08_DENY_OUTPUT"; then
-    fail "a 0.8 run reported its inbound decision against allowLocalNetwork, a field its schema does not define."
+if grep -Fq "Inbound (allowLocalNetwork)" <<<"$DENY_INGRESS_OUTPUT"; then
+    fail "a directional run reported its inbound decision against allowLocalNetwork, a field its schema does not define."
 fi
 
-if grep -Fq "Network policy requests no firewall" <<<"$V08_DENY_OUTPUT"; then
-    fail "a stated 0.8 ingress posture was treated as requesting no firewall, so nothing was enforced."
+if grep -Fq "Network policy requests no firewall" <<<"$DENY_INGRESS_OUTPUT"; then
+    fail "a stated directional ingress posture was treated as requesting no firewall, so nothing was enforced."
 fi
 
 assert_no_new_chains iptables "$MXCI_BEFORE_V4" mxci_chains "inbound chain(s)"
@@ -265,5 +232,5 @@ assert_no_new_chains ip6tables "$MXCI_BEFORE_V6" mxci_chains "inbound chain(s)"
 assert_no_new_chains iptables "$MXC_BEFORE_V4" mxc_egress_chains "egress chain(s) left behind"
 assert_no_new_chains ip6tables "$MXC_BEFORE_V6" mxc_egress_chains "egress chain(s) left behind"
 
-echo "PASS: 0.8 deny ingress enforced and reported against its own field."
+echo "PASS: directional deny ingress enforced and reported against its own field."
 echo "LXC inbound default-deny test passed."

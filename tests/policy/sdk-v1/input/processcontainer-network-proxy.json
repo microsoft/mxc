@@ -1,0 +1,23 @@
+{
+  "description": "A ProcessContainer runtime proxy reached through an allowed proxy peer.",
+  "policy": {
+    "network": {
+      "egress": {
+        "default": "deny"
+      },
+      "ingress": {
+        "default": "allow",
+        "hostLoopback": "deny"
+      },
+      "runtimeConfig": {
+        "networkProxy": "http://127.0.0.1:8080"
+      }
+    }
+  },
+  "containment": {
+    "kind": "processContainer",
+    "allowedProxyPeer": "Contoso.Proxy"
+  },
+  "command": "echo golden",
+  "containerName": "golden-processcontainer-network-proxy"
+}

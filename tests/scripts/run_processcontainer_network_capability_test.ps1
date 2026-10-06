@@ -29,7 +29,7 @@ Initialize-WpcContext @PSBoundParameters
 # than approximate: privateNetworkClientServer is bidirectional, so accepting
 # it there would grant inbound access the caller never asked for.
 function Phase-NetworkCapabilityMatrix {
-    Section 'Phase 8a: schema 0.8 egress/ingress capability matrix'
+    Section 'Phase 8a: egress/ingress capability matrix'
 
     if ($SkipNetwork) {
         Record-Result -Phase 'P8a' -Name 'network capability matrix' -Status 'skip' -Detail '-SkipNetwork'

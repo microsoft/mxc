@@ -1,7 +1,7 @@
 #!/bin/bash
 # LXC extra-interface isolation test
 #
-# A schema 0.8 request naming no network fields must leave the workload with
+# A request naming no network fields must leave the workload with
 # loopback and nothing else.  The container is started with no interface rather
 # than filtered, so no chain is installed and any interface that survives is
 # unfiltered network access under a policy that granted none.

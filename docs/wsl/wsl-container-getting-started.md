@@ -14,7 +14,7 @@ MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 | **Windows 10 1903 (build 18362.1049)+ on x64, or Windows 10 2004 (build 19041)+ on ARM64** | WSL 2's own [system requirements](https://learn.microsoft.com/windows/wsl/install-manual#step-2---check-requirements-for-running-wsl-2). MXC does not check the OS version itself — see [How an unsupported Windows version is reported](#how-an-unsupported-windows-version-is-reported) below. The WSL runtime package installs only on build 19041 and later, so in practice a 1903/1909 host still needs an upgrade to reach the WSL version below. |
 | **WSL 2.9.9+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
 | **WSLC SDK** | `wslcsdk.dll` is a separate client SDK and must be in the same directory as the running executable (`wxc-exec.exe`, or your own binary when using the Rust SDK) |
-| **Container images** | Pre-pulled or available from a registry with network access |
+| **Container images** | Reachable from a registry, already cached, or supplied as a local tar |
 
 ### How an unsupported Windows version is reported
 
@@ -82,7 +82,7 @@ Follow the build instructions in the WSL repository README to build and install.
 
 > **Note:** Building the WSL repo installs the **WSL runtime** (the system
 > service). This is separate from `wslcsdk.dll`, which is the client SDK
-> library. The DLL is bundled in the MXC repo under `external/wslc-sdk/` and
+> library. The DLL is bundled in the `mxc-sdk` package under `build/wslc_common/` and
 > is automatically extracted when you build MXC with `--with-wslc` (Step 2).
 
 ## Step 2 — Build MXC with WSLC support
@@ -110,11 +110,12 @@ Verify the binary starts without errors:
 > DLL is loaded at runtime only when the WSLC backend is invoked. All other
 > backends (Process Container, Windows Sandbox) work without it.
 
-## Step 3 — Pre-pull container images
+## Step 3 — Container images (optional pre-pull)
 
-MXC is an execution layer and does **not** pull container images at run
-time. Pre-pull each image you intend to use into the WSLC SDK cache
-before invoking a config that references it:
+A run pulls its image on a cache miss, so you can skip straight to
+Step 4. Pre-pulling is still worth doing in two cases: to keep the
+download off the critical path of a later run, and to populate a cache
+for a host that cannot reach a registry.
 
 ```powershell
 cd <repo-root>
@@ -136,12 +137,47 @@ cost once per image, not once per run.
 > configs override `wslc.storagePath`, pass the same
 > value here with `-StoragePath` (or `--storage-path` on
 > `wxc-exec.exe`), otherwise the runner will not find what you just
-> pulled.
+> pulled and will pull it again under its own path.
 
-If you forget this step, the next `wxc-exec.exe` invocation will fail
-fast with an actionable error pointing back at the `--setup-wslc`
-command — your image name pre-filled — so the first-time stumble is
-self-correcting.
+> **Bring-up reaches the network.** A cache miss makes the host fetch
+> from the image's registry before the container starts. That fetch is
+> outside the sandbox's own network policy, so a config declaring
+> `network.egress.default: "deny"` is **refused** rather than pulled —
+> warm the cache first, or set `wslc.imageTarPath`. A config that
+> allows egress pulls on a miss.
+
+### Limiting which registries a machine may use
+
+An administrator can restrict runtime pulls to named registries with a
+`REG_MULTI_SZ` value under the machine policy key:
+
+```
+HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Mxc
+    WslcAllowedImageRegistries  (REG_MULTI_SZ)
+        docker.io
+        mcr.microsoft.com
+```
+
+A reference with no registry (`alpine:latest`) resolves against
+`docker.io`. With no value configured the machine is unmanaged and any
+registry may be used. A value that exists but cannot be read permits
+**nothing**, so a misconfigured policy denies rather than silently
+falling open. The allowlist governs runtime pulls only; `--setup-wslc`
+and `wslc.imageTarPath` are unaffected.
+
+See [`wslc-registry-allowlist-policy.md`](wslc-registry-allowlist-policy.md)
+for the full administrator reference, including deployment and verification.
+
+### How long a pull may take
+
+A single pull is bounded at 540 seconds; `MXC_WSLC_PULL_TIMEOUT_SECS`
+overrides it.
+
+A state-aware pull is additionally held 60 seconds under the deadline its
+client is waiting on, so that a slow registry surfaces as a failed provision
+rather than a timeout that abandons a container. Raising the budget past
+540 seconds on that path therefore needs
+`MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS` (default 600) raised with it.
 
 ## Step 4 — Verify WSLC is working
 
@@ -159,103 +195,96 @@ Hello from WSL Container!
 Linux <hostname> 6.6.x-microsoft-standard-WSL2 ... x86_64 Linux
 ```
 
-## Two-step lifecycle
+## Warming the cache
 
-Once setup is done, the day-to-day flow is two distinct commands:
+The day-to-day flow is a single command:
 
 ```powershell
-# (one-time per image) pre-pull into the SDK cache
-.\scripts\setup-wslc.ps1 -Image <image>
-
-# (any number of times) execute against the cached image
 .\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe my-config.json
 ```
 
-This separation keeps `wxc-exec.exe` hermetic and fast at run time —
-the runner never reaches for the network, never blocks on a pull, and
-its failure modes are decoupled from registry availability.
+The first run of a given image pays for its download; later runs read
+it from the cache. To pay that cost ahead of time instead — or to
+prepare a machine that will run offline — warm the cache first:
+
+```powershell
+.\scripts\setup-wslc.ps1 -Image <image>
+```
 
 ## Usage
 
 ### TypeScript SDK
 
-Use `createConfigFromPolicy()` to build a config, then customize WSLC-specific
-fields before spawning:
+Create a V1 `ContainerRequest` with WSLC configuration and use `spawn`
+for live output:
 
 ```typescript
-import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+import { spawn, type ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
-const policy = {
-  version: '0.9.0-alpha',
-  network: {
-    egress: { default: 'allow' as const },
-    ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
+const request: ContainerRequest = {
+  containment: {
+    type: 'wslc',
+    config: { image: 'python:3.12-alpine', cpuCount: 2, memoryMb: 1024 },
   },
+  command: 'python3 -c "print(\'Hello from WSLC\')"',
+  network: {
+    egress: { default: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
+  timeoutMs: 30_000,
 };
 
-const config = createConfigFromPolicy(policy, 'wslc');
-config.process!.commandLine = 'python3 -c "print(\'Hello from WSLC\')"';
-config.wslc!.image = 'python:3.12-alpine';
-config.wslc!.cpuCount = 2;
-config.wslc!.memoryMb = 1024;
-
-// PTY mode (interactive terminal):
-const ptyProcess = spawnSandboxFromConfig(config);
-
-// Non-PTY mode (reliable exit codes, separate stdout/stderr):
-const child = spawnSandboxFromConfig(config, { usePty: false });
-child.stdout?.on('data', (data) => console.log(data.toString()));
-child.on('close', (code) => console.log('Exit code:', code));
+const child = await spawn(request);
+try {
+  child.standardOutput?.on('data', (data) => process.stdout.write(data));
+  child.standardError?.on('data', (data) => process.stderr.write(data));
+  console.log(await child.wait());
+} finally {
+  child.dispose();
+}
 ```
+
+WSLC SDK execution uses standard output/error streams and does not expose a
+caller-controlled PTY or stdin.
 
 ### Rust SDK
 
 The Rust SDK (`mxc-sdk`) runs WSLC **in-process** — it does not spawn
 `wxc-exec.exe`. Build the crate with its `wslc` feature, select the backend with
-`build_request_with_containment`, and run the request directly:
+`Containment::Wslc`, and run the request directly:
 
 ```toml
 # Cargo.toml
 [target.'cfg(target_os = "windows")'.dependencies]
-mxc-sdk = { path = "…/src/core/mxc-sdk", features = ["wslc"] }
+mxc-sdk = { path = "…/src/mxc-sdk", features = ["wslc"] }
 ```
 
 ```rust
-use mxc_sdk::{
-    build_request_with_containment, run, spawn_sandbox, Containment, SandboxPolicy, WslcSection,
-};
+use mxc_sdk::v1::{self, configs::WslcConfig, ContainerRequest, Containment};
 
-let policy = SandboxPolicy {
-    version: "0.9.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
-};
-
-let wslc = WslcSection {
+let wslc = WslcConfig {
     image: "python:3.12-alpine".to_string(),
     cpu_count: Some(2),
     memory_mb: Some(1024),
     ..Default::default()
 };
-
-let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c \"print('Hello from WSLC')\"", None)?;
+let request = ContainerRequest {
+    containment: Containment::Wslc(wslc),
+    ..ContainerRequest::new("python3 -c \"print('Hello from WSLC')\"")
+};
 
 // Run to completion, capturing output…
-let output = run(request.clone())?;
+let output = v1::run(request.clone(), Default::default())?;
 println!("{}", String::from_utf8_lossy(&output.stdout));
 
 // …or stream it live (read stdout/stderr while it runs, kill it, wait).
-let mut sandbox = spawn_sandbox(request)?;
-let stdout = sandbox.take_stdout().expect("stdout");
+let mut process = v1::spawn(request, Default::default())?;
+let stdout = process.take_stdout().expect("stdout");
 ```
 
-`WslcSection` mirrors the `wslc` block below;
-`WslcSection::default()` matches the SDK default (`alpine:latest`). Settings go
-through the same parser the executor uses, so a rejected value (e.g. a port
-mapping with a zero or duplicated host port) fails at
-`build_request_with_containment` rather than at spawn.
+`WslcConfig` mirrors the `wslc` settings below;
+`WslcConfig::default()` matches the SDK default (`alpine:latest`). The typed
+request is validated by the same native engine as executor requests.
 
 Notes and limits:
 
@@ -286,33 +315,28 @@ WSLC-specific settings go under `wslc` in the JSON config:
 
 ### Image sources
 
-> **All three sources require pre-pulling/importing before the runner
-> can use them.** The runner only checks the local cache; see
-> [Step 3](#step-3--pre-pull-container-images) for the setup commands.
+> The store is consulted first in every case. A miss pulls from the
+> registry, except with `imageTarPath`, which imports the tar instead.
+> See [Step 3](#step-3--container-images-optional-pre-pull) for warming
+> the cache ahead of time.
 
-**1. Pre-pulled from DockerHub (default registry):**
-
-```powershell
-.\scripts\setup-wslc.ps1 -Image alpine:latest
-```
+**1. From DockerHub (default registry):**
 
 ```json
 "wslc": { "image": "alpine:latest" }
 ```
 
-**2. Pre-pulled from a custom registry (no auth):**
-
-```powershell
-.\scripts\setup-wslc.ps1 -Image ghcr.io/linuxserver/baseimage-alpine:3.21
-```
+**2. From a custom registry (no auth):**
 
 ```json
 "wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" }
 ```
 
 Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
+Private registries needing credentials are not supported yet; pre-pull
+those out of band or supply a tar.
 
-**3. Import from a local tar file (no pre-pull needed):**
+**3. Import from a local tar file (never touches a registry):**
 
 ```json
 "wslc": {
@@ -336,8 +360,7 @@ no separate `--setup-wslc` step is required.
 > **No per-host filtering primitive exists.** The container lacks
 > `CAP_NET_ADMIN`; MXC refuses unsupported rules rather than running them
 > unenforced. The removed legacy `allowOutbound` authoring and wire host-list
-> vocabulary must not be used for v0.9. Published-version compatibility is
-> separate from these new directional declarations.
+> vocabulary is not accepted by any supported exact contract.
 
 ### Network proxy (cooperative, unprivileged)
 
@@ -363,10 +386,11 @@ variables that well-behaved clients honor.
 2. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.) honor
    the env vars and their traffic flows through the proxy.
 
-**The runtime field contains a URL string.** A WSLC container runs in its own network
-namespace (a separate WSL system VM), so a host- or distro-loopback proxy is
-**not reachable** from inside the container. The proxy must be a routable
-address the container can reach:
+**The runtime field contains a URL string.** A WSLC container runs in its own
+network namespace (a separate WSL system VM). Its own `127.0.0.1` loopback is
+valid for a proxy running inside that container, as in the test fixture below;
+a proxy on the host's or WSL distro's loopback is **not reachable**. An external
+proxy must have an address routable from the container:
 
 ```json
 {
@@ -409,27 +433,15 @@ deny/deny/deny or unrestricted allow/allow/allow across egress, ingress, and
 host-loopback. Mixed directions are rejected because no independent restriction
 primitive exists.
 
-### Legacy enforcement and inbound fields (published contracts only)
+### Retired enforcement and inbound fields
 
-The following compatibility rules apply to legacy published contracts, not
-v0.9, which structurally rejects `enforcementMode` and `allowLocalNetwork`.
-`network.enforcementMode: "firewall"` (or `"both"`) is **rejected** for the same
-reason as per-host filtering: both ask for per-rule firewall enforcement inside a
-container that has no `CAP_NET_ADMIN` to apply it with. The default
-`"capabilities"` is accepted — it is an honest description of WSLC's
-all-or-nothing network, so an explicitly supplied `"capabilities"` is accepted
-rather than refused merely for being present.
-
-#### Legacy inbound: `allowLocalNetwork` is not supported
-
-`network.allowLocalNetwork: true` (a blanket grant to bind/listen and accept
-inbound connections) is **rejected at config-parse time** for WSLC. A WSLC
-container runs in the NAT'd WSL2 VM and MXC does not honor a blanket
-inbound-listen grant — only explicit host→container forwards via
-`wslc` `portMappings` have any inbound effect, so accepting the
-flag would silently promise reachability the backend never delivers. Expose
-specific ports with `portMappings` instead. (`allowLocalNetwork: false`, the
-default, is a no-op and is accepted.)
+Pre-v0.9 published contracts are immutable history but fail at exact-version
+dispatch. In supported contracts, `network.enforcementMode`,
+`network.allowLocalNetwork`, host lists, and `network.proxy` are unknown fields
+and fail structural parsing; there is no legacy `"capabilities"` selector.
+Use the directional all-allow or all-deny posture above. Inbound reachability
+requires explicit host-to-container forwards through `wslc.portMappings`;
+`ingress.default: "allow"` alone does not create them.
 
 **Caveats**
 
@@ -449,6 +461,18 @@ default, is a no-op and is accepted.)
 Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
+
+### Working directory (`process.cwd`)
+
+One-shot runs take `process.cwd` as a local Windows drive path and map it the
+same way: `C:\workspace` starts the process in `/mnt/c/workspace`. Grant the
+directory in `filesystem` so it is mounted. A value that cannot be mapped —
+a relative, drive-relative (`C:work`), UNC, or in-container path such as
+`/workspace` — is **rejected** before the container is created. An omitted or
+blank `cwd` leaves the container's default working directory in place.
+
+State-aware `exec` takes the opposite form: an absolute in-container path such
+as `/work`.
 
 ### Environment
 
@@ -568,15 +592,21 @@ images — cannot be used.
 | HRESULT `0x80040327` (`WSL_E_OS_NOT_SUPPORTED`) from any WSLC call | The SDK reached WSL's service-connect guard on a host that is neither Windows 11 nor has the WSL support interface | Upgrade Windows. `0x80040321` (`WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`) is the sibling code when the legacy `lxss` component is absent too |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
-| `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
-| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `wslc.storagePath` if set |
+| `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/mxc-sdk/build/build_wslc_common.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
+| `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress |
+| `WSLC image '<name>' cannot be pulled: '<host>' is not in the administrative registry allowlist` | Machine policy restricts which registries may be used | Use a permitted registry, set `imageTarPath`, or ask an administrator to widen `WslcAllowedImageRegistries` |
+| `WSLC image '<name>' did not finish pulling within <n>s and was stopped` | The pull exceeded its budget and was aborted | Retry, raise `MXC_WSLC_PULL_TIMEOUT_SECS`, or warm the cache from a faster network |
+| `WSLC image '<name>' did not finish pulling within <n>s. The transfer was abandoned` | The registry stopped responding, so the pull was given up on rather than ended | Retry, or warm the cache from a faster network. On a state-aware run raise `MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS` alongside `MXC_WSLC_PULL_TIMEOUT_SECS`, since the budget is held under it |
+| `WSLC image '<name>' could not be pulled` with `repository does not exist or may require 'docker login'` | The reference is wrong, or the registry needs credentials MXC cannot supply | Fix the image name and tag. For a private registry, use `imageTarPath` or import the image out of band |
+| `WSLC image '<name>' could not be pulled` with `no such host` or a connection error | This host cannot reach the registry | Restore network access, or warm the cache from a connected machine with `--setup-wslc` and match `storagePath`. `imageTarPath` removes the dependency entirely |
+| `WSLC image '<name>' could not be pulled` with `HRESULT 0x8004060D` | Administrative policy on the host blocks the registry | Use a permitted registry, or supply the image with `imageTarPath` |
 | Container exits with code -1 | Process failed or timed out | Check stderr output with `--debug` flag |
 
 ## Example Configs
 
 - [`tests/examples/wslc_hello_world.json`](../../tests/examples/wslc_hello_world.json) — Hello world with Alpine
 - [`tests/configs/wslc_network_isolated.json`](../../tests/configs/wslc_network_isolated.json) — Network isolation
-- [`tests/configs/wslc_network_proxy.json`](../../tests/configs/wslc_network_proxy.json) — Cooperative HTTP proxy (`network.proxy.url`)
+- [`tests/configs/wslc_network_proxy.json`](../../tests/configs/wslc_network_proxy.json) — In-container cooperative HTTP proxy (`runtimeConfig.networkProxy` at the container's `127.0.0.1`)
 - [`tests/configs/wslc_custom_registry_ghcr.json`](../../tests/configs/wslc_custom_registry_ghcr.json) — Pull from GitHub Container Registry
 - [`tests/configs/wslc_custom_registry_quay.json`](../../tests/configs/wslc_custom_registry_quay.json) — Pull from Quay.io
 - [`tests/configs/wslc_tar_import_rootfs.json`](../../tests/configs/wslc_tar_import_rootfs.json) — Import rootfs tar

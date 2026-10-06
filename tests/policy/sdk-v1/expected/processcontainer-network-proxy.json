@@ -1,0 +1,37 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-processcontainer-network-proxy",
+  "containment": "processcontainer",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "timeout": 0
+  },
+  "filesystem": {
+    "readwritePaths": [],
+    "readonlyPaths": [],
+    "deniedPaths": []
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "deny"
+    }
+  },
+  "processContainer": {
+    "leastPrivilege": false,
+    "capabilities": [],
+    "network": {
+      "allowedProxyPeer": "Contoso.Proxy"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  }
+}

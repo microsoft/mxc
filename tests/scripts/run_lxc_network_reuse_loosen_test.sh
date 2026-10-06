@@ -55,14 +55,14 @@ fixture_field() {
     sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
 }
 
-# Drift guard: all three fixtures must exist and declare a 0.8 schema, and all
+# Drift guard: all three fixtures must exist and declare a 1.0 schema, and all
 # must probe the same address.
 for config in "$CTRL_CONFIG" "$DENY_CONFIG" "$ALLOW_CONFIG"; do
     [ -f "$config" ] || fail "fixture $config is missing."
 
     schema_ver="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)"
-    if ! echo "$schema_ver" | grep -q '^0\.8\.'; then
-        fail "fixture $(basename "$config") declares schema '$schema_ver', not 0.8; this test is specific to 0.8 reuse behavior."
+    if ! echo "$schema_ver" | grep -q '^1\.0\.'; then
+        fail "fixture $(basename "$config") declares schema '$schema_ver', not 1.0; this test covers reuse behavior on the current contract."
     fi
 
     if ! grep -Fq "$PROBE_ADDRESS" "$config"; then
@@ -167,7 +167,7 @@ assert_allowed "an explicitly allowed destination was unreachable on the positiv
 # Run 2: setup run on the reuse container id, with no network section.  The
 # container must survive so run 3 reuses the same instance.
 run_config "run 2 (setup): reuse id, no network section -- workload must be blocked" "$DENY_CONFIG"
-assert_blocked "the workload reached $PROBE_ADDRESS on a 0.8 request with no network section.  The container was not isolated as expected, so run 3 would not be testing the loosening scenario."
+assert_blocked "the workload reached $PROBE_ADDRESS on a request with no network section.  The container was not isolated as expected, so run 3 would not be testing the loosening scenario."
 
 if ! lxc-info -n "$REUSE_CONTAINER" >/dev/null 2>&1; then
     fail "destroyOnExit was false, but run 2 destroyed the container.  There is nothing for run 3 to reuse."

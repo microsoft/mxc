@@ -18,7 +18,7 @@ use std::ffi::c_char;
 use std::panic::catch_unwind;
 use std::ptr;
 
-use mxc_sdk::Error;
+use mxc_sdk::v1::Error;
 
 use crate::{alloc_cstring, free_cstr};
 
@@ -119,7 +119,7 @@ pub unsafe extern "C" fn mxc_error_detail_free(detail: *mut MxcErrorDetail) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mxc_sdk::ErrorCode;
+    use mxc_sdk::v1::ErrorCode;
     use std::ffi::CStr;
 
     /// Read an owned C string back, or `None` when the pointer is null. Absence

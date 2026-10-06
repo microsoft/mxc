@@ -20,7 +20,7 @@ function Invoke-Case([string]$Name, [string[]]$ReadOnlyPaths) {
     # Config
 $configJson = @"
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "process",
     "process": {
         "cwd": $($WorkDirectory | ConvertTo-Json -Compress),

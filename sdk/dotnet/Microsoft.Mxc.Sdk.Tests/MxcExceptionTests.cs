@@ -4,6 +4,7 @@
 using System.Linq;
 using System.Reflection;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
@@ -94,13 +95,9 @@ public class MxcExceptionTests
     [Fact]
     public void NativeFailureWithNoApiCall_MarshalsAbsentFieldsAsNull()
     {
-        // A version-less policy is rejected by the native parser before any
-        // backend API is reached, so the detail crosses with a message and
-        // nothing else. Null rather than empty is the point: it is how a caller
-        // tells "the API supplied no status" from "it supplied an empty one".
-        var policy = new SandboxPolicy { Version = string.Empty };
+        var request = InvalidCidrRequest();
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Run(policy, "echo hi"));
+        var ex = Assert.Throws<MxcException>(() => MxcContainer.Run(request));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
@@ -115,12 +112,30 @@ public class MxcExceptionTests
         // The streaming entry point fills a caller-provided detail rather than
         // returning one inside a result struct; this pins that the same shape
         // reaches the caller by that route too.
-        var policy = new SandboxPolicy { Version = string.Empty };
+        var request = InvalidCidrRequest();
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Spawn(policy, "echo hi"));
+        var ex = Assert.Throws<MxcException>(() => MxcContainer.Spawn(request));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
         Assert.Null(ex.Operation);
     }
+
+    private static ContainerRequest InvalidCidrRequest() => new("echo hi")
+    {
+        Network = new NetworkPolicy
+        {
+            Egress = new NetworkEgressPolicy
+            {
+                Default = NetworkAction.Deny,
+                Allow =
+                [
+                    new NetworkRulePolicy
+                    {
+                        To = [new NetworkPeerPolicy("not-a-cidr")],
+                    },
+                ],
+            },
+        },
+    };
 }

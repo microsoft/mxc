@@ -1,40 +1,109 @@
 # MXC Versioning Design
 
+## Architecture at a glance
+
+Versioning determines **which configuration contract is accepted**, not which
+backend implementation runs or what the host can enforce. Keep these decisions
+separate:
+
+| Decision | Authority |
+| --- | --- |
+| Which fields and values exist? | The exact Rust contract types and registration in `mxc_contract`. Published contracts are immutable; the development contract can evolve. |
+| Which exact contract does a typed SDK emit? | `sdkMajorTargets` in `schemas/schema-version.json`, checked against the exact Rust registry. Callers select a major-version SDK API, not an exact JSON version. |
+| Which exact contract does raw JSON use? | The caller's declared, registered `version`. A version range or development opt-in cannot authorize another spelling. |
+| Which backend and policy can run? | `mxc_engine` resolves the backend and checks authorization; host capabilities and backend validation determine what can actually be enforced. |
+
+Typed authoring and raw JSON converge before backend execution:
+
+```mermaid
+flowchart LR
+    typed["Typed SDK policy or lifecycle request"]
+    target["SDK-owned published exact target"]
+    raw["Raw JSON with caller-declared version"]
+    contract["Registered exact Rust contract"]
+    adapter["Version-specific adapter"]
+    normalized["Shared normalization<br/>ExecutionRequest and typed lifecycle operation"]
+    engine["Engine routing and authorization"]
+    backend["Host-capability validation and enforcement"]
+
+    typed --> target --> contract
+    raw --> contract
+    contract --> adapter --> normalized --> engine --> backend
+```
+
+Rust builders construct exact contract values in memory. Node and .NET exact
+writers serialize those values to JSON for the native boundary. In either
+case, version-specific adapters and shared normalization own the conversion
+to runtime requests; SDK policy types and generated schemas do not form
+another native configuration authority. The
+[native-ingress section](#native-ingress) identifies the deprecated binding
+exceptions that remain while the migration is staged.
+
+Publication, SDK targeting, and runtime authorization are independent:
+opening `1.1.0-alpha` does not change V1's published target, and accepting
+that exact development contract does not grant experimental backend access.
+Conversely, experimental authorization does not make a field legal in an
+older contract or override backend policy validation.
+
+The sections below distinguish the [three version axes](#the-three-version-axes),
+[contract shipping and parsing](#schema-shipping-model),
+[SDK major targets](#high-level-sdk-major-targets), and
+[backend authorization](#experimental-flag). Artifact regeneration belongs in
+[Schema Code Generation](schema-codegen.md); backend execution flow is covered
+by [Architecture](architecture.md).
+
 ## Core Concepts
 
 ### Policy = Intent
 
 The policy (filesystem, network) expresses **what** the user wants — "block network, allow these paths." It does not specify how the OS enforces it, nor which container type to use.
 
-### Current v0.x Policy Version = Config Schema Version
+### High-level policy and raw configuration
 
-The current v0.x SDKs expose an exact `version` field in `SandboxPolicy`. It
-must match the MXC config JSON version: they are the same version, tied 1:1.
+Rust, .NET, and Node high-level one-shot policy and typed lifecycle APIs do not
+take a caller-supplied schema version. Each v1 SDK targets the published exact
+`1.0.0` contract internally.
 
-When a consumer specifies a SandboxPolicy version (e.g.,
-`0.6.0-alpha`), MXC creates the corresponding configuration using the
-`0.6.0-alpha` schema.
+Raw configuration APIs require the caller to declare a registered `version`
+to select an immutable historical or mutable development contract.
 
 ```typescript
 // sdk/node/src/types.ts
 const policy: SandboxPolicy = {
-  version: "0.6.0-alpha",
   filesystem: { ... },
   network: { ... },
   timeoutMs: 30000,
 };
 ```
 
-The config JSON carries this same version:
+The exact JSON emitted internally by a high-level v1 API carries the SDK-owned
+version:
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "1.0.0",
   "process": { ... },
   "filesystem": { ... },
   "network": { ... }
 }
 ```
+
+### SDK major-version namespaces
+
+Contract-mapped SDK types live in a namespace for their schema-contract major:
+`Microsoft.Mxc.Sdk.V1`, `mxc_sdk::v1`, and `@microsoft/mxc-sdk/v1`.
+The V1 namespace contains `SandboxPolicy`, its policy sections, containment
+selection and backend settings, policy-to-request builders, and typed
+state-aware lifecycle request/result/option types and entry points. These APIs
+evolve additively as published 1.x contracts grow; the SDK owns the exact
+contract target (currently `1.0.0`) and callers do not supply a schema version.
+A future breaking schema line adds a side-by-side V2 namespace rather than
+replacing V1.
+
+Version-independent APIs stay at the package root: errors and error codes,
+running-sandbox handles and output/wait types, platform/backend discovery,
+telemetry consent, schema-version constants, raw exact-JSON APIs that take
+caller-declared versions, and executor-backed raw config APIs.
 
 ### Versioning follows Semver
 
@@ -51,18 +120,17 @@ reasons:
 
 | Axis | What it describes | Where it lives | Who decides it |
 |---|---|---|---|
-| **Schema (config) version** | The *shape* of the config JSON — which fields exist and what values they accept. | The `version` field in raw config and, in current v0.x SDKs, `SandboxPolicy`. | The config author or current v0.x SDK caller; a v1 high-level SDK owns its exact minor target. |
+| **Schema (config) version** | The *shape* of the config JSON — which fields exist and what values they accept. | The `version` field in raw configuration; high-level SDK policy omits it. | The raw-config author or, for high-level APIs, the SDK package. |
 | **Product version** | The MXC *binaries and npm package* that do the work. | Rust workspace version (`src/Cargo.toml`) + `sdk/package.json`. | The release. |
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
 - **Schema version** selects an exact registered contract at the trust boundary:
-  `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, or
-  `0.10.0-alpha`.
+  `0.9.0-alpha`, `1.0.0`, or `1.1.0-alpha`.
   Patch and prerelease spelling are significant; `0.6.1-alpha` and `0.8.0-dev`
   are not registered and are rejected. A missing declaration is rejected too.
-  The SDK enforces the same exact set. IsolationSession and WSLC state-aware
-  requests use `0.9.0-alpha`; Windows Sandbox state-aware requests use
-  `0.10.0-alpha`. The compatibility constants in
+  Raw SDK entry points enforce the same exact set. High-level v1 one-shot and
+  state-aware APIs select stable `1.0.0` internally and expose only the
+  backends supported by that contract. The compatibility constants in
   `schemas/schema-version.json` do not authorize other versions within their
   minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
@@ -77,57 +145,6 @@ reasons:
   policy that is expressible in multiple registered contracts retains the same
   host-capability-driven backend selection.
 
-### How the v1 High-Level SDK Selects a Schema Contract
-
-The SDK package and schema contract are separate version axes. The
-`@microsoft/mxc-sdk` package version governs compatibility of its public
-TypeScript API. The schema version governs the exact JSON contract accepted at
-the native trust boundary. A high-level SDK API connects the two by selecting
-the exact schema contract that it constructs.
-
-In the current v0.x API, callers put an exact schema version in
-`SandboxPolicy`. In the v1 high-level API, the policy arguments to
-`spawnSandbox`, `spawnSandboxAsync`, and `createConfigFromPolicy` will not
-contain a `version` field. The installed SDK package will select the exact
-contract and put its version in the generated `ContainerConfig`.
-
-Raw configuration remains explicitly versioned. This includes a
-`ContainerConfig` passed to `spawnSandboxFromConfig`, a JSON configuration
-file, `--config-base64` input, and replay tooling.
-
-For example:
-
-```typescript
-// High-level API: the caller supplies policy intent; the SDK selects the
-// exact contract.
-spawnSandbox("python script.py", {
-  filesystem: { readonlyPaths: ["C:\\tools"] },
-});
-
-// Raw configuration API: the caller selects an exact registered contract.
-spawnSandboxFromConfig({
-  version: "1.0.0",
-  process: { commandLine: "python script.py" },
-});
-```
-
-Within an SDK package major, compatible minor releases may add optional
-high-level fields or methods without requiring existing callers to adopt them.
-Breaking changes to the public TypeScript API require a new package major. This
-does not promise identical observed behavior across releases: bug fixes,
-security corrections, and host-capability differences may change runtime
-behavior while preserving the API contract.
-
-`0.10.0-alpha` is the current unpublished development schema. At the v1
-cutover, the published v1.0 contract will be based on v0.9 and will not contain
-the v0.10-only development surfaces. Those development surfaces then move to
-the v1.1 development contract; this plan does not publish a stable v0.10
-contract.
-
-The v1 high-level policy model is directional-network-only. Legacy networking
-remains available through the immutable v0.6-v0.8 raw JSON contracts, not
-through v1 high-level SDK policy.
-
 ## Schema Shipping Model
 
 ```
@@ -135,33 +152,37 @@ mxc/schemas/
 ├── stable/
 │   ├── mxc-config.schema.0.4.0-alpha.json  (retired — below the supported floor)
 │   ├── mxc-config.schema.0.5.0-alpha.json  (retired — below the supported floor)
-│   ├── mxc-config.schema.0.6.0-alpha.json  (minimum supported)
-│   ├── mxc-config.schema.0.7.0-alpha.json  (shipped)
-│   ├── mxc-config.schema.0.8.0-alpha.json  (shipped)
-│   └── mxc-config.schema.0.9.0-alpha.json  (shipped — current stable)
+│   ├── mxc-config.schema.0.6.0-alpha.json  (retired — below the supported floor)
+│   ├── mxc-config.schema.0.7.0-alpha.json  (retired — below the supported floor)
+│   ├── mxc-config.schema.0.8.0-alpha.json  (retired — below the supported floor)
+│   ├── mxc-config.schema.0.9.0-alpha.json  (minimum supported)
+│   └── mxc-config.schema.1.0.0.json        (shipped — current stable)
 └── dev/
-    └── mxc-config.schema.0.10.0-alpha.json  (exact closed development contract)
+    └── mxc-config.schema.1.1.0-alpha.json  (exact closed development contract)
 ```
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
 parser simply stops accepting those versions (the supported floor is
-`0.6.0-alpha`). Released schemas are never edited or deleted.
+`0.9.0-alpha`). Released schemas are never edited or deleted.
 
 The development artifact is generated from the exact
-`mxc_config_contract::dev` model. It describes all eight closed one-shot and
-state-aware roots, including recursively closed development-only structures,
-and is the authoritative contract for declared `0.10.0-alpha` requests.
+`mxc_contract::dev` model. It describes all eight closed one-shot and
+state-aware roots, including recursively closed experimental structures. The
+registered Rust types remain the authority for declared `1.1.0-alpha`
+requests; the schema is their derived editor and validation artifact.
 
-The runtime parser and Rust SDK policy builders dispatch through the exact
-contract registered for the declared version. Corpus validation selects the
-exact registered schema from each document's `version`.
+Raw JSON is parsed with the exact registered contract named by its `version`
+field. High-level Rust, .NET, and Node v1 builders do not accept a caller-supplied
+schema version: they construct requests for exact `1.0.0` and reject fields or
+backends outside that contract. Repository config validation selects the schema
+matching each raw document's declared version.
 
-Only the v0.10 file under `schemas/dev/` is a generated development artifact.
-Published v0.9 is represented by its exact Rust contract and immutable stable
-schema. Exact fixtures and adapter/runtime tests remain ordinary mutable tests
-so they can gain regression coverage as implementations evolve. See
-[Schema Code Generation](schema-codegen.md) for the regeneration commands and
-independent drift/history gates.
+Only the v1.1 prerelease file under `schemas/dev/` is a generated development
+artifact. Published v0.9 and v1.0 are represented by exact Rust contracts and
+immutable stable schemas. Exact fixtures and adapter/runtime tests remain
+ordinary mutable tests so they can gain regression coverage as implementations
+evolve. See [Schema Code Generation](schema-codegen.md) for the regeneration
+commands and independent drift/history gates.
 
 ### Typed state-aware dispatch
 
@@ -205,16 +226,15 @@ configuration JSON.
 
 Runtime behavior is selected from explicit normalized semantics rather than by
 comparing contract-version strings. In particular,
-`NetworkEnforcementCompatibility::LegacyCompatible` preserves the accepted
-v0.6/v0.7 network behavior for both JSON and direct typed SDK inputs, while
-`Strict` applies to v0.8 and later inputs. Direct typed SDK construction clears
-only source-contract attribution; it retains the compatibility selected by the
-exact version adapter.
+`NetworkEnforcementCompatibility::Strict` is the only mode for registered
+exact contracts and direct typed SDK requests. Retired pre-v0.9 contracts
+cannot select legacy enforcement behavior. Direct typed SDK construction
+clears only source-contract attribution; it does not weaken validation.
 
 ### IsolationSession directional networking
 
-The published `0.9.0-alpha` contract accepts the standard directional
-all-allow posture for IsolationSession:
+The published `0.9.0-alpha` and `1.0.0` contracts accept the standard
+directional all-allow posture for IsolationSession:
 
 ```json
 {
@@ -232,17 +252,26 @@ The policy continues through the ordinary cross-cutting network model and
 policy identity. No backend-specific acknowledgment field, transport, or hash
 projection is introduced.
 
-The stable v0.9 schema and TypeScript oracle are regenerated from the
-published Rust model and compared in CI. Exact fixture and adapter/runtime
-tests remain editable so regression coverage can grow without changing the
-published JSON contract.
+The stable v0.9 and v1.0 schemas and TypeScript oracles are regenerated from
+their published Rust models and compared in CI. Exact fixture and
+adapter/runtime tests remain editable so regression coverage can grow without
+changing a published JSON contract.
+
+The v1.0 contract preserves the v0.9 request roots and canonical field/value
+spellings, but removes the legacy `appcontainer`, `appContainer`, and
+`macos_sandbox` aliases. They remain rejected throughout the v1 contract line.
+Features that exist only in mutable v1.1 development, including Windows Sandbox
+provision and the `vm`, `microvm`, and `hyperlight` one-shot surfaces, are not
+accepted by v1.0.
 
 ### Trust boundary vs schema defaults
 
 Schemas in `stable/` are immutable: they document the input shape that was
 promised at release. They are **not** authoritative for runtime security
-defaults. `wxc-exec` is the trust boundary and may apply stricter defaults
-than a stable schema declares when a security issue requires it.
+defaults. Native contract parsing and backend validation form the trust
+boundary for both executor and library callers. Runtime enforcement may apply
+stricter defaults than a stable schema declares when a security issue requires
+it.
 
 For example, an older stable schema may declare
 `network.defaultPolicy` defaulting to `"allow"`. The runtime may treat an
@@ -258,17 +287,20 @@ Development features use their intended permanent top-level locations in the
 mutable exact contract. JSON location, publication eligibility, and runtime
 authorization are separate concerns. This gives editors full autocomplete and
 validation without requiring a later field move when a feature graduates.
-Today, the `--experimental` flag is a global runtime toggle that enables all
-features which still require authorization; per-feature gating is under
-consideration.
+The engine-owned backend registry in
+`src/mxc-sdk/src/core/mxc_engine/backend_registry.rs` records which backend selections
+require runtime experimental authorization. Contract publication does not
+implicitly change that classification. The flag does not enable otherwise
+invalid fields or bypass backend enforcement.
 
 **Rules:**
 - **Published contract contents** — shipped, stable, and immutable.
 - **Development contract contents** — mutable fields and roots at their
   permanent locations. Inclusion does not imply runtime authorization.
-- **Promotion:** When a feature is ready to ship, include it in the published
-  exact contract and remove its runtime experimental gate. Its JSON location
-  does not change.
+- **Promotion:** Publish the feature in an exact stable contract without
+  changing its JSON location. Update backend experimental classification
+  separately when that backend is ready for production; publishing a field
+  alone does not remove a backend's authorization requirement.
 
 ### Published-contract history
 
@@ -293,9 +325,8 @@ generated request roots.
 
 `schemas/schema-version.json` owns `sdkMajorTargets`, the canonical mapping
 from each high-level SDK major line to the latest published stable exact
-contract that line targets. The map remains empty until a stable contract is
-published for that major. SDK v1.0 adds `"1": "1.0.0"`; opening mutable
-`1.1.0-alpha` development does not advance that value. Publishing stable
+line targets. The v1 line targets `"1": "1.0.0"`. Opening mutable
+`1.1.0-alpha` development does not advance that target; publishing stable
 `1.1.0` does.
 
 The exact Rust contract registry is authoritative. The schema-version gate
@@ -310,12 +341,31 @@ Generated schemas remain derived artifacts and drift oracles. They do not
 define the SDK target or the accepted contract shape.
 
 Compatibility comparison and SDK API baselines are intentionally deferred
-until the relevant artifacts exist. When published stable `1.0.0` and `1.1.0`
-coexist, structural tooling may compare temporary projections generated
-directly from their exact Rust types, while explicit Rust and fixture tests
-cover semantic meaning. Rust, Node, and .NET API baselines are captured when
-the v1.0 SDK surface is established rather than through empty placeholder
+until the relevant stable and public API artifacts exist. When stable `1.0.0`
+and `1.1.0` are both published, structural tooling may compare temporary
+projections generated directly from their exact Rust types, while explicit
+Rust and fixture tests cover semantic meaning. Rust, Node, and .NET API
+baselines are captured when the v1.0 SDK surface is established rather than
+through empty placeholder
 descriptors.
+
+### Native ingress
+
+The exact JSON execution surface uses `mxc_run_json`, `mxc_spawn_json`, and
+the state-aware JSON exports. Typed binding writers select the SDK-owned
+contract; raw APIs preserve the caller's exact document. These exports use
+the registered contract parser and take non-configuration controls, including
+experimental authorization, as typed FFI arguments rather than JSON fields.
+The [SDK conformance fixtures](../tests/policy/README.md#sdk-v1-conformance-fixtures)
+pair high-level invocations with independently hand-authored expected exact
+documents to check mapping intent across Rust, Node, and .NET.
+
+The .NET request probe uses the same exact request writer as execution and
+calls `mxc_probe_request_json_with_error`. The private execution and probe
+exports and their request parser are removed. Rust SDK policy authoring types
+no longer derive serde traits; they build exact contract values rather than
+forming another deserializable JSON contract. Exact contract types and
+test-only fixture types retain their serialization support.
 
 ### Experimental Flag
 
@@ -329,16 +379,19 @@ lxc-exec config.json --experimental
 wxc-exec.exe --experimental config.json
 ```
 
-The parser **always** parses fields defined by the selected exact contract
-regardless of the flag; parsing is flag-independent. The `--experimental` flag only sets
-`request.experimental_enabled`:
-- When set, the runners apply the parsed experimental features alongside the
-  stable features
-- When unset, `experimental_enabled` is false and the runners **ignore** the
-  parsed features that still require authorization — no error, those features
-  are just not applied
+The parser **always** parses fields defined by the selected exact contract;
+parsing is flag-independent. The flag authorizes selecting an experimental
+backend (MicroVM, Hyperlight, or Windows Sandbox). Without it, native refuses
+the request with
+`backend_unavailable` on every one-shot and state-aware entry point. The flag
+is ignored for production backends, including production-backend fields in a
+development contract; unsupported policy still fails closed rather than being
+silently ignored. Contract version and backend authorization are separate.
+The authorization switch is excluded from policy identity because it does not
+change the selected backend's enforcement.
 
-**2. SDK (`@microsoft/mxc-sdk`):**
+**2. SDK:** policy APIs come from `@microsoft/mxc-sdk/v1`; raw config
+spawning comes from `@microsoft/mxc-sdk`.
 ```typescript
 // With policy:
 const pty = spawnSandbox("python app.py", policy, {
@@ -366,7 +419,7 @@ step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
 truth):**
 
 Add the field to the applicable closed request type under
-`src/core/mxc_config_contract/src/dev/`, including the backend and phase roots
+`src/mxc-sdk/src/core/mxc_contract/dev/`, including the backend and phase roots
 that admit it.
 
 **In the exact adapter and common request IR:**
@@ -378,11 +431,11 @@ pub(crate) struct CommonRequestIR {
 ```
 
 Edit the authoritative closed mutable contract under
-`src/core/mxc_config_contract/src/dev/`, then adapt the exact field into
+`src/mxc-sdk/src/core/mxc_contract/dev/`, then adapt the exact field into
 `CommonRequestIR`. Regenerate the exact schema:
 
 ```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 1.1.0-alpha --out schemas/dev/mxc-config.schema.1.1.0-alpha.json
 ```
 
 Also regenerate the exact TypeScript oracle with the corresponding
@@ -433,15 +486,13 @@ location. Existing containment/section consistency rules continue unchanged.
 ## Data Flow
 
 ```
-User writes SandboxPolicy (policy + environment, versioned)
+Caller supplies SandboxPolicy (no schema-version field)
         │
         ▼
-Config JSON (version: "0.6.0-alpha")
+v1 SDK builds a request for its exact `1.0.0` target
         │
         ▼
-MXC parses → Stage 1: select and validate the exact registered contract
-        │       → published contracts exclude experimental fields
-        │       → development defines them; execution still requires --experimental
+MXC validates the request against the selected contract and policy
         │
         ▼
 Stage 2: resolve `containment` intent → concrete backend
@@ -465,12 +516,12 @@ Process runs in sandbox
 MXC deliberately keeps three Rust representations rather than sharing one type
 across trust-boundary parsing, common normalization, and backend execution:
 
-- **Exact registered contracts** (`mxc_config_contract`) — version-, phase-, and
+- **Exact registered contracts** (`mxc_contract`) — version-, phase-, and
   backend-specific closed request roots. These are the production JSON
   deserialization boundary and the source for authoritative schemas and
   generated exact TypeScript wire types.
 - **Common request IR**
-  (`wxc_common::common_request_ir::CommonRequestIR`) — the private common
+  (`mxc_common::common_request_ir::CommonRequestIR`) — the private common
   representation produced by version-specific adapters and consumed by shared
   semantic normalization. It is not a JSON parse or schema generation target.
 - **Runtime / domain model** (`models::ExecutionRequest` and friends) — the
@@ -483,8 +534,12 @@ The exact contract rejects structural errors first. Version-specific adapters
 then perform structural conversion into `CommonRequestIR`.
 `normalize_common_request_ir` applies shared defaults and semantic validation
 and constructs the runtime model.
+The registered contracts admit only directional networking, so their adapters
+pass directional network sections to shared normalization. An omitted network
+section receives directional deny defaults; shared normalization does not select
+a network format from contract provenance or legacy field presence.
 
-Reusable nested DTOs under `wxc_common::wire` help adapters share representations
+Reusable nested DTOs under `mxc_common::wire` help adapters share representations
 for common fields. They are not a whole-request deserialization boundary and do
 not generate schemas or public SDK types.
 
@@ -644,9 +699,9 @@ what the user should do (upgrade OS, enable feature, change the config).
 
 ## Experimental Features — Clarifications
 
-**Shipping model:** The shipped schema contains **only** non-experimental 
-features. Experimental features exist solely for internal development and 
-testing — they are never shipped to end users. The `--experimental` flag is a 
+**Shipping model:** The shipped schema contains **only** non-experimental
+features. Experimental features exist solely for internal development and
+testing — they are never shipped to end users. The `--experimental` flag is a
 development tool, not a production feature.
 
 **Global flag:** The `--experimental` flag is a single global toggle. When enabled,
@@ -664,30 +719,16 @@ When a wire value is renamed (e.g. `appcontainer` → `processcontainer` in
 [#268](https://github.com/microsoft/mxc/pull/268)), the legacy spelling enters a
 deprecation window where both forms are accepted on the wire.
 
-**Policy:** alias acceptance belongs to each exact parser contract. For
-contracts whose schemas and raw types are generated from that exact contract,
-the parser, schema, generated raw type, and raw SDK validator must agree on the
-accepted spellings. An alias accepted by several current contracts is
-deliberately present in each contract; it is not a version-independent parser
-exception.
+**Policy:** alias acceptance belongs to each exact parser contract. The parser,
+schema, generated raw type, and raw SDK validator must agree on the spellings
+accepted by the declared `config.version`; aliases are not version-independent
+parser exceptions.
 
-**Legacy schema exception.** The v0.6-v0.8 stable schemas predate exact-contract
-artifact generation and describe a curated stable surface rather than every
-spelling accepted by their parsers. The v0.6-v0.8 parsers accept the
-`appcontainer` containment value and the top-level `appContainer` field. The
-v0.7-v0.8 parsers also accept the `macos_sandbox` containment value and
-top-level field. Their immutable stable schemas do not consistently advertise
-those aliases: only the v0.7 schema includes `appContainer`, and none includes
-the deprecated containment values or `macos_sandbox` field. This historical
-schema/parser mismatch does not make aliases version-independent; each exact
-parser still owns the aliases it accepts. Generated exact-contract artifacts,
-starting with v0.9, advertise the accepted aliases.
-
-Within a stable major line, adding an alias is compatible but removing an
-accepted alias is breaking. A v1.x alias therefore remains accepted for the
-rest of the v1 line and may be removed only in the next major contract. New
-high-level SDK APIs should emit the canonical spelling and may warn when a raw
-configuration uses a deprecated alias.
+The historical v0 contracts retain their original compatibility aliases.
+`appcontainer` and `appContainer` are accepted by v0.6-v0.9, while
+`macos_sandbox` is accepted by v0.7-v0.9. The v1 line removes all three
+spellings at its major-version boundary, so raw v1.0 and v1.1 requests must use
+`processcontainer`, `processContainer`, and `seatbelt`.
 
 **Observability.** Each exact contract accepts its version-specific legacy
 value aliases and normalizes them during exact deserialization, before its
@@ -698,10 +739,10 @@ through `wire::Containment::parse_wire_name`. Alias acceptance is silent in the
 native parser; the TypeScript SDK validator may still surface a deprecation hint
 via `diagLog` while inspecting raw config.
 
-**Removal.** Remove an alias only in a new major exact contract. The prior
-major's immutable contracts continue to accept it. Document the removal in the
-new major's migration guidance and return the standard exact-contract
-diagnostic when the new contract receives the retired spelling.
+**Removal.** Removing an accepted alias is a breaking wire change and therefore
+belongs at a major-version boundary. Older immutable contracts continue to
+accept their historical spellings; the new major rejects them with the
+standard exact-contract diagnostic.
 
 ## Open Questions
 

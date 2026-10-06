@@ -21,6 +21,9 @@
 // Must run at a real interactive console.
 
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 
 namespace Microsoft.Mxc.Sdk.ConsoleDriver;
 
@@ -78,12 +81,11 @@ internal static class Program
         var label = scenario?.Name ?? "custom";
         var command = scenario?.Command ?? arg;
 
-        SandboxId id;
+        ContainerId id;
         try
         {
-            var provisioned = MxcLifecycle.ProvisionSandbox(
-                StateAwareContainment.IsolationSession,
-                new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy
+            var provisioned = MxcLifecycle.ProvisionContainer(
+                new IsolationSessionProvisionRequest(new NetworkPolicy
                 {
                     Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
                     Ingress = new NetworkIngressPolicy
@@ -92,7 +94,7 @@ internal static class Program
                         HostLoopback = NetworkAction.Allow,
                     },
                 }));
-            id = provisioned.SandboxId;
+            id = provisioned.ContainerId;
         }
         catch (MxcException e)
         {
@@ -109,7 +111,7 @@ internal static class Program
         try
         {
             Console.Error.WriteLine("[driver] provisioned.");
-            MxcLifecycle.StartSandbox(id);
+            MxcLifecycle.StartContainer(id);
             Console.Error.WriteLine($"[driver] started. Scenario: {label}");
             if (scenario is { } s)
             {
@@ -118,7 +120,14 @@ internal static class Program
             Console.Error.WriteLine(
                 "[driver] everything below runs inside the isolation session.\n");
 
-            var outcome = MxcLifecycle.ExecInSandboxAttached(id, command);
+            using var terminal = MxcLifecycle.SpawnInContainerWithPty(
+                id,
+                new ExecutionRequest(command),
+                new SpawnInContainerWithPtyOptions
+                {
+                    Size = CurrentConsoleSize(),
+                });
+            var outcome = AttachToCurrentConsole(terminal);
             Console.WriteLine(
                 $"\n[driver] timedOut: {outcome.TimedOut}, exitCode: {outcome.ExitCode}");
             return outcome.ExitCode;
@@ -128,12 +137,17 @@ internal static class Program
             Console.WriteLine($"\n[driver] failed [{e.Code}]: {e.Message}");
             return 1;
         }
+        catch (Win32Exception e)
+        {
+            Console.WriteLine($"\n[driver] console setup failed: {e.Message}");
+            return 1;
+        }
         finally
         {
             Console.Error.WriteLine("\n[driver] tearing down…");
             try
             {
-                MxcLifecycle.StopSandbox(id);
+                MxcLifecycle.StopContainer(id);
             }
             catch (MxcException)
             {
@@ -142,7 +156,7 @@ internal static class Program
             }
             try
             {
-                MxcLifecycle.DeprovisionSandbox(id);
+                MxcLifecycle.DeprovisionContainer(id);
                 Console.Error.WriteLine("[driver] deprovisioned.");
             }
             catch (MxcException e)
@@ -151,5 +165,169 @@ internal static class Program
                     $"[driver] WARNING: deprovision failed, account may leak: {e.Message}");
             }
         }
+    }
+
+    // Attach the caller-controlled PTY to this process's console by relaying its
+    // streams and forwarding console input, control characters, and resize events.
+    private static WaitResult AttachToCurrentConsole(MxcPtyProcess terminal)
+    {
+        using var consoleMode = ConsoleModeScope.EnterRaw();
+        using var cancellation = new CancellationTokenSource();
+        using var input = terminal.Input;
+        var output = terminal.Output;
+        using var outputCloser = terminal.StandardOutputCloser;
+        var outputTask = output.CopyToAsync(Console.OpenStandardOutput());
+        var inputTask = Console.OpenStandardInput().CopyToAsync(input, cancellation.Token);
+        var resizeTask = TrackConsoleSizeAsync(terminal, cancellation.Token);
+
+        try
+        {
+            var outcome = terminal.Wait();
+            outputCloser?.Close();
+            outputTask.GetAwaiter().GetResult();
+            return outcome;
+        }
+        finally
+        {
+            cancellation.Cancel();
+            input.Dispose();
+            ObserveInputRelay(inputTask);
+            try
+            {
+                resizeTask.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+    }
+
+    private static void ObserveInputRelay(Task inputTask)
+    {
+        _ = inputTask.ContinueWith(
+            static task =>
+            {
+                var error = task.Exception?.GetBaseException();
+                if (error is not (OperationCanceledException or ObjectDisposedException))
+                {
+                    Console.Error.WriteLine(
+                        $"[driver] WARNING: console input relay failed: {error?.Message}");
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    // Console has no resize event; poll so the sandboxed TUI can reflow when
+    // the operator resizes this window.
+    private static async Task TrackConsoleSizeAsync(
+        MxcPtyProcess terminal,
+        CancellationToken cancellationToken)
+    {
+        var last = CurrentConsoleSize();
+        while (true)
+        {
+            await Task.Delay(100, cancellationToken);
+            var current = CurrentConsoleSize();
+            if (current != last)
+            {
+                terminal.Resize(current);
+                last = current;
+            }
+        }
+    }
+
+    // ConPTY dimensions are non-zero signed 16-bit values.
+    private static MxcPtySize CurrentConsoleSize() =>
+        new(
+            checked((ushort)Math.Clamp(Console.WindowHeight, 1, short.MaxValue)),
+            checked((ushort)Math.Clamp(Console.WindowWidth, 1, short.MaxValue)));
+
+    private sealed class ConsoleModeScope : IDisposable
+    {
+        private const int StdInputHandle = -10;
+        private const int StdOutputHandle = -11;
+        private const uint EnableProcessedInput = 0x0001;
+        private const uint EnableLineInput = 0x0002;
+        private const uint EnableEchoInput = 0x0004;
+        private const uint EnableVirtualTerminalProcessing = 0x0004;
+        private const uint DisableNewlineAutoReturn = 0x0008;
+        private const uint EnableVirtualTerminalInput = 0x0200;
+
+        private readonly nint _input;
+        private readonly nint _output;
+        private readonly uint _inputMode;
+        private readonly uint _outputMode;
+        private bool _disposed;
+
+        private ConsoleModeScope(
+            nint input,
+            nint output,
+            uint inputMode,
+            uint outputMode)
+        {
+            _input = input;
+            _output = output;
+            _inputMode = inputMode;
+            _outputMode = outputMode;
+        }
+
+        internal static ConsoleModeScope EnterRaw()
+        {
+            var input = GetStdHandle(StdInputHandle);
+            var output = GetStdHandle(StdOutputHandle);
+            if (!GetConsoleMode(input, out var inputMode)
+                || !GetConsoleMode(output, out var outputMode))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "the PTY driver must run from a real interactive console");
+            }
+
+            var rawInput = (inputMode | EnableVirtualTerminalInput)
+                & ~(EnableProcessedInput | EnableLineInput | EnableEchoInput);
+            if (!SetConsoleMode(input, rawInput))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "failed to put console input into raw VT mode");
+            }
+
+            var rawOutput = outputMode
+                | EnableVirtualTerminalProcessing
+                | DisableNewlineAutoReturn;
+            if (!SetConsoleMode(output, rawOutput))
+            {
+                var error = Marshal.GetLastWin32Error();
+                _ = SetConsoleMode(input, inputMode);
+                throw new Win32Exception(error, "failed to enable VT console output");
+            }
+
+            return new ConsoleModeScope(input, output, inputMode, outputMode);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _ = SetConsoleMode(_output, _outputMode);
+            _ = SetConsoleMode(_input, _inputMode);
+            _disposed = true;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern nint GetStdHandle(int standardHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetConsoleMode(nint consoleHandle, out uint mode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetConsoleMode(nint consoleHandle, uint mode);
     }
 }

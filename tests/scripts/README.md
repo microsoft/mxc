@@ -43,8 +43,8 @@ Linux / macOS (`.sh`):
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
 | `run_isolation_session_tests.ps1` | IsolationSession one-shot E2E suite | Interactive local session; OS-side IsolationSession service |
 | `run_isolation_session_state_aware_tests.ps1` | IsolationSession provision/start/exec/stop/deprovision E2E suite | Interactive local session; OS-side IsolationSession service |
-| `run_wslc_all_tests.ps1` | All WSLC one-shot and state-aware E2E tests | WSL2, WSLC SDK, staged daemon, and network access for image setup (or pre-pulled images with `-SkipSetup`) |
-| `run_processcontainer_all_tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, enumeration-only grants, UI mitigations, DACL restore, crash recovery, schema 0.8 networking. Dispatches to the per-area `run_processcontainer_*_test.ps1` scripts | `wxc-exec.exe`, `wxc-ui-probe.exe`, `plm.exe` and `winhttp-proxy-shim.exe` beside `wxc-exec.exe` |
+| `run_wslc_all_tests.ps1` | All WSLC one-shot and state-aware E2E tests | WSL2, WSLC SDK, staged daemon, and registry access for the image preflight (`-SkipSetup` skips it and needs an already-warm cache, because the state-aware fixtures deny egress) |
+| `run_processcontainer_all_tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, enumeration-only grants, UI mitigations, DACL restore, crash recovery, directional networking. Dispatches to the per-area `run_processcontainer_*_test.ps1` scripts | `wxc-exec.exe`, `wxc-ui-probe.exe`, `plm.exe` and `winhttp-proxy-shim.exe` beside `wxc-exec.exe` |
 | `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
 | `run_telemetry_consent_smoke_test.ps1` | Consent maintenance, presentation, policy, and exit-code smoke tests | Debug `wxc-exec.exe` built with `test-support` |
 | `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture | Debug `wxc-exec.exe` built with `test-support`; ETW tooling; Administrator, otherwise the test skips |
@@ -125,6 +125,28 @@ npm run test:integration    # SDK integration tests
 cd src
 cargo test --workspace       # Rust unit tests
 ```
+
+### Unix PTY SDK integration tests
+
+The caller-controlled PTY contract is directly runnable on a matching host:
+
+```bash
+# Linux with Bubblewrap installed
+cd src
+cargo test -p mxc-sdk --test streaming_bubblewrap bubblewrap_pty -- --nocapture
+
+# Linux with LXC installed; run as root
+sudo --preserve-env=PATH,HOME "$(command -v cargo)" \
+  test -p mxc-sdk --test streaming_lxc lxc_pty -- --nocapture
+
+# macOS
+cd src
+cargo test -p mxc-sdk --test streaming seatbelt_pty -- --nocapture
+```
+
+The local Bubblewrap and LXC tests report a prerequisite skip when their backend
+is unavailable. Provisioned CI hosts run the same tests in backend-specific
+lanes; strict mode turns a missing prerequisite into a failure.
 
 ## Running executor E2E via Cargo
 

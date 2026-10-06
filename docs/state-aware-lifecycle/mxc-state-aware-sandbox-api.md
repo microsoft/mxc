@@ -62,7 +62,7 @@ elaborates.
 
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
-| TypeScript SDK (§6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation for promise-returning operations via the existing `SandboxSpawnOptions`; live exec callers use `MxcSandboxProcess.kill()`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
+| TypeScript SDK (§6) | Five lifecycle functions: `provisionContainer`, `startContainer`, `spawnInContainer` / `runInContainer`, `stopContainer`, `deprovisionContainer`, plus `spawnInContainerWithPty` for a caller-controlled interactive terminal when supported by the selected backend. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation for promise-returning operations via the existing `SandboxSpawnOptions`; live exec callers use `MxcProcess.kill()` or dispose the returned `MxcPtyProcess`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension mechanism reused. The existing wire-format-aligned `ProcessConfig` / `FilesystemConfig` / `NetworkConfig` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside the new state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). Existing typed `*Config` naming convention reused. |
 | JSON wire format (§7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under each backend's permanent top-level section. Named envelope types as a TypeScript discriminated union over `phase`. Exact registered roots admit only the cross-cutting fields supported by each backend and phase. | One-shot remains the no-`phase` request mode and uses its own exact versioned roots. |
 | Rust executor (§9) | Exact registered request contracts selected by version, phase, and provision containment; typed neutral operations; checked backend binding; and `StatefulSandboxBackend` dispatch. | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends function without modification. |
 | Error model (§8) | Closed enum of 12 error codes. `MxcError` class with `code: ErrorCode`. `details` open object as escape hatch for backend-specific structured information. Exact-root structural failures precede backend validation. | One-shot retains its existing response surface, while exact-contract failures use that surface's structural-error mapping. |
@@ -190,9 +190,9 @@ unrecognised prefix, and this is by design:
 
 | Source                  | Behaviour for an unrecognised `sandboxId` prefix |
 | ----------------------- | ------------------------------------------------ |
-| SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` before invoking `mxc_state_aware` or `mxc_state_aware_exec`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id. See `sdk/node/src/state-aware-helper.ts`. |
+| SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` before invoking `mxc_run_state_aware_json` or `mxc_exec_state_aware_json`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id. See `sdk/node/src/state-aware-helper.ts`. |
 | SDK (Rust)              | `SandboxId::parse` accepts a syntactically valid opaque id without interpreting its prefix. Dispatch returns `MxcError { code: 'unsupported_containment' }` when that prefix is not registered. Empty ids, ids without prefix structure, and ids containing NUL are `malformed_id`. |
-| Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/core/wxc_common/src/state_aware_dispatch.rs`. |
+| Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/mxc-sdk/src/tools/mxc_common/state_aware_dispatch.rs`. |
 
 A recognised prefix with a malformed body is `malformed_id` from both sources
 (§8). The same prefix is exposed on the `StatefulSandboxBackend` trait as
@@ -241,8 +241,15 @@ wire format and have different roles:
 
 | Field | Where it appears | Source | Purpose |
 |---|---|---|---|
-| `sandboxId` | State-aware wire envelope (§7); SDK return value from `provisionSandbox` | System-generated by the backend | Opaque routing identifier; must be passed to subsequent state-aware calls |
+| `sandboxId` | State-aware wire envelope (§7); SDK return value from `provisionContainer` | System-generated by the backend | Opaque routing identifier; must be passed to subsequent state-aware calls |
 | `containerId` | One-shot wire envelope (per `docs/schema.md`) | Caller-supplied (or auto-generated random hex) | Human-readable label, used as e.g. AppContainer profile name |
+
+For direct `wxc-exec` lifecycle calls, `--container-id` supplies the opaque
+lifecycle routing identifier represented as `sandboxId` in raw JSON. It is
+distinct from the one-shot JSON `containerId` label: the CLI option is required
+for `start`, `exec`, `stop`, and `deprovision`, and is not accepted for
+`provision`. This is a CLI transport name only; the JSON field and native ABI
+continue to use `sandboxId`.
 
 State-aware non-provision calls carry `sandboxId` on the request; provision returns it
 on the response. A state-aware request **may** also carry `containerId` — the parser
@@ -252,348 +259,109 @@ One-shot calls carry `containerId` (when present); they do not carry `sandboxId`
 
 ## 6. TypeScript SDK
 
-The SDK adds five new functions, exported from `@microsoft/mxc-sdk` alongside the existing
-one-shot entry points. Each function corresponds to a lifecycle phase from §4. The
-state-aware surface does not use `SandboxPolicy` — its cross-cutting fields live
-directly on the per-(backend, phase) Configs introduced below.
+All public APIs, types, discovery, telemetry, and helpers are exported from
+`@microsoft/mxc-sdk/v1`. The package root exports no APIs. The SDK owns the
+exact stable V1 contract; callers do not select a wire version.
 
 ### 6.1 Type definitions
 
-```typescript
-import type {
-  StateAwareSchemaVersion,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-} from '@microsoft/mxc-sdk';
+| Purpose | Public type |
+|---|---|
+| Creation workload and shared policy | `ContainerRequest` |
+| SDK-owned creation containment choice | `Containment` discriminated union; defaults to `process` |
+| Persistent provision input | `ProvisionRequest<C>` with a `containment` discriminator |
+| Opaque persistent identity | `ContainerId<C>` |
+| Existing-container process settings | `ExecutionRequest<C>` |
+| Live standard pipes / terminal | `MxcProcess` / `MxcPtyProcess` |
+| Captured execution / completion | `ExecutionResult` / `WaitResult` |
 
-type SandboxId<C extends StateAwareContainmentBackend> =
-  string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
+`ContainerRequest` and `ExecutionRequest` use `command`, `workingDirectory`,
+`environment`, `inheritDefaultEnvironment`, and `timeoutMs`. Creation also
+holds shared filesystem, network, UI, and containment settings. Creation
+telemetry is supplied through the operation options.
+Persistent policy is supplied during provision, not restated during exec.
+`ui.disable` controls UI access; clipboard and input injection are separate.
+Creation choices are the closed type-only `Containment.Process`,
+`Containment.ProcessContainer`, and sibling interfaces; their union is
+`Containment`. For WSLC existing-container execution, proxy settings
+are authored under `ExecutionRequest.network.runtimeConfig` only. The SDK maps
+that runtime-only object to the existing top-level wire `runtimeConfig`, while
+provision-time directional policy remains fixed.
 
-type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
-
-type StateAwareContainmentBackend = Extract<
-  ContainmentBackend,
-  'isolation_session' | 'windows_sandbox' | 'wslc'
->;
-
-// Per-(backend, phase) Configs. Each declares only the fields valid for that backend
-// at that phase. Cross-cutting fields (`filesystem`, `network`, `ui`) appear inline
-// at the Config root, only in phases where the backend honors them per its policy
-// honor matrix (§10.3). Phases with no backend-specific or cross-cutting fields
-// declare a Config carrying only `version?`.
-
-// NOTE: the IsolationSession shapes below are *illustrative* — they show the
-// per-(backend, phase) Config pattern, not the shipped IsolationSession
-// contract. The authoritative shapes (including the provision-phase `appId`
-// and the three-field provision metadata) live in
-// `docs/isolation-session/state-aware-rust.md` and
-// `sdk/node/src/state-aware-types.ts`. The same caveat applies to the worked
-// example in §7.4 and the config-typing example in §10.2.
-
-interface IsolationSessionProvisionConfig {
-  version?: '0.9.0-alpha';
-  // IsolationSession cannot filter or deny the container network, so provision
-  // requires this exact unrestricted posture. Filesystem policy is rejected (§10.3).
-  network: {
-    egress: { default: 'allow' };
-    ingress: { default: 'allow'; hostLoopback: 'allow' };
-  };
-}
-
-interface IsolationSessionStartConfig {
-  version?: '0.9.0-alpha';
-}
-
-interface IsolationSessionExecConfig {
-  version?: '0.9.0-alpha';
-  process: ProcessConfig;
-}
-
-interface IsolationSessionStopConfig {
-  version?: '0.9.0-alpha';
-}
-
-interface IsolationSessionDeprovisionConfig {
-  version?: '0.9.0-alpha';
-}
-
-interface IsolationSessionProvisionMetadata {
-  agentUserName: string;
-  agentUserSid: string;
-  ephemeralWorkspacePath: string;
-}
-
-// WindowsSandbox holds a single active sandbox behind a persistent host-side
-// daemon. Filesystem policy is honored at
-// provision and is immutable thereafter (see §10.3).
-
-interface WindowsSandboxProvisionConfig {
-  version?: typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION;
-  filesystem?: FilesystemConfig;
-}
-
-interface WindowsSandboxStartConfig {
-  version?: typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION;
-}
-
-interface WindowsSandboxExecConfig {
-  version?: typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION;
-  process: ProcessConfig;
-}
-
-interface WindowsSandboxStopConfig {
-  version?: typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION;
-}
-
-interface WindowsSandboxDeprovisionConfig {
-  version?: typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION;
-}
-
-// WindowsSandbox returns no metadata for any phase.
-
-// Backend Config bundle — outer keys are state-aware-capable backends; inner per-phase
-// entries carry the typed per-(backend, phase) Config. Used by the generic per-phase
-// helpers below.
-type ConfigsForBackend<C extends StateAwareContainmentBackend> =
-  C extends 'isolation_session' ? {
-    provision: IsolationSessionProvisionConfig;
-    start: IsolationSessionStartConfig;
-    exec: IsolationSessionExecConfig;
-    stop: IsolationSessionStopConfig;
-    deprovision: IsolationSessionDeprovisionConfig;
-  } : C extends 'windows_sandbox' ? {
-    provision: WindowsSandboxProvisionConfig;
-    start: WindowsSandboxStartConfig;
-    exec: WindowsSandboxExecConfig;
-    stop: WindowsSandboxStopConfig;
-    deprovision: WindowsSandboxDeprovisionConfig;
-  } : never;
-
-type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
-  ConfigsForBackend<C>['provision'];
-type StartConfigFor<C extends StateAwareContainmentBackend> =
-  ConfigsForBackend<C>['start'];
-type ExecConfigFor<C extends StateAwareContainmentBackend> =
-  ConfigsForBackend<C>['exec'];
-type StopConfigFor<C extends StateAwareContainmentBackend> =
-  ConfigsForBackend<C>['stop'];
-type DeprovisionConfigFor<C extends StateAwareContainmentBackend> =
-  ConfigsForBackend<C>['deprovision'];
-
-// Per-backend metadata bundle. Backends omit phases that return no metadata.
-interface StateAwareMetadata {
-  isolation_session?: {
-    provision?: IsolationSessionProvisionMetadata;
-    // IsolationSession returns no metadata for start, stop, deprovision
-  };
-  windows_sandbox?: Record<never, never>;
-  // WindowsSandbox returns no metadata for any phase (keyof never -> undefined).
-  // Future state-aware-capable backends add typed entries here.
-}
-
-type ProvisionMetadataFor<C extends StateAwareContainmentBackend> =
-  'provision' extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>['provision']
-    : undefined;
-type StartMetadataFor<C extends StateAwareContainmentBackend> =
-  'start' extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>['start']
-    : undefined;
-type StopMetadataFor<C extends StateAwareContainmentBackend> =
-  'stop' extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>['stop']
-    : undefined;
-type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> =
-  'deprovision' extends keyof NonNullable<StateAwareMetadata[C]>
-    ? NonNullable<StateAwareMetadata[C]>['deprovision']
-    : undefined;
-
-interface ProvisionResult<C extends StateAwareContainmentBackend> {
-  sandboxId: SandboxId<C>;
-  metadata?: ProvisionMetadataFor<C>;
-}
-
-interface StartResult<C extends StateAwareContainmentBackend> {
-  metadata?: StartMetadataFor<C>;
-}
-
-interface StopResult<C extends StateAwareContainmentBackend> {
-  metadata?: StopMetadataFor<C>;
-}
-
-interface DeprovisionResult<C extends StateAwareContainmentBackend> {
-  metadata?: DeprovisionMetadataFor<C>;
-}
-
-interface ExecResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-```
-
-`FilesystemConfig`, `NetworkConfig`, `UiConfig`, `ProcessConfig` are the existing
-wire-format-aligned interfaces from `sdk/node/src/types.ts`, reused unchanged as field
-types inside the per-(backend, phase) Configs. State-aware deliberately does not use
-`SandboxPolicy`; consumers spell out wire-format-aligned values directly (e.g.,
-`network: { egress: { default: 'deny' } }` for a backend that supports it).
-
-A backend's per-(backend, phase) Config declares each cross-cutting field exactly once,
-and only in the phase where the backend's policy honor matrix (§10.3) marks it as
-`applied`. IsolationSession provision carries the backend-specific acknowledgment
-and optional `appId`, not filesystem/network/UI policy. Its phase types reject
-those policy fields (§10.3
-explains how the matrix lands at compile time on the SDK and at runtime in Rust).
-Phases with no backend-specific or cross-cutting fields declare a Config carrying only
-`version?` — explicit and minimal. Adding a future state-aware backend is a localised
-change: extend `StateAwareContainmentBackend`, define five new `*Config` interfaces, and
-add an arm to `ConfigsForBackend`.
-
-Each Config carries an optional `version?: StateAwareSchemaVersion`, using the
-existing SDK type for the exact state-aware contract, currently `0.9.0-alpha`.
-When omitted, the SDK supplies `STATE_AWARE_VERSION` (`0.9.0-alpha`); an explicit
-value must name that same registered state-aware contract. Other spellings are
-rejected, not range-validated or negotiated. The emitted JSON envelope always
-contains the required `version` declaration.
+Provision requests discriminate the SDK-supported persistent backends,
+IsolationSession and WSLC. IsolationSession requires an explicit unrestricted
+directional network policy. WSLC fixes its network posture at provision.
+Backend and phase semantics are validated by the native engine.
 
 ### 6.2 Method signatures
 
-```typescript
-function provisionSandbox<C extends StateAwareContainmentBackend>(
-  containment: C,
-  config?: ProvisionConfigFor<C>,
-  options?: SandboxSpawnOptions,
-): Promise<ProvisionResult<C>>;
+| Operation | Input order | Return |
+|---|---|---|
+| `run` | `ContainerRequest`, `RunOptions?` | `Promise<ExecutionResult>` |
+| `spawn` | `ContainerRequest`, `SpawnOptions?` | `Promise<MxcProcess>` |
+| `spawnWithPty` | `ContainerRequest`, `SpawnWithPtyOptions?` (includes `size`) | `Promise<MxcPtyProcess>` |
+| `provisionContainer` | `ProvisionRequest`, `ProvisionOptions?` | `Promise<ProvisionResult>` |
+| `startContainer` | `ContainerId`, `StartOptions?` | `Promise<LifecycleResult>` |
+| `spawnInContainer` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerOptions?` | `Promise<MxcProcess>` |
+| `runInContainer` | `ContainerId`, `ExecutionRequest`, `RunInContainerOptions?` | `Promise<ExecutionResult>` |
+| `spawnInContainerWithPty` | `ContainerId`, `ExecutionRequest`, `SpawnInContainerWithPtyOptions?` (includes `size`) | `Promise<MxcPtyProcess>` |
+| `stopContainer` | `ContainerId`, `StopOptions?` | `Promise<LifecycleResult>` |
+| `deprovisionContainer` | `ContainerId`, `DeprovisionOptions?` | `Promise<LifecycleResult>` |
 
-function startSandbox<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
-  config?: StartConfigFor<C>,
-  options?: SandboxSpawnOptions,
-): Promise<StartResult<C>>;
+Invocation options control experimental authorization and, for lifecycle and
+existing-container operations, optional telemetry. Supplied invocation telemetry
+overrides request telemetry but cannot grant persisted consent or override an
+administrative restriction. Options do not change the owned wire contract.
 
-function execInSandbox<C extends 'isolation_session' | 'wslc'>(
-  sandboxId: SandboxId<C>,
-  config: ExecConfigFor<C>,
-  options?: StateAwareStreamingOptions,
-): MxcSandboxProcess;
-
-function execInSandboxAsync<C extends 'isolation_session' | 'wslc'>(
-  sandboxId: SandboxId<C>,
-  config: ExecConfigFor<C>,
-  options?: SandboxSpawnOptions,
-): Promise<ExecResult>;
-
-function stopSandbox<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
-  config?: StopConfigFor<C>,
-  options?: SandboxSpawnOptions,
-): Promise<StopResult<C>>;
-
-function deprovisionSandbox<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
-  config?: DeprovisionConfigFor<C>,
-  options?: SandboxSpawnOptions,
-): Promise<DeprovisionResult<C>>;
-```
-
-For IsolationSession and WSLC, `execInSandbox` returns an owning
-`MxcSandboxProcess` for live output, waiting, termination, and disposal.
-IsolationSession also exposes stdin; WSLC currently exposes stdout/stderr only.
-`execInSandboxAsync` is a buffered convenience that accumulates output and
-resolves on exit. Windows Sandbox does not expose piped native exec streams, so
-Node does not expose its exec phase, including dry-run.
-
-`provisionSandbox` takes `containment` as its first argument, binding the backend choice
-into the returned `SandboxId<C>`. Subsequent calls (`startSandbox`, `execInSandbox` /
-`execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`) infer the backend from the
-branded id and do not restate it. The wire envelope mirrors this: provision carries
-`containment`; non-provision phases route via the prefix on `sandboxId` (§5, §7.1).
-
-Promise-returning operations accept `SandboxSpawnOptions`, including
-`signal?: AbortSignal` for cancellation. Live `execInSandbox` accepts
-`StateAwareStreamingOptions` and exposes cancellation through the returned
-process's `kill()` method. State-aware calls require experimental authorization
-only when the selected backend or policy is experimental. Windows Sandbox
-requires backend authorization; IsolationSession and WSLC do not.
+`validateProvision`, `validateStart`, `validateStop`, `validateDeprovision`,
+and `validateProcess` use native dry-run validation and return no execution
+result. There is no `dryRun` execution option or public attached-exec API.
+Captured and streaming execution are asynchronous. Live processes own wait,
+kill, and disposal.
+IsolationSession has stdin; WSLC currently provides stdout/stderr only.
 
 ### 6.3 Example
 
 ```typescript
 import {
-  provisionSandbox,
-  startSandbox,
-  execInSandbox,
-  execInSandboxAsync,
-  stopSandbox,
-  deprovisionSandbox,
-  IsolationSessionProvisionConfig,
-} from '@microsoft/mxc-sdk';
+  provisionContainer, startContainer, runInContainer,
+  stopContainer, deprovisionContainer,
+} from '@microsoft/mxc-sdk/v1';
 
-const provisionConfig: IsolationSessionProvisionConfig = {
-  // IsolationSession cannot filter or deny the container network, so provision
-  // requires this exact unrestricted posture.
+const { containerId } = await provisionContainer({
+  containment: 'isolation_session',
   network: {
     egress: { default: 'allow' },
     ingress: { default: 'allow', hostLoopback: 'allow' },
   },
-};
-
-// Provision — cross-cutting fields apply at this phase per the IS honor matrix (§10.3).
-const { sandboxId } = await provisionSandbox('isolation_session', provisionConfig);
-
-// Start — IsolationSession takes no per-phase config here.
-await startSandbox(sandboxId);
-
-// Exec — buffered convenience for short workloads.
-const result = await execInSandboxAsync(
-  sandboxId,
-  { process: { commandLine: 'echo hello', timeout: 5000 } },
-);
-console.log(result.stdout);  // "hello\n"
-
-// Exec — streaming for long-running workloads.
-const sandboxProcess = execInSandbox(
-  sandboxId,
-  { process: { commandLine: 'C:\\workspace\\agent.exe --watch' } },
-);
-sandboxProcess.standardOutput?.on('data', (chunk) => process.stdout.write(chunk));
-const { exitCode } = await sandboxProcess.waitAsync();
-console.log(`agent exit: ${exitCode}`);
-
-// Stop and deprovision when done. Stop and deprovision Configs carry only `version?`,
-// so callers typically pass `{}` (or omit when no options are needed).
-await stopSandbox(sandboxId);
-await deprovisionSandbox(sandboxId);
+});
+await startContainer(containerId);
+const result = await runInContainer(containerId, {
+  command: 'echo hello',
+  timeoutMs: 5000,
+});
+console.log(result.stdout);
+await stopContainer(containerId);
+await deprovisionContainer(containerId);
 ```
 
-### 6.4 Composition with the one-shot surface
+### 6.4 Creation and persistent execution
 
-`spawnSandbox` is the composition of the five state-aware phases run end-to-end. The two
-surfaces share `ContainmentBackend` and the wire-format-aligned interfaces in
-`sdk/node/src/types.ts` (`ProcessConfig`, `FilesystemConfig`, `NetworkConfig`, `UiConfig`).
-They differ in granularity and in how those interfaces are surfaced: one-shot bundles
-them inside `ContainerConfig` (which is itself produced from a `SandboxPolicy` by
-`createConfigFromPolicy`); state-aware uses them as field types inside the
-per-(backend, phase) Configs and does not involve `SandboxPolicy` at all. A backend
-that participates in both modes can be invoked through either surface; a backend that
-participates in only one returns `unsupported_phase` from the other (§8).
-
-State-aware-capable backends extend `ContainmentBackend` and `StateAwareContainmentBackend`
-the same way ephemeral backends extend `ContainmentBackend`. Cancellation via
-`AbortSignal` is supported on promise-returning state-aware methods (via
-`signal?: AbortSignal` on `SandboxSpawnOptions`). Live `execInSandbox` callers
-cancel through the returned process's `kill()` method. Detached /
-fire-and-forget exec (process outliving the SDK call) is deferred to v2 (§14).
+Creation and persistent execution share process-setting semantics but have
+different ownership lifetimes. Creation runs a `ContainerRequest` through the
+native engine. Persistent execution uses an already-provisioned identity and
+`ExecutionRequest`; starting or stopping that container is a separate operation.
 
 ### 6.5 Policy discovery
 
-The existing policy-discovery helpers (`getAvailableToolsPolicy`,
-`getUserProfilePolicy`, `getTemporaryFilesPolicy`) compose with state-aware Configs
-unchanged. They produce `FilesystemPolicyResult` fragments — `{ readonlyPaths,
-readwritePaths }` — whose shape matches `FilesystemConfig`'s readonly / readwrite path
-arrays. Consumers merge the fragments directly into the `filesystem` field of a
-state-aware Config for a backend that honors filesystem policy at provision (e.g.
-WindowsSandbox); IsolationSession rejects filesystem policy, so its provision Config
-omits it.
+`policy.filesystem.getAvailableToolsPolicy`,
+`policy.filesystem.getUserProfilePolicy`, and
+`policy.filesystem.getTemporaryFilesPolicy` are V1 filesystem-policy helpers. Their fragments
+compose into supported request filesystem fields. Native enforcement remains
+backend-specific.
+
+See the [Node SDK reference](../../sdk/node/README.md) for the supported
+consumer API and the backend guides for policy requirements.
 
 ## 7. Wire contract
 
@@ -630,7 +398,7 @@ interface OneShotRequest {
 
 interface ProvisionStateAwareRequest {
   phase: 'provision';                             // discriminator
-  version: StateAwareSchemaVersion;
+  version: '1.0.0';
   containment: StateAwareContainmentBackend;
   filesystem?: FilesystemConfig;                  // backend declares per-phase honor
   network?: NetworkConfig;                        // backend declares per-phase honor
@@ -645,7 +413,7 @@ interface ProvisionStateAwareRequest {
 
 interface NonProvisionStateAwareRequest {
   phase: 'start' | 'exec' | 'stop' | 'deprovision';  // discriminator
-  version: StateAwareSchemaVersion;
+  version: '1.0.0';
   sandboxId: SandboxId<StateAwareContainmentBackend>;  // backend resolved from prefix
   process?: ProcessConfig;                            // exec only
   filesystem?: FilesystemConfig;                      // backend declares per-phase honor
@@ -666,7 +434,7 @@ Top-level fields shared by both branches:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `version` | string | Yes | Exact backend-specific schema version. IsolationSession and WSLC use `0.9.0-alpha`; Windows Sandbox uses `0.10.0-alpha`. The SDK fills this field when the consumer Config omits it. |
+| `version` | string | Yes | Raw exact callers declare a registered version. High-level Rust, .NET, and Node v1 APIs do not expose this field and emit SDK-owned stable `1.0.0`. Windows Sandbox lifecycle is raw exact `1.1.0-alpha` only. |
 
 Backend-routing fields:
 
@@ -690,20 +458,20 @@ and pass them as command-line arguments:
 
 ```text
 wxc-exec.exe policy.json --operation provision
-wxc-exec.exe policy.json --operation start --sandbox-id iso:abc
-wxc-exec.exe policy.json --operation exec --sandbox-id iso:abc -- command arg
-wxc-exec.exe policy.json --operation stop --sandbox-id iso:abc
-wxc-exec.exe policy.json --operation deprovision --sandbox-id iso:abc
+wxc-exec.exe policy.json --operation start --container-id iso:abc
+wxc-exec.exe policy.json --operation exec --container-id iso:abc -- command arg
+wxc-exec.exe policy.json --operation stop --container-id iso:abc
+wxc-exec.exe policy.json --operation deprovision --container-id iso:abc
 ```
 
 Provision JSON still contains `containment`; later operations route from the
-`--sandbox-id` prefix. Supplying `phase` or `sandboxId` in CLI JSON is rejected rather
+`--container-id` prefix. Supplying `phase` or `sandboxId` in CLI JSON is rejected rather
 than overriding the command-line routing. Without `--operation`, `wxc-exec` accepts
 only one-shot JSON.
 
 `--operation` cannot be combined with delete or maintenance routing, including
 `--delete`, its `--containername` option, setup modes, probing, force-reclaim, or
-audit modes. Lifecycle identity comes only from `--sandbox-id`; conflicting options
+audit modes. Lifecycle identity comes only from `--container-id`; conflicting options
 are rejected rather than ignored.
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
@@ -889,22 +657,20 @@ arguments.
 #### Phase 1 — provision
 
 ```typescript
-const config: IsolationSessionProvisionConfig = {
+const config: ProvisionRequest<'isolation_session'> = {
+  containment: 'isolation_session',
   network: {
     egress: { default: 'allow' },
     ingress: { default: 'allow', hostLoopback: 'allow' },
   },
 };
-const { sandboxId } = await provisionSandbox(
-  'isolation_session',
-  config,
-);
+const { containerId: sandboxId } = await provisionContainer(config);
 // sandboxId = "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 ```
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "1.0.0",
   "phase": "provision",
   "containment": "isolation_session",
   "network": {
@@ -937,7 +703,7 @@ backend.provision(&request, Some(provision_config))
 #### Phase 2 — start
 
 ```typescript
-await startSandbox(
+await startContainer(
   sandboxId,
   undefined,
 );
@@ -945,14 +711,14 @@ await startSandbox(
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "1.0.0",
   "phase": "start",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 Direct executor routing: remove `phase` and `sandboxId`, then pass
-`--operation start --sandbox-id <id>`.
+`--operation start --container-id <id>`.
 
 ```rust
 // `start` carries no per-phase config for this backend — its StartConfig is
@@ -973,16 +739,16 @@ backend.start(
 #### Phase 3 — exec (buffered)
 
 ```typescript
-const r = await execInSandboxAsync(
+const r = await runInContainer(
   sandboxId,
-  { process: { commandLine: 'echo hello', timeout: 5000 } },
+  { command: 'echo hello', timeoutMs: 5000 },
 );
 // r = { stdout: "hello\n", stderr: "", exitCode: 0 }
 ```
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "1.0.0",
   "phase": "exec",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
   "process": { "commandLine": "echo hello", "timeout": 5000 }
@@ -990,7 +756,7 @@ const r = await execInSandboxAsync(
 ```
 
 Direct executor routing: remove `phase` and `sandboxId`, then pass
-`--operation exec --sandbox-id <id>`.
+`--operation exec --container-id <id>`.
 
 ```rust
 // Parser populates request.script_code = "echo hello", request.script_timeout =
@@ -1011,19 +777,19 @@ native process streams and completion result.
 #### Phase 4 — stop
 
 ```typescript
-await stopSandbox(sandboxId, {});
+await stopContainer(sandboxId, {});
 ```
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "1.0.0",
   "phase": "stop",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 Direct executor routing: remove `phase` and `sandboxId`, then pass
-`--operation stop --sandbox-id <id>`.
+`--operation stop --container-id <id>`.
 
 ```rust
 backend.stop("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
@@ -1037,19 +803,19 @@ backend.stop("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", 
 #### Phase 5 — deprovision
 
 ```typescript
-await deprovisionSandbox(sandboxId, {});
+await deprovisionContainer(sandboxId, {});
 ```
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "1.0.0",
   "phase": "deprovision",
   "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 Direct executor routing: remove `phase` and `sandboxId`, then pass
-`--operation deprovision --sandbox-id <id>`.
+`--operation deprovision --container-id <id>`.
 
 ```rust
 backend.deprovision("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
@@ -1065,12 +831,13 @@ backend.deprovision("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTI
 The SDK places backend-specific config under the backend's permanent top-level
 section when serialising state-aware calls — consumers write `appId` directly on the
 `IsolationSessionProvisionConfig`, the SDK builds the nested wire form. Cross-cutting
-fields (`filesystem` / `network` / `runtimeConfig` / `ui`) on a per-(backend, phase) Config map directly
-to top-level wire fields — they are already wire-format-aligned in the Config, so the
-SDK passes them through unchanged. Cross-backend exec fields (`commandLine`, `cwd`,
+fields (`filesystem` / `network` / `runtimeConfig` / `ui`) map to top-level wire
+fields. Existing-exec proxy authoring is intentionally grouped at
+`network.runtimeConfig`; the SDK lifts it to the wire-level `runtimeConfig`.
+Cross-backend exec fields (`commandLine`, `cwd`,
 `env`, `timeout`) flow through the top-level `process` block. The typed SDK requires
 `commandLine`. The executor CLI supplies operation and existing sandbox identity through
-`--operation` and `--sandbox-id`; it can complete an `exec` template from arguments
+`--operation` and `--container-id`; it can complete an `exec` template from arguments
 after `--` by setting `process.commandLine` before parsing. Trailing commands are
 rejected for every non-exec operation. The Node SDK receives owned response data and
 native process streams through `mxc_ffi`. Responses unwrap any `result` envelope at the
@@ -1092,7 +859,7 @@ other state-aware backend, so caller error-handling code is portable across back
 | `malformed_request` | Structural request error: malformed JSON, missing required field, unknown or phase-inappropriate field, recursively unknown backend-specific field, or invalid phase-specific shape |
 | `unsupported_containment` | The backend named by `containment` (provision) or implied by a syntactically valid `sandboxId` prefix (non-provision) is not recognised in this build. The TypeScript SDK checks its closed prefix union before dispatch and instead throws `malformed_id`; the typed Rust SDK keeps ids opaque and therefore returns `unsupported_containment` from dispatch, matching raw FFI requests. See §6.4. |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
-| `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
+| `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped), or the backend is experimental and the caller did not enable experimental features |
 | `malformed_id` | The `sandboxId` is structurally invalid or has a recognised prefix but does not deserialize into the backend's native form. The TypeScript SDK also uses this code for a prefix outside its closed `StateAwareContainmentBackend` union; typed Rust and raw FFI calls classify a syntactically valid unknown prefix as `unsupported_containment`. |
 | `stale_id` | The `sandboxId` deserialised but refers to a resource the backend no longer recognises |
 | `not_provisioned` | Phase requires a provisioned sandbox; none provided, or the id is in a pre-provision state |
@@ -1157,11 +924,12 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Exact request contracts and the shared execution model
 
-`src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
+`src/mxc-sdk/src/tools/mxc_common/config_deserialize.rs` performs path-aware JSON
 deserialization into the exact contract selected by version, phase, and
-provision containment. Published v0.9 and development v0.10 select one-shot,
-`provision`, `start`, `exec`, `stop`, or `deprovision`; provision then selects
-the backend-specific closed root registered by that exact contract.
+provision containment. Published v0.9 and v1.0 plus development v1.1 select
+one-shot, `provision`, `start`, `exec`, `stop`, or `deprovision`; provision
+then selects the backend-specific closed root registered by that exact
+contract.
 
 The exact contract is the JSON trust boundary. Its recursively closed request
 types enforce required declarations, phase-inappropriate fields,
@@ -1173,12 +941,14 @@ payloads directly to runtime configurations, while common fields reuse
 internal common parser and executable equivalence harness have been removed.
 
 The Rust SDK also has a direct typed ingress lane. High-level lifecycle calls
-construct `SdkStateAwareInput` from `ProvisionRequest`,
-`LifecycleRequest`, or `ExecRequest`. An opaque `SandboxId` is passed separately
-for operations on an existing sandbox, and authorization, telemetry preference,
-and other invocation controls are carried by `OperationOptions`. The combined
-input then normalizes through the same private `CommonRequestIR` and
-`StateAwareInput` seam:
+construct `SdkStateAwareInput` from `ProvisionRequest` or `ExecutionRequest`. An
+opaque `ContainerId` is passed separately for operations on an existing container;
+start, stop, and deprovision require no additional policy request.
+Authorization, telemetry preference, and other invocation controls are carried
+by the operation-specific `ProvisionOptions`, `StartOptions`, `StopOptions`,
+`DeprovisionOptions`, and execution options. The high-level v1 SDK supplies its package-owned exact
+`1.0.0` target, and the combined input then normalizes through the same private
+`CommonRequestIR` and `StateAwareInput` seam:
 
 ```text
 typed Rust request
@@ -1190,7 +960,7 @@ typed Rust request
 ```
 
 This lane does not serialize or parse JSON and does not invoke an exact-contract
-adapter. Its selected version still controls compatibility semantics, but the
+adapter. The SDK-owned `1.0.0` target controls compatibility semantics, but the
 normalized request has no `source_contract` because no external exact contract
 produced it. Raw callers follow the separate exact path:
 
@@ -1363,7 +1133,7 @@ pub trait StatefulSandboxBackend {
     /// workload is arbitrary and may not be idempotent, so a refusal issued
     /// after the fact reports "unsupported" for something that has already
     /// taken effect and whose output has already gone somewhere the caller
-    /// never asked for. `wxc_common::state_aware_backend::unsupported_piped_exec`
+    /// never asked for. `mxc_common::state_aware_backend::unsupported_piped_exec`
     /// is the shared refusal.
     fn exec(
         &mut self,
@@ -1497,7 +1267,7 @@ pub enum ExecOutcome {
 ```
 
 Trait methods take `&ExecutionRequest` (the existing one-shot domain model from
-`wxc_common::models`, populated by the same `normalize_common_request_ir`
+`mxc_common::models`, populated by the same `normalize_common_request_ir`
 parser path that serves one-shot calls), plus `sandbox_id` for non-provision
 phases and an optional backend-specific typed config
 (`Self::<Phase>Config`). Cross-cutting policy fields
@@ -1514,7 +1284,7 @@ descriptor on Linux. The executor's outer driver reads from `ExecHandle.stdout` 
 `stderr`, awaits exit via `waiter`, and calls `terminator` to tear the exec down.
 It does **not** write to `stdin`.
 
-`mint_random_token()` is a small helper in `wxc_common` that produces a short hex string
+`mint_random_token()` is a small helper in `mxc_common` that produces a short hex string
 (mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
 default `provision` body to construct synthetic ids for stateless-underneath backends.
 
@@ -1682,7 +1452,7 @@ registered prefix table. Mismatches surface as `unsupported_containment` (unreco
 prefix) or `malformed_id` (no prefix structure) per §8.
 
 `bind_isolation_session`, `bind_windows_sandbox`, and `bind_wslc` live in
-`wxc_common::state_aware_binding`, without backend crate dependencies. The engine
+`mxc_common::state_aware_binding`, without backend crate dependencies. The engine
 chooses a concrete backend after its existing routing/opt-in/availability gates.
 An incompatible payload/backend pair is `malformed_request`, never `None`.
 Binding is a static conversion, not JSON serialization, reparsing, or downcasting.
@@ -1755,16 +1525,15 @@ agent user").
 ### 10.2 Backend-side config typing
 
 A state-aware backend declares runtime configuration as trait associated types.
-IsolationSession and WSLC provision types live in `wxc_common::models`, keeping
+IsolationSession and WSLC provision types live in `mxc_common::models`, keeping
 neutral operations and binding independent of backend crates. Exact contract
 types separately define the JSON shape under each permanent top-level
 `<backend>.<phase>` section; adapters map their fields exhaustively to runtime
 values. Dispatch does not require `Deserialize`. The
 TypeScript type exported from the SDK package is the consumer-facing per-(backend,
-phase) Config from §6.1; it is a strict superset of the wire shape, adding
-`version?` (for an optional exact schema declaration) and the cross-cutting `filesystem` /
-`network` / `ui` fields in phases where the backend's policy honor matrix marks them
-as `applied` (§10.3).
+phase) Config from §6.1; it is a strict superset of the backend-specific wire
+shape, adding the cross-cutting `filesystem` / `network` / `ui` fields in phases
+where the backend's policy honor matrix marks them as `applied` (§10.3).
 
 ```rust
 #[derive(Debug, Default)]
@@ -1775,7 +1544,6 @@ pub struct IsolationSessionProvisionConfig {
 
 ```typescript
 interface IsolationSessionProvisionConfig {
-  version?: StateAwareSchemaVersion;
   appId?: string;
   network: {
     egress: { default: 'allow' };
@@ -1784,14 +1552,14 @@ interface IsolationSessionProvisionConfig {
 }
 ```
 
-The TypeScript Config carries `version` (which the SDK serialises to the top-level
-wire `version` field) plus any cross-cutting fields the matrix marks as honored for
-that phase. IsolationSession's required all-allow posture is a top-level network
-policy. The Rust struct receives the `appId` from the wire's
+The TypeScript Config carries any cross-cutting fields the matrix marks as
+honored for that phase. The SDK independently supplies its exact `1.0.0`
+target in the top-level wire `version` field. IsolationSession's required
+all-allow posture is a top-level network policy. The Rust struct receives the `appId` from the wire's
 `isolationSession.provision` block through exact adaptation and checked
 binding to `Self::ProvisionConfig` (§9.3), while the network policy remains on the
 execution request. The SDK is responsible for splitting
-the consumer Config into top-level common fields (cross-cutting, `version`) and
+the consumer Config into top-level common fields and
 the permanent backend section; Rust sees only the post-split shape.
 
 `provision` is used here because it is IsolationSession's **only** phase with a
@@ -1822,7 +1590,8 @@ session isolates the *host's* UI from contained code but does not deny that code
 capabilities, so no `ui` posture would be truthful and the section is refused rather
 than silently dropped. An omitted `ui` is accepted and applies no restriction.
 
-For WindowsSandbox, filesystem policy (readwrite/readonly/denied HOST paths) is
+For raw exact WindowsSandbox lifecycle requests, filesystem policy
+(readwrite/readonly/denied HOST paths) is
 applied at provision and frozen for the life of the sandbox; later phases reject it.
 `network` and `ui` are not yet honored at any phase (network isolation is enforced
 unconditionally by the in-guest agent).
@@ -1900,20 +1669,18 @@ Validation runs before the phase method; failures short-circuit and surface as t
 ### 11.3 Define typed `*Config` interfaces in the SDK
 
 For each of the five lifecycle phases, add a typed TypeScript interface to
-`@microsoft/mxc-sdk`. Each Config carries only the fields valid for that backend at
-that phase: `version?` always, the cross-cutting `filesystem` / `network` / `ui`
+`@microsoft/mxc-sdk/v1`. Each Config carries only the fields valid for that
+backend at that phase: the cross-cutting `filesystem` / `network` / `ui`
 fields in the phases where the backend honors them (§10.3), and any backend-specific
 fields. Phases with no backend-specific or cross-cutting fields declare a Config
-carrying only `version?`. Example shape (mirroring §6.1):
+carrying only optional telemetry. Example shape (mirroring §6.1):
 
 ```typescript
 interface MyBackendProvisionConfig {
-  version?: StateAwareSchemaVersion;
   // cross-cutting fields for phases where MyBackend's matrix marks `applied`
 }
 
 interface MyBackendStartConfig {
-  version?: StateAwareSchemaVersion;
   // backend-specific start fields
 }
 
@@ -2088,7 +1855,7 @@ calls, and the executor CLI accepts them without `--experimental`. For example, 
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "1.0.0",
   "phase": "provision",
   "containment": "isolation_session",
   "network": {
@@ -2119,10 +1886,10 @@ path forward.
 - **Detached or long-running execs.** A model where `exec` returns a process id and
   the spawned process outlives the SDK call. The JS-async fire-and-forget pattern
   (don't `await`
-  `execInSandboxAsync`) IS supported via the existing functions — the spawned process
+  `runInContainer`) IS supported via the existing functions — the spawned process
   is tethered to the SDK consumer's lifetime, but the caller can move on without
   awaiting. True OS-level detachment (process owned by the OS service, independent of any
-  caller) needs a different SDK contract (e.g., a future `execInSandboxDetached`
+  caller) needs a different SDK contract (e.g., a future `spawnInContainerDetached`
   returning a process id, no waiting for exit). Deferred to a later version with that
   dedicated function.
 - **Additional lifecycle stages** (snapshot, suspend, attach, restore). Backends with

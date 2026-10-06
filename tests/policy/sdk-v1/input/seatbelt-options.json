@@ -1,0 +1,15 @@
+{
+  "description": "Explicit Seatbelt settings.",
+  "policy": {},
+  "containment": {
+    "kind": "seatbelt",
+    "guiAccess": true,
+    "nestedPty": false,
+    "keychainAccess": true,
+    "extraMachLookups": [
+      "com.example.service"
+    ]
+  },
+  "command": "echo golden",
+  "containerName": "golden-seatbelt-options"
+}

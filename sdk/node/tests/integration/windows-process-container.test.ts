@@ -8,7 +8,6 @@ import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { SandboxPolicy } from '@microsoft/mxc-sdk';
 import {
   sdk,
   supportedVersions,
@@ -19,6 +18,13 @@ import {
   pythonCommand,
   pythonSkipReason,
 } from './test-helpers.js';
+
+const proxyOriginUrl = process.env.MXC_TEST_PROXY_ORIGIN_URL;
+const proxyExpectedBody = process.env.MXC_TEST_PROXY_EXPECTED_BODY;
+const proxySkipReason = sandboxSkipReason ??
+  (process.env.MXC_ENABLE_PROCESSCONTAINER_PROXY_TESTS === '1'
+    ? (proxyOriginUrl && proxyExpectedBody ? undefined : 'Set MXC_TEST_PROXY_ORIGIN_URL and MXC_TEST_PROXY_EXPECTED_BODY')
+    : 'Set MXC_ENABLE_PROCESSCONTAINER_PROXY_TESTS=1 to run ProcessContainer proxy tests');
 
 for (const schemaVersion of supportedVersions) {
 describe(`Windows Process Container (schema ${schemaVersion})`, {
@@ -33,10 +39,56 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     }
   });
 
+  for (const [name, operation] of [['run', sdk.run]] as const) {
+    it(`public ${name} captures output and the workload exit code`, { skip: sandboxSkipReason }, async () => {
+      const result = await operation({
+        containment: { type: 'processcontainer' },
+        command: 'cmd.exe /c "echo PUBLIC_RUN_OK & echo PUBLIC_RUN_ERROR 1>&2 & exit /b 7"',
+        timeoutMs: 30000,
+      });
+      assert.strictEqual(result.exitCode, 7);
+      assert.strictEqual(result.timedOut, false);
+      assert.ok(result.stdout.includes('PUBLIC_RUN_OK'));
+      assert.ok(result.stderr.includes('PUBLIC_RUN_ERROR'));
+      assert.ok(Array.isArray(result.warnings));
+    });
+  }
+
+  for (const [name, operation] of [['spawn', sdk.spawn]] as const) {
+    it(`public ${name} returns an SDK process with live standard streams`, { skip: sandboxSkipReason }, async () => {
+      const handle = await operation({
+        containment: { type: 'processcontainer' },
+        command: 'cmd.exe /c "echo PUBLIC_SPAWN_OK & echo PUBLIC_SPAWN_ERROR 1>&2 & exit /b 9"',
+        timeoutMs: 30000,
+      });
+      try {
+        const stdout = handle.standardOutput;
+        const stderr = handle.standardError;
+        assert.ok(stdout);
+        assert.ok(stderr);
+        const read = async (stream: NodeJS.ReadableStream): Promise<string> => {
+          let text = '';
+          for await (const chunk of stream) text += chunk.toString();
+          return text;
+        };
+        const output = read(stdout);
+        const error = read(stderr);
+        const result = await handle.wait();
+        assert.strictEqual(result.exitCode, 9);
+        assert.strictEqual(result.timedOut, false);
+        assert.ok((await output).includes('PUBLIC_SPAWN_OK'));
+        assert.ok((await error).includes('PUBLIC_SPAWN_ERROR'));
+        assert.ok(Array.isArray(handle.warnings));
+      } finally {
+        handle.dispose();
+      }
+    });
+  }
+
   it('should execute cmd.exe in process container', { skip: sandboxSkipReason }, async () => {
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       'cmd.exe /c echo Container test successful',
-      { version: schemaVersion.raw },
+      {},
       {},
       undefined,
       `test-1-${schemaVersion}`,
@@ -46,9 +98,9 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
   });
 
   it('should execute powershell 5.1 in process container', { skip: sandboxSkipReason }, async () => {
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       "powershell.exe -NoProfile -Command Write-Output 'PowerShell test successful'",
-      { version: schemaVersion.raw, ui: { allowWindows: true } },
+      { ui: { disable: false } },
       {},
       undefined,
       `test-2-${schemaVersion}`,
@@ -58,8 +110,8 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
   });
 
   it('should execute python in process container', { skip: sandboxSkipReason ?? pythonSkipReason }, async () => {
-    const policy = withToolPaths({ version: schemaVersion.raw, ui: { allowWindows: true } }) as SandboxPolicy;
-    const result = await sdk.spawnSandboxAsync(
+    const policy = withToolPaths({ ui: { disable: false } });
+    const result = await sdk.runRequestForTest(
       `${pythonCommand} -c "print('Python test successful')"`,
       policy,
       {},
@@ -76,11 +128,10 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const scriptFile = path.join(tempDir, 'write_test.py');
     fs.writeFileSync(scriptFile, `f = open(r'${testFile}', 'w')\nf.write('hello')\nf.close()\nprint('WRITE_OK')\n`);
     const policy = withToolPaths({
-      version: schemaVersion.raw,
-      ui: { allowWindows: true },
+      ui: { disable: false },
       filesystem: { readwritePaths: [tempDir] },
-    }) as SandboxPolicy;
-    const result = await sdk.spawnSandboxAsync(
+    });
+    const result = await sdk.runRequestForTest(
       `${pythonCommand} ${scriptFile}`,
       policy,
       {},
@@ -97,10 +148,9 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     fs.writeFileSync(path.join(tempDir, 'input.txt'), 'readonly test data');
     const inputFile = path.join(tempDir, 'input.txt');
     const policy = withToolPaths({
-      version: schemaVersion.raw,
       filesystem: { readonlyPaths: [tempDir] },
-    }) as SandboxPolicy;
-    const result = await sdk.spawnSandboxAsync(
+    });
+    const result = await sdk.runRequestForTest(
       `cmd.exe /c type ${inputFile}`,
       policy,
       {},
@@ -112,9 +162,9 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
   });
 
   it('should launch basic process container with valid version', { skip: sandboxSkipReason }, async () => {
-    const result = await sdk.spawnSandboxAsync(
+    const result = await sdk.runRequestForTest(
       'cmd.exe /c echo version ok',
-      { version: schemaVersion.raw },
+      {},
       {},
       undefined,
       `test-ver-${schemaVersion}`,
@@ -123,7 +173,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     assert.ok(result.stdout.includes('version ok'));
   });
 
-  describe('proxy end-to-end', { skip: sandboxSkipReason }, () => {
+  describe('proxy end-to-end', { skip: proxySkipReason }, () => {
     let proxyProcess: ChildProcess | null = null;
     let originalMaxListeners: number;
 
@@ -144,65 +194,40 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
       }
     });
 
-    it('should route traffic through built-in proxy', async () => {
-      tempDir = createTempDir('mxc-proxy-test');
-      const policy = withToolPaths({
-        version: schemaVersion.raw,
-        network: { allowOutbound: true, proxy: { builtinTestServer: true } },
-        ui: { allowWindows: true },
-      }) as SandboxPolicy;
-      const script =
-        `powershell.exe -NoProfile -Command "` +
-        `$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1; ` +
-        `$h.Open('GET','https://api.github.com/zen',$false); ` +
-        `$h.Send(); ` +
-        `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
-      const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(
-        (resolve) => {
-          const sandboxProcess = sdk.spawnSandbox(
-            script,
-            policy,
-            { debug: true, allowTestingFeatures: true },
-            undefined,
-            `proxy-builtin-${schemaVersion}`,
-          );
-          let stdout = '';
-          sandboxProcess.onData((data: string) => { stdout += data; });
-          sandboxProcess.onExit(({ exitCode }: { exitCode: number }) => {
-            resolve({ stdout, stderr: '', exitCode });
-          });
-        },
-      );
+    for (const [name, operation] of [['run', sdk.run]] as const) {
+      it(`public ${name} routes traffic through an unpackaged proxy`, async () => {
+        assert.ok(proxyExpectedBody);
+        tempDir = createTempDir('mxc-proxy-test');
+        const { port, proxyProcess: proc } = startTestProxy(tempDir);
+        proxyProcess = proc;
 
-      assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
-      assert.ok(result.stdout.includes('PROXY_RESPONSE:'));
-      assert.ok(result.stdout.includes('Proxy policy active'));
-    });
+        const script =
+          `powershell.exe -NoProfile -Command "` +
+          `$ErrorActionPreference = 'Stop'; ` +
+          `$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1; ` +
+          `$h.SetTimeouts(5000,5000,5000,5000); ` +
+          `$h.Open('GET','${proxyOriginUrl}',$false); ` +
+          `$h.Send(); ` +
+          `if ($h.Status -ne 200) { throw ('HTTP status ' + $h.Status) }; ` +
+          `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
+        const result = await operation({
+          command: script,
+          containment: { type: 'processcontainer' },
+          ui: { disable: false },
+          timeoutMs: 30000,
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'allow', hostLoopback: 'allow' },
+            runtimeConfig: { networkProxy: `http://127.0.0.1:${port}` },
+          },
+        });
 
-    it('should route traffic through external proxy', async () => {
-      tempDir = createTempDir('mxc-proxy-test');
-      const { port, proxyProcess: proc } = startTestProxy(tempDir);
-      proxyProcess = proc;
-
-      const policy = withToolPaths({
-        version: schemaVersion.raw,
-        network: { allowOutbound: true, proxy: { localhost: port } },
-        ui: { allowWindows: true },
-      }) as SandboxPolicy;
-      const script =
-        `powershell.exe -NoProfile -Command "` +
-        `$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1; ` +
-        `$h.Open('GET','https://api.github.com/zen',$false); ` +
-        `$h.Send(); ` +
-        `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
-      const result = await sdk.spawnSandboxAsync(
-        script, policy, {}, undefined, `proxy-ext-${schemaVersion}`,
-      );
-
-      assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
-      assert.ok(result.stdout.includes('PROXY_RESPONSE:'));
-      assert.ok(result.stdout.includes('Proxy policy active'));
-    });
+        assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
+        assert.strictEqual(result.timedOut, false);
+        assert.ok(result.stdout.includes('PROXY_RESPONSE: '), result.stdout);
+        assert.ok(result.stdout.includes(proxyExpectedBody), result.stdout);
+      });
+    }
   });
 });
 }

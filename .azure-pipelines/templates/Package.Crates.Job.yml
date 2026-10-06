@@ -1,13 +1,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# Packages mxc-sdk and its internal dependencies into .crate files using
-# `cargo package --no-verify`. The publish template always performs Cargo's
-# crates.io dry run before a production ESRP release.
+# Packages mxc-sdk into a .crate file using `cargo package --no-verify`. The
+# publish template always performs Cargo's crates.io dry run before a
+# production ESRP release.
 #
 # The steps hold no logic: Invoke-CratePackage.ps1 does the packaging and
-# derives the crate list from the workspace, so adding a crate needs no edit
-# here, and the same command reproduces a leg locally.
+# validates the single published crate, and the same command reproduces a leg
+# locally.
 
 parameters:
   - name: cratesArtifactName
@@ -43,7 +43,7 @@ jobs:
       - task: 1ES.Build.Rust.Setup@1
 
       - task: PowerShell@2
-        displayName: Package mxc-sdk and dependencies
+        displayName: Package mxc-sdk
         inputs:
           targetType: filePath
           filePath: $(Build.SourcesDirectory)/scripts/ci/Invoke-CratePackage.ps1

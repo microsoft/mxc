@@ -11,7 +11,7 @@
 
 .DESCRIPTION
     Each test invokes wxc-exec.exe with lifecycle routing in --operation /
-    --sandbox-id and a base64-encoded phase-specific request payload.
+    --container-id and a base64-encoded phase-specific request payload.
     Provision / start / stop / deprovision return a JSON envelope on stdout
     (asserted on `result` / `error`); a successful exec streams the script's
     own stdout (relayed from the daemon) and exits with the script's exit code.
@@ -23,7 +23,8 @@
     exits on its own.
 
     Requires: Windows 11, WSL2, the WSLC SDK runtime (wslcsdk.dll staged next
-    to the binaries), pre-pulled images, and a wxc-exec.exe + wxc-wslc-daemon.exe
+    to the binaries), registry access or an already-cached alpine:latest, and a
+    wxc-exec.exe + wxc-wslc-daemon.exe
     built with `--features wslc`. Cannot run in GitHub Actions CI.
 
     Prerequisite probes (skip, not fail, if missing):
@@ -48,7 +49,8 @@
     Probe the debug target dir and pass --debug to wxc-exec.
 
 .PARAMETER SkipSetup
-    Skip the WSLC image pre-pull preflight (assume the cache is warm).
+    Skip the image-cache warming preflight. The provision fixtures declare deny
+    egress, which refuses a registry pull, so the cache has to be warm already.
 
 .EXAMPLE
     .\run_wslc_state_aware_tests.ps1
@@ -102,7 +104,7 @@ Write-Host "Binary: $WxcExec`n" -ForegroundColor Gray
 $DaemonExe = Join-Path (Split-Path -Parent $WxcExec) "wxc-wslc-daemon.exe"
 if (-not (Test-Path $DaemonExe)) {
     Write-Host "SKIPPED: wxc-wslc-daemon.exe not found next to wxc-exec.exe ($DaemonExe)" -ForegroundColor Yellow
-    Write-Host "  Build it with: cargo build --features wslc $(if (-not $Debug) { '--release ' })--target $Target -p wxc-wslc-daemon" -ForegroundColor Yellow
+    Write-Host "  Build it with: cargo build -p mxc-sdk --bin wxc-wslc-daemon --features wslc $(if (-not $Debug) { '--release ' })--target $Target" -ForegroundColor Yellow
     exit 0
 }
 $DaemonProcName = "wxc-wslc-daemon"
@@ -167,7 +169,7 @@ function ConvertTo-StateAwareInvocation {
     } elseif ($Request) {
         $requestObject = $Request.Clone()
         if (-not $Request.ContainsKey('version')) {
-            $requestObject['version'] = '0.9.0-alpha'
+            $requestObject['version'] = '1.0.0'
         }
     } else {
         throw "State-aware invocation requires either -Request or -ConfigFile"
@@ -241,7 +243,7 @@ function Invoke-StateAware {
 
     $argList = @('--operation', $invocation.Operation)
     if ($invocation.Operation -ne 'provision') {
-        $argList += @('--sandbox-id', $invocation.SandboxId)
+        $argList += @('--container-id', $invocation.SandboxId)
     }
     if ($DryRun) { $argList += '--dry-run' }
     if ($Debug) { $argList += '--debug' }
@@ -297,7 +299,7 @@ function Invoke-StateAwareStreaming {
 
     $argList = @('--operation', $invocation.Operation)
     if ($invocation.Operation -ne 'provision') {
-        $argList += @('--sandbox-id', $invocation.SandboxId)
+        $argList += @('--container-id', $invocation.SandboxId)
     }
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $invocation.ConfigBase64)
