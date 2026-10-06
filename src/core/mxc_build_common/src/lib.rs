@@ -4,9 +4,9 @@
 //! Shared build-time helpers for embedding Windows VersionInfo metadata in MXC binaries.
 //!
 //! Used as a `[build-dependencies]` crate — call [`embed_version_info`] from each
-//! binary crate's `build.rs` to stamp `ProductName`, `FileDescription`,
+//! executable or library crate's `build.rs` to stamp `ProductName`, `FileDescription`,
 //! `OriginalFilename`, and `ProductVersion` (with the git commit hash) into the
-//! resulting PE executable.
+//! resulting PE file.
 
 use std::path::Path;
 use std::process::Command;
@@ -46,7 +46,11 @@ fn embed_version_info_windows(file_description: &str, original_filename: &str) {
     let commit = git_short_hash();
 
     let mut resource = winresource::WindowsResource::new();
+    if original_filename.to_ascii_lowercase().ends_with(".dll") {
+        resource.set_version_info(winresource::VersionInfo::FILETYPE, 2);
+    }
     resource
+        .set("CompanyName", "Microsoft Corporation")
         .set("ProductName", PRODUCT_NAME)
         .set("FileDescription", file_description)
         .set("OriginalFilename", original_filename)

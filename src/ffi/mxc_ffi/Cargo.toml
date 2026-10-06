@@ -49,4 +49,5 @@ name = "attached_console_ffi"
 required-features = ["isolation_session"]
 
 [build-dependencies]
+mxc_build_common.workspace = true
 csbindgen = { version = "1", optional = true }

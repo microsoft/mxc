@@ -121,7 +121,7 @@ reasons:
 | Axis | What it describes | Where it lives | Who decides it |
 |---|---|---|---|
 | **Schema (config) version** | The *shape* of the config JSON — which fields exist and what values they accept. | The `version` field in raw configuration; high-level SDK policy omits it. | The raw-config author or, for high-level APIs, the SDK package. |
-| **Product version** | The MXC *binaries and npm package* that do the work. | Rust workspace version (`src/Cargo.toml`) + `sdk/package.json`. | The release. |
+| **Product version** | The MXC binaries and Rust, Node, and .NET SDK packages. | Rust workspace version (`src/Cargo.toml`), `sdk/node/package.json`, and the .NET SDK project `<Version>`. | The release. |
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
 - **Schema version** selects an exact registered contract at the trust boundary:
@@ -135,6 +135,10 @@ reasons:
   minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
   schema version; a binary release can fix bugs without changing the config shape.
+  The .NET packaging project passes the release's `PackageVersion` into its
+  nuspec; the SDK project's `<Version>` supplies its managed assembly version.
+  Windows binaries, including `mxc_ffi.dll`, embed the product version and source
+  commit in their version-resource metadata.
   `scripts/check-version-sync.js` keeps the Rust workspace and npm versions in
   step, and `scripts/versioning/check-schema-versions.js` keeps the schema-version
   constants in step — but the two axes are not tied to each other.

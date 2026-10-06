@@ -14,6 +14,8 @@
 //! the expected entry points are produced.
 
 fn main() {
+    mxc_build_common::embed_version_info("MXC native SDK library", "mxc_ffi.dll");
+
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/error_detail.rs");
     println!("cargo:rerun-if-changed=src/pty.rs");
