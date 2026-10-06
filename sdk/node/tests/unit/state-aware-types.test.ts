@@ -32,13 +32,13 @@ import { backendForSandboxId } from '../../src/state-aware-helper.js';
 // passing test for each scenario.
 
 describe('ContainerId<C> brand', () => {
-  it('exports sync captured execution with piped-backend and request restrictions', async () => {
+  it('exports captured execution with piped-backend and request restrictions', async () => {
     const { runInContainer } = await import('../../src/v1/index.js');
     const isolation = 'iso:abc' as ContainerId<'isolation_session'>;
     const wslc = 'wslc:abc' as ContainerId<'wslc'>;
-    const valid = () => {
+    const valid = async () => {
       const result = runInContainer(isolation, { command: 'echo' });
-      const exitCode: number = result.exitCode;
+      const exitCode: number = (await result).exitCode;
       runInContainer(wslc, { command: 'echo', network: {} });
       return exitCode;
     };

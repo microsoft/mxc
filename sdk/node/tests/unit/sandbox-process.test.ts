@@ -172,7 +172,7 @@ describe('native sandbox process', () => {
     const driver = new FakeDriver();
     const proc = new MxcProcess(driver);
     const inputEnded = once(driver.standardInput, 'finish');
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
 
     driver.standardOutput.end(Buffer.alloc(128 * 1024));
     driver.standardError.end(Buffer.alloc(128 * 1024));
@@ -192,7 +192,7 @@ describe('native sandbox process', () => {
     driver.metadata = { captureDenialsError: { message: 'native failure', etlPath: 'trace.etl' } };
     driver.complete(9, true);
 
-    assert.deepStrictEqual(await proc.waitAsync(), {
+    assert.deepStrictEqual(await proc.wait(), {
       exitCode: 9,
       timedOut: true,
     });
@@ -211,7 +211,7 @@ describe('native sandbox process', () => {
     driver.standardInput.emit('error', error);
     driver.complete(7);
 
-    assert.deepStrictEqual(await proc.waitAsync(), {
+    assert.deepStrictEqual(await proc.wait(), {
       exitCode: 7,
       timedOut: false,
     });
@@ -225,7 +225,7 @@ describe('native sandbox process', () => {
     driver.standardInput.emit('error', error);
     driver.complete(7);
 
-    assert.deepStrictEqual(await proc.waitAsync(), {
+    assert.deepStrictEqual(await proc.wait(), {
       exitCode: 7,
       timedOut: false,
     });
@@ -238,7 +238,7 @@ describe('native sandbox process', () => {
 
     driver.standardInput.emit('error', error);
 
-    await assert.rejects(proc.waitAsync(), /stdin failed/);
+    await assert.rejects(proc.wait(), /stdin failed/);
   });
 
   it('does not destroy caller-owned output when the process exits', async () => {
@@ -249,7 +249,7 @@ describe('native sandbox process', () => {
     driver.standardOutput.write('trailing output');
     driver.complete();
 
-    await proc.waitAsync();
+    await proc.wait();
 
     assert.strictEqual(output.destroyed, false);
     assert.strictEqual(output.read()?.toString(), 'trailing output');
@@ -271,7 +271,7 @@ describe('native sandbox process', () => {
     const proc = new MxcProcess(driver);
     driver.pollError = new Error('poll failed');
 
-    await assert.rejects(proc.waitAsync(), /poll failed/);
+    await assert.rejects(proc.wait(), /poll failed/);
     assert.strictEqual(driver.waitCount, 0);
     assert.strictEqual(driver.freeCount, 1);
   });
@@ -279,7 +279,7 @@ describe('native sandbox process', () => {
   it('disposes streams and native lifecycle ownership exactly once', async () => {
     const driver = new FakeDriver();
     const proc = new MxcProcess(driver);
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
 
     proc.dispose();
     proc.dispose();
@@ -332,7 +332,7 @@ describe('native sandbox process', () => {
     const driver = new FakeDriver();
     const scheduler = new ManualScheduler();
     const proc = new MxcProcess(driver, 35, scheduler);
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
 
     assert.deepStrictEqual(scheduler.scheduledDelays, [35]);
     scheduler.advance(35);
@@ -346,7 +346,7 @@ describe('native sandbox process', () => {
     const scheduler = new ManualScheduler();
     const proc = new MxcProcess(driver, 1, scheduler);
 
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
     scheduler.advance(100);
     const result = await wait;
 
@@ -362,7 +362,7 @@ describe('native sandbox process', () => {
     const scheduler = new ManualScheduler();
     const proc = new MxcProcess(driver, 1, scheduler);
 
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
     scheduler.advance(100);
     const result = await wait;
 
@@ -383,7 +383,7 @@ describe('native sandbox process', () => {
     const scheduler = new ManualScheduler();
     const proc = new MxcProcess(driver, 1, scheduler);
 
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
     scheduler.advance(100);
     const result = await wait;
 
@@ -397,7 +397,7 @@ describe('native sandbox process', () => {
     driver.deferWait = true;
     const scheduler = new ManualScheduler();
     const proc = new MxcProcess(driver, undefined, scheduler);
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
     driver.complete(5);
 
     scheduler.advance(100);
@@ -414,7 +414,7 @@ describe('native sandbox process', () => {
     driver.deferWait = true;
     const scheduler = new ManualScheduler();
     const proc = new ActiveOperationProcess(driver, undefined, scheduler);
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
     driver.complete(5);
 
     scheduler.advance(100);
@@ -435,7 +435,7 @@ describe('native sandbox process', () => {
     driver.deferWait = true;
     const scheduler = new ManualScheduler();
     const proc = new MxcProcess(driver, undefined, scheduler);
-    const wait = proc.waitAsync();
+    const wait = proc.wait();
     driver.complete(5);
 
     scheduler.advance(100);

@@ -11,7 +11,7 @@
 //! `SandboxProcess` whose stdio follows the requested `StdioMode`:
 //! `Inherit` gives the child the host's own stdio (a real TTY when the
 //! binary runs under a pty), while `Pipes` exposes stdout/stderr/stdin
-//! handles the caller can stream.
+//! handles the caller can stream and `Pty` exposes a caller-owned terminal.
 //!
 //! For apps that require LaunchServices (`launchMethod: "open"`), the runner
 //! writes a sandbox helper script and launches the target app via `open -n -W`,
@@ -27,14 +27,15 @@ use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use mxc_pty::{LivePty, PtySize as UnixPtySize};
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
-    spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio,
+    spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
@@ -44,6 +45,37 @@ use wxc_common::validator::{
 
 use crate::default_env::{env_pairs, resolved_env, DEFAULT_SANDBOX_PATH};
 use crate::profile_builder::build_profile_with_proxy;
+
+#[link(name = "proc")]
+unsafe extern "C" {
+    fn proc_listallpids(buffer: *mut libc::c_void, buffersize: libc::c_int) -> libc::c_int;
+    fn proc_pidinfo(
+        pid: libc::c_int,
+        flavor: libc::c_int,
+        arg: u64,
+        buffer: *mut libc::c_void,
+        buffersize: libc::c_int,
+    ) -> libc::c_int;
+    fn proc_signal_with_audittoken(token: *mut AuditToken, signal: libc::c_int) -> libc::c_int;
+}
+
+#[repr(C)]
+struct AuditToken {
+    val: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ProcUniqueIdentifierInfo {
+    uuid: [u8; 16],
+    unique_id: u64,
+    parent_unique_id: u64,
+    id_version: i32,
+    original_parent_id_version: i32,
+    reserved: [u64; 2],
+}
+
+const PROC_PID_UNIQUE_IDENTIFIER_INFO: libc::c_int = 17;
 
 /// Env var keys the cooperative proxy manages. When a proxy is active these
 /// are stripped from the caller-supplied environment so sandboxed code cannot
@@ -62,6 +94,118 @@ const PROXY_ENV_KEYS: &[&str] = &[
     "NO_PROXY",
     "no_proxy",
 ];
+
+fn session_kill(child: &mut std::process::Child, session_id: libc::pid_t) -> std::io::Result<()> {
+    let leader_result = match child.try_wait()? {
+        Some(_) => Ok(()),
+        None => child.kill(),
+    };
+    let session_result = kill_session_members(session_id);
+    leader_result.and(session_result)
+}
+
+fn terminate_session_and_reap(
+    child: &mut std::process::Child,
+    session_id: libc::pid_t,
+    timeout: Duration,
+) -> std::io::Result<()> {
+    session_kill(child, session_id)?;
+    match wait_with_timeout(child, Some(timeout)) {
+        Ok(_) => Ok(()),
+        Err(WaitError::Timeout) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Seatbelt: killed process did not become reapable before the deadline",
+        )),
+        Err(WaitError::Io(error)) => Err(error),
+    }
+}
+
+fn kill_session_members(session_id: libc::pid_t) -> std::io::Result<()> {
+    const SESSION_SWEEPS: usize = 3;
+
+    let mut first_error = None;
+    // SAFETY: `getpid` has no preconditions.
+    let current_pid = unsafe { libc::getpid() };
+    for _ in 0..SESSION_SWEEPS {
+        for pid in list_all_pids()? {
+            if pid <= 0 || pid == current_pid {
+                continue;
+            }
+            let Some(mut token) = process_audit_token(pid)? else {
+                continue;
+            };
+            // The token is captured first. If the PID exits before this query,
+            // a replacement's different session is rejected; if it exits after
+            // the query, the token's pid-version prevents signaling a replacement.
+            // SAFETY: `getsid` only queries the process identified by `pid`.
+            if unsafe { libc::getsid(pid) } != session_id {
+                continue;
+            }
+            // SAFETY: libproc validates the token's PID version atomically with
+            // process lookup before signaling.
+            let error = unsafe { proc_signal_with_audittoken(&mut token, libc::SIGKILL) };
+            if error != 0 && error != libc::ESRCH && first_error.is_none() {
+                first_error = Some(std::io::Error::from_raw_os_error(error));
+            }
+        }
+        std::thread::yield_now();
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn process_audit_token(pid: libc::pid_t) -> std::io::Result<Option<AuditToken>> {
+    let mut info = ProcUniqueIdentifierInfo::default();
+    let size = libc::c_int::try_from(std::mem::size_of_val(&info))
+        .map_err(|_| std::io::Error::other("macOS process identity is too large"))?;
+    // SAFETY: `info` is writable for `size` bytes and libproc only fills the
+    // requested identity record for `pid`.
+    let copied = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PID_UNIQUE_IDENTIFIER_INFO,
+            0,
+            std::ptr::from_mut(&mut info).cast::<libc::c_void>(),
+            size,
+        )
+    };
+    if copied == 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(None),
+            _ => Err(error),
+        };
+    }
+    if copied != size {
+        return Err(std::io::Error::other(format!(
+            "macOS returned a truncated process identity for pid {pid}"
+        )));
+    }
+    let mut token = AuditToken { val: [0; 8] };
+    token.val[5] = pid as u32;
+    token.val[7] = info.id_version as u32;
+    Ok(Some(token))
+}
+
+fn list_all_pids() -> std::io::Result<Vec<libc::pid_t>> {
+    // SAFETY: a null buffer asks libproc for the current process count.
+    let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
+    if count < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut pids = vec![0; count as usize + 128];
+    let buffer_size = pids
+        .len()
+        .checked_mul(std::mem::size_of::<libc::pid_t>())
+        .and_then(|size| libc::c_int::try_from(size).ok())
+        .ok_or_else(|| std::io::Error::other("macOS process list is too large"))?;
+    // SAFETY: `pids` is writable for exactly `buffer_size` bytes.
+    let listed = unsafe { proc_listallpids(pids.as_mut_ptr().cast::<libc::c_void>(), buffer_size) };
+    if listed < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    pids.truncate((listed as usize).min(pids.len()));
+    Ok(pids)
+}
 
 /// Proxy env var keys injected (pointing at the resolved proxy URL) when a
 /// proxy is active. `NO_PROXY` is intentionally absent — see the module docs
@@ -147,11 +291,6 @@ impl SandboxBackend for SeatbeltScriptRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         validate_common(request)?;
         self.validate(request)?;
-        if matches!(stdio, StdioMode::Pty(_)) {
-            return Err(ScriptResponse::rejected(
-                "Seatbelt does not support caller-controlled PTY spawning",
-            ));
-        }
 
         // Start the cooperative network proxy (if configured) before building
         // the profile and launching the child: the profile's proxy-reachability
@@ -203,8 +342,9 @@ impl SandboxBackend for SeatbeltScriptRunner {
 /// [`StdioMode::Pipes`] the child gets pipes and leads its own session (so the
 /// caller can tree-terminate via the process group); with
 /// [`StdioMode::Inherit`] it inherits the process's stdio (a TTY when the
-/// binary has one) and stays in the binary's session. `gui_access` apps require
-/// inherited stdio and cannot stream.
+/// binary has one) and stays in the binary's session; with [`StdioMode::Pty`]
+/// it gets a caller-owned terminal and leads its own session. `gui_access`
+/// apps require inherited stdio.
 fn spawn_exec(
     profile: &str,
     request: &ExecutionRequest,
@@ -213,10 +353,15 @@ fn spawn_exec(
     logger: &mut Logger,
     proxy: UnixProxyCoordinator,
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-    if gui_access && stdio == StdioMode::Pipes {
-        return Err(error_response(
-            "Seatbelt guiAccess requires inherited stdio and cannot stream over pipes".to_string(),
-        ));
+    if gui_access && stdio != StdioMode::Inherit {
+        let mode = if stdio == StdioMode::Pipes {
+            "pipes"
+        } else {
+            "a caller-owned PTY"
+        };
+        return Err(error_response(format!(
+            "Seatbelt guiAccess requires inherited stdio and cannot use {mode}"
+        )));
     }
 
     // Pipes → own session (setsid) so a process-group tree-kill never touches
@@ -230,11 +375,15 @@ fn spawn_exec(
     // this is limited to timeout-bounded runs, which are inherently
     // non-interactive.
     let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
-    let mut command = build_sandbox_command(
+    let (mut command, pty) = build_sandbox_command(
         profile,
         &request.script_code,
         new_session,
         new_group,
+        match stdio {
+            StdioMode::Pty(size) => Some(size),
+            _ => None,
+        },
         logger,
     )?;
 
@@ -282,7 +431,7 @@ fn spawn_exec(
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
         }
-        StdioMode::Pty(_) => unreachable!("PTY mode was rejected before backend setup"),
+        StdioMode::Pty(_) => {}
     }
 
     let mut child = command
@@ -292,7 +441,7 @@ fn spawn_exec(
     let (stdin, stdout, stderr) = match stdio {
         StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
         StdioMode::Inherit => (None, None, None),
-        StdioMode::Pty(_) => unreachable!("PTY mode was rejected before spawn"),
+        StdioMode::Pty(_) => (None, None, None),
     };
 
     // Wrap the pipe reads so the caller can abandon a stream a backgrounded
@@ -315,6 +464,9 @@ fn spawn_exec(
             }
         };
 
+    let started = Instant::now();
+    let session_id =
+        (new_session || matches!(stdio, StdioMode::Pty(_))).then_some(child.id() as libc::pid_t);
     Ok(Box::new(SeatbeltSandboxProcess {
         child,
         stdin,
@@ -322,8 +474,13 @@ fn spawn_exec(
         stderr,
         stdout_canceller,
         stderr_canceller,
+        pty,
         timeout: timeout_from(request),
-        group: new_session || new_group,
+        started,
+        timed_out: false,
+        termination_error: None,
+        group: new_session || new_group || stdio != StdioMode::Inherit,
+        session_id,
         cleanup: Vec::new(),
         proxy,
     }))
@@ -341,11 +498,15 @@ fn spawn_open(
     logger: &mut Logger,
     proxy: UnixProxyCoordinator,
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-    if stdio == StdioMode::Pipes {
-        return Err(error_response(
-            "Seatbelt launchMethod 'open' launches Terminal.app and cannot stream over pipes"
-                .to_string(),
-        ));
+    if stdio != StdioMode::Inherit {
+        let mode = if stdio == StdioMode::Pipes {
+            "stream over pipes"
+        } else {
+            "expose a caller-owned PTY"
+        };
+        return Err(error_response(format!(
+            "Seatbelt launchMethod 'open' launches Terminal.app and cannot {mode}"
+        )));
     }
 
     let _ = writeln!(
@@ -463,6 +624,7 @@ fn spawn_open(
     // The `open -W` process is the thing to wait on; the sandboxed shell runs
     // inside Terminal. No streamable stdio; the temp files are removed once the
     // handle's `wait()` (or drop) runs.
+    let started = Instant::now();
     Ok(Box::new(SeatbeltSandboxProcess {
         child,
         stdin: None,
@@ -470,8 +632,13 @@ fn spawn_open(
         stderr: None,
         stdout_canceller: None,
         stderr_canceller: None,
+        pty: None,
         timeout: timeout_from(request),
+        started,
+        timed_out: false,
+        termination_error: None,
         group: false,
+        session_id: None,
         cleanup: vec![profile_path, helper_path, command_path],
         proxy,
     }))
@@ -494,10 +661,18 @@ struct SeatbeltSandboxProcess {
     /// after the stream has been taken.
     stdout_canceller: Option<ReadCanceller>,
     stderr_canceller: Option<ReadCanceller>,
+    /// Caller-owned primary PTY for direct exec mode.
+    pty: Option<LivePty>,
     timeout: Option<Duration>,
-    /// The child leads its own process group (`setsid`), so termination signals
-    /// the whole group; `false` for inherited / Open mode (a single process).
+    started: Instant,
+    timed_out: bool,
+    termination_error: Option<String>,
+    /// The child leads its own process group, so termination can signal that
+    /// group without touching the host process group.
     group: bool,
+    /// The child leads an owned session, so job-control descendants in other
+    /// process groups can be terminated without touching the host session.
+    session_id: Option<libc::pid_t>,
     /// Temp files to remove once the child exits (Open mode); empty otherwise.
     cleanup: Vec<String>,
     /// The per-run cooperative network proxy. Inactive (a no-op on teardown)
@@ -528,6 +703,14 @@ impl SeatbeltSandboxProcess {
 
 impl SandboxProcess for SeatbeltSandboxProcess {
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        if let Some(pty) = self.pty.as_ref() {
+            let stdio = pty.take_native_stdio()?;
+            return Ok(Some(NativeStdio {
+                stdin: Some(stdio.stdin),
+                stdout: Some(stdio.stdout),
+                stderr: None,
+            }));
+        }
         let stdio = duplicate_and_take_native_stdio(
             &mut self.stdin,
             &mut self.stdout,
@@ -547,6 +730,61 @@ impl SandboxProcess for SeatbeltSandboxProcess {
         take_boxed_write(&mut self.stdin)
     }
 
+    fn is_pty(&self) -> bool {
+        self.pty.is_some()
+    }
+
+    fn pty_clone_reader(&self) -> std::io::Result<Box<dyn std::io::Read + Send>> {
+        self.pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Seatbelt process has no PTY"))?
+            .try_clone_reader()
+    }
+
+    fn pty_clone_reader_with_closer(
+        &self,
+    ) -> std::io::Result<wxc_common::sandbox_process::PtyReaderWithCloser> {
+        let (reader, closer) = self
+            .pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Seatbelt process has no PTY"))?
+            .try_clone_reader_with_canceller()?;
+        Ok((reader, Some(Box::new(closer))))
+    }
+
+    fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        self.pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Seatbelt process has no PTY"))?
+            .take_writer()
+    }
+
+    fn pty_resize(&self, size: PtySize) -> std::io::Result<()> {
+        self.pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Seatbelt process has no PTY"))?
+            .resize(UnixPtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: size.pixel_width,
+                pixel_height: size.pixel_height,
+            })
+    }
+
+    fn pty_size(&self) -> std::io::Result<PtySize> {
+        let size = self
+            .pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Seatbelt process has no PTY"))?
+            .size();
+        Ok(PtySize {
+            rows: size.rows,
+            cols: size.cols,
+            pixel_width: size.pixel_width,
+            pixel_height: size.pixel_height,
+        })
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         take_boxed_read(&mut self.stdout)
     }
@@ -564,10 +802,36 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        Ok(self
-            .child
-            .try_wait()?
-            .map(|status| status.code().unwrap_or(-1)))
+        if let Some(error) = self.termination_error.as_ref() {
+            return Err(std::io::Error::other(error.clone()));
+        }
+        if self.timed_out {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Seatbelt: process timed out",
+            ));
+        }
+        if let Some(status) = self.child.try_wait()? {
+            return Ok(Some(status.code().unwrap_or(-1)));
+        }
+        if self
+            .timeout
+            .is_some_and(|timeout| self.started.elapsed() >= timeout)
+        {
+            if let Err(error) = self.kill_for_timeout() {
+                let error = format!(
+                    "Seatbelt: process timed out, but its session could not be terminated: {error}"
+                );
+                self.termination_error = Some(error.clone());
+                return Err(std::io::Error::other(error));
+            }
+            self.timed_out = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Seatbelt: process timed out",
+            ));
+        }
+        Ok(None)
     }
 
     fn id(&self) -> u32 {
@@ -575,6 +839,9 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(session_id) = self.session_id {
+            return session_kill(&mut self.child, session_id);
+        }
         // No-op once the child has exited and been reaped: its pid/pgid can be
         // recycled, so signaling it could hit an unrelated process (group). A
         // reaped `Child` returns its cached status here without a syscall.
@@ -593,40 +860,100 @@ impl SandboxProcess for SeatbeltSandboxProcess {
         }
     }
 
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let result = if let Some(session_id) = self.session_id {
+            terminate_session_and_reap(&mut self.child, session_id, REAP_TIMEOUT)
+        } else {
+            self.kill()?;
+            match wait_with_timeout(&mut self.child, Some(REAP_TIMEOUT)) {
+                Ok(_) => Ok(()),
+                Err(WaitError::Timeout) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Seatbelt: killed process did not become reapable within 5 seconds",
+                )),
+                Err(WaitError::Io(error)) => Err(error),
+            }
+        };
+        result?;
+        self.timed_out = true;
+        Ok(())
+    }
+
     fn wait(&mut self) -> std::io::Result<i32> {
         // Close our copy of any not-taken stdin so the child sees EOF and is
         // not blocked waiting for input the caller never intends to send.
         self.stdin.take();
+        if let Some(pty) = self.pty.as_ref() {
+            pty.close_writer();
+        }
 
         // Drain (and discard) any not-taken stdout/stderr concurrently so the
         // child can't block on a full pipe (taken streams are the caller's
         // responsibility).
         let stdout_thread = spawn_discard(self.stdout.take());
         let stderr_thread = spawn_discard(self.stderr.take());
+        let (pty_thread, pty_canceller, pty_setup_error) = match self.pty.as_ref() {
+            Some(pty) => match pty.take_unclaimed_reader() {
+                Ok(Some((reader, canceller))) => {
+                    (spawn_discard(Some(reader)), Some(canceller), None)
+                }
+                Ok(None) => (None, None, None),
+                Err(error) => (None, None, Some(error)),
+            },
+            None => (None, None, None),
+        };
 
-        let result = match wait_with_timeout(&mut self.child, self.timeout) {
-            Ok(status) => Ok(status.code().unwrap_or(-1)),
-            Err(WaitError::Timeout) => {
-                // Timed out — terminate now (`kill()` SIGKILLs the group or the
-                // lone child) and reap the zombie.
-                let _ = self.kill();
-                let _ = self.child.wait();
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Seatbelt: process timed out",
-                ))
-            }
-            Err(WaitError::Io(error)) => {
-                // The child may still be running: kill+reap it (don't orphan
-                // the sandbox) before returning.
-                let _ = self.kill();
-                let _ = self.child.wait();
-                Err(std::io::Error::other(format!("wait failed: {error}")))
+        let remaining_timeout = self
+            .timeout
+            .map(|timeout| timeout.saturating_sub(self.started.elapsed()));
+        let result = if let Some(error) = pty_setup_error {
+            let _ = self.kill();
+            let _ = wait_with_timeout(&mut self.child, Some(Duration::from_secs(5)));
+            Err(std::io::Error::other(format!(
+                "Seatbelt: failed to prepare PTY output draining: {error}"
+            )))
+        } else if let Some(error) = self.termination_error.as_ref() {
+            Err(std::io::Error::other(error.clone()))
+        } else if self.timed_out {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Seatbelt: process timed out",
+            ))
+        } else {
+            match wait_with_timeout(&mut self.child, remaining_timeout) {
+                Ok(status) => Ok(status.code().unwrap_or(-1)),
+                Err(WaitError::Timeout) => {
+                    if let Err(error) = self.kill_for_timeout() {
+                        let error =
+                            format!("Seatbelt: process timed out, but teardown failed: {error}");
+                        self.termination_error = Some(error.clone());
+                        Err(std::io::Error::other(error))
+                    } else {
+                        self.timed_out = true;
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Seatbelt: process timed out",
+                        ))
+                    }
+                }
+                Err(WaitError::Io(error)) => {
+                    // The child may still be running: kill+reap it (don't orphan
+                    // the sandbox) before returning.
+                    let _ = self.kill();
+                    let _ = wait_with_timeout(&mut self.child, Some(Duration::from_secs(5)));
+                    Err(std::io::Error::other(format!("wait failed: {error}")))
+                }
             }
         };
 
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
+        if let Some(pty) = self.pty.as_ref() {
+            pty.finish_native_bridge();
+        }
+        cancel_and_join_discard(pty_thread, &pty_canceller);
         self.run_cleanup();
         result
     }
@@ -635,11 +962,15 @@ impl SandboxProcess for SeatbeltSandboxProcess {
 impl Drop for SeatbeltSandboxProcess {
     fn drop(&mut self) {
         // Don't leak a running sandboxed process (and its group) or a zombie if
-        // the handle is dropped without `wait()`, and remove any temp files.
-        // `kill()` is idempotent (its `try_wait` guard no-ops once the child has
-        // exited).
-        let _ = self.kill();
-        let _ = self.child.wait();
+        // the handle is dropped without `wait()`, but never block destruction
+        // indefinitely when macOS does not make a signalled child reapable.
+        const DROP_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+        if let Some(session_id) = self.session_id {
+            let _ = terminate_session_and_reap(&mut self.child, session_id, DROP_REAP_TIMEOUT);
+        } else {
+            let _ = self.kill();
+            let _ = wait_with_timeout(&mut self.child, Some(DROP_REAP_TIMEOUT));
+        }
         self.run_cleanup();
     }
 }
@@ -651,17 +982,18 @@ impl Drop for SeatbeltSandboxProcess {
 ///
 /// # Safety
 ///
-/// `pre_exec` runs between `fork()` and `exec()`. We limit operations
-/// inside it to a single FFI call (`sandbox_init`) with pre-allocated
-/// arguments. `sandbox_init` is not formally async-signal-safe but is
-/// used in this pattern by Chromium and other production macOS sandboxes.
+/// `pre_exec` runs between `fork()` and `exec()`. Session/PTY setup uses
+/// async-signal-safe syscalls before the pre-allocated `sandbox_init` call.
+/// `sandbox_init` is not formally async-signal-safe but is used in this
+/// pattern by Chromium and other production macOS sandboxes.
 fn build_sandbox_command(
     profile: &str,
     script_code: &str,
     new_session: bool,
     new_group: bool,
+    pty_size: Option<PtySize>,
     logger: &mut Logger,
-) -> Result<Command, ScriptResponse> {
+) -> Result<(Command, Option<LivePty>), ScriptResponse> {
     let profile_cstr = CString::new(profile)
         .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
 
@@ -702,6 +1034,22 @@ fn build_sandbox_command(
         }
     }
 
+    let pty = pty_size
+        .map(|size| {
+            LivePty::attach(
+                &mut command,
+                UnixPtySize {
+                    rows: size.rows,
+                    cols: size.cols,
+                    pixel_width: size.pixel_width,
+                    pixel_height: size.pixel_height,
+                },
+                &[],
+            )
+            .map_err(|error| error_response(format!("Seatbelt: failed to allocate PTY: {error}")))
+        })
+        .transpose()?;
+
     // SAFETY: The closure runs after fork(), before exec(). We only call
     // sandbox_init with a pre-allocated CString — no Rust allocations
     // happen inside the closure. sandbox_init is used in this fork+exec
@@ -728,7 +1076,7 @@ fn build_sandbox_command(
         });
     }
 
-    Ok(command)
+    Ok((command, pty))
 }
 
 /// Emit the generated profile to `logger` for `--debug` / `--log-file`.
@@ -1001,6 +1349,37 @@ mod tests {
         request.experimental_enabled = true;
         request.seatbelt = Some(SeatbeltConfig::default());
         request
+    }
+
+    #[test]
+    fn gui_access_rejects_caller_owned_pty() {
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let error = spawn_exec(
+            "(version 1)\n(allow default)",
+            &base_request(),
+            true,
+            StdioMode::Pty(PtySize::default()),
+            &mut logger,
+            UnixProxyCoordinator::new(),
+        )
+        .err()
+        .expect("guiAccess PTY must be rejected");
+        assert!(error.error_message.contains("caller-owned PTY"));
+    }
+
+    #[test]
+    fn open_launch_rejects_caller_owned_pty() {
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let error = spawn_open(
+            "(version 1)\n(allow default)",
+            &base_request(),
+            StdioMode::Pty(PtySize::default()),
+            &mut logger,
+            UnixProxyCoordinator::new(),
+        )
+        .err()
+        .expect("open PTY must be rejected");
+        assert!(error.error_message.contains("caller-owned PTY"));
     }
 
     #[test]

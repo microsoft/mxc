@@ -189,6 +189,11 @@ pub trait SandboxProcess: Send {
     }
 
     /// Take the pseudo-terminal input writer. This may succeed only once.
+    ///
+    /// On Unix, dropping the writer requests terminal EOF by writing the
+    /// configured `VEOF` character while the terminal is in canonical mode.
+    /// Raw-mode applications receive no pipe-style half-close and must define
+    /// their own input-completion protocol.
     fn pty_take_writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,

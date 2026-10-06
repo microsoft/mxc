@@ -62,7 +62,7 @@ describe('WSLC SDK E2E — V1 request APIs', {
         },
         filesystem: { readwritePaths: [mountDir] },
       };
-      const result = await sdk.runAsync({
+      const result = await sdk.run({
         ...policy,
         command: [
           "python3 -c \"import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}')\"",
@@ -129,7 +129,7 @@ srv = socketserver.TCPServer(('0.0.0.0', ${CONTAINER_PORT}), H)
 srv.handle_request()
 `;
     const scriptB64 = Buffer.from(pythonScript, 'utf8').toString('base64');
-    const child = sdk.spawn({
+    const child = await sdk.spawn({
       ...policy,
       command: `python3 -c "import base64; exec(base64.b64decode('${scriptB64}'))"`,
       containment: {
@@ -155,7 +155,7 @@ srv.handle_request()
       stderr += Buffer.isBuffer(d) ? d.toString() : d;
     });
     let completion: { exitCode: number; timedOut: boolean } | undefined;
-    const closed = child.waitAsync().then((result) => {
+    const closed = child.wait().then((result) => {
       completion = result;
       return result;
     });

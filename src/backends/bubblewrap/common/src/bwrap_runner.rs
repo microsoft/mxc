@@ -35,13 +35,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
+use mxc_pty::{LivePty, PtySize as UnixPtySize};
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
-    spawn_discard, take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess,
-    StdioMode, StreamCloser,
+    spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
+    SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::{
@@ -409,8 +410,8 @@ impl BubblewrapScriptRunner {
     /// Set up networking and spawn `bwrap`, returning a [`BwrapChild`] wrapped
     /// by the [`SandboxProcess`] handle. With [`StdioMode::Pipes`] the child's
     /// stdio is piped (the caller drives it); with [`StdioMode::Inherit`] it
-    /// inherits the binary's stdio (a TTY when the binary has one). bwrap is
-    /// always placed in its own process group so it can be tree-terminated.
+    /// inherits the binary's stdio (a TTY when the binary has one); with
+    /// [`StdioMode::Pty`] it is attached to a caller-owned Unix PTY.
     fn spawn_bwrap(
         &self,
         request: &ExecutionRequest,
@@ -590,12 +591,13 @@ impl BubblewrapScriptRunner {
         // 4. Spawn `bwrap`.
         let mut command = Command::new("bwrap");
         command.args(&args);
-        match stdio {
+        let pty = match stdio {
             StdioMode::Pipes => {
                 command
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
+                None
             }
             StdioMode::Inherit => {
                 // The child (bwrap) inherits the binary's stdio directly — a
@@ -604,13 +606,30 @@ impl BubblewrapScriptRunner {
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit());
+                None
             }
-            StdioMode::Pty(_) => {
-                return Err(ScriptResponse::rejected(
-                    "Bubblewrap does not yet support in-process PTY spawning",
-                ));
-            }
-        }
+            StdioMode::Pty(size) => match LivePty::attach(
+                &mut command,
+                UnixPtySize {
+                    rows: size.rows,
+                    cols: size.cols,
+                    pixel_width: size.pixel_width,
+                    pixel_height: size.pixel_height,
+                },
+                &[],
+            ) {
+                Ok(pty) => Some(pty),
+                Err(error) => {
+                    let mut fw_manager = fw_manager;
+                    cleanup_iptables(&mut fw_manager, logger);
+                    stop_proxy_network(&mut proxy_network, logger);
+                    proxy.stop(logger);
+                    return Err(ScriptResponse::error(&format!(
+                        "Bubblewrap: failed to allocate PTY: {error}"
+                    )));
+                }
+            },
+        };
         // Pipes mode: put bwrap in its own process group so a timeout / `kill()`
         // can tree-kill it with a single `killpg` without touching the host's
         // group. Inherit mode keeps bwrap in the executor's group (so it retains
@@ -618,8 +637,8 @@ impl BubblewrapScriptRunner {
         // there, killing bwrap relies on `--die-with-parent` to take the
         // sandbox down, since bwrap forks and is not itself PID 1 of the new
         // pid namespace.
-        let group = stdio == StdioMode::Pipes;
-        if group {
+        let group = stdio != StdioMode::Inherit;
+        if stdio == StdioMode::Pipes {
             command.process_group(0);
         }
         if let Some(startup) = network_startup.as_ref() {
@@ -669,7 +688,7 @@ impl BubblewrapScriptRunner {
         let (stdin, stdout, stderr) = match stdio {
             StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
             StdioMode::Inherit => (None, None, None),
-            StdioMode::Pty(_) => unreachable!("PTY mode was rejected before spawn"),
+            StdioMode::Pty(_) => (None, None, None),
         };
         // Wrap the pipe reads so the caller can abandon a stream a backgrounded
         // descendant is holding open (see `SandboxProcess::stdout_closer`)
@@ -699,6 +718,7 @@ impl BubblewrapScriptRunner {
         } else {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
+        let started = Instant::now();
 
         let child = Arc::new(Mutex::new(child));
         // Armed only now: until the gate was released a dead provider surfaced
@@ -715,12 +735,16 @@ impl BubblewrapScriptRunner {
             stderr,
             stdout_canceller,
             stderr_canceller,
+            pty,
             group,
             proxy,
             proxy_network,
             fw_manager,
             monitor,
             timeout,
+            started,
+            timed_out: false,
+            termination_error: None,
         })
     }
 }
@@ -738,7 +762,8 @@ struct BwrapChild {
     /// closers can mint a [`StreamCloser`] even after the stream is taken.
     stdout_canceller: Option<ReadCanceller>,
     stderr_canceller: Option<ReadCanceller>,
-    /// `true` when bwrap leads its own process group (`Pipes` mode), so
+    pty: Option<LivePty>,
+    /// `true` when bwrap leads its own process group (`Pipes` or `Pty`), so
     /// termination signals the whole group; `false` for `Inherit` mode, where
     /// killing bwrap relies on `--die-with-parent` to take the sandbox with it.
     group: bool,
@@ -747,6 +772,9 @@ struct BwrapChild {
     fw_manager: Option<NetworkIptablesManager>,
     monitor: Option<ProviderMonitor>,
     timeout: Option<Duration>,
+    started: Instant,
+    timed_out: bool,
+    termination_error: Option<String>,
 }
 
 impl BwrapChild {
@@ -807,7 +835,10 @@ impl BubblewrapSandboxProcess {
         const MIN_POLL: Duration = Duration::from_millis(1);
         const MAX_POLL: Duration = Duration::from_millis(50);
 
-        let deadline = self.inner.timeout.map(|timeout| Instant::now() + timeout);
+        let deadline = self
+            .inner
+            .timeout
+            .map(|timeout| self.inner.started + timeout);
         let mut interval = MIN_POLL;
         loop {
             let exited = match self.inner.lock_child().try_wait() {
@@ -857,6 +888,14 @@ enum BwrapOutcome {
 
 impl SandboxProcess for BubblewrapSandboxProcess {
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        if let Some(pty) = self.inner.pty.as_ref() {
+            let stdio = pty.take_native_stdio()?;
+            return Ok(Some(NativeStdio {
+                stdin: Some(stdio.stdin),
+                stdout: Some(stdio.stdout),
+                stderr: None,
+            }));
+        }
         let stdio = duplicate_and_take_native_stdio(
             &mut self.inner.stdin,
             &mut self.inner.stdout,
@@ -876,6 +915,66 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         take_boxed_write(&mut self.inner.stdin)
     }
 
+    fn is_pty(&self) -> bool {
+        self.inner.pty.is_some()
+    }
+
+    fn pty_clone_reader(&self) -> std::io::Result<Box<dyn std::io::Read + Send>> {
+        self.inner
+            .pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Bubblewrap process has no PTY"))?
+            .try_clone_reader()
+    }
+
+    fn pty_clone_reader_with_closer(
+        &self,
+    ) -> std::io::Result<wxc_common::sandbox_process::PtyReaderWithCloser> {
+        let (reader, closer) = self
+            .inner
+            .pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Bubblewrap process has no PTY"))?
+            .try_clone_reader_with_canceller()?;
+        Ok((reader, Some(Box::new(closer))))
+    }
+
+    fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        self.inner
+            .pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Bubblewrap process has no PTY"))?
+            .take_writer()
+    }
+
+    fn pty_resize(&self, size: PtySize) -> std::io::Result<()> {
+        self.inner
+            .pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Bubblewrap process has no PTY"))?
+            .resize(UnixPtySize {
+                rows: size.rows,
+                cols: size.cols,
+                pixel_width: size.pixel_width,
+                pixel_height: size.pixel_height,
+            })
+    }
+
+    fn pty_size(&self) -> std::io::Result<PtySize> {
+        let size = self
+            .inner
+            .pty
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Bubblewrap process has no PTY"))?
+            .size();
+        Ok(PtySize {
+            rows: size.rows,
+            cols: size.cols,
+            pixel_width: size.pixel_width,
+            pixel_height: size.pixel_height,
+        })
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         take_boxed_read(&mut self.inner.stdout)
     }
@@ -893,11 +992,38 @@ impl SandboxProcess for BubblewrapSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        Ok(self
+        if let Some(error) = self.inner.termination_error.as_ref() {
+            return Err(std::io::Error::other(error.clone()));
+        }
+        if self.inner.timed_out {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Bubblewrap: script timed out",
+            ));
+        }
+        if let Some(status) = self.inner.lock_child().try_wait()? {
+            return Ok(Some(status.code().unwrap_or(-1)));
+        }
+        if self
             .inner
-            .lock_child()
-            .try_wait()?
-            .map(|status| status.code().unwrap_or(-1)))
+            .timeout
+            .is_some_and(|timeout| self.inner.started.elapsed() >= timeout)
+        {
+            if let Err(error) = self.kill_for_timeout() {
+                let error = format!(
+                    "Bubblewrap: script timed out, and the process group could not be terminated: \
+                     {error}"
+                );
+                self.inner.termination_error = Some(error.clone());
+                return Err(std::io::Error::other(error));
+            }
+            self.inner.timed_out = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Bubblewrap: script timed out",
+            ));
+        }
+        Ok(None)
     }
 
     fn id(&self) -> u32 {
@@ -913,7 +1039,7 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             return Ok(());
         }
         if self.inner.group {
-            // Pipes mode: bwrap leads its own process group — tree-kill it.
+            // Pipes and PTY modes give bwrap its own process group.
             group_kill(&mut child)
         } else {
             // Inherit mode: bwrap shares the executor's group (no
@@ -925,49 +1051,109 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         }
     }
 
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
+        self.kill()?;
+        let mut child = self.inner.lock_child();
+        match wait_with_timeout(&mut child, Some(REAP_TIMEOUT)) {
+            Ok(_) => {
+                drop(child);
+                self.inner.timed_out = true;
+                Ok(())
+            }
+            Err(WaitError::Timeout) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Bubblewrap: killed process did not become reapable within 5 seconds",
+            )),
+            Err(WaitError::Io(error)) => Err(error),
+        }
+    }
+
     fn wait(&mut self) -> std::io::Result<i32> {
         // Close our copy of any not-taken stdin so the child sees EOF.
         self.inner.stdin.take();
+        if let Some(pty) = self.inner.pty.as_ref() {
+            pty.close_writer();
+        }
 
         // Drain (and discard) any not-taken stdout/stderr concurrently so the
         // child can't block on a full pipe (taken streams are the caller's
         // responsibility).
         let stdout_thread = spawn_discard(self.inner.stdout.take());
         let stderr_thread = spawn_discard(self.inner.stderr.take());
+        let (pty_thread, pty_canceller, pty_setup_error) = match self.inner.pty.as_ref() {
+            Some(pty) => match pty.take_unclaimed_reader() {
+                Ok(Some((reader, canceller))) => {
+                    (spawn_discard(Some(reader)), Some(canceller), None)
+                }
+                Ok(None) => (None, None, None),
+                Err(error) => (None, None, Some(error)),
+            },
+            None => (None, None, None),
+        };
 
-        let result = match self.await_outcome() {
-            BwrapOutcome::Exited(status) => Ok(status.code().unwrap_or(-1)),
-            BwrapOutcome::ProviderLost => {
-                let _ = self.kill();
-                let _ = self.inner.lock_child().wait();
-                Err(std::io::Error::other(self.lost_provider_message()))
+        let result = if let Some(error) = pty_setup_error {
+            let _ = self.kill();
+            {
+                let mut child = self.inner.lock_child();
+                let _ = wait_with_timeout(&mut child, Some(Duration::from_secs(5)));
             }
-            BwrapOutcome::Timeout => {
-                // Tree-kill so descendants die too and release any stdout/stderr
-                // pipe write-ends (else the drain threads below could block).
-                // `kill()` group-kills in Pipes mode; in Inherit mode it kills
-                // bwrap, which `--die-with-parent` turns into a full teardown.
-                let _ = self.kill();
-                let _ = self.inner.lock_child().wait();
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Bubblewrap: script timed out",
-                ))
-            }
-            BwrapOutcome::Io(error) => {
-                // The child may still be alive; kill+reap it before
-                // `run_teardown()` removes the iptables/proxy enforcement out
-                // from under it.
-                let _ = self.kill();
-                let _ = self.inner.lock_child().wait();
-                Err(std::io::Error::other(format!(
-                    "Bubblewrap: wait failed: {error}"
-                )))
+            Err(std::io::Error::other(format!(
+                "Bubblewrap: failed to prepare PTY output draining: {error}"
+            )))
+        } else if let Some(error) = self.inner.termination_error.as_ref() {
+            Err(std::io::Error::other(error.clone()))
+        } else if self.inner.timed_out {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Bubblewrap: script timed out",
+            ))
+        } else {
+            match self.await_outcome() {
+                BwrapOutcome::Exited(status) => Ok(status.code().unwrap_or(-1)),
+                BwrapOutcome::ProviderLost => {
+                    let _ = self.kill();
+                    let _ = self.inner.lock_child().wait();
+                    Err(std::io::Error::other(self.lost_provider_message()))
+                }
+                BwrapOutcome::Timeout => {
+                    // Tree-kill so descendants die too and release any stdout/stderr
+                    // pipe write-ends (else the drain threads below could block).
+                    // `kill()` group-kills in Pipes mode; in Inherit mode it kills
+                    // bwrap, which `--die-with-parent` turns into a full teardown.
+                    if let Err(error) = self.kill_for_timeout() {
+                        let error =
+                            format!("Bubblewrap: script timed out, and teardown failed: {error}");
+                        self.inner.termination_error = Some(error.clone());
+                        Err(std::io::Error::other(error))
+                    } else {
+                        self.inner.timed_out = true;
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Bubblewrap: script timed out",
+                        ))
+                    }
+                }
+                BwrapOutcome::Io(error) => {
+                    // The child may still be alive; kill+reap it before
+                    // `run_teardown()` removes the iptables/proxy enforcement out
+                    // from under it.
+                    let _ = self.kill();
+                    let _ = self.inner.lock_child().wait();
+                    Err(std::io::Error::other(format!(
+                        "Bubblewrap: wait failed: {error}"
+                    )))
+                }
             }
         };
 
         cancel_and_join_discard(stdout_thread, &self.inner.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.inner.stderr_canceller);
+        if let Some(pty) = self.inner.pty.as_ref() {
+            pty.finish_native_bridge();
+        }
+        cancel_and_join_discard(pty_thread, &pty_canceller);
         self.run_teardown();
         result
     }

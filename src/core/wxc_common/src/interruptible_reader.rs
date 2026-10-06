@@ -20,6 +20,7 @@ use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::sandbox_process::StreamCloser;
 
@@ -77,18 +78,36 @@ pub struct InterruptibleReader {
     /// Read end of the self-pipe; readable once cancellation writes its byte.
     wake_r: OwnedFd,
     state: Arc<CancelState>,
+    eof_probe_interval: Option<Duration>,
 }
 
 impl InterruptibleReader {
     /// Wrap an owned readable pipe `fd` so its reads can be cancelled
     /// out-of-band. Sets `fd` non-blocking and creates the self-pipe used for
-    /// wakeups.
+    /// wakeups. The wrapped descriptor is also marked close-on-exec so callers
+    /// may safely supply duplicated pipes or terminals from any source.
     ///
     /// # Errors
     ///
     /// Returns the underlying [`io::Error`] if the self-pipe cannot be created
-    /// or either fd cannot be switched to non-blocking mode.
+    /// or descriptor flags cannot be applied.
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
+        Self::new_with_eof_probe_interval(fd, None)
+    }
+
+    /// Wrap an owned readable pipe and periodically probe it for EOF.
+    ///
+    /// This is needed for Darwin FIFOs, where `poll` may not wake when the
+    /// final writer closes even though a non-blocking `read` returns EOF.
+    pub fn new_with_periodic_eof_probe(fd: OwnedFd, interval: Duration) -> io::Result<Self> {
+        Self::new_with_eof_probe_interval(fd, Some(interval))
+    }
+
+    fn new_with_eof_probe_interval(
+        fd: OwnedFd,
+        eof_probe_interval: Option<Duration>,
+    ) -> io::Result<Self> {
+        set_cloexec(fd.as_raw_fd())?;
         set_nonblocking(fd.as_raw_fd())?;
 
         // Self-pipe for wakeups: the write end is non-blocking so `cancel`
@@ -103,8 +122,7 @@ impl InterruptibleReader {
         let wake_w = unsafe { OwnedFd::from_raw_fd(fds[1]) };
         // `pipe(2)` doesn't set close-on-exec, so mark both ends `FD_CLOEXEC` —
         // otherwise they leak into any process this thread later forks+execs
-        // (e.g. another sandbox child). The data pipe is already CLOEXEC: Rust
-        // sets it on `Child` stdio.
+        // (e.g. another sandbox child).
         set_cloexec(wake_r.as_raw_fd())?;
         set_cloexec(wake_w.as_raw_fd())?;
         set_nonblocking(wake_w.as_raw_fd())?;
@@ -116,6 +134,7 @@ impl InterruptibleReader {
                 cancelled: AtomicBool::new(false),
                 wake_w,
             }),
+            eof_probe_interval,
         })
     }
 
@@ -175,13 +194,26 @@ impl Read for InterruptibleReader {
             ];
             // SAFETY: `poll_fds` is a valid 2-element array of pollfds; both
             // fds are owned and live for the duration of the call.
-            let rc = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
+            let timeout = self
+                .eof_probe_interval
+                .map(|interval| {
+                    interval.as_millis().clamp(1, libc::c_int::MAX as u128) as libc::c_int
+                })
+                .unwrap_or(-1);
+            let rc = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, timeout) };
             if rc < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
                 return Err(err);
+            }
+            if rc == 0 {
+                match read_fd(self.fd.as_raw_fd(), buf) {
+                    Ok(count) => return Ok(count),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(error) => return Err(error),
+                }
             }
 
             // Cancellation wins over any pending data so a held-open pipe is
@@ -191,22 +223,26 @@ impl Read for InterruptibleReader {
             }
 
             if poll_fds[0].revents != 0 {
-                // SAFETY: `fd` is owned and `buf` is a valid writable slice.
-                let n =
-                    unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-                if n >= 0 {
-                    return Ok(n as usize);
-                }
-                let err = io::Error::last_os_error();
-                match err.raw_os_error() {
+                match read_fd(self.fd.as_raw_fd(), buf) {
+                    Ok(count) => return Ok(count),
                     // Spurious readiness (e.g. POLLHUP with no buffered bytes):
                     // loop and re-poll.
-                    Some(libc::EAGAIN) => continue,
-                    _ if err.kind() == io::ErrorKind::Interrupted => continue,
-                    _ => return Err(err),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
                 }
             }
         }
+    }
+}
+
+fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: `fd` is live and `buf` is a valid writable slice.
+    let count = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if count >= 0 {
+        Ok(count as usize)
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -266,6 +302,35 @@ mod tests {
         let n = reader.read(&mut buf).expect("read data");
         assert_eq!(&buf[..n], b"hello");
         assert_eq!(reader.read(&mut buf).expect("read eof"), 0);
+    }
+
+    #[test]
+    fn periodic_probe_detects_writer_close_after_data() {
+        let mut fds = [0 as RawFd; 2];
+        assert!(unsafe { libc::pipe(fds.as_mut_ptr()) } == 0, "pipe");
+        let read_end = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write_end = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let mut reader =
+            InterruptibleReader::new_with_periodic_eof_probe(read_end, Duration::from_millis(10))
+                .expect("wrap reader");
+        let mut writer = std::fs::File::from(write_end);
+        writer.write_all(b"hello").expect("write");
+
+        let mut buf = [0u8; 16];
+        let n = reader.read(&mut buf).expect("read data");
+        assert_eq!(&buf[..n], b"hello");
+
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(writer);
+        });
+        let started = Instant::now();
+        assert_eq!(reader.read(&mut buf).expect("read eof"), 0);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "periodic EOF probe did not observe writer close"
+        );
+        closer.join().expect("writer closer");
     }
 
     #[test]

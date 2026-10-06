@@ -12,3 +12,4 @@ wxc_common = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
+mxc_pty = { workspace = true }

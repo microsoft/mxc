@@ -207,7 +207,7 @@ describe('macOS Seatbelt Container', {
   });
 
   it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {
-    const process = sdk.spawn({
+    const process = await sdk.spawn({
       command: "echo 'profile override works'",
       containment: {
         type: 'seatbelt',
@@ -223,7 +223,7 @@ describe('macOS Seatbelt Container', {
       standardOutput.once('end', resolve);
       standardOutput.once('error', reject);
     });
-    const outcome = await process.waitAsync();
+    const outcome = await process.wait();
     await outputEnded;
     assert.strictEqual(outcome.exitCode, 0, `Expected exit 0: ${stdout}`);
     assert.ok(stdout.includes('profile override works'));

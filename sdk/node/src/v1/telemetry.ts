@@ -325,7 +325,7 @@ async function presentConsentDecision(
 }
 
 /** Read persisted/effective consent and policy without blocking the event loop. */
-export async function getTelemetryConsentStatusAsync(): Promise<TelemetryConsentStatus> {
+export async function getTelemetryConsentStatus(): Promise<TelemetryConsentStatus> {
   if (!isWindows()) {
     return {
       state: 'not-applicable',
@@ -345,12 +345,12 @@ export async function getTelemetryConsentStatusAsync(): Promise<TelemetryConsent
       policy: status.policy,
     };
   } catch (error) {
-    return failedConsentQuery('getTelemetryConsentStatusAsync', error);
+    return failedConsentQuery('getTelemetryConsentStatus', error);
   }
 }
 
 /** Request consent with the versioned canonical consent resource. */
-export async function requestTelemetryConsentAsync(
+export async function requestTelemetryConsent(
   presenter: TelemetryConsentPresenter,
   locale?: string,
 ): Promise<TelemetryConsentOutcome> {
@@ -366,7 +366,7 @@ export async function requestTelemetryConsentAsync(
 }
 
 /** Idempotently withdraw telemetry consent without blocking the event loop. */
-export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentOutcome> {
+export async function withdrawTelemetryConsent(): Promise<TelemetryConsentOutcome> {
   if (!isWindows()) {
     return notApplicable('withdraw');
   }

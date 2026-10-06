@@ -17,7 +17,10 @@ Attached execution is not exposed by the V1 SDK.
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
-and operation options. PTY support is IsolationSession-only. A PTY gives the
+and operation options. One-shot PTY support covers IsolationSession, Bubblewrap,
+LXC, and Seatbelt direct execution. Existing-container PTY support remains
+IsolationSession-only. Seatbelt PTY rejects `guiAccess` and legacy
+`launchMethod: "open"`. A PTY gives the
 caller explicit input, output, resize, and process ownership instead of
 attaching the workload to the host process's global console streams.
 

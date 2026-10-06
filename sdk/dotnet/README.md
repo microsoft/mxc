@@ -64,12 +64,12 @@ choose initial dimensions; it defaults to 24 rows by 80 columns. Async cancellat
 tokens come last. `Experimental` authorizes native experimental features
 without changing the SDK-owned wire contract.
 
-## Spawn with an IsolationSession terminal
+## Spawn with a caller-controlled terminal
 
-PTY execution is available only for IsolationSession on a supported Windows
-host with the native `isolation_session` feature enabled. IsolationSession
-requires explicit unrestricted networking because it cannot enforce network
-restrictions.
+PTY execution supports IsolationSession on Windows with the native
+`isolation_session` feature enabled, Bubblewrap and LXC on Linux, and Seatbelt
+direct execution on macOS. IsolationSession requires explicit unrestricted
+networking because it cannot enforce network restrictions.
 
 ```csharp
 using System.Text;
@@ -102,6 +102,10 @@ Console.WriteLine($"exit={result.ExitCode}");
 
 `SpawnWithPty` returns an `MxcPtyProcess` with merged terminal output and
 resizing support. Initial dimensions default to 24 rows by 80 columns.
+PTY stderr is merged into `Output`. Closing `Input` requests terminal EOF in
+canonical mode; raw-mode applications must use their own completion protocol.
+Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
+Unsupported combinations are rejected before sandbox creation.
 
 ## Lifecycle API
 

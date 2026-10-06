@@ -93,7 +93,7 @@ describe('ProcessContainer node-pty binding', () => {
     terminal.kill();
     assert.strictEqual(pty.killCount, 1);
     pty.exit(7);
-    assert.deepStrictEqual(await terminal.waitAsync(), {
+    assert.deepStrictEqual(await terminal.wait(), {
       exitCode: 7,
       timedOut: false,
     });

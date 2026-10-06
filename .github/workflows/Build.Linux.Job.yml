@@ -101,10 +101,12 @@ jobs:
 
       # The job defaults working-directory to src/core/lxc, so the `Test lxc`
       # step above covers only the lxc package. This streaming suite must follow
-      # the install: these skip when bwrap is absent, so running them earlier
-      # would silently exercise nothing.
+      # the install. Strict mode makes a failed availability probe fail this
+      # provisioned lane instead of silently exercising nothing.
       - name: Test Bubblewrap streaming (mxc-sdk)
         working-directory: src
+        env:
+          MXC_BWRAP_TESTS_REQUIRE_EXECUTION: "1"
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test streaming_bubblewrap
 

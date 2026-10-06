@@ -63,8 +63,8 @@ test jobs only ever `download-artifact`.
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
 | `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
-| `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit + `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
+| `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `isolation-session-bundle` | `Package.IsolationSession.TestBundle.Job.yml` — uploads `isolation-session-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |

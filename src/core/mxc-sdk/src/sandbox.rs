@@ -535,6 +535,10 @@ impl MxcPtyProcess {
     }
 
     /// Wait for the container process to exit, draining untaken terminal output.
+    ///
+    /// Untaken input requests canonical-mode terminal EOF. Raw-mode applications
+    /// must use their own completion protocol. Output draining is cancelled after
+    /// the foreground process exits so descendants cannot keep this call waiting.
     pub fn wait(&self) -> std::io::Result<WaitResult> {
         if !self.writer_taken.load(Ordering::Acquire) {
             drop(self.take_writer()?);

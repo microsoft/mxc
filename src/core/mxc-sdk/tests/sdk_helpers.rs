@@ -7,6 +7,7 @@ use mxc_sdk::v1::platform_support;
 use mxc_sdk::v1::policy::filesystem::{
     available_tools_policy, temporary_files_policy, user_profile_policy,
 };
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use mxc_sdk::v1::ContainerRequest;
 #[cfg(target_os = "windows")]
 use mxc_sdk::v1::ErrorCode;

@@ -34,7 +34,7 @@ export class MxcPtyProcess extends MxcProcess {
     super(driver, timeoutMs, scheduler);
   }
 
-  /** Writable PTY input. Send the terminal's exit or EOF sequence before closing it. */
+  /** Writable PTY input. */
   get input(): Writable {
     const input = this.standardInput;
     if (input === null) {

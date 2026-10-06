@@ -1461,15 +1461,18 @@ mod tests {
             ui: None,
             timeout_ms: None,
         };
-        // build_request leaves `process` for the engine to resolve, so the
-        // setters create the Seatbelt config on first use.
-        let mut request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
-        let mut union: Vec<String> = request.seatbelt_extra_mach_lookups().to_vec();
-        union.push("com.example.service".to_string());
-        request.set_seatbelt_extra_mach_lookups(union.clone());
-        request.set_seatbelt_keychain_access(true);
-
-        assert_eq!(request.seatbelt_extra_mach_lookups(), union.as_slice());
+        let mut seatbelt = crate::configs::SeatbeltConfig::default();
+        seatbelt
+            .extra_mach_lookups
+            .push("com.example.service".to_string());
+        seatbelt.keychain_access = true;
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::Seatbelt(seatbelt),
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
         let cfg = request
             .inner
             .seatbelt

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 wxc_common = { workspace = true }
 lxc_common = { workspace = true }
+mxc_pty = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

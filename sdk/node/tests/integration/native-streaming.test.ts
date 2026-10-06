@@ -23,7 +23,7 @@ interface NativeSandbox {
   readonly standardInput: Writable | null;
   readonly standardOutput: Readable | null;
   readonly standardError: Readable | null;
-  waitAsync(): Promise<{ exitCode: number; timedOut: boolean }>;
+  wait(): Promise<{ exitCode: number; timedOut: boolean }>;
   kill(): void;
   dispose(): void;
 }
@@ -140,7 +140,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     });
 
     let completed = false;
-    const wait = sandbox.waitAsync().then((result) => {
+    const wait = sandbox.wait().then((result) => {
       completed = true;
       return result;
     });
@@ -180,7 +180,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     const request = oneShotModule.prepareOneShotRequest(config);
     const sandbox = await streamingModule.spawnBindingSandboxProcess(request);
 
-    const result = await sandbox.waitAsync();
+    const result = await sandbox.wait();
     assert.strictEqual(result.exitCode, 0);
   });
 });
@@ -269,7 +269,7 @@ describe(`Internal native streaming over LXC (schema ${schemaVersion})`, {
       });
 
       let completed = false;
-      const wait = sandbox.waitAsync().then((result) => {
+      const wait = sandbox.wait().then((result) => {
         completed = true;
         return result;
       });

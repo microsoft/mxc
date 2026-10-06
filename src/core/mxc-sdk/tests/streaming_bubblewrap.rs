@@ -12,6 +12,8 @@
 
 #![cfg(target_os = "linux")]
 
+mod unix_pty_contract;
+
 use mxc_sdk::v1::WaitResult;
 use mxc_sdk::v1::{spawn, ContainerRequest, FilesystemPolicy};
 
@@ -21,6 +23,9 @@ fn bwrap_available() -> bool {
     match bwrap_common::bwrap_version::probe_bwrap() {
         Ok(_) => true,
         Err(err) => {
+            if std::env::var("MXC_BWRAP_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {
+                panic!("strict mode: {err}");
+            }
             println!("SKIPPED: {err}");
             false
         }
@@ -70,6 +75,50 @@ fn streaming_bubblewrap_bidirectional_stdio() {
     assert!(out.contains("ping-pong"), "got: {out:?}");
 
     assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
+}
+
+#[test]
+fn bubblewrap_pty_supports_io_resize_and_merged_output() {
+    if !bwrap_available() {
+        return;
+    }
+    unix_pty_contract::assert_round_trip(bwrap_request(
+        unix_pty_contract::ROUND_TRIP_COMMAND,
+        30_000,
+    ));
+}
+
+#[test]
+fn bubblewrap_pty_enforces_script_timeout() {
+    if !bwrap_available() {
+        return;
+    }
+    unix_pty_contract::assert_timeout(
+        bwrap_request(unix_pty_contract::TIMEOUT_COMMAND, 1_000),
+        std::time::Duration::from_secs(15),
+    );
+}
+
+#[test]
+fn bubblewrap_pty_preserves_explicit_timeout_kill() {
+    if !bwrap_available() {
+        return;
+    }
+    unix_pty_contract::assert_explicit_timeout_kill(bwrap_request(
+        unix_pty_contract::TIMEOUT_COMMAND,
+        30_000,
+    ));
+}
+
+#[test]
+fn bubblewrap_pty_transfers_native_stdio() {
+    if !bwrap_available() {
+        return;
+    }
+    unix_pty_contract::assert_native_stdio(bwrap_request(
+        unix_pty_contract::NATIVE_STDIO_COMMAND,
+        30_000,
+    ));
 }
 
 #[test]

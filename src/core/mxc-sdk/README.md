@@ -132,7 +132,13 @@ operation options and return no execution output.
 | Terminal process outcome | `v1::WaitResult` |
 
 `v1::spawn_with_pty` creates a container with a caller-controlled terminal.
-PTY support is available only for IsolationSession on supported Windows hosts.
+One-shot PTY support is available for IsolationSession on Windows, Bubblewrap
+and LXC on Linux, and Seatbelt direct execution on macOS. LXC requires root.
+Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
+`wait()` requests canonical-mode terminal EOF for untaken input; raw-mode
+applications must use their own completion protocol. Untaken merged output is
+drained and discarded without waiting indefinitely for descendants that keep
+the terminal open. Ordinary `spawn` continues to use separate pipes.
 For host discovery, use
 `mxc_sdk::v1::platform_support` and `mxc_sdk::v1::available_backends`. Errors are
 returned as `mxc_sdk::v1::Error` with an `ErrorCode`.

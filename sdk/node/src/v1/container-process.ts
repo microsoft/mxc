@@ -74,7 +74,7 @@ function isExpectedStdinClosure(error: unknown): boolean {
  * Rust retains lifecycle ownership; Node owns the transferred native stdio
  * endpoints and provides their normal buffering and backpressure.
  *
- * Access each output stream before calling {@link waitAsync}. Waiting drains
+ * Access each output stream before calling {@link wait}. Waiting drains
  * any untaken output internally, and subsequent access to that stream throws.
  * Output metadata is populated only after terminal settling completes.
  */
@@ -151,14 +151,14 @@ export class MxcProcess {
   }
 
   /**
-   * Returns stdout unless {@link waitAsync} already began draining it
+   * Returns stdout unless {@link wait} already began draining it
    * internally.
    */
   get standardOutput(): Readable | null {
     this.throwIfDisposed();
     if (this.outputDrained) {
       throw new Error(
-        'standard output is unavailable because waitAsync() began draining it; ' +
+        'standard output is unavailable because wait() began draining it; ' +
         'access the stream before awaiting process completion',
       );
     }
@@ -167,14 +167,14 @@ export class MxcProcess {
   }
 
   /**
-   * Returns stderr unless {@link waitAsync} already began draining it
+   * Returns stderr unless {@link wait} already began draining it
    * internally.
    */
   get standardError(): Readable | null {
     this.throwIfDisposed();
     if (this.errorDrained) {
       throw new Error(
-        'standard error is unavailable because waitAsync() began draining it; ' +
+        'standard error is unavailable because wait() began draining it; ' +
         'access the stream before awaiting process completion',
       );
     }
@@ -197,7 +197,7 @@ export class MxcProcess {
    * streams are drained internally to prevent pipe-buffer deadlocks. The
    * native process handle is released before the promise resolves.
    */
-  waitAsync(): Promise<WaitResult> {
+  wait(): Promise<WaitResult> {
     this.throwIfDisposed();
     if (
       !this.inputTaken &&

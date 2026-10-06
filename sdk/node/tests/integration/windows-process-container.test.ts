@@ -39,7 +39,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     }
   });
 
-  for (const [name, operation] of [['run', sdk.run], ['runAsync', sdk.runAsync]] as const) {
+  for (const [name, operation] of [['run', sdk.run]] as const) {
     it(`public ${name} captures output and the workload exit code`, { skip: sandboxSkipReason }, async () => {
       const result = await operation({
         containment: { type: 'processcontainer' },
@@ -54,7 +54,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     });
   }
 
-  for (const [name, operation] of [['spawn', sdk.spawn], ['spawnAsync', sdk.spawnAsync]] as const) {
+  for (const [name, operation] of [['spawn', sdk.spawn]] as const) {
     it(`public ${name} returns an SDK process with live standard streams`, { skip: sandboxSkipReason }, async () => {
       const handle = await operation({
         containment: { type: 'processcontainer' },
@@ -73,7 +73,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         };
         const output = read(stdout);
         const error = read(stderr);
-        const result = await handle.waitAsync();
+        const result = await handle.wait();
         assert.strictEqual(result.exitCode, 9);
         assert.strictEqual(result.timedOut, false);
         assert.ok((await output).includes('PUBLIC_SPAWN_OK'));
@@ -194,7 +194,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
       }
     });
 
-    for (const [name, operation] of [['run', sdk.run], ['runAsync', sdk.runAsync]] as const) {
+    for (const [name, operation] of [['run', sdk.run]] as const) {
       it(`public ${name} routes traffic through an unpackaged proxy`, async () => {
         assert.ok(proxyExpectedBody);
         tempDir = createTempDir('mxc-proxy-test');

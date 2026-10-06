@@ -17,12 +17,12 @@ and helpers live under `mxc_sdk::v1`, `Microsoft.Mxc.Sdk.V1`, or
 | Capability | Rust | .NET | Node |
 |---|---|---|---|
 | Creation input | `ContainerRequest` | `ContainerRequest` | `ContainerRequest` |
-| Captured creation | `run` | `MxcContainer.Run` / `RunAsync` | `run` / `runAsync` |
-| Live standard pipes | `spawn` | `MxcContainer.Spawn` / `SpawnAsync` | `spawn` / `spawnAsync` |
+| Captured creation | `run` | `MxcContainer.Run` / `RunAsync` | `run` |
+| Live standard pipes | `spawn` | `MxcContainer.Spawn` / `SpawnAsync` | `spawn` |
 | Provision | `container::provision_container` | `MxcLifecycle.ProvisionContainer` | `provisionContainer` |
 | Start | `container::start_container` | `MxcLifecycle.StartContainer` | `startContainer` |
-| Existing-container capture | `container::run_in_container` | `RunInContainer` / `RunInContainerAsync` | `runInContainer` / `runInContainerAsync` |
-| Existing-container streaming | `container::spawn_in_container` | `SpawnInContainer` / `SpawnInContainerAsync` | `spawnInContainer` / `spawnInContainerAsync` |
+| Existing-container capture | `container::run_in_container` | `RunInContainer` / `RunInContainerAsync` | `runInContainer` |
+| Existing-container streaming | `container::spawn_in_container` | `SpawnInContainer` / `SpawnInContainerAsync` | `spawnInContainer` |
 | Stop | `container::stop_container` | `MxcLifecycle.StopContainer` | `stopContainer` |
 | Deprovision | `container::deprovision_container` | `MxcLifecycle.DeprovisionContainer` | `deprovisionContainer` |
 

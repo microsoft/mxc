@@ -19,7 +19,7 @@ import {
 import {
   deprovisionContainer,
   provisionContainer,
-  runAsync,
+  run,
   type ContainerId,
   type Containment,
   type ContainerRequest,
@@ -76,7 +76,7 @@ export function runRequestForTest(
   workingDirectory?: string,
   containerName?: string,
 ) {
-  return runAsync({
+  return run({
     ...request,
     command,
     ...(workingDirectory === undefined ? {} : { workingDirectory }),
