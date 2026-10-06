@@ -1,5 +1,7 @@
 # MXC State-Aware Sandbox API - Overview
 
+> **Audience:** MXC consumers
+
 Companion to [mxc-state-aware-sandbox-api.md](./mxc-state-aware-sandbox-api.md).
 
 MXC separates container creation from persistent lifecycle operations.

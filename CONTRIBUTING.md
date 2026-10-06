@@ -1,5 +1,7 @@
 # MXC Contributor's Guide
 
+> **Audience:** MXC developers
+
 Below is our guidance for how to report issues, propose new features, and submit contributions via Pull Requests (PRs).
 
 ## Open Development Workflow
@@ -94,6 +96,16 @@ For those willing to help fix issues or implement features:
 Some issues are quick and simple to describe. Once a team member has agreed with your approach, skip ahead to "Fork, Clone, Branch, and Create your PR" below.
 
 Some changes require careful thought and a written design before implementation. For these, we'll request a short design document — typically a markdown file under `docs/` or a detailed comment on the issue describing the proposed configuration schema changes, runner behavior, or SDK API surface. Driving towards agreement in writing, before any code is written, often results in simpler code and less wasted effort.
+
+### Documentation audiences
+
+Human-facing Markdown documentation includes one visible audience marker immediately below its title:
+
+- `> **Audience:** MXC consumers` for people configuring, embedding, or operating MXC.
+- `> **Audience:** MXC developers` for repository design, architecture, build, test, and maintenance material.
+- `> **Audience:** MXC consumers and developers` when a document genuinely serves both groups.
+
+Do not add these markers to legal text, GitHub templates or workflow prompts, or agent instruction files.
 
 ### Experimental features
 

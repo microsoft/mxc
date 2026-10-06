@@ -1,5 +1,7 @@
 # `mxc-sdk`
 
+> **Audience:** MXC consumers and developers
+
 `mxc-sdk` is the Rust library for authoring MXC container requests and executing
 them in-process through the native engine. The versioned public API is under
 `mxc_sdk::v1`. `ContainerRequest` owns the command and shared filesystem,

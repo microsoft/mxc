@@ -1,5 +1,7 @@
 # Run in a persisted container
 
+> **Audience:** MXC consumers
+
 Demonstrates a persisted IsolationSession container:
 
 1. Provision a container.

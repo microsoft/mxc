@@ -1,5 +1,7 @@
 # wxc_test_proxy
 
+> **Audience:** MXC developers
+
 **⚠️ Testing-only. NOT a production proxy.**
 
 Minimal HTTP CONNECT proxy for `wxc` integration testing. Tunnels HTTPS via `CONNECT` — no caching, filtering, or auth.

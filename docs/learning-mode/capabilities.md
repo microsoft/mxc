@@ -1,5 +1,7 @@
 # Learning-mode capabilities
 
+> **Audience:** MXC consumers
+
 MXC sandboxes are **deny-by-default**: when a workload touches a file, registry
 key, or other resource the policy does not grant, the access is blocked and the
 OS returns the usual "Access is denied" error. For non-trivial workloads this is

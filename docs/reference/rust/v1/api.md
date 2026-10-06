@@ -1,5 +1,7 @@
 # Rust V1 operation signatures
 
+> **Audience:** MXC consumers
+
 Public entrypoint: `mxc_sdk::v1`. [Types](types.md) | [Overview](README.md)
 
 Signatures describe the typed consumer API and omit implementation bodies.

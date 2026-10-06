@@ -1,5 +1,7 @@
 # Run with logging access denied
 
+> **Audience:** MXC consumers
+
 Runs a harmless Windows ProcessContainer workload that attempts to read a
 checked-in file explicitly denied by policy. `captureDenials` keeps the access
 blocked, records the denial, and returns structured metadata describing the

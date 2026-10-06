@@ -1,5 +1,7 @@
 # Windows.AI.IsolationSession — WinMD Provenance
 
+> **Audience:** MXC developers
+
 This directory tracks provenance for the generated Rust bindings in
 `src/mxc-sdk/src/backends/isolation_session/bindings/`. The WinMD file itself is NOT checked in.
 

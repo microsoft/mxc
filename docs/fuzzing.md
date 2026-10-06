@@ -1,5 +1,7 @@
 # Fuzzing
 
+> **Audience:** MXC developers
+
 MXC uses [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html) for
 local fuzzing harnesses and [OneFuzz](https://aka.ms/onefuzz) for continuous
 fuzzing in CI.

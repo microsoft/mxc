@@ -1,5 +1,7 @@
 # Nanvix MicroVM Backend
 
+> **Audience:** MXC consumers and developers
+
 Nanvix MicroVM is an experimental containment backend for MxC. It is powered by the
 [Nanvix OS/VM](https://aka.ms/nanvix) and runs untrusted code with hardware-enforced isolation
 via the Windows Hypervisor Platform (WHP) on Windows or KVM on Linux.

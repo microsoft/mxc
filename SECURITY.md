@@ -2,6 +2,8 @@
 
 ## Security
 
+> **Audience:** MXC consumers and developers
+
 Microsoft takes the security of our software products and services seriously, which
 includes all source code repositories in our GitHub organizations.
 

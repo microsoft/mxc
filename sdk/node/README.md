@@ -1,5 +1,7 @@
 # `@microsoft/mxc-sdk`
 
+> **Audience:** MXC consumers
+
 Node.js / TypeScript SDK for MXC (Microsoft eXecution Containers). The
 versioned public request, execution, and lifecycle APIs are exported from
 `@microsoft/mxc-sdk/v1`, including platform discovery, errors, and telemetry consent.

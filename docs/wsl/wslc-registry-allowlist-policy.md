@@ -1,5 +1,7 @@
 # MXC administrative WSLC registry allowlist
 
+> **Audience:** MXC consumers
+
 MXC pulls a WSL Container image from its registry when a run names an image the
 machine has not cached. An administrator can restrict which registries that pull
 may contact.

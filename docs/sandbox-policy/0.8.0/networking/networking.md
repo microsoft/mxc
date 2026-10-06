@@ -1,5 +1,7 @@
 # MXC Network Configuration, GA
 
+> **Audience:** MXC consumers
+
 Schema 0.8.0 accepts the `network.egress` and `network.ingress` sections
 described in this document. Schema 0.7 and earlier retain their legacy network
 configuration shape. During the additive transition, schema 0.8 requests may

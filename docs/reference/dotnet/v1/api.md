@@ -1,5 +1,7 @@
 # .NET V1 operation signatures
 
+> **Audience:** MXC consumers
+
 Public entrypoint: `Microsoft.Mxc.Sdk.V1`. [Types](types.md) | [Overview](README.md)
 
 Signatures describe the typed consumer API and omit implementation bodies.

@@ -1,5 +1,7 @@
 # Windows Sandbox Backend - Reference
 
+> **Audience:** MXC consumers and developers
+
 For the overview and policy matrix, see
 [windows-sandbox.md](windows-sandbox.md).
 

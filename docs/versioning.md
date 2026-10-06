@@ -1,5 +1,7 @@
 # MXC Versioning Design
 
+> **Audience:** MXC developers
+
 ## Architecture at a glance
 
 Versioning determines **which configuration contract is accepted**, not which

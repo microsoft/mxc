@@ -1,5 +1,7 @@
 # Repository architecture
 
+> **Audience:** MXC developers
+
 MXC is a Rust workspace with TypeScript and C# SDKs. This page summarizes the
 repository layout and the main execution layers. Backend behavior is documented
 in the corresponding guides under `docs/`.

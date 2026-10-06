@@ -1,5 +1,7 @@
 # Run in a transient container
 
+> **Audience:** MXC consumers
+
 Demonstrates a complete run-to-completion container request using the host's native
 process-isolation backend. The sample checks host support, supplies a bounded
 command and an environment override, runs it in a newly created transient

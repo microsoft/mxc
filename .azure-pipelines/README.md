@@ -1,5 +1,7 @@
 # Configuration Strategy
 
+> **Audience:** MXC developers
+
 ## Local development
 
 Developers should use public registries like `crates.io`

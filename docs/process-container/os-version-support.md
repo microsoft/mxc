@@ -1,5 +1,7 @@
 # Windows OS-version policy support (`processcontainer`)
 
+> **Audience:** MXC consumers and developers
+
 This is the authoritative reference for **which policy aspects the Windows
 `processcontainer` backend can enforce on each Windows release**. It covers the
 filesystem, network, and UI-restriction policy surfaces. **All releases in this

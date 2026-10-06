@@ -1,5 +1,7 @@
 # MXC State-Aware Sandbox API
 
+> **Audience:** MXC consumers and developers
+
 *Detailed design proposal. Compiled 2026-04-28.*
 
 ## Contents

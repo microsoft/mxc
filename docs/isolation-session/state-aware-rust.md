@@ -1,5 +1,7 @@
 # MXC IsolationSession Backend — State-Aware (Rust)
 
+> **Audience:** MXC developers
+
 This document describes the IsolationSession backend's behaviour under the
 state-aware lifecycle API ([design](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)).
 It is the per-backend specification required by §11.6 of that design and

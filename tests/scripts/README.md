@@ -1,5 +1,7 @@
 # Test Scripts
 
+> **Audience:** MXC developers
+
 This directory contains convenience scripts for running MXC end-to-end tests
 locally and in CI. The primary Rust executor E2E path is
 `cargo test -p wxc_e2e_tests`, which invokes the MXC binaries directly instead
