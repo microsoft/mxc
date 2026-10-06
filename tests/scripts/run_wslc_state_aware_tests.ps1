@@ -1685,6 +1685,49 @@ try {
         } | Out-Null
     }
 
+    # J4: a long exec on A must not delay a full lifecycle on another sandbox,
+    # so that lifecycle completes while A is still running.
+    if ($ccAReady) {
+        Run-StateAwareTest "J: a long exec on A does not block lifecycle work on another sandbox" {
+            $blocker = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = "sh -c 'sleep 25; echo blocker-done'"; timeout = 60000 } }
+            $blockerHandle = Start-StateAware -Request $blocker
+            Start-Sleep -Milliseconds 1500
+
+            $sandboxC = $null
+            try {
+                $rp = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
+                $envObj = Assert-ResultEnvelope $rp "C provision during A's exec"
+                if ($envObj) { $sandboxC = [string]$envObj.result.sandboxId }
+
+                if ($sandboxC) {
+                    $rs = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $sandboxC
+                    $null = Assert-ResultEnvelope $rs "C start during A's exec"
+
+                    $req = @{ phase = 'exec'; sandboxId = $sandboxC; process = @{ commandLine = 'echo C-ran-during-A'; timeout = 30000 } }
+                    $re = Invoke-StateAware -Request $req
+                    Assert-True ($re.ExitCode -eq 0) "C exec during A's exec exits 0"
+                    Assert-True ($re.Stdout -match 'C-ran-during-A') "C produced its own output"
+
+                    $rstop = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $sandboxC
+                    $null = Assert-ResultEnvelope $rstop "C stop during A's exec"
+                }
+            } finally {
+                if ($sandboxC) {
+                    try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $sandboxC } catch { }
+                }
+            }
+            $cEnded = [DateTime]::UtcNow
+
+            $rb = Wait-StateAware $blockerHandle
+            Assert-True ($rb.ExitCode -eq 0) "A's exec still exits 0"
+            Assert-True ($rb.Stdout -match 'blocker-done') "A's exec ran to completion"
+
+            $leadSec = [math]::Round(($rb.EndedAt - $cEnded).TotalSeconds, 2)
+            Assert-True ($cEnded -lt $rb.EndedAt) `
+                "C's whole lifecycle finished ${leadSec}s before A's exec did"
+        } | Out-Null
+    }
+
     if ($ccAProvOk) {
         $ccADeprovPassed = Run-StateAwareTest "J: deprovision A" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:ccSandboxA

@@ -21,7 +21,9 @@
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::wslc_common::daemon_client::DaemonClient;
+use mxc_sdk::wslc_common::container_steps::OutStream;
+use mxc_sdk::wslc_common::daemon_client::{DaemonClient, DaemonError};
+use mxc_sdk::wslc_common::daemon_protocol::{ErrKind, ExecConfig, ExecTerminal};
 use mxc_sdk::wslc_common::daemon_record::{read_daemon_record, STATE_ROOT_ENV_VAR};
 use mxc_sdk::wslc_common::process_env::EnvScope;
 
@@ -79,6 +81,187 @@ impl Drop for DaemonProcess {
         // override so a later test in this binary falls back to the default root.
         std::env::remove_var(STATE_ROOT_ENV_VAR);
     }
+}
+
+/// Provision and start a sandbox over the pipe, returning its id.
+fn provisioned_and_started(client: &DaemonClient) -> String {
+    use mxc_sdk::wslc_common::daemon_protocol::{ProvisionConfig, StartConfig};
+
+    let sandbox_id = client
+        .provision(ProvisionConfig {
+            image: "alpine:latest".to_string(),
+            image_tar_path: None,
+            volumes: Vec::new(),
+            network: Default::default(),
+            port_mappings: Vec::new(),
+        })
+        .expect("provision");
+    client
+        .start(StartConfig {
+            sandbox_id: sandbox_id.clone(),
+        })
+        .expect("start");
+    sandbox_id
+}
+
+/// A run that prints a marker, then an epoch second either side of a sleep.
+fn stamped_exec(exec_id: &str, sandbox_id: &str, seconds: u32) -> ExecConfig {
+    ExecConfig {
+        exec_id: exec_id.to_string(),
+        run_token: format!("{exec_id}-run"),
+        sandbox_id: sandbox_id.to_string(),
+        script_code: format!("echo marker-{exec_id}; date +%s; sleep {seconds}; date +%s"),
+        working_directory: String::new(),
+        env: Vec::new(),
+        env_scope: EnvScope::Merge,
+        timeout_ms: 60_000,
+    }
+}
+
+/// The epoch seconds a stamped run reported either side of its sleep.
+fn stamped_interval(stdout: &str) -> (i64, i64) {
+    let stamps: Vec<i64> = stdout
+        .lines()
+        .filter_map(|line| line.trim().parse::<i64>().ok())
+        .collect();
+    assert!(
+        stamps.len() >= 2,
+        "a stamped run must report a start and an end, got {stdout:?}"
+    );
+    (stamps[0], stamps[stamps.len() - 1])
+}
+
+fn deprovision_all(client: &DaemonClient, sandbox_ids: Vec<String>) {
+    use mxc_sdk::wslc_common::daemon_protocol::DeprovisionConfig;
+
+    for sandbox_id in sandbox_ids {
+        let _ = client.deprovision(DeprovisionConfig { sandbox_id });
+    }
+}
+
+/// Two clients running against their own sandboxes share the daemon: both are
+/// admitted, each sees only its own output, and the runs overlap in the guest.
+#[test]
+#[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
+fn two_clients_exec_concurrently_over_the_pipe() {
+    let _daemon = DaemonProcess::spawn_ready();
+    let client = DaemonClient::connect().expect("connect to daemon");
+
+    let sandboxes = vec![
+        provisioned_and_started(&client),
+        provisioned_and_started(&client),
+    ];
+
+    let runs: Vec<_> = ["alpha", "beta"]
+        .iter()
+        .zip(sandboxes.iter())
+        .map(|(tag, sandbox_id)| {
+            let client = client.clone();
+            let config = stamped_exec(tag, sandbox_id, 6);
+            std::thread::spawn(move || {
+                let mut stdout = Vec::new();
+                let completion = client
+                    .exec_streaming(config, |stream, data| {
+                        if stream == OutStream::Stdout {
+                            stdout.extend_from_slice(data);
+                        }
+                    })
+                    .expect("both clients must be admitted");
+                (completion, String::from_utf8_lossy(&stdout).into_owned())
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = runs
+        .into_iter()
+        .map(|handle| handle.join().expect("run thread"))
+        .collect();
+
+    for ((completion, stdout), tag) in results.iter().zip(["alpha", "beta"]) {
+        assert_eq!(completion.outcome, ExecTerminal::Exited(0));
+        assert!(!completion.truncated, "{tag} reported dropped output");
+        assert!(
+            stdout.contains(&format!("marker-{tag}")),
+            "{tag} did not receive its own output: {stdout:?}"
+        );
+    }
+    assert!(
+        !results[0].1.contains("marker-beta") && !results[1].1.contains("marker-alpha"),
+        "each client must receive only its own stream"
+    );
+
+    // Both sandboxes share one utility VM, so their clocks agree.
+    let (alpha_start, alpha_end) = stamped_interval(&results[0].1);
+    let (beta_start, beta_end) = stamped_interval(&results[1].1);
+    let overlap = alpha_end.min(beta_end) - alpha_start.max(beta_start);
+    assert!(
+        overlap >= 2,
+        "the two 6s runs overlapped by {overlap}s, so they were serialized"
+    );
+
+    deprovision_all(&client, sandboxes);
+}
+
+/// The daemon's exec capacity is finite, so enough simultaneous clients are
+/// refused before admission.
+#[test]
+#[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
+fn the_global_exec_cap_refuses_the_excess() {
+    // Above the daemon's exec cap, which is private to the control server.
+    const CLIENTS: usize = 10;
+
+    let _daemon = DaemonProcess::spawn_ready();
+    let client = DaemonClient::connect().expect("connect to daemon");
+
+    let sandboxes: Vec<String> = (0..CLIENTS)
+        .map(|_| provisioned_and_started(&client))
+        .collect();
+
+    let runs: Vec<_> = sandboxes
+        .iter()
+        .enumerate()
+        .map(|(n, sandbox_id)| {
+            let client = client.clone();
+            let config = stamped_exec(&format!("capacity-{n}"), sandbox_id, 6);
+            std::thread::spawn(move || client.exec_streaming(config, |_, _| {}))
+        })
+        .collect();
+
+    let results: Vec<_> = runs
+        .into_iter()
+        .map(|handle| handle.join().expect("run thread"))
+        .collect();
+
+    let admitted = results.iter().filter(|result| result.is_ok()).count();
+    let refused = results
+        .iter()
+        .filter(|result| {
+            matches!(
+                result,
+                Err(DaemonError::Daemon {
+                    kind: ErrKind::Busy,
+                    ..
+                })
+            )
+        })
+        .count();
+
+    assert!(
+        admitted >= 2,
+        "the daemon must admit concurrent execs, got {admitted} of {CLIENTS}"
+    );
+    assert!(
+        refused >= 1,
+        "the exec cap must refuse the excess, got {admitted} admitted and {refused} refused \
+         of {CLIENTS}"
+    );
+    assert_eq!(
+        admitted + refused,
+        CLIENTS,
+        "every client must be admitted or refused as busy, not fail some other way"
+    );
+
+    deprovision_all(&client, sandboxes);
 }
 
 #[test]
