@@ -1,0 +1,125 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Publishes mxc-sdk to crates.io through ESRP Release under the
+# microsoft-oss-releases account. Consumes the mxc-crates-package artifact.
+#
+# Dry runs invoke Cargo against the checked-out workspace. Real releases submit
+# one packaged crate per ESRP task; each task waits for completion before the
+# crate is submitted. CI keeps the crate parameter synchronized.
+#
+# The pool enforces 1ES network isolation (CFSClean), so this job performs no
+# crates.io reads.
+
+parameters:
+  - name: ESRPInfo
+    type: object
+  - name: publishCrates
+    type: object
+    # Keep this list internal to the template so release operators cannot
+    # override the Cargo-validated publication order at queue time.
+    default:
+      # BEGIN MXC-SDK PUBLISH CRATES
+      - mxc-sdk
+      # END MXC-SDK PUBLISH CRATES
+  - name: dryRun
+    type: boolean
+    default: true
+  - name: cratesArtifactName
+    type: string
+    default: mxc-crates-package
+
+jobs:
+  - job: validate_crates_publication
+    displayName: Validate crates.io publication
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: ubuntu-latest
+      os: linux
+    templateContext:
+      rust:
+        rustToolchain:
+          toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+          version: 'ms-prod-1.93'
+    steps:
+      - checkout: self
+
+      - template: Cargo.Setup.Private.yml@self
+        parameters:
+          authenticate: true
+
+      - task: 1ES.Build.Rust.Setup@1
+
+      - pwsh: |
+          $ErrorActionPreference = 'Stop'
+          $crates = [string[]] ($env:PUBLISH_CRATES_JSON | ConvertFrom-Json)
+          $arguments = [System.Collections.Generic.List[string]]::new()
+          $arguments.Add('publish')
+          $arguments.Add('--dry-run')
+          $arguments.Add('--locked')
+          $arguments.Add('--manifest-path')
+          $arguments.Add('src/Cargo.toml')
+          foreach ($crate in $crates)
+          {
+            $arguments.Add('-p')
+            $arguments.Add($crate)
+          }
+          Write-Host "cargo $($arguments -join ' ')"
+          cargo @arguments
+          if ($LASTEXITCODE -ne 0) { throw "cargo publish --dry-run failed with exit $LASTEXITCODE" }
+        displayName: Cargo publish dry run
+        env:
+          PUBLISH_CRATES_JSON: ${{ convertToJson(parameters.publishCrates) }}
+
+  - ${{ if eq(parameters.dryRun, false) }}:
+      - job: publish_crates
+        displayName: Publish crates to crates.io (ESRP)
+        dependsOn: validate_crates_publication
+        condition: succeeded()
+        pool:
+          name: Azure-Pipelines-1ESPT-ExDShared
+          image: windows-2022
+          os: windows
+        templateContext:
+          type: releaseJob
+          isProduction: true
+          inputs:
+            - input: pipelineArtifact
+              artifactName: ${{ parameters.cratesArtifactName }}
+              targetPath: $(Pipeline.Workspace)/crates
+        variables:
+          cratesDir: $(Pipeline.Workspace)/crates
+        steps:
+          - pwsh: |
+              $ErrorActionPreference = 'Stop'
+              $ref = $env:SOURCE_REF
+              Write-Host "Run was queued against: $ref"
+              if ($ref -cnotlike 'refs/tags/v?*')
+              {
+                throw "Crates.io publication requires refs/tags/v*; queued ref was '$ref'."
+              }
+              Write-Host "Releasing from tag $($ref.Substring('refs/tags/'.Length))"
+            displayName: Require a version tag
+            env:
+              SOURCE_REF: $(Build.SourceBranch)
+
+          - ${{ each crate in parameters.publishCrates }}:
+              - task: EsrpRelease@12
+                displayName: "Publish ${{ crate }} to crates.io"
+                inputs:
+                  connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+                  usemanagedidentity: false
+                  keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+                  authcertname: ${{ parameters.ESRPInfo.authCertName }}
+                  signcertname: ${{ parameters.ESRPInfo.signCertName }}
+                  clientid: ${{ parameters.ESRPInfo.clientId }}
+                  intent: 'PackageDistribution'
+                  contenttype: 'Rust'
+                  contentsource: 'Folder'
+                  folderlocation: $(cratesDir)\${{ crate }}
+                  owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+                  approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+                  waitforreleasecompletion: true
+                  serviceendpointurl: 'https://api.esrp.microsoft.com'
+                  mainpublisher: 'ESRPRELPACMAN'
+                  domaintenantid: ${{ parameters.ESRPInfo.tenantId }}

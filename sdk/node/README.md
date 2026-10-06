@@ -75,9 +75,7 @@ disabled; clipboard and input-injection permissions remain separate.
 
 ## Spawn with a caller-controlled terminal
 
-PTY execution supports IsolationSession on Windows, Bubblewrap and LXC on Linux,
-and Seatbelt direct execution on macOS. IsolationSession requires explicit
-unrestricted networking because it cannot enforce network restrictions.
+PTY execution supports all backends except WSLc.
 
 ```typescript
 import { spawnWithPty } from '@microsoft/mxc-sdk/v1';
@@ -103,7 +101,7 @@ try {
 `spawnWithPty` returns a `Promise<MxcPtyProcess>` with merged terminal output
 and resizing support. Initial dimensions default to 24 rows by 80 columns.
 Terminal stderr is merged into `output`. Closing `input` requests terminal EOF
-in canonical mode; raw-mode applications must use their own completion protocol.
+when supported; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
 Unsupported combinations are rejected before sandbox creation.
 

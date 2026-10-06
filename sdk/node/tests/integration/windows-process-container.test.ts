@@ -85,6 +85,30 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     });
   }
 
+  it('public spawnWithPty supports interactive ProcessContainer I/O', { skip: sandboxSkipReason }, async () => {
+    const terminal = await sdk.spawnWithPty({
+      containment: { type: 'processcontainer' },
+      command: 'cmd.exe',
+      timeoutMs: 30000,
+    });
+    try {
+      assert.ok(terminal.id > 0);
+      const output = (async (): Promise<string> => {
+        let text = '';
+        for await (const chunk of terminal.output) text += chunk.toString();
+        return text;
+      })();
+      terminal.input.write('echo PUBLIC_PTY_OK\r\nexit /b 13\r\n');
+
+      const result = await terminal.wait();
+      assert.strictEqual(result.exitCode, 13);
+      assert.strictEqual(result.timedOut, false);
+      assert.ok((await output).includes('PUBLIC_PTY_OK'));
+    } finally {
+      terminal.dispose();
+    }
+  });
+
   it('should execute cmd.exe in process container', { skip: sandboxSkipReason }, async () => {
     const result = await sdk.runRequestForTest(
       'cmd.exe /c echo Container test successful',

@@ -20,10 +20,8 @@ type ResizePty = (size: MxcPtySize) => void;
  * A container process attached to an MXC-owned pseudo-terminal.
  *
  * Terminal output is a single merged stream. Write terminal input, including
- * control characters and escape sequences, to {@link input}. Closing input
- * sends the configured terminal EOF character in canonical mode; raw-mode
- * programs must define their own completion protocol. Call {@link resize} when
- * the visible terminal dimensions change.
+ * control characters and escape sequences, to {@link input}, and call
+ * {@link resize} when the visible terminal dimensions change.
  */
 export class MxcPtyProcess extends MxcProcess {
   /** @internal */
@@ -36,7 +34,7 @@ export class MxcPtyProcess extends MxcProcess {
     super(driver, timeoutMs, scheduler);
   }
 
-  /** Writable PTY input. Closing it requests canonical-mode terminal EOF. */
+  /** Writable PTY input. */
   get input(): Writable {
     const input = this.standardInput;
     if (input === null) {

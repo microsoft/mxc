@@ -75,6 +75,10 @@ jobs:
       - name: Check Rust toolchain sync (rust-toolchain.toml == ADO template)
         run: node scripts/versioning/check-rust-toolchain-sync.js
 
+      - name: Check crate publishing metadata
+        shell: pwsh
+        run: ./scripts/ci/Invoke-CratePackage.ps1 -ValidateOnly
+
       - name: Check dotnet ErrorCode parity (C# enum == native MXC_STATUS_*)
         run: node scripts/check-dotnet-errorcode-parity.js
 

@@ -1,0 +1,58 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+#
+# Packages mxc-sdk into a .crate file using `cargo package --no-verify`. The
+# publish template always performs Cargo's crates.io dry run before a
+# production ESRP release.
+#
+# The steps hold no logic: Invoke-CratePackage.ps1 does the packaging and
+# validates the single published crate, and the same command reproduces a leg
+# locally.
+
+parameters:
+  - name: cratesArtifactName
+    type: string
+    default: mxc-crates-package
+
+jobs:
+  - job: package_crates
+    displayName: Package Crates
+    pool:
+      name: Azure-Pipelines-1ESPT-ExDShared
+      image: ubuntu-latest
+      os: linux
+
+    variables:
+      outDir: $(Build.SourcesDirectory)/out/crates
+
+    templateContext:
+      rust:
+        rustToolchain:
+          toolchainFeed: https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+          version: 'ms-prod-1.93'
+
+    steps:
+      - checkout: self
+
+      # Configure and authenticate the private registry explicitly before the
+      # 1ES task installs the internal Rust toolchain.
+      - template: Cargo.Setup.Private.yml@self
+        parameters:
+          authenticate: true
+
+      - task: 1ES.Build.Rust.Setup@1
+
+      - task: PowerShell@2
+        displayName: Package mxc-sdk
+        inputs:
+          targetType: filePath
+          filePath: $(Build.SourcesDirectory)/scripts/ci/Invoke-CratePackage.ps1
+          arguments: -OutDir '$(outDir)' -PackageRegistry 'Mxc-Azure-Feed'
+          pwsh: true
+          workingDirectory: $(Build.SourcesDirectory)
+
+      - task: 1ES.PublishPipelineArtifact@1
+        displayName: Publish crate package artifact
+        inputs:
+          path: $(outDir)
+          artifactName: ${{ parameters.cratesArtifactName }}
