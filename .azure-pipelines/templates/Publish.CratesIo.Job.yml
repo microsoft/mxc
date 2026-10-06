@@ -57,6 +57,8 @@ jobs:
           $arguments.Add('publish')
           $arguments.Add('--dry-run')
           $arguments.Add('--locked')
+          $arguments.Add('--registry')
+          $arguments.Add('crates-io')
           $arguments.Add('--manifest-path')
           $arguments.Add('src/Cargo.toml')
           foreach ($crate in $crates)
