@@ -104,7 +104,7 @@ Write-Host "Binary: $WxcExec`n" -ForegroundColor Gray
 $DaemonExe = Join-Path (Split-Path -Parent $WxcExec) "wxc-wslc-daemon.exe"
 if (-not (Test-Path $DaemonExe)) {
     Write-Host "SKIPPED: wxc-wslc-daemon.exe not found next to wxc-exec.exe ($DaemonExe)" -ForegroundColor Yellow
-    Write-Host "  Build it with: cargo build --features wslc $(if (-not $Debug) { '--release ' })--target $Target -p wxc-wslc-daemon" -ForegroundColor Yellow
+    Write-Host "  Build it with: cargo build -p mxc-sdk --bin wxc-wslc-daemon --features wslc $(if (-not $Debug) { '--release ' })--target $Target" -ForegroundColor Yellow
     exit 0
 }
 $DaemonProcName = "wxc-wslc-daemon"

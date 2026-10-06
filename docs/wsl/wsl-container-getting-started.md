@@ -82,7 +82,7 @@ Follow the build instructions in the WSL repository README to build and install.
 
 > **Note:** Building the WSL repo installs the **WSL runtime** (the system
 > service). This is separate from `wslcsdk.dll`, which is the client SDK
-> library. The DLL is bundled in the MXC repo under `external/wslc-sdk/` and
+> library. The DLL is bundled in the `mxc-sdk` package under `build/wslc_common/` and
 > is automatically extracted when you build MXC with `--with-wslc` (Step 2).
 
 ## Step 2 — Build MXC with WSLC support
@@ -256,7 +256,7 @@ The Rust SDK (`mxc-sdk`) runs WSLC **in-process** — it does not spawn
 ```toml
 # Cargo.toml
 [target.'cfg(target_os = "windows")'.dependencies]
-mxc-sdk = { path = "…/src/core/mxc-sdk", features = ["wslc"] }
+mxc-sdk = { path = "…/src/mxc-sdk", features = ["wslc"] }
 ```
 
 ```rust
@@ -592,7 +592,7 @@ images — cannot be used.
 | HRESULT `0x80040327` (`WSL_E_OS_NOT_SUPPORTED`) from any WSLC call | The SDK reached WSL's service-connect guard on a host that is neither Windows 11 nor has the WSL support interface | Upgrade Windows. `0x80040321` (`WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`) is the sibling code when the legacy `lxss` component is absent too |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
-| `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
+| `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/mxc-sdk/build/build_wslc_common.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
 | `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress |
 | `WSLC image '<name>' cannot be pulled: '<host>' is not in the administrative registry allowlist` | Machine policy restricts which registries may be used | Use a permitted registry, set `imageTarPath`, or ask an administrator to widen `WslcAllowedImageRegistries` |
 | `WSLC image '<name>' did not finish pulling within <n>s and was stopped` | The pull exceeded its budget and was aborted | Retry, raise `MXC_WSLC_PULL_TIMEOUT_SECS`, or warm the cache from a faster network |

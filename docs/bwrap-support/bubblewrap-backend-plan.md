@@ -43,7 +43,7 @@ Plus optional `validate_runner()`. This is a perfect fit for bwrap, which is fun
 
 ### 1. Schema Changes
 
-**Source:** `src/core/mxc_config_contract/src/dev/one_shot.rs`
+**Source:** `src/mxc-sdk/src/core/mxc_contract/dev/one_shot.rs`
 
 Add `"bubblewrap"` to the exact development contract's `containment` enum:
 ```json
@@ -61,7 +61,7 @@ updating the parser's single-backend-section enforcement so it is allowed.
 
 ### 2. Rust Model Changes
 
-**File:** `src/core/wxc_common/src/models.rs`
+**File:** `src/mxc-sdk/src/tools/mxc_common/models.rs`
 
 ```rust
 // Add to ContainmentBackend enum:
@@ -91,18 +91,14 @@ policy, env, etc.). A backend-specific config can be added directly to
 - Optionally: make `"process"` resolve to `Bubblewrap` on Linux when LXC is unavailable
   (or add a `"process"` → bwrap fallback chain)
 
-### 4. New Crate: `bwrap_common`
-
-**Pattern follows:** `backends/lxc/common/` and `backends/seatbelt/common/`
+### 4. Backend module: `bwrap_common`
 
 ```
-src/backends/bubblewrap/common/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs
-│   ├── bwrap_runner.rs        # BubblewrapScriptRunner
-│   ├── bwrap_command.rs       # Command builder for bwrap CLI
-│   └── filesystem_policy.rs   # Maps ContainerPolicy → bwrap mount args
+src/mxc-sdk/src/backends/bubblewrap/common/
+├── mod.rs
+├── bwrap_runner.rs        # BubblewrapScriptRunner
+├── bwrap_command.rs       # Command builder for bwrap CLI
+└── filesystem_policy.rs   # Maps ContainerPolicy → bwrap mount args
 ```
 
 **Cargo.toml:**
@@ -113,7 +109,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wxc_common = { workspace = true }
+mxc_common = { workspace = true }
 lxc_common = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
@@ -300,7 +296,7 @@ the LXC runner: apply rules before execution, remove rules after.
 
 - Unit tests in `bwrap_common/src/bwrap_runner.rs` (command-line generation, policy mapping)
 - Test config files in `tests/configs/` (e.g., `bubblewrap_basic.json`)
-- E2E test in `wxc_e2e_tests` if applicable
+- E2E integration test under `src/mxc-sdk/tests/` if applicable
 - Script in `tests/scripts/run_bwrap_tests.sh`
 
 ### 10. Documentation
@@ -330,27 +326,26 @@ policy gap is a design decision, not an implementation challenge.
 ## Files to Touch (Summary)
 
 ### Rust (new)
-- `src/backends/bubblewrap/common/Cargo.toml`
-- `src/backends/bubblewrap/common/src/lib.rs`
-- `src/backends/bubblewrap/common/src/bwrap_runner.rs`
-- `src/backends/bubblewrap/common/src/bwrap_command.rs`
-- `src/backends/bubblewrap/common/src/filesystem_policy.rs`
+- `src/mxc-sdk/src/backends/bubblewrap/common/mod.rs`
+- `src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs`
+- `src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs`
+- `src/mxc-sdk/src/backends/bubblewrap/common/filesystem_policy.rs`
 
 ### Rust (modify)
-- `src/Cargo.toml` — add `bwrap_common` to workspace members + dependencies
-- `src/core/lxc/Cargo.toml` — add `bwrap_common` dependency
-- `src/core/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
-- `src/core/mxc_config_contract/src/dev/one_shot.rs` — add the external
+- `src/mxc-sdk/Cargo.toml` — add Bubblewrap dependencies
+- `src/tools/lxc/Cargo.toml` — add `bwrap_common` dependency
+- `src/tools/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
+- `src/mxc-sdk/src/core/mxc_contract/dev/one_shot.rs` — add the external
   `Bubblewrap` containment value and any backend-specific request fields
-- `src/core/wxc_common/src/config_contract_adapters/dev/one_shot.rs` — adapt
+- `src/mxc-sdk/src/tools/mxc_common/config_contract_adapters/dev/one_shot.rs` — adapt
   the exact request into `CommonRequestIR`
-- `src/core/wxc_common/src/common_request_ir.rs` — carry any new normalized
+- `src/mxc-sdk/src/tools/mxc_common/common_request_ir.rs` — carry any new normalized
   backend fields
-- `src/core/wxc_common/src/models.rs` — add the `Bubblewrap` variant and, if
+- `src/mxc-sdk/src/tools/mxc_common/models.rs` — add the `Bubblewrap` variant and, if
   needed, a `BubblewrapConfig` field on `ExecutionRequest`
-- `src/core/wxc_common/src/wire.rs` — add the internal normalized
+- `src/mxc-sdk/src/tools/mxc_common/wire.rs` — add the internal normalized
   `Bubblewrap` containment variant
-- `src/core/wxc_common/src/config_parser.rs` — map the normalized containment
+- `src/mxc-sdk/src/tools/mxc_common/config_parser.rs` — map the normalized containment
   value in `map_wire_containment`
 
 ### Schema (modify)

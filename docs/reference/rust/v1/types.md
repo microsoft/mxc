@@ -1131,8 +1131,8 @@ pub struct ConsentPrompt {
   pub learn_more_url: &'static str,
 }
 
-impl From<&wxc_common::telemetry::consent_prompt::ConsentPrompt> for ConsentPrompt {
-  fn from(value: &wxc_common::telemetry::consent_prompt::ConsentPrompt) -> Self;
+impl From<&mxc_sdk::mxc_common::telemetry::consent_prompt::ConsentPrompt> for ConsentPrompt {
+  fn from(value: &mxc_sdk::mxc_common::telemetry::consent_prompt::ConsentPrompt) -> Self;
 }
 ```
 

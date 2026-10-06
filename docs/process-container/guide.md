@@ -56,7 +56,7 @@ external/windows-sdk/ProcessSecurityEnvironment.fbs
 Then regenerate the Rust bindings in:
 
 ```text
-src/core/generated/process_security_environment_specification/
+src/mxc-sdk/src/core/process_security_environment_spec/
 ```
 
 ### 3. Flow the policy through MXC
@@ -70,7 +70,7 @@ artifacts by hand.
 ### 4. Build the PSEC specification
 
 Update the helpers under
-`src/backends/process_container/common/src/base_container_helpers.rs` to encode
+`src/mxc-sdk/src/backends/process_container/common/base_container_helpers.rs` to encode
 the runtime policy into the PSEC FlatBuffer. Update
 `BaseContainerRunner::can_backend_service_request()` so the BaseContainer tier
 is selected only when the single request-level decision reports that the
@@ -99,9 +99,9 @@ Use a Windows build containing the processmodel change.
 |-------|------|------|
 | OS schema and enforcement | Microsoft Windows OS source (internal) | processmodel PSEC contract and implementation |
 | MXC FlatBuffer copy | mxc | `external/windows-sdk/ProcessSecurityEnvironment.fbs` |
-| MXC generated bindings | mxc | `src/core/generated/process_security_environment_specification/` |
-| MXC specification builder | mxc | `src/backends/process_container/common/src/base_container_helpers.rs` |
-| MXC executor and capability selection | mxc | `src/backends/process_container/common/src/base_container_runner.rs` |
+| MXC generated bindings | mxc | `src/mxc-sdk/src/core/process_security_environment_spec/` |
+| MXC specification builder | mxc | `src/mxc-sdk/src/backends/process_container/common/base_container_helpers.rs` |
+| MXC executor and capability selection | mxc | `src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs` |
 | MXC Config schema | mxc | `schemas/dev/mxc-config.schema.*.json` |
 | MXC SDK mapping | mxc | `sdk/node/src/sandbox.ts` |
 | MXC SDK types | mxc | `sdk/node/src/types.ts` |

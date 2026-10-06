@@ -64,21 +64,34 @@ jobs:
         parameters:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
-          # macOS-only crate set; the rest of the workspace has Windows-only
-          # crates that do not compile on macOS. unix_test_proxy and mxc_ffi
-          # ship next to mxc-exec-mac.
-          cargoPackages: mxc_darwin,seatbelt_common,wxc_common,unix_test_proxy,mxc_ffi
+          # macOS-compatible crate set; backend and shared runtime modules are
+          # consolidated in mxc-sdk. unix_test_proxy and mxc_ffi ship next to
+          # mxc-exec-mac.
+          cargoPackages: mxc_darwin,mxc-sdk,unix_test_proxy,mxc_ffi
+          enableTest: 'false'
 
     - ${{ else }}:
       - template: Rust.Build.Steps.Unofficial.yml@self
         parameters:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
-          cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common -p unix_test_proxy -p mxc_ffi
+          cargoArgs: -p mxc_darwin -p mxc-sdk -p unix_test_proxy -p mxc_ffi
+          enableTest: 'false'
+
+    # mxc_pty was not part of this macOS lane before it was consolidated into
+    # mxc-sdk. Keep those host-sensitive unit tests out of this build while
+    # retaining the rest of the package tests.
+    - script: |
+        set -euo pipefail
+        cargo test --locked --release --target $(targetTriple) \
+          -p mxc_darwin -p mxc-sdk -p unix_test_proxy -p mxc_ffi -- \
+          --skip 'core_modules::mxc_pty::tests::'
+      displayName: Test
+      workingDirectory: $(workingDirectory)
 
     - script: |
         set -euo pipefail
-        cargo test --locked --release --target $(targetTriple) -p mxc_engine -p mxc_ffi --lib state_aware
+        cargo test --locked --release --target $(targetTriple) -p mxc-sdk -p mxc_ffi --lib state_aware
         cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test state_aware
       displayName: Test state-aware SDK boundaries
       workingDirectory: $(workingDirectory)

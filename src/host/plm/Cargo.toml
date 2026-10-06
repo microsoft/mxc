@@ -1,11 +1,8 @@
 [package]
 name = "plm"
+publish = false
 version = "0.1.0"
 edition.workspace = true
-
-[lib]
-name = "plm"
-path = "src/lib.rs"
 
 [[bin]]
 name = "plm"
@@ -22,7 +19,7 @@ serde.workspace = true
 chrono.workspace = true
 tempfile.workspace = true
 getrandom.workspace = true
-learning_mode_windows.workspace = true
+mxc-sdk.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
@@ -41,11 +38,9 @@ windows = { workspace = true, features = [
     "Win32_Security_Cryptography",
     "Win32_Security_WinTrust",
 ] }
-wxc_common = { workspace = true }
-learning_mode_core = { workspace = true }
-
-[build-dependencies]
-mxc_build_common.workspace = true
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
+winresource.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
