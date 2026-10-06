@@ -22,8 +22,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::mxc_common::logger::{Logger, Mode};
-#[cfg(test)]
-use crate::mxc_common::models::NetworkPolicy;
 use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::{
@@ -526,6 +524,7 @@ fn build_provision_config(
     request: &ExecutionRequest,
     config: Option<WslcProvisionConfig>,
 ) -> Result<ProvisionConfig, MxcError> {
+    crate::wslc_common::policy::reject_retired_network_fields(request)?;
     let image = config
         .as_ref()
         .and_then(|c| c.image.clone())
@@ -846,13 +845,7 @@ mod tests {
 
     #[test]
     fn map_network_maps_block_to_none() {
-        let req = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let req = ExecutionRequest::default();
         assert_eq!(map_network(&req), NetworkMode::None);
     }
 
@@ -860,7 +853,10 @@ mod tests {
     fn map_network_maps_allow_to_bridged() {
         let req = ExecutionRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
