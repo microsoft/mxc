@@ -48,9 +48,14 @@ use mxc_sdk::wslc_common::daemon_protocol::{
 
 use crate::session_manager::{ExecStream, SessionHandle, WorkerError};
 
-/// Exec streams admitted at once. A further request is refused rather than
+/// Exec streams admitted at once; a further request is refused rather than
 /// queued behind a workload of unknown duration.
-const MAX_CONCURRENT_EXECS: usize = 1;
+///
+/// Each admitted exec owns a bounded live-output queue of
+/// `LIVE_OUTPUT_CHANNEL_CAPACITY` x `LIVE_OUTPUT_MAX_CHUNK_BYTES`, so this
+/// bound holds the persistent per-user daemon near 128 MB of live output
+/// against clients that never drain.
+const MAX_CONCURRENT_EXECS: usize = 8;
 
 /// Capacity reserved for cancellation and lifecycle requests while all exec
 /// stream slots are occupied.
@@ -702,7 +707,9 @@ async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(pipe: &mut S, msg: &T)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_manager::{register_exec, spawn};
+    use crate::session_manager::{
+        register_exec, spawn, LIVE_OUTPUT_CHANNEL_CAPACITY, LIVE_OUTPUT_MAX_CHUNK_BYTES,
+    };
     use mxc_sdk::wslc_common::daemon_protocol::{
         CancelExecConfig, ErrKind, ExecConfig, ProvisionConfig,
     };
@@ -713,6 +720,17 @@ mod tests {
         let active_execs = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let cancellation = Arc::new(AtomicBool::new(false));
         Arc::new(register_exec(&active_execs, "test-exec", "test-run", &cancellation).unwrap())
+    }
+
+    /// Each admitted exec owns a bounded live-output queue, so the cap is what
+    /// holds the daemon's worst-case live-output memory down.
+    #[test]
+    fn the_exec_cap_bounds_worst_case_live_output_memory() {
+        let worst_case =
+            MAX_CONCURRENT_EXECS * LIVE_OUTPUT_CHANNEL_CAPACITY * LIVE_OUTPUT_MAX_CHUNK_BYTES;
+
+        assert_eq!(worst_case, 128 * 1024 * 1024);
+        assert_eq!(MAX_CONCURRENT_CLIENTS, 16);
     }
 
     #[tokio::test]

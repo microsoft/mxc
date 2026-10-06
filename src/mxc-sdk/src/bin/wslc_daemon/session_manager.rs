@@ -107,6 +107,9 @@ pub enum WorkerError {
     /// The sandbox exists but has not been started.
     NotStarted(String),
 
+    /// An exec already holds this container's single-flight slot.
+    Busy(String),
+
     /// The host cannot run WSLc at all.
     Unavailable(anyhow::Error),
 
@@ -123,6 +126,7 @@ impl WorkerError {
         match self {
             WorkerError::NotProvisioned(_) => ErrKind::NotProvisioned,
             WorkerError::NotStarted(_) => ErrKind::NotStarted,
+            WorkerError::Busy(_) => ErrKind::Busy,
             WorkerError::Unavailable(_) => ErrKind::Unavailable,
             WorkerError::Rejected(_) => ErrKind::Rejected,
             WorkerError::Backend(_) => ErrKind::Backend,
@@ -135,6 +139,7 @@ impl std::fmt::Display for WorkerError {
         match self {
             WorkerError::NotProvisioned(id) => write!(f, "unknown sandbox {id}"),
             WorkerError::NotStarted(id) => write!(f, "sandbox {id} is not started"),
+            WorkerError::Busy(id) => write!(f, "sandbox {id} already has an exec in flight"),
             WorkerError::Unavailable(e) | WorkerError::Rejected(e) | WorkerError::Backend(e) => {
                 write!(f, "{e:#}")
             }
@@ -351,7 +356,7 @@ pub type OutputChunk = (OutStream, Vec<u8>);
 /// the SDK callback thread — which also delivers the process-exit callback — is
 /// never parked. Stalling that thread could otherwise block exit delivery and
 /// wedge teardown for every sandbox sharing the daemon.
-const LIVE_OUTPUT_CHANNEL_CAPACITY: usize = 256;
+pub(crate) const LIVE_OUTPUT_CHANNEL_CAPACITY: usize = 256;
 
 /// Max bytes per enqueued live-output chunk. A single SDK callback can deliver
 /// an arbitrarily large buffer; splitting it here bounds each queue entry's
@@ -359,7 +364,7 @@ const LIVE_OUTPUT_CHANNEL_CAPACITY: usize = 256;
 /// protocol's `MAX_FRAME_SIZE` (a `Vec<u8>` serializes as a JSON number array,
 /// ~4x expansion), so a large callback can never overflow a frame and abort the
 /// stream before its terminal frame.
-const LIVE_OUTPUT_MAX_CHUNK_BYTES: usize = 64 * 1024;
+pub(crate) const LIVE_OUTPUT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Enqueue an SDK output callback, splitting it into `LIVE_OUTPUT_MAX_CHUNK_BYTES`
 /// pieces so each queue entry and its resulting frame stay bounded regardless of
@@ -513,11 +518,12 @@ impl SessionHandle {
     }
 
     /// Admit and run a command in a started container. Awaits the worker's
-    /// **admission** decision first: on rejection (unknown/not-started sandbox)
-    /// this returns the typed error *before* the caller writes any admission to
-    /// the client. On admission it returns an [`ExecStream`] — the completion
-    /// receiver (the run's exit code) plus the live-output receiver, which the
-    /// caller drains into `Stdout`/`Stderr` frames as bytes arrive. Admission and
+    /// **admission** decision first: on rejection (unknown / not-started /
+    /// already-busy sandbox) this returns the typed error *before* the caller
+    /// writes any admission to the client. On admission it returns an
+    /// [`ExecStream`] — the completion receiver (the run's exit code) plus the
+    /// live-output receiver, which the caller drains into `Stdout`/`Stderr`
+    /// frames as bytes arrive. Admission and
     /// the claim on the container are atomic on the worker thread, so no
     /// lifecycle command can invalidate the checked state before the run starts.
     pub async fn exec(&self, config: ExecConfig) -> Result<ExecStream, WorkerError> {
@@ -562,8 +568,8 @@ impl SessionHandle {
         })
     }
 
-    /// Signal an admitted exec without waiting for the worker, which may have
-    /// parked the run behind an earlier exec on the same container.
+    /// Signal an admitted exec without waiting for the worker, which may not
+    /// have reached the run yet.
     pub fn cancel_exec(&self, exec_id: &str, run_token: &str) {
         if let Some(cancellation) = self
             .active_execs
@@ -1042,7 +1048,8 @@ impl Worker {
     /// needed to run. Sole owner of the exists+started invariant: [`begin_exec`]
     /// trusts the handle it is given and never re-checks, because the worker
     /// validates and claims the container's in-flight slot without yielding, and
-    /// every later command naming that container parks behind the claim.
+    /// no later command naming that container can release the handle while the
+    /// claim stands.
     ///
     /// [`begin_exec`]: Worker::begin_exec
     fn validate_exec(&self, sandbox_id: &str) -> Result<WslcContainer, WorkerError> {
@@ -1057,14 +1064,17 @@ impl Worker {
         }
     }
 
-    /// Run one container command, or park it behind the exec still using that
-    /// container's handle.
-    ///
-    /// A parked command waits for the run and then takes effect, so a caller
-    /// sees a delay rather than a refusal.
+    /// Run one container command, refusing a second exec on a container that
+    /// already has one and parking lifecycle work behind the run instead.
     fn dispatch(&mut self, work: ContainerWork, worker: &mpsc::UnboundedSender<WorkerCommand>) {
         if let Some(in_flight) = self.exec_in_flight.get_mut(work.sandbox_id()) {
-            in_flight.parked.push(work);
+            match work {
+                ContainerWork::Exec(request) => {
+                    let ExecRequest { config, admit, .. } = request;
+                    let _ = admit.send(Err(WorkerError::Busy(config.sandbox_id)));
+                }
+                lifecycle => in_flight.parked.push(lifecycle),
+            }
             return;
         }
 
@@ -2149,6 +2159,19 @@ mod tests {
         (worker, done)
     }
 
+    fn start_work(sandbox_id: &str) -> (ContainerWork, oneshot::Receiver<Result<(), WorkerError>>) {
+        let (reply, reply_rx) = oneshot::channel();
+        (
+            ContainerWork::Start {
+                config: StartConfig {
+                    sandbox_id: sandbox_id.to_string(),
+                },
+                reply,
+            },
+            reply_rx,
+        )
+    }
+
     fn stop_work(sandbox_id: &str) -> (ContainerWork, oneshot::Receiver<Result<(), WorkerError>>) {
         let (reply, reply_rx) = oneshot::channel();
         (
@@ -2177,7 +2200,26 @@ mod tests {
         )
     }
 
-    /// Deleting the container would free the handle the run thread is holding.
+    /// Deleting the container would free the handle the run thread is using, so
+    /// lifecycle work waits instead of being refused.
+    #[test]
+    fn lifecycle_work_parks_behind_an_exec_rather_than_being_refused() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut worker, _done) = worker_with_exec_in_flight();
+        let (start, mut start_reply) = start_work("wslc:busy");
+        let (stop, mut stop_reply) = stop_work("wslc:busy");
+        let (deprovision, mut deprovision_reply) = deprovision_work("wslc:busy");
+
+        worker.dispatch(start, &tx);
+        worker.dispatch(stop, &tx);
+        worker.dispatch(deprovision, &tx);
+
+        assert!(start_reply.try_recv().is_err());
+        assert!(stop_reply.try_recv().is_err());
+        assert!(deprovision_reply.try_recv().is_err());
+        assert_eq!(worker.exec_in_flight["wslc:busy"].parked.len(), 3);
+    }
+
     #[test]
     fn deprovision_parks_behind_an_exec_using_the_same_container() {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2237,39 +2279,68 @@ mod tests {
     }
 
     #[test]
-    fn a_second_exec_on_the_same_container_waits_for_the_first() {
+    fn a_second_exec_on_the_same_container_is_refused_as_busy() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let (mut worker, _done) = worker_with_exec_in_flight();
         let mut second = exec_work("wslc:busy", "second");
 
         worker.dispatch(second.work, &tx);
 
+        let err = second
+            .admit
+            .try_recv()
+            .expect("a refused exec must be answered through admit")
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrKind::Busy);
         assert!(
-            second.admit.try_recv().is_err(),
-            "a second exec must not be admitted while the first holds the container"
+            worker.exec_in_flight["wslc:busy"].parked.is_empty(),
+            "a refused exec must not also queue behind the first"
+        );
+    }
+
+    #[test]
+    fn execs_on_different_containers_are_both_admitted() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut worker, _done) = worker_with_exec_in_flight();
+        worker
+            .containers
+            .insert("wslc:idle".to_string(), started_entry());
+        let mut other = exec_work("wslc:idle", "other");
+
+        worker.dispatch(other.work, &tx);
+
+        assert!(
+            other
+                .admit
+                .try_recv()
+                .expect("idle container answered")
+                .is_ok(),
+            "a container of its own must not inherit another container's slot"
         );
     }
 
     /// The guarantee a cancellation must keep: observed before the run starts,
     /// it reports cancelled rather than creating the process.
     #[test]
-    fn a_parked_exec_cancelled_before_it_starts_never_runs() {
+    fn an_exec_cancelled_before_it_starts_never_runs() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let (mut worker, _done) = worker_with_exec_in_flight();
-        let mut queued = exec_work("wslc:busy", "queued");
-        worker.dispatch(queued.work, &tx);
-
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:idle".to_string(), started_entry());
+        let mut queued = exec_work("wslc:idle", "queued");
         queued.cancellation.store(true, Ordering::Release);
-        worker.finish_exec(
-            "wslc:busy",
-            ExecReport::Finished(Ok(ExecTerminal::Exited(0))),
-            &tx,
-        );
+
+        worker.dispatch(queued.work, &tx);
 
         assert!(queued.admit.try_recv().unwrap().is_ok());
         assert_eq!(
             queued.done.try_recv().unwrap().unwrap(),
             ExecTerminal::Cancelled
+        );
+        assert!(
+            !worker.exec_in_flight.contains_key("wslc:idle"),
+            "a cancelled exec must not claim the container's slot"
         );
     }
 
@@ -2588,6 +2659,53 @@ mod tests {
         ));
     }
 
+    /// Provision and start a sandbox on the live host, returning its id.
+    async fn provisioned_and_started(handle: &SessionHandle) -> String {
+        let id = handle
+            .provision(ProvisionConfig {
+                image: "alpine:latest".to_string(),
+                image_tar_path: None,
+                volumes: Vec::new(),
+                network: Default::default(),
+                port_mappings: Vec::new(),
+            })
+            .await
+            .unwrap();
+        handle
+            .start(StartConfig {
+                sandbox_id: id.clone(),
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    async fn stop_and_deprovision(handle: &SessionHandle, sandbox_id: String) {
+        handle
+            .stop(StopConfig {
+                sandbox_id: sandbox_id.clone(),
+            })
+            .await
+            .unwrap();
+        handle
+            .deprovision(DeprovisionConfig { sandbox_id })
+            .await
+            .unwrap();
+    }
+
+    fn sleep_exec(exec_id: &str, sandbox_id: &str, seconds: u32) -> ExecConfig {
+        ExecConfig {
+            exec_id: exec_id.to_string(),
+            run_token: format!("{exec_id}-run"),
+            sandbox_id: sandbox_id.to_string(),
+            script_code: format!("sleep {seconds}"),
+            working_directory: String::new(),
+            env: Vec::new(),
+            env_scope: EnvScope::Merge,
+            timeout_ms: 30_000,
+        }
+    }
+
     // Exercises the real SDK path end to end: provision (boot VM + create
     // container) → start → exec → stop → deprovision → refcount back to 0. It
     // provisions with the default isolated posture, which refuses a registry
@@ -2659,40 +2777,29 @@ mod tests {
         handle.shutdown().await.unwrap();
     }
 
+    /// The guarantee a cancellation must keep against the live SDK: observed
+    /// before the worker reaches the run, it creates no process.
     #[tokio::test]
     #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
     async fn cancelled_queued_exec_never_starts_process() {
         let handle = spawn().unwrap();
-        let id = handle
-            .provision(ProvisionConfig {
-                image: "alpine:latest".to_string(),
-                image_tar_path: None,
-                volumes: Vec::new(),
-                network: Default::default(),
-                port_mappings: Vec::new(),
-            })
-            .await
-            .unwrap();
-        handle
-            .start(StartConfig {
-                sandbox_id: id.clone(),
-            })
-            .await
-            .unwrap();
+        let id = provisioned_and_started(&handle).await;
 
-        let blocker = handle
-            .exec(ExecConfig {
-                exec_id: "queue-blocker".to_string(),
-                run_token: "queue-blocker-run".to_string(),
-                sandbox_id: id.clone(),
-                script_code: "sleep 2".to_string(),
-                working_directory: String::new(),
-                env: Vec::new(),
-                env_scope: EnvScope::Merge,
-                timeout_ms: 30_000,
-            })
-            .await
-            .unwrap();
+        // Occupy the worker with a container creation, so the exec below is
+        // still queued when the cancellation lands. Spawned tasks are polled in
+        // order, so this provision reaches the worker first.
+        let blocker_handle = handle.clone();
+        let blocker = tokio::spawn(async move {
+            blocker_handle
+                .provision(ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                    port_mappings: Vec::new(),
+                })
+                .await
+        });
 
         let queued_handle = handle.clone();
         let queued_id = id.clone();
@@ -2731,11 +2838,8 @@ mod tests {
             "queued exec was not registered"
         );
         handle.cancel_exec("cancelled-queued", "cancelled-queued-run");
-        assert_eq!(
-            blocker.done.await.unwrap().unwrap(),
-            ExecTerminal::Exited(0)
-        );
 
+        let blocker_id = blocker.await.unwrap().unwrap();
         let queued = queued.await.unwrap().unwrap();
         assert_eq!(queued.done.await.unwrap().unwrap(), ExecTerminal::Cancelled);
 
@@ -2757,16 +2861,75 @@ mod tests {
             ExecTerminal::Exited(0)
         );
 
+        stop_and_deprovision(&handle, id).await;
         handle
-            .stop(StopConfig {
-                sandbox_id: id.clone(),
+            .deprovision(DeprovisionConfig {
+                sandbox_id: blocker_id,
             })
             .await
             .unwrap();
-        handle
-            .deprovision(DeprovisionConfig { sandbox_id: id })
+        handle.shutdown().await.unwrap();
+    }
+
+    /// A second exec on a container that already has one is refused before any
+    /// admission reaches the client.
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
+    async fn a_second_exec_on_a_busy_container_is_refused() {
+        let handle = spawn().unwrap();
+        let id = provisioned_and_started(&handle).await;
+
+        let first = handle.exec(sleep_exec("busy-first", &id, 3)).await.unwrap();
+
+        let refused = handle
+            .exec(ExecConfig {
+                exec_id: "busy-second".to_string(),
+                run_token: "busy-second-run".to_string(),
+                sandbox_id: id.clone(),
+                script_code: "echo hi".to_string(),
+                working_directory: String::new(),
+                env: Vec::new(),
+                env_scope: EnvScope::Merge,
+                timeout_ms: 30_000,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(refused.kind(), ErrKind::Busy);
+
+        assert_eq!(first.done.await.unwrap().unwrap(), ExecTerminal::Exited(0));
+
+        stop_and_deprovision(&handle, id).await;
+        handle.shutdown().await.unwrap();
+    }
+
+    /// Two sandboxes must run at the same time rather than one after the other.
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
+    async fn execs_on_two_sandboxes_overlap() {
+        let handle = spawn().unwrap();
+        let first_id = provisioned_and_started(&handle).await;
+        let second_id = provisioned_and_started(&handle).await;
+
+        let started = Instant::now();
+        let first = handle
+            .exec(sleep_exec("overlap-first", &first_id, 3))
             .await
             .unwrap();
+        let second = handle
+            .exec(sleep_exec("overlap-second", &second_id, 3))
+            .await
+            .unwrap();
+        assert_eq!(first.done.await.unwrap().unwrap(), ExecTerminal::Exited(0));
+        assert_eq!(second.done.await.unwrap().unwrap(), ExecTerminal::Exited(0));
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "two 3s runs finished in {elapsed:?}, so they were serialized"
+        );
+
+        stop_and_deprovision(&handle, first_id).await;
+        stop_and_deprovision(&handle, second_id).await;
         handle.shutdown().await.unwrap();
     }
 

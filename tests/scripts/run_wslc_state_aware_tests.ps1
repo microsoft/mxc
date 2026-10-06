@@ -237,12 +237,19 @@ function ConvertTo-StateAwareInvocation {
     }
 }
 
-# Parse or clone a state-aware request, move lifecycle routing to executor
-# arguments, encode the remaining phase-specific payload, and run wxc-exec.
-# A `wslc:{{SANDBOX_ID}}` fixture placeholder retains backend identity during
-# static corpus parsing and is replaced as one unit by the full real ID.
-# Returns @{ ExitCode; Stdout; Stderr }.
-function Invoke-StateAware {
+# Launch one state-aware phase and return without waiting, so a caller can start
+# another phase while this one is still running. Complete it with Wait-StateAware.
+#
+# Drive wxc-exec via System.Diagnostics.Process rather than Start-Process
+# -Wait: the state-aware phase process exits as soon as it has driven the
+# daemon, but the daemon lives on. Start-Process -Wait does a process-tree
+# (job-object) wait and would block until the surviving daemon also exits.
+# WaitForExit()/ReadToEnd() here wait only on the direct phase process (the
+# daemon does not inherit its stdio), matching how real SDK callers behave;
+# capturing stderr this way also keeps wxc-exec's warnings off PowerShell's
+# error stream (a bare `&` + `2>` throws under $ErrorActionPreference=Stop).
+function Start-StateAware {
+    [CmdletBinding()]
     param(
         [hashtable]$Request,
         [string]$ConfigFile,
@@ -262,14 +269,6 @@ function Invoke-StateAware {
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $invocation.ConfigBase64)
 
-    # Drive wxc-exec via System.Diagnostics.Process rather than Start-Process
-    # -Wait: the state-aware phase process exits as soon as it has driven the
-    # daemon, but the daemon lives on. Start-Process -Wait does a process-tree
-    # (job-object) wait and would block until the surviving daemon also exits.
-    # WaitForExit()/ReadToEnd() here wait only on the direct phase process (the
-    # daemon does not inherit its stdio), matching how real SDK callers behave;
-    # capturing stderr this way also keeps wxc-exec's warnings off PowerShell's
-    # error stream (a bare `&` + `2>` throws under $ErrorActionPreference=Stop).
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $WxcExec
     foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
@@ -281,19 +280,55 @@ function Invoke-StateAware {
     $proc = [System.Diagnostics.Process]::new()
     $proc.StartInfo = $psi
     $null = $proc.Start()
-    # Read stdout to EOF (fires when the phase process exits) while draining
-    # stderr async so a large stderr can never deadlock the stdout read.
-    $stderrTask = $proc.StandardError.ReadToEndAsync()
-    $stdoutText = $proc.StandardOutput.ReadToEnd()
-    $proc.WaitForExit()
-    $stderrText = $stderrTask.GetAwaiter().GetResult()
-    $exitCode = $proc.ExitCode
-    $proc.Dispose()
+
+    # Read both pipes async so neither can fill and stall the child while this
+    # caller is off starting another phase.
     @{
-        ExitCode = $exitCode
-        Stdout   = if ($null -eq $stdoutText) { "" } else { [string]$stdoutText }
-        Stderr   = if ($null -eq $stderrText) { "" } else { [string]$stderrText }
+        Process    = $proc
+        StdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        StderrTask = $proc.StandardError.ReadToEndAsync()
+        StartedAt  = [DateTime]::UtcNow
     }
+}
+
+# Complete a Start-StateAware handle. Returns
+# @{ ExitCode; Stdout; Stderr; StartedAt; EndedAt } with UTC timestamps.
+function Wait-StateAware {
+    param([hashtable]$Handle)
+
+    $stdoutText = $Handle.StdoutTask.GetAwaiter().GetResult()
+    $stderrText = $Handle.StderrTask.GetAwaiter().GetResult()
+    $Handle.Process.WaitForExit()
+    $endedAt = [DateTime]::UtcNow
+    $exitCode = $Handle.Process.ExitCode
+    $Handle.Process.Dispose()
+    @{
+        ExitCode  = $exitCode
+        Stdout    = if ($null -eq $stdoutText) { "" } else { [string]$stdoutText }
+        Stderr    = if ($null -eq $stderrText) { "" } else { [string]$stderrText }
+        StartedAt = $Handle.StartedAt
+        EndedAt   = $endedAt
+    }
+}
+
+# Parse or clone a state-aware request, move lifecycle routing to executor
+# arguments, encode the remaining phase-specific payload, and run wxc-exec.
+# A `wslc:{{SANDBOX_ID}}` fixture placeholder retains backend identity during
+# static corpus parsing and is replaced as one unit by the full real ID.
+# Returns @{ ExitCode; Stdout; Stderr }.
+function Invoke-StateAware {
+    [CmdletBinding()]
+    param(
+        [hashtable]$Request,
+        [string]$ConfigFile,
+        [string]$SandboxId,
+        [int]$WindowsPort,
+        [switch]$DryRun
+    )
+
+    Wait-StateAware (Start-StateAware `
+        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId `
+        -WindowsPort $WindowsPort -DryRun:$DryRun)
 }
 
 # Like Invoke-StateAware but records the wall-clock arrival time of each stdout
@@ -374,6 +409,15 @@ function Envelope-Arm {
     if ($Envelope.PSObject.Properties.Name -contains 'result') { return 'result' }
     if ($Envelope.PSObject.Properties.Name -contains 'error') { return 'error' }
     '<unknown>'
+}
+
+# The epoch seconds a stamped exec printed before and after its sleep; $null if
+# the run did not report both.
+function Get-ExecInterval {
+    param([string]$Stdout)
+    $stamps = @($Stdout -split '\r?\n' | Where-Object { $_.Trim() -match '^\d+$' } | ForEach-Object { [long]$_.Trim() })
+    if ($stamps.Count -lt 2) { return $null }
+    @{ Start = $stamps[0]; End = $stamps[-1] }
 }
 
 # Is the daemon process currently running?
@@ -1529,6 +1573,138 @@ try {
     }
     if ($null -ne $script:mcSandboxB -and -not $mcBDeprovisionedOk) {
         try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:mcSandboxB } catch { }
+    }
+}
+
+# ---------------- Lifecycle J: exec concurrency ----------------
+
+# Placed ahead of H because H drives the daemon to exit. Each scenario needs two
+# phases in flight at once -- overlapping runs on separate sandboxes, a refused
+# same-container second exec, and a lifecycle command issued mid-run -- so all
+# three use Start-StateAware rather than the sequential Invoke-StateAware.
+$script:ccSandboxA = $null
+$script:ccSandboxB = $null
+$ccADeprovisionedOk = $false
+$ccBDeprovisionedOk = $false
+try {
+    $ccAReady = $false
+    $ccBReady = $false
+    $ccAProvOk = Run-StateAwareTest "J: provision sandbox A" {
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
+        $envObj = Assert-ResultEnvelope $r "concurrency A provision"
+        if ($envObj) { $script:ccSandboxA = [string]$envObj.result.sandboxId }
+    }
+    $ccBProvOk = Run-StateAwareTest "J: provision sandbox B" {
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
+        $envObj = Assert-ResultEnvelope $r "concurrency B provision"
+        if ($envObj) { $script:ccSandboxB = [string]$envObj.result.sandboxId }
+    }
+    if ($ccAProvOk) {
+        $ccAReady = Run-StateAwareTest "J: start sandbox A" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:ccSandboxA
+            $null = Assert-ResultEnvelope $r "concurrency A start"
+        }
+    }
+    if ($ccBProvOk) {
+        $ccBReady = Run-StateAwareTest "J: start sandbox B" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:ccSandboxB
+            $null = Assert-ResultEnvelope $r "concurrency B start"
+        }
+    }
+
+    # J1: both sandboxes share one utility VM, so their clocks agree and the two
+    # runs can be compared directly. Serialized runs cannot overlap at all.
+    if ($ccAReady -and $ccBReady) {
+        Run-StateAwareTest "J: execs on two sandboxes overlap in wall clock" {
+            $stamped = "sh -c 'date +%s; sleep 6; date +%s'"
+            $sleepA = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = $stamped; timeout = 60000 } }
+            $sleepB = @{ phase = 'exec'; sandboxId = $script:ccSandboxB; process = @{ commandLine = $stamped; timeout = 60000 } }
+
+            $handleA = Start-StateAware -Request $sleepA
+            $handleB = Start-StateAware -Request $sleepB
+            $ra = Wait-StateAware $handleA
+            $rb = Wait-StateAware $handleB
+
+            Assert-True ($ra.ExitCode -eq 0) "A exec exit 0"
+            Assert-True ($rb.ExitCode -eq 0) "B exec exit 0"
+
+            $ia = Get-ExecInterval -Stdout $ra.Stdout
+            $ib = Get-ExecInterval -Stdout $rb.Stdout
+            Assert-True ($null -ne $ia -and $null -ne $ib) "both runs reported an in-container start and end"
+            if ($null -ne $ia -and $null -ne $ib) {
+                $overlapSec = [math]::Min($ia.End, $ib.End) - [math]::Max($ia.Start, $ib.Start)
+                Assert-True ($overlapSec -ge 2) `
+                    "the two 6s runs overlapped by ${overlapSec}s inside their containers"
+            }
+        } | Out-Null
+    }
+
+    # J2: the refusal is a pre-admission error, so it reaches the client as an
+    # envelope on stderr rather than a terminal stream frame.
+    if ($ccAReady) {
+        Run-StateAwareTest "J: second exec on the same sandbox is refused as busy" {
+            $blocker = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = "sh -c 'sleep 4; echo blocker-done'"; timeout = 30000 } }
+            $second = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = 'echo should-not-run'; timeout = 30000 } }
+
+            $blockerHandle = Start-StateAware -Request $blocker
+            Start-Sleep -Milliseconds 1500
+            $rs = Invoke-StateAware -Request $second
+
+            Assert-True ($rs.ExitCode -ne 0) "the refused exec exits non-zero"
+            Assert-True ($rs.Stdout -notmatch 'should-not-run') "the refused command never ran"
+            $envObj = Parse-StderrEnvelope -Stderr $rs.Stderr
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            $message = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($code -eq 'backend_error') "busy surfaces as 'backend_error' (got '$code')"
+            Assert-True ($message -match 'already has an exec in flight') `
+                "the message names the single-flight slot (got '$message')"
+
+            $rb = Wait-StateAware $blockerHandle
+            Assert-True ($rb.ExitCode -eq 0) "the first exec is unaffected by the refusal"
+            Assert-True ($rb.Stdout -match 'blocker-done') "the first exec ran to completion"
+        } | Out-Null
+    }
+
+    # J3: stop must wait for the run instead of deleting the container under it,
+    # so its wall clock covers the rest of the 4s exec.
+    if ($ccBReady) {
+        $ccStopWaited = Run-StateAwareTest "J: stop during an in-flight exec waits for the run" {            $longRun = @{ phase = 'exec'; sandboxId = $script:ccSandboxB; process = @{ commandLine = "sh -c 'sleep 4; echo run-survived'"; timeout = 30000 } }
+
+            $execHandle = Start-StateAware -Request $longRun
+            Start-Sleep -Milliseconds 1500
+            $stopHandle = Start-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:ccSandboxB
+            $rstop = Wait-StateAware $stopHandle
+            $rexec = Wait-StateAware $execHandle
+
+            Assert-True ($rexec.ExitCode -eq 0) "the in-flight exec still exits 0"
+            Assert-True ($rexec.Stdout -match 'run-survived') "the run was not cut short by the stop"
+            $null = Assert-ResultEnvelope $rstop "stop issued during an exec"
+            $stopSec = [math]::Round(($rstop.EndedAt - $rstop.StartedAt).TotalSeconds, 2)
+            Assert-True ($stopSec -ge 1.5) `
+                "stop took ${stopSec}s, so it waited for the run rather than racing it"
+        } | Out-Null
+    }
+
+    if ($ccAProvOk) {
+        $ccADeprovPassed = Run-StateAwareTest "J: deprovision A" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:ccSandboxA
+            $null = Assert-ResultEnvelope $r "concurrency A deprovision"
+        }
+        if ($ccADeprovPassed) { $ccADeprovisionedOk = $true }
+    }
+    if ($ccBProvOk) {
+        $ccBDeprovPassed = Run-StateAwareTest "J: deprovision B" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:ccSandboxB
+            $null = Assert-ResultEnvelope $r "concurrency B deprovision"
+        }
+        if ($ccBDeprovPassed) { $ccBDeprovisionedOk = $true }
+    }
+} finally {
+    if ($null -ne $script:ccSandboxA -and -not $ccADeprovisionedOk) {
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:ccSandboxA } catch { }
+    }
+    if ($null -ne $script:ccSandboxB -and -not $ccBDeprovisionedOk) {
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:ccSandboxB } catch { }
     }
 }
 

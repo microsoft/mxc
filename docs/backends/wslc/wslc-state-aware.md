@@ -43,9 +43,10 @@ Sandbox daemon pattern.
 The daemon owns the live SDK handles on a **single apartment-affine worker thread**, which services
 every lifecycle command. Any thread that has joined the MTA may use those handles, so an image
 pull and an `exec` each run on an MTA thread of their own and post their outcome back to the
-worker, leaving it free to serve other sandboxes for the duration of a run. A command naming a
-container with a run in flight waits for that run, because deleting the container would free a
-handle the run is using. See [Known limitations](#known-limitations).
+worker, leaving it free to serve other sandboxes for the duration of a run. A second `exec` on a
+container with a run in flight is refused as `busy`; a lifecycle command naming that container
+waits for the run, because deleting the container would free a handle the run is using. See
+[Known limitations](#known-limitations).
 
 ## Components
 
@@ -143,11 +144,19 @@ the streaming path reports it through its wait result.
 
 ### exec admission, cancellation, and failure containment
 
-The daemon admits one exec at a time. A concurrent exec is rejected with
-`backend_error` rather than queued behind an unknown-duration workload. Up to
-eight additional control connections can be serviced while an exec owns the
-stream slot; connections beyond the daemon's bounded client capacity are
-refused.
+The daemon admits up to eight exec streams at once, one per container. A second
+exec naming a container that already has one in flight is refused with `busy`
+before any admission reaches the client, rather than queued behind a workload of
+unknown duration; the outward SDK error is `backend_error`. The bound of eight
+comes from memory: each in-flight exec owns a bounded live-output queue, so the
+persistent per-user daemon stays near 128 MB of live output even against clients
+that never drain. Up to eight additional control connections can be serviced
+while every exec slot is occupied; connections beyond the daemon's bounded
+client capacity are refused.
+
+`start` / `stop` / `deprovision` naming a container with an exec in flight
+**wait** rather than being refused, because deleting the container would free a
+handle the run is still using.
 
 Each exec carries an internal ID and per-run token. A duplicate live ID is
 rejected, and cancellation must match both values so a delayed cancellation
@@ -277,8 +286,13 @@ it can observe idle-teardown within seconds.
 host that can reach a registry or already has the image cached, and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
 core lifecycle, warm-reuse (a marker written by one `exec` is read back by a separate `exec`
 process — only possible if the container stayed warm), filesystem volumes, bridged networking +
-proxy, validation rejections, and idle teardown. Fixtures live in
+proxy, validation rejections, exec concurrency, and idle teardown. Fixtures live in
 `tests/configs/wslc_state_aware_*.json`.
+
+The concurrency section launches a phase without waiting for it (`Start-StateAware` /
+`Wait-StateAware`), which is what lets it observe two sandboxes running at once, a refused
+same-container second exec, and a lifecycle command issued while a run is in flight. Every other
+section drives one phase process at a time.
 
 ### Running the fixtures (ordering + id substitution)
 
@@ -302,15 +316,16 @@ fixtures **through the harness**, not by pointing `wxc-exec --config` at them di
 
 ## Known limitations
 
-- **Multiple exec streams are deferred.** The daemon admits one exec stream at a time, so a
-  client's concurrent exec is refused rather than run alongside the first, and the per-container
-  single-flight slot is not reported as `Busy`. Raising that bound is tracked as follow-up work.
-  Lifecycle calls on another sandbox are a separate matter: they are admitted through the control
-  client reserve and proceed while a run is in flight.
+- **Ordering is per-container, not global.** A lifecycle command naming a container with a run in
+  flight waits for that run; commands for other sandboxes proceed independently. A caller cannot
+  infer that work on one sandbox completed because work on another did.
 
-- **Ordering is per-container, not global.** Commands naming a container with a run in flight wait
-  for that run; commands for other sandboxes proceed independently. A caller cannot infer that
-  work on one sandbox completed because work on another did.
+- **`busy` collapses to `backend_error` (deferred).** A second exec on a container that already has
+  one is refused rather than queued, but the refusal reaches an SDK caller as a generic
+  `backend_error` with no indication that retrying would succeed. A retryable wire code needs a new
+  `MxcErrorCode` variant, which is a closed set matching the SDK `ErrorCode` union one-for-one, so
+  it spans Rust, Node, .NET, the versioned references, and schema regeneration. This is tracked as
+  follow-up work.
 
 - **No typed SDK can set port mappings yet.** The Rust, Node, and .NET v1 SDKs
   all pin the published stable contract `1.0.0`, which does not declare the
