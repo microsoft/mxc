@@ -39,24 +39,24 @@ CheckRoundTrip(new TelemetryConfig { Enabled = false }, x => x.Enabled == false,
 foreach (var enabled in new bool?[] { null, true, false })
 {
     var telemetry = enabled.HasValue ? new TelemetryConfig { Enabled = enabled.Value } : null;
-    CheckRoundTrip(new RunOptions { Experimental = true, Telemetry = telemetry },
-        x => x.Experimental && x.Telemetry?.Enabled == enabled, "run options");
-    CheckRoundTrip(new SpawnOptions { Experimental = true, Telemetry = telemetry },
-        x => x.Experimental && x.Telemetry?.Enabled == enabled, "spawn options");
+    CheckRoundTrip(new RunOptions { Telemetry = telemetry },
+        x => x.Telemetry?.Enabled == enabled, "run options");
+    CheckRoundTrip(new SpawnOptions { Telemetry = telemetry },
+        x => x.Telemetry?.Enabled == enabled, "spawn options");
     CheckRoundTrip(
-        new SpawnWithPtyOptions { Experimental = true, Size = initialPtySize, Telemetry = telemetry },
-        x => x.Experimental && x.Size == initialPtySize && x.Telemetry?.Enabled == enabled,
+        new SpawnWithPtyOptions { Size = initialPtySize, Telemetry = telemetry },
+        x => x.Size == initialPtySize && x.Telemetry?.Enabled == enabled,
         "PTY options, telemetry, and initial dimensions");
 }
-CheckRoundTrip(new ProvisionOptions { Experimental = true }, x => x.Experimental, "provision options");
-CheckRoundTrip(new StartOptions { Experimental = true }, x => x.Experimental, "start options");
-CheckRoundTrip(new StopOptions { Experimental = true }, x => x.Experimental, "stop options");
-CheckRoundTrip(new DeprovisionOptions { Experimental = true }, x => x.Experimental, "deprovision options");
-CheckRoundTrip(new SpawnInContainerOptions { Experimental = true }, x => x.Experimental, "container spawn options");
-CheckRoundTrip(new RunInContainerOptions { Experimental = true }, x => x.Experimental, "container run options");
+CheckRoundTrip(new ProvisionOptions(), x => x.Telemetry is null, "provision options");
+CheckRoundTrip(new StartOptions(), x => x.Telemetry is null, "start options");
+CheckRoundTrip(new StopOptions(), x => x.Telemetry is null, "stop options");
+CheckRoundTrip(new DeprovisionOptions(), x => x.Telemetry is null, "deprovision options");
+CheckRoundTrip(new SpawnInContainerOptions(), x => x.Telemetry is null, "container spawn options");
+CheckRoundTrip(new RunInContainerOptions(), x => x.Telemetry is null, "container run options");
 CheckRoundTrip(
-    new SpawnInContainerWithPtyOptions { Experimental = true, Size = initialPtySize },
-    x => x.Experimental && x.Size == initialPtySize,
+    new SpawnInContainerWithPtyOptions { Size = initialPtySize },
+    x => x.Size == initialPtySize,
     "container PTY options and initial dimensions");
 CheckRoundTrip<ProvisionRequest>(
     new WslcProvisionRequest { Image = "alpine:latest" },

@@ -47,7 +47,7 @@ public static class MxcLifecycle
         var result = RunEnvelopePhase(
             BuildProvisionEnvelope(containment, request, options?.Telemetry),
             dryRun: false,
-            experimental: options?.Experimental == true)
+            experimental: false)
             ?? throw new MxcException(
                 ErrorCode.BackendError,
                 "provision response carried no result object");
@@ -112,7 +112,7 @@ public static class MxcLifecycle
         return ParseValidationResult(RunEnvelopePhase(
             BuildProvisionEnvelope(request.Containment, request, options?.Telemetry),
             dryRun: true,
-            experimental: options?.Experimental == true));
+            experimental: false));
     }
 
     internal static JsonObject BuildProvisionEnvelope(
@@ -162,14 +162,14 @@ public static class MxcLifecycle
     public static LifecycleResult StartContainer(ContainerId id, StartOptions? options = null)
     {
         return ParseLifecycleResult(RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: false,
-            experimental: options?.Experimental == true));
+            experimental: false));
     }
 
     /// <summary>Validate a start request without starting the container.</summary>
     public static ValidationResult ValidateStart(ContainerId id, StartOptions? options = null)
     {
         return ParseValidationResult(RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: true,
-            experimental: options?.Experimental == true));
+            experimental: false));
     }
 
     internal static JsonObject BuildStartEnvelope(
@@ -203,7 +203,7 @@ public static class MxcLifecycle
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
                 var status = NativeMethods.mxc_exec_state_aware_json(
-                    requestPtr, options?.Experimental == true ? 1 : 0, &handle, &error);
+                    requestPtr, NoExperimentalOptIn, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
@@ -255,7 +255,7 @@ public static class MxcLifecycle
                 MxcErrorDetail error = default;
                 var status = NativeMethods.mxc_state_aware_exec_pty(
                     requestPtr,
-                    options?.Experimental == true ? 1 : 0,
+                    NoExperimentalOptIn,
                     terminalSize.Rows,
                     terminalSize.Columns,
                     &handle,
@@ -294,7 +294,7 @@ public static class MxcLifecycle
         return ParseValidationResult(RunEnvelopePhase(
             BuildExecEnvelope(id, request, options?.Telemetry),
             dryRun: true,
-            experimental: options?.Experimental == true));
+            experimental: false));
     }
 
     internal static JsonObject BuildExecEnvelope(
@@ -345,7 +345,6 @@ public static class MxcLifecycle
             request,
             new SpawnInContainerOptions
             {
-                Experimental = options?.Experimental == true,
                 Telemetry = options?.Telemetry,
             },
             cancellationToken)
@@ -460,14 +459,14 @@ public static class MxcLifecycle
     public static LifecycleResult StopContainer(ContainerId id, StopOptions? options = null)
     {
         return ParseLifecycleResult(RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: false,
-            experimental: options?.Experimental == true));
+            experimental: false));
     }
 
     /// <summary>Validate a stop request without stopping the container.</summary>
     public static ValidationResult ValidateStop(ContainerId id, StopOptions? options = null)
     {
         return ParseValidationResult(RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: true,
-            experimental: options?.Experimental == true));
+            experimental: false));
     }
 
     internal static JsonObject BuildStopEnvelope(
@@ -485,7 +484,7 @@ public static class MxcLifecycle
         DeprovisionOptions? options = null)
     {
         return ParseLifecycleResult(RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: false,
-            experimental: options?.Experimental == true));
+            experimental: false));
     }
 
     /// <summary>Validate a deprovision request without destroying the container.</summary>
@@ -494,7 +493,7 @@ public static class MxcLifecycle
         DeprovisionOptions? options = null)
     {
         return ParseValidationResult(RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: true,
-            experimental: options?.Experimental == true));
+            experimental: false));
     }
 
     internal static ValidationResult ParseValidationResult(JsonObject? result)

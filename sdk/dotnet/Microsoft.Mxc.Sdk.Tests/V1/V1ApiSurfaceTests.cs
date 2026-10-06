@@ -46,4 +46,24 @@ public sealed class V1ApiSurfaceTests
                 && type.Name.Contains("Sandbox", StringComparison.Ordinal)
                 && !type.Name.Contains("WindowsSandbox", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void StableOperationOptionsDoNotExposeExperimentalAuthorization()
+    {
+        var optionTypes = new[]
+        {
+            typeof(RunOptions),
+            typeof(SpawnOptions),
+            typeof(SpawnWithPtyOptions),
+            typeof(ProvisionOptions),
+            typeof(StartOptions),
+            typeof(StopOptions),
+            typeof(DeprovisionOptions),
+            typeof(SpawnInContainerOptions),
+            typeof(RunInContainerOptions),
+            typeof(SpawnInContainerWithPtyOptions),
+        };
+
+        Assert.All(optionTypes, type => Assert.Null(type.GetProperty("Experimental")));
+    }
 }

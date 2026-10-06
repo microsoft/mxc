@@ -3,13 +3,13 @@
 # This file is the single source of truth for the pinned regeneration toolchain
 # and the authoritative hash of the vendored `ProcessSecurityEnvironment.fbs`.
 # It is consumed by:
-#   * src/core/generated/process_security_environment_specification/regenerate.ps1
+#   * scripts/versioning/regenerate-psec.ps1
 #     (validates the schema hash + pins the exact flatc version before generating)
 #   * scripts/versioning/check-psec-codegen.js
-#     (CI drift gate — verifies the committed schema + generated crate)
+#     (CI drift gate — verifies the committed schema + generated SDK module)
 #
 # Update this file whenever the vendored schema is refreshed from the OS source,
-# then regenerate the bindings (see the crate README).
+# then regenerate the bindings (see the module README).
 
 [source]
 # The schema originates from the Microsoft Windows OS repository. Only the

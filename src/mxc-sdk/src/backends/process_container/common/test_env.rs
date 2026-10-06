@@ -1,0 +1,208 @@
+//! Shared test-only helpers for env-var serialization across modules.
+//!
+//! The dispatcher tier-selection tests and the fallback-detector probe
+//! tests both mutate `MXC_FORCE_TIER` and `MXC_BFSCFG_PATH` (which are
+//! process-global). Each module previously owned its own private
+//! `ENV_LOCK`, but that meant a `fallback_detector::tests` thread and a
+//! `dispatcher::tests` thread could mutate the same env var
+//! concurrently — observable as a race once both test families started
+//! running under the same profile (cfg(test), any profile).
+//!
+//! This module uses the crate-wide `ENV_LOCK` that all `mxc-sdk` test
+//! modules take before touching the relevant env vars.
+//! Hold the guard for the entire duration of the env-var-dependent
+//! work so the value remains stable across the call. The provided
+//! `ForceTierGuard` and `BfscfgPathGuard` types encapsulate the
+//! set / clear discipline.
+//!
+//! Compiled in only under `#[cfg(test)]`.
+
+pub(crate) use crate::mxc_common::test_env::{lock, ENV_LOCK};
+use std::sync::MutexGuard;
+
+/// RAII guard that sets `MXC_FORCE_TIER` to `value` for the lifetime
+/// of the guard and restores it on `Drop`. Acquires [`ENV_LOCK`]
+/// internally so concurrent guards serialize.
+///
+/// Holding the lock *inside* the struct ensures the env-var clear in
+/// `Drop` happens before the lock is released — preventing a follow-up
+/// thread from observing the stale value.
+pub(crate) struct ForceTierGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl ForceTierGuard {
+    pub(crate) fn set(value: &str) -> Self {
+        let guard = lock();
+        // SAFETY: env-var mutation is gated by ENV_LOCK; no other
+        // ForceTierGuard / BfscfgPathGuard can be active concurrently.
+        unsafe {
+            std::env::set_var("MXC_FORCE_TIER", value);
+        }
+        ForceTierGuard { _lock: guard }
+    }
+
+    /// Typed variant: forces a real tier by its canonical serialized name, so
+    /// call-sites don't hardcode the string. Prefer this over [`set`](Self::set),
+    /// which remains for negative tests that need an intentionally invalid value.
+    pub(crate) fn set_tier(
+        tier: crate::process_container_common::fallback_detector::IsolationTier,
+    ) -> Self {
+        Self::set(tier.as_str())
+    }
+}
+
+impl Drop for ForceTierGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized by ENV_LOCK still held in `_lock`; the
+        // lock is released only after this `Drop` returns.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_TIER");
+        }
+    }
+}
+
+/// RAII guard for `MXC_FORCE_BC_USABLE`, mirroring [`ForceTierGuard`]. Forces
+/// `BaseContainerRunner::is_base_container_api_present()` to a fixed value so
+/// tier-selection tests can simulate "symbol present but feature disabled"
+/// (and the reverse) without real OS support. Also clears `MXC_FORCE_TIER` so
+/// the force-tier seam does not pre-empt the capability path under test.
+pub(crate) struct BcUsableGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl BcUsableGuard {
+    pub(crate) fn set(usable: bool) -> Self {
+        let guard = lock();
+        // SAFETY: env-var mutation is gated by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_TIER");
+            std::env::set_var("MXC_FORCE_BC_USABLE", if usable { "1" } else { "0" });
+        }
+        BcUsableGuard { _lock: guard }
+    }
+}
+
+impl Drop for BcUsableGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialized by ENV_LOCK still held in `_lock`.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_BC_USABLE");
+        }
+    }
+}
+
+/// Forces both BaseContainer usability and native-capture availability while
+/// holding the shared environment lock. This distinguishes native PSEC/V2
+/// capture from AppContainer + guarded-WPR selection in dispatcher tests.
+pub(crate) struct CaptureCapabilityGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl CaptureCapabilityGuard {
+    pub(crate) fn set(base_container_usable: bool, native_capture_usable: bool) -> Self {
+        let guard = lock();
+        unsafe {
+            std::env::remove_var("MXC_FORCE_TIER");
+            std::env::set_var(
+                "MXC_FORCE_BC_USABLE",
+                if base_container_usable { "1" } else { "0" },
+            );
+            std::env::set_var(
+                "MXC_FORCE_NATIVE_CAPTURE_USABLE",
+                if native_capture_usable { "1" } else { "0" },
+            );
+        }
+        Self { _lock: guard }
+    }
+}
+
+impl Drop for CaptureCapabilityGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("MXC_FORCE_BC_USABLE");
+            std::env::remove_var("MXC_FORCE_NATIVE_CAPTURE_USABLE");
+        }
+    }
+}
+
+/// RAII guard for `MXC_BFSCFG_PATH`, mirroring [`ForceTierGuard`].
+///
+/// Only compiled in under the `tier2_bfs` feature, because the
+/// `MXC_BFSCFG_PATH` test seam in `fallback_detector::find_bfscfg_exe`
+/// is itself feature-gated — without `tier2_bfs`, `find_bfscfg_exe`
+/// returns `Ok(None)` unconditionally and setting the env var would
+/// have no observable effect.
+#[cfg(feature = "tier2_bfs")]
+pub(crate) struct BfscfgPathGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+#[cfg(feature = "tier2_bfs")]
+impl BfscfgPathGuard {
+    pub(crate) fn set(value: &str) -> Self {
+        let guard = lock();
+        // SAFETY: see ForceTierGuard::set.
+        unsafe {
+            std::env::set_var("MXC_BFSCFG_PATH", value);
+        }
+        BfscfgPathGuard { _lock: guard }
+    }
+}
+
+#[cfg(feature = "tier2_bfs")]
+impl Drop for BfscfgPathGuard {
+    fn drop(&mut self) {
+        // SAFETY: see ForceTierGuard::drop.
+        unsafe {
+            std::env::remove_var("MXC_BFSCFG_PATH");
+        }
+    }
+}
+
+/// RAII helper that points `MXC_DACL_STATE_DIR` at a freshly created
+/// tempdir for the duration of a test, then restores the previous
+/// value on drop. Holds [`ENV_LOCK`] for its lifetime via [`lock`],
+/// which serializes all env-var-touching tests within the process.
+///
+/// Lives here (rather than in `filesystem_dacl::tests`) so it shares
+/// `ENV_LOCK` with [`ForceTierGuard`] / [`BfscfgPathGuard`]. Without
+/// the shared lock, a `filesystem_dacl` test could delete its tempdir
+/// while a concurrent `dispatcher` test was mid-write to the same
+/// path (the dispatcher test reads `MXC_DACL_STATE_DIR` through
+/// `state_dir()` inside `DaclManager::new()` and would race the
+/// `Drop` on the other test's `ScopedStateDir`).
+pub(crate) struct ScopedStateDir {
+    _lock: MutexGuard<'static, ()>,
+    _td: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl ScopedStateDir {
+    pub(crate) fn new() -> Self {
+        let guard = lock();
+        let td = tempfile::tempdir().expect("create tempdir");
+        let prev = std::env::var_os("MXC_DACL_STATE_DIR");
+        // SAFETY: serialized by ENV_LOCK; see ForceTierGuard::set.
+        unsafe {
+            std::env::set_var("MXC_DACL_STATE_DIR", td.path());
+        }
+        Self {
+            _lock: guard,
+            _td: td,
+            prev,
+        }
+    }
+}
+
+impl Drop for ScopedStateDir {
+    fn drop(&mut self) {
+        // SAFETY: serialized by ENV_LOCK still held in `_lock`.
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("MXC_DACL_STATE_DIR", v),
+                None => std::env::remove_var("MXC_DACL_STATE_DIR"),
+            }
+        }
+    }
+}

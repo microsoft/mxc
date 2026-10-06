@@ -19,9 +19,9 @@ use anyhow::{Context, Result};
 #[cfg(target_os = "windows")]
 use clap::{Parser, Subcommand};
 #[cfg(target_os = "windows")]
-use plm::elevated::{self, Operation};
+use mxc_sdk::plm::elevated::{self, Operation};
 #[cfg(target_os = "windows")]
-use plm::{extract_caps, log, stop};
+use mxc_sdk::plm::{extract_caps, log, stop};
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
 
@@ -109,7 +109,7 @@ fn internal_operation(operation: InternalOperation) -> Result<()> {
     // runtime LoadLibrary cannot side-load an adjacent DLL. The install
     // directory is also verified non-user-writable by the launcher's trust
     // gate; this is defense-in-depth.
-    plm::trust::harden_dll_search_path()?;
+    mxc_sdk::plm::trust::harden_dll_search_path()?;
     match operation {
         InternalOperation::Start {
             pipe_name,

@@ -214,7 +214,6 @@ Invocation controls for releasing a container.
 
 ```typescript
 export interface DeprovisionOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
 }
 ```
@@ -668,7 +667,6 @@ Invocation controls for provisioning a container.
 
 ```typescript
 export interface ProvisionOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
 }
 ```
@@ -704,7 +702,6 @@ Invocation controls for captured execution in an existing container.
 
 ```typescript
 export interface RunInContainerOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
 }
 ```
@@ -716,7 +713,6 @@ Invocation controls for run.
 
 ```typescript
 export interface RunOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
 }
 ```
@@ -763,7 +759,6 @@ Invocation controls for live execution in an existing container.
 
 ```typescript
 export interface SpawnInContainerOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
 }
 ```
@@ -775,7 +770,6 @@ Invocation controls for a terminal in an existing container.
 
 ```typescript
 export interface SpawnInContainerWithPtyOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
   size?: MxcPtySize;
 }
@@ -788,7 +782,6 @@ Invocation controls for spawn.
 
 ```typescript
 export interface SpawnOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
 }
 ```
@@ -800,7 +793,6 @@ Invocation controls for spawning a caller-controlled terminal.
 
 ```typescript
 export interface SpawnWithPtyOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
   size?: MxcPtySize;
 }
@@ -814,7 +806,6 @@ Invocation controls for starting a container.
 
 ```typescript
 export interface StartOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
 }
 ```
@@ -828,7 +819,6 @@ Invocation controls for stopping a container.
 
 ```typescript
 export interface StopOptions {
-  experimental?: boolean;
   telemetry?: TelemetryConfig;
 }
 ```

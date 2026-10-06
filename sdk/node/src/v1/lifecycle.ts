@@ -55,7 +55,6 @@ function assertStateAwareOptions(
   for (const [key, value] of Object.entries(options)) {
     if (key === 'telemetry') continue;
     if (
-      key !== 'experimental' &&
       key !== 'dryRun' &&
       !additionalOptionKeys.includes(key)
     ) {
@@ -96,20 +95,20 @@ function logBackgroundFailure(operation: string, error: unknown): void {
 async function runStateAwareEnvelopeRequest(
   apiName: string,
   envelope: Record<string, unknown>,
-  options: MxcOptions,
+  options: MxcOptions & { telemetry?: TelemetryConfig },
 ): Promise<string> {
   assertStateAwareOptions(apiName, options);
   return runBindingStateAwareRequestAsync({
     requestJson: JSON.stringify(envelope),
     dryRun: options.dryRun === true,
-    experimental: options.experimental === true,
+    experimental: false,
   });
 }
 
 async function nonExecBindingCall(
   apiName: string,
   envelope: Record<string, unknown>,
-  options: MxcOptions,
+  options: MxcOptions & { telemetry?: TelemetryConfig },
 ): Promise<Record<string, unknown>> {
   assertStateAwareStreamingOptions(apiName, options);
   return parseResultObject(await runStateAwareEnvelopeRequest(apiName, envelope, options), apiName);
@@ -149,14 +148,14 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
   assertPipedExecBackend(apiName, sandboxId);
   return spawnStateAwareBindingSandboxProcessAsync(
     JSON.stringify(buildExecEnvelope(sandboxId, request, options.telemetry)),
-    options.experimental === true,
+    false,
     request.timeoutMs,
   );
 }
 
 function assertStateAwareStreamingOptions(
   apiName: string,
-  options: MxcOptions,
+  options: MxcOptions & { telemetry?: TelemetryConfig },
   additionalOptionKeys: readonly string[] = [],
 ): void {
   assertStateAwareOptions(apiName, options, additionalOptionKeys);
@@ -277,7 +276,7 @@ export async function spawnInContainerWithPty<C extends LifecycleContainmentKind
   }
   return execStateAwareBindingSandboxWithPty(
     JSON.stringify(buildExecEnvelope(containerId, request, options.telemetry)),
-    options.experimental === true,
+    false,
     size.rows,
     size.columns,
     request.timeoutMs,

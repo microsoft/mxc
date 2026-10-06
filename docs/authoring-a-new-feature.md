@@ -110,14 +110,14 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `src/core/mxc_config_contract/src/dev/` | Add the field to the authoritative closed mutable development contract |
-| `src/core/wxc_common/src/config_contract_adapters/dev/` | Adapt the exact field into private `CommonRequestIR` |
-| `src/core/wxc_common/src/wire.rs` | Add only reusable nested normalization DTOs needed by the adapter; never add a whole-request root |
-| `src/core/mxc-sdk/src/policy/exact/` | Once the field is in the SDK's published target, update that contract's typed builder (currently `v1_0.rs` for `1.0.0`) |
+| `src/mxc-sdk/src/core/mxc_contract/dev/` | Add the field to the authoritative closed mutable development contract |
+| `src/mxc-sdk/src/core/mxc_common/config_contract_adapters/dev/` | Adapt the exact field into private `CommonRequestIR` |
+| `src/mxc-sdk/src/core/mxc_common/wire.rs` | Add only reusable nested normalization DTOs needed by the adapter; never add a whole-request root |
+| `src/mxc-sdk/src/policy/exact/` | Once the field is in the SDK's published target, update that contract's typed builder (currently `v1_0.rs` for `1.0.0`) |
 | `schemas/dev/mxc-config.schema.1.1.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
 | `sdk/node/src/generated/v1_1_0_alpha/wire.ts` | **Generated exact artifact** — do not hand-edit |
-| `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` and an optional field on `ExecutionRequest` |
-| `src/core/wxc_common/src/config_parser.rs` | Map the new config-input field into `ExecutionRequest.gpu_isolation` |
+| `src/mxc-sdk/src/core/mxc_common/models.rs` | Add `GpuIsolationConfig` and an optional field on `ExecutionRequest` |
+| `src/mxc-sdk/src/core/mxc_common/config_parser.rs` | Map the new config-input field into `ExecutionRequest.gpu_isolation` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
 
@@ -129,12 +129,12 @@ when the SDK target advances to a published contract containing that field.
 ## Step 1: Add the field to the development contract and config input
 
 Add the feature to the authoritative closed request types under
-`src/core/mxc_config_contract/src/dev/`, then adapt it into the shared internal
+`src/mxc-sdk/src/core/mxc_contract/dev/`, then adapt it into the shared internal
 config input used by semantic normalization.
 The development request and every nested object are recursively closed.
 
 ```rust
-// in mxc_config_contract/src/dev/one_shot.rs
+// in mxc_contract/src/dev/one_shot.rs
 pub struct Request {
     // Existing permanent fields...
     #[serde(default)]
@@ -168,7 +168,7 @@ regeneration steps are mandatory.
 
 ## Step 2: Add the runtime model field
 
-In `src/core/wxc_common/src/models.rs`, add `GpuIsolationConfig` and an optional
+In `src/mxc-sdk/src/core/mxc_common/models.rs`, add `GpuIsolationConfig` and an optional
 field directly on `ExecutionRequest`:
 
 ```rust

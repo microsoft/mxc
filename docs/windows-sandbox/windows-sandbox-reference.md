@@ -309,21 +309,21 @@ PID-plus-creation-time ownership proof.
 
 | File | Purpose |
 |---|---|
-| `src/core/mxc_engine/src/run.rs` | One-shot backend selection |
-| `src/core/mxc_engine/src/state_aware.rs` | State-aware backend selection |
-| `src/backends/windows_sandbox/lifecycle/src/one_shot.rs` | One-shot orchestration |
-| `src/backends/windows_sandbox/lifecycle/src/state_aware.rs` | State-aware phase implementation |
-| `src/backends/windows_sandbox/lifecycle/src/control_plane.rs` | Records, state decisions, IPC constants, and locks |
-| `src/backends/windows_sandbox/lifecycle/src/teardown.rs` | One-shot markers and cleanup |
-| `src/backends/windows_sandbox/lifecycle/src/bridge.rs` | Guest bridge and stream relay |
-| `src/backends/windows_sandbox/lifecycle/src/ipc_exec.rs` | Daemon exec frame codec |
-| `src/backends/windows_sandbox/lifecycle/src/vm.rs` | VM generation, launch, proof, and teardown |
-| `src/backends/windows_sandbox/lifecycle/src/policy.rs` | Policy mapping and validation |
-| `src/backends/windows_sandbox/daemon/src/main.rs` | State-aware daemon ownership and launch |
-| `src/backends/windows_sandbox/daemon/src/control_server.rs` | Daemon IPC and single-flight execution |
-| `src/backends/windows_sandbox/common/src/auth.rs` | Nonce and role authentication |
-| `src/backends/windows_sandbox/common/src/sandbox_protocol.rs` | Guest control framing |
-| `src/backends/windows_sandbox/guest/src/` | Guest startup, execution, firewall, and job object |
+| `src/mxc-sdk/src/core/mxc_engine/run.rs` | One-shot backend selection |
+| `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | State-aware backend selection |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/one_shot.rs` | One-shot orchestration |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/state_aware.rs` | State-aware phase implementation |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/control_plane.rs` | Records, state decisions, IPC constants, and locks |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/teardown.rs` | One-shot markers and cleanup |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/bridge.rs` | Guest bridge and stream relay |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/ipc_exec.rs` | Daemon exec frame codec |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/vm.rs` | VM generation, launch, proof, and teardown |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/policy.rs` | Policy mapping and validation |
+| `src/mxc-sdk/src/bin/windows_sandbox_daemon/main.rs` | State-aware daemon ownership and launch |
+| `src/mxc-sdk/src/bin/windows_sandbox_daemon/control_server.rs` | Daemon IPC and single-flight execution |
+| `src/mxc-sdk/src/backends/windows_sandbox/common/auth.rs` | Nonce and role authentication |
+| `src/mxc-sdk/src/backends/windows_sandbox/common/sandbox_protocol.rs` | Guest control framing |
+| `src/mxc-sdk/src/bin/windows_sandbox_guest/` | Guest startup, execution, firewall, and job object |
 
 ## E2E Tests
 

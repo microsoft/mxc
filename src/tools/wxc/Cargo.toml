@@ -1,0 +1,38 @@
+[package]
+name = "wxc"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wxc-exec"
+path = "src/main.rs"
+
+[dependencies]
+mxc-sdk.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+windows.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tempfile.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
+winresource.workspace = true
+
+[build-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = []
+test-support = ["mxc-sdk/test-support"]
+microvm = ["mxc-sdk/microvm"]
+wslc = ["mxc-sdk/wslc"]
+hyperlight = ["mxc-sdk/hyperlight"]
+isolation_session = ["mxc-sdk/isolation_session"]
+force-tier-testing = ["mxc-sdk/force-tier-testing"]
+tier2_bfs = ["mxc-sdk/tier2_bfs"]

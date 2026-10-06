@@ -610,7 +610,7 @@ public class MxcLifecycleTests
         Assert.False(
             typeof(StartOptions).IsAssignableFrom(
                 typeof(ExecutionRequest)));
-        Assert.Null(typeof(ExecutionRequest).GetProperty(nameof(StartOptions.Experimental)));
+        Assert.Null(typeof(ExecutionRequest).GetProperty("Experimental"));
     }
 
     [Fact]

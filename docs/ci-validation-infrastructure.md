@@ -252,7 +252,7 @@ every entry.
   VirtualMachinePlatform optional features to be baked into the image, then
   installs/updates the WSL runtime (including the pre-release ring) up to the
   minimum version parsed from `WSLC_SDK_VERSION` in
-  `src/backends/wslc/common/build.rs`.
+  `src/mxc-sdk/build/build_wslc_common.rs`.
 - everything else — prints a "no prerequisites yet" line.
 
 Windows optional features are **verified, never enabled**: turning one on needs a

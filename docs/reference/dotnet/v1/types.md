@@ -323,7 +323,6 @@ public sealed class DeprovisionOptions
 {
     public DeprovisionOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1101,7 +1100,6 @@ public sealed class ProvisionOptions
 {
     public ProvisionOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1168,7 +1166,6 @@ public sealed class RunInContainerOptions
 {
     public RunInContainerOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1183,7 +1180,6 @@ public sealed class RunOptions
 {
     public RunOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1227,7 +1223,6 @@ public sealed class SpawnInContainerOptions
 {
     public SpawnInContainerOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1242,7 +1237,6 @@ public sealed class SpawnInContainerWithPtyOptions
 {
     public SpawnInContainerWithPtyOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
     public MxcPtySize? Size { get; set; }
 }
@@ -1258,7 +1252,6 @@ public sealed class SpawnOptions
 {
     public SpawnOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1273,7 +1266,6 @@ public sealed class SpawnWithPtyOptions
 {
     public SpawnWithPtyOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
     public MxcPtySize? Size { get; set; }
 }
@@ -1289,7 +1281,6 @@ public sealed class StartOptions
 {
     public StartOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1304,7 +1295,6 @@ public sealed class StopOptions
 {
     public StopOptions();
 
-    public bool Experimental { get; set; }
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```

@@ -7,7 +7,9 @@ Every PR is validated automatically by the GitHub Actions workflows under
 it fans out to the reusable `Build.Windows.Job.yml`, `Build.Linux.Job.yml`, and
 `Build.MacOS.Job.yml` workflows, which build and test on native Windows
 x64/arm64, Linux x64/arm64, and macOS arm64 hosts, then runs the lint,
-versioning, and SDK jobs.
+versioning, repository-consistency, and SDK jobs. Repository consistency also
+checks that `mxc-sdk` is the only Rust release crate and has a valid package
+name, version, description, repository, and license.
 
 ### Local Node SDK package validation
 

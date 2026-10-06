@@ -8,7 +8,7 @@ separate:
 
 | Decision | Authority |
 | --- | --- |
-| Which fields and values exist? | The exact Rust contract types and registration in `mxc_config_contract`. Published contracts are immutable; the development contract can evolve. |
+| Which fields and values exist? | The exact Rust contract types and registration in `mxc_contract`. Published contracts are immutable; the development contract can evolve. |
 | Which exact contract does a typed SDK emit? | `sdkMajorTargets` in `schemas/schema-version.json`, checked against the exact Rust registry. Callers select a major-version SDK API, not an exact JSON version. |
 | Which exact contract does raw JSON use? | The caller's declared, registered `version`. A version range or development opt-in cannot authorize another spelling. |
 | Which backend and policy can run? | `mxc_engine` resolves the backend and checks authorization; host capabilities and backend validation determine what can actually be enforced. |
@@ -121,7 +121,7 @@ reasons:
 | Axis | What it describes | Where it lives | Who decides it |
 |---|---|---|---|
 | **Schema (config) version** | The *shape* of the config JSON — which fields exist and what values they accept. | The `version` field in raw configuration; high-level SDK policy omits it. | The raw-config author or, for high-level APIs, the SDK package. |
-| **Product version** | The MXC *binaries and npm package* that do the work. | Rust workspace version (`src/Cargo.toml`) + `sdk/package.json`. | The release. |
+| **Product version** | The MXC binaries and Rust, Node, and .NET SDK packages. | Rust workspace version (`src/Cargo.toml`), `sdk/node/package.json`, and the .NET SDK project `<Version>`. | The release. |
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
 - **Schema version** selects an exact registered contract at the trust boundary:
@@ -135,6 +135,10 @@ reasons:
   minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
   schema version; a binary release can fix bugs without changing the config shape.
+  The .NET packaging project passes the release's `PackageVersion` into its
+  nuspec; the SDK project's `<Version>` supplies its managed assembly version.
+  Windows binaries, including `mxc_ffi.dll`, embed the product version and source
+  commit in their version-resource metadata.
   `scripts/check-version-sync.js` keeps the Rust workspace and npm versions in
   step, and `scripts/versioning/check-schema-versions.js` keeps the schema-version
   constants in step — but the two axes are not tied to each other.
@@ -166,7 +170,7 @@ parser simply stops accepting those versions (the supported floor is
 `0.9.0-alpha`). Released schemas are never edited or deleted.
 
 The development artifact is generated from the exact
-`mxc_config_contract::dev` model. It describes all eight closed one-shot and
+`mxc_contract::dev` model. It describes all eight closed one-shot and
 state-aware roots, including recursively closed experimental structures. The
 registered Rust types remain the authority for declared `1.1.0-alpha`
 requests; the schema is their derived editor and validation artifact.
@@ -288,7 +292,7 @@ mutable exact contract. JSON location, publication eligibility, and runtime
 authorization are separate concerns. This gives editors full autocomplete and
 validation without requiring a later field move when a feature graduates.
 The engine-owned backend registry in
-`src/core/mxc_engine/src/backend_registry.rs` records which backend selections
+`src/mxc-sdk/src/core/mxc_engine/backend_registry.rs` records which backend selections
 require runtime experimental authorization. Contract publication does not
 implicitly change that classification. The flag does not enable otherwise
 invalid fields or bypass backend enforcement.
@@ -419,7 +423,7 @@ step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
 truth):**
 
 Add the field to the applicable closed request type under
-`src/core/mxc_config_contract/src/dev/`, including the backend and phase roots
+`src/mxc-sdk/src/core/mxc_contract/dev/`, including the backend and phase roots
 that admit it.
 
 **In the exact adapter and common request IR:**
@@ -431,7 +435,7 @@ pub(crate) struct CommonRequestIR {
 ```
 
 Edit the authoritative closed mutable contract under
-`src/core/mxc_config_contract/src/dev/`, then adapt the exact field into
+`src/mxc-sdk/src/core/mxc_contract/dev/`, then adapt the exact field into
 `CommonRequestIR`. Regenerate the exact schema:
 
 ```text
@@ -516,12 +520,12 @@ Process runs in sandbox
 MXC deliberately keeps three Rust representations rather than sharing one type
 across trust-boundary parsing, common normalization, and backend execution:
 
-- **Exact registered contracts** (`mxc_config_contract`) — version-, phase-, and
+- **Exact registered contracts** (`mxc_contract`) — version-, phase-, and
   backend-specific closed request roots. These are the production JSON
   deserialization boundary and the source for authoritative schemas and
   generated exact TypeScript wire types.
 - **Common request IR**
-  (`wxc_common::common_request_ir::CommonRequestIR`) — the private common
+  (`mxc_common::common_request_ir::CommonRequestIR`) — the private common
   representation produced by version-specific adapters and consumed by shared
   semantic normalization. It is not a JSON parse or schema generation target.
 - **Runtime / domain model** (`models::ExecutionRequest` and friends) — the
@@ -539,7 +543,7 @@ pass directional network sections to shared normalization. An omitted network
 section receives directional deny defaults; shared normalization does not select
 a network format from contract provenance or legacy field presence.
 
-Reusable nested DTOs under `wxc_common::wire` help adapters share representations
+Reusable nested DTOs under `mxc_common::wire` help adapters share representations
 for common fields. They are not a whole-request deserialization boundary and do
 not generate schemas or public SDK types.
 

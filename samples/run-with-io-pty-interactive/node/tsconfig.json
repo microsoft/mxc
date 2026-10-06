@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@microsoft/mxc-sdk/v1": ["../../../sdk/node/dist/v1/index.d.ts"]
+    },
+    "typeRoots": ["../../../sdk/node/node_modules/@types"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

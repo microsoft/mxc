@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>Microsoft.Mxc.Sdk</RootNamespace>
     <AssemblyName>Microsoft.Mxc.Sdk</AssemblyName>
-    <Version>0.9.0</Version>
+    <Version>1.0.0</Version>
     <!-- Do not inherit an ambient Visual Studio Platform (for example x64)
          into the managed SDK. Native assets are selected by RID at runtime. -->
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -62,7 +62,6 @@
          there the native unit is both files. -->
     <MxcCargoPackages>-p mxc_ffi</MxcCargoPackages>
     <MxcCargoPackages Condition="$([MSBuild]::IsOSPlatform('Windows'))">-p mxc_ffi -p plm</MxcCargoPackages>
-    <MxcCargoPackages Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcCargoPackages) -p wxc_wslc_daemon</MxcCargoPackages>
     <MxcSidecarFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">plm.exe</MxcSidecarFileName>
 
     <MxcNativeUnitFileNames>$(MxcNativeFileName)</MxcNativeUnitFileNames>
@@ -188,6 +187,13 @@
           WorkingDirectory="$(MxcSrcDir)"
           ConsoleToMSBuild="true"
           StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" ItemName="MxcCargoOutput" />
+    </Exec>
+    <Exec Command="cargo build -p mxc-sdk --bin wxc-wslc-daemon --features wslc --target $(MxcRustHostTriple) $(MxcCargoProfileArg) --message-format=json-render-diagnostics"
+          WorkingDirectory="$(MxcSrcDir)"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="low"
+          Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">
       <Output TaskParameter="ConsoleOutput" ItemName="MxcCargoOutput" />
     </Exec>
     <MxcReadCargoArtifacts Lines="@(MxcCargoOutput)">

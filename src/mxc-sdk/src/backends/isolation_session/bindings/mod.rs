@@ -1,0 +1,19 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Generated WinRT bindings for the IsolationSession Preview API.
+//!
+//! This crate contains Rust projections generated from the
+//! `Windows.AI.IsolationSession.Preview` WinMD using `windows-bindgen`.
+//!
+//! See `build/isolation_session_bindings/GENERATION_INFO.toml`
+//! for provenance details.
+
+#[allow(
+    non_snake_case,
+    non_upper_case_globals,
+    non_camel_case_types,
+    dead_code,
+    clippy::all
+)]
+pub mod bindings;

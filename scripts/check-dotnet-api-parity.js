@@ -339,9 +339,9 @@ const managedOptions = read(
   "sdk", "dotnet", "Microsoft.Mxc.Sdk", "V1", "ExecutionOptions.cs"
 );
 for (const [name, fields] of [
-  ["RunOptions", ["experimental", "telemetry"]],
-  ["SpawnOptions", ["experimental", "telemetry"]],
-  ["SpawnWithPtyOptions", ["experimental", "telemetry", "size"]],
+  ["RunOptions", ["telemetry"]],
+  ["SpawnOptions", ["telemetry"]],
+  ["SpawnWithPtyOptions", ["telemetry", "size"]],
 ]) {
   compare(`${name} invocation fields`, managedJsonFields(managedOptions, name), fields);
 }
@@ -368,9 +368,9 @@ compare(
   ["disable", "clipboard", "allowInputInjection"]
 );
 
-const rustProbeFull = read("src", "core", "mxc_engine", "src", "probe.rs");
+const rustProbeFull = read("src", "mxc-sdk", "src", "core", "mxc_engine", "probe.rs");
 const rustProbe = rustProbeFull.split("#[cfg(test)]")[0];
-const rustModels = read("src", "core", "wxc_common", "src", "models.rs");
+const rustModels = read("src", "mxc-sdk", "src", "core", "mxc_common", "models.rs");
 const managedDiscovery = read(
   "sdk",
   "dotnet",
@@ -461,9 +461,10 @@ if (!tierMatch) {
 
 const rustStateAware = read(
   "src",
+  "mxc-sdk",
+  "src",
   "core",
   "mxc_engine",
-  "src",
   "state_aware.rs"
 ).split("#[cfg(test)]")[0];
 const runStateAwareBody = namedBody(rustStateAware, "fn", "run_state_aware");
@@ -491,9 +492,10 @@ if (rustBackends.length === 0) {
 
 const rustDispatch = read(
   "src",
-  "core",
-  "wxc_common",
+  "mxc-sdk",
   "src",
+  "core",
+  "mxc_common",
   "state_aware_dispatch.rs"
 );
 const managedLifecycle = read(

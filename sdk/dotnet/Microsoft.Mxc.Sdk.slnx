@@ -1,7 +1,16 @@
 <Solution>
+  <Project Path="../../samples/dryrun-check-containment-support/dotnet/Mxc.Sample.DryRunCheckContainmentSupport.csproj" />
+  <Project Path="../../samples/run-in-persisted-container/dotnet/Mxc.Sample.RunInPersistedContainer.csproj" />
+  <Project Path="../../samples/run-in-transient-container/dotnet/Mxc.Sample.RunInTransientContainer.csproj" />
+  <Project Path="../../samples/run-with-containment-of-filesystem/dotnet/Mxc.Sample.RunWithContainmentOfFilesystem.csproj" />
+  <Project Path="../../samples/run-with-containment-of-network/dotnet/Mxc.Sample.RunWithContainmentOfNetwork.csproj" />
+  <Project Path="../../samples/run-with-logging-access-denied/dotnet/Mxc.Sample.RunWithLoggingAccessDenied.csproj" />
+  <Project Path="../../samples/run-with-io-captured/dotnet/Mxc.Sample.RunWithIoCaptured.csproj" />
+  <Project Path="../../samples/run-with-io-pty-interactive/dotnet/Mxc.Sample.RunWithIoPtyInteractive.csproj" />
+  <Project Path="../../samples/run-with-io-stdio-streaming/dotnet/Mxc.Sample.RunWithIoStdioStreaming.csproj" />
+  <Project Path="../../samples/run-with-telemetry/dotnet/Mxc.Sample.RunWithTelemetry.csproj" />
   <Project Path="Microsoft.Mxc.Sdk.AotSmokeTest/Microsoft.Mxc.Sdk.AotSmokeTest.csproj" />
   <Project Path="Microsoft.Mxc.Sdk.ConsoleDriver/Microsoft.Mxc.Sdk.ConsoleDriver.csproj" />
-  <Project Path="Microsoft.Mxc.Sdk.Sample/Microsoft.Mxc.Sdk.Sample.csproj" />
   <Project Path="Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj" />
   <Project Path="Microsoft.Mxc.Sdk/Microsoft.Mxc.Sdk.csproj" />
 </Solution>

@@ -89,9 +89,6 @@ public sealed class ProvisionOptions
 {
     internal string? Version { get; set; }
 
-    /// <summary>Authorize runtime-gated experimental features.</summary>
-    public bool Experimental { get; set; }
-
     /// <summary>
     /// Optional per-phase telemetry request. Emission is still gated by the
     /// MXC-owned user consent and administrative policy.
@@ -105,9 +102,6 @@ public sealed class StartOptions
 {
     internal string? Version { get; set; }
 
-    /// <summary>Authorize runtime-gated experimental features.</summary>
-    public bool Experimental { get; set; }
-
     /// <summary>Optional telemetry preference, subject to consent and policy.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 }
@@ -118,9 +112,6 @@ public sealed class StopOptions
 {
     internal string? Version { get; set; }
 
-    /// <summary>Authorize runtime-gated experimental features.</summary>
-    public bool Experimental { get; set; }
-
     /// <summary>Optional telemetry preference, subject to consent and policy.</summary>
     public TelemetryConfig? Telemetry { get; set; }
 }
@@ -130,9 +121,6 @@ public sealed class StopOptions
 public sealed class DeprovisionOptions
 {
     internal string? Version { get; set; }
-
-    /// <summary>Authorize runtime-gated experimental features.</summary>
-    public bool Experimental { get; set; }
 
     /// <summary>Optional telemetry preference, subject to consent and policy.</summary>
     public TelemetryConfig? Telemetry { get; set; }

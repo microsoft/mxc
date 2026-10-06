@@ -8,7 +8,6 @@ import {
     ContainerConfig,
     ContainmentChoice,
     ExecutionResult,
-    type MxcOptions,
     UnsupportedV1NetworkFields,
 } from './types.js';
 import { applyLinuxNetworkPolicy } from '../helper.js';
@@ -24,6 +23,7 @@ import {
 } from '../bindings/streaming.js';
 import type { MxcProcess } from './container-process.js';
 import { spawnBindingSandboxWithPty } from '../bindings/pty.js';
+import { spawnProcessContainerWithPty } from '../bindings/process-container-pty.js';
 import type { MxcPtyProcess } from './mxc-pty-process.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
 import type { RunOptions, SpawnOptions, SpawnWithPtyOptions } from './operation-options.js';
@@ -359,7 +359,7 @@ export function prepareContainerRequest(
 
 function validateOperationOptions(
   apiName: string,
-  options: MxcOptions,
+  options: object,
   supportsDryRun: boolean,
   additionalOptionKeys: readonly string[] = [],
 ): void {
@@ -392,7 +392,6 @@ function validateOperationOptions(
       continue;
     }
     if (
-      key !== 'experimental' &&
       key !== 'dryRun' &&
       !additionalOptionKeys.includes(key)
     ) {
@@ -433,7 +432,7 @@ export async function spawn(
   validateOperationOptions('spawn', options, false);
   return spawnBindingSandboxProcess(
     prepareContainerRequest(request, options.telemetry),
-    options.experimental === true,
+    false,
   );
 }
 
@@ -457,9 +456,14 @@ export async function spawnWithPty(
       'PTY rows and columns must be integers between 1 and 32767',
     );
   }
-  return spawnBindingSandboxWithPty(
-    prepareContainerRequest(request, options.telemetry),
-    options.experimental === true,
+  const preparedRequest = prepareContainerRequest(request, options.telemetry);
+  const spawnPty = process.platform === 'win32'
+      && preparedRequest.containment === 'processcontainer'
+    ? spawnProcessContainerWithPty
+    : spawnBindingSandboxWithPty;
+  return spawnPty(
+    preparedRequest,
+    false,
     size.rows,
     size.columns,
   );
@@ -473,6 +477,6 @@ export async function run(
   validateOperationOptions('run', options, false);
   return toExecutionResult(await runOneShotJsonAsync(
     prepareContainerRequest(request, options.telemetry),
-    options.experimental === true,
+    false,
   ));
 }

@@ -151,13 +151,9 @@ function Invoke-NetworkProxyAssertions {
                 -Detail "verdict=$($direct.Verdict); WFP scopes egress to the proxy endpoint only"
         }
     } else {
-        # "runtime proxy requests do not fall back because
-        # AppContainer cannot preserve their peer or host-loopback
-        # requirements."
         $rejected = Test-WasRejected $envRun
-        Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects runtime proxy (no fallback)' `
-            -Pass $rejected `
-            -Detail "exit=$($envRun.Result.ExitCode); timedOut=$($envRun.Result.TimedOut); tier=$($Script:ExpectedTier)"
+        Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects runtime proxy (no fallback)' -Status 'skip' `
+            -Detail "the identity-less shape requires hostLoopback='allow', which is not supported on this Windows version; rejected=$rejected; exit=$($envRun.Result.ExitCode); tier=$($Script:ExpectedTier)"
     }
 
     # --- Model-2 shape requirements, independent of tier. -----------------
