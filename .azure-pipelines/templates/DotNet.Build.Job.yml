@@ -208,6 +208,9 @@ jobs:
       contents: libmxc_ffi.dylib
       targetFolder: $(packageRoot)\runtimes\osx-arm64\native
 
+  # MXC's build-time ESRP service is not configured to sign NuGet packages.
+  # Use a neutral transport suffix so the OneBranch release pipeline can
+  # download the unsigned payload, restore .nupkg, and sign it later.
   - ${{ each package in parameters.nugetPackageVariants }}:
     - task: NuGetCommand@2
       displayName: Pack Microsoft.Mxc.Sdk for ${{ package.displayName }}
@@ -226,59 +229,21 @@ jobs:
           -PackagePath "$(packageOutput)\Microsoft.Mxc.Sdk.${{ package.version }}.nupkg"
           -RequireWslc
 
-    - ${{ if eq(parameters.isOfficialBuild, true) }}:
-      - task: EsrpCodeSigning@6
-        displayName: Sign Microsoft.Mxc.Sdk for ${{ package.displayName }}
-        inputs:
-          ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
-          AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
-          AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
-          esrpClientId: ${{ parameters.ESRPInfo.clientId }}
-          AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-          AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
-          AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
-          FolderPath: $(packageOutput)
-          Pattern: Microsoft.Mxc.Sdk.${{ package.version }}.nupkg
-          UseMinimatch: true
-          SessionTimeout: '90'
-          MaxConcurrency: '25'
-          ServiceEndpointUrl: https://api.esrp.microsoft.com/api/v2
-          signConfigType: inlineSignParams
-          inlineOperation: >-
-            [
-              {
-                "KeyCode": "CP-401405",
-                "OperationCode": "NuGetSign",
-                "Parameters": {},
-                "ToolName": "sign",
-                "ToolVersion": "1.0"
-              },
-              {
-                "KeyCode": "CP-401405",
-                "OperationCode": "NuGetVerify",
-                "Parameters": {},
-                "ToolName": "sign",
-                "ToolVersion": "1.0"
-              }
-            ]
-
     - task: PowerShell@2
-      displayName: Stage ${{ package.displayName }} package for release
+      displayName: Prepare ${{ package.displayName }} package for release transport
       inputs:
         targetType: inline
         script: |
           $packagePath = "$(packageOutput)\Microsoft.Mxc.Sdk.${{ package.version }}.nupkg"
-          $releaseDirectory = "$(packageOutput)\${{ package.transportKind }}"
-          $releasePath = Join-Path $releaseDirectory "Microsoft.Mxc.Sdk.${{ package.version }}.nupkg"
+          $transportPath = "$(packageOutput)\Microsoft.Mxc.Sdk.${{ package.version }}.${{ package.transportKind }}-unsigned-package"
 
           if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
-            throw "NuGet package was not found: $packagePath"
+            throw "Unsigned NuGet package was not found: $packagePath"
           }
-          if (Test-Path -LiteralPath $releasePath) {
-            throw "Release package path already exists: $releasePath"
+          if (Test-Path -LiteralPath $transportPath) {
+            throw "Release transport path already exists: $transportPath"
           }
-          New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
-          Move-Item -LiteralPath $packagePath -Destination $releasePath
+          Move-Item -LiteralPath $packagePath -Destination $transportPath
 
   - task: PowerShell@2
     displayName: Verify release transport directory
@@ -287,11 +252,11 @@ jobs:
       script: |
         $remainingPackages = @(Get-ChildItem -LiteralPath "$(packageOutput)" -Filter *.nupkg -File)
         if ($remainingPackages.Count -ne 0) {
-          throw "Unstaged .nupkg files remain in the release artifact directory"
+          throw "Unsigned .nupkg files remain in the release artifact directory"
         }
 
   - task: 1ES.PublishPipelineArtifact@1
-    displayName: Publish NuGet release payload
+    displayName: Publish unsigned NuGet release payload
     inputs:
       path: $(packageOutput)
-      artifactName: mxc-dotnet-sdk-nuget
+      artifactName: mxc-dotnet-sdk-nuget-unsigned

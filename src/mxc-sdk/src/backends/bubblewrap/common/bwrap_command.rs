@@ -600,7 +600,7 @@ fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
 /// I/O and so stays unit-testable on every host. Unit tests and any caller that
 /// has not stat'd the denied paths use it. The Bubblewrap runner uses
 /// [`build_args_classified`] instead. See
-/// docs/bwrap-support/bubblewrap-backend.md for how denied paths are masked.
+/// docs/backends/bwrap/bubblewrap-backend.md for how denied paths are masked.
 pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> Vec<String> {
     build_args_classified(request, proxy_address, &HashSet::new())
 }
@@ -623,7 +623,7 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
 /// `denied_files` is the set of `deniedPaths` entries the runner classified as
 /// files (built by `symlink_metadata`-probing each denied path, so this function
 /// performs no filesystem I/O and stays unit-testable on every host). See
-/// docs/bwrap-support/bubblewrap-backend.md for how denied paths are masked.
+/// docs/backends/bwrap/bubblewrap-backend.md for how denied paths are masked.
 pub fn build_args_classified(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
@@ -649,7 +649,7 @@ pub(crate) fn build_args_classified_with_mode(
     // unsharing, leaving that descriptor open in the workload. It is inert only
     // because bwrap empties the capability sets before exec — asserted by
     // run_bwrap_network_proxy_test.sh, explained in
-    // docs/bwrap-support/bubblewrap-backend.md.
+    // docs/backends/bwrap/bubblewrap-backend.md.
     args.extend(
         ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
             .into_iter()

@@ -798,7 +798,7 @@ export interface ProbeFacts {
  * namespace and default-drop everything except the proxy endpoint. That
  * requires host tooling (slirp4netns, util-linux unshare, nsenter, the
  * iptables family) plus unprivileged user and network namespaces the kernel
- * will actually grant; see `docs/bwrap-support/bubblewrap-backend.md` for the
+ * will actually grant; see `docs/backends/bwrap/bubblewrap-backend.md` for the
  * full list. There is deliberately no fallback to the weaker shared-host-network
  * model, so a request that cannot configure private networking fails rather
  * than silently degrading. This reports, before launching, whether the host

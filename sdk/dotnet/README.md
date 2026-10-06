@@ -158,8 +158,8 @@ Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. The
 asynchronous methods are convenience wrappers over native operations and
 support cancellation. Backend and phase-specific policy requirements are
 described in the
-[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/state-aware-rust.md) and
-[WSLC](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) guides.
+[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
+[WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides.
 `MxcLifecycle.SpawnInContainerWithPty(id, request, options?)` starts an
 IsolationSession exec with a caller-controlled terminal and returns an
 `MxcPtyProcess`. Set `SpawnInContainerWithPtyOptions.Size` to choose initial
@@ -216,9 +216,9 @@ Backend/platform discovery, errors, telemetry, and helpers are also in
 | Terminal process outcome | `WaitResult` |
 
 All types above are in `Microsoft.Mxc.Sdk.V1`. See the
-[networking guide](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/networking/networking.md)
+[networking guide](https://github.com/microsoft/mxc/blob/main/docs/containment-configuration/0.8.0/networking/networking.md)
 for policy behavior and the
-[SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/reference/README.md)
+[SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md)
 for complete signatures and types.
 
 ## Errors, warnings, and discovery
@@ -260,6 +260,6 @@ pipeline produces the publishable NuGet package; `build.bat` creates local
 architecture-specific packages under `output\packages`.
 
 For API details, see the
-[SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/reference/README.md).
+[SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md).
 Build and validation commands are in the
-[pull request guide](https://github.com/microsoft/mxc/blob/main/docs/pull-requests.md).
+[pull request guide](https://github.com/microsoft/mxc/blob/main/docs/development/build-and-test/pull-requests.md).

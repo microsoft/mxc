@@ -3,8 +3,8 @@
 
 //! Tests the resolved value of an omitted `network.ingress.hostLoopback`.
 //!
-//! Contract source: `docs/sandbox-policy/0.8.0/networking/networking.md`
-//! ("Host Loopback and Inbound Policy") and `docs/sandbox-policy/0.8.0/policy.md`:
+//! Contract source: `docs/containment-configuration/0.8.0/networking/networking.md`
+//! ("Host Loopback and Inbound Policy") and `docs/containment-configuration/0.8.0/policy.md`:
 //! both ingress controls default to `deny`, and `hostLoopback` resolves
 //! independently of `ingress.default` rather than inheriting it.
 //!

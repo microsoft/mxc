@@ -46,7 +46,7 @@ to 24 rows by 80 columns.
 Set the request's typed `Containment` when a specific backend is required.
 Shared restrictions remain on `ContainerRequest`; backend-specific settings
 are carried by the selected containment variant. These types are documented in
-the [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/reference/README.md).
+the [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md).
 
 `UiPolicy.disable` defaults to `true`; clipboard and input-injection
 permissions are authored separately.
@@ -105,8 +105,8 @@ Use `v1::container::spawn_in_container` for live piped execution.
 terminal; PTY support is currently available for IsolationSession.
 Attached execution is not exposed by the Rust SDK. Lifecycle operations and
 existing-container execution are synchronous in Rust. Backend support and phase-specific requirements are described in the
-[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/state-aware-rust.md) and
-[WSLC](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) guides.
+[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
+[WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides.
 
 Lifecycle calls use distinct `ProvisionOptions`, `StartOptions`, `StopOptions`,
 and `DeprovisionOptions`. Existing-container execution uses
@@ -144,7 +144,7 @@ For host discovery, use
 `mxc_sdk::v1::platform_support` and `mxc_sdk::v1::available_backends`. Errors are
 returned as `mxc_sdk::v1::Error` with an `ErrorCode`.
 Telemetry and policy helpers are also under `v1`. The
-[launch-choice table](../../../docs/reference/rust/v1/api.md#choosing-a-launch-operation)
+[launch-choice table](../../docs/api-reference/rust/v1/api.md#choosing-a-launch-operation)
 compares captured, piped, and terminal execution.
 
 ## Build features and backend support

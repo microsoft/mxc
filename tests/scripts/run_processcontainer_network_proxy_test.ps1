@@ -25,7 +25,7 @@ Initialize-WpcContext @PSBoundParameters
 
 # Phase 8e — runtime proxy (model 2).
 #
-# Per docs/process-container/networking.md: HTTP(S)_PROXY (both cases) point
+# Per docs/backends/process-container/networking.md: HTTP(S)_PROXY (both cases) point
 # at the loopback endpoint, NO_PROXY must not carry it, direct egress is
 # blocked, egress rules do not apply, identity-less proxy requires
 # hostLoopback allow, and no fallback to an AppContainer tier.
@@ -219,4 +219,3 @@ function Invoke-NetworkProxyAssertions {
 
 Invoke-WpcPhase -Key 'NetworkProxy' -Body { Phase-NetworkProxy }
 Complete-WpcChild
-
