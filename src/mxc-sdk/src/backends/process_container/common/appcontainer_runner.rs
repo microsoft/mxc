@@ -39,7 +39,8 @@ use crate::mxc_common::audit::{
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    ContainmentBackend, ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse,
+    ContainerPolicy, ContainmentBackend, ExecutionRequest, FailurePhase, ProxyAddress,
+    SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -67,6 +68,7 @@ use crate::process_container_common::network_policy_helpers::{
     add_default_network_capabilities, allows_network_egress,
 };
 use crate::process_container_common::process_mitigation;
+use crate::process_container_common::proxy_coordinator::ProxyCoordinator;
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
     "captureDenials requires either the native BaseContainer learning-mode APIs or an \
@@ -1506,8 +1508,34 @@ impl Drop for AppContainerScriptRunner {
 /// the sandboxed child. Created by [`AppContainerScriptRunner::prepare`] and
 /// torn down by [`AppContainerScriptRunner::teardown`] after the child exits.
 struct Prepared {
-    network_manager: crate::process_container_common::network_manager::NetworkManager,
+    proxy_coordinator: ProxyCoordinator,
     bfs_manager: crate::process_container_common::filesystem_bfs::FileSystemBfsManager,
+}
+
+fn log_app_network_policy_audit(
+    policy: &ContainerPolicy,
+    identity: &str,
+    tier: &str,
+    proxy_address: Option<&ProxyAddress>,
+    network_result: &Result<(), WxcError>,
+    logger: &mut Logger,
+) {
+    if logger.has_diagnostic_sink() {
+        let status = if network_result.is_ok() {
+            OperationStatus::Success
+        } else {
+            OperationStatus::Failure
+        };
+        let record =
+            crate::process_container_common::network_policy_helpers::network_policy_applied_record(
+                policy,
+                sanitize_identity(identity),
+                tier,
+                proxy_address,
+                status,
+            );
+        logger.log_audit_event(&record);
+    }
 }
 
 impl AppContainerScriptRunner {
@@ -1520,7 +1548,6 @@ impl AppContainerScriptRunner {
         logger: &mut Logger,
     ) -> Result<Prepared, ScriptResponse> {
         use crate::process_container_common::filesystem_bfs::FileSystemBfsManager;
-        use crate::process_container_common::network_manager::NetworkManager;
 
         if request.experimental_enabled {
             if let Some(ref test) = request.test_feature {
@@ -1574,51 +1601,35 @@ impl AppContainerScriptRunner {
             );
         }
 
-        let mut network_manager = NetworkManager::new();
-        let network_result = network_manager.start(
-            &principal_id,
-            &self.app_container_name,
+        let mut proxy_coordinator = ProxyCoordinator::new();
+        let network_result = if request.policy.network_proxy.is_enabled() {
+            proxy_coordinator.start(
+                &request.policy.network_proxy,
+                &self.app_container_name,
+                &principal_id,
+                self.app_container_sid,
+                logger,
+            )
+        } else {
+            Ok(())
+        };
+        log_app_network_policy_audit(
             &request.policy,
-            self.app_container_sid,
+            &self.app_container_name,
+            self.tier_str(),
+            proxy_coordinator.address(),
+            &network_result,
             logger,
         );
-        if logger.has_diagnostic_sink() {
-            let status = if network_result.is_ok() {
-                OperationStatus::Success
-            } else {
-                OperationStatus::Failure
-            };
-            let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
-                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
-                .str("identity", sanitize_identity(&self.app_container_name))
-                .str("tier", self.tier_str())
-                .str(
-                    "enforcement_mode",
-                    crate::process_container_common::network_policy_helpers::CAPABILITIES_ENFORCEMENT_MODE,
-                )
-                .str(
-                    "default_policy",
-                    crate::process_container_common::network_policy_helpers::audit_egress_default(&request.policy),
-                )
-                .u64(
-                    "proxy_port",
-                    network_manager
-                        .proxy_address()
-                        .map(|address| address.port as u64)
-                        .unwrap_or(0),
-                )
-                .u64("firewall_rules_created", 0)
-                .bool("firewall_applied", false)
-                .str("status", status.as_str());
-            logger.log_audit_event(&record);
-        }
         if crate::mxc_common::telemetry::is_active() {
             crate::mxc_common::telemetry::log_network_policy_applied(
                 sanitize_identity(&self.app_container_name),
                 crate::process_container_common::network_policy_helpers::CAPABILITIES_ENFORCEMENT_MODE,
-                crate::process_container_common::network_policy_helpers::audit_egress_default(&request.policy),
-                network_manager
-                    .proxy_address()
+                crate::process_container_common::network_policy_helpers::audit_egress_default(
+                    &request.policy,
+                ),
+                proxy_coordinator
+                    .address()
                     .map(|address| address.port as u64)
                     .unwrap_or(0),
             );
@@ -1626,7 +1637,7 @@ impl AppContainerScriptRunner {
 
         match network_result {
             Ok(()) => {
-                self.proxy_address = network_manager.proxy_address().cloned();
+                self.proxy_address = proxy_coordinator.address().cloned();
             }
             Err(err) => {
                 return Err(ScriptResponse::error(&err.to_string()));
@@ -1634,14 +1645,14 @@ impl AppContainerScriptRunner {
         }
 
         Ok(Prepared {
-            network_manager,
+            proxy_coordinator,
             bfs_manager,
         })
     }
 
     /// Tear down the per-run proxy and filesystem policy after the child exits.
     fn teardown(&self, prepared: &mut Prepared, preserve_policy: bool, logger: &mut Logger) {
-        let proxy_stopped = prepared.network_manager.stop_all(logger);
+        let proxy_stopped = prepared.proxy_coordinator.stop(logger);
         let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && prepared.bfs_manager.configured()
             && !preserve_policy;
@@ -1781,14 +1792,6 @@ impl SandboxBackend for AppContainerScriptRunner {
                 crate::mxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
         }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::rejected(
-                crate::mxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        crate::process_container_common::network_policy_helpers::reject_retired_network_policy(
-            &request.policy,
-        )?;
         Ok(())
     }
 
@@ -1889,8 +1892,8 @@ struct AppContainerSandboxProcess {
 // and this handle is owned exclusively by the caller (not shared), so it is
 // only ever touched from one thread at a time.
 //
-// `NetworkManager` owns only the proxy coordinator's process-global handles
-// and paths; no thread-affine COM interface or apartment state is retained.
+// `ProxyCoordinator` owns only process-global handles and paths; no
+// thread-affine COM interface or apartment state is retained.
 // Moving this handle across threads is therefore sound.
 unsafe impl Send for AppContainerSandboxProcess {}
 
@@ -1989,10 +1992,7 @@ impl AppContainerSandboxProcess {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
-        let proxy_stopped = self
-            .prepared
-            .network_manager
-            .stop_all(&mut self.audit_logger);
+        let proxy_stopped = self.prepared.proxy_coordinator.stop(&mut self.audit_logger);
         let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && self.prepared.bfs_manager.configured()
             && !self.preserve_policy;
@@ -2270,6 +2270,78 @@ impl Drop for AppContainerSandboxProcess {
 #[cfg(test)]
 mod tests {
     use crate::mxc_common::audit::{TeardownSkipReason, TeardownStatus};
+
+    #[test]
+    fn appcontainer_network_audit_records_proxyless_proxy_and_start_failure() {
+        use super::*;
+        use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy};
+
+        for (default, configured_proxy, start_failed, expected_default, expected_port, status) in [
+            (NetworkAction::Deny, false, false, "block", 0, "success"),
+            (NetworkAction::Allow, false, false, "allow", 0, "success"),
+            (NetworkAction::Deny, true, false, "block", 8080, "success"),
+            (NetworkAction::Deny, true, true, "block", 0, "failure"),
+        ] {
+            let mut policy = ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    default,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            if configured_proxy {
+                policy.network_proxy.address =
+                    Some(ProxyAddress::new("127.0.0.1".to_string(), 8080));
+            }
+            let active_address = if start_failed {
+                None
+            } else {
+                policy.network_proxy.address.as_ref()
+            };
+            let result = if start_failed {
+                Err(WxcError::NetworkProxy("shim startup failed".to_string()))
+            } else {
+                Ok(())
+            };
+            let directory = tempfile::tempdir().expect("tempdir");
+            let path = directory.path().join("network-audit.log");
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            logger.enable_file_sink(&path).expect("diagnostic sink");
+
+            log_app_network_policy_audit(
+                &policy,
+                "untrusted-profile-name",
+                FilesystemMode::Dacl.isolation_tier().as_str(),
+                active_address,
+                &result,
+                &mut logger,
+            );
+            drop(logger);
+
+            let output = std::fs::read_to_string(&path).expect("read audit");
+            let (_, json) = output
+                .trim_end()
+                .split_once("] ")
+                .expect("timestamped audit record");
+            let record: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+            assert_eq!(output.lines().count(), 1);
+            assert_eq!(
+                record,
+                serde_json::json!({
+                    "event": "mxc.NetworkPolicyApplied",
+                    "backend": "processcontainer",
+                    "identity": "redacted",
+                    "tier": "appcontainer-dacl",
+                    "enforcement_mode": "capabilities",
+                    "default_policy": expected_default,
+                    "proxy_port": expected_port,
+                    "firewall_rules_created": 0,
+                    "firewall_applied": false,
+                    "status": status,
+                })
+            );
+        }
+    }
 
     #[test]
     fn released_resources_format_is_stable() {
@@ -2856,30 +2928,6 @@ mod tests {
         });
         let _ = session.discard();
         assert_eq!(*events.lock().unwrap(), vec!["discard".to_string()]);
-    }
-
-    #[test]
-    fn validate_runner_rejects_allowed_hosts() {
-        let runner = AppContainerScriptRunner::new();
-        let mut request = ExecutionRequest::default();
-        request.policy.allowed_hosts = vec!["example.com".into()];
-
-        let err = runner
-            .validate(&request)
-            .expect_err("allowedHosts is not yet supported");
-        assert!(err.error_message.contains("allowedHosts"));
-    }
-
-    #[test]
-    fn validate_runner_rejects_blocked_hosts() {
-        let runner = AppContainerScriptRunner::new();
-        let mut request = ExecutionRequest::default();
-        request.policy.blocked_hosts = vec!["bad.example.com".into()];
-
-        let err = runner
-            .validate(&request)
-            .expect_err("blockedHosts is not yet supported");
-        assert!(err.error_message.contains("blockedHosts"));
     }
 
     #[test]

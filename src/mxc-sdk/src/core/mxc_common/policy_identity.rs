@@ -40,7 +40,7 @@
 //! | `telemetry`, internal `test_feature` | No enforcement effect. |
 //! | `network_proxy.original_url` | A proxy URL can embed `user:password@`. The host and port *are* hashed. |
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
-//! | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+//! | `dry_run` | Invocation mode, not policy. |
 //! | `experimental_enabled` | Authorizes selecting an experimental backend; it does not change the selected backend's enforcement. |
 //! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. |
 //!
@@ -219,7 +219,6 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         inherit_default_env: _excluded_environment_mode,
         // Invocation modes, not policy.
         dry_run: _excluded_dry_run,
-        testing_features_enabled: _excluded_testing_features,
     } = request;
 
     let mut root = Map::new();
@@ -297,10 +296,6 @@ fn proxy_projection(request: &ExecutionRequest) -> Value {
     let proxy = &request.policy.network_proxy;
     let mut out = Map::new();
     out.insert("enabled".into(), Value::Bool(proxy.is_enabled()));
-    out.insert(
-        "builtinTestServer".into(),
-        Value::Bool(proxy.builtin_test_server),
-    );
     match &proxy.address {
         Some(addr) => {
             out.insert("address".into(), Value::String(addr.address.clone()));
@@ -580,7 +575,17 @@ mod tests {
     fn changing_the_network_policy_changes_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();
-        changed.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Allow;
+        changed.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        assert_ne!(baseline, policy_hash(&changed));
+
+        changed.policy.network_egress = None;
+        changed.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
         assert_ne!(baseline, policy_hash(&changed));
     }
 
@@ -718,7 +723,6 @@ mod tests {
         let baseline = policy_hash(&request());
         let mut changed = request();
         changed.dry_run = true;
-        changed.testing_features_enabled = true;
         changed.experimental_enabled = true;
         assert_eq!(baseline, policy_hash(&changed));
     }

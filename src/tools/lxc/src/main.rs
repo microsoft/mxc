@@ -45,12 +45,6 @@ struct Cli {
     #[arg(long)]
     experimental: bool,
 
-    /// Allow testing-only features that must never run in production, currently
-    /// `network.proxy.builtinTestServer` (a bundled, deliberately-permissive
-    /// test HTTP proxy). Distinct from --experimental.
-    #[arg(long = "allow-testing-features")]
-    allow_testing_features: bool,
-
     /// Report host backend availability as JSON and exit
     #[arg(long = "available-backends")]
     available_backends: bool,
@@ -279,7 +273,6 @@ fn main() {
     };
 
     request.experimental_enabled = cli.experimental;
-    request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
     // ── Telemetry init ──────────────────────────────────────────────

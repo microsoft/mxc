@@ -178,7 +178,7 @@ public sealed class NetworkRulePolicy
     public List<NetworkPortPolicy>? Ports { get; set; }
 }
 
-/// <summary>Schema-0.8 outbound network policy.</summary>
+/// <summary>Directional outbound network policy.</summary>
 public sealed class NetworkEgressPolicy
 {
     /// <summary>Action for traffic not matched by a rule.</summary>
@@ -194,7 +194,7 @@ public sealed class NetworkEgressPolicy
     public List<NetworkRulePolicy>? Deny { get; set; }
 }
 
-/// <summary>Schema-0.8 inbound and host-loopback network policy.</summary>
+/// <summary>Directional inbound and host-loopback network policy.</summary>
 public sealed class NetworkIngressPolicy
 {
     /// <summary>Default inbound action.</summary>
@@ -206,7 +206,7 @@ public sealed class NetworkIngressPolicy
     public NetworkAction? HostLoopback { get; set; }
 }
 
-/// <summary>Schema-0.8 runtime network values.</summary>
+/// <summary>Runtime network values.</summary>
 public sealed class NetworkRuntimeConfig
 {
     /// <summary>

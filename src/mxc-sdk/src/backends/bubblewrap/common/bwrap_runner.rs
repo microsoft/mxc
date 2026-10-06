@@ -30,7 +30,6 @@ use crate::mxc_common::sandbox_process::{
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
-use crate::mxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
@@ -179,12 +178,6 @@ impl BubblewrapScriptRunner {
     where
         F: FnOnce() -> Result<bwrap_version::BwrapVersion, bwrap_version::BwrapUnavailable>,
     {
-        if let Some(reason) = bwrap_command::retired_network_fields_rejection(request) {
-            return Err(ScriptResponse::error(reason));
-        }
-        if let Some(reason) = bwrap_command::builtin_proxy_rejection(request) {
-            return Err(ScriptResponse::error(reason));
-        }
         validate_network_policy_support(request, self.network_policy_support())?;
 
         // User-input validation runs before the environmental `bwrap`
@@ -371,50 +364,34 @@ impl BubblewrapScriptRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<BwrapChild, ScriptResponse> {
-        // 1. Start the network proxy if configured. Must happen before
-        //    arg-building so the proxy's loopback address can be injected as
-        //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
-        let mut proxy = UnixProxyCoordinator::new();
-        if request.policy.network_proxy.is_enabled() {
-            if let Err(err) = proxy.start(
-                &request.policy.network_proxy,
-                "127.0.0.1",
-                &[],
-                &[],
-                crate::mxc_common::models::NetworkPolicy::Block,
-                logger,
-            ) {
-                return Err(ScriptResponse::error(&format!(
-                    "Bubblewrap: failed to start network proxy: {}",
-                    err
-                )));
-            }
+        // The caller manages the proxy; pass its address into the sandbox
+        // environment and restrict direct egress to that endpoint.
+        let configured_proxy = request.policy.network_proxy.address.as_ref();
+        if let Some(address) = configured_proxy {
+            logger.log_line(&format!(
+                "Unix network proxy active: {}",
+                crate::mxc_common::proxy_env::redact_proxy_url(&address.to_url())
+            ));
         }
 
-        let network_mode = ResolvedNetworkMode::from_request(request, proxy.is_active());
+        let network_mode = ResolvedNetworkMode::from_request(request, configured_proxy.is_some());
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
-            match proxy.address() {
-                Some(address) => match proxy_network::SandboxProxy::resolve(address) {
-                    Ok(resolved) => Some(resolved),
-                    Err(error) => {
-                        proxy.stop(logger);
-                        return Err(ScriptResponse::error(&error));
-                    }
-                },
-                None => {
-                    proxy.stop(logger);
-                    return Err(ScriptResponse::error(
-                        "Bubblewrap: proxy mode was selected without a resolved proxy address.",
-                    ));
-                }
-            }
+            let address = configured_proxy.ok_or_else(|| {
+                ScriptResponse::error(
+                    "Bubblewrap: proxy mode was selected without a resolved proxy address.",
+                )
+            })?;
+            Some(
+                proxy_network::SandboxProxy::resolve(address)
+                    .map_err(|error| ScriptResponse::error(&error))?,
+            )
         } else {
             None
         };
         let proxy_address = sandbox_proxy
             .as_ref()
             .map(|resolved| resolved.address())
-            .or_else(|| proxy.address());
+            .or(configured_proxy);
 
         let mut proxy_network = match sandbox_proxy.as_ref() {
             // The workload dials the sandbox-visible address, so that is what
@@ -429,10 +406,7 @@ impl BubblewrapScriptRunner {
                     request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
-                    Err(error) => {
-                        proxy.stop(logger);
-                        return Err(ScriptResponse::error(&error));
-                    }
+                    Err(error) => return Err(ScriptResponse::error(&error)),
                 }
             }
             // Direct directional egress uses the same private namespace.
@@ -445,10 +419,7 @@ impl BubblewrapScriptRunner {
                     Some(plan) => plan,
                     None => match network_rules::EgressPlan::for_request(request) {
                         Ok(plan) => plan,
-                        Err(error) => {
-                            proxy.stop(logger);
-                            return Err(ScriptResponse::error(&error));
-                        }
+                        Err(error) => return Err(ScriptResponse::error(&error)),
                     },
                 };
                 match proxy_network::ProxyNetworkNamespace::start(
@@ -459,10 +430,7 @@ impl BubblewrapScriptRunner {
                     request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
-                    Err(error) => {
-                        proxy.stop(logger);
-                        return Err(ScriptResponse::error(&error));
-                    }
+                    Err(error) => return Err(ScriptResponse::error(&error)),
                 }
             }
             None => None,
@@ -482,7 +450,6 @@ impl BubblewrapScriptRunner {
                 Ok(startup) => Some(startup),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
-                    proxy.stop(logger);
                     return Err(ScriptResponse::error(&error));
                 }
             },
@@ -527,7 +494,6 @@ impl BubblewrapScriptRunner {
                 Ok(pty) => Some(pty),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
-                    proxy.stop(logger);
                     return Err(ScriptResponse::error(&format!(
                         "Bubblewrap: failed to allocate PTY: {error}"
                     )));
@@ -550,7 +516,6 @@ impl BubblewrapScriptRunner {
             Ok(process) => process,
             Err(error) => {
                 stop_proxy_network(&mut proxy_network, logger);
-                proxy.stop(logger);
                 return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: failed to spawn bwrap: {}",
                     error
@@ -577,7 +542,6 @@ impl BubblewrapScriptRunner {
                 let _ = child.kill();
                 let _ = child.wait();
                 stop_proxy_network(&mut proxy_network, logger);
-                proxy.stop(logger);
                 return Err(ScriptResponse::error(&error));
             }
         }
@@ -600,7 +564,6 @@ impl BubblewrapScriptRunner {
                     let _ = child.kill();
                     let _ = child.wait();
                     stop_proxy_network(&mut proxy_network, logger);
-                    proxy.stop(logger);
                     let error = out_result.err().or(err_result.err());
                     return Err(ScriptResponse::error(&format!(
                         "Bubblewrap: failed to wrap stdio pipes: {}",
@@ -632,7 +595,6 @@ impl BubblewrapScriptRunner {
             stderr_canceller,
             pty,
             group,
-            proxy,
             proxy_network,
             monitor,
             timeout,
@@ -661,7 +623,6 @@ struct BwrapChild {
     /// termination signals the whole group; `false` for `Inherit` mode, where
     /// killing bwrap relies on `--die-with-parent` to take the sandbox with it.
     group: bool,
-    proxy: UnixProxyCoordinator,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
     monitor: Option<ProviderMonitor>,
     timeout: Option<Duration>,
@@ -675,7 +636,7 @@ impl BwrapChild {
         self.child.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Tear down per-run proxy and private network state.
+    /// Tear down per-run private network state.
     fn cleanup(&mut self, logger: &mut Logger) {
         // Stopping the supervisor closes the descriptor the monitor watches, so
         // disarming first is what keeps a normal teardown from reading as a
@@ -684,7 +645,6 @@ impl BwrapChild {
         if let Some(mut network) = self.proxy_network.take() {
             network.stop(logger);
         }
-        self.proxy.stop(logger);
     }
 }
 
@@ -1226,7 +1186,6 @@ mod tests {
                 "proxy.example.com".into(),
                 3128,
             )),
-            builtin_test_server: false,
         };
         req
     }
@@ -1493,7 +1452,6 @@ mod tests {
                     request.policy.runtime_network_proxy_specified = true;
                     request.policy.network_proxy = ProxyConfig {
                         address: Some(ProxyAddress::new("127.0.0.1".to_string(), 3128)),
-                        builtin_test_server: false,
                     };
                     request
                 },
@@ -1633,7 +1591,6 @@ mod tests {
         req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("[::1]".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let runner = BubblewrapScriptRunner::new();
@@ -1702,7 +1659,6 @@ mod tests {
         });
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let unavailable = bwrap_version::BwrapUnavailable::NotFound;
@@ -1723,7 +1679,6 @@ mod tests {
         req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("2001:db8::1".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let runner = BubblewrapScriptRunner::new();
@@ -1752,7 +1707,6 @@ mod tests {
         req.policy.denied_paths = vec!["/etc/hosts".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let runner = BubblewrapScriptRunner::new();
@@ -1779,7 +1733,6 @@ mod tests {
         let mut req = base_request();
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
-            builtin_test_server: false,
         };
 
         // As written, this matches nothing the check looks for.
@@ -1809,7 +1762,6 @@ mod tests {
         req.policy.denied_paths = vec!["/etc/hosts".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let unavailable = bwrap_version::BwrapUnavailable::NotFound;
@@ -1818,34 +1770,6 @@ mod tests {
             .validate_prepared_with_probe(&req, || Err(unavailable))
             .unwrap_err();
         assert_eq!(err.error_message, expected);
-    }
-
-    /// Direct callers can construct a retired policy even though exact
-    /// contracts cannot. Refuse every non-default legacy field before probing.
-    #[test]
-    fn validate_rejects_retired_fields_before_the_environment_probe() {
-        let setters: [fn(&mut ExecutionRequest); 5] = [
-            |r| r.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Allow,
-            |r| {
-                r.policy.network_enforcement_mode =
-                    crate::mxc_common::models::NetworkEnforcementMode::Firewall
-            },
-            |r| r.policy.allow_local_network = true,
-            |r| r.policy.allowed_hosts.push("203.0.113.7".into()),
-            |r| r.policy.blocked_hosts.push("203.0.113.8".into()),
-        ];
-        for set_field in setters {
-            let mut req = base_request();
-            set_field(&mut req);
-            let err = BubblewrapScriptRunner::new()
-                .validate_prepared_with_probe(&req, || panic!("retired policy reached bwrap probe"))
-                .unwrap_err();
-            assert!(
-                err.error_message.contains("retired network"),
-                "{}",
-                err.error_message
-            );
-        }
     }
 
     #[test]

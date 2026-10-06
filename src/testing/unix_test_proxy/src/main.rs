@@ -1,18 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Standalone binary for the Unix builtin test proxy.
+//! Standalone Unix test proxy for caller-managed integration tests.
 //!
 //! **Testing-only tool.** Launches a minimal HTTP CONNECT proxy on an
 //! OS-assigned port, atomically writes the port to a ready file, then waits
 //! for SIGTERM, SIGINT, or EOF on its parent-lifetime pipe before shutting
 //! down.
 //!
-//! Designed to be spawned by `mxc_sdk::mxc_common::unix_proxy_coordinator` to provide
-//! cooperative, unprivileged proxy-based enforcement of `allowedHosts` /
-//! `blockedHosts`. Used by the Bubblewrap backend on Linux and the Seatbelt
-//! backend on macOS. It builds and runs on any Unix; the CONNECT proxy itself
-//! (`proxy`) is platform-neutral.
+//! Test harnesses launch it independently and supply its address through
+//! `runtimeConfig.networkProxy`. MXC does not start it from a request.
+//! It builds and runs on any Unix; the CONNECT proxy itself (`proxy`) is
+//! platform-neutral.
 
 #[cfg(unix)]
 mod proxy;

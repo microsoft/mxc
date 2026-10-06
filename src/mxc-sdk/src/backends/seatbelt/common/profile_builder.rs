@@ -1044,7 +1044,6 @@ mod tests {
         r.policy.network_egress = Some(egress(NetworkAction::Deny));
         r.policy.network_proxy = crate::mxc_common::models::ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 9091)),
-            ..Default::default()
         };
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow network-outbound (remote ip \"localhost:9091\"))"));

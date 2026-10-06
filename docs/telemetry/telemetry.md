@@ -540,7 +540,7 @@ rejection records from the same invocation. A successful launch emits no
 | `mxc.PolicyHash` | Every launch, after the effective request is resolved | `backend`, `policy_hash`, `config_schema_version` |
 | `mxc.SandboxIdentity` | After a successful state-aware phase | `backend`, `identity`, `phase` |
 | `mxc.EnforcementDegraded` | ProcessContainer dispatch resolved below the preferred tier | `backend`, `identity`, `tier`, `needs_dacl_augmentation`, `effective_enforcement_level`, `degradation_reasons`, `degradation_reason_count` |
-| `mxc.NetworkPolicyApplied` | After network policy setup, on success **and** failure | `backend`, `identity`, `tier` (no `pid` yet), plus `enforcement_mode`, `default_policy`, `proxy_port`, `firewall_rules_created`, `firewall_applied`, `status` |
+| `mxc.NetworkPolicyApplied` | AppContainer: after network setup, before process launch. BaseContainer: success after launch. Both tiers: failure when network setup fails | `backend`, `identity`, `tier` (no `pid` field), plus `enforcement_mode`, `default_policy`, `proxy_port`, `firewall_rules_created`, `firewall_applied`, `status` |
 | `mxc.ProcessExited` | Sandboxed process exited on its own | `exit_code` |
 | `mxc.ProcessTimedOut` | `scriptTimeout` breached | `timeout_ms` |
 | `mxc.ProcessKillFailed` | A kill/terminate call failed (**failure only**) | `kill_method`, `error_code` |
@@ -550,7 +550,14 @@ rejection records from the same invocation. A successful launch emits no
 For the ProcessContainer AppContainer fallback, the firewall fields remain in
 these records for compatibility: no local firewall rules are created or
 removed, `firewall_applied` is `false`, and `firewall_removal_ok` is `true`.
-Proxy setup failures still set `mxc.NetworkPolicyApplied.status` to failure.
+AppContainer proxy-shim startup failures set `mxc.NetworkPolicyApplied.status`
+to `failure` and report `proxy_port: 0` after the coordinator cleans up.
+AppContainer reports network success before spawning the process; a later
+launch failure can therefore follow a successful network record.
+BaseContainer reports `failure` if native PSEC setup (including its proxy
+policy) fails, with the requested proxy port; it emits `success` only after
+launch succeeds. Unrelated pre-setup and process-launch failures do not emit a
+BaseContainer network record.
 
 ### Error semantics: `FallbackError` vs `ActivityError`
 
@@ -641,13 +648,14 @@ Excluded, and why:
 | `source_contract` | External exact-contract provenance used for diagnostics and telemetry attribution, not enforcement. |
 | `telemetry`, internal `test` feature | No enforcement effect. |
 | proxy `original_url` | Can embed `user:password@`. The host and port *are* hashed. |
-| `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+| `dry_run` | Invocation mode, not policy. |
 | `experimental_enabled` | Authorizes selecting an experimental backend, not enforcement; changing it leaves policy identity unchanged. |
 
-The retired network compatibility marker is no longer part of the projection.
-Hashes from builds that included it can differ even when the supported
-effective policy is unchanged; compare policy hashes across builds only with
-that projection change in mind.
+The retired network compatibility marker, legacy network model fields, and
+built-in test proxy discriminator are no longer part of the projection. Hashes
+from builds that included them can differ even when the supported effective
+policy is unchanged; compare policy hashes across builds only with those
+projection changes in mind.
 
 Enforcement-relevant backend configuration is hashed from
 `ExecutionRequest.windows_sandbox` and `ExecutionRequest.wslc`. The canonical

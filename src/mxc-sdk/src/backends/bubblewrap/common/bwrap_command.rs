@@ -11,8 +11,6 @@ use std::collections::HashSet;
 
 use crate::mxc_common::filesystem_resolve::FsIntent;
 use crate::mxc_common::models::{ExecutionRequest, NetworkAction, ProxyAddress};
-#[cfg(any(test, target_os = "linux"))]
-use crate::mxc_common::models::{NetworkEnforcementMode, NetworkPolicy};
 use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
 /// The fixed prefix of the command bwrap is asked to run.
@@ -135,32 +133,6 @@ impl ResolvedNetworkMode {
     }
 }
 
-/// Interim protection for directly constructed requests while the shared
-/// runtime model still exposes fields retired from every supported contract.
-#[cfg(any(test, target_os = "linux"))]
-pub(crate) fn retired_network_fields_rejection(request: &ExecutionRequest) -> Option<&'static str> {
-    let policy = &request.policy;
-    (policy.default_network_policy != NetworkPolicy::Block
-        || policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities
-        || policy.allow_local_network
-        || !policy.allowed_hosts.is_empty()
-        || !policy.blocked_hosts.is_empty())
-    .then_some(
-        "Bubblewrap: retired network.defaultPolicy, enforcementMode, allowLocalNetwork, \
-         allowedHosts and blockedHosts are not supported; use network.egress and \
-         network.ingress.",
-    )
-}
-
-/// The built-in test proxy has no supported exact contract spelling.
-#[cfg(any(test, target_os = "linux"))]
-pub(crate) fn builtin_proxy_rejection(request: &ExecutionRequest) -> Option<&'static str> {
-    request.policy.network_proxy.builtin_test_server.then_some(
-        "Bubblewrap: network.proxy.builtinTestServer is retired; configure an externally \
-         managed runtimeConfig.networkProxy.",
-    )
-}
-
 /// Refuse an inbound posture Bubblewrap cannot honor.
 ///
 /// The backend declares `INGRESS_DEFAULT` and `HOST_LOOPBACK` in
@@ -205,7 +177,7 @@ pub const BWRAP_HOST_LOOPBACK_ALLOW: &str =
      network.ingress.hostLoopback='deny'.";
 
 /// Rejection text for a proxy combined with direct egress.
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) const BWRAP_PROXY_DIRECTIONAL_EGRESS: &str =
     "Bubblewrap: runtimeConfig.networkProxy cannot be combined with direct network.egress rules \
      or default='allow'. \
@@ -215,7 +187,7 @@ pub(crate) const BWRAP_PROXY_DIRECTIONAL_EGRESS: &str =
      remove runtimeConfig.networkProxy and express the policy with network.egress.";
 
 /// Reject direct egress that proxy-only routing would otherwise discard.
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn proxy_with_egress_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     let proxy = &request.policy.network_proxy;
     if !proxy.is_enabled() {
@@ -812,24 +784,6 @@ mod tests {
     }
 
     #[test]
-    fn directly_constructed_retired_network_fields_are_refused() {
-        let mut request = base_request();
-        let mut cases: [fn(&mut ExecutionRequest); 5] = [
-            |r| r.policy.default_network_policy = NetworkPolicy::Allow,
-            |r| r.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall,
-            |r| r.policy.allow_local_network = true,
-            |r| r.policy.allowed_hosts.push("192.0.2.1".into()),
-            |r| r.policy.blocked_hosts.push("192.0.2.2".into()),
-        ];
-        for set_field in &mut cases {
-            set_field(&mut request);
-            assert!(retired_network_fields_rejection(&request).is_some());
-            request = base_request();
-        }
-        assert!(retired_network_fields_rejection(&request).is_none());
-    }
-
-    #[test]
     fn only_external_runtime_proxies_are_accepted() {
         let mut request = directional_egress_request(NetworkAction::Deny, false);
         request.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
@@ -842,8 +796,6 @@ mod tests {
             proxy_with_egress_rejection(&request),
             Some(BWRAP_PROXY_DIRECTIONAL_EGRESS)
         );
-        request.policy.network_proxy.builtin_test_server = true;
-        assert!(builtin_proxy_rejection(&request).is_some());
     }
 
     #[test]

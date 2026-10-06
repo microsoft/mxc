@@ -24,12 +24,9 @@
 //!
 //! Checks run filesystem → ui → network, so a request that trips several gets a
 //! stable message rather than one that depends on field order (asserted by
-//! tests). [`reject_ui_policy`] and [`reject_retired_network_fields`] apply
-//! to both one-shot and state-aware validation.
+//! tests). [`reject_ui_policy`] applies to both one-shot and state-aware validation.
 
-use crate::mxc_common::models::{
-    ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
-};
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::validator::NetworkPolicySupport;
 
@@ -87,9 +84,6 @@ pub(crate) fn network_is_isolated(request: &ExecutionRequest) -> bool {
 /// connectivity; BRIDGED cannot promise either inbound or host-loopback filtering.
 pub(crate) fn validate_directional_network(request: &ExecutionRequest) -> Result<(), MxcError> {
     let policy = &request.policy;
-    if policy.network_egress.is_none() && policy.network_ingress.is_none() {
-        return Ok(());
-    }
     if policy
         .network_egress
         .as_ref()
@@ -137,11 +131,10 @@ pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<()
     )
     .map_err(MxcError::policy_validation)?;
     reject_ui_policy(request)?;
-    reject_retired_network_fields(request)?;
-    validate_directional_network(request)?;
     if request.policy.network_proxy.is_enabled() {
         return Err(MxcError::policy_validation(ERR_PROXY_AT_PROVISION));
     }
+    validate_directional_network(request)?;
     Ok(())
 }
 
@@ -151,7 +144,6 @@ pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<()
 pub(crate) fn validate_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     reject_filesystem_policy(request)?;
     reject_ui_policy(request)?;
-    reject_retired_network_fields(request)?;
     reject_post_provision_network_mode(request)?;
     if request.policy.network_proxy.is_enabled() {
         return Err(MxcError::policy_validation(ERR_PROXY_AT_PHASE));
@@ -165,7 +157,6 @@ pub(crate) fn validate_post_provision_policy(request: &ExecutionRequest) -> Resu
 pub(crate) fn validate_exec_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     reject_filesystem_policy(request)?;
     reject_ui_policy(request)?;
-    reject_retired_network_fields(request)?;
     reject_post_provision_network_mode(request)?;
     if request.policy.network_proxy.is_enabled() && exec_proxy_url(request).is_none() {
         return Err(MxcError::policy_validation(ERR_PROXY_URL_FORM));
@@ -196,7 +187,7 @@ pub(crate) fn reject_proxy_credentials_in_argv(request: &ExecutionRequest) -> Re
 }
 
 /// The routable proxy URL to inject at exec, or `None` when the proxy is
-/// disabled or specified in a non-`url` form (localhost / builtinTestServer).
+/// disabled or specified without an original URL.
 /// Borrows from the request so presence validation does not allocate.
 pub(crate) fn exec_proxy_url(request: &ExecutionRequest) -> Option<&str> {
     if !request.policy.network_proxy.is_enabled() {
@@ -225,30 +216,6 @@ fn reject_filesystem_policy(request: &ExecutionRequest) -> Result<(), MxcError> 
 pub(crate) fn reject_ui_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.policy.ui_specified {
         return Err(MxcError::policy_validation(ERR_UI_POLICY));
-    }
-    Ok(())
-}
-
-/// Reject retired runtime fields before backend provisioning or execution.
-pub(crate) fn reject_retired_network_fields(request: &ExecutionRequest) -> Result<(), MxcError> {
-    let policy = &request.policy;
-    let field = if policy.default_network_policy != NetworkPolicy::Block {
-        Some("network.defaultPolicy")
-    } else if policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities {
-        Some("network.enforcementMode")
-    } else if policy.allow_local_network {
-        Some("network.allowLocalNetwork")
-    } else if !policy.allowed_hosts.is_empty() {
-        Some("network.allowedHosts")
-    } else if !policy.blocked_hosts.is_empty() {
-        Some("network.blockedHosts")
-    } else {
-        None
-    };
-    if let Some(field) = field {
-        return Err(MxcError::policy_validation(format!(
-            "WSLc: {field} is retired; use network.egress and network.ingress"
-        )));
     }
     Ok(())
 }
@@ -290,14 +257,12 @@ mod tests {
                 "127.0.0.1".to_string(),
                 8888,
             )),
-            builtin_test_server: false,
         }
     }
 
     fn non_url_proxy() -> ProxyConfig {
         ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8888)),
-            builtin_test_server: false,
         }
     }
 
@@ -308,7 +273,6 @@ mod tests {
                 "proxy.example".to_string(),
                 8080,
             )),
-            builtin_test_server: false,
         }
     }
 
@@ -489,15 +453,6 @@ mod tests {
     }
 
     #[test]
-    fn provision_rejects_host_filtering() {
-        let req = request_with_policy(ContainerPolicy {
-            allowed_hosts: vec!["example.com".to_string()],
-            ..Default::default()
-        });
-        assert_policy_validation(validate_provision_policy(&req).unwrap_err(), "allowedHosts");
-    }
-
-    #[test]
     fn provision_rejects_proxy() {
         let req = request_with_policy(ContainerPolicy {
             network_proxy: url_proxy(),
@@ -527,8 +482,8 @@ mod tests {
 
     #[test]
     fn post_provision_rejects_network_mode_by_presence() {
-        // Explicit `defaultPolicy: "block"` (value equals the default) must still
-        // be rejected post-provision: presence, not value, is what matters.
+        // Even an explicit directional deny (equal to the default) must be
+        // rejected post-provision: presence, not value, is what matters.
         let req = request_with_policy(ContainerPolicy {
             network_mode_specified: true,
             ..Default::default()
@@ -652,67 +607,6 @@ mod tests {
         validate_exec_policy(&req).unwrap();
     }
 
-    // ---- allowLocalNetwork ----
-
-    #[test]
-    fn provision_rejects_allow_local_network() {
-        let req = request_with_policy(ContainerPolicy {
-            allow_local_network: true,
-            ..Default::default()
-        });
-        assert_policy_validation(
-            validate_provision_policy(&req).unwrap_err(),
-            "allowLocalNetwork",
-        );
-    }
-
-    /// Post-provision needs no dedicated `allowLocalNetwork` check: supplying
-    /// the field sets `network_mode_specified`, which immutability already
-    /// refuses. Pinned so both rejections can't be dropped as "redundant".
-    #[test]
-    fn post_provision_rejects_retired_allow_local_network() {
-        let req = request_with_policy(ContainerPolicy {
-            allow_local_network: true,
-            network_mode_specified: true,
-            ..Default::default()
-        });
-        assert_policy_validation(
-            validate_post_provision_policy(&req).unwrap_err(),
-            "allowLocalNetwork",
-        );
-        assert_policy_validation(validate_exec_policy(&req).unwrap_err(), "allowLocalNetwork");
-    }
-
-    // ---- enforcementMode ----
-
-    #[test]
-    fn provision_rejects_firewall_and_both_enforcement_modes() {
-        for mode in [
-            NetworkEnforcementMode::Firewall,
-            NetworkEnforcementMode::Both,
-        ] {
-            let req = request_with_policy(ContainerPolicy {
-                network_enforcement_mode: mode.clone(),
-                ..Default::default()
-            });
-            assert_policy_validation(
-                validate_provision_policy(&req).expect_err(&format!("{mode:?} must be rejected")),
-                "enforcementMode",
-            );
-        }
-    }
-
-    /// Guards against over-rejection: `capabilities` is honoured, so unlike
-    /// `ui` it must not be refused for merely being present.
-    #[test]
-    fn provision_accepts_explicit_capabilities_enforcement_mode() {
-        let req = request_with_policy(ContainerPolicy {
-            network_enforcement_mode: NetworkEnforcementMode::Capabilities,
-            ..Default::default()
-        });
-        validate_provision_policy(&req).unwrap();
-    }
-
     // ---- rejection ordering ----
     //
     // filesystem -> ui -> network. Pinned so reordering the validator bodies is
@@ -736,9 +630,11 @@ mod tests {
     fn ui_error_takes_precedence_over_network() {
         let req = request_with_policy(ContainerPolicy {
             ui_specified: true,
-            allowed_hosts: vec!["example.com".to_string()],
-            allow_local_network: true,
-            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                allow: vec![Default::default()],
+                ..Default::default()
+            }),
             network_proxy: url_proxy(),
             ..Default::default()
         });
@@ -760,11 +656,11 @@ mod tests {
                 ..Default::default()
             },
             ContainerPolicy {
-                allow_local_network: true,
-                ..Default::default()
-            },
-            ContainerPolicy {
-                network_enforcement_mode: NetworkEnforcementMode::Firewall,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    allow: vec![Default::default()],
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         ];

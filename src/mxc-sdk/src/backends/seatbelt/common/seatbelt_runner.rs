@@ -37,7 +37,6 @@ use crate::mxc_common::sandbox_process::{
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
-use crate::mxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
@@ -295,31 +294,20 @@ impl SandboxBackend for SeatbeltScriptRunner {
         validate_common(request)?;
         self.validate(request)?;
 
-        // Start the cooperative network proxy (if configured) before building
-        // the profile and launching the child: the profile's proxy-reachability
-        // rule is scoped to the proxy's *resolved* address, and the child needs that address injected as
-        // HTTP_PROXY / HTTPS_PROXY. macOS has no WinHTTP-style OS proxy policy,
+        // The caller manages the proxy. Scope the profile's reachability rule
+        // to its address and inject HTTP_PROXY / HTTPS_PROXY. macOS has no
+        // WinHTTP-style OS proxy policy,
         // so — like the Bubblewrap backend — enforcement is cooperative:
         // well-behaved HTTP clients honor the env vars; raw-socket clients
         // bypass them.
-        let mut proxy = UnixProxyCoordinator::new();
-        if request.policy.network_proxy.is_enabled() {
-            proxy
-                .start(
-                    &request.policy.network_proxy,
-                    "127.0.0.1",
-                    &[],
-                    &[],
-                    crate::mxc_common::models::NetworkPolicy::Block,
-                    logger,
-                )
-                .map_err(|err| {
-                    error_response(format!("Seatbelt: failed to start network proxy: {err}"))
-                })?;
+        let proxy_address = request.policy.network_proxy.address.as_ref();
+        if let Some(address) = proxy_address {
+            logger.log_line(&format!(
+                "Unix network proxy active: {}",
+                crate::mxc_common::proxy_env::redact_proxy_url(&address.to_url())
+            ));
         }
-        // Build the Seatbelt profile now that the proxy address is resolved, so
-        // the reachability rule can be scoped to the proxy's exact host + port.
-        let profile = build_profile_with_proxy(request, proxy.address()).map_err(error_response)?;
+        let profile = build_profile_with_proxy(request, proxy_address).map_err(error_response)?;
         log_generated_profile(&profile, logger);
 
         // Determine launch method + GUI access from the seatbelt config.
@@ -334,8 +322,10 @@ impl SandboxBackend for SeatbeltScriptRunner {
         let gui_access = crate::seatbelt_common::seatbelt_policy::gui_access_effective(request);
 
         match launch_method {
-            LaunchMethod::Exec => spawn_exec(&profile, request, gui_access, stdio, logger, proxy),
-            LaunchMethod::Open => spawn_open(&profile, request, stdio, logger, proxy),
+            LaunchMethod::Exec => {
+                spawn_exec(&profile, request, gui_access, stdio, logger, proxy_address)
+            }
+            LaunchMethod::Open => spawn_open(&profile, request, stdio, logger, proxy_address),
         }
     }
 }
@@ -353,7 +343,7 @@ fn spawn_exec(
     gui_access: bool,
     stdio: StdioMode,
     logger: &mut Logger,
-    proxy: UnixProxyCoordinator,
+    proxy_address: Option<&ProxyAddress>,
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
     if gui_access && stdio != StdioMode::Inherit {
         let mode = if stdio == StdioMode::Pipes {
@@ -409,7 +399,7 @@ fn spawn_exec(
         }
     };
     let home_dir = resolved_cwd.as_ref().map(|_| cwd.as_str());
-    apply_clean_environment(&mut command, request, proxy.address(), home_dir);
+    apply_clean_environment(&mut command, request, proxy_address, home_dir);
 
     // Also export `PWD` so the child's `getcwd()` uses its
     // fast `$PWD` path (a single stat) instead of walking parent directories
@@ -484,7 +474,6 @@ fn spawn_exec(
         group: new_session || new_group || stdio != StdioMode::Inherit,
         session_id,
         cleanup: Vec::new(),
-        proxy,
     }))
 }
 
@@ -498,7 +487,7 @@ fn spawn_open(
     request: &ExecutionRequest,
     stdio: StdioMode,
     logger: &mut Logger,
-    proxy: UnixProxyCoordinator,
+    proxy_address: Option<&ProxyAddress>,
 ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
     if stdio != StdioMode::Inherit {
         let mode = if stdio == StdioMode::Pipes {
@@ -552,7 +541,7 @@ fn spawn_open(
     //    active its HTTP_PROXY/HTTPS_PROXY vars are injected and caller-supplied
     //    proxy vars stripped (see `resolve_environment`).
     let mut env_exports = String::new();
-    for (key, value) in resolve_environment(request, proxy.address(), home_dir.as_deref()) {
+    for (key, value) in resolve_environment(request, proxy_address, home_dir.as_deref()) {
         // Validate key is a safe shell identifier to prevent injection.
         if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             || key.is_empty()
@@ -642,7 +631,6 @@ fn spawn_open(
         group: false,
         session_id: None,
         cleanup: vec![profile_path, helper_path, command_path],
-        proxy,
     }))
 }
 
@@ -677,23 +665,12 @@ struct SeatbeltSandboxProcess {
     session_id: Option<libc::pid_t>,
     /// Temp files to remove once the child exits (Open mode); empty otherwise.
     cleanup: Vec<String>,
-    /// The per-run cooperative network proxy. Inactive (a no-op on teardown)
-    /// unless `network.proxy` was configured; stopped once the child exits.
-    proxy: UnixProxyCoordinator,
 }
 
 impl SeatbeltSandboxProcess {
-    /// Tear down per-run state once the child has exited: stop the cooperative
-    /// network proxy (idempotent; a no-op when it was never started) and remove
-    /// the Open-mode temp files (profile / helper / `.command`). Safe to call
-    /// from both `wait()` and `drop` — the proxy stop is idempotent and the
-    /// temp-file list is drained.
+    /// Remove Open-mode temp files (profile / helper / `.command`) after the
+    /// child exits. Safe to call from both `wait()` and `drop`.
     fn run_cleanup(&mut self) {
-        // Silent buffer logger: teardown may run during `drop` (possibly on an
-        // unwinding path), and the coordinator's own `Drop` is likewise silent.
-        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        self.proxy.stop(&mut logger);
-
         if self.cleanup.is_empty() {
             return;
         }
@@ -1356,7 +1333,7 @@ mod tests {
             true,
             StdioMode::Pty(PtySize::default()),
             &mut logger,
-            UnixProxyCoordinator::new(),
+            None,
         )
         .err()
         .expect("guiAccess PTY must be rejected");
@@ -1371,7 +1348,7 @@ mod tests {
             &base_request(),
             StdioMode::Pty(PtySize::default()),
             &mut logger,
-            UnixProxyCoordinator::new(),
+            None,
         )
         .err()
         .expect("open PTY must be rejected");
@@ -1473,16 +1450,6 @@ mod tests {
         assert!(profile.contains("mxc-profile-log-probe"), "got: {profile}");
     }
 
-    #[test]
-    fn rejects_retired_blocked_hosts_bypassing_the_parser() {
-        let mut request = base_request();
-        request.policy.blocked_hosts = vec!["evil.example.com".into()];
-        let runner = SeatbeltScriptRunner::new();
-        let response = runner.validate(&request).unwrap_err();
-        assert_eq!(response.exit_code, -1);
-        assert!(response.error_message.contains("retired network fields"));
-    }
-
     /// Directly constructed requests must receive the same rejection as parsed
     /// requests, before the profile or any proxy is created.
     #[test]
@@ -1507,27 +1474,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_allowed_hosts_under_deny_bypassing_the_parser() {
-        let mut request = base_request();
-        request.policy.allowed_hosts = vec!["example.com".into()];
-        let runner = SeatbeltScriptRunner::new();
-        let err = runner.validate(&request).unwrap_err();
-        assert!(
-            err.error_message.contains("retired network fields"),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn rejects_retired_builtin_test_proxy() {
-        let mut request = base_request();
-        request.policy.network_proxy.builtin_test_server = true;
-        let runner = SeatbeltScriptRunner::new();
-        let err = runner.validate(&request).unwrap_err();
-        assert!(err.error_message.contains("builtinTestServer"), "{err:?}");
-    }
-
-    #[test]
     fn rejects_remote_proxy_under_deny_bypassing_the_parser() {
         let mut request = base_request();
         request.policy.network_proxy.address = Some(ProxyAddress::from_url(
@@ -1538,7 +1484,8 @@ mod tests {
         let runner = SeatbeltScriptRunner::new();
         let err = runner.validate(&request).unwrap_err();
         assert!(
-            err.error_message.contains("remote network.proxy"),
+            err.error_message
+                .contains("runtimeConfig.networkProxy must name a loopback endpoint"),
             "{err:?}"
         );
     }
@@ -1887,7 +1834,7 @@ mod tests {
     /// request.
     #[test]
     fn home_follows_the_directory_the_child_starts_in() {
-        let mut request = base_request();
+        let request = base_request();
         let pairs = resolve_environment(&request, None, Some("/Users/someone/work"));
         assert_eq!(env_value(&pairs, "HOME"), Some("/Users/someone/work"));
     }

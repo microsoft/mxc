@@ -952,19 +952,6 @@ mod requirement_conformance {
         );
     }
 
-    /// Network policy (M-ETW-4) names the accepted `enforcementMode` values explicitly, and
-    /// `capabilities` is the OS-enforced (BaseContainer) case.
-    #[test]
-    fn network_policy_enforcement_mode_vocabulary_matches_the_requirement() {
-        use crate::mxc_common::models::NetworkEnforcementMode;
-        assert_eq!(
-            NetworkEnforcementMode::Capabilities.as_str(),
-            "capabilities"
-        );
-        assert_eq!(NetworkEnforcementMode::Firewall.as_str(), "firewall");
-        assert_eq!(NetworkEnforcementMode::Both.as_str(), "both");
-    }
-
     /// Sandbox teardown (M-ETW-5): "identity, status (success/failure), and what was released".
     /// Acceptance: "a cleanup failure is distinguishable from success".
     #[test]

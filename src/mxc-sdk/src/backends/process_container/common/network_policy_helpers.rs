@@ -3,9 +3,8 @@
 
 //! Shared ProcessContainer network-policy helpers.
 
-use crate::mxc_common::models::{
-    ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
-};
+use crate::mxc_common::audit::{AuditEvent, AuditEventName, OperationStatus};
+use crate::mxc_common::models::{ContainerPolicy, ContainmentBackend, NetworkAction, ProxyAddress};
 
 pub(crate) const INTERNET_CLIENT_CAPABILITY: &str = "internetClient";
 pub(crate) const PRIVATE_NETWORK_CAPABILITY: &str = "privateNetworkClientServer";
@@ -35,24 +34,26 @@ pub(crate) fn audit_egress_default(policy: &ContainerPolicy) -> &'static str {
     }
 }
 
-pub(crate) fn reject_retired_network_policy(
+pub(crate) fn network_policy_applied_record(
     policy: &ContainerPolicy,
-) -> Result<(), ScriptResponse> {
-    let field = if policy.default_network_policy != NetworkPolicy::Block {
-        Some("network.defaultPolicy")
-    } else if policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities {
-        Some("network.enforcementMode")
-    } else if policy.allow_local_network {
-        Some("network.allowLocalNetwork")
-    } else {
-        None
-    };
-    if let Some(field) = field {
-        return Err(ScriptResponse::rejected(&format!(
-            "{field} is retired; use network.egress and network.ingress"
-        )));
-    }
-    Ok(())
+    identity: &str,
+    tier: &str,
+    proxy_address: Option<&ProxyAddress>,
+    status: OperationStatus,
+) -> AuditEvent {
+    AuditEvent::new(AuditEventName::NetworkPolicyApplied)
+        .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+        .str("identity", identity)
+        .str("tier", tier)
+        .str("enforcement_mode", CAPABILITIES_ENFORCEMENT_MODE)
+        .str("default_policy", audit_egress_default(policy))
+        .u64(
+            "proxy_port",
+            proxy_address.map_or(0, |address| address.port as u64),
+        )
+        .u64("firewall_rules_created", 0)
+        .bool("firewall_applied", false)
+        .str("status", status.as_str())
 }
 
 pub(crate) fn ensure_capability(capabilities: &mut Vec<String>, capability: &str) {
@@ -166,32 +167,6 @@ mod tests {
                 PRIVATE_NETWORK_CAPABILITY.to_string()
             ]
         );
-    }
-
-    #[test]
-    fn directly_built_requests_cannot_activate_retired_network_fields() {
-        let mut policy = ContainerPolicy {
-            default_network_policy: NetworkPolicy::Allow,
-            ..Default::default()
-        };
-        assert!(reject_retired_network_policy(&policy)
-            .unwrap_err()
-            .error_message
-            .contains("defaultPolicy"));
-
-        policy.default_network_policy = NetworkPolicy::Block;
-        policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
-        assert!(reject_retired_network_policy(&policy)
-            .unwrap_err()
-            .error_message
-            .contains("enforcementMode"));
-
-        policy.network_enforcement_mode = NetworkEnforcementMode::Capabilities;
-        policy.allow_local_network = true;
-        assert!(reject_retired_network_policy(&policy)
-            .unwrap_err()
-            .error_message
-            .contains("allowLocalNetwork"));
     }
 
     #[test]

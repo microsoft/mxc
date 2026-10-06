@@ -10,9 +10,7 @@
 
 use std::path::Path;
 
-use crate::mxc_common::models::{
-    ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
-};
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction};
 
 use crate::windows_sandbox_lifecycle::error::OneShotError;
 use crate::windows_sandbox_lifecycle::vm::MappedFolder;
@@ -37,29 +35,12 @@ pub(crate) fn plan_policy(request: &ExecutionRequest) -> Result<WsbPolicyPlan, O
 fn validate_network(request: &ExecutionRequest) -> Result<(), OneShotError> {
     let policy = &request.policy;
 
-    if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
-        return Err(OneShotError::Policy(
-            "per-host network filtering (allowedHosts/blockedHosts) is not supported by the \
-             Windows Sandbox backend; the guest agent enforces all-or-nothing network isolation"
-                .to_string(),
-        ));
-    }
     if policy.network_proxy.is_enabled() {
         return Err(OneShotError::Policy(
             "a network proxy is not supported by the Windows Sandbox backend".to_string(),
         ));
     }
 
-    if policy.default_network_policy != NetworkPolicy::Block
-        || policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities
-        || policy.allow_local_network
-    {
-        return Err(OneShotError::Policy(
-            "retired network fields are not supported by the Windows Sandbox backend; use \
-             network.egress and network.ingress"
-                .to_string(),
-        ));
-    }
     if policy.network_mode_specified
         || policy.network_egress.as_ref().is_some_and(|egress| {
             egress.default == NetworkAction::Allow
@@ -364,7 +345,7 @@ mod tests {
     fn explicitly_supplied_network_posture_is_not_silently_ignored() {
         let err = plan_policy(&request_with(ContainerPolicy {
             network_mode_specified: true,
-            network_egress: Some(NetworkEgressPolicy::default()),
+            network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy::default()),
             ..Default::default()
         }))
         .unwrap_err();
@@ -374,7 +355,7 @@ mod tests {
     #[test]
     fn allow_network_rejected() {
         let err = plan_policy(&request_with(ContainerPolicy {
-            network_egress: Some(NetworkEgressPolicy {
+            network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
                 default: NetworkAction::Allow,
                 ..Default::default()
             }),
@@ -382,36 +363,6 @@ mod tests {
         }))
         .unwrap_err();
         assert_policy_err_contains(err, "directional network policy");
-    }
-
-    #[test]
-    fn retired_outbound_default_is_rejected() {
-        let err = plan_policy(&request_with(ContainerPolicy {
-            default_network_policy: NetworkPolicy::Allow,
-            ..Default::default()
-        }))
-        .unwrap_err();
-        assert_policy_err_contains(err, "retired network fields");
-    }
-
-    #[test]
-    fn allowed_hosts_rejected() {
-        let err = plan_policy(&request_with(ContainerPolicy {
-            allowed_hosts: vec!["example.com".to_string()],
-            ..Default::default()
-        }))
-        .unwrap_err();
-        assert_policy_err_contains(err, "per-host network filtering");
-    }
-
-    #[test]
-    fn blocked_hosts_rejected() {
-        let err = plan_policy(&request_with(ContainerPolicy {
-            blocked_hosts: vec!["evil.com".to_string()],
-            ..Default::default()
-        }))
-        .unwrap_err();
-        assert_policy_err_contains(err, "per-host network filtering");
     }
 
     #[test]
@@ -473,7 +424,6 @@ mod tests {
         let err = plan_policy(&request_with(ContainerPolicy {
             network_proxy: ProxyConfig {
                 address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-                builtin_test_server: false,
             },
             ..Default::default()
         }))

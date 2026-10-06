@@ -222,7 +222,7 @@ PROBE
 
     local rc=0
     local out
-    out="$("$LXC_EXEC" --experimental --allow-testing-features "$config" 2>&1)" || rc=$?
+    out="$("$LXC_EXEC" --experimental "$config" 2>&1)" || rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "$out"
         echo "FAIL: reachability probe exited $rc; the enforcement path itself is broken."
@@ -270,7 +270,7 @@ run_enforced() {
     sed -e "s/{{LISTENER_PORT}}/$LISTENER_PORT/g" \
         "$REPO_DIR/tests/configs/$config" >"$WORK_DIR/$config"
     local out
-    if ! out=$("$LXC_EXEC" --experimental --allow-testing-features "$WORK_DIR/$config" 2>&1); then
+    if ! out=$("$LXC_EXEC" --experimental "$WORK_DIR/$config" 2>&1); then
         echo "$out"
         echo "FAIL: $label (lxc-exec returned non-zero)"
         exit 1
@@ -351,7 +351,7 @@ cat >"$PORT_CONFIG" <<PORTS
 PORTS
 echo "Running Bubblewrap directional test: directional port narrowing..."
 PORT_OUT=""
-if ! PORT_OUT=$("$LXC_EXEC" --experimental --allow-testing-features "$PORT_CONFIG" 2>&1); then
+if ! PORT_OUT=$("$LXC_EXEC" --experimental "$PORT_CONFIG" 2>&1); then
     echo "$PORT_OUT"
     echo "FAIL: directional port narrowing (lxc-exec returned non-zero)"
     exit 1
@@ -388,7 +388,7 @@ run_parity() {
         "$REPO_DIR/tests/configs/$config" >"$WORK_DIR/$config"
     local out
     local rc=0
-    out=$("$LXC_EXEC" --experimental --allow-testing-features "$WORK_DIR/$config" 2>&1) || rc=$?
+    out=$("$LXC_EXEC" --experimental "$WORK_DIR/$config" 2>&1) || rc=$?
     printf '%s\n' "$out" >"$WORK_DIR/$label.parity.out"
     if [ "$rc" -ne 0 ]; then
         printf '%s\n' "$out" >&2

@@ -46,15 +46,21 @@ and put the loopback proxy endpoint in runtime configuration:
 ```
 
 Direct egress rules and `runtimeConfig.networkProxy` select different
-connectivity models and cannot be combined. Both ingress controls deny when
-omitted, and `hostLoopback` resolves independently of `ingress.default` rather
-than inheriting it, so host-loopback access must be requested explicitly.
+connectivity models and cannot be combined. Direct mode applies numeric CIDR,
+protocol, and port rules where the backend supports them. A runtime proxy
+names a caller-managed HTTP/S endpoint; the proxy owns any destination
+filtering. Whether MXC can restrict raw-socket traffic to that endpoint
+depends on the backend; see its guide. When `network`, `network.egress`, or
+`network.egress.default` is omitted, `egress.default` resolves to `deny`.
+Both ingress controls also default to `deny` when omitted. `hostLoopback`
+resolves independently of `ingress.default`, so host-loopback access must
+be requested explicitly.
 A ProcessContainer proxy requires `ingress.default: "allow"`. Identity-scoped
 proxies set a non-blank `allowedProxyPeer` and keep `hostLoopback: "deny"`;
 identity-less host proxies omit `allowedProxyPeer` and require
 `hostLoopback: "allow"`. The identity-less route is a weaker development/testing
-compatibility deployment because it opens both host-loopback directions; it is
-not the strict proxy-endpoint exception defined by the shared model-2 policy.
+deployment: it opens both host-loopback directions without restricting access
+to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
 
 ```json
 {
@@ -84,26 +90,6 @@ No supported exact contract accepts them. Migrate existing policies to
 directional fields and `runtimeConfig.networkProxy` rather than changing
 the version string alone.
 
-#### Historical legacy network host-list semantics (retired)
-
-In the retired contracts, host lists refined `defaultPolicy`; they did not
-replace it. This table describes historical behavior, not supported authoring:
-
-| `defaultPolicy` | `allowedHosts` | `blockedHosts` | Result |
-| --- | --- | --- | --- |
-| `block` | empty | empty | Valid: no egress |
-| `block` | non-empty | empty | Valid: allow only listed destinations |
-| `block` | empty | non-empty | Invalid: a blocklist cannot refine a block default without an allowlist |
-| `block` | non-empty | non-empty | Valid shared policy: explicit blocks override allowed destinations; backends may reject if they cannot represent both lists |
-| `allow` | empty | empty | Valid: unrestricted egress |
-| `allow` | empty | non-empty | Valid: allow all except listed destinations |
-| `allow` | non-empty | empty | Invalid: an allowlist cannot refine an allow default |
-| `allow` | non-empty | non-empty | Invalid: `allowedHosts` cannot be used with an allow default |
-
-For the valid block-default combination containing both lists, explicit blocks
-take precedence over allowed destinations. A backend that cannot represent both
-lists must reject the combination rather than dropping either list.
-
 ### IsolationSession unrestricted networking (0.9)
 
 IsolationSession cannot restrict networking. Exact v0.9 requests must describe
@@ -127,8 +113,7 @@ that actual posture through the standard directional network fields:
 All three directional values must be explicitly `allow`; omission defaults to
 deny. Legacy network fields, rules, mixed postures, and proxies are rejected.
 An absent or empty `network` object is rejected. Exact v0.9 IsolationSession
-does not require an experimental execution opt-in. Earlier published contracts
-remain immutable history but are no longer accepted.
+does not require an experimental execution opt-in.
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
 that field when the command is supplied after `--`; `wxc-exec.exe` inserts or

@@ -72,11 +72,6 @@ pub mod system_dir;
 #[cfg(unix)]
 pub mod interruptible_reader;
 
-// Unix cooperative network proxy coordinator, used by the Bubblewrap (Linux)
-// and Seatbelt (macOS) backends.
-#[cfg(unix)]
-pub mod unix_proxy_coordinator;
-
 /// Crate-wide lock and guards for tests that mutate process environment.
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) mod test_env;

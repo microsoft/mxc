@@ -11,9 +11,7 @@
 //! `ScriptResponse`.
 
 use crate::mxc_common::host_is_canonical_loopback;
-use crate::mxc_common::models::{
-    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
-};
+use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkAction};
 
 /// Effective GUI posture: `seatbelt.guiAccess` only means anything when the UI
 /// policy leaves UI enabled, since every GUI grant is emitted alongside the
@@ -74,24 +72,6 @@ pub fn host_loopback_allowed(policy: &ContainerPolicy) -> bool {
 pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), String> {
     let proxy_enabled = policy.network_proxy.is_enabled();
     let outbound_allowed = egress_allowed(policy);
-
-    if policy.default_network_policy != NetworkPolicy::Block
-        || policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities
-        || policy.allow_local_network
-        || !policy.allowed_hosts.is_empty()
-        || !policy.blocked_hosts.is_empty()
-    {
-        return Err("Seatbelt: retired network fields are not supported; use \
-                    network.egress and network.ingress"
-            .to_string());
-    }
-    if policy.network_proxy.builtin_test_server {
-        return Err(
-            "Seatbelt: network.proxy.builtinTestServer is retired; supply a caller-managed \
-                    loopback proxy through runtimeConfig.networkProxy"
-                .to_string(),
-        );
-    }
 
     // A remote proxy can't be expressed as a reachability rule.
     if !outbound_allowed
@@ -176,7 +156,6 @@ mod tests {
                 host.to_string(),
                 8080,
             )),
-            builtin_test_server: false,
         }
     }
 
@@ -191,37 +170,6 @@ mod tests {
 
         let msg = validate_seatbelt_network_policy(&p).unwrap_err();
         assert!(msg.contains("network.egress.default='deny'"), "got: {msg}");
-    }
-
-    #[test]
-    fn rejects_retired_firewall_enforcement_mode() {
-        for mode in [
-            NetworkEnforcementMode::Firewall,
-            NetworkEnforcementMode::Both,
-        ] {
-            let mut p = policy();
-            p.network_proxy = proxy("127.0.0.1");
-            p.network_enforcement_mode = mode.clone();
-
-            let msg = validate_seatbelt_network_policy(&p).unwrap_err();
-            assert!(
-                msg.contains("retired network fields"),
-                "{mode:?} got: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_retired_builtin_test_proxy() {
-        let mut p = policy();
-        p.network_proxy = ProxyConfig {
-            address: None,
-            builtin_test_server: true,
-        };
-
-        assert!(validate_seatbelt_network_policy(&p)
-            .unwrap_err()
-            .contains("builtinTestServer"));
     }
 
     /// The guard compared unbracketed literals only, so `http://[::1]` — the
@@ -265,50 +213,6 @@ mod tests {
             let msg = validate_seatbelt_network_policy(&p).unwrap_err();
             assert!(msg.contains("loopback endpoint"), "{host:?} got: {msg}");
         }
-    }
-
-    #[test]
-    fn rejects_retired_allowed_hosts() {
-        let mut p = policy();
-        p.allowed_hosts = vec!["api.github.com".to_string()];
-
-        let msg = validate_seatbelt_network_policy(&p).unwrap_err();
-        assert!(msg.contains("retired network fields"), "got: {msg}");
-    }
-
-    #[test]
-    fn rejects_retired_allowed_hosts_with_builtin_test_proxy() {
-        let mut p = policy();
-        p.allowed_hosts = vec!["api.github.com".to_string()];
-        p.network_proxy = ProxyConfig {
-            address: None,
-            builtin_test_server: true,
-        };
-
-        assert!(validate_seatbelt_network_policy(&p)
-            .unwrap_err()
-            .contains("retired network fields"));
-    }
-
-    #[test]
-    fn rejects_allowed_hosts_with_external_proxy() {
-        let mut p = policy();
-        p.allowed_hosts = vec!["api.github.com".to_string()];
-        p.network_proxy = proxy("127.0.0.1");
-
-        let msg = validate_seatbelt_network_policy(&p).unwrap_err();
-        assert!(msg.contains("retired network fields"), "got: {msg}");
-    }
-
-    #[test]
-    fn seatbelt_rejects_retired_allow_default_and_host_list() {
-        let mut p = policy();
-        p.default_network_policy = NetworkPolicy::Allow;
-        p.allowed_hosts = vec!["api.github.com".to_string()];
-
-        assert!(validate_seatbelt_network_policy(&p)
-            .unwrap_err()
-            .contains("retired network fields"));
     }
 
     /// `guiAccess` with a `SeatbeltConfig` and the given `ui.disable`.
