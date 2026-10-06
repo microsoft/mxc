@@ -11,6 +11,12 @@ tense describes work proposed for the MXC integration.
 workloads with hardware-enforced isolation. It is built on OpenVMM and runs
 Linux as its guest. It is a cross-platform microVM sandbox for agentic workloads.
 
+Customers will use NVX through the MXC APIs and will not need to understand
+OpenVMM, the guest agent, or image conversion.
+
+The implementation may initially remain experimental or preview while the
+integration is validated end to end.
+
 NVX offers hardware-enforced isolation, warm
 repeated execution, and direct Rust integration, with rich filesystem and
 network controls compared to the existing Nanvix implementation. It will replace
@@ -160,6 +166,9 @@ The integration will target the MXC `1.1.0-alpha` development schema.
 {
   "version": "1.1.0-alpha",
   "containment": "microvm",
+  "microvm": {
+    "image": "alpine:latest"
+  },
   "process": {
     "commandLine": "cat /mnt/c/input/message.txt > /mnt/c/output/result.txt",
     "cwd": "/",
@@ -305,25 +314,53 @@ NVX lifecycle errors align with the existing
 will map the additional NVX execution outcomes as described in
 [Appendix B](#appendix-b-nvx-execution-outcome-mapping).
 
-## 6. Image delivery models
+## 6. Image model support
 
-The implementation will support two image-delivery models. Both models will ultimately provide MXC with a tar file that contains the inputs needed to run the
+The implementation will support two image-delivery models. Both models will
+ultimately provide MXC with a tar file containing the filesystem used by the
 workload.
 
-### 6.1 Default NVX image
+### 6.1 Standard image and workload
 
-The default model will use a pre-built static tar published by
-[`microsoft/nvx`][nvx-readme]. MXC will pin, download or stage, validate, and
-import this tar directly. The tar will match the pinned NVX runtime version
-and will provide the default workload filesystem.
-**TBD on the workload it will support.**
+The developer will provide the workload and select a supported OCI image
+through `image`. The image will default to `alpine:latest` when it is omitted.
 
+```json
+{
+  "microvm": {
+    "image": "alpine:latest"
+  }
+}
+```
 
-### 6.2 Custom image
+The complete request in section 4.1 is an example of this model:
 
-The custom-image model will reuse the existing WSLC image handling code and
-schema. The `image` and `imageTarPath` fields will keep the same meaning; only
-the top-level element will change from `wslc` to `microvm`.
+- `microvm.image` selects the standard `alpine:latest` image.
+- `imageTarPath` is omitted because the developer is not providing an image
+  tar.
+- `process.commandLine` defines the workload to execute.
+- The filesystem policy makes the workload's input available read-only and
+  its output location available read-write.
+- The network policy limits the workload to the requested destination and
+  port.
+
+The integration will reuse the existing WSLC cache and registry handling:
+
+1. Use the image from the local cache when it is already available.
+2. Otherwise, pull the image from its registry and cache it.
+3. Use the signed NVX image tool to combine the standard image with the
+   workload and produce the NVX-compatible tar.
+
+Image references without an explicit registry will resolve against Docker Hub.
+Explicitly named permitted registries such as MCR or GHCR will also be
+supported.
+
+### 6.2 Bring Your Own Image
+
+The developer will provide a custom local image tar through `imageTarPath`.
+The integration will reuse the existing WSLC image handling code and schema.
+The `image` and `imageTarPath` fields will keep the same meaning; only the
+top-level element will change from `wslc` to `microvm`.
 
 ```json
 {
@@ -334,15 +371,24 @@ the top-level element will change from `wslc` to `microvm`.
 }
 ```
 
-`image` will identify the workload image. `imageTarPath` will identify the
-local tar that MXC imports and passes to NVX. The integration will reuse the
-existing WSLC image download, conversion, validation, and tar-handling
-implementation rather than duplicate it for NVX.
+`image` will identify the custom image after import. `imageTarPath` will point
+to the local tar containing that image. When the named image already exists in
+the local cache, MXC will use the cached image and will not re-import the tar.
 
-The signed image tool from the production NVX ZIP will download the standard
-image, combine it with the workload input, and produce the tar at
-`imageTarPath`. The resulting tar will include the workload and image metadata
-required by NVX.
+| Image content source | Configuration | Supported input |
+| --- | --- | --- |
+| Docker image archive | `imageTarPath` points to a local tar created by `docker save` | Archive containing a root-level `manifest.json` |
+| Root filesystem tar | `imageTarPath` points to a local tar created by `docker export` | Root filesystem containing directories such as `bin`, `etc`, `usr`, `lib`, `sbin`, or `var` |
+| NVX conversion tool output | `imageTarPath` points to the generated local tar | A supported Docker archive or root filesystem tar |
+
+`imageTarPath` will be a path to a local tar file accessible to MXC. It will
+not be a registry reference, URL, directory, named pipe, or input stream. The
+tar format will be detected automatically. Unreadable files and unrecognised
+tar formats will be rejected.
+
+The integration will reuse the existing WSLC image download, conversion,
+validation, cache, and tar-handling implementation rather than duplicate it
+for NVX.
 
 MXC will validate the declared checksums for both models. It will also validate
 the signatures of the signed implementation DLL, OpenVMM executable, and image
@@ -370,10 +416,21 @@ packaged MXC executor and all three SDKs on Windows x64 and ARM with WHP.
 | Packaging | Rust crate, npm, and NuGet installation; inclusion of the DLL, OpenVMM, image tool, kernel, and initramfs; tar conversion; static NVX tar staging; automatic runtime discovery; and missing/corrupt artifacts |
 | Signing | Validate signatures and checksums and reject unapproved or tampered artifacts |
 | Host | Real execution on Windows x64 and ARM with WHP installed and enabled |
-| Image models | Verify the default static `microsoft/nvx` tar and the custom-image WSLC code/schema reuse, conversion, validation, and import path |
+| Image models | Verify standard-image cache and registry resolution, workload conversion, BYOI `docker save` archives, `docker export` rootfs tars, conversion-tool output, invalid tar rejection, and WSLC code/schema reuse |
 
 Negative filesystem and network tests must include a working positive control
 so infrastructure failures are not mistaken for policy enforcement.
+
+## 9. Long-term plan
+
+- Converge the NVX MicroVM integration under the broader WSL platform.
+- Reuse and align session, image, SDK, and runtime concepts with WSLC.
+- Allow MXC to replace its direct NVX integration without changing the
+  developer-facing contract.
+- Preserve NVX policy capabilities while the common API evolves across the
+  WSL runtime options.
+- Resolve long-term branding and component ownership as part of the WSL
+  integration.
 
 ## Appendix A: Planned MXC to OpenVMM communication
 
