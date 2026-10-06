@@ -53,11 +53,7 @@ fn reconcile_isolation_session_runtime() {
         .unwrap_or_else(|e| panic!("IsolationSession SDK staging failed: {e}"));
 
     #[cfg(not(feature = "isolation_session_lifted"))]
-    for file_name in [
-        "IsoSessionApp.dll",
-        "IsoSession.manifest",
-        "IsoSessionApp.runtimeversion",
-    ] {
+    for file_name in ["IsoSessionApp.dll", "IsoSession.manifest"] {
         let path = target_dir.join(file_name);
         match std::fs::remove_file(&path) {
             Ok(()) => {}

@@ -111,64 +111,80 @@ fn verify_inbox_bindings_version() {
         .join("build")
         .join("isolation_session_bindings")
         .join("GENERATION_INFO.toml");
-    if !info_path.exists() {
-        return;
-    }
-
-    let contents = std::fs::read_to_string(&info_path).unwrap_or_default();
-    let Some(expected) = contents.lines().find_map(|line| {
-        let line = line.trim();
-        if line.starts_with("target_windows_crate") {
-            line.split('=')
-                .nth(1)
-                .map(|value| value.trim().trim_matches('"').to_string())
-        } else {
-            None
-        }
-    }) else {
-        return;
-    };
+    let contents = std::fs::read_to_string(&info_path).unwrap_or_else(|error| {
+        panic!(
+            "isolation_session_bindings: read provenance {}: {error}",
+            info_path.display()
+        )
+    });
+    let expected = contents
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            if line.starts_with("target_windows_crate") {
+                line.split('=')
+                    .nth(1)
+                    .map(|value| value.trim().trim_matches('"').to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "isolation_session_bindings: {} has no target_windows_crate",
+                info_path.display()
+            )
+        });
 
     let lock_path = Path::new(&manifest_dir)
         .join("..")
         .join("Cargo.lock");
-    let lock_contents = std::fs::read_to_string(lock_path).unwrap_or_default();
-    let actual = lock_contents
+    let lock_contents = std::fs::read_to_string(&lock_path).unwrap_or_else(|error| {
+        panic!(
+            "isolation_session_bindings: read workspace lockfile {}: {error}",
+            lock_path.display()
+        )
+    });
+    let actual_versions = lock_contents
         .split("[[package]]")
-        .find(|block| {
+        .filter(|block| {
             block
                 .lines()
                 .any(|line| line.trim() == "name = \"windows\"")
         })
-        .and_then(|block| {
+        .filter_map(|block| {
             block.lines().find_map(|line| {
                 let line = line.trim();
-                if line.starts_with("version = ") {
-                    line.split('=')
-                        .nth(1)
-                        .map(|value| value.trim().trim_matches('"').to_string())
-                } else {
-                    None
-                }
+                line.strip_prefix("version = ")
+                    .map(|value| value.trim().trim_matches('"').to_string())
             })
-        });
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_versions.len(),
+        1,
+        "isolation_session_bindings: expected exactly one windows package in {}, found {:?}",
+        lock_path.display(),
+        actual_versions
+    );
+    let actual = &actual_versions[0];
 
     let parts = expected.split('.').take(2).collect::<Vec<_>>();
-    if parts.len() != 2 {
-        return;
-    }
-    let Ok(requirement) = semver::VersionReq::parse(&format!("^{}.{}", parts[0], parts[1])) else {
-        return;
-    };
-
-    if let Some(actual) = actual {
-        let Ok(actual_version) = semver::Version::parse(&actual) else {
-            return;
-        };
-        assert!(
-            requirement.matches(&actual_version),
-            "isolation_session_bindings: committed inbox bindings target windows crate \
-             {expected}, but the workspace has {actual}; regenerate the inbox bindings"
-        );
-    }
+    assert_eq!(
+        parts.len(),
+        2,
+        "isolation_session_bindings: invalid target_windows_crate {expected:?}"
+    );
+    let requirement = semver::VersionReq::parse(&format!("^{}.{}", parts[0], parts[1]))
+        .unwrap_or_else(|error| {
+            panic!("isolation_session_bindings: invalid target_windows_crate {expected:?}: {error}")
+        });
+    let actual_version = semver::Version::parse(actual).unwrap_or_else(|error| {
+        panic!("isolation_session_bindings: invalid windows version {actual:?}: {error}")
+    });
+    assert!(
+        requirement.matches(&actual_version),
+        "isolation_session_bindings: committed inbox bindings target windows crate \
+         {expected}, but the workspace has {actual}; regenerate the inbox bindings"
+    );
 }

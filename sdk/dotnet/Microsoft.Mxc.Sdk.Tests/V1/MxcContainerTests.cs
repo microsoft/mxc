@@ -436,15 +436,15 @@ public class MxcContainerTests
         Assert.NotNull(backends);
         if (OperatingSystem.IsWindows())
         {
+            var support = MxcPlatform.GetPlatformSupport();
             var processContainer = Assert.Single(
                 backends,
                 backend => backend.Backend == ContainmentBackend.ProcessContainer);
             Assert.NotNull(processContainer.Tier);
-#if MXC_WITH_ISOLATION_SESSION
-            Assert.Contains(
-                backends,
-                backend => backend.Backend == ContainmentBackend.IsolationSession);
-#endif
+            Assert.Equal(
+                support.AvailableMethods.Contains(ContainmentBackend.IsolationSession),
+                backends.Any(
+                    backend => backend.Backend == ContainmentBackend.IsolationSession));
         }
     }
 

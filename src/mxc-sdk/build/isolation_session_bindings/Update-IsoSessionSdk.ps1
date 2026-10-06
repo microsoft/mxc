@@ -2,13 +2,13 @@
 
 <#
 .SYNOPSIS
-    Replaces MXC's pinned IsolationSession SDK package.
+    Updates MXC's pinned IsolationSession SDK package metadata.
 
 .DESCRIPTION
-    Validates the package payload and release identity, replaces the single
-    checked-in package, and regenerates GENERATION_INFO.toml from the package.
-    The script fails before modifying the destination when the package is
-    incomplete or internally inconsistent.
+    Validates the package payload and release identity, updates MXC's package
+    version and SHA-256 pin, and regenerates GENERATION_INFO.toml. The package
+    itself is not copied into the repository. The script fails before modifying
+    tracked files when the package is incomplete or internally inconsistent.
 
 .PARAMETER PackagePath
     Path to Microsoft.Windows.AI.IsolationSession.SDK.<version>.nupkg.
@@ -129,8 +129,8 @@ try {
     if ($packageId -ne 'Microsoft.Windows.AI.IsolationSession.SDK') {
         throw "Unexpected package id '$packageId'."
     }
-    if ($packageVersion -notmatch '^0\.(\d{2}|20\d{2})(0[1-9]|1[0-2])\.(\d+)$') {
-        throw "Unexpected package version '$packageVersion'; expected 0.YYMM.patch or 0.YYYYMM.patch."
+    if ($packageVersion -notmatch '^0\.(20\d{2})(0[1-9]|1[0-2])\.(\d+)$') {
+        throw "Unexpected package version '$packageVersion'; expected 0.YYYYMM.patch."
     }
 
     $year = $Matches[1]
@@ -224,33 +224,32 @@ finally {
     $archive.Dispose()
 }
 
-$destinationPackage = Join-Path $DestinationDirectory $canonicalFileName
-$sourceResolved = $package.FullName
-$destinationResolved = [System.IO.Path]::GetFullPath($destinationPackage)
-if ($sourceResolved -ine $destinationResolved) {
-    $temporaryPackage = "$destinationPackage.new"
-    try {
-        Copy-Item -LiteralPath $sourceResolved -Destination $temporaryPackage -Force
-        Get-ChildItem -LiteralPath $DestinationDirectory -Filter '*.nupkg' -File |
-            Where-Object { $_.FullName -ine $temporaryPackage } |
-            Remove-Item -Force
-        Move-Item -LiteralPath $temporaryPackage -Destination $destinationPackage -Force
-    }
-    finally {
-        if (Test-Path -LiteralPath $temporaryPackage) {
-            Remove-Item -LiteralPath $temporaryPackage -Force
-        }
-    }
-}
-else {
-    Get-ChildItem -LiteralPath $DestinationDirectory -Filter '*.nupkg' -File |
-        Where-Object { $_.FullName -ine $destinationResolved } |
-        Remove-Item -Force
+$packageHash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+$repositoryRoot = [System.IO.Path]::GetFullPath(
+    (Join-Path $DestinationDirectory '..\..\..'))
+$pinPath = Join-Path $repositoryRoot 'src\core\mxc_build_common\src\lib.rs'
+if (-not (Test-Path -LiteralPath $pinPath -PathType Leaf)) {
+    throw "IsolationSession SDK pin file does not exist: '$pinPath'."
 }
 
-# Cargo build scripts track this package by timestamp. Refresh it even when a
-# corrected package reuses the same version and canonical file name.
-(Get-Item -LiteralPath $destinationPackage).LastWriteTimeUtc = [DateTime]::UtcNow
+$pinContent = [System.IO.File]::ReadAllText($pinPath)
+$versionPattern = 'pub const PACKAGE_VERSION: &str = "[^"]+";'
+$hashPattern = 'pub const PACKAGE_SHA256: &str =\s*"[^"]+";'
+if ([regex]::Matches($pinContent, $versionPattern).Count -ne 1) {
+    throw "Expected exactly one PACKAGE_VERSION pin in '$pinPath'."
+}
+if ([regex]::Matches($pinContent, $hashPattern).Count -ne 1) {
+    throw "Expected exactly one PACKAGE_SHA256 pin in '$pinPath'."
+}
+
+$pinContent = [regex]::Replace(
+    $pinContent,
+    $versionPattern,
+    "pub const PACKAGE_VERSION: &str = `"$packageVersion`";")
+$pinContent = [regex]::Replace(
+    $pinContent,
+    $hashPattern,
+    "pub const PACKAGE_SHA256: &str =`n        `"$packageHash`";")
 
 $parsedGeneratedDate = [DateTimeOffset]::MinValue
 if ($releaseGeneratedTimestamp -and
@@ -294,11 +293,17 @@ if ($buildGuid) {
 }
 
 $generationInfoPath = Join-Path $DestinationDirectory 'GENERATION_INFO.toml'
-Set-Content -LiteralPath $generationInfoPath -Value $generationInfo -Encoding UTF8
+$utf8WithoutBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText($pinPath, $pinContent, $utf8WithoutBom)
+[System.IO.File]::WriteAllText(
+    $generationInfoPath,
+    "$generationInfo`n",
+    $utf8WithoutBom)
 
 [pscustomobject][ordered]@{
-    Package = $destinationPackage
-    PackageSha256 = (Get-FileHash -LiteralPath $destinationPackage -Algorithm SHA256).Hash
+    Package = $package.FullName
+    PackageSha256 = $packageHash
+    PackageVersion = $packageVersion
     PreviewWinmdSha256 = $previewHash
     OsBuild = $osBuild
     BuildGuid = $buildGuid

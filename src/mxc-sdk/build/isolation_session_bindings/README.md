@@ -52,15 +52,18 @@ payload into the Node and .NET SDK runtimes. The .NET SDK uses
 (lifted).
 
 Lifted mode fails the build if package download, integrity validation, metadata
-generation, or activation-payload staging fails. It never silently produces an
-inbox-mode binary.
+generation, activation-payload staging, or native payload architecture
+validation fails. It never silently produces an inbox-mode binary or package a
+shim for the wrong target architecture.
 
 ## Updating the lifted SDK
 
-1. Update `PACKAGE_VERSION` and `PACKAGE_SHA256` in
-   `src/mxc-sdk/build/build_mxc_build_common.rs`.
-2. Update `GENERATION_INFO.toml` with the package and WinMD provenance.
-3. Build and test both feature configurations.
+1. Run `Update-IsoSessionSdk.ps1 -PackagePath <path-to-package>`. The script
+   validates the package, updates `PACKAGE_VERSION` and `PACKAGE_SHA256`, and
+   regenerates `GENERATION_INFO.toml` without copying the package into Git.
+2. Build and test both feature configurations. Set
+   `ISOLATION_SESSION_SDK_PACKAGE` to the validated local package until that
+   exact version is available from NuGet.org.
 
 `windows-bindgen` is pinned to `=0.62.1` in `src/mxc-sdk/Cargo.toml`
 and must stay in lockstep with the workspace `windows` crate's major.minor

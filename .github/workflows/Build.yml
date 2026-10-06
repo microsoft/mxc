@@ -41,6 +41,11 @@ jobs:
   windows:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.Windows.Job.yml
+    with:
+      # Enable after the pinned SDK package is published at the endpoint used
+      # by mxc_build_common. Until then, package-independent helper tests still
+      # run in the normal x64 Windows job.
+      run_isolation_session_lifted: ${{ vars.MXC_ISOLATION_SESSION_LIFTED_CI == 'true' }}
 
   linux:
     needs: dependency-feed-check

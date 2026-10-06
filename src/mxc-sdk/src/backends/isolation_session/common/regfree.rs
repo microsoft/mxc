@@ -15,7 +15,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use windows::core::{s, HSTRING, PCSTR, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{GetLastError, ERROR_NOT_SUPPORTED, REGDB_E_CLASSNOTREG, S_OK};
+use windows::Win32::Foundation::{
+    ERROR_NOT_SUPPORTED, ERROR_PROC_NOT_FOUND, REGDB_E_CLASSNOTREG, S_OK,
+};
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
@@ -25,6 +27,7 @@ use windows_core::{Interface, RuntimeName, HRESULT};
 
 const SHIM_NAME: &str = "IsoSessionApp.dll";
 const MANIFEST_NAME: &str = "IsoSession.manifest";
+const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
 
 type DllGetActivationFactory =
     unsafe extern "system" fn(*mut std::ffi::c_void, *mut *mut std::ffi::c_void) -> HRESULT;
@@ -84,7 +87,10 @@ where
 {
     // Some callers enter through a native thread without initializing COM.
     // RPC_E_CHANGED_MODE only means another apartment model is already active.
-    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let initialize_result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if initialize_result.is_err() && initialize_result.0 as u32 != RPC_E_CHANGED_MODE {
+        return Some(Err(windows_core::Error::from_hresult(initialize_result)));
+    }
 
     let directory = adjacent_runtime_directory()?;
     let factory = match load_activation_factory::<T>(&directory.join(SHIM_NAME)) {
@@ -176,7 +182,7 @@ fn resolve_verify_framework(
         )
     }?;
     let export = unsafe { GetProcAddress(module, VERIFY_FRAMEWORK_EXPORT) }.ok_or_else(|| {
-        windows_core::Error::from_hresult(HRESULT::from_win32(unsafe { GetLastError().0 }))
+        windows_core::Error::from_hresult(HRESULT::from_win32(ERROR_PROC_NOT_FOUND.0))
     })?;
 
     // The module intentionally stays loaded; the process only verifies once.
@@ -243,7 +249,7 @@ fn resolve_get_activation_factory(
     }?;
     let export =
         unsafe { GetProcAddress(module, s!("DllGetActivationFactory")) }.ok_or_else(|| {
-            windows_core::Error::from_hresult(HRESULT::from_win32(unsafe { GetLastError().0 }))
+            windows_core::Error::from_hresult(HRESULT::from_win32(ERROR_PROC_NOT_FOUND.0))
         })?;
     let get_factory: DllGetActivationFactory = unsafe { std::mem::transmute(export) };
 

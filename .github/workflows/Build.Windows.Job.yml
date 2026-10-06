@@ -2,6 +2,12 @@ name: Windows Build
 
 on:
   workflow_call:
+    inputs:
+      run_isolation_session_lifted:
+        description: Run x64 Cargo validation against the published lifted IsolationSession SDK package.
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -120,3 +126,61 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
           if-no-files-found: error
           retention-days: 1
+
+  isolation-session-lifted:
+    name: x64 isolation_session_lifted
+    if: inputs.run_isolation_session_lifted
+    runs-on: windows-2025
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          target: x86_64-pc-windows-msvc
+          override: false
+          rustflags: ''
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target
+          key: x86_64-pc-windows-msvc-isolation-session-lifted-v1
+          cache-on-failure: false
+
+      - name: Test lifted SDK and compile FFI tests
+        run: |
+          cargo test --locked --release --target x86_64-pc-windows-msvc `
+            -p mxc-sdk --features isolation_session_lifted
+          cargo test --locked --release --target x86_64-pc-windows-msvc `
+            -p mxc_ffi --features isolation_session_lifted --no-run
+
+      - name: Build lifted CLI
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+             -p wxc --no-default-features --features isolation_session_lifted
+
+      - name: Verify adjacent activation payload
+        shell: pwsh
+        run: |
+          $releaseDir = 'target\x86_64-pc-windows-msvc\release'
+          $requiredFiles = @(
+            'wxc-exec.exe',
+            'IsoSessionApp.dll',
+            'IsoSession.manifest'
+          )
+
+          foreach ($file in $requiredFiles) {
+            $path = Join-Path $releaseDir $file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Lifted build did not stage required file: $path"
+            }
+          }

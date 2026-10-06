@@ -29,12 +29,12 @@ use windows_core::{HSTRING, PCWSTR};
 
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
-#[cfg(feature = "lifted_msi")]
-use super::error::{framework_unavailable, lifted_payload_missing};
 use super::error::{
     activation_error, check_result, format_iso_error, lifecycle_err, op, transport_err,
     IsolationSessionError, StalePromotion,
 };
+#[cfg(feature = "lifted_msi")]
+use super::error::{framework_unavailable, lifted_payload_missing};
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
@@ -1549,23 +1549,37 @@ mod tests {
             Err(IsolationSessionError::ServiceUnavailable(failure)) => {
                 // Service is NOT available. Verify the error is clean and
                 // descriptive (not a panic or cryptic COM error), and that
-                // it names the activation operation it failed on. On a host
-                // without the adjacent lifted payload (the usual dev box),
-                // activation resolves to the lifted hard error; on a
-                // host where the class is inbox-registered but unavailable it
-                // is the "not available" message.
+                // it names the operation it failed on. Lifted builds verify
+                // the adjacent framework before activation; inbox builds go
+                // directly to activation.
                 assert!(
                     failure.message.contains("not available")
                         || failure.message.contains("activation failed")
-                        || failure.message.contains("lifted activation was not taken"),
+                        || failure.message.contains("lifted activation was not taken")
+                        || failure
+                            .message
+                            .contains("framework verification entry point could not be loaded"),
                     "Expected descriptive error message, got: {}",
                     failure.message
                 );
-                assert_eq!(failure.operation, op::ACTIVATE);
-                assert!(
-                    failure.code.is_some(),
-                    "activation failure carries no HRESULT"
-                );
+
+                #[cfg(feature = "lifted_msi")]
+                {
+                    assert_eq!(failure.operation, op::VERIFY_FRAMEWORK);
+                    assert!(
+                        failure.code.is_none(),
+                        "framework refusal unexpectedly carried an HRESULT"
+                    );
+                }
+
+                #[cfg(not(feature = "lifted_msi"))]
+                {
+                    assert_eq!(failure.operation, op::ACTIVATE);
+                    assert!(
+                        failure.code.is_some(),
+                        "activation failure carries no HRESULT"
+                    );
+                }
             }
             Err(other) => {
                 panic!("expected ServiceUnavailable variant, got: {:?}", other);

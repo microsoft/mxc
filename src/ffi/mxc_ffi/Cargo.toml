@@ -56,4 +56,4 @@ csbindgen = { version = "1", optional = true }
 cc = "1"
 sha2.workspace = true
 winresource.workspace = true
-zip = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

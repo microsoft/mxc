@@ -25,6 +25,8 @@ pub mod isolation_session_sdk {
 
     const APP_DLL: &str = "IsoSessionApp.dll";
     const RUNTIME_MANIFEST: &str = "IsoSession.manifest";
+    const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+    const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
 
     pub fn resolve_package() -> Result<PathBuf, String> {
         println!("cargo:rerun-if-env-changed={PACKAGE_PATH_ENV}");
@@ -34,13 +36,6 @@ pub mod isolation_session_sdk {
             verify_package(&path)?;
             println!("cargo:rerun-if-changed={}", path.display());
             return Ok(path);
-        }
-
-        let vendored = vendored_package_path();
-        if vendored.is_file() {
-            verify_package(&vendored)?;
-            println!("cargo:rerun-if-changed={}", vendored.display());
-            return Ok(vendored);
         }
 
         let package_name = format!(
@@ -127,17 +122,13 @@ pub mod isolation_session_sdk {
         Ok(package_path)
     }
 
-    /// The pinned package checked in under `external/windows-sdk/isolation-session`.
-    pub fn vendored_package_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../external/windows-sdk/isolation-session")
-            .join(format!("{PACKAGE_ID}.{PACKAGE_VERSION}.nupkg"))
-    }
-
     pub fn stage_runtime() -> Result<(), String> {
         let package = resolve_package()?;
         let app_dll = read_entry(&package, APP_DLL)?;
         let manifest = read_entry(&package, RUNTIME_MANIFEST)?;
+        let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
+            .map_err(|e| format!("CARGO_CFG_TARGET_ARCH is not set: {e}"))?;
+        validate_runtime_architecture(&app_dll, &target_arch)?;
         let instance = package_runtime_instance()?;
         validate_runtime_manifest(&manifest, &instance)?;
 
@@ -146,6 +137,47 @@ pub mod isolation_session_sdk {
             .map_err(|e| format!("stage {APP_DLL} to {}: {e}", target_dir.display()))?;
         std::fs::write(target_dir.join(RUNTIME_MANIFEST), manifest)
             .map_err(|e| format!("stage {RUNTIME_MANIFEST} to {}: {e}", target_dir.display()))?;
+        Ok(())
+    }
+
+    fn validate_runtime_architecture(binary: &[u8], target_arch: &str) -> Result<(), String> {
+        let expected_machine = match target_arch {
+            "x86_64" => IMAGE_FILE_MACHINE_AMD64,
+            "aarch64" => IMAGE_FILE_MACHINE_ARM64,
+            other => {
+                return Err(format!(
+                    "IsolationSession lifted runtime does not support target architecture {other:?}"
+                ));
+            }
+        };
+
+        if binary.len() < 0x40 || &binary[..2] != b"MZ" {
+            return Err(format!("{APP_DLL} is not a valid PE image"));
+        }
+        let pe_offset = u32::from_le_bytes(
+            binary[0x3c..0x40]
+                .try_into()
+                .expect("slice length is checked"),
+        ) as usize;
+        let machine_end = pe_offset
+            .checked_add(6)
+            .ok_or_else(|| format!("{APP_DLL} has an invalid PE header offset"))?;
+        if machine_end > binary.len() || &binary[pe_offset..pe_offset + 4] != b"PE\0\0" {
+            return Err(format!("{APP_DLL} has an invalid PE header"));
+        }
+
+        let actual_machine = u16::from_le_bytes(
+            binary[pe_offset + 4..machine_end]
+                .try_into()
+                .expect("slice length is checked"),
+        );
+        if actual_machine != expected_machine {
+            return Err(format!(
+                "{APP_DLL} machine type 0x{actual_machine:04X} does not match Cargo target \
+                 architecture {target_arch:?} (expected 0x{expected_machine:04X}); publish a \
+                 matching runtime payload before building this target"
+            ));
+        }
         Ok(())
     }
 
@@ -273,14 +305,9 @@ pub mod isolation_session_sdk {
     #[cfg(test)]
     mod tests {
         use super::{
-            package_runtime_instance, validate_runtime_manifest, vendored_package_path,
-            verify_package,
+            package_runtime_instance, validate_runtime_architecture, validate_runtime_manifest,
+            IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
         };
-
-        #[test]
-        fn vendored_package_matches_pin() {
-            verify_package(&vendored_package_path()).unwrap();
-        }
 
         const MANIFEST: &str = "\
 <assembly>
@@ -303,6 +330,51 @@ pub mod isolation_session_sdk {
         fn mismatched_runtime_manifest_is_rejected() {
             let error = validate_runtime_manifest(MANIFEST.as_bytes(), "2026.10").unwrap_err();
             assert!(error.contains("does not identify runtime instance"));
+        }
+
+        fn pe_image(machine: u16) -> Vec<u8> {
+            let mut image = vec![0; 0x80];
+            image[..2].copy_from_slice(b"MZ");
+            image[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+            image[0x40..0x44].copy_from_slice(b"PE\0\0");
+            image[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
+            image
+        }
+
+        #[test]
+        fn runtime_architecture_accepts_matching_targets() {
+            validate_runtime_architecture(&pe_image(IMAGE_FILE_MACHINE_AMD64), "x86_64").unwrap();
+            validate_runtime_architecture(&pe_image(IMAGE_FILE_MACHINE_ARM64), "aarch64").unwrap();
+        }
+
+        #[test]
+        fn runtime_architecture_rejects_mismatched_target() {
+            let error =
+                validate_runtime_architecture(&pe_image(IMAGE_FILE_MACHINE_AMD64), "aarch64")
+                    .unwrap_err();
+            assert!(error.contains("does not match Cargo target architecture"));
+        }
+
+        #[test]
+        fn runtime_architecture_rejects_invalid_pe() {
+            let error = validate_runtime_architecture(b"not a PE", "x86_64").unwrap_err();
+            assert!(error.contains("not a valid PE image"));
+        }
+
+        #[test]
+        fn runtime_architecture_rejects_truncated_pe_header() {
+            let mut image = pe_image(IMAGE_FILE_MACHINE_AMD64);
+            image.truncate(0x44);
+
+            let error = validate_runtime_architecture(&image, "x86_64").unwrap_err();
+            assert!(error.contains("invalid PE header"));
+        }
+
+        #[test]
+        fn runtime_architecture_rejects_unsupported_target() {
+            let error = validate_runtime_architecture(&pe_image(IMAGE_FILE_MACHINE_AMD64), "x86")
+                .unwrap_err();
+            assert!(error.contains("does not support target architecture"));
         }
     }
 }
