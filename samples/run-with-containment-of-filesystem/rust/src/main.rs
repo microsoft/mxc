@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Grants one host file read-only to a transient container.
+//! Grants the sample directory read-only to a transient container.
 
 use std::error::Error;
 use std::io::{self, Write};

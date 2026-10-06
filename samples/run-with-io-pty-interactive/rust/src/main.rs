@@ -7,6 +7,9 @@ use std::error::Error;
 use std::io::{self, IsTerminal};
 use std::thread;
 
+use mxc_sdk::v1::policy::{
+    NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy,
+};
 use mxc_sdk::v1::{self, ContainerRequest, Containment, WaitResult};
 
 fn run() -> Result<i32, Box<dyn Error>> {
@@ -14,14 +17,29 @@ fn run() -> Result<i32, Box<dyn Error>> {
         return Err(io::Error::other("run this sample from an interactive terminal").into());
     }
 
-    let (command, containment) = if cfg!(target_os = "windows") {
-        ("powershell.exe -NoLogo", Containment::IsolationSession)
+    let (command, containment, network) = if cfg!(target_os = "windows") {
+        (
+            "powershell.exe -NoLogo",
+            Containment::IsolationSession,
+            Some(NetworkPolicy {
+                egress: Some(NetworkEgressPolicy {
+                    default: Some(NetworkAction::Allow),
+                    ..Default::default()
+                }),
+                ingress: Some(NetworkIngressPolicy {
+                    default: Some(NetworkAction::Allow),
+                    host_loopback: Some(NetworkAction::Allow),
+                }),
+                ..Default::default()
+            }),
+        )
     } else {
-        ("sh", Containment::Process)
+        ("sh", Containment::Process, None)
     };
     eprintln!("Starting a contained shell. Type `exit` to leave.");
     let request = ContainerRequest {
         containment,
+        network,
         ..ContainerRequest::new(command)
     };
     let terminal = v1::spawn_with_pty(request, Default::default())?;

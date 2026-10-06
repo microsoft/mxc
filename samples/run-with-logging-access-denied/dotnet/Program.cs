@@ -17,7 +17,8 @@ var deniedPath = Path.GetFullPath(
 try
 {
     var request = new ContainerRequest(
-        "cmd.exe /d /s /c \"type \\\"%MXC_DENIED_FILE%\\\" >nul 2>&1 & exit /b 0\"")
+        "cmd.exe /d /s /c \"type \\\"%MXC_DENIED_FILE%\\\" >nul 2>&1 & "
+        + "if errorlevel 1 (exit /b 0) else (echo ERROR: denied file was readable 1>&2 & exit /b 1)\"")
     {
         Containment = new Containment.ProcessContainer
         {
@@ -55,6 +56,10 @@ try
     }
     var capture = result.OutputMetadata?.CaptureDenials
         ?? throw new InvalidOperationException("Denial capture returned no report.");
+    if (capture.TotalDenials == 0)
+    {
+        throw new InvalidOperationException("Denial capture returned an empty report.");
+    }
 
     Console.WriteLine(
         $"captured {capture.TotalDenials} denial(s) in {capture.OutputPath}");

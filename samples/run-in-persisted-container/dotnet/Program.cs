@@ -37,7 +37,10 @@ try
     var result = await MxcLifecycle.RunInContainerAsync(
         containerId.Value,
         new ExecutionRequest(
-            "cmd.exe /d /s /c \"echo hello from persisted container\""));
+            "cmd.exe /d /s /c \"echo hello from persisted container\"")
+        {
+            TimeoutMs = 30_000,
+        });
     Console.Write(result.Stdout);
     Console.Error.Write(result.Stderr);
     foreach (var warning in result.Warnings)

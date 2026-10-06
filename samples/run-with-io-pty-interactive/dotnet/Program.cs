@@ -12,8 +12,9 @@ if (Console.IsInputRedirected || Console.IsOutputRedirected)
 
 try
 {
-    var command = OperatingSystem.IsWindows() ? "powershell.exe -NoLogo" : "sh";
-    var containment = OperatingSystem.IsWindows()
+    var windows = OperatingSystem.IsWindows();
+    var command = windows ? "powershell.exe -NoLogo" : "sh";
+    var containment = windows
         ? (Containment)new Containment.IsolationSession()
         : new Containment.Process();
     Console.Error.WriteLine("Starting a contained shell. Type `exit` to leave.");
@@ -21,6 +22,17 @@ try
         new ContainerRequest(command)
         {
             Containment = containment,
+            Network = windows
+                ? new NetworkPolicy
+                {
+                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                    Ingress = new NetworkIngressPolicy
+                    {
+                        Default = NetworkAction.Allow,
+                        HostLoopback = NetworkAction.Allow,
+                    },
+                }
+                : null,
         });
     using var inputCancellation = new CancellationTokenSource();
     var input = Console.OpenStandardInput().CopyToAsync(

@@ -29,8 +29,16 @@ try
         return 124;
     }
 
-    System.Diagnostics.Debug.Assert(result.Stdout.Contains("hello from MXC", StringComparison.Ordinal));
-    return result.ExitCode;
+    if (result.ExitCode != 0)
+    {
+        return result.ExitCode;
+    }
+    if (!result.Stdout.Contains("hello from MXC", StringComparison.Ordinal))
+    {
+        Console.Error.WriteLine("captured stdout did not contain the expected greeting");
+        return 1;
+    }
+    return 0;
 }
 catch (MxcException error)
 {

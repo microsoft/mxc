@@ -39,6 +39,7 @@ async function main(): Promise<number> {
 
     const result = await runInContainer(containerId, {
       command: 'cmd.exe /d /s /c "echo hello from persisted container"',
+      timeoutMs: 30_000,
     });
     process.stdout.write(result.stdout);
     process.stderr.write(result.stderr);

@@ -21,6 +21,14 @@ async function main(): Promise<number> {
     containment: windows
       ? { type: 'isolation_session' }
       : { type: 'process' },
+    ...(windows
+      ? {
+          network: {
+            egress: { default: 'allow' },
+            ingress: { default: 'allow', hostLoopback: 'allow' },
+          },
+        }
+      : {}),
   };
   const terminal = await spawnWithPty(request);
   const wasRaw = process.stdin.isRaw;

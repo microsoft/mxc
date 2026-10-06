@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Runs a transient container while forwarding its standard I/O streams.
+//! Runs a transient container while forwarding stdout and stderr.
 
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Read};

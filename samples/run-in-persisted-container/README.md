@@ -28,6 +28,8 @@ cargo run
 dotnet run -p:MxcWithIsolationSession=true
 
 # Node
+npm --prefix ../../../sdk/node install
+npm --prefix ../../../sdk/node run build
 npm install
 npm start
 ```

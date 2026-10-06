@@ -18,7 +18,9 @@ async function main(): Promise<number> {
 
   const deniedPath = path.resolve('../denied.txt');
   const request: ContainerRequest = {
-    command: 'cmd.exe /d /s /c "type \\"%MXC_DENIED_FILE%\\" >nul 2>&1 & exit /b 0"',
+    command: 'cmd.exe /d /s /c "type \\"%MXC_DENIED_FILE%\\" >nul 2>&1 & '
+      + 'if errorlevel 1 (exit /b 0) else '
+      + '(echo ERROR: denied file was readable 1>&2 & exit /b 1)"',
     containment: {
       type: 'processcontainer',
       config: {
@@ -52,6 +54,9 @@ async function main(): Promise<number> {
   const capture = result.outputMetadata?.captureDenials;
   if (capture === undefined) {
     throw new Error('Denial capture returned no report.');
+  }
+  if (capture.totalDenials === 0) {
+    throw new Error('Denial capture returned an empty report.');
   }
 
   console.log(

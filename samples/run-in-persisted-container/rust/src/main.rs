@@ -52,7 +52,12 @@ fn run() -> Result<i32, Box<dyn Error>> {
 
         let result = container::run_in_container(
             &container_id,
-            ExecutionRequest::new("cmd.exe /d /s /c \"echo hello from persisted container\""),
+            ExecutionRequest {
+                timeout_ms: Some(30_000),
+                ..ExecutionRequest::new(
+                    "cmd.exe /d /s /c \"echo hello from persisted container\"",
+                )
+            },
             Default::default(),
         )?;
         io::stdout().write_all(&result.stdout)?;
