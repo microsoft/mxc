@@ -28,6 +28,3 @@ dotnet run -p:MxcWithIsolationSession=true
 npm install
 npm start
 ```
-
-On Windows, the Node SDK's native unit must be built with IsolationSession
-support before running the Node sample.

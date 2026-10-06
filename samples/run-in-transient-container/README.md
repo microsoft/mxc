@@ -1,6 +1,6 @@
 # Run in a transient container
 
-Demonstrates a complete one-shot container request using the host's native
+Demonstrates a complete run-to-completion container request using the host's native
 process-isolation backend. The sample checks host support, supplies a bounded
 command and an environment override, runs it in a newly created transient
 container, reports warnings and output, and returns the workload's exit code.

@@ -7,7 +7,7 @@ compare while each implementation remains idiomatic for its language.
 | Scenario | Purpose | Rust | .NET | Node |
 |---|---|---|---|---|
 | [Run in a persisted container](run-in-persisted-container/README.md) | Provision, start, execute, stop, and deprovision | `run-in-persisted-container/rust` | `run-in-persisted-container/dotnet` | `run-in-persisted-container/node` |
-| [Run in a transient container](run-in-transient-container/README.md) | Build and execute a complete one-shot request | `run-in-transient-container/rust` | `run-in-transient-container/dotnet` | `run-in-transient-container/node` |
+| [Run in a transient container](run-in-transient-container/README.md) | Build and execute a complete run-to-completion request | `run-in-transient-container/rust` | `run-in-transient-container/dotnet` | `run-in-transient-container/node` |
 | [Run with filesystem containment](run-with-containment-of-filesystem/README.md) | Grant one host file read-only | `run-with-containment-of-filesystem/rust` | `run-with-containment-of-filesystem/dotnet` | `run-with-containment-of-filesystem/node` |
 | [Run with network containment](run-with-containment-of-network/README.md) | Deny outbound, inbound, and host-loopback networking | `run-with-containment-of-network/rust` | `run-with-containment-of-network/dotnet` | `run-with-containment-of-network/node` |
 | [Run with logging access denied](run-with-logging-access-denied/README.md) | Capture blocked ProcessContainer accesses | `run-with-logging-access-denied/rust` | `run-with-logging-access-denied/dotnet` | `run-with-logging-access-denied/node` |
