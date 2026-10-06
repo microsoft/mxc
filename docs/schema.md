@@ -266,7 +266,7 @@ that can be executed independently.
 > is rejected with a parse error. Callers cannot supply `correlationVector`;
 > it is rejected as an unknown field because lifecycle correlation is internal
 > to MXC and is not part of the request or response contract. See
-> [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
+> [Container lifecycle architecture](development/architecture/container-lifecycle.md)
 > and [telemetry architecture](development/architecture/telemetry.md).
 
 ### Working Directory
@@ -499,7 +499,7 @@ State-aware-capable backends today are `isolation_session`, `windows_sandbox`,
 and `wslc` (all Windows-only). IsolationSession does not require runtime
 experimental authorization; Windows Sandbox does.
 
-Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
+Full lifecycle API: [container lifecycle](container-lifecycle.md).
 
 ### Schema Versioning
 

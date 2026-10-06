@@ -216,9 +216,9 @@ Backend/platform discovery, errors, telemetry, and helpers are also in
 | Terminal process outcome | `WaitResult` |
 
 All types above are in `Microsoft.Mxc.Sdk.V1`. See the
-[networking guide](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/networking/networking.md)
+[networking guide](https://github.com/microsoft/mxc/blob/main/docs/containment-configuration/0.8.0/networking/networking.md)
 for policy behavior and the
-[SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/reference/README.md)
+[SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md)
 for complete signatures and types.
 
 ## Errors, warnings, and discovery
@@ -260,6 +260,6 @@ pipeline produces the publishable NuGet package; `build.bat` creates local
 architecture-specific packages under `output\packages`.
 
 For API details, see the
-[SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/reference/README.md).
+[SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md).
 Build and validation commands are in the
 [pull request guide](https://github.com/microsoft/mxc/blob/main/docs/development/build-and-test/pull-requests.md).

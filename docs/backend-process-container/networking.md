@@ -7,7 +7,7 @@ and `network.ingress` policy plus `runtimeConfig.networkProxy` and
 `processContainer.network.allowedProxyPeer` configuration.
 
 Implementation companion to the parent
-[MXC Network Configuration, GA design](../sandbox-policy/0.8.0/networking/networking.md)
+[MXC Network Configuration, GA design](../containment-configuration/0.8.0/networking/networking.md)
 doc. The parent owns the shared policy schema, connectivity models, and GA goal.
 This doc covers only how the Windows ProcessContainer backend enforces them.
 

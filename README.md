@@ -249,7 +249,7 @@ By default, native binaries run in **silent mode** — stdin/stdout/stderr is co
 wxc-exec.exe --debug config.json
 ```
 
-See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
+See [diagnostics](docs/development/guides/diagnostics.md) for the full developer reference.
 
 ### Request-aware ProcessContainer probe
 
@@ -334,15 +334,15 @@ can browse the [development documentation](docs/development/README.md).
 | [CI validation infrastructure](docs/development/build-and-test/ci-validation-infrastructure.md) | Scheduled backend validation matrix and CI dispatch |
 | [tests/scripts/README.md](tests/scripts/README.md) | Local and CI backend test suites |
 | [docs/host-prep.md](docs/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
-| [docs/diagnostics.md](docs/diagnostics.md) | Diagnostic logging and ETW |
-| [docs/sandbox-policy/0.7.0/policy.md](docs/sandbox-policy/0.7.0/policy.md) | Sandbox policy 0.7.0 specification |
+| [Diagnostics](docs/development/guides/diagnostics.md) | Diagnostic logging and ETW |
+| [Containment configuration 0.7.0](docs/containment-configuration/0.7.0/policy.md) | Containment configuration 0.7.0 specification |
 | [Adding ProcessContainer OS features](docs/development/guides/process-container-adding-os-features.md) | Windows AppContainer / BaseContainer developer guide |
 | [docs/backend-lxc/lxc-backend.md](docs/backend-lxc/lxc-backend.md) | LXC backend (Linux) |
 | [docs/backend-bwrap/bubblewrap-backend.md](docs/backend-bwrap/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
 | [docs/backend-seatbelt/seatbelt-backend.md](docs/backend-seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |
 | [docs/backend-windows-sandbox/windows-sandbox.md](docs/backend-windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/backend-hyperlight/hyperlight-backend.md](docs/backend-hyperlight/hyperlight-backend.md) | Hyperlight backend (Linux, Windows) |
-| [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
+| [Container lifecycle](docs/container-lifecycle.md) | Public container lifecycle API |
 | [Telemetry architecture](docs/development/architecture/telemetry.md) | TraceLogging telemetry architecture |
 | [Telemetry consent design](docs/development/architecture/telemetry-consent-design.md) | Telemetry consent contract |
 | [docs/telemetry.md](docs/telemetry.md) | Administrative telemetry controls |

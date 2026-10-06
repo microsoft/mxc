@@ -15,7 +15,7 @@ see [Windows OS-version policy support](../../backend-process-container/os-versi
 
 ## Prerequisites
 
-1. Read the [Sandbox Policy spec](../../sandbox-policy/0.7.0/policy.md) to
+1. Read the [containment configuration spec](../../containment-configuration/0.7.0/policy.md) to
    understand how `SandboxPolicy` maps to `ContainerConfig`.
 2. Read [authoring-a-new-feature.md](authoring-a-new-feature.md), especially
    Step 1 (feature spec) and Step 2 (OS changes).

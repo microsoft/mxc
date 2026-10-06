@@ -1941,7 +1941,7 @@ fn recovery_required_error(
         "{reason}; recovery marker: {}; refusing to stop or cancel unverified host-wide WPR \
          state. From an elevated terminal, inspect the recording, preserve or discard it, \
          confirm WPR is inactive, and only then delete the marker. See \"Recovering guarded-WPR \
-         state\" in docs/diagnostics.md",
+         state\" in docs/development/guides/diagnostics.md",
         marker_path.display()
     ))
 }
@@ -2846,7 +2846,7 @@ mod tests {
         assert!(message.contains("inspect the recording"));
         assert!(message.contains("confirm WPR is inactive"));
         assert!(message.contains("only then delete the marker"));
-        assert!(message.contains("docs/diagnostics.md"));
+        assert!(message.contains("docs/development/guides/diagnostics.md"));
         assert!(message.contains("wpr start diagnostic"));
     }
 

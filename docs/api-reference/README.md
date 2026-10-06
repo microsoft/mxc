@@ -61,5 +61,5 @@ nullability, ownership, platform gates, and examples.
 
 Breaking changes to a published SDK API require a new versioned (V*) API
 surface and matching signature/type references under each affected SDK's
-`docs/reference/<sdk>/v*/` directory. Preserve the published version's
+`docs/api-reference/<sdk>/v*/` directory. Preserve the published version's
 references.

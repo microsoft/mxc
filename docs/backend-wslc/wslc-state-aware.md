@@ -10,7 +10,7 @@ cost.
 It complements:
 
 - [WSLC SDK bindings runbook](../development/build-and-test/wslc-sdk-bindings.md) — regenerating the SDK bindings.
-- [`../state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
+- [Container lifecycle architecture](../development/architecture/container-lifecycle.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
 
 The raw WSLc state-aware surface is available in published exact schemas
 beginning with `0.9.0-alpha`. The Rust, .NET, and Node high-level v1 lifecycle

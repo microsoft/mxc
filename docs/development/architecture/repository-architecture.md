@@ -85,7 +85,7 @@ whole-request parser or model remains. See
 
 State-aware requests follow the same parsing path and produce a typed lifecycle
 operation. See the
-[State-aware sandbox API](../../state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
+[Container lifecycle architecture](container-lifecycle.md).
 
 ## Execution surfaces
 

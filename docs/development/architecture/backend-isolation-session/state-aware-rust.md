@@ -3,7 +3,7 @@
 > **Audience:** MXC developers
 
 This document describes the IsolationSession backend's behaviour under the
-state-aware lifecycle API ([design](../../../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)).
+state-aware lifecycle API ([design](../container-lifecycle.md)).
 It is the per-backend specification required by §11.6 of that design and
 covers the five state-aware phases — provision, start, exec, stop,
 deprovision — plus the cross-cutting policy matrix, idempotence behaviour,
@@ -45,7 +45,7 @@ For interactive execution, use
 lets the caller own input, output, resizing, and termination without binding
 the workload to the host application's global console streams. All Rust SDK
 launch operations take typed requests; see the
-[launch-choice table](../../../reference/rust/v1/api.md#choosing-a-launch-operation).
+[launch-choice table](../../../api-reference/rust/v1/api.md#choosing-a-launch-operation).
 
 Backend runtime requirements:
 
@@ -281,7 +281,7 @@ the optional `appId`, at provision.
 
 The matrix covers the full surface a caller can express, on both the one-shot
 and state-aware paths. Dispositions come from the closed set in §10.3 of the
-[state-aware design](../../../state-aware-lifecycle/mxc-state-aware-sandbox-api.md),
+[state-aware design](../container-lifecycle.md),
 plus `required` for the network posture and `n/a` where a field has no
 meaning for this backend.
 
@@ -469,7 +469,7 @@ the finer step is described in `message`.
 These values are **best-effort diagnostics, not a versioned contract**: they mirror the
 projected WinRT class and method names, which this repo does not own. Branch on `code`;
 treat `operation` as telemetry and log detail. See the
-[cross-backend contract](../../../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) §7.3.
+[cross-backend contract](../container-lifecycle.md) §7.3.
 
 `nativeCode` is the HRESULT rendered as lowercase hex, e.g. `0x80070490`.
 
@@ -588,8 +588,8 @@ OS limitation.
 
 ## References
 
-- [State-aware design (full)](../../../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
-- [State-aware design (overview)](../../../state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md)
+- [State-aware design (full)](../container-lifecycle.md)
+- [Container lifecycle overview](../../../container-lifecycle.md)
 - [TypeScript spec](state-aware-typescript.md) — SDK companion
   to this doc; covers SDK API surface, types, and TS usage examples.
 - [One-shot bringup](oneshot.md) — the

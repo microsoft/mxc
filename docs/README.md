@@ -16,9 +16,9 @@ should start with the [development documentation](development/README.md).
 ## Configure MXC
 
 - [Configuration schema](schema.md)
-- [Sandbox policy 0.8](sandbox-policy/0.8.0/policy.md)
-- [Network policy](sandbox-policy/0.8.0/networking/networking.md)
-- [State-aware lifecycle overview](state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md)
+- [Containment configuration 0.8](containment-configuration/0.8.0/policy.md)
+- [Network policy](containment-configuration/0.8.0/networking/networking.md)
+- [Container lifecycle](container-lifecycle.md)
 - [Logging access denied](logging-access-denied.md)
 
 ## Choose and operate a backend
@@ -34,8 +34,7 @@ should start with the [development documentation](development/README.md).
 
 ## Integrate and troubleshoot
 
-- [SDK API reference](reference/README.md)
-- [Diagnostics](diagnostics.md)
-- [Playground limitations](playground-limitations.md)
+- [SDK API reference](api-reference/README.md)
+- [Playground limitations](../tests/playground/playground-limitations.md)
 - [Administrative telemetry policy](telemetry.md)
 - [Administrative WSLC registry allowlist](backend-wslc/wslc-registry-allowlist-policy.md)

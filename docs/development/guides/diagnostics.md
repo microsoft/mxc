@@ -1,6 +1,6 @@
 # MXC Diagnostics
 
-> **Audience:** MXC consumers and developers
+> **Audience:** MXC developers
 
 A unified diagnostic view across every layer of the MXC stack:
 
@@ -146,9 +146,9 @@ internal trace. Retained ETL can contain sensitive paths and identifiers; the
 caller is responsible for deleting it when it is no longer needed.
 
 The checked-in
-[`tests/examples/29_capture_denials.json`](../tests/examples/29_capture_denials.json)
+[`tests/examples/29_capture_denials.json`](../../../tests/examples/29_capture_denials.json)
 is a minimal block-mode example. See
-[Logging access denied](logging-access-denied.md#relationship-to-denial-capture)
+[Logging access denied](../../logging-access-denied.md#relationship-to-denial-capture)
 for the output schemas, bounds, host-selection behavior, and SDK metadata
 surfaces.
 
@@ -267,12 +267,12 @@ the `MXC_DIAG_CONSOLE` pipe — never to stdout, so they cannot pollute an SDK
 caller's captured output. With neither sink configured, these JSON records are not emitted and no record
 is built. When Windows ETW telemetry is explicitly enabled, the separate
 `Microsoft.MXC` TraceLogging provider may still receive the bounded M-ETW
-events described in [telemetry architecture](development/architecture/telemetry.md);
+events described in [telemetry architecture](../architecture/telemetry.md);
 those events are local ETW only and are not uploaded by MXC.
 
 These are **local diagnostics, not ETW telemetry**: no provider, no consent gate,
 nothing uploaded. See
-[Telemetry architecture: Local audit log records](development/architecture/telemetry.md#local-audit-log-records)
+[Telemetry architecture: Local audit log records](../architecture/telemetry.md#local-audit-log-records)
 for the JSON-lines format, the full record inventory with fields, the content
 rules (bounded vocabularies, config field *paths* but never values, no raw user
 identifiers),

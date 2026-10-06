@@ -9,6 +9,7 @@ directory.
 ## Architecture
 
 - [Repository architecture](architecture/repository-architecture.md)
+- [Container lifecycle architecture](architecture/container-lifecycle.md)
 - [Versioning design](architecture/versioning.md)
 - [Telemetry architecture](architecture/telemetry.md)
 - [Telemetry consent design](architecture/telemetry-consent-design.md)
@@ -27,6 +28,7 @@ directory.
 ## Contributor guides
 
 - [Authoring a new feature](guides/authoring-a-new-feature.md)
+- [Diagnostics](guides/diagnostics.md)
 - [Adding ProcessContainer OS features](guides/process-container-adding-os-features.md)
 
 ## Plans

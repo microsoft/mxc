@@ -23,7 +23,7 @@ concurrency); this doc covers SDK API surface, types, and consumer usage pattern
   for the policy matrix, idempotence,
   concurrency, and error mapping.
 - The wire-format envelope — see the
-  [main design doc](../../../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) §7.
+  [main design doc](../container-lifecycle.md) §7.
 - Cross-backend lifecycle and error handling — see the SDK documentation and
   [Rust backend guide](state-aware-rust.md).
 
@@ -162,7 +162,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 
 ## References
 
-- [State-aware design (main)](../../../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
-- [State-aware design (overview)](../../../state-aware-lifecycle/mxc-state-aware-sandbox-api-overview.md)
+- [State-aware design (main)](../container-lifecycle.md)
+- [Container lifecycle overview](../../../container-lifecycle.md)
 - [Rust spec](state-aware-rust.md) — runtime semantics
 - [One-shot bringup](oneshot.md)

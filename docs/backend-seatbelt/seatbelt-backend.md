@@ -183,7 +183,7 @@ Anything it hasn't declared is rejected up front.
 ### Fields (supported schema 0.9+)
 
 This is the cross-backend directional shape accepted by the registered exact
-contracts. The original [0.8 networking design](../sandbox-policy/0.8.0/networking/networking.md)
+contracts. The original [0.8 networking design](../containment-configuration/0.8.0/networking/networking.md)
 is historical; schema 0.8 is no longer accepted.
 
 > **Omitting `network` entirely denies all IP networking.** Every field below

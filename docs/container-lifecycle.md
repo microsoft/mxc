@@ -1,8 +1,8 @@
-# MXC State-Aware Sandbox API - Overview
+# MXC Container Lifecycle
 
 > **Audience:** MXC consumers
 
-Companion to [mxc-state-aware-sandbox-api.md](./mxc-state-aware-sandbox-api.md).
+Companion to the [full lifecycle and wire contract](development/architecture/container-lifecycle.md).
 
 MXC separates container creation from persistent lifecycle operations.
 Creation runs a `ContainerRequest`; persistent execution provisions a
@@ -44,9 +44,9 @@ Creation defaults to generic `Process` intent.
 Explicit PTY APIs return SDK-owned terminal process handles with interactive
 input, resize, wait, termination, and disposal. Use these for interactive
 workloads instead of attaching a workload to the host application's console.
-See the launch-choice tables for [Rust](../reference/rust/v1/api.md#choosing-a-launch-operation),
-[.NET](../reference/dotnet/v1/api.md#choosing-a-launch-operation), and
-[Node](../reference/node/v1/api.md#choosing-a-launch-operation).
+See the launch-choice tables for [Rust](api-reference/rust/v1/api.md#choosing-a-launch-operation),
+[.NET](api-reference/dotnet/v1/api.md#choosing-a-launch-operation), and
+[Node](api-reference/node/v1/api.md#choosing-a-launch-operation).
 
 Explicit validation APIs perform native dry-run validation and return no
 execution result. Backend policy and feature support remain native-engine
@@ -73,16 +73,16 @@ warnings rather than converting failures into successful-looking output.
 
 ## Contributor and native integration details
 
-The [full design](./mxc-state-aware-sandbox-api.md) documents engine dispatch,
+The [full design](development/architecture/container-lifecycle.md) documents engine dispatch,
 backend interfaces, and native JSON contracts for contributors and direct
 executor/FFI integrations. These implementation details are not required to
 author typed SDK requests.
 
 ## References
 
-- [Full lifecycle and wire contract](./mxc-state-aware-sandbox-api.md)
-- [Rust SDK](../../src/mxc-sdk/README.md)
-- [.NET SDK](../../sdk/dotnet/README.md)
-- [Node SDK](../../sdk/node/README.md)
-- [IsolationSession TypeScript architecture](../development/architecture/backend-isolation-session/state-aware-typescript.md)
-- [WSLC lifecycle guide](../backend-wslc/wslc-state-aware.md)
+- [Full lifecycle and wire contract](development/architecture/container-lifecycle.md)
+- [Rust SDK](../src/mxc-sdk/README.md)
+- [.NET SDK](../sdk/dotnet/README.md)
+- [Node SDK](../sdk/node/README.md)
+- [IsolationSession TypeScript architecture](development/architecture/backend-isolation-session/state-aware-typescript.md)
+- [WSLC lifecycle guide](backend-wslc/wslc-state-aware.md)
