@@ -2104,8 +2104,8 @@ mod tests {
     };
     use crate::mxc_common::models::{
         BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr,
-        NetworkEgressPolicy, NetworkPeer, NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress,
-        ProxyConfig, UiPolicy,
+        NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort, NetworkProtocol,
+        NetworkRule, ProxyAddress, ProxyConfig, UiPolicy,
     };
     use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
@@ -2914,7 +2914,7 @@ mod tests {
     fn capture_denials_directional_default_deny_reaches_tessera_network_policy() {
         let mut request = ExecutionRequest::default();
         request.policy.capture_denials = Some(Default::default());
-        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+        request.policy.network_egress = Some(NetworkEgressPolicy {
             default: NetworkAction::Deny,
             ..Default::default()
         });
@@ -2939,11 +2939,11 @@ mod tests {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
-        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+        request.policy.network_egress = Some(NetworkEgressPolicy {
             default: NetworkAction::Deny,
             ..Default::default()
         });
-        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+        request.policy.network_ingress = Some(NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Allow,
         });
