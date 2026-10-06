@@ -44,7 +44,9 @@ export interface TelemetryAsyncImplementation {
 }
 
 function bindTelemetryApi(native: ReturnType<typeof loadMxcFfi>): TelemetryApi {
-  const stringOutParameters = [koffi.out(koffi.pointer('char', 2))];
+  // Keep owned char* outputs opaque so Koffi does not convert them and lose
+  // the allocation identity required by mxc_string_free.
+  const stringOutParameters = [koffi.out(koffi.pointer('void *'))];
   return {
     getConsentStatus: bindNativeFunction<StringOutSignature>(native.handle, {
       symbol: 'mxc_telemetry_get_consent_status',
@@ -63,13 +65,13 @@ function bindTelemetryApi(native: ReturnType<typeof loadMxcFfi>): TelemetryApi {
         'const char *',
         koffi.pointer(TelemetryConsentPresenter),
         'void *',
-        koffi.out(koffi.pointer('char', 2)),
+        koffi.out(koffi.pointer('void *')),
       ],
     }),
     stringFree: bindNativeFunction<StringFreeSignature>(native.handle, {
       symbol: 'mxc_string_free',
       result: 'void',
-      parameters: ['char *'],
+      parameters: ['void *'],
     }),
   };
 }
