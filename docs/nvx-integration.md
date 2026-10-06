@@ -49,7 +49,7 @@ It will also add signature verification for the downloaded binaries.
 | File | Approximate size | Contents |
 | --- | ---: | --- |
 | NVX implementation DLL | Not yet published | Will provide the signed implementation of the Rust crate interface |
-| `openvmm[.exe]` | 22 MB Windows;<br>461-475 MB Linux | Platform OpenVMM executable |
+| `openvmm.exe` | 22 MB | Windows OpenVMM executable |
 | `vmlinux` | 24 MB | NVX Linux kernel |
 | `initramfs.cpio.gz` | 7.4 MB | Alpine userspace and NVX guest agent |
 
@@ -59,8 +59,6 @@ licence, and package-inventory files.
 | Runtime bundle | Compressed | Expanded |
 | --- | ---: | ---: |
 | Windows WHP | 139 MB | 187 MB |
-| Linux KVM | 247 MB | 626 MB |
-| Linux MSHV | 247 MB | 641 MB |
 
 These are the current development-bundle sizes and can change.
 
@@ -107,7 +105,7 @@ The developer experience will be the same in all three ecosystems:
 4. MXC will validate the signatures and checksums, then launch OpenVMM through
    the NVX Rust integration.
 
-Developers will not provide paths to `openvmm[.exe]`, `vmlinux`, or
+Developers will not provide paths to `openvmm.exe`, `vmlinux`, or
 `initramfs.cpio.gz`, and will not communicate with OpenVMM directly.
 
 ## 3. Architecture
@@ -205,8 +203,7 @@ flowchart LR
 
 Read-write mappings are
 live: a guest write changes the mapped host file immediately. Denied entries
-are hidden by OpenVMM within the exported host tree. Linux host permissions
-continue to apply to the mapped paths.
+are hidden by OpenVMM within the exported host tree.
 
 | MXC Schema field | Works today |
 | --- | --- |
@@ -351,35 +348,28 @@ MXC will validate the declared checksums for both models. It will also validate
 the signatures of the signed implementation DLL, OpenVMM executable, and image
 tool before use.
 
-## 7. Host support
+## 7. Windows requirement
 
-| Backend | Requirements | Coverage today |
-| --- | --- | --- |
-| Windows WHP | Windows x64 with WHP enabled | Live-tested on the selected baseline |
-| Linux KVM | Linux x64 with access to `/dev/kvm` | Supported by NVX; not live-tested in the supplied campaign |
-| Linux MSHV | Linux x64 with access to `/dev/mshv` | Supported by NVX; not live-tested in the supplied campaign |
-| macOS | Not supported | No NVX backend |
-| ARM64 | Not supported by the selected runtime | No selected runtime bundle |
-
-Moving to another NVX version will require renewed host-compatibility testing.
+The implementation will support Windows x64 and ARM only. Windows Hypervisor Platform
+(WHP) must already be installed and enabled on the system.
 
 ## 8. Requirements and end-to-end tests
 
 The NVX backend will be complete when the following areas pass through the
-packaged MXC executor and all three SDKs on each supported host backend.
+packaged MXC executor and all three SDKs on Windows x64 and ARM with WHP.
 
 | Area | Required coverage |
 | --- | --- |
 | Integration | `microvm` routes to NVX for one-shot and state-aware execution |
 | Lifecycle | Provision, start, repeated and overlapping exec, caller reconnect, stop, deprovision, invalid transitions, and stale IDs |
 | SDKs and FFI | Rust, Node, and .NET produce the same policy and result behaviour; native ownership and cleanup remain correct |
-| Filesystem | Read-only, read-write, denied paths, files, directories, multiple mappings, invalid combinations, and Linux permissions |
+| Filesystem | Read-only, read-write, denied paths, files, directories, multiple mappings, and invalid combinations |
 | Network | Defaults, allow/deny precedence, CIDRs, exclusions, TCP/UDP ranges, and rejection of unsupported rules |
 | Process | Command, CWD, environment, timeout, cancellation, output limits, nonzero exits, and descendant cleanup |
 | PTY | Confirm unsupported in the initial implementation; add terminal tests when implemented |
 | Packaging | Rust crate, npm, and NuGet installation; inclusion of the DLL, OpenVMM, image tool, kernel, and initramfs; tar conversion; static NVX tar staging; automatic runtime discovery; and missing/corrupt artifacts |
 | Signing | Validate signatures and checksums and reject unapproved or tampered artifacts |
-| Hosts | Real WHP and KVM runs; MSHV if shipped; clear rejection on macOS and unsupported architectures |
+| Host | Real execution on Windows x64 and ARM with WHP installed and enabled |
 | Image models | Verify the default static `microsoft/nvx` tar and the custom-image WSLC code/schema reuse, conversion, validation, and import path |
 
 Negative filesystem and network tests must include a working positive control
@@ -393,7 +383,7 @@ so infrastructure failures are not mistaken for policy enforcement.
 | NVX Rust interface to signed implementation DLL | In-process interface call | Will use the implementation supplied in the production ZIP |
 | NVX implementation DLL to `openvmm.exe` | Process launch with CLI arguments | Will supply the kernel, initramfs, hypervisor, filesystem and network configuration, and control-endpoint address |
 | NVX implementation DLL to `openvmm.exe`, during startup only | OpenVMM stdin | Will pass a one-time 32-byte authentication capability; stdin will not be the ongoing command channel |
-| NVX implementation DLL to `openvmm.exe` | Windows named pipe or Linux Unix domain socket | Will carry ongoing lifecycle and workload control through the NVX framed binary protocol |
+| NVX implementation DLL to `openvmm.exe` | Windows named pipe | Will carry ongoing lifecycle and workload control through the NVX framed binary protocol |
 | OpenVMM to Alpine guest agent | Dedicated virtio-console | Will carry readiness, workload commands, stdout and stderr, cancellation, shutdown, and execution outcomes |
 
 
