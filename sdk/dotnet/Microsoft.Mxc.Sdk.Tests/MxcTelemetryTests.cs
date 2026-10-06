@@ -20,7 +20,7 @@ public sealed class MxcTelemetryCollectionDefinition
 
 /// <summary>
 /// Redirects the debug-build-only <c>MXC_TEST_LOCALAPPDATA_OVERRIDE</c>
-/// environment variable (read by <c>wxc_common::telemetry::consent</c> in
+/// environment variable (read by <c>mxc_common::telemetry::consent</c> in
 /// place of the real <c>LOCALAPPDATA</c> — see that module for the security
 /// rationale; a release-profile native build compiles this override out
 /// entirely and always resolves the real per-user known-folder path) to a

@@ -13,6 +13,9 @@
 //! `scripts/check-dotnet-bindings-codegen.js`, which regenerates and asserts
 //! the expected entry points are produced.
 
+#[path = "../../mxc-sdk/build/build_mxc_build_common.rs"]
+mod mxc_build_common;
+
 fn main() {
     mxc_build_common::embed_version_info("MXC native SDK library", "mxc_ffi.dll");
 

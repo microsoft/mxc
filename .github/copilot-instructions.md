@@ -12,11 +12,12 @@ MXC (Microsoft eXecution Container) is a cross-platform sandboxed code execution
 
 ## Architecture invariants
 
-- `wxc_common` is the cross-platform foundation. Do not move backend execution or enforcement into it, or add new backend implementation dependencies.
-- Backend crates generally depend on `wxc_common`; avoid cross-dependencies between backend crates. The existing optional `nanvix_common` dependency supplies shared MicroVM data/constants rather than backend dispatch.
-- `mxc_engine` is the single execution engine. Executor binaries and `mxc-sdk` delegate backend routing to it.
+- `mxc_sdk::mxc_common` is the cross-platform foundation. Do not move backend execution or enforcement into it, or add new backend implementation dependencies.
+- Keep implementation dependencies internal to `mxc-sdk` as Rust modules in the `mxc-sdk` crate, not as separate workspace crates.
+- Backend modules generally depend on `mxc_sdk::mxc_common`; avoid cross-dependencies between backend modules. The optional `nanvix_common` module supplies shared MicroVM data/constants rather than backend dispatch.
+- `mxc_sdk::mxc_engine` is the single execution engine. Executor binaries and the public SDK facade delegate backend routing to it.
 - Keep `wxc`, `lxc`, and `mxc_darwin` thin. Do not add backend-selection matches to the binaries.
-- Keep build-time staging in `mxc_build_common` or `nanvix_build_common`, not runtime crates.
+- Keep build-time staging in the `mxc-sdk/build/` build modules, not runtime modules.
 - Use `#[cfg(target_os = "...")]` and existing Cargo feature gates for platform-specific code.
 - Preserve the distinction between run-to-completion, streaming, and state-aware lifecycle APIs.
 - Unsupported policy must fail closed. Do not accept a field that the selected backend cannot enforce.
@@ -43,6 +44,15 @@ build.bat
 ./build-mac.sh
 ```
 
+The sidecars declared as `[[bin]]` targets in `src/mxc-sdk/Cargo.toml` are
+ordinary Cargo binary targets. Workspace builds compile the targets whose
+`required-features` are enabled; do not invoke Cargo recursively from
+`mxc-sdk/build.rs`. Build a sidecar directly with
+`cargo build -p mxc-sdk --bin <target>`. The `wxc-wslc-daemon` target requires
+`--features wslc`. Keep version-resource generation and dependency staging in
+the package build script, and keep artifact copying/signing in the repository
+build and CI entry points.
+
 ### Targeted validation
 
 ```text
@@ -50,14 +60,14 @@ build.bat
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo test -p wxc_common
-cargo test -p wxc_common -- config_parser
+cargo test -p mxc-sdk --lib
+cargo test -p mxc-sdk --lib -- config_parser
 
 # From sdk/node/
 npm test
 npm run test:integration
 
-# From sdk/dotnet/ (requires .NET SDK 10+)
+# From sdk/dotnet/ (requires .NET SDK 10+)
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 

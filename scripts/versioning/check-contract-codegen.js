@@ -30,21 +30,13 @@ const { compareVersions, parseVersion } = require("./lib/version.js");
 const repoRoot = join(__dirname, "..", "..");
 const cargoRoot = join(repoRoot, "src");
 
-// The fixture corpus lives beside the contract it exercises, in the crate's
-// own module naming (`0.9.0-alpha` -> `v0_9_0_alpha`). Deriving it from the
-// registry keeps the gate version-driven, so a publication that advances the
-// development contract validates its own fixtures rather than the previous
-// contract's.
+// The fixture corpus lives in the consolidated mxc-sdk package's integration
+// tests (`0.9.0-alpha` -> `v0_9_0_alpha`). Deriving it from the registry keeps
+// the gate version-driven, so a publication that advances the development
+// contract validates its own fixtures rather than the previous contract's.
 function fixtureRootFor(contract) {
   const module = `v${contract.version.replace(/[.-]/g, "_")}`;
-  return join(
-    cargoRoot,
-    "core",
-    "mxc_config_contract",
-    "tests",
-    module,
-    "fixtures"
-  );
+  return join(cargoRoot, "mxc-sdk", "tests", "mxc_contract", module, "fixtures");
 }
 
 function fail(message) {

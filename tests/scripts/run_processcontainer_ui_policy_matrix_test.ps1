@@ -8,7 +8,7 @@
 # are supposed to ALLOW an operation.
 #
 # Expectations come from `resolve_ui_restrictions`
-# (src/core/wxc_common/src/ui_policy.rs), whose rule is "the named thing is
+# (src/mxc-sdk/src/core/mxc_common/ui_policy.rs), whose rule is "the named thing is
 # the thing you keep": clipboard=read allows reading and blocks writing.
 #
 # Allow-direction coverage matters: a flag wired to the wrong bit, or set

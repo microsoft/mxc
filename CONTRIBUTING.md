@@ -132,7 +132,7 @@ Once you've discussed your proposed change with a team member and agreed on an a
 ### Project layout
 
 ```
-src/                Rust workspace (wxc-exec, lxc-exec, mxc-exec-mac, wxc_common, etc.)
+src/                Rust workspace (wxc-exec, lxc-exec, mxc-exec-mac, mxc_common, etc.)
 sdk/                TypeScript SDK (@microsoft/mxc-sdk)
 docs/               Schema and configuration documentation
 tests/              Test collateral (examples, configs, scripts)
@@ -239,16 +239,16 @@ Testing is a key component in the development workflow. We expect contributors t
 ```bash
 # Rust unit tests (from src/)
 cargo test --workspace
-cargo test -p wxc_common                    # Single crate
-cargo test -p wxc_common -- config_parser   # Filter by test name
+cargo test -p mxc-sdk --lib                         # Consolidated library unit tests
+cargo test -p mxc-sdk --lib -- config_parser        # Filter by test name
 
 # SDK unit and integration tests (from sdk/node/)
 npm test
 npm run test:integration
 
 # Rust end-to-end tests against the built binaries (from src/)
-cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
-cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests
+cargo test -p mxc-sdk --test 'wxc_e2e_tests_*'              # Invokes MXC binaries directly
+cargo test -p mxc-sdk --test 'wxc_e2e_tests_*' -- --ignored # Include stress tests
 ```
 
 PowerShell and shell helper scripts that drive the executor end-to-end live under `tests/scripts/` and require a local build. See the [README](./README.md) and the [SDK README](./sdk/node/README.md) for more.

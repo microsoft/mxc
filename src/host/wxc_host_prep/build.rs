@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#[path = "../../mxc-sdk/build/build_mxc_build_common.rs"]
+mod mxc_build_common;
+
 // Build script for `wxc_host_prep`:
 //
 // 1. Embed the standard MXC Windows VersionInfo resource (ProductName,
