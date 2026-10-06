@@ -226,6 +226,10 @@ fn reject_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcErr
         || !p.denied_paths.is_empty()
         || !p.allowed_hosts.is_empty()
         || !p.blocked_hosts.is_empty()
+        || p.default_network_policy != crate::mxc_common::models::NetworkPolicy::Block
+        || p.network_enforcement_mode
+            != crate::mxc_common::models::NetworkEnforcementMode::Capabilities
+        || p.allow_local_network
         || p.network_proxy.is_enabled()
         || p.network_mode_specified
         || p.network_egress.is_some()

@@ -205,7 +205,7 @@ middle rows provide different protections and are not ordered relative to each o
 
 For identity-scoped proxies, the scoped peer rule and `privateNetworkClientServer` do not bypass Windows
 Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
-declaration shown in the [historical schema 0.8 manifest example](examples/0.8.0-schema.md); its application entry uses
+declaration shown in the [proxy package manifest example](examples/0.8.0-schema.md); its application entry uses
 `uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
 requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID, proxy
 executable, and configured port.
@@ -279,7 +279,10 @@ proxy peer identity, and host-loopback allow fail with a typed unsupported-polic
 ## 3. WFP enforcement
 
 PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. AppContainer fallback does not
-install directional WFP filters.
+install directional WFP filters. It uses capabilities for supported direction
+defaults and keeps the external runtime proxy setup. Its network audit records retain the firewall fields with
+`firewall_rules_created` and `firewall_rules_removed` at `0`, `firewall_applied` at `false`, and
+`firewall_removal_ok` at `true`.
 
 WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.
 `privateNetworkClientServer`, selected through `ingress.default`, is the prerequisite for private-network access and
