@@ -579,6 +579,7 @@ export interface ProbeFacts {
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
   baseContainerSupportsIngressHostLoopbackAllow: boolean;
+  baseContainerSupportsIdentitylessLoopbackProxy: boolean;
   isolationSessionAvailable: boolean;
   hyperlightAvailable: boolean;
   uiCapabilities: UiCapabilitySupport;

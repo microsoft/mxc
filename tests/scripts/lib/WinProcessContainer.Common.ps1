@@ -351,13 +351,9 @@ function Get-HostCapabilities {
     $enumBit = if ($p.probes.PSObject.Properties['baseContainerSupportsEnumeratePaths']) {
         [bool]$p.probes.baseContainerSupportsEnumeratePaths
     } else { $false }
-    $backends = Invoke-Probe -Wxc $WxcDebug -AvailableBackends -Phase 'P0' -Name 'backend-capabilities'
-    $processContainer = @($backends | Where-Object { $_ -and $_.backend -eq 'processcontainer' })
-    if ($processContainer.Count -ne 1) {
-        throw 'Get-HostCapabilities: backend discovery did not report exactly one ProcessContainer backend.'
-    }
-    $identitylessProxyBit = $processContainer[0].PSObject.Properties['capabilities'] -and
-        ($processContainer[0].capabilities -contains 'identitylessLoopbackProxy')
+    $identitylessProxyBit = if ($p.probes.PSObject.Properties['baseContainerSupportsIdentitylessLoopbackProxy']) {
+        [bool]$p.probes.baseContainerSupportsIdentitylessLoopbackProxy
+    } else { $false }
     # uiCapabilities is absent on older binaries / when the detector errored.
     $canInject = $false
     if ($p.probes.PSObject.Properties['uiCapabilities'] -and
@@ -698,13 +694,12 @@ function New-Config {
 
 # Test runners
 function Invoke-Probe {
-    param([string]$Wxc, [string]$ConfigPath = $null, [string]$Phase, [string]$Name,
-          [switch]$AvailableBackends)
+    param([string]$Wxc, [string]$ConfigPath = $null, [string]$Phase, [string]$Name)
     # Use ProcessStartInfo so we can keep stdout (the JSON) separate from
     # stderr (DACL-recovery messages, build-time warnings).
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Wxc
-    $argList = @(if ($AvailableBackends) { '--available-backends' } else { '--probe' })
+    $argList = @('--probe')
     if ($ConfigPath) { $argList += @('--config', "`"$ConfigPath`"") }
     $psi.Arguments = ($argList -join ' ')
     $psi.RedirectStandardOutput = $true

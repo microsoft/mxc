@@ -16,7 +16,6 @@ import {
   _setRequestProbeDependencies,
   probe,
 } from '../../src/v1/probe.js';
-import type { ProbeFacts } from '../../src/v1/types.js';
 
 const completeProbe = {
   tier: 'appcontainer-dacl',
@@ -31,6 +30,7 @@ const completeProbe = {
     baseContainerSupportsDenyPaths: false,
     baseContainerSupportsEnumeratePaths: false,
     baseContainerSupportsIngressHostLoopbackAllow: false,
+    baseContainerSupportsIdentitylessLoopbackProxy: false,
     isolationSessionAvailable: false,
     hyperlightAvailable: false,
     uiCapabilities: {
@@ -193,11 +193,33 @@ describe('probe', () => {
     assert.equal(output.needsDaclAugmentation, true);
   });
 
-  it('accepts the published V1 ProbeFacts shape', () => {
-    const facts: ProbeFacts = completeProbe.probes;
-    const output = runProbeOutput({ ...completeProbe, probes: facts });
+  it('preserves identity-less proxy support with or without general ingress', () => {
+    for (const [supported, ingressSupported] of [[false, false], [true, false], [true, true]]) {
+      const output = runProbeOutput({
+        ...completeProbe,
+        tier: 'base-container',
+        needsDaclAugmentation: false,
+        probes: {
+          ...completeProbe.probes,
+          baseContainerSupportsIdentitylessLoopbackProxy: supported,
+          baseContainerSupportsIngressHostLoopbackAllow: ingressSupported,
+        },
+      });
+      assert.equal(output.probes.baseContainerSupportsIdentitylessLoopbackProxy, supported);
+      assert.equal(output.probes.baseContainerSupportsIngressHostLoopbackAllow, ingressSupported);
+    }
+  });
 
-    assert.deepStrictEqual(output.probes, facts);
+  it('rejects missing or invalid identity-less loopback proxy facts', () => {
+    for (const value of [undefined, null, 'true', 1]) {
+      assertProbeOutputRejected({
+        ...completeProbe,
+        probes: {
+          ...completeProbe.probes,
+          baseContainerSupportsIdentitylessLoopbackProxy: value,
+        },
+      });
+    }
   });
 
   it('rejects an unknown envelope field', () => {

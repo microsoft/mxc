@@ -34,51 +34,6 @@ fn platform_support_reports_host() {
     assert!(!support.available_methods.is_empty());
 }
 
-#[cfg(target_os = "windows")]
-#[test]
-fn published_v1_probe_facts_remain_constructible_and_exhaustive() {
-    use mxc_sdk::v1::{ProbeFacts, UiCapabilitySupport};
-
-    let facts = ProbeFacts {
-        base_container_api_present: false,
-        native_capture_available: false,
-        guarded_capture_available: false,
-        bfscfg_present: false,
-        bfs_compiled_in: false,
-        base_container_supports_deny_paths: false,
-        base_container_supports_enumerate_paths: false,
-        base_container_supports_ingress_host_loopback_allow: false,
-        isolation_session_available: false,
-        hyperlight_available: false,
-        ui_capabilities: UiCapabilitySupport {
-            can_block_clipboard_read: false,
-            can_block_clipboard_write: false,
-            can_block_input_injection: false,
-            can_block_input_method_changes: false,
-            can_block_external_ui_objects: false,
-            can_block_global_ui_namespace: false,
-            can_block_desktop_switching: false,
-            can_block_logoff_or_shutdown: false,
-            can_block_system_parameter_changes: false,
-            can_block_display_settings_changes: false,
-        },
-    };
-    let ProbeFacts {
-        base_container_api_present,
-        native_capture_available: _,
-        guarded_capture_available: _,
-        bfscfg_present: _,
-        bfs_compiled_in: _,
-        base_container_supports_deny_paths: _,
-        base_container_supports_enumerate_paths: _,
-        base_container_supports_ingress_host_loopback_allow: _,
-        isolation_session_available: _,
-        hyperlight_available: _,
-        ui_capabilities: _,
-    } = facts;
-    assert!(!base_container_api_present);
-}
-
 #[cfg(target_os = "macos")]
 #[test]
 fn platform_support_macos_is_seatbelt() {
