@@ -303,7 +303,7 @@ the LXC runner: apply rules before execution, remove rules after.
 
 ### 10. Documentation
 
-- `docs/bwrap-support/bubblewrap-backend.md` — user guide
+- `docs/backend-bwrap/bubblewrap-backend.md` — user guide
 - Update `docs/schema.md` — new containment value and config block
 - Update `.github/copilot-instructions.md` — add to backend table
 - Update `docs/development/guides/authoring-a-new-feature.md` if the experimental feature checklist changes
@@ -363,7 +363,7 @@ policy gap is a design decision, not an implementation challenge.
 - `sdk/node/src/helper.ts` — no changes needed (lxc-exec handles both backends)
 
 ### Documentation (new/modify)
-- `docs/bwrap-support/bubblewrap-backend.md` (new)
+- `docs/backend-bwrap/bubblewrap-backend.md` (new)
 - `docs/schema.md` (modify)
 - `.github/copilot-instructions.md` (modify — add to backend table)
 

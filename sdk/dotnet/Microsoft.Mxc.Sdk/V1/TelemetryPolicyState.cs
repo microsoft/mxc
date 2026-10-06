@@ -5,7 +5,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// The administrative (MDM / Group Policy) telemetry decision for this machine.
-/// See docs/telemetry/telemetry-administrative-policy.md for the admin-facing reference.
+/// See docs/telemetry.md for the admin-facing reference.
 ///
 /// An administrator can disable MXC telemetry machine-wide via Intune, another
 /// MDM, or Group Policy. The policy is a <em>ceiling, never a grant</em>: an

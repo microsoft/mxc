@@ -102,7 +102,7 @@ See [`docs/development/build-and-test/schema-codegen.md`](../docs/development/bu
 - Preserve panic containment across `mxc_ffi`; no panic may unwind through the C ABI.
 - Preserve exact resource ownership and cleanup contracts, especially for processes, jobs, traces, sessions, and native handles.
 - Do not weaken validation or convert failures into success-shaped fallbacks.
-- Telemetry is Windows-only, requires explicit user consent, and fails closed. Administrative policy may restrict consent but may never grant it. See [`docs/telemetry/`](../docs/telemetry/).
+- Telemetry is Windows-only, requires explicit user consent, and fails closed. Administrative policy may restrict consent but may never grant it. See [`docs/telemetry.md`](../docs/telemetry.md).
 
 ## Documentation
 
@@ -113,7 +113,7 @@ Update documentation in the same change when behavior changes:
 - Versioning or promotion: `docs/development/architecture/versioning.md`.
 - Backend behavior: the corresponding guide under `docs/`.
 - SDK APIs: the affected SDK README and versioned references under `docs/reference/{rust,dotnet,node}/v*/`.
-- Telemetry: `docs/telemetry/`.
+- Telemetry: `docs/telemetry.md`.
 - CI validation: `docs/development/build-and-test/ci-validation-infrastructure.md`.
 
 Do not duplicate detailed backend behavior here. Keep the canonical explanation in the subsystem documentation.

@@ -137,7 +137,7 @@ Backend-specific migration can require an additional acknowledgment without chan
   `ingress.default: "deny"` is rejected: no rule can carry the promised host-to-container grant. The reverse pair,
   `ingress.hostLoopback: "deny"` under `ingress.default: "allow"`, is accepted and enforces the container-to-host
   half only; the blanket inbound grant over-permits the host-to-container half, which is documented in the
-  [Seatbelt backend guide](../../../seatbelt/seatbelt-backend.md).
+  [Seatbelt backend guide](../../../backend-seatbelt/seatbelt-backend.md).
 - Isolation Session cannot enforce any network restriction. Its directional
   acknowledgment is reserved for the backend migration work; until that lands,
   callers must continue using the legacy unrestricted acknowledgment
@@ -147,5 +147,5 @@ Backend-specific migration can require an additional acknowledgment without chan
 
 | Backend | Configuration |
 |---|---|
-| ProcessContainer | [Schema 0.8 proxy configuration](../../../process-container/examples/0.8.0-schema.md) |
-| Seatbelt (macOS) | [Schema 0.8 configuration](../../../seatbelt/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy)
+| ProcessContainer | [Schema 0.8 proxy configuration](../../../backend-process-container/examples/0.8.0-schema.md) |
+| Seatbelt (macOS) | [Schema 0.8 configuration](../../../backend-seatbelt/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy)

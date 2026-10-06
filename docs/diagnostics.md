@@ -148,7 +148,7 @@ caller is responsible for deleting it when it is no longer needed.
 The checked-in
 [`tests/examples/29_capture_denials.json`](../tests/examples/29_capture_denials.json)
 is a minimal block-mode example. See
-[Learning-mode capabilities](learning-mode/capabilities.md#relationship-to-denial-capture)
+[Logging access denied](logging-access-denied.md#relationship-to-denial-capture)
 for the output schemas, bounds, host-selection behavior, and SDK metadata
 surfaces.
 

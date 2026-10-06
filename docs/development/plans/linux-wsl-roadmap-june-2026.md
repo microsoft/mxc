@@ -103,7 +103,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 16 | **(N4) Deny-wins precedence** | ✅ Addressed | `egress.deny[]` rules are emitted ahead of `egress.allow[]` rules, matching the ordering already used for the legacy host lists. The legacy DNS exemption is not carried into a directional posture — port 53 is governed by the same rules as every other forwarded destination, per GA decision D3. Two paths still sit outside the generated rules: the base chain's `ESTABLISHED,RELATED` accept, and the bridge resolver, which the container reaches through the host's `INPUT` path rather than this chain. Both are stated in `docs/lxc-support/lxc-backend.md`. | S |
+| 16 | **(N4) Deny-wins precedence** | ✅ Addressed | `egress.deny[]` rules are emitted ahead of `egress.allow[]` rules, matching the ordering already used for the legacy host lists. The legacy DNS exemption is not carried into a directional posture — port 53 is governed by the same rules as every other forwarded destination, per GA decision D3. Two paths still sit outside the generated rules: the base chain's `ESTABLISHED,RELATED` accept, and the bridge resolver, which the container reaches through the host's `INPUT` path rather than this chain. Both are stated in `docs/backend-lxc/lxc-backend.md`. | S |
 | 17 | **(N5) Proxy — env vars + enforcement** | 🟡 Actionable | Schema field exists, backend ignores it. Fix: inject `HTTP_PROXY`/`HTTPS_PROXY`, clear all inherited proxy vars, and restrict egress to proxy port only via iptables. | M |
 
 > **Example (N5).** Consumer starts proxy on `127.0.0.1:8080`. MXC sets `HTTP_PROXY=127.0.0.1:8080` inside the container and applies `iptables -A OUTPUT -d 127.0.0.1 --dport 8080 -j ACCEPT` + default DROP. An app ignoring the env var tries `connect(140.82.112.4:443)` → dropped.
@@ -135,7 +135,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Description | Effort |
 |---|---|---|---|
 | 29 | **Structured denied-resource diagnostics** | Process Container surfaces structured denial reasons; LXC returns opaque "execution failed" strings — wire equivalent telemetry. | M |
-| 30 | **Doc drift cleanup** | `docs/lxc-support/lxc-backend.md:38-49,102-103` references `containerName` and `removeRulesOnExit` fields that don't exist in code. | S |
+| 30 | **Doc drift cleanup** | `docs/backend-lxc/lxc-backend.md:38-49,102-103` references `containerName` and `removeRulesOnExit` fields that don't exist in code. | S |
 | 31 | **Un-gate LXC network tests in CI** | Done for GHA (PR `user/sodas/lxc-ci-enablement`). `MXC_SKIP_LXC_NETWORK_TESTS=1` kept on both GHA and ADO. ADO egress blocks `lxcbr0` NAT'd traffic. *(see [Ext-Dep E1](#external-dependencies))* | M |
 
 ---
@@ -486,7 +486,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
 | 28 | **Port-mapping support** | ✅ Addressed | TCP host→container port forwarding shipped in [PR #530](https://github.com/microsoft/mxc/pull/530) (merged 2026-06-23). Provides explicit per-port inbound exposure (the `hostLoopback: "allow"` primitive for mapped ports); policy-driven `ingress.hostLoopback` default posture still needs the VM-level API (see Network #16 / SDK dep #1). | — |
-| 29 | **State-aware lifecycle** | ✅ Addressed | Daemon-backed warm session/container reuse across separate phase processes (`wxc-wslc-daemon.exe`) implements `StatefulSandboxBackend` for WSLC — the highest-value WSLC win (slowest cold start). See `docs/wsl/wslc-state-aware.md`. | — |
+| 29 | **State-aware lifecycle** | ✅ Addressed | Daemon-backed warm session/container reuse across separate phase processes (`wxc-wslc-daemon.exe`) implements `StatefulSandboxBackend` for WSLC — the highest-value WSLC win (slowest cold start). See `docs/backend-wslc/wslc-state-aware.md`. | — |
 | 30 | **Structured denied-resource diagnostics** | 🟡 Actionable | Parity with Process Container's structured denial reporting. | M |
 | 31 | **Un-gate WSLC tests in CI** | ⛔ Blocked | Needs `wslcsdk.dll` public NuGet (see SDK dep #2 above). | M |
 

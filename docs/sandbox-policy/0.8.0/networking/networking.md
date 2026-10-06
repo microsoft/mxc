@@ -317,7 +317,7 @@ sockets come with their own security questions and should be outlined in a separ
 
 **Elevation caveat:** Installing these filters (WFP on Windows, iptables on the Linux backends) generally requires elevation. Elevating on every sandbox launch is out of the question, so MXC applies them through a privileged broker/service rather than from the unelevated launch path. A per-platform, per-technology elevation story must be defined in a separate MXC elevation design doc and is a prerequisite for this enforcement.
 
-> **Bubblewrap does not need this.** The caveat above holds only for filters installed on the *host*. Bubblewrap gives the sandbox its own network namespace and programs iptables inside it from a supervisor holding `CAP_NET_ADMIN` in an unprivileged user namespace — namespace-scoped capabilities are not host privilege, so the rules install with no elevation and no broker. The sandbox still cannot alter them, because it drops `CAP_NET_ADMIN` before the workload runs. Shipped at schema 0.8; see `docs/bwrap-support/bubblewrap-backend.md`. The elevation design remains a prerequisite for the host-filter backends only.
+> **Bubblewrap does not need this.** The caveat above holds only for filters installed on the *host*. Bubblewrap gives the sandbox its own network namespace and programs iptables inside it from a supervisor holding `CAP_NET_ADMIN` in an unprivileged user namespace — namespace-scoped capabilities are not host privilege, so the rules install with no elevation and no broker. The sandbox still cannot alter them, because it drops `CAP_NET_ADMIN` before the workload runs. Shipped at schema 0.8; see `docs/backend-bwrap/bubblewrap-backend.md`. The elevation design remains a prerequisite for the host-filter backends only.
 
 ### D3: IP literals and CIDRs only (no DNS names)
 
@@ -449,7 +449,7 @@ they cannot preserve either posture.
 | DNS | DNS queries follow same IP/CIDR allow/block rules as other traffic. No domain-based filtering. | If DNS resolver IP is blocked, DNS fails. If allowed, sandbox can resolve any domain. **For HTTP(S) via the proxy, DNS resolution happens in the proxy.** |
 | Bypass resistance | High. Kernel-enforced WFP filters. Bypass requires kernel compromise or AppContainer escape (elevation). | |
 
-**Implementation doc:** [Process Container Networking Configuration, GA](../../../process-container/networking.md)
+**Implementation doc:** [Process Container Networking Configuration, GA](../../../backend-process-container/networking.md)
 
 ### WSLc: GA enforcement
 

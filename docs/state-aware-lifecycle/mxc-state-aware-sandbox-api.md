@@ -1576,7 +1576,7 @@ cross-cutting field, a column per phase, with values from the closed set
 `applied` / `rejected` / `ignored`. Specific values per backend are documented in each
 backend's plan doc (§11.6). The IsolationSession row set below mirrors the shipped
 backend; the authoritative statement lives in
-[IsolationSession state-aware Rust architecture](../development/architecture/isolation-session/state-aware-rust.md):
+[IsolationSession state-aware Rust architecture](../development/architecture/backend-isolation-session/state-aware-rust.md):
 
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
@@ -1601,7 +1601,7 @@ unconditionally by the in-guest agent).
 > **Known gap (`deniedPaths`).** WindowsSandbox honors `deniedPaths` only as a
 > best-effort provision-time rejection (a `.wsb` mapped share cannot express a Deny
 > ACE), not as a hardened security boundary. See the "Known gap (`deniedPaths`)"
-> caveat in [`docs/windows-sandbox/windows-sandbox.md`](../windows-sandbox/windows-sandbox.md).
+> caveat in [`docs/backend-windows-sandbox/windows-sandbox.md`](../backend-windows-sandbox/windows-sandbox.md).
 
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
