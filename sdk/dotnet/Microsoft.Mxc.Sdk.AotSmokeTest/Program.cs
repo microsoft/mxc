@@ -48,12 +48,12 @@ foreach (var enabled in new bool?[] { null, true, false })
         x => x.Size == initialPtySize && x.Telemetry?.Enabled == enabled,
         "PTY options, telemetry, and initial dimensions");
 }
-CheckRoundTrip(new ProvisionOptions(), _ => true, "provision options");
-CheckRoundTrip(new StartOptions(), _ => true, "start options");
-CheckRoundTrip(new StopOptions(), _ => true, "stop options");
-CheckRoundTrip(new DeprovisionOptions(), _ => true, "deprovision options");
-CheckRoundTrip(new SpawnInContainerOptions(), _ => true, "container spawn options");
-CheckRoundTrip(new RunInContainerOptions(), _ => true, "container run options");
+CheckRoundTrip(new ProvisionOptions(), x => x.Telemetry is null, "provision options");
+CheckRoundTrip(new StartOptions(), x => x.Telemetry is null, "start options");
+CheckRoundTrip(new StopOptions(), x => x.Telemetry is null, "stop options");
+CheckRoundTrip(new DeprovisionOptions(), x => x.Telemetry is null, "deprovision options");
+CheckRoundTrip(new SpawnInContainerOptions(), x => x.Telemetry is null, "container spawn options");
+CheckRoundTrip(new RunInContainerOptions(), x => x.Telemetry is null, "container run options");
 CheckRoundTrip(
     new SpawnInContainerWithPtyOptions { Size = initialPtySize },
     x => x.Size == initialPtySize,
