@@ -337,7 +337,8 @@ const string probeJson = """
     "bfsCompiledIn": false,
     "baseContainerSupportsDenyPaths": true,
     "baseContainerSupportsEnumeratePaths": false,
-    "baseContainerSupportsIngressHostLoopbackAllow": true,
+    "baseContainerSupportsIngressHostLoopbackAllow": false,
+    "baseContainerSupportsProxyLoopbackCompatibility": true,
     "isolationSessionAvailable": true,
     "hyperlightAvailable": false,
     "uiCapabilities": {
@@ -359,6 +360,14 @@ var probe = MxcContainer.ParseProbeOutput(probeJson);
 Check(probe.Tier == IsolationTier.AppContainerDacl, "probe tier parsed");
 Check(probe.NeedsDaclAugmentation == true, "probe dacl augmentation parsed");
 Check(probe.Probes.BaseContainerApiPresent, "probe facts parsed");
+Check(probe.Probes.BaseContainerSupportsProxyLoopbackCompatibility, "proxy loopback compatibility parsed");
 Check(probe.Probes.UiCapabilities.CanBlockClipboardRead, "probe ui capabilities parsed");
+var nativeProbe = MxcJson.Deserialize<NativeProbeOutput>(probeJson, MxcJson.ProbeOptions)!;
+CheckRoundTrip(nativeProbe.Probes!,
+    x => x.BaseContainerSupportsProxyLoopbackCompatibility, "proxy loopback compatibility facts");
+var discovery = MxcPlatform.ParseAvailableBackends(
+    """[{"backend":"processcontainer","tier":"base-container","capabilities":["proxyLoopbackCompatibility"]}]""");
+Check(discovery.Single().Capabilities.SequenceEqual([BackendCapability.ProxyLoopbackCompatibility]),
+    "proxy loopback compatibility discovery");
 
 Console.WriteLine("AOT smoke test passed: all JSON paths are reflection-free.");

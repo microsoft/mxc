@@ -14,7 +14,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::learning_mode_core::DenialAnalyzer;
-use crate::learning_mode_windows::{EtlDenialAnalyzer, LEARNING_MODE_API_SET};
+use crate::learning_mode_windows::{EtlDenialAnalyzer, LearningModeError, LEARNING_MODE_API_SET};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
     HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -328,15 +328,32 @@ impl BaseContainerRunner {
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress)
     }
 
+    /// Whether this host supports the identity-less proxy loopback workaround.
+    /// This is not general host-loopback ingress support.
+    pub(crate) fn supports_proxy_loopback_compatibility() -> Result<bool, LearningModeError> {
+        if !Self::is_base_container_api_present() {
+            return Ok(false);
+        }
+        Self::psec_1_0_only(secenv::supports_version)
+    }
+
+    fn psec_1_0_only(
+        mut supports_version: impl FnMut(SecurityEnvironmentVersion) -> Result<bool, LearningModeError>,
+    ) -> Result<bool, LearningModeError> {
+        // A 1.1+ host must keep using the advertised ingress support flag,
+        // even if it also accepts a 1.0 payload.
+        if supports_version(SecurityEnvironmentVersion::V1_1)? {
+            return Ok(false);
+        }
+        supports_version(SecurityEnvironmentVersion::V1_0)
+    }
+
     // Temporary compatibility for explicit identity-less proxies on PSEC 1.0-only
     // hosts. Remove once those hosts support PSEC 1.1; keep loopback allow opt-in.
     fn psec_1_0_proxy_loopback_workaround(
         request: &ExecutionRequest,
-        mut supports_version: impl FnMut(
-            SecurityEnvironmentVersion,
-        )
-            -> Result<bool, learning_mode_windows::LearningModeError>,
-    ) -> Result<bool, learning_mode_windows::LearningModeError> {
+        supports_version: impl FnMut(SecurityEnvironmentVersion) -> Result<bool, LearningModeError>,
+    ) -> Result<bool, LearningModeError> {
         let policy = &request.policy;
         if !policy.runtime_network_proxy_specified
             || !policy.network_proxy.is_enabled()
@@ -345,12 +362,7 @@ impl BaseContainerRunner {
         {
             return Ok(false);
         }
-        // A 1.1+ host must keep using the advertised ingress support flag,
-        // even if it also accepts a 1.0 payload.
-        if supports_version(SecurityEnvironmentVersion::V1_1)? {
-            return Ok(false);
-        }
-        supports_version(SecurityEnvironmentVersion::V1_0)
+        Self::psec_1_0_only(supports_version)
     }
 
     /// The single PSEC version-selection point: start at 1.0 and raise it to
@@ -411,11 +423,12 @@ impl BaseContainerRunner {
         }
         if unrestricted_host_loopback_allowed(&request.policy)
             && !Self::supports_ingress_host_loopback_allow()
+            && !matches!(
+                Self::psec_1_0_proxy_loopback_workaround(request, secenv::supports_version),
+                Ok(true)
+            )
         {
-            match Self::psec_1_0_proxy_loopback_workaround(request, secenv::supports_version) {
-                Ok(true) => {}
-                Ok(false) | Err(_) => return BaseContainerRequestDecision::IngressUnsupported,
-            }
+            return BaseContainerRequestDecision::IngressUnsupported;
         }
         BaseContainerRequestDecision::Serviceable
     }
@@ -2940,6 +2953,35 @@ mod tests {
     }
 
     #[test]
+    fn proxy_loopback_compatibility_requires_base_container_api() {
+        let _guard = crate::process_container_common::test_env::BcUsableGuard::set(false);
+        assert!(!BaseContainerRunner::supports_proxy_loopback_compatibility().unwrap());
+    }
+
+    #[test]
+    fn proxy_loopback_compatibility_requires_psec_1_0_only() {
+        for (supports_1_0, supports_1_1, expected) in [
+            (true, false, true),
+            (true, true, false),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            let supported = BaseContainerRunner::psec_1_0_only(|version| {
+                Ok(if version == SecurityEnvironmentVersion::V1_1 {
+                    supports_1_1
+                } else {
+                    supports_1_0
+                })
+            })
+            .unwrap();
+            assert_eq!(
+                supported, expected,
+                "PSEC 1.0={supports_1_0}, PSEC 1.1={supports_1_1}"
+            );
+        }
+    }
+
+    #[test]
     fn psec_1_0_proxy_workaround_requires_a_1_0_only_host() {
         let request = psec_1_0_proxy_request();
         for (supports_1_0, supports_1_1, expected) in [
@@ -3009,7 +3051,7 @@ mod tests {
             let result =
                 BaseContainerRunner::psec_1_0_proxy_loopback_workaround(&request, |version| {
                     if version == failing_version {
-                        Err(learning_mode_windows::LearningModeError::HResultCall {
+                        Err(LearningModeError::HResultCall {
                             function: "IsProcessSecurityEnvironmentVersionSupported",
                             code: E_NOTIMPL.0,
                         })
@@ -3017,10 +3059,7 @@ mod tests {
                         Ok(false)
                     }
                 });
-            assert!(matches!(
-                result,
-                Err(learning_mode_windows::LearningModeError::HResultCall { .. })
-            ));
+            assert!(matches!(result, Err(LearningModeError::HResultCall { .. })));
         }
     }
 
@@ -3041,7 +3080,7 @@ mod tests {
             .any(|capability| capability == "networkLoopback"));
         assert_eq!(
             network.allowed_appcontainer_peer(),
-            Some(crate::base_container_helpers::LOOPBACK_NETWORK_PEER)
+            Some(crate::process_container_common::base_container_helpers::LOOPBACK_NETWORK_PEER)
         );
         assert_eq!(
             network.proxy().unwrap().url(),

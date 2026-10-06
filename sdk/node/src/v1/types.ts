@@ -711,6 +711,7 @@ export type BackendCapability =
   | 'filesystemEnumeratePaths'
   | 'ingressHostLoopbackAllow'
   | 'proxyEnforcement'
+  | 'proxyLoopbackCompatibility'
   | 'unknown';
 
 /** One host-available backend and its native capabilities. */
@@ -784,6 +785,8 @@ export interface ProbeFacts {
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
   baseContainerSupportsIngressHostLoopbackAllow: boolean;
+  /** PSEC 1.0-only identity-less proxy workaround, not general ingress support. */
+  baseContainerSupportsProxyLoopbackCompatibility: boolean;
   /** True when this executor includes IsolationSession and the host can activate it. */
   isolationSessionAvailable: boolean;
   /** True when this executor includes Hyperlight and its host runtime is available. */

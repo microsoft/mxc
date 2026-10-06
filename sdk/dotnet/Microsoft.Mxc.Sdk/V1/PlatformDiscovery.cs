@@ -78,6 +78,12 @@ public enum BackendCapability
     /// Native filesystem enumeration-only access at the reported tier.
     /// </summary>
     FilesystemEnumeratePaths = 5,
+
+    /// <summary>
+    /// Identity-less proxy loopback workaround on PSEC 1.0-only hosts.
+    /// Requires explicit host-loopback allow; not general ingress support.
+    /// </summary>
+    ProxyLoopbackCompatibility = 6,
 }
 
 /// <summary>One host-available backend and its probed capabilities.</summary>
@@ -146,6 +152,8 @@ public sealed class ProbeFacts
     public bool BaseContainerSupportsDenyPaths { get; init; }
     public bool BaseContainerSupportsEnumeratePaths { get; init; }
     public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
+    /// <summary>PSEC 1.0-only identity-less proxy workaround, not general ingress support.</summary>
+    public bool BaseContainerSupportsProxyLoopbackCompatibility { get; init; }
     public bool IsolationSessionAvailable { get; init; }
     public bool HyperlightAvailable { get; init; }
     public required UiCapabilitySupport UiCapabilities { get; init; }
@@ -278,6 +286,10 @@ internal sealed class NativeProbeFacts
     [JsonRequired]
     [JsonPropertyName("baseContainerSupportsIngressHostLoopbackAllow")]
     public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("baseContainerSupportsProxyLoopbackCompatibility")]
+    public bool BaseContainerSupportsProxyLoopbackCompatibility { get; init; }
 
     [JsonRequired]
     [JsonPropertyName("isolationSessionAvailable")]

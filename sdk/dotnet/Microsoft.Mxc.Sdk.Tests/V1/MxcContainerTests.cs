@@ -30,6 +30,7 @@ public class MxcContainerTests
             "baseContainerSupportsDenyPaths": true,
             "baseContainerSupportsEnumeratePaths": false,
             "baseContainerSupportsIngressHostLoopbackAllow": true,
+            "baseContainerSupportsProxyLoopbackCompatibility": false,
             "isolationSessionAvailable": true,
             "hyperlightAvailable": false,
             "uiCapabilities": {
@@ -272,6 +273,40 @@ public class MxcContainerTests
             json["probes"]!.AsObject().Remove("bfscfgPresent"));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ProbeParser_PreservesProxyLoopbackCompatibility(bool supported)
+    {
+        var json = CreateCompleteProbeJson();
+        json["tier"] = "base-container";
+        json["needsDaclAugmentation"] = false;
+        json["probes"]!["baseContainerSupportsIngressHostLoopbackAllow"] = false;
+        json["probes"]!["baseContainerSupportsProxyLoopbackCompatibility"] = supported;
+
+        var output = MxcContainer.ParseProbeOutput(json.ToJsonString());
+
+        Assert.Equal(supported, output.Probes.BaseContainerSupportsProxyLoopbackCompatibility);
+        Assert.False(output.Probes.BaseContainerSupportsIngressHostLoopbackAllow);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsMissingProxyLoopbackCompatibility()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!.AsObject().Remove("baseContainerSupportsProxyLoopbackCompatibility"));
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("\"true\"")]
+    [InlineData("1")]
+    public void ProbeParser_RejectsInvalidProxyLoopbackCompatibility(string value)
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!["baseContainerSupportsProxyLoopbackCompatibility"] = JsonNode.Parse(value));
+    }
+
     [Fact]
     public void ProbeParser_RejectsMissingRequiredUiBoolean()
     {
@@ -456,6 +491,7 @@ public class MxcContainerTests
     [InlineData("filesystemEnumeratePaths", BackendCapability.FilesystemEnumeratePaths)]
     [InlineData("ingressHostLoopbackAllow", BackendCapability.IngressHostLoopbackAllow)]
     [InlineData("proxyEnforcement", BackendCapability.ProxyEnforcement)]
+    [InlineData("proxyLoopbackCompatibility", BackendCapability.ProxyLoopbackCompatibility)]
     public void Discovery_MapsEveryNativeCapability(
         string wireName,
         BackendCapability expected)
@@ -472,6 +508,7 @@ public class MxcContainerTests
         Assert.Equal(3, (int)BackendCapability.FilesystemDeniedPaths);
         Assert.Equal(4, (int)BackendCapability.IngressHostLoopbackAllow);
         Assert.Equal(5, (int)BackendCapability.FilesystemEnumeratePaths);
+        Assert.Equal(6, (int)BackendCapability.ProxyLoopbackCompatibility);
     }
 
     [Theory]

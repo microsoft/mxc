@@ -36,8 +36,13 @@ public enum BackendCapability
     FilesystemDeniedPaths = 3,
     IngressHostLoopbackAllow = 4,
     FilesystemEnumeratePaths = 5,
+    ProxyLoopbackCompatibility = 6,
 }
 ```
+
+`ProxyLoopbackCompatibility` reports the identity-less proxy workaround on
+PSEC 1.0-only hosts, not general ingress support. See
+[proxy compatibility discovery](../../../process-container/networking.md#discovering-proxy-loopback-compatibility).
 
 
 ## `Microsoft.Mxc.Sdk.V1.CaptureDenialsError`
@@ -952,6 +957,7 @@ public sealed class ProbeFacts
     public bool BaseContainerSupportsDenyPaths { get; init; }
     public bool BaseContainerSupportsEnumeratePaths { get; init; }
     public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
+    public bool BaseContainerSupportsProxyLoopbackCompatibility { get; init; }
     public bool IsolationSessionAvailable { get; init; }
     public bool HyperlightAvailable { get; init; }
     public required UiCapabilitySupport UiCapabilities { get; init; }

@@ -254,6 +254,12 @@ through V1 creation. Discovery is advisory, and launch-time validation still
 applies. Native failures and malformed discovery results throw rather than
 reporting an unsupported host.
 
+For the PSEC 1.0-only identity-less proxy workaround, check the ProcessContainer
+capability `proxyLoopbackCompatibility` or, on Windows,
+`probe().probes.baseContainerSupportsProxyLoopbackCompatibility`.
+This is not general host-loopback ingress support; see
+[proxy compatibility discovery](../../docs/process-container/networking.md#discovering-proxy-loopback-compatibility).
+
 Filesystem discovery helpers and their result/options types are grouped under
 `policy.filesystem` from `@microsoft/mxc-sdk/v1`. They take an optional
 `environment` map; omission uses

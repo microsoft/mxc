@@ -114,10 +114,31 @@ PSEC rejects it alongside a proxy. Their ingress default still selects `privateN
 host-loopback setting selects both the `networkLoopback` capability and the `MXC-Loopback` peer rather than an
 identity-scoped proxy peer. The peer alone is insufficient: without the capability, the environment can be created
 but its client cannot reach the host proxy.
-The public ingress policy remains required, and host-loopback allow retains the PSEC 1.1 host requirement.
-Requests that do not allow host loopback use the
-PSEC 1.0 capability mapping; `hostLoopback: "allow"` is rejected when the PSEC 1.1 ingress contract is unavailable.
+The public ingress policy remains required. Direct-egress host-loopback allow
+requires PSEC 1.1 and the ingress support flag. For an identity-less
+`runtimeConfig.networkProxy` with explicit `hostLoopback: "allow"`, MXC also
+supports a compatibility workaround on hosts that support PSEC 1.0 but not 1.1.
+Hosts that support PSEC 1.1 or newer must still advertise the ingress support
+flag; accepting a 1.0 payload does not enable this workaround.
+Requests that do not allow host loopback use the PSEC 1.0 capability mapping.
 Requests the PSEC contract cannot preserve continue to an AppContainer tier.
+
+#### Discovering proxy loopback compatibility
+
+Backend discovery reports `proxyLoopbackCompatibility` on the ProcessContainer
+`base-container` tier only when the PSEC 1.0-only workaround is available.
+The Windows request probe also reports
+`probes.baseContainerSupportsProxyLoopbackCompatibility`, including when called
+without a request. Both use the same PSEC version gate as execution. A query
+failure omits the capability, sets the probe fact to `false`, and adds a warning.
+
+This does not grant general `ingressHostLoopbackAllow` support or report that the
+current request uses the workaround. The request must set
+`runtimeConfig.networkProxy`, omit `processContainer.network.allowedProxyPeer`,
+and explicitly allow host loopback, while retaining the Model 2 network policy.
+Other requested features still require their own host support.
+Use the request-aware probe for the complete policy. Neither probe launches the
+workload or checks proxy reachability.
 
 **Unresolved ingress limitation:** on Windows build 26691.1002, this proxy mapping permits unprivileged connections
 to the configured proxy and blocks direct loopback bypasses, but host-to-container listener connections still time

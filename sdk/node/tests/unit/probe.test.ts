@@ -30,6 +30,7 @@ const completeProbe = {
     baseContainerSupportsDenyPaths: false,
     baseContainerSupportsEnumeratePaths: false,
     baseContainerSupportsIngressHostLoopbackAllow: false,
+    baseContainerSupportsProxyLoopbackCompatibility: false,
     isolationSessionAvailable: false,
     hyperlightAvailable: false,
     uiCapabilities: {
@@ -190,6 +191,34 @@ describe('probe', () => {
 
     assert.equal(output.tier, 'appcontainer-dacl');
     assert.equal(output.needsDaclAugmentation, true);
+  });
+
+  it('preserves proxy loopback compatibility independently of general ingress', () => {
+    for (const supported of [false, true]) {
+      const output = runProbeOutput({
+        ...completeProbe,
+        tier: 'base-container',
+        needsDaclAugmentation: false,
+        probes: {
+          ...completeProbe.probes,
+          baseContainerSupportsProxyLoopbackCompatibility: supported,
+        },
+      });
+      assert.equal(output.probes.baseContainerSupportsProxyLoopbackCompatibility, supported);
+      assert.equal(output.probes.baseContainerSupportsIngressHostLoopbackAllow, false);
+    }
+  });
+
+  it('rejects missing or invalid proxy loopback compatibility facts', () => {
+    for (const value of [undefined, null, 'true', 1]) {
+      assertProbeOutputRejected({
+        ...completeProbe,
+        probes: {
+          ...completeProbe.probes,
+          baseContainerSupportsProxyLoopbackCompatibility: value,
+        },
+      });
+    }
   });
 
   it('rejects an unknown envelope field', () => {

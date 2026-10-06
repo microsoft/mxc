@@ -71,6 +71,19 @@ describe('native backend discovery', () => {
     }]);
   });
 
+  it('reports proxy loopback compatibility without general ingress support', () => {
+    assert.deepStrictEqual(parseAvailableBackends(JSON.stringify([{
+      backend: 'processcontainer',
+      tier: 'base-container',
+      capabilities: ['proxyLoopbackCompatibility'],
+    }])), [{
+      backend: 'processcontainer',
+      tier: 'base-container',
+      capabilities: ['proxyLoopbackCompatibility'],
+      warnings: [],
+    }]);
+  });
+
   it('rejects malformed discovery results instead of returning no backends', () => {
     for (const payload of [
       null, {}, [null], [[]], [{}], [{ backend: 1 }],
