@@ -44,17 +44,14 @@ jobs:
         run: cargo build --locked --release --target aarch64-apple-darwin
              -p mxc_darwin -p mxc-sdk -p unix_test_proxy -p mxc_ffi
 
-      # mxc-sdk includes the Seatbelt executor characterization tests. Its
-      # consolidated mxc_pty module was not part of this pre-consolidation
-      # macOS lane, so keep those host-sensitive unit tests out of this job.
+      # mxc-sdk includes the Seatbelt executor characterization tests.
       # mxc-exec-mac (built above via -p mxc_darwin) is what they drive; the
       # tests skip via has_platform_exec() if it is missing. sandbox-exec needs
       # no elevation, so they run in this standard macOS job.
       - name: Test
         run: |
           cargo test --locked --release --target aarch64-apple-darwin \
-            -p mxc_darwin -p mxc-sdk -- \
-            --skip 'core_modules::mxc_pty::tests::'
+            -p mxc_darwin -p mxc-sdk
 
       - name: Test state-aware SDK boundaries
         shell: bash

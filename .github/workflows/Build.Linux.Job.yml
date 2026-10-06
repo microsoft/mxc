@@ -131,6 +131,14 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
+      # This lane selects lib tests by module, so mxc_pty needs an explicit
+      # step; the macOS lane picks it up via the package-wide run. The tests
+      # drive /dev/ptmx directly and need no sandbox backend installed.
+      - name: Test unix pty bridge
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --lib 'core_modules::mxc_pty::'
+
       # These need no LXC installed: the engine tests inject their probes, and
       # the dispatch and FFI pins are refused before a container is created.
       - name: Test LXC dispatch and discovery

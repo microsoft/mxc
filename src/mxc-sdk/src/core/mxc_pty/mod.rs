@@ -106,6 +106,11 @@ pub struct PtySize {
     pub pixel_height: u16,
 }
 
+/// Interval for the Darwin end-of-input probe. Darwin may not wake `poll` when
+/// the last terminal writer closes, so readers retry to observe `EIO`.
+#[cfg(target_os = "macos")]
+const DARWIN_EOF_PROBE_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Caller-owned primary side of a Unix pseudo-terminal.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct LivePty {
@@ -468,7 +473,7 @@ impl LivePty {
         #[cfg(target_os = "macos")]
         let input_reader = InterruptibleReader::new_with_periodic_eof_probe(
             input_read_fd,
-            std::time::Duration::from_millis(50),
+            DARWIN_EOF_PROBE_INTERVAL,
         )?;
         let input_canceller = input_reader.canceller();
         let input_shutdown = BridgeShutdown::new()?;
@@ -675,7 +680,13 @@ impl LivePty {
     }
 
     fn reader_from_file(reader: std::fs::File) -> std::io::Result<(PtyReader, PtyReadCanceller)> {
+        #[cfg(target_os = "linux")]
         let reader = InterruptibleReader::new(reader.into())?;
+        #[cfg(target_os = "macos")]
+        let reader = InterruptibleReader::new_with_periodic_eof_probe(
+            reader.into(),
+            DARWIN_EOF_PROBE_INTERVAL,
+        )?;
         let canceller = PtyReadCanceller(reader.canceller());
         Ok((PtyReader(reader), canceller))
     }
@@ -1746,7 +1757,7 @@ mod tests {
         let mut child = command.spawn().expect("spawn child");
         drop(command);
 
-        let mut output: Box<dyn Read> = if native {
+        let mut output: Box<dyn Read + Send> = if native {
             let stdio = terminal.take_native_stdio().expect("take native stdio");
             let mut output = std::fs::File::from(stdio.stdout);
             let mut ready = [0_u8; 5];
@@ -1783,8 +1794,36 @@ mod tests {
         terminal.finish_native_bridge();
         drop(terminal);
 
-        let mut text = String::new();
-        output.read_to_string(&mut text).expect("read output");
+        // Read on a worker so a reader that never observes end-of-input fails
+        // with what it collected instead of hanging the whole suite.
+        const EOF_TIMEOUT: Duration = Duration::from_secs(10);
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let worker = Arc::clone(&collected);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 1024];
+            loop {
+                match output.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => worker
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .extend_from_slice(&buffer[..count]),
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        let reached_eof = done_rx.recv_timeout(EOF_TIMEOUT).is_ok();
+        let text = {
+            let bytes = collected
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        assert!(
+            reached_eof,
+            "reader never observed EOF; collected: {text:?}"
+        );
         assert!(text.contains("terminal-eof-observed"), "got: {text:?}");
     }
 
@@ -2029,6 +2068,7 @@ mod tests {
         command.arg("-c").arg("(sleep 30) & printf 'done\\n'");
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
+        let session = child.id() as libc::pid_t;
         drop(command);
         let stdio = terminal.take_native_stdio().expect("take native stdio");
         drop(stdio.stdin);
@@ -2040,31 +2080,6 @@ mod tests {
             start.elapsed() < Duration::from_secs(5),
             "native bridge did not cancel promptly"
         );
-
-        let mut output = std::fs::File::from(stdio.stdout);
-        let mut text = String::new();
-        output.read_to_string(&mut text).expect("read output");
-        assert!(text.contains("done"), "got: {text:?}");
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_bridge_cancellation_does_not_inject_eof() {
-        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("(read value; printf eof-injected) & printf 'done\\n'");
-        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
-        let mut child = command.spawn().expect("spawn child");
-        let session = child.id() as libc::pid_t;
-        drop(command);
-        let stdio = terminal.take_native_stdio().expect("take native stdio");
-        let input = stdio.stdin;
-
-        assert!(child.wait().expect("wait child").success());
-        terminal.finish_native_bridge();
-        drop(input);
         // SAFETY: the child created its own session with its PID as the process-group ID.
         unsafe {
             libc::kill(-session, libc::SIGKILL);
@@ -2072,6 +2087,86 @@ mod tests {
 
         let mut output = std::fs::File::from(stdio.stdout);
         let mut text = String::new();
+        output.read_to_string(&mut text).expect("read output");
+        assert!(text.contains("done"), "got: {text:?}");
+    }
+
+    /// Reads whatever is already buffered on `fd` without blocking.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn drain_available(fd: std::os::fd::RawFd) -> String {
+        // SAFETY: `fd` is owned by the caller and stays open across the call.
+        let previous = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if previous < 0 {
+            return String::new();
+        }
+        // SAFETY: as above.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, previous | libc::O_NONBLOCK) };
+        let mut collected = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            // SAFETY: `buffer` is a valid writable slice for the length passed.
+            let count = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+            if count <= 0 {
+                break;
+            }
+            collected.extend_from_slice(&buffer[..count as usize]);
+        }
+        // SAFETY: restores the descriptor flags sampled above.
+        unsafe { libc::fcntl(fd, libc::F_SETFL, previous) };
+        String::from_utf8_lossy(&collected).into_owned()
+    }
+
+    /// Collects output until `marker` arrives.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn wait_for_marker(fd: std::os::fd::RawFd, marker: &str) -> String {
+        const MARKER_TIMEOUT: Duration = Duration::from_secs(10);
+        const MARKER_POLL: Duration = Duration::from_millis(10);
+
+        let deadline = std::time::Instant::now() + MARKER_TIMEOUT;
+        let mut collected = String::new();
+        while std::time::Instant::now() < deadline {
+            collected.push_str(&drain_available(fd));
+            if collected.contains(marker) {
+                return collected;
+            }
+            std::thread::sleep(MARKER_POLL);
+        }
+        panic!("timed out waiting for {marker:?}; got: {collected:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_bridge_cancellation_does_not_inject_eof() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        // The reader has to stay in the foreground process group. A
+        // backgrounded reader is orphaned once the parent shell exits, and
+        // reading a controlling terminal from an orphaned group fails with
+        // EIO, which looks exactly like the injected end-of-input this test
+        // is meant to catch.
+        command
+            .arg("-c")
+            .arg("printf 'done\\n'; read value; printf 'eof-injected'");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        let session = child.id() as libc::pid_t;
+        drop(command);
+        let stdio = terminal.take_native_stdio().expect("take native stdio");
+        let input = stdio.stdin;
+
+        // The shell is now blocked in `read`, so any end-of-input it observes
+        // has to come from the bridge.
+        let mut text = wait_for_marker(stdio.stdout.as_raw_fd(), "done");
+
+        terminal.finish_native_bridge();
+        drop(input);
+        // SAFETY: the child created its own session with its PID as the process-group ID.
+        unsafe {
+            libc::kill(-session, libc::SIGKILL);
+        }
+        let _ = child.wait();
+
+        let mut output = std::fs::File::from(stdio.stdout);
         output.read_to_string(&mut text).expect("read output");
         assert!(text.contains("done"), "got: {text:?}");
         assert!(!text.contains("eof-injected"), "got: {text:?}");
