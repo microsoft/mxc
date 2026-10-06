@@ -129,14 +129,15 @@ Requests the PSEC contract cannot preserve continue to an AppContainer tier.
 
 Backend discovery reports `identitylessLoopbackProxy` on the ProcessContainer
 `base-container` tier when the host supports an identity-less proxy on loopback.
-The Windows request probe also reports
-`probes.baseContainerSupportsIdentitylessLoopbackProxy`, including when called
-without a request. Support is available on PSEC 1.0-only hosts and on hosts with
+Use SDK backend discovery (`available_backends`, `MxcPlatform.GetAvailableBackends`,
+or `getAvailableBackends`) or `wxc-exec --available-backends` to read it.
+The published V1 request-probe result remains unchanged.
+Support is available on PSEC 1.0-only hosts and on hosts with
 PSEC 1.1 or newer that advertise ingress support. A host that reports
 `baseContainerSupportsIngressHostLoopbackAllow` also supports an identity-less
 loopback proxy. PSEC 1.1 or newer without ingress support does not qualify,
 even if it also accepts PSEC 1.0 payloads. Version-query failures omit the
-capability, set the probe fact to `false`, and add a warning.
+capability and add a warning.
 
 This does not grant general `ingressHostLoopbackAllow` support or report that the
 current request uses an identity-less proxy. The request must set

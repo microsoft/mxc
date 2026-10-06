@@ -152,8 +152,6 @@ public sealed class ProbeFacts
     public bool BaseContainerSupportsDenyPaths { get; init; }
     public bool BaseContainerSupportsEnumeratePaths { get; init; }
     public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
-    /// <summary>Identity-less proxy support on loopback; requires explicit host-loopback allow.</summary>
-    public bool BaseContainerSupportsIdentitylessLoopbackProxy { get; init; }
     public bool IsolationSessionAvailable { get; init; }
     public bool HyperlightAvailable { get; init; }
     public required UiCapabilitySupport UiCapabilities { get; init; }
@@ -286,10 +284,6 @@ internal sealed class NativeProbeFacts
     [JsonRequired]
     [JsonPropertyName("baseContainerSupportsIngressHostLoopbackAllow")]
     public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
-
-    [JsonRequired]
-    [JsonPropertyName("baseContainerSupportsIdentitylessLoopbackProxy")]
-    public bool BaseContainerSupportsIdentitylessLoopbackProxy { get; init; }
 
     [JsonRequired]
     [JsonPropertyName("isolationSessionAvailable")]

@@ -785,8 +785,6 @@ export interface ProbeFacts {
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
   baseContainerSupportsIngressHostLoopbackAllow: boolean;
-  /** Identity-less proxy support on loopback; requires explicit host-loopback allow. */
-  baseContainerSupportsIdentitylessLoopbackProxy: boolean;
   /** True when this executor includes IsolationSession and the host can activate it. */
   isolationSessionAvailable: boolean;
   /** True when this executor includes Hyperlight and its host runtime is available. */

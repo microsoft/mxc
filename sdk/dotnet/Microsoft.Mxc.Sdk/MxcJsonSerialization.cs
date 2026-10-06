@@ -82,7 +82,6 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(NativeAvailableBackend[]))]
 [JsonSerializable(typeof(NativePlatformSupport))]
 [JsonSerializable(typeof(NativeProbeOutput))]
-[JsonSerializable(typeof(NativeProbeFacts))]
 [JsonSerializable(typeof(ExecutionMetadata))]
 [JsonSerializable(typeof(CaptureDenialsResult))]
 [JsonSerializable(typeof(CaptureDenialsError))]
