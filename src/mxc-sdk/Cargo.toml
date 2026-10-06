@@ -1,0 +1,116 @@
+[package]
+name = "mxc-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Importable library for starting MXC sandboxes in-process, with streaming stdio."
+repository = "https://github.com/microsoft/mxc"
+readme = "README.md"
+build = "build.rs"
+autobins = false
+
+[lib]
+name = "mxc_sdk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wxc-windows-sandbox-daemon"
+path = "src/bin/windows_sandbox_daemon/portable_main.rs"
+
+[[bin]]
+name = "wxc-windows-sandbox-guest"
+path = "src/bin/windows_sandbox_guest/portable_main.rs"
+
+[[bin]]
+name = "wxc-wslc-daemon"
+path = "src/bin/wslc_daemon/main.rs"
+required-features = ["wslc"]
+
+[features]
+default = []
+wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
+link-wslcsdk = ["dep:zip"]
+isolation_session = ["dep:windows-collections", "dep:windows-future"]
+test-support = []
+microvm = []
+hyperlight = [
+    "dep:hyperlight-unikraft",
+    "dep:ureq",
+    "dep:flate2",
+    "dep:tar",
+]
+force-tier-testing = []
+tier2_bfs = []
+schema-gen = ["dep:schemars"]
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+cidr.workspace = true
+flatbuffers.workspace = true
+getrandom.workspace = true
+libc.workspace = true
+libloading = { version = "0.8", optional = true }
+nix.workspace = true
+same-file.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tar = { version = "0.4", optional = true }
+unicode-general-category.workspace = true
+url.workspace = true
+uuid.workspace = true
+widestring.workspace = true
+
+[build-dependencies]
+semver = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+
+[dev-dependencies]
+filetime = "0.2"
+quick-xml.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+flate2 = { version = "1", optional = true }
+hyperlight-unikraft = { version = "=0.17.0", default-features = false, optional = true }
+ureq = { version = "3", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tracelogging.workspace = true
+windows = { workspace = true, features = [
+    "Foundation",
+    "UI",
+    "Win32_Globalization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
+    "Win32_System_EventLog",
+] }
+windows-collections = { version = "0.3", optional = true }
+windows-core.workspace = true
+windows-future = { version = "0.3", optional = true }
+winreg.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
+winresource = { version = "0.1.31", default-features = false }
+
+[[example]]
+name = "isolation_session_console"
+required-features = ["isolation_session"]
+
+[[example]]
+name = "sta_probe"
+required-features = ["isolation_session"]

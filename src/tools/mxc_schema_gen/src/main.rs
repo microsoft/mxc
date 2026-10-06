@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use mxc_config_contract::{descriptor, supported_versions, ContractDescriptor, ContractVersion};
+use mxc_sdk::mxc_contract::{descriptor, supported_versions, ContractDescriptor, ContractVersion};
 use serde_json::{json, Value};
 
 #[derive(Debug, Parser)]
@@ -57,17 +57,17 @@ fn exact_schema(version: ContractVersion) -> Result<(Value, ContractDescriptor),
         ));
     }
     let mut schema = renderable_exact_schema(version)?;
-    mxc_schema_support::prepare_schema(&mut schema, descriptor.schema_id());
+    mxc_sdk::mxc_schema_support::prepare_schema(&mut schema, descriptor.schema_id());
     Ok((schema, descriptor))
 }
 
 fn renderable_exact_schema(version: ContractVersion) -> Result<Value, String> {
     match version {
         ContractVersion::V0_9_0Alpha => {
-            Ok(mxc_config_contract::published::v0_9_0_alpha::published_schema())
+            Ok(mxc_sdk::mxc_contract::published::v0_9_0_alpha::published_schema())
         }
-        ContractVersion::V1_0_0 => Ok(mxc_config_contract::published::v1_0_0::published_schema()),
-        ContractVersion::V1_1_0Alpha => Ok(mxc_config_contract::dev::development_schema()),
+        ContractVersion::V1_0_0 => Ok(mxc_sdk::mxc_contract::published::v1_0_0::published_schema()),
+        ContractVersion::V1_1_0Alpha => Ok(mxc_sdk::mxc_contract::dev::development_schema()),
     }
 }
 
@@ -78,13 +78,13 @@ fn schema_content(version: ContractVersion) -> Result<String, String> {
         .ok_or_else(|| "generated contract schema root is not an object".to_string())?;
     Ok(format!(
         "{}\n",
-        mxc_schema_support::render_root_ordered(root)
+        mxc_sdk::mxc_schema_support::render_root_ordered(root)
     ))
 }
 
 fn types_content(version: ContractVersion) -> Result<String, String> {
     let (schema, _) = exact_schema(version)?;
-    Ok(mxc_schema_support::emit_contract_ts(
+    Ok(mxc_sdk::mxc_schema_support::emit_contract_ts(
         &schema,
         version.as_str(),
     ))
@@ -92,7 +92,7 @@ fn types_content(version: ContractVersion) -> Result<String, String> {
 
 fn csharp_content(version: ContractVersion) -> Result<String, String> {
     let (schema, _) = exact_schema(version)?;
-    Ok(mxc_schema_support::emit_contract_cs(
+    Ok(mxc_sdk::mxc_schema_support::emit_contract_cs(
         &schema,
         version.as_str(),
     ))

@@ -69,8 +69,10 @@ echo ""
 echo "=== Building Rust binaries ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
-# Packages to build and lint — kept in one place so build and clippy stay in sync.
-LXC_PACKAGES=(-p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy -p mxc_ffi)
+# Packages to build and lint — kept in one place so build and clippy stay in
+# sync. The former lxc_common, mxc_common, and bwrap_common crates are modules
+# inside mxc-sdk.
+LXC_PACKAGES=(-p mxc-sdk -p lxc -p unix_test_proxy -p mxc_ffi)
 
 CARGO_FEATURES=()
 FEATURES_LIST=()
@@ -94,8 +96,8 @@ echo "  Check formatting"
 cargo fmt --all -- --check
 
 echo "  Check linting"
-# Scope clippy to Linux-compatible crates only. --workspace includes Windows-only
-# crates (wxc, wslc_common, etc.) whose dependencies fail to compile on Linux.
+# Scope clippy to Linux-compatible crates only. Windows-only workspace tools
+# remain separate packages, while their mxc-sdk backend modules are cfg-gated.
 cargo clippy "${LXC_PACKAGES[@]}" --all-targets "${CARGO_FEATURES[@]}" -- -D warnings
 
 echo "Rust build complete."

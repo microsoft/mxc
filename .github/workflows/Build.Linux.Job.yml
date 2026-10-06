@@ -21,7 +21,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
-        working-directory: src/core/lxc
+        working-directory: src/tools/lxc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -47,7 +47,7 @@ jobs:
         with:
           workspaces: |
             src -> target
-            src/core/lxc -> target
+            src/tools/lxc -> target
           key: ${{ matrix.target }}-v2
           cache-on-failure: false
 
@@ -77,18 +77,29 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" \
             --no-default-features "${features[@]}"
 
-      # The step above runs from src/core/lxc and so covers only the lxc
-      # package. The backend's own crate holds the LXC-gated unit tests, which
-      # compile on no other platform and would otherwise never run.
-      - name: Test lxc_common
+      # The step above runs from src/tools/lxc and so covers only the thin lxc
+      # package. The consolidated SDK module holds the LXC-gated unit tests.
+      - name: Test lxc_common module
         working-directory: src
-        run: cargo test --locked --release --target ${{ matrix.target }}
-             -p lxc_common --lib
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$(mktemp)"
+          cargo test --locked --release --target "${{ matrix.target }}" \
+            -p mxc-sdk --lib 'backend_modules::lxc::common::' 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+            echo "::error::LXC module filter ran no tests."
+            exit 1
+          fi
 
       # Bubblewrap is required to run the executor characterization tests in
-      # wxc_e2e_tests (they skip via has_bwrap() when it is absent). lxc-exec
-      # always includes the Bubblewrap backend (bwrap_common is a non-optional
-      # dependency), so the binary built above can drive it.
+      # mxc-sdk (they skip via has_bwrap() when it is absent). lxc-exec always
+      # includes the Bubblewrap backend module, so the binary built above can
+      # drive it.
       - name: Install Bubblewrap
         working-directory: ${{ github.workspace }}
         run: |
@@ -99,7 +110,7 @@ jobs:
           # sandbox can start (no-op on kernels without this knob).
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
-      # The job defaults working-directory to src/core/lxc, so the `Test lxc`
+      # The job defaults working-directory to src/tools/lxc, so the `Test lxc`
       # step above covers only the lxc package. This streaming suite must follow
       # the install. Strict mode makes a failed availability probe fail this
       # provisioned lane instead of silently exercising nothing.
@@ -115,9 +126,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --lib
-          cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --doc
-          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --lib mxc_common::
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --doc
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
       # These need no LXC installed: the engine tests inject their probes, and
@@ -145,17 +156,22 @@ jobs:
               exit 1
             fi
           }
-          run_pinned "LXC discovery matrix" -p mxc_engine --lib linux_support
-          run_pinned "LXC dispatch arm" -p mxc_engine --lib streaming_lxc_reaches_the_backend_on_linux
+          run_pinned "LXC discovery matrix" -p mxc-sdk --lib linux_support
+          run_pinned "LXC dispatch arm" -p mxc-sdk --lib streaming_lxc_reaches_the_backend_on_linux
           run_pinned "LXC FFI routing" -p mxc_ffi --test ffi extern_spawn_json_reaches_the_lxc_backend
           run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
-      - name: Test executor characterization (wxc_e2e_tests)
+      - name: Test Bubblewrap executor characterization
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }}
-             -p wxc_e2e_tests
+             -p mxc-sdk --test wxc_e2e_tests_e2e_bubblewrap_characterization
+
+      - name: Test MicroVM executor characterization
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --test wxc_e2e_tests_e2e_linux_microvm
              
       # PLM (Permissive Learning Mode) is functionally Windows-only, but the
       # crate builds cross-platform: the lib's helper modules compile on every

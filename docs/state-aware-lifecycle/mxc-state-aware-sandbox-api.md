@@ -192,7 +192,7 @@ unrecognised prefix, and this is by design:
 | ----------------------- | ------------------------------------------------ |
 | SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` before invoking `mxc_run_state_aware_json` or `mxc_exec_state_aware_json`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id. See `sdk/node/src/state-aware-helper.ts`. |
 | SDK (Rust)              | `SandboxId::parse` accepts a syntactically valid opaque id without interpreting its prefix. Dispatch returns `MxcError { code: 'unsupported_containment' }` when that prefix is not registered. Empty ids, ids without prefix structure, and ids containing NUL are `malformed_id`. |
-| Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/core/wxc_common/src/state_aware_dispatch.rs`. |
+| Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/mxc-sdk/src/tools/mxc_common/state_aware_dispatch.rs`. |
 
 A recognised prefix with a malformed body is `malformed_id` from both sources
 (§8). The same prefix is exposed on the `StatefulSandboxBackend` trait as
@@ -924,7 +924,7 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Exact request contracts and the shared execution model
 
-`src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
+`src/mxc-sdk/src/tools/mxc_common/config_deserialize.rs` performs path-aware JSON
 deserialization into the exact contract selected by version, phase, and
 provision containment. Published v0.9 and v1.0 plus development v1.1 select
 one-shot, `provision`, `start`, `exec`, `stop`, or `deprovision`; provision
@@ -1133,7 +1133,7 @@ pub trait StatefulSandboxBackend {
     /// workload is arbitrary and may not be idempotent, so a refusal issued
     /// after the fact reports "unsupported" for something that has already
     /// taken effect and whose output has already gone somewhere the caller
-    /// never asked for. `wxc_common::state_aware_backend::unsupported_piped_exec`
+    /// never asked for. `mxc_common::state_aware_backend::unsupported_piped_exec`
     /// is the shared refusal.
     fn exec(
         &mut self,
@@ -1267,7 +1267,7 @@ pub enum ExecOutcome {
 ```
 
 Trait methods take `&ExecutionRequest` (the existing one-shot domain model from
-`wxc_common::models`, populated by the same `normalize_common_request_ir`
+`mxc_common::models`, populated by the same `normalize_common_request_ir`
 parser path that serves one-shot calls), plus `sandbox_id` for non-provision
 phases and an optional backend-specific typed config
 (`Self::<Phase>Config`). Cross-cutting policy fields
@@ -1284,7 +1284,7 @@ descriptor on Linux. The executor's outer driver reads from `ExecHandle.stdout` 
 `stderr`, awaits exit via `waiter`, and calls `terminator` to tear the exec down.
 It does **not** write to `stdin`.
 
-`mint_random_token()` is a small helper in `wxc_common` that produces a short hex string
+`mint_random_token()` is a small helper in `mxc_common` that produces a short hex string
 (mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
 default `provision` body to construct synthetic ids for stateless-underneath backends.
 
@@ -1452,7 +1452,7 @@ registered prefix table. Mismatches surface as `unsupported_containment` (unreco
 prefix) or `malformed_id` (no prefix structure) per §8.
 
 `bind_isolation_session`, `bind_windows_sandbox`, and `bind_wslc` live in
-`wxc_common::state_aware_binding`, without backend crate dependencies. The engine
+`mxc_common::state_aware_binding`, without backend crate dependencies. The engine
 chooses a concrete backend after its existing routing/opt-in/availability gates.
 An incompatible payload/backend pair is `malformed_request`, never `None`.
 Binding is a static conversion, not JSON serialization, reparsing, or downcasting.
@@ -1525,7 +1525,7 @@ agent user").
 ### 10.2 Backend-side config typing
 
 A state-aware backend declares runtime configuration as trait associated types.
-IsolationSession and WSLC provision types live in `wxc_common::models`, keeping
+IsolationSession and WSLC provision types live in `mxc_common::models`, keeping
 neutral operations and binding independent of backend crates. Exact contract
 types separately define the JSON shape under each permanent top-level
 `<backend>.<phase>` section; adapters map their fields exhaustively to runtime

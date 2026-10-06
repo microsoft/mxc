@@ -15,7 +15,7 @@ C++ shim, WIL, or FFI is required.
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  wxc_common::telemetry                               │
+│  mxc_sdk::mxc_common::telemetry                      │
 │  (Rust — config resolution, sanitisation, types)     │
 │                                                      │
 │  init() / log_execution() / log_error() /             │
@@ -24,8 +24,9 @@ C++ shim, WIL, or FFI is required.
                 │  Direct Rust function calls
                 ▼
 ┌──────────────────────────────────────────────────────┐
-│  mxc_telemetry (Rust crate)                          │
-│  src/lib.rs — define_provider! + write_event!        │
+│  mxc_sdk::mxc_telemetry (Rust module)                │
+│  src/core/mxc_telemetry/mod.rs                       │
+│  define_provider! + write_event!                     │
 │                                                      │
 │  Windows: ETW events via tracelogging crate          │
 │  Linux/macOS: compile-time no-op stubs               │
@@ -824,11 +825,11 @@ values (plain ETW only).
 ```powershell
 # Test with a dummy group GUID (not the real one) — telemetry-mode metadata
 $env:MXC_TELEMETRY_PROVIDER_GROUP_GUID = '00000000-1111-2222-3333-444444444444'
-cargo build -p mxc_telemetry
+cargo build -p mxc-sdk
 
 # Test without (public build) — local-only metadata
 Remove-Item Env:\MXC_TELEMETRY_PROVIDER_GROUP_GUID
-cargo build -p mxc_telemetry
+cargo build -p mxc-sdk
 ```
 
 ### What's public vs. private

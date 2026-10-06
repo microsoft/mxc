@@ -40,8 +40,8 @@ use mxc_sdk::__ffi::{
 };
 use mxc_sdk::v1::MxcPtySize;
 
-use mxc_engine::exec_state_aware_attached as exec_attached;
-use wxc_common::state_aware_backend::ExecOutcome as WaitOutcome;
+use mxc_sdk::mxc_common::state_aware_backend::ExecOutcome as WaitOutcome;
+use mxc_sdk::mxc_engine::exec_state_aware_attached as exec_attached;
 
 use crate::streaming::{finish_handle, MxcSandbox};
 use crate::{

@@ -56,7 +56,7 @@ function expectConst(file, text, label, regex, expected) {
   }
 }
 
-// -- Exact Rust contract registry (mxc_config_contract) --
+// -- Exact Rust contract registry (mxc_contract) --
 let registry = [];
 let registryByVersion = new Map();
 try {

@@ -137,7 +137,7 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 # stdout and stderr are captured SEPARATELY. Merging them would let any stderr
 # line corrupt the JSON, and stderr is not hypothetical here: wxc-exec runs a
 # best-effort DACL-recovery pass BEFORE the `--probe` arm and reports it on
-# stderr (`core/wxc/src/main.rs`), so a host carrying leftover state from a
+# stderr (`tools/wxc/src/main.rs`), so a host carrying leftover state from a
 # crashed prior run would emit unparseable output and be judged "unavailable"
 # while being perfectly capable. That failure mode is inverted with respect to
 # risk — the dirtier the host, the likelier the false skip — which is exactly

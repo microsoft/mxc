@@ -18,6 +18,8 @@ x86/
 [Aa][Rr][Mm]64/
 bld/
 [Bb]in/
+!src/mxc-sdk/src/bin/
+!src/mxc-sdk/src/bin/**
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
@@ -36,6 +38,7 @@ nuget.exe
 vcpkg_installed/
 *.nupkg
 *.snupkg
+!src/mxc-sdk/build/wslc_common/*.nupkg
 
 # build artifacts
 output

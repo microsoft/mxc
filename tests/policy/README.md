@@ -32,7 +32,7 @@ adapts them through shared normalization to a runtime `ExecutionRequest`.
 
 The matching expected document is an independently hand-authored exact
 `1.0.0` JSON request. The test submits it to
-`wxc_common::config_parser::load_mxc_request_from_json`, which selects the
+`mxc_common::config_parser::load_mxc_request_from_json`, which selects the
 registered exact type, applies its version-specific adapter, and normalizes
 it to another `ExecutionRequest`. Comparing the two requests checks that
 the reference JSON preserves the SDK invocation's intent. Only

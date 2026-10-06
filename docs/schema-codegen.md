@@ -4,9 +4,9 @@ MXC generates artifacts from exact registered configuration contracts:
 
 | Artifact family | Rust source | Purpose |
 | --- | --- | --- |
-| Exact `0.9.0-alpha` | `src/core/mxc_config_contract/src/published/v0_9_0_alpha/` | Authoritative closed published contract and versioned TypeScript oracle |
-| Exact `1.0.0` | `src/core/mxc_config_contract/src/published/v1_0_0/` | Authoritative closed published SDK target and generated TypeScript / C# wire types |
-| Exact `1.1.0-alpha` | `src/core/mxc_config_contract/src/dev/` | Authoritative closed development contract and versioned TypeScript oracle |
+| Exact `0.9.0-alpha` | `src/mxc-sdk/src/core/mxc_contract/published/v0_9_0_alpha/` | Authoritative closed published contract and versioned TypeScript oracle |
+| Exact `1.0.0` | `src/mxc-sdk/src/core/mxc_contract/published/v1_0_0/` | Authoritative closed published SDK target and generated TypeScript / C# wire types |
+| Exact `1.1.0-alpha` | `src/mxc-sdk/src/core/mxc_contract/dev/` | Authoritative closed development contract and versioned TypeScript oracle |
 
 Published schemas under `schemas/stable/` are immutable release artifacts.
 `mxc_schema_gen` renders published v0.9 and v1.0 into temporary output so
@@ -17,18 +17,18 @@ identities.
 
 ## Sources of truth
 
-`src/core/mxc_config_contract/src/dev/` defines the exact mutable
+`src/mxc-sdk/src/core/mxc_contract/dev/` defines the exact mutable
 `1.1.0-alpha` contract. Its one-shot and seven state-aware request roots are
 independent closed Rust types. Constrained primitives and the `string_enum!`
 and `string_marker!` macros implement `JsonSchema` so deserialization and
 generated constants cannot drift.
 
-`src/core/mxc_config_contract/src/published/v0_9_0_alpha/` defines the exact
+`src/mxc-sdk/src/core/mxc_contract/published/v0_9_0_alpha/` defines the exact
 published v0.9 contract, including IsolationSession and WSLC one-shot and
 state-aware roots. It remains renderable for verification; generation does
 not make the stable artifact mutable.
 
-`src/core/mxc_config_contract/src/published/v1_0_0/` defines the exact
+`src/mxc-sdk/src/core/mxc_contract/published/v1_0_0/` defines the exact
 published v1.0 contract. It preserves the seven v0.9 request roots while
 removing the pre-v1 compatibility aliases. The mutable v1.1 contract retains
 that removal so no v1 exact contract accepts the retired spellings. Published
@@ -39,7 +39,7 @@ artifact mutable.
 rendering, TypeScript emission, and C# wire-type emission. `mxc_schema_gen`
 uses those helpers for every renderable exact contract.
 
-`wxc_common::common_request_ir::CommonRequestIR` is the internal whole-request
+`mxc_common::common_request_ir::CommonRequestIR` is the internal whole-request
 normalization boundary that replaced the former deserializable
 `wire::MxcConfig` root. Exact contract adapters assemble it, and it may contain
 reusable nested DTOs from `wire.rs`, but it has no JSON deserialization or
@@ -113,11 +113,11 @@ contract-valid, and no relaxed schema twin is generated.
 ### Adding a state-aware provision containment
 
 1. Define and export the closed provision request and containment marker under
-   `src/core/mxc_config_contract/src/dev/state_aware/provision/`.
+   `src/mxc-sdk/src/core/mxc_contract/dev/state_aware/provision/`.
 2. Add its subschema and containment discriminator to `provision_dispatch()` in
    `dev/schema.rs`, then include the root in `ROOT_NAMES`.
 3. Add the root's `ContractRequestRoot` entry to the version's `request_roots`
-   metadata in `src/core/mxc_config_contract/src/registry.rs`, and create
+   metadata in `src/mxc-sdk/src/core/mxc_contract/registry.rs`, and create
    matching valid and invalid fixture directories under
    `tests/v1_1_0_alpha/fixtures/`.
 4. Regenerate the exact schema and versioned TypeScript oracle.

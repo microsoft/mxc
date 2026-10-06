@@ -3,6 +3,7 @@ name = "mxc_diagnostic_console"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "mxc-diagnostic-console"
@@ -14,7 +15,8 @@ windows-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
-wxc_common.workspace = true
+mxc-sdk.workspace = true
 
-[build-dependencies]
-mxc_build_common.workspace = true
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
+winresource.workspace = true
