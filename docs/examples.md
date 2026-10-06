@@ -135,9 +135,11 @@ the development/testing configuration is:
 
 This identity-less host-loopback deployment restricts client egress to the
 configured proxy address and port, but does not verify which process owns that
-endpoint. It requires native PSEC 1.1 ingress/host-loopback support; unsupported
-hosts reject the request. For production ProcessContainer deployments, identify
-a packaged proxy through `processContainer.network.allowedProxyPeer` instead; see
+endpoint. It supports PSEC 1.0-only hosts and hosts with PSEC 1.1 or newer that
+advertise ingress support. PSEC 1.1 or newer without that flag rejects the
+request, even if the host also accepts PSEC 1.0 payloads. For production
+ProcessContainer deployments, identify a packaged proxy through
+`processContainer.network.allowedProxyPeer` instead; see
 [proxy deployment choices](backends/process-container/networking.md#proxy-deployment-choices).
 Bubblewrap and Seatbelt also support a caller-managed loopback proxy, but
 their supported ingress policies differ. See their backend guides.
