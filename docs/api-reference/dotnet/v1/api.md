@@ -22,7 +22,10 @@ LXC, and Seatbelt direct execution. Existing-container PTY support remains
 IsolationSession-only. Seatbelt PTY rejects `guiAccess` and legacy
 `launchMethod: "open"`. Terminal handles
 give the caller explicit input, output, resize, and process ownership; there
-is no separate public attached-console or raw-JSON launch API.
+is no separate public attached-console API. The [V1.Dev exact-JSON API](dev.md)
+accepts caller-authored requests separately from this typed surface.
+Captured existing-container execution closes its output readers on timeout
+and returns the text collected so far with `TimedOut = true`.
 
 ## Discovery and validation
 

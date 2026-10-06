@@ -565,9 +565,21 @@ public class MxcProcess : IMxcProcess
 
         var stdoutTask = ReadAll(outStream);
         var stderrTask = ReadAll(errStream);
+        var timeoutCloseFailed = false;
         try
         {
             var result = await WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (result.TimedOut)
+            {
+                timeoutCloseFailed =
+                    !CloseQuietly(outCloser, outStream is not null) |
+                    !CloseQuietly(errCloser, errStream is not null);
+                if (timeoutCloseFailed)
+                {
+                    throw new MxcException(ErrorCode.BackendError,
+                        "timed-out capture could not close its output readers");
+                }
+            }
             var stdout = await stdoutTask.ConfigureAwait(false);
             var stderr = await stderrTask.ConfigureAwait(false);
             return (result, stdout, stderr);
@@ -589,6 +601,13 @@ public class MxcProcess : IMxcProcess
         }
         catch
         {
+            if (timeoutCloseFailed)
+            {
+                // Without a closer, waiting for a descendant-held pipe can never finish.
+                KillQuietly();
+                _ = Task.WhenAll(SwallowAsync(stdoutTask), SwallowAsync(stderrTask));
+                throw;
+            }
             // On cancellation/failure the reader tasks may be parked in a blocking
             // native read that only returns once the child's pipes reach EOF. Kill
             // the child first so those write ends close and the reads return;
