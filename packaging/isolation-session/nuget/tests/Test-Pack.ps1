@@ -7,7 +7,6 @@ $nugetDir = Split-Path -Parent $PSScriptRoot
 $repoRoot = Resolve-Path (Join-Path $nugetDir '..\..\..')
 $packScript = Join-Path $nugetDir 'pack.ps1'
 $releaseInfoScript = Join-Path $repoRoot 'packaging\isolation-session\common\Get-IsoSessionReleaseInfo.ps1'
-$licensePath = Join-Path $repoRoot 'LICENSE.md'
 
 if (-not (Test-Path -LiteralPath $packScript)) {
     throw "pack.ps1 not found at '$packScript'."
@@ -15,10 +14,6 @@ if (-not (Test-Path -LiteralPath $packScript)) {
 if (-not (Test-Path -LiteralPath $releaseInfoScript)) {
     throw "Get-IsoSessionReleaseInfo.ps1 not found at '$releaseInfoScript'."
 }
-if (-not (Test-Path -LiteralPath $licensePath)) {
-    throw "LICENSE.md not found at '$licensePath'."
-}
-
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mxc-isosession-pack-test-{0}" -f ([guid]::NewGuid()))
@@ -280,11 +275,11 @@ try {
                 'metadata/GENERATION_INFO.toml',
                 'metadata/RELEASE_INFO.json',
                 'runtime/IsoSessionApp.dll',
-                'runtime/IsoSession.manifest',
-                'LICENSE.md')) {
+                'runtime/IsoSession.manifest')) {
             Assert-True ($entries -contains $entry) "entry '$entry' is present"
         }
         foreach ($entry in @(
+                'LICENSE.md',
                 'runtime/IsoSessionApp.comClass.manifest',
                 'runtime/IsoSessionApp.runtimeversion')) {
             Assert-True ($entries -notcontains $entry) "obsolete entry '$entry' is absent"
@@ -293,17 +288,8 @@ try {
         $nuspecText = Get-ZipEntryTextFromPath -NupkgPath $expectedNupkg -EntryName 'Microsoft.AI.IsolationSession.SDK.nuspec'
         Assert-True ($nuspecText -match '<id>Microsoft\.AI\.IsolationSession\.SDK</id>') 'package id is canonical'
         Assert-True ($nuspecText -match [regex]::Escape("<version>$($releaseInfo.nugetVersion)</version>")) 'package version includes the patch'
-        Assert-True ($nuspecText -match '<license type="file">LICENSE\.md</license>') `
-            'package declares its embedded license'
-
-        $packagedLicenseBytes = Get-ZipEntryBytesFromPath `
-            -NupkgPath $expectedNupkg `
-            -EntryName 'LICENSE.md'
-        $sourceLicenseBytes = [System.IO.File]::ReadAllBytes($licensePath)
-        Assert-True (
-            [Convert]::ToBase64String($packagedLicenseBytes) -eq
-            [Convert]::ToBase64String($sourceLicenseBytes)) `
-            'package embeds the repository license without modification'
+        Assert-True ($nuspecText -match '<license type="expression">MIT</license>') `
+            'package declares the SPDX MIT license expression'
 
         $packagedRuntimeManifestBytes = Get-ZipEntryBytesFromPath `
             -NupkgPath $expectedNupkg `
