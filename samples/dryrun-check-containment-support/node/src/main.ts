@@ -23,9 +23,6 @@ function main(): number {
   }
   for (const backend of backends) {
     console.log(`backend: ${backend.backend}`);
-    if (backend.tier !== undefined) {
-      console.log(`  tier: ${backend.tier}`);
-    }
     if (backend.capabilities.length > 0) {
       console.log(`  capabilities: ${backend.capabilities.join(', ')}`);
     }
@@ -39,8 +36,6 @@ function main(): number {
       command: 'cmd.exe /d /s /c "echo support check only"',
     };
     const result = probe(request);
-    console.log(`ProcessContainer request tier: ${result.tier ?? 'unavailable'}`);
-    console.log(`needs DACL augmentation: ${result.needsDaclAugmentation ?? 'unknown'}`);
     for (const warning of result.warnings) {
       console.log(`probe warning: ${warning}`);
     }

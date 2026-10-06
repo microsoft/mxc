@@ -21,10 +21,6 @@ try
     foreach (var backend in backends)
     {
         Console.WriteLine($"backend: {backend.Backend}");
-        if (backend.Tier is { } tier)
-        {
-            Console.WriteLine(      $"  tier: {tier}");
-        }
         if (backend.Capabilities.Count > 0)
         {
             Console.WriteLine($"  capabilities: {string.Join(", ", backend.Capabilities)}");
@@ -39,8 +35,6 @@ try
     {
         var probe = MxcContainer.Probe(
             new ContainerRequest("cmd.exe /d /s /c \"echo support check only\""));
-        Console.WriteLine($"ProcessContainer request tier: {probe.Tier}");
-        Console.WriteLine($"needs DACL augmentation: {probe.NeedsDaclAugmentation}");
         foreach (var warning in probe.Warnings)
         {
             Console.WriteLine($"probe warning: {warning}");

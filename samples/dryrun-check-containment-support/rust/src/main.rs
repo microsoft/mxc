@@ -20,9 +20,6 @@ fn run() -> Result<i32, Box<dyn Error>> {
     }
     for backend in backends {
         println!("backend: {}", backend.backend);
-        if let Some(tier) = backend.tier {
-            println!("  tier: {tier}");
-        }
         if !backend.capabilities.is_empty() {
             println!("  capabilities: {:?}", backend.capabilities);
         }
@@ -35,11 +32,6 @@ fn run() -> Result<i32, Box<dyn Error>> {
     {
         let request = ContainerRequest::new("cmd.exe /d /s /c \"echo support check only\"");
         let probe = v1::probe(Some(&request))?;
-        println!("ProcessContainer request tier: {:?}", probe.tier);
-        println!(
-            "needs DACL augmentation: {:?}",
-            probe.needs_dacl_augmentation
-        );
         for warning in probe.warnings {
             println!("probe warning: {warning}");
         }
