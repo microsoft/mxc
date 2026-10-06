@@ -52,14 +52,14 @@ extends:
       displayName: 'Package Crates'
       dependsOn: []
       jobs:
-      - template: templates/Package.Crates.Job.yml@self
+      - template: /.azure-pipelines/templates/Package.Crates.Job.yml@self
 
     - stage: Publish_to_CratesIo
       displayName: 'Publish Crates.io Packages'
       dependsOn: Package_Crates_For_Release
       condition: succeeded()
       jobs:
-      - template: templates/Publish.CratesIo.Job.yml@self
+      - template: /.azure-pipelines/templates/Publish.CratesIo.Job.yml@self
         parameters:
           ESRPInfo:
             serviceName: $(serviceName)
