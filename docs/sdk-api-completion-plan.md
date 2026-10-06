@@ -26,7 +26,7 @@ baseline commit.
 | Typed execution | All three SDKs expose the six *operation categories*, plus typed lifecycle and validation. One-shot native PTY supports IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution; existing-container PTY supports IsolationSession. Node additionally routes typed ProcessContainer PTY through `wxc-exec` and `node-pty` because its in-process PTY binding does not support that backend. | Prove each advertised mode on each supporting backend and refuse unsupported modes explicitly. Forward raw ProcessContainer PTY JSON unchanged through the executor. |
 | Raw execution and lifecycle | Native JSON entry points and internal adapters exist, but none of the SDKs exposes the planned complete public six-operation raw family or public raw lifecycle phases. Rust's `mxc_sdk::__ffi` is explicitly internal; Node's package root exports no raw API. | Add the agreed public, caller-authored exact-JSON execution and lifecycle APIs under V1.Dev. Rust uses in-process exact-JSON routing; Node/.NET use the existing FFI except Node ProcessContainer PTY, which launches `wxc-exec`. |
 | Experimental access | #1402 removed `experimental` from typed V1 options in all three SDKs. The current registered development contract is exactly `1.1.0-alpha`; its request types include experimental backends. There is no public raw SDK access to that contract. | Add V1.Dev calls that accept caller-authored `1.1.0-alpha` JSON for experimental features plus an explicit experimental-backend authorization option. Do not route such calls through typed V1. |
-| Results, handles, and async | Public typed APIs use `ExecutionResult`, `ExecutionRequest`, and `MxcPtyProcess`, which are the naming baseline. #1398 made Node plain-verb execution and process waiting Promise-based and removed the redundant blocking/`*Async` execution calls. .NET has synchronous PTY entry points. Rust captured output is bytes; Node and .NET captured results expose strings. | Reuse public V1 result/handle types and per-operation ownership and cancellation behavior; make Node dev calls Promise-based and lengthy .NET dev calls return `Task<T>`. Byte-preserving capture remains a separate follow-up. |
+| Results, handles, and async | Public typed APIs use `ExecutionResult`, `ExecutionRequest`, and `MxcPtyProcess`, which are the naming baseline. #1398 made Node plain-verb execution and process waiting Promise-based and removed the redundant blocking/`*Async` execution calls. .NET has synchronous PTY entry points. Rust captured output is bytes; Node and .NET captured results expose strings. | Reuse public V1 result/handle types and per-operation ownership and cancellation behavior; make Node dev calls Promise-based and .NET dev capture, pipe-backed spawn, and lifecycle calls return `Task<T>`. Keep .NET dev PTY spawns synchronous. Byte-preserving capture remains a separate follow-up. |
 
 This is an **API/source inventory**, not a claim that all modes have passed
 host-dependent runtime or packaged-consumer verification. The merged API
@@ -47,7 +47,7 @@ also landed under `samples/`; add dev API examples when the surface exists.
 | --- | --- | --- | --- | --- |
 | One-shot capture | `v1::run` | `MxcContainer.Run` / `RunAsync` | `run` | Result and cancellation semantics differ. |
 | One-shot pipes | `v1::spawn` | `MxcContainer.Spawn` / `SpawnAsync` | `spawn` | Confirm stream and cancellation contracts. |
-| One-shot PTY | `v1::spawn_with_pty` | `MxcContainer.SpawnWithPty` | `spawnWithPty` | Native: IsolationSession, Bubblewrap, LXC, Seatbelt direct execution. Node also supports ProcessContainer through an executor-backed path; the V1.Dev .NET operation will be asynchronous. |
+| One-shot PTY | `v1::spawn_with_pty` | `MxcContainer.SpawnWithPty` | `spawnWithPty` | Native: IsolationSession, Bubblewrap, LXC, Seatbelt direct execution. Node also supports ProcessContainer through an executor-backed path; V1.Dev .NET PTY stays synchronous. |
 | Existing-container capture | `v1::container::run_in_container` | `MxcLifecycle.RunInContainer` / `RunInContainerAsync` | `runInContainer` | Preserve caller ownership of the container. |
 | Existing-container pipes | `v1::container::spawn_in_container` | `MxcLifecycle.SpawnInContainer` / `SpawnInContainerAsync` | `spawnInContainer` | Reject unsupported backend modes explicitly. |
 | Existing-container PTY | `v1::container::spawn_in_container_with_pty` | `MxcLifecycle.SpawnInContainerWithPty` | `spawnInContainerWithPty` | Documented IsolationSession-only; terminal ownership needs end-to-end verification. |
@@ -95,9 +95,11 @@ different names, but do not satisfy these public SDK requirements.
   native byte-buffer ABI.
   Node raw APIs return `Promise<T>`, following the plain-verb conventions
   of #1398; a live-handle Promise resolves after startup, not after exit.
-  Potentially lengthy .NET dev calls return `Task<T>`, including both PTY
-  spawns and lifecycle operations. This work merges after v1 publication;
-  the raw family is **not** a prerequisite for the initial v1 release.
+  Potentially lengthy .NET dev capture, pipe-backed spawn, and lifecycle
+  calls return `Task<T>`. The two .NET dev PTY spawns remain synchronous,
+  matching typed V1; do not add `*WithPtyJsonAsync` variants for now. This
+  work merges after v1 publication; the raw family is **not** a prerequisite
+  for the initial v1 release.
 
 ### Initial result contract and remaining output work
 
@@ -175,27 +177,29 @@ the dev implementation must use its merged API rather than obsolete names.
 
 The six public dev execution operations use the merged V1 operation names
 with a JSON suffix, under the chosen namespace. Rust follows snake_case,
-.NET appends `JsonAsync` for potentially lengthy operations, and Node
-appends `Json` to the Promise-returning plain verb. Native names do not
-have to match the public SDK spelling:
+.NET appends `JsonAsync` to capture and pipe-backed operations but keeps the
+two PTY spawns synchronous as `*WithPtyJson`, and Node appends `Json` to the
+Promise-returning plain verb. Native names do not have to match the public
+SDK spelling:
 
 | Mode | Rust | .NET | Node | Existing native FFI |
 | --- | --- | --- | --- | --- |
 | One-shot capture | `run_json` | `RunJsonAsync` | `runJson` | `mxc_run_json` |
 | One-shot pipes | `spawn_json` | `SpawnJsonAsync` | `spawnJson` | `mxc_spawn_json` |
-| One-shot PTY | `spawn_with_pty_json` | `SpawnWithPtyJsonAsync` | `spawnWithPtyJson` | `mxc_spawn_pty_json`, except Node ProcessContainer uses `wxc-exec` |
+| One-shot PTY | `spawn_with_pty_json` | `SpawnWithPtyJson` | `spawnWithPtyJson` | `mxc_spawn_pty_json`, except Node ProcessContainer uses `wxc-exec` |
 | Existing-container capture | `run_in_container_json` | `RunInContainerJsonAsync` | `runInContainerJson` | `mxc_exec_state_aware_json` (Node/.NET SDKs spawn, drain, wait, dispose) |
 | Existing-container pipes | `spawn_in_container_json` | `SpawnInContainerJsonAsync` | `spawnInContainerJson` | `mxc_exec_state_aware_json` |
-| Existing-container PTY | `spawn_in_container_with_pty_json` | `SpawnInContainerWithPtyJsonAsync` | `spawnInContainerWithPtyJson` | `mxc_state_aware_exec_pty` |
+| Existing-container PTY | `spawn_in_container_with_pty_json` | `SpawnInContainerWithPtyJson` | `spawnInContainerWithPtyJson` | `mxc_state_aware_exec_pty` |
 
 The Rust SDK calls its in-process exact-JSON adapters instead of the FFI
 exports in the final column. Captured calls return the existing
 `ExecutionResult` shape (`Task<ExecutionResult>` in .NET,
 `Promise<ExecutionResult>` in Node), with lossy text on Node/.NET;
 pipe and PTY calls return the existing `MxcProcess` and `MxcPtyProcess`
-handles (`Task<T>` in .NET, `Promise<T>` in Node) after startup. The complete
-JSON document includes the existing-container identity; do not also require
-a `ContainerId` argument. The native FFI also exposes
+handles after startup: .NET pipe spawns return `Task<MxcProcess>` and PTY
+spawns return `MxcPtyProcess` synchronously; Node returns `Promise<T>` for
+both. The complete JSON document includes the existing-container identity;
+do not also require a `ContainerId` argument. The native FFI also exposes
 `mxc_run_state_aware_exec_json`, but the Node/.NET SDK dev in-container
 capture calls use the live FFI `mxc_exec_state_aware_json` handle to match
 typed V1 stream draining, wait, disposal, and .NET cancellation behavior.
@@ -255,10 +259,13 @@ document backend limitations where that channel does not provide them.
   optional one-shot container name, and OS process ID concepts. Do not
   rename published wire fields such as `sandboxId` or backend product names.
 - **Asynchrony:** Node dev calls return Promises, matching merged V1.
-  Potentially lengthy .NET dev operations return `Task<T>`, including PTY
-  spawns, capture, provision, start, stop, deprovision, and validation.
-  A `run` resolves after capture and completion; a `spawn` resolves with an
-  owned live handle after startup, not after process exit. Rust stays
+  .NET dev capture, pipe-backed spawn, provision, start, stop, deprovision,
+  and validation return `Task<T>`. The two .NET dev PTY spawns return live
+  `MxcPtyProcess` handles synchronously, matching typed V1; no PTY `Async`
+  variants are planned in this milestone.
+  Async `run` resolves after capture and completion; async `spawn` resolves
+  with an owned live handle after startup, not after process exit. Synchronous
+  .NET PTY spawns return the live handle after startup. Rust stays
   synchronous like the merged V1 API.
 - **Lifecycle responses:** Non-exec lifecycle and validation calls return
   the complete native response JSON string, not stable typed lifecycle
@@ -303,8 +310,9 @@ stronger guarantees:
    run operations do not add one. Live Node/.NET dev process handles retain
    V1 `kill`, wait, stream, and disposal behavior; Rust dev run remains
    synchronous and in-process. A .NET `Task<T>` alone does not require a
-   `CancellationToken`: dev lifecycle and PTY methods without typed async
-   cancellation counterparts need not add one. Test timeout and partial
+   `CancellationToken`: dev lifecycle methods without typed async
+   cancellation counterparts need not add one. Dev PTY methods stay
+   synchronous like typed V1. Test timeout and partial
    output, concurrent stream draining, capture limits, failed-startup
    cleanup, and that in-container exec leaves its caller-owned container
    provisioned.
