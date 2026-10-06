@@ -1,5 +1,7 @@
 # Run with network containment
 
+> **Audience:** MXC consumers
+
 Starts a temporary loopback HTTP endpoint in the host process, then runs a
 transient container with outbound, inbound, and host-loopback networking
 explicitly denied. The contained `curl` request must fail; a successful request

@@ -1,5 +1,7 @@
 # Process Container Networking Configuration, GA
 
+> **Audience:** MXC consumers and developers
+
 Supported exact contracts from `0.9.0-alpha` use the shared `network.egress`
 and `network.ingress` policy plus `runtimeConfig.networkProxy` and
 `processContainer.network.allowedProxyPeer` configuration.

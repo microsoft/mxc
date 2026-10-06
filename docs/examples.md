@@ -1,5 +1,7 @@
 ## Examples
 
+> **Audience:** MXC consumers
+
 For a more comprehensive list of examples, see
 [`tests/examples/`](../tests/examples/).
 

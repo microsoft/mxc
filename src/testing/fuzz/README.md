@@ -1,5 +1,7 @@
 # mxc_fuzz
 
+> **Audience:** MXC developers
+
 cargo-fuzz harnesses for the MXC config-parsing surface. Continuous fuzzing
 runs daily under [OneFuzz](https://aka.ms/onefuzz) on Windows x64 with
 AddressSanitizer. See [`docs/fuzzing.md`](../../docs/fuzzing.md) for the

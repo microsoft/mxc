@@ -1,5 +1,7 @@
 # MXC administrative telemetry policy
 
+> **Audience:** MXC consumers
+
 Audience: developers embedding MXC in a product that ships to Windows devices.
 
 MXC supports a single administrative policy that lets an organization prevent

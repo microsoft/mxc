@@ -1,5 +1,7 @@
 # Microsoft.Mxc.Sdk
 
+> **Audience:** MXC consumers
+
 `Microsoft.Mxc.Sdk` provides .NET APIs for authoring and executing MXC
 container requests through the in-process native `mxc_ffi` library. The
 versioned public API is in `Microsoft.Mxc.Sdk.V1`. All request and policy types

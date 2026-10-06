@@ -1,5 +1,7 @@
 # SDK API reference
 
+> **Audience:** MXC consumers
+
 These references describe the supported V1 SDK authoring surfaces: operation
 signatures, public types, fields, and containment choices. They complement the
 SDK READMEs and backend guides; they do not replace native policy validation or

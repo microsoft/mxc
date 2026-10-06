@@ -1,5 +1,7 @@
 # MXC SDK samples
 
+> **Audience:** MXC consumers
+
 These samples demonstrate the supported V1 SDK surfaces in Rust, .NET, and
 Node. They are organized by scenario so equivalent operations are easy to
 compare while each implementation remains idiomatic for its language.

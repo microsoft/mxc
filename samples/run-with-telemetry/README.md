@@ -1,5 +1,7 @@
 # Run with telemetry
 
+> **Audience:** MXC consumers
+
 Requests telemetry consent when the current user still needs to make a
 decision, then opts one small transient-container run into telemetry.
 

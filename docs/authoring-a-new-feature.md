@@ -1,5 +1,7 @@
 # Adding a New Feature
 
+> **Audience:** MXC developers
+
 > **Stable schemas are immutable once shipped.** Files in
 > `schemas/stable/` that are already published in a release must not be
 > edited. Add experimental work to `schemas/dev/` only, then carry it

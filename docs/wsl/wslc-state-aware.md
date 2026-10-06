@@ -1,5 +1,7 @@
 # WSLc State-Aware Lifecycle
 
+> **Audience:** MXC consumers and developers
+
 This document describes the **state-aware lifecycle** for the WSL Container (WSLc) backend:
 the multi-invocation `provision → start → exec → stop → deprovision` surface that keeps a
 container **warm** across separate `wxc-exec` phase processes, amortizing WSLc's high cold-start

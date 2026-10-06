@@ -1,5 +1,7 @@
 # Telemetry consent design
 
+> **Audience:** MXC developers
+
 This document defines the implemented Windows telemetry-consent contract.
 MXC ships the canonical consent resource, persistent consent storage, and
 consent-management APIs described below. Telemetry remains off by default and

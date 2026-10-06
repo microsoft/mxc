@@ -1,5 +1,7 @@
 # WSLC Getting Started — Running Linux Containers from Windows via MXC
 
+> **Audience:** MXC consumers
+
 This guide walks you through setting up the WSL Container (WSLC) backend for
 MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 

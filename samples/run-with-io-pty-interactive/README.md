@@ -1,5 +1,7 @@
 # Run with interactive PTY I/O
 
+> **Audience:** MXC consumers
+
 Runs an interactive shell in a transient container and connects the calling
 console to an MXC-owned pseudo-terminal. Terminal output is merged, input is
 forwarded until the contained shell exits, and the workload exit code is

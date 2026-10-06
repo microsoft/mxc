@@ -1,5 +1,7 @@
 # UI Policy Schema — `"ui"` Section
 
+> **Audience:** MXC consumers and developers
+
 > **Status:** Draft — for review
 > **Location:** MXC container configuration JSON
 > **Reference:** Based on the internal Microsoft Windows OS team's UIContainer design (private reference; not publicly available).

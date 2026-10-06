@@ -1,5 +1,7 @@
 # MXC Sandbox Policy Spec v0.8.0
 
+> **Audience:** MXC consumers
+
 > Historical design reference: schema 0.8 is retired. Use the
 > [current schema and migration guide](../../schema.md) for supported requests.
 

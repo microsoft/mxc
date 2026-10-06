@@ -1,5 +1,7 @@
 # MXC NanVix Integration — Design Document
 
+> **Audience:** MXC developers
+
 ## Problem
 
 MXC (Microsoft eXecution Container) runs untrusted code in sandboxed environments. Today it supports multiple backends: **AppContainer** (process-level isolation), **Windows Sandbox** (full VM), **LXC** and **WSLC** (Linux containers via WSL).

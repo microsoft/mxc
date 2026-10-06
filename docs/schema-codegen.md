@@ -1,5 +1,7 @@
 # Schema codegen
 
+> **Audience:** MXC developers
+
 MXC generates artifacts from exact registered configuration contracts:
 
 | Artifact family | Rust source | Purpose |

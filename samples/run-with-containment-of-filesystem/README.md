@@ -1,5 +1,7 @@
 # Run with filesystem containment
 
+> **Audience:** MXC consumers
+
 Grants the sample directory to a transient container as read-only, uses it as
 the contained working directory, and proves that reading succeeds while
 creating a file is blocked. Other host paths remain subject to the selected

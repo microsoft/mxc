@@ -1,5 +1,7 @@
 # MXC network schema updates: 0.7 to 0.8
 
+> **Audience:** MXC consumers and developers
+
 Schema 0.8 adds explicit egress and ingress policy and moves proxy runtime data
 outside the shared policy. During the additive transition, a 0.8 request may
 use either the legacy fields or the new fields, but cannot mix both formats.

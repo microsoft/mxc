@@ -1,5 +1,7 @@
 # .NET V1 reference
 
+> **Audience:** MXC consumers
+
 All public SDK operations and types are available under `Microsoft.Mxc.Sdk.V1`.
 Filesystem discovery helpers use `Microsoft.Mxc.Sdk.V1.Policy.Filesystem`.
 Discovery, probes, telemetry, and policy helpers use the same versioned boundary.

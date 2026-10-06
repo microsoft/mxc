@@ -1,5 +1,7 @@
 # Node V1 types
 
+> **Audience:** MXC consumers
+
 Public entrypoint: `@microsoft/mxc-sdk/v1`. [Operations](api.md) | [Overview](README.md)
 
 Declarations include public fields, variants, constructors, and members. Inherited SDK members remain defined on their base type; implementation-only helpers and external framework APIs are not expanded.

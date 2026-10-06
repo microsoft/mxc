@@ -1,6 +1,8 @@
 
 ## Configuration Schema
 
+> **Audience:** MXC consumers and developers
+
 MXC uses a JSON configuration file. The current stable schema is at
 [`schemas/stable/mxc-config.schema.1.0.0.json`](../schemas/stable/mxc-config.schema.1.0.0.json).
 For development, the exact schema at

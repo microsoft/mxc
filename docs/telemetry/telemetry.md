@@ -1,5 +1,7 @@
 # MXC Telemetry — Windows TraceLogging Architecture
 
+> **Audience:** MXC developers
+
 MXC uses the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate
 (published by Microsoft) for **Windows-only** TraceLogging ETW telemetry. No
 C++ shim, WIL, or FFI is required.

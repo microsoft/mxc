@@ -1,5 +1,7 @@
 # winhttp-proxy-shim
 
+> **Audience:** MXC developers
+
 Temporary elevated helper that sets per-AppContainer WinHTTP proxy policy.
 
 This binary will be removed once `CreateProcess` supports associating an

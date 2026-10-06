@@ -1,5 +1,7 @@
 # Dry-run check for containment support
 
+> **Audience:** MXC consumers
+
 Discovers which containment backends the current host can run without creating
 a container or starting a process. It prints platform support, each
 host-available backend, optional capabilities, and warnings.

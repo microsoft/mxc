@@ -1,5 +1,7 @@
 # Cross-language policy fixtures
 
+> **Audience:** MXC developers
+
 This directory holds shared policy fixture families:
 
 - `sdk-v1/` — the exact 1.0.0 documents every v1 SDK must emit for a shared

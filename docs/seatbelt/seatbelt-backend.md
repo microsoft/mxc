@@ -1,5 +1,7 @@
 # macOS Seatbelt Backend
 
+> **Audience:** MXC consumers and developers
+
 Runs commands inside Apple's kernel-enforced sandbox — the same Seatbelt
 framework behind the App Sandbox that every Mac App Store app uses.
 

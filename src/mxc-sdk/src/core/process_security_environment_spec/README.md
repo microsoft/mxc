@@ -1,5 +1,7 @@
 # `mxc_sdk::process_security_environment_spec`
 
+> **Audience:** MXC developers
+
 Rust bindings **generated** from `external/windows-sdk/ProcessSecurityEnvironment.fbs`
 by the FlatBuffers compiler (`flatc`).
 

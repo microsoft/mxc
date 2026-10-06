@@ -1,5 +1,7 @@
 # MXC IsolationSession Backend — State-Aware (TypeScript)
 
+> **Audience:** MXC developers
+
 This document describes the IsolationSession backend's TypeScript SDK surface under
 the state-aware lifecycle API. It is the SDK companion to the
 [Rust backend guide](state-aware-rust.md).

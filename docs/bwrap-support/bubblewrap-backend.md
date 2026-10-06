@@ -1,5 +1,7 @@
 # Bubblewrap Backend
 
+> **Audience:** MXC consumers and developers
+
 The Bubblewrap backend provides **unprivileged Linux sandboxing** using
 [Bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`). It uses
 Linux user namespaces to create isolated sandbox environments without

@@ -1,5 +1,7 @@
 # MXC Diagnostics
 
+> **Audience:** MXC consumers and developers
+
 A unified diagnostic view across every layer of the MXC stack:
 
 | Layer | Source | What you see |

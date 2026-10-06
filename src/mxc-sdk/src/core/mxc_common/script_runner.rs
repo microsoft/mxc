@@ -59,14 +59,25 @@ pub fn get_timeout_milliseconds(timeout: u32) -> u32 {
     }
 }
 
+/// The one-line dry-run verdict, including the rejection reason when there is
+/// one.
+fn dry_run_summary(response: &ScriptResponse) -> String {
+    if response.exit_code == 0 {
+        return "Dry run completed. Result: validation passed".to_string();
+    }
+    if response.error_message.is_empty() {
+        return "Dry run completed. Result: validation failed".to_string();
+    }
+    format!(
+        "Dry run completed. Result: validation failed: {}",
+        response.error_message
+    )
+}
+
 /// Print a dry-run result message to the logger, flush, and exit the process.
 pub fn handle_dry_run_exit(response: &ScriptResponse, logger: &mut Logger) -> ! {
     use std::fmt::Write;
-    if response.exit_code == 0 {
-        let _ = writeln!(logger, "Dry run completed. Result: validation passed");
-    } else {
-        let _ = writeln!(logger, "Dry run completed. Result: validation failed");
-    }
+    let _ = writeln!(logger, "{}", dry_run_summary(response));
     print!("{}", logger.get_buffer());
     std::process::exit(response.exit_code);
 }
@@ -151,5 +162,39 @@ mod tests {
             extended_error: "WIN32_ERROR(1920)".to_string(),
             ..Default::default()
         });
+    }
+
+    #[test]
+    fn dry_run_summary_reports_why_validation_failed() {
+        use crate::mxc_common::models::ScriptResponse;
+        let summary = super::dry_run_summary(&ScriptResponse::rejected(
+            "network.egress allow/deny rules are not supported by the selected backend",
+        ));
+        assert_eq!(
+            summary,
+            "Dry run completed. Result: validation failed: \
+             network.egress allow/deny rules are not supported by the selected backend"
+        );
+    }
+
+    #[test]
+    fn dry_run_summary_keeps_the_bare_verdicts() {
+        use crate::mxc_common::models::ScriptResponse;
+        assert_eq!(
+            super::dry_run_summary(&ScriptResponse {
+                exit_code: 0,
+                ..Default::default()
+            }),
+            "Dry run completed. Result: validation passed"
+        );
+        // A refusal that carried no message must not grow a dangling colon.
+        assert_eq!(
+            super::dry_run_summary(&ScriptResponse {
+                exit_code: 1,
+                error_message: String::new(),
+                ..Default::default()
+            }),
+            "Dry run completed. Result: validation failed"
+        );
     }
 }

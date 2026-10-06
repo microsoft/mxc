@@ -1,5 +1,7 @@
 # LXC Container Backend
 
+> **Audience:** MXC consumers and developers
+
 The LXC backend provides Linux container isolation using [LXC (Linux Containers)](https://linuxcontainers.org/lxc/).
 
 For exact `0.9.0-alpha`, networking is directional-only: use `network.egress`
