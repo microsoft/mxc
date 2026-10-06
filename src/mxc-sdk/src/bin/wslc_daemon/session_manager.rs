@@ -5,12 +5,12 @@
 //! thread.
 //!
 //! The WSLc SDK's `WslcSession` / `WslcContainer` / `WslcProcess` handles are
-//! apartment-affine rather than thread-affine, so any thread that has joined the
-//! MTA may use them. A single long-lived worker thread owns the container map
-//! and every short SDK call; async pipe handlers dispatch typed
-//! [`WorkerCommand`]s to it over a channel and await the reply. An image pull
-//! and an `exec` both run for an unbounded time, so each takes a thread of its
-//! own and posts its outcome back to the worker as another command.
+//! apartment-affine: any thread that has joined the MTA may use them. A single
+//! long-lived worker thread owns the container map and every short SDK call;
+//! async pipe handlers dispatch typed [`WorkerCommand`]s to it over a channel
+//! and await the reply. An image pull and an `exec` both run for an unbounded
+//! time, so each takes a thread of its own and posts its outcome back to the
+//! worker as another command.
 //!
 //! State-aware topology (decided): **one** shared `WslcSession` (the WSL2
 //! utility VM, booted lazily on first provision and amortised across all
@@ -59,9 +59,6 @@ const PULL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long teardown waits for an off-worker exec before giving up on it.
 const EXEC_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Off-worker execs that have not reported back.
-static EXECS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Block until `in_flight` reads zero, or `budget` expires.
 ///
@@ -160,39 +157,10 @@ pub enum WorkerCommand {
         config: ProvisionConfig,
         reply: oneshot::Sender<Result<String, WorkerError>>,
     },
-    Start {
-        config: StartConfig,
-        reply: oneshot::Sender<Result<(), WorkerError>>,
-    },
-    /// Validate the sandbox (exists + started) and, if admitted, hand the run to
-    /// a thread of its own. The two replies make admission **atomic** with the
-    /// claim on the container: the worker validates, claims the container's
-    /// in-flight slot, answers `admit` and starts the run thread without
-    /// yielding, and every later `Exec`/`Start`/`Stop`/`Deprovision` naming that
-    /// container parks behind the claim, so none can interleave with the run.
-    /// `admit` carries the pre-run decision (so an unknown/not-started sandbox is
-    /// a pre-admission typed error, never a post-admission stream `Error`);
-    /// `done` carries the run's exit code once [`WorkerCommand::ExecFinished`]
-    /// lands.
-    Exec {
-        config: ExecConfig,
-        /// Live-output sink the worker hands to `exec_in_container`; the SDK's
-        /// stdout/stderr callbacks push chunks through it to the pipe handler as
-        /// bytes arrive, alongside the capped capture buffers.
-        sink: OutputSink,
-        cancellation: Arc<AtomicBool>,
-        registration: Arc<ExecRegistration>,
-        admit: oneshot::Sender<Result<(), WorkerError>>,
-        done: oneshot::Sender<Result<ExecTerminal, WorkerError>>,
-    },
-    Stop {
-        config: StopConfig,
-        reply: oneshot::Sender<Result<(), WorkerError>>,
-    },
-    Deprovision {
-        config: DeprovisionConfig,
-        reply: oneshot::Sender<Result<(), WorkerError>>,
-    },
+    /// Anything addressed to one container. Routing every such command through
+    /// a single variant is what forces it through [`Worker::dispatch`], so a new
+    /// one cannot reach a container whose exec is still using its handle.
+    Container(ContainerWork),
     /// Report a parked provision's pull, from the pull thread or its deadline.
     PullFinished {
         token: u64,
@@ -212,6 +180,21 @@ pub enum WorkerCommand {
     ContainerCount { reply: oneshot::Sender<usize> },
     /// Release all containers + the session and stop the worker thread.
     Shutdown { reply: oneshot::Sender<()> },
+}
+
+/// Everything an admitted exec needs, kept together so it travels as one value
+/// from the pipe handler to the run thread.
+pub struct ExecRequest {
+    pub config: ExecConfig,
+
+    /// Live-output sink the worker hands to `exec_in_container`; the SDK's
+    /// stdout/stderr callbacks push chunks through it to the pipe handler as
+    /// bytes arrive, alongside the capped capture buffers.
+    pub sink: OutputSink,
+    pub cancellation: Arc<AtomicBool>,
+    pub(crate) registration: Arc<ExecRegistration>,
+    pub admit: oneshot::Sender<Result<(), WorkerError>>,
+    pub done: oneshot::Sender<Result<ExecTerminal, WorkerError>>,
 }
 
 /// What an off-worker exec thread hands back, already classified.
@@ -242,6 +225,23 @@ struct ExecJob {
 // arrived only on its own capture buffer and live sink.
 unsafe impl Send for ExecJob {}
 
+/// Keeps the in-flight count accurate even if the run panics, so teardown
+/// cannot be blocked forever by a thread that is already gone.
+struct ExecCount(Arc<AtomicUsize>);
+
+impl ExecCount {
+    fn enter(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for ExecCount {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Run an exec on a thread of its own, reporting back to the worker.
 ///
 /// Returns as soon as the thread starts. The caller keeps `sdk` loaded and the
@@ -250,29 +250,40 @@ unsafe impl Send for ExecJob {}
 fn start_exec(
     job: ExecJob,
     worker: mpsc::UnboundedSender<WorkerCommand>,
+    in_flight: &Arc<AtomicUsize>,
 ) -> Result<(), std::io::Error> {
-    EXECS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+    let counted = ExecCount::enter(in_flight);
     let spawned = std::thread::Builder::new()
         .name("wslc-exec".to_string())
         .spawn(move || {
             let job = job;
+
+            // Declared first so it releases the count after the report is
+            // queued: a teardown that sees zero is then guaranteed to find it.
+            let _counted = counted;
             let sandbox_id = job.config.sandbox_id.clone();
-            let report = match ComApartment::enter() {
+
+            let run = std::panic::AssertUnwindSafe(|| match ComApartment::enter() {
                 Err(e) => ExecReport::Finished(Err(WorkerError::Backend(e))),
                 Ok(_apartment) => {
                     let mut log = Logger::new(Mode::Console);
                     run_exec(job, &mut log)
                 }
-            };
-            EXECS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            });
+
+            // A panic leaves the process's fate unknown, which is what
+            // `Unconfirmed` already means: the worker quarantines the container
+            // rather than handing it to another exec.
+            let report = std::panic::catch_unwind(run).unwrap_or_else(|_| {
+                ExecReport::Unconfirmed("the exec thread panicked".to_string())
+            });
+
             let _ = worker.send(WorkerCommand::ExecFinished { sandbox_id, report });
         });
 
-    if let Err(e) = spawned {
-        EXECS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-        return Err(e);
-    }
-    Ok(())
+    // A spawn failure drops the guard along with the closure, so there is no
+    // release to do here.
+    spawned.map(|_| ())
 }
 
 /// The off-worker half of an exec: run it to completion and classify it.
@@ -293,7 +304,7 @@ fn run_exec(job: ExecJob, logger: &mut Logger) -> ExecReport {
         .collect();
 
     // SAFETY: `sdk` is valid and `container` is a live, started handle; the
-    // worker releases neither while this run is counted in `EXECS_IN_FLIGHT`.
+    // worker releases neither while this run is still counted in flight.
     let outcome = unsafe {
         container_steps::exec_in_container(
             &*sdk,
@@ -478,6 +489,13 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// The live-exec registry, so a test can observe what [`Self::cancel_exec`]
+    /// reached.
+    #[cfg(test)]
+    pub(crate) fn active_execs(&self) -> &ActiveExecs {
+        &self.active_execs
+    }
+
     /// Provision a container, returning its minted `sandbox_id`.
     pub async fn provision(&self, config: ProvisionConfig) -> Result<String, WorkerError> {
         let (reply, rx) = oneshot::channel();
@@ -488,7 +506,10 @@ impl SessionHandle {
     /// Start a provisioned container.
     pub async fn start(&self, config: StartConfig) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
-        self.send(WorkerCommand::Start { config, reply })?;
+        self.send(WorkerCommand::Container(ContainerWork::Start {
+            config,
+            reply,
+        }))?;
         rx.await.map_err(worker_gone)?
     }
 
@@ -525,14 +546,14 @@ impl SessionHandle {
             &config.run_token,
             &cancellation,
         )?);
-        self.send(WorkerCommand::Exec {
+        self.send(WorkerCommand::Container(ContainerWork::Exec(ExecRequest {
             config,
             sink,
             cancellation,
             registration: Arc::clone(&registration),
             admit,
             done,
-        })?;
+        })))?;
         admit_rx.await.map_err(worker_gone)??;
         Ok(ExecStream {
             done: done_rx,
@@ -560,14 +581,20 @@ impl SessionHandle {
     /// Stop a running container.
     pub async fn stop(&self, config: StopConfig) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
-        self.send(WorkerCommand::Stop { config, reply })?;
+        self.send(WorkerCommand::Container(ContainerWork::Stop {
+            config,
+            reply,
+        }))?;
         rx.await.map_err(worker_gone)?
     }
 
     /// Deprovision (delete) a container.
     pub async fn deprovision(&self, config: DeprovisionConfig) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
-        self.send(WorkerCommand::Deprovision { config, reply })?;
+        self.send(WorkerCommand::Container(ContainerWork::Deprovision {
+            config,
+            reply,
+        }))?;
         rx.await.map_err(worker_gone)?
     }
 
@@ -632,15 +659,17 @@ struct PendingProvision {
 
 /// A command addressed to one container, either about to run or parked behind
 /// an exec that is still using that container's handle.
-enum ContainerWork {
-    Exec {
-        config: ExecConfig,
-        sink: OutputSink,
-        cancellation: Arc<AtomicBool>,
-        registration: Arc<ExecRegistration>,
-        admit: oneshot::Sender<Result<(), WorkerError>>,
-        done: oneshot::Sender<Result<ExecTerminal, WorkerError>>,
-    },
+pub(crate) enum ContainerWork {
+    /// Validate the sandbox (exists + started) and, if admitted, hand the run to
+    /// a thread of its own. The two replies make admission **atomic** with the
+    /// claim on the container: the worker validates, claims the container's
+    /// in-flight slot, answers `admit` and starts the run thread without
+    /// yielding, and every later command naming that container parks behind the
+    /// claim, so none can interleave with the run. `admit` carries the pre-run
+    /// decision (so an unknown/not-started sandbox is a pre-admission typed
+    /// error, never a post-admission stream `Error`); `done` carries the run's
+    /// exit code once [`WorkerCommand::ExecFinished`] lands.
+    Exec(ExecRequest),
     Start {
         config: StartConfig,
         reply: oneshot::Sender<Result<(), WorkerError>>,
@@ -658,7 +687,7 @@ enum ContainerWork {
 impl ContainerWork {
     fn sandbox_id(&self) -> &str {
         match self {
-            ContainerWork::Exec { config, .. } => &config.sandbox_id,
+            ContainerWork::Exec(request) => &request.config.sandbox_id,
             ContainerWork::Start { config, .. } => &config.sandbox_id,
             ContainerWork::Stop { config, .. } => &config.sandbox_id,
             ContainerWork::Deprovision { config, .. } => &config.sandbox_id,
@@ -669,8 +698,8 @@ impl ContainerWork {
     fn refuse(self, message: &str) {
         let error = WorkerError::Backend(anyhow::anyhow!("{message}"));
         match self {
-            ContainerWork::Exec { admit, .. } => {
-                let _ = admit.send(Err(error));
+            ContainerWork::Exec(request) => {
+                let _ = request.admit.send(Err(error));
             }
             ContainerWork::Start { reply, .. }
             | ContainerWork::Stop { reply, .. }
@@ -708,9 +737,17 @@ struct Worker {
     containers: HashMap<String, ContainerEntry>,
     pending: HashMap<u64, PendingProvision>,
     exec_in_flight: HashMap<String, InFlightExec>,
+
+    /// Runs this worker started that have not reported back. Shared with the run
+    /// threads, which outlive this struct whenever teardown abandons a handle.
+    execs_in_flight: Arc<AtomicUsize>,
     next_pull_token: u64,
     session: Option<WslcSessionGuard>,
-    sdk: Option<WslcSdk>,
+
+    /// Boxed so the address an off-worker pull or exec was handed survives this
+    /// struct being moved or the field being taken, which teardown does to leak
+    /// the SDK rather than unload it under a running thread.
+    sdk: Option<Box<WslcSdk>>,
 }
 
 impl Worker {
@@ -722,6 +759,7 @@ impl Worker {
             containers: HashMap::new(),
             pending: HashMap::new(),
             exec_in_flight: HashMap::new(),
+            execs_in_flight: Arc::new(AtomicUsize::new(0)),
             next_pull_token: 0,
         }
     }
@@ -732,7 +770,7 @@ impl Worker {
             // SAFETY: the worker thread is already in the MTA (see `ComApartment`).
             let sdk =
                 unsafe { container_steps::load_sdk_checked(&mut self.logger) }.map_err(sr_err)?;
-            self.sdk = Some(sdk);
+            self.sdk = Some(Box::new(sdk));
         }
         if self.session.is_none() {
             let storage = default_storage_path();
@@ -1032,22 +1070,7 @@ impl Worker {
         }
 
         match work {
-            ContainerWork::Exec {
-                config,
-                sink,
-                cancellation,
-                registration,
-                admit,
-                done,
-            } => self.begin_exec(
-                config,
-                sink,
-                cancellation,
-                registration,
-                admit,
-                done,
-                worker,
-            ),
+            ContainerWork::Exec(request) => self.begin_exec(request, worker),
             ContainerWork::Start { config, reply } => {
                 let _ = reply.send(self.start(config));
             }
@@ -1065,20 +1088,16 @@ impl Worker {
     /// Validation, the admission reply, the claim on the container and the
     /// spawn all happen here without yielding, so nothing can delete the
     /// validated handle before the run thread takes it.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "mirrors the WorkerCommand::Exec payload at its single call site"
-    )]
-    fn begin_exec(
-        &mut self,
-        config: ExecConfig,
-        sink: OutputSink,
-        cancellation: Arc<AtomicBool>,
-        registration: Arc<ExecRegistration>,
-        admit: oneshot::Sender<Result<(), WorkerError>>,
-        done: oneshot::Sender<Result<ExecTerminal, WorkerError>>,
-        worker: &mpsc::UnboundedSender<WorkerCommand>,
-    ) {
+    fn begin_exec(&mut self, request: ExecRequest, worker: &mpsc::UnboundedSender<WorkerCommand>) {
+        let ExecRequest {
+            config,
+            sink,
+            cancellation,
+            registration,
+            admit,
+            done,
+        } = request;
+
         let container = match self.validate_exec(&config.sandbox_id) {
             Ok(container) => container,
             Err(e) => {
@@ -1109,14 +1128,16 @@ impl Worker {
 
         let sandbox_id = config.sandbox_id.clone();
         let job = ExecJob {
-            sdk: sdk as *const WslcSdk,
+            // The box's contents, not the field: teardown may take the field
+            // while this run is still dereferencing the SDK.
+            sdk: &**sdk as *const WslcSdk,
             container,
             config,
             sink,
             cancellation,
         };
 
-        if let Err(e) = start_exec(job, worker.clone()) {
+        if let Err(e) = start_exec(job, worker.clone(), &self.execs_in_flight) {
             let _ = done.send(Err(WorkerError::Backend(anyhow::anyhow!(
                 "could not start a thread to run exec on sandbox {sandbox_id}: {e}"
             ))));
@@ -1142,8 +1163,18 @@ impl Worker {
         report: ExecReport,
         worker: &mpsc::UnboundedSender<WorkerCommand>,
     ) {
+        for work in self.retire_exec(sandbox_id, report) {
+            self.dispatch(work, worker);
+        }
+    }
+
+    /// Answer a finished exec and hand back whatever parked behind it.
+    ///
+    /// Separate from [`Worker::finish_exec`] so teardown can answer the client
+    /// without releasing parked work into a daemon that is shutting down.
+    fn retire_exec(&mut self, sandbox_id: &str, report: ExecReport) -> Vec<ContainerWork> {
         let Some(in_flight) = self.exec_in_flight.remove(sandbox_id) else {
-            return;
+            return Vec::new();
         };
 
         let outcome = match report {
@@ -1163,9 +1194,7 @@ impl Worker {
             ));
         }
 
-        for work in in_flight.parked {
-            self.dispatch(work, worker);
-        }
+        in_flight.parked
     }
 
     fn quarantine(
@@ -1273,11 +1302,61 @@ impl Worker {
         Ok(())
     }
 
+    /// Give up the SDK handles rather than release them, when a run thread may
+    /// still be using one.
+    ///
+    /// Reached only on an unwind, where [`Worker::shutdown`]'s drain never ran.
+    fn abandon_if_execs_running(mut self, in_flight: usize) {
+        if in_flight > 0 {
+            std::mem::forget(std::mem::take(&mut self.containers));
+            std::mem::forget(self.session.take());
+            std::mem::forget(self.sdk.take());
+        }
+
+        // Only the handles are abandoned. The bookkeeping drops, closing the
+        // reply channels a client is still awaiting so it observes the worker
+        // is gone instead of waiting out its own deadline.
+    }
+
+    /// Answer a command pulled off the queue during teardown.
+    ///
+    /// [`WorkerCommand::ExecFinished`] is the one the drain is looking for and
+    /// is handled by its caller.
+    fn refuse_while_shutting_down(&self, cmd: WorkerCommand) {
+        const SHUTTING_DOWN: &str = "the WSLc daemon is shutting down";
+
+        match cmd {
+            WorkerCommand::Provision { reply, .. } => {
+                let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                    "{SHUTTING_DOWN}"
+                ))));
+            }
+            WorkerCommand::Container(work) => work.refuse(SHUTTING_DOWN),
+            WorkerCommand::Retire { reply, .. } => {
+                let _ = reply.send(());
+            }
+            WorkerCommand::ContainerCount { reply } => {
+                let _ = reply.send(self.live_container_count());
+            }
+            WorkerCommand::Shutdown { reply } => {
+                let _ = reply.send(());
+            }
+
+            // The provision this would resume was already answered above.
+            WorkerCommand::PullFinished { .. } => {}
+            WorkerCommand::ExecFinished { .. } => {}
+        }
+    }
+
     /// Release every container and the session.
     ///
     /// A parked provision is answered rather than dropped, since a dropped
     /// reply reaches its client as a bare "worker gone".
-    fn shutdown(&mut self) {
+    fn shutdown(
+        &mut self,
+        rx: &mut mpsc::UnboundedReceiver<WorkerCommand>,
+        drain_budget: Duration,
+    ) {
         for (_, pending) in self.pending.drain() {
             let _ = pending.reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
                 "the WSLc daemon shut down while pulling image '{}'",
@@ -1287,7 +1366,32 @@ impl Worker {
 
         // An off-worker exec is still using its container handle, so nothing
         // below may stop, delete or release one until the runs report back.
-        let execs_drained = wait_for_execs_in_flight(&EXECS_IN_FLIGHT, EXEC_DRAIN_TIMEOUT);
+        let execs_drained = wait_for_execs_in_flight(&self.execs_in_flight, drain_budget);
+
+        if execs_drained {
+            // Every drained run queued its report before releasing its count, so
+            // the reports are all in the channel now. Collecting them is what
+            // lets a finished exec keep its own exit code instead of the
+            // shutdown error below. Anything else found along the way is
+            // answered rather than dropped, since a dropped reply reaches its
+            // client as a bare "worker gone".
+            while !self.exec_in_flight.is_empty() {
+                let Ok(cmd) = rx.try_recv() else {
+                    break;
+                };
+                match cmd {
+                    WorkerCommand::ExecFinished { sandbox_id, report } => {
+                        for work in self.retire_exec(&sandbox_id, report) {
+                            work.refuse(&format!(
+                                "the WSLc daemon shut down before sandbox {sandbox_id} was free"
+                            ));
+                        }
+                    }
+                    other => self.refuse_while_shutting_down(other),
+                }
+            }
+        }
+
         for (sandbox_id, in_flight) in self.exec_in_flight.drain() {
             let _ = in_flight
                 .done
@@ -1380,59 +1484,45 @@ pub fn spawn() -> Result<SessionHandle> {
             };
 
             let mut worker = Worker::new();
-            while let Some(cmd) = rx.blocking_recv() {
-                match cmd {
-                    WorkerCommand::Provision { config, reply } => {
-                        worker.begin_provision(config, reply, &worker_tx);
-                    }
-                    WorkerCommand::PullFinished { token, outcome } => {
-                        worker.finish_provision(token, outcome);
-                    }
-                    WorkerCommand::Start { config, reply } => {
-                        worker.dispatch(ContainerWork::Start { config, reply }, &worker_tx);
-                    }
-                    WorkerCommand::Exec {
-                        config,
-                        sink,
-                        cancellation,
-                        registration,
-                        admit,
-                        done,
-                    } => {
-                        worker.dispatch(
-                            ContainerWork::Exec {
-                                config,
-                                sink,
-                                cancellation,
-                                registration,
-                                admit,
-                                done,
-                            },
-                            &worker_tx,
-                        );
-                    }
-                    WorkerCommand::ExecFinished { sandbox_id, report } => {
-                        worker.finish_exec(&sandbox_id, report, &worker_tx);
-                    }
-                    WorkerCommand::Stop { config, reply } => {
-                        worker.dispatch(ContainerWork::Stop { config, reply }, &worker_tx);
-                    }
-                    WorkerCommand::Deprovision { config, reply } => {
-                        worker.dispatch(ContainerWork::Deprovision { config, reply }, &worker_tx);
-                    }
-                    WorkerCommand::Retire { sandbox_id, reply } => {
-                        worker.retire(&sandbox_id);
-                        let _ = reply.send(());
-                    }
-                    WorkerCommand::ContainerCount { reply } => {
-                        let _ = reply.send(worker.live_container_count());
-                    }
-                    WorkerCommand::Shutdown { reply } => {
-                        worker.shutdown();
-                        let _ = reply.send(());
-                        break;
+
+            // A panic here would otherwise drop the container handles an exec
+            // thread is still using, so the unwind is caught and the handles are
+            // abandoned instead -- the same trade teardown already makes when a
+            // run outlives its drain budget.
+            let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                while let Some(cmd) = rx.blocking_recv() {
+                    match cmd {
+                        WorkerCommand::Provision { config, reply } => {
+                            worker.begin_provision(config, reply, &worker_tx);
+                        }
+                        WorkerCommand::PullFinished { token, outcome } => {
+                            worker.finish_provision(token, outcome);
+                        }
+                        WorkerCommand::Container(work) => {
+                            worker.dispatch(work, &worker_tx);
+                        }
+                        WorkerCommand::ExecFinished { sandbox_id, report } => {
+                            worker.finish_exec(&sandbox_id, report, &worker_tx);
+                        }
+                        WorkerCommand::Retire { sandbox_id, reply } => {
+                            worker.retire(&sandbox_id);
+                            let _ = reply.send(());
+                        }
+                        WorkerCommand::ContainerCount { reply } => {
+                            let _ = reply.send(worker.live_container_count());
+                        }
+                        WorkerCommand::Shutdown { reply } => {
+                            worker.shutdown(&mut rx, EXEC_DRAIN_TIMEOUT);
+                            let _ = reply.send(());
+                            break;
+                        }
                     }
                 }
+            }));
+
+            if served.is_err() {
+                let in_flight = worker.execs_in_flight.load(Ordering::SeqCst);
+                worker.abandon_if_execs_running(in_flight);
             }
         })
         .map_err(|e| anyhow::anyhow!("spawn WSLc worker thread: {e}"))?;
@@ -1967,6 +2057,22 @@ mod tests {
         }
     }
 
+    /// A container whose handle release is observable, so a test can tell a
+    /// deliberate leak from a normal drop.
+    fn flagged_entry(
+        release: unsafe extern "C" fn(mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32,
+    ) -> ContainerEntry {
+        let sentinel = std::ptr::dangling_mut();
+        ContainerEntry {
+            started: false,
+            quarantined: false,
+            retired: false,
+            // SAFETY: `release` never dereferences the handle, so the guard owns
+            // a value it can release without touching memory.
+            container: unsafe { WslcContainerGuard::from_raw(sentinel, release) },
+        }
+    }
+
     /// An exec occupying a container's in-flight slot, with the completion
     /// receiver a test uses to observe what the worker answers.
     fn in_flight_exec(
@@ -2008,7 +2114,7 @@ mod tests {
             Arc::new(register_exec(&active_execs, exec_id, "run", &cancellation).unwrap());
         let sink: OutputSink = Box::new(|_, _| {});
         TestExec {
-            work: ContainerWork::Exec {
+            work: ContainerWork::Exec(ExecRequest {
                 config: ExecConfig {
                     exec_id: exec_id.to_string(),
                     run_token: "run".to_string(),
@@ -2024,7 +2130,7 @@ mod tests {
                 registration,
                 admit,
                 done,
-            },
+            }),
             admit: admit_rx,
             done: done_rx,
             cancellation,
@@ -2201,14 +2307,125 @@ mod tests {
         assert_eq!(worker.live_container_count(), 0);
     }
 
+    /// A run that has not reported back is still holding its container handle,
+    /// so a teardown that gives up waiting must abandon the handles rather than
+    /// release them.
     #[test]
-    fn shutdown_answers_an_exec_and_the_work_parked_behind_it() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+    fn a_timed_out_shutdown_answers_clients_without_releasing_live_handles() {
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+
+        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+            RELEASED.store(true, Ordering::SeqCst);
+            0
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:busy".to_string(), flagged_entry(release));
+        let (in_flight, mut done) = in_flight_exec("running");
+        worker
+            .exec_in_flight
+            .insert("wslc:busy".to_string(), in_flight);
+        let (work, mut parked_reply) = stop_work("wslc:busy");
+        worker.dispatch(work, &tx);
+
+        // The run never reports, so the drain can only expire.
+        let _counted = ExecCount::enter(&worker.execs_in_flight);
+
+        worker.shutdown(&mut rx, Duration::from_millis(100));
+
+        assert!(
+            !RELEASED.load(Ordering::SeqCst),
+            "a container handle the run thread still holds must not be released"
+        );
+        assert!(
+            done.try_recv()
+                .expect("the running exec must be answered")
+                .is_err(),
+            "the client gets a typed error rather than a dropped channel"
+        );
+        assert!(parked_reply
+            .try_recv()
+            .expect("parked work must be answered")
+            .is_err());
+    }
+
+    /// A command that reaches the queue ahead of the exec report must not cost
+    /// the exec its result, nor be swallowed on its way past.
+    #[test]
+    fn shutdown_answers_a_command_queued_ahead_of_the_exec_report() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut worker, mut done) = worker_with_exec_in_flight();
+
+        let (queued, mut queued_reply) = stop_work("wslc:other");
+        tx.send(WorkerCommand::Container(queued)).unwrap();
+        tx.send(WorkerCommand::ExecFinished {
+            sandbox_id: "wslc:busy".to_string(),
+            report: ExecReport::Finished(Ok(ExecTerminal::Exited(0))),
+        })
+        .unwrap();
+
+        worker.shutdown(&mut rx, EXEC_DRAIN_TIMEOUT);
+
+        assert_eq!(
+            done.try_recv()
+                .expect("the finished exec must be answered")
+                .unwrap(),
+            ExecTerminal::Exited(0),
+            "a command ahead of the report must not cost the exec its exit code"
+        );
+        assert!(
+            queued_reply
+                .try_recv()
+                .expect("the queued command must be answered, not dropped")
+                .is_err(),
+            "a command consumed during teardown gets a typed error"
+        );
+    }
+
+    /// A run that finished before teardown keeps its own exit code: the drain
+    /// found its report already queued.
+    #[test]
+    fn shutdown_delivers_a_finished_execs_real_outcome() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut worker, mut done) = worker_with_exec_in_flight();
+        let (work, mut reply) = stop_work("wslc:busy");
+        worker.dispatch(work, &tx);
+        tx.send(WorkerCommand::ExecFinished {
+            sandbox_id: "wslc:busy".to_string(),
+            report: ExecReport::Finished(Ok(ExecTerminal::Exited(0))),
+        })
+        .unwrap();
+
+        worker.shutdown(&mut rx, EXEC_DRAIN_TIMEOUT);
+
+        assert_eq!(
+            done.try_recv()
+                .expect("the finished exec must be answered")
+                .unwrap(),
+            ExecTerminal::Exited(0),
+            "a run that completed before teardown must keep its exit code"
+        );
+        assert!(
+            reply
+                .try_recv()
+                .expect("the parked stop must be answered rather than dropped")
+                .is_err(),
+            "parked work is refused once the daemon is shutting down"
+        );
+    }
+
+    /// The synthetic error is for a run whose report never arrived.
+    #[test]
+    fn shutdown_answers_an_exec_whose_report_never_arrived() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let (mut worker, mut done) = worker_with_exec_in_flight();
         let (work, mut reply) = stop_work("wslc:busy");
         worker.dispatch(work, &tx);
 
-        worker.shutdown();
+        worker.shutdown(&mut rx, EXEC_DRAIN_TIMEOUT);
 
         assert!(done
             .try_recv()
@@ -2218,6 +2435,142 @@ mod tests {
             .try_recv()
             .expect("the parked stop must be answered rather than dropped")
             .is_err());
+    }
+
+    /// A thread that unwinds never reaches its own release statement, so the
+    /// count has to come off in `Drop` or teardown waits out the full budget.
+    #[test]
+    fn a_panicking_run_still_releases_its_in_flight_count() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let panicked = std::panic::catch_unwind({
+            let count = Arc::clone(&count);
+            move || {
+                let _counted = ExecCount::enter(&count);
+                assert_eq!(count.load(Ordering::SeqCst), 1);
+                panic!("the run exploded");
+            }
+        });
+
+        assert!(panicked.is_err());
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "a panicking run must not leave itself counted forever"
+        );
+    }
+
+    /// A client awaiting a reply learns the worker is gone from its channel
+    /// closing, so an unwind must not take the reply channels with it.
+    #[test]
+    fn an_unwind_closes_the_reply_channels_it_abandons() {
+        let (mut worker, mut done) = worker_with_exec_in_flight();
+        let (work, mut parked_reply) = stop_work("wslc:busy");
+        worker
+            .exec_in_flight
+            .get_mut("wslc:busy")
+            .unwrap()
+            .parked
+            .push(work);
+        let (reply, mut pending_reply) = oneshot::channel();
+        worker.pending.insert(
+            1,
+            PendingProvision {
+                config: ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                    port_mappings: Vec::new(),
+                },
+                reply,
+                _retire_deadline: std::sync::mpsc::channel().0,
+            },
+        );
+
+        worker.abandon_if_execs_running(1);
+
+        assert!(
+            matches!(done.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
+            "the running exec's client must see its channel close"
+        );
+        assert!(
+            matches!(
+                parked_reply.try_recv(),
+                Err(oneshot::error::TryRecvError::Closed)
+            ),
+            "parked work's client must see its channel close"
+        );
+        assert!(
+            matches!(
+                pending_reply.try_recv(),
+                Err(oneshot::error::TryRecvError::Closed)
+            ),
+            "a parked provision's client must see its channel close"
+        );
+    }
+
+    /// Releasing a container handle is an SDK call; a run thread still holding
+    /// one must outlive the worker that owned it.
+    #[test]
+    fn an_unwind_with_a_run_still_counted_keeps_container_handles() {
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+
+        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+            RELEASED.store(true, Ordering::SeqCst);
+            0
+        }
+
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:busy".to_string(), flagged_entry(release));
+
+        worker.abandon_if_execs_running(1);
+
+        assert!(
+            !RELEASED.load(Ordering::SeqCst),
+            "a handle the run thread is still using must not be released"
+        );
+    }
+
+    #[test]
+    fn an_unwind_with_no_run_counted_releases_container_handles() {
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+
+        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+            RELEASED.store(true, Ordering::SeqCst);
+            0
+        }
+
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:idle".to_string(), flagged_entry(release));
+
+        worker.abandon_if_execs_running(0);
+
+        assert!(
+            RELEASED.load(Ordering::SeqCst),
+            "with nothing in flight the handles must be released normally"
+        );
+    }
+
+    /// Teardown asks whether *its own* handles are free, so one worker's run
+    /// must not hold another's drain open.
+    #[test]
+    fn one_workers_run_does_not_count_against_anothers_drain() {
+        let busy = Worker::new();
+        let idle = Worker::new();
+
+        let _counted = ExecCount::enter(&busy.execs_in_flight);
+
+        assert_eq!(busy.execs_in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            idle.execs_in_flight.load(Ordering::SeqCst),
+            0,
+            "a run on one worker must not be counted against another's teardown"
+        );
     }
 
     /// Teardown must not free a container handle a run thread is still using.
@@ -2431,6 +2784,7 @@ mod tests {
                 image_tar_path: None,
                 volumes: Vec::new(),
                 network: Default::default(),
+                port_mappings: Vec::new(),
             })
             .await
             .unwrap();

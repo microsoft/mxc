@@ -41,11 +41,11 @@ pipe; the daemon performs the actual SDK calls and streams stdio back. This mirr
 Sandbox daemon pattern.
 
 The daemon owns the live SDK handles on a **single apartment-affine worker thread**, which services
-every lifecycle command. Those handles are apartment-affine rather than thread-affine, so an image
-pull and an `exec` each take an MTA thread of their own and post their outcome back to the worker;
-a long run no longer blocks commands against other sandboxes. A command naming a container whose
-run is still in flight waits for that run, because deleting the container would free a handle the
-run is using. See [Known limitations](#known-limitations).
+every lifecycle command. Any thread that has joined the MTA may use those handles, so an image
+pull and an `exec` each run on an MTA thread of their own and post their outcome back to the
+worker, leaving it free to serve other sandboxes for the duration of a run. A command naming a
+container with a run in flight waits for that run, because deleting the container would free a
+handle the run is using. See [Known limitations](#known-limitations).
 
 ## Components
 
@@ -302,11 +302,15 @@ fixtures **through the harness**, not by pointing `wxc-exec --config` at them di
 
 ## Known limitations
 
-- **One exec admitted at a time (deferred).** The worker no longer blocks for the duration of a
-  run, so a provision or an exec against another sandbox proceeds while one is running. The daemon
-  still admits a single exec stream, so a client's concurrent exec is refused rather than run
-  alongside the first, and the per-container single-flight slot is not yet reported as `Busy`.
-  Raising that bound is tracked as follow-up work.
+- **Multiple exec streams are deferred.** The daemon admits one exec stream at a time, so a
+  client's concurrent exec is refused rather than run alongside the first, and the per-container
+  single-flight slot is not reported as `Busy`. Raising that bound is tracked as follow-up work.
+  Lifecycle calls on another sandbox are a separate matter: they are admitted through the control
+  client reserve and proceed while a run is in flight.
+
+- **Ordering is per-container, not global.** Commands naming a container with a run in flight wait
+  for that run; commands for other sandboxes proceed independently. A caller cannot infer that
+  work on one sandbox completed because work on another did.
 
 - **No typed SDK can set port mappings yet.** The Rust, Node, and .NET v1 SDKs
   all pin the published stable contract `1.0.0`, which does not declare the

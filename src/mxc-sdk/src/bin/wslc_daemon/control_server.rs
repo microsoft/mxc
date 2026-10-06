@@ -510,10 +510,11 @@ where
 /// [`StreamFrame`]s, followed by a terminal frame.
 ///
 /// The sandbox is validated (exists + started) *before* the `Ok` admission is
-/// written, and — critically — admission is **atomic** with the start of the
-/// run on the worker thread (see [`SessionHandle::exec`]): the worker validates
-/// and begins running within one command handler, so no `Stop`/`Deprovision`
-/// can invalidate the checked state between the admission and the run. An
+/// written, and — critically — admission is **atomic** with the claim the
+/// worker takes on the container (see [`SessionHandle::exec`]): the worker
+/// validates, claims the container and hands the run to a thread of its own
+/// without yielding, and every later command naming that container parks behind
+/// the claim, so no `Stop`/`Deprovision` can invalidate the checked state. An
 /// unknown/not-started sandbox therefore comes back as a pre-admission typed
 /// [`DaemonResponse::Err`] rather than a post-admission stream `Error` frame.
 ///
@@ -533,9 +534,22 @@ async fn handle_exec<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    let exec_id = config.exec_id.clone();
+    let run_token = config.run_token.clone();
+
     // Await the worker's admission decision before writing anything: a rejected
     // exec is a pre-admission typed error, never a post-admission stream frame.
-    write_exec_result(&mut pipe, session.exec(config).await).await
+    let delivered = write_exec_result(&mut pipe, session.exec(config).await).await;
+
+    if delivered.is_err() {
+        // The run outlives this handler on a thread of its own, and the permit
+        // that bounds exec capacity is released as this returns. Without a kill
+        // a client could disconnect in a loop and leave an unbounded number of
+        // runs going, each holding a container.
+        session.cancel_exec(&exec_id, &run_token);
+    }
+
+    delivered
 }
 
 /// Turn an exec **admission** outcome into the client's frame sequence, generic
@@ -736,6 +750,49 @@ mod tests {
                 message: "WSLc daemon exec capacity is exhausted".to_string(),
             }
         );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_undelivered_exec_is_cancelled_so_its_run_cannot_outlive_the_permit() {
+        use crate::session_manager::register_exec;
+
+        let session = crate::session_manager::spawn().unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let registration = register_exec(
+            session.active_execs(),
+            "orphan-1",
+            "orphan-run-1",
+            &cancellation,
+        )
+        .unwrap();
+
+        let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_EXECS));
+        let permit = limiter.clone().try_acquire_owned().unwrap();
+        let delivered = handle_exec(
+            BrokenPipe,
+            session.clone(),
+            mxc_sdk::wslc_common::daemon_protocol::ExecConfig {
+                exec_id: "orphan-1".to_string(),
+                run_token: "orphan-run-1".to_string(),
+                sandbox_id: "wslc:does-not-exist".to_string(),
+                script_code: "sleep 600".to_string(),
+                working_directory: String::new(),
+                env: Vec::new(),
+                env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
+                timeout_ms: 0,
+            },
+            permit,
+        )
+        .await;
+
+        assert!(delivered.is_err(), "the broken pipe must fail delivery");
+        assert!(
+            cancellation.load(Ordering::Acquire),
+            "a run the client can no longer read must be cancelled, or it keeps \
+             going after its capacity permit is released"
+        );
+        drop(registration);
         session.shutdown().await.unwrap();
     }
 
