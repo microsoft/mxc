@@ -1746,29 +1746,26 @@ mod tests {
         let mut child = command.spawn().expect("spawn child");
         drop(command);
 
-        let (mut output, output_canceller): (Box<dyn Read + Send>, Option<PtyReadCanceller>) =
-            if native {
-                let stdio = terminal.take_native_stdio().expect("take native stdio");
-                let mut output = std::fs::File::from(stdio.stdout);
-                let mut ready = [0_u8; 5];
-                output.read_exact(&mut ready).expect("read readiness");
-                assert_eq!(&ready, b"ready");
-                let mut writer = std::fs::File::from(stdio.stdin);
-                writer.write_all(input).expect("write terminal input");
-                drop(writer);
-                (Box::new(output), None)
-            } else {
-                let (mut output, canceller) = terminal
-                    .try_clone_reader_with_canceller()
-                    .expect("clone reader");
-                let mut ready = [0_u8; 5];
-                output.read_exact(&mut ready).expect("read readiness");
-                assert_eq!(&ready, b"ready");
-                let mut writer = terminal.take_writer().expect("take writer");
-                writer.write_all(input).expect("write terminal input");
-                drop(writer);
-                (output, Some(canceller))
-            };
+        let mut output: Box<dyn Read> = if native {
+            let stdio = terminal.take_native_stdio().expect("take native stdio");
+            let mut output = std::fs::File::from(stdio.stdout);
+            let mut ready = [0_u8; 5];
+            output.read_exact(&mut ready).expect("read readiness");
+            assert_eq!(&ready, b"ready");
+            let mut writer = std::fs::File::from(stdio.stdin);
+            writer.write_all(input).expect("write terminal input");
+            drop(writer);
+            Box::new(output)
+        } else {
+            let mut output = terminal.try_clone_reader().expect("clone reader");
+            let mut ready = [0_u8; 5];
+            output.read_exact(&mut ready).expect("read readiness");
+            assert_eq!(&ready, b"ready");
+            let mut writer = terminal.take_writer().expect("take writer");
+            writer.write_all(input).expect("write terminal input");
+            drop(writer);
+            output
+        };
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -1786,26 +1783,8 @@ mod tests {
         terminal.finish_native_bridge();
         drop(terminal);
 
-        let text = if let Some(canceller) = output_canceller {
-            let (result_tx, result_rx) = std::sync::mpsc::channel();
-            let output_thread = std::thread::spawn(move || {
-                let mut text = String::new();
-                let result = output.read_to_string(&mut text).map(|_| text);
-                let _ = result_tx.send(result);
-            });
-            std::thread::sleep(Duration::from_millis(50));
-            canceller.close();
-            let text = result_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("PTY output reader did not stop after cancellation")
-                .expect("read output");
-            output_thread.join().expect("output reader thread");
-            text
-        } else {
-            let mut text = String::new();
-            output.read_to_string(&mut text).expect("read output");
-            text
-        };
+        let mut text = String::new();
+        output.read_to_string(&mut text).expect("read output");
         assert!(text.contains("terminal-eof-observed"), "got: {text:?}");
     }
 
