@@ -1,6 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import type {
   IDisposable,
@@ -13,19 +20,28 @@ import {
   type NativeLifecycleStatus,
   type WaitResult,
 } from '../v1/container-process.js';
-import { MxcError } from '../v1/errors.js';
+import {
+  MxcError,
+  type ErrorCode,
+} from '../v1/errors.js';
 import { MxcPtyProcess } from '../v1/mxc-pty-process.js';
 import { findWxcExecutable } from '../v1/platform.js';
 import type { ExecutionMetadata } from '../v1/types.js';
+import {
+  parseExecutionMetadata,
+  parseStringArray,
+} from './native-error.js';
 
 interface ProcessContainerPtyDependencies {
   loadNodePty: () => Promise<typeof import('node-pty')>;
   findExecutable: typeof findWxcExecutable;
+  platform: () => NodeJS.Platform;
 }
 
 const defaultDependencies: ProcessContainerPtyDependencies = {
   loadNodePty: () => import('node-pty'),
   findExecutable: findWxcExecutable,
+  platform: () => process.platform,
 };
 
 let dependencies = defaultDependencies;
@@ -34,8 +50,88 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+interface WxcPtyResult {
+  exitCode: number;
+  timedOut: boolean;
+  warnings: string[];
+  outputMetadata?: ExecutionMetadata;
+  errorCode: ErrorCode;
+  errorMessage: string;
+  extendedError: string;
+  failurePhase: string;
+}
+
+const errorCodes = new Set<ErrorCode>([
+  'malformed_request',
+  'unsupported_containment',
+  'unsupported_phase',
+  'backend_unavailable',
+  'malformed_id',
+  'stale_id',
+  'not_provisioned',
+  'not_started',
+  'already_started',
+  'already_stopped',
+  'policy_validation',
+  'backend_error',
+]);
+
+function parseWxcPtyResult(resultFile: string): WxcPtyResult {
+  const value: unknown = JSON.parse(readFileSync(resultFile, 'utf8'));
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('result must be a JSON object');
+  }
+
+  const result = value as Record<string, unknown>;
+  if (!Number.isInteger(result.exitCode)) {
+    throw new Error('result.exitCode must be an integer');
+  }
+  if (typeof result.timedOut !== 'boolean') {
+    throw new Error('result.timedOut must be a boolean');
+  }
+  if (
+    typeof result.errorCode !== 'string'
+    || !errorCodes.has(result.errorCode as ErrorCode)
+    || typeof result.errorMessage !== 'string'
+    || typeof result.extendedError !== 'string'
+    || typeof result.failurePhase !== 'string'
+  ) {
+    throw new Error('result error fields are invalid');
+  }
+
+  return {
+    exitCode: result.exitCode as number,
+    timedOut: result.timedOut,
+    warnings: parseStringArray(
+      JSON.stringify(result.warnings),
+      'wxc-exec returned malformed ProcessContainer PTY warnings',
+    ),
+    outputMetadata: result.outputMetadata === null
+      ? undefined
+      : parseExecutionMetadata(JSON.stringify(result.outputMetadata)),
+    errorCode: result.errorCode as ErrorCode,
+    errorMessage: result.errorMessage,
+    extendedError: result.extendedError,
+    failurePhase: result.failurePhase,
+  };
+}
+
+function resultError(result: WxcPtyResult): MxcError | undefined {
+  if (!result.errorMessage || result.timedOut) {
+    return undefined;
+  }
+
+  return new MxcError({
+    code: result.errorCode,
+    message: result.extendedError
+      ? `${result.errorMessage}: ${result.extendedError}`
+      : result.errorMessage,
+    details: { failurePhase: result.failurePhase },
+  });
+}
+
 class NodePtyLifecycleDriver implements NativeLifecycleDriver {
-  readonly id: number;
+  readonly id = 0;
   readonly standardInput: Writable;
   readonly standardOutput = new PassThrough();
   readonly standardError = null;
@@ -49,9 +145,16 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
   private readonly dataSubscription: IDisposable;
   private readonly exitSubscription: IDisposable;
   private resolveExit!: (result: WaitResult) => void;
+  private rejectExit!: (error: Error) => void;
+  private warningsValue: readonly string[] = [];
+  private outputMetadataValue: ExecutionMetadata | undefined;
+  private killRequested = false;
 
-  constructor(private readonly pty: IPty) {
-    this.id = pty.pid;
+  constructor(
+    private readonly pty: IPty,
+    private readonly resultDirectory: string,
+    private readonly resultFile: string,
+  ) {
     this.standardInput = new Writable({
       write: (chunk: Buffer, _encoding, callback) => {
         try {
@@ -62,9 +165,11 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
         }
       },
     });
-    this.exitPromise = new Promise<WaitResult>((resolve) => {
+    this.exitPromise = new Promise<WaitResult>((resolve, reject) => {
       this.resolveExit = resolve;
+      this.rejectExit = reject;
     });
+    void this.exitPromise.catch(() => {});
     this.dataSubscription = pty.onData((data) => {
       if (!this.standardOutput.write(data)) {
         this.pty.pause();
@@ -77,13 +182,42 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
     });
     this.exitSubscription = pty.onExit(({ exitCode }) => {
       if (!this.status.running) return;
-      this.status = {
-        exitCode,
-        running: false,
-        timedOut: false,
-      };
-      this.standardOutput.end();
-      this.resolveExit({ exitCode, timedOut: false });
+      try {
+        const result = parseWxcPtyResult(this.resultFile);
+        this.status = {
+          exitCode: result.exitCode,
+          running: false,
+          timedOut: result.timedOut,
+        };
+        this.warningsValue = result.warnings;
+        this.outputMetadataValue = result.outputMetadata;
+        this.standardOutput.end();
+        const error = resultError(result);
+        if (error === undefined) {
+          this.resolveExit({
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+          });
+        } else {
+          this.rejectExit(error);
+        }
+      } catch (error) {
+        this.status = {
+          exitCode,
+          running: false,
+          timedOut: false,
+        };
+        this.standardOutput.end();
+        if (this.killRequested) {
+          this.resolveExit({ exitCode, timedOut: false });
+        } else {
+          this.rejectExit(new MxcError({
+            code: 'backend_error',
+            message: 'wxc-exec did not produce a valid ProcessContainer PTY result',
+            details: { cause: asError(error).message },
+          }));
+        }
+      }
     });
   }
 
@@ -96,15 +230,16 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
   }
 
   warnings(): readonly string[] {
-    return [];
+    return this.warningsValue;
   }
 
   outputMetadata(): ExecutionMetadata | undefined {
-    return undefined;
+    return this.outputMetadataValue;
   }
 
   kill(): void {
     if (this.status.running) {
+      this.killRequested = true;
       this.pty.kill();
     }
   }
@@ -122,20 +257,29 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
     if (!this.standardOutput.destroyed && !this.standardOutput.readableEnded) {
       this.standardOutput.end();
     }
+    rmSync(this.resultDirectory, { recursive: true, force: true });
   }
 }
 
 /** @internal Creates the public process wrapper around a node-pty handle. */
 export function createNodePtyProcess(
   pty: IPty,
-  timeoutMs: number | undefined,
+  resultDirectory: string,
+  resultFile: string,
 ): MxcPtyProcess {
-  const driver = new NodePtyLifecycleDriver(pty);
+  const driver = new NodePtyLifecycleDriver(
+    pty,
+    resultDirectory,
+    resultFile,
+  );
   return new MxcPtyProcess(
     driver,
     ({ rows, columns }) => pty.resize(columns, rows),
-    timeoutMs,
   );
+}
+
+export function isProcessContainerExecutablePtySupported(): boolean {
+  return dependencies.platform() === 'win32';
 }
 
 // Work around the in-process PTY binding's lack of ProcessContainer support by
@@ -156,9 +300,13 @@ async function spawnWithWxcExecutablePty(
   }
 
   const requestJson = JSON.stringify(request);
+  const resultDirectory = mkdtempSync(join(tmpdir(), 'mxc-node-pty-'));
+  const resultFile = join(resultDirectory, 'result.json');
   const args = [
     '--config-base64',
     Buffer.from(requestJson, 'utf8').toString('base64'),
+    '--sdk-result-file',
+    resultFile,
   ];
   if (experimental) {
     args.push('--experimental');
@@ -175,7 +323,7 @@ async function spawnWithWxcExecutablePty(
       env: process.env,
       useConpty: true,
     });
-    return createNodePtyProcess(pty, request.process.timeout);
+    return createNodePtyProcess(pty, resultDirectory, resultFile);
   } catch (error) {
     if (pty !== undefined) {
       try {
@@ -184,6 +332,7 @@ async function spawnWithWxcExecutablePty(
         // Preserve the original construction failure.
       }
     }
+    rmSync(resultDirectory, { recursive: true, force: true });
     throw new MxcError(
       'backend_error',
       `failed to launch ProcessContainer PTY: ${asError(error).message}`,

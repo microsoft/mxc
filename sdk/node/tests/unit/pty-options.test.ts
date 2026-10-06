@@ -8,6 +8,7 @@ import {
   _setSpawnBindingSandboxWithPtyImplementation,
 } from '../../src/bindings/pty.js';
 import {
+  _setProcessContainerPtyDependencies,
   _setSpawnProcessContainerWithPtyImplementation,
 } from '../../src/bindings/process-container-pty.js';
 import type { OneShotRequest } from '../../src/generated/v1_0_0/wire.js';
@@ -59,6 +60,7 @@ describe('initial PTY dimensions in operation options', () => {
     _setSpawnBindingSandboxWithPtyImplementation(() => {
       assert.fail('ProcessContainer PTY must not use the FFI binding');
     });
+    _setProcessContainerPtyDependencies({ platform: () => 'win32' });
     _setSpawnProcessContainerWithPtyImplementation(
       (request, _experimental, rows, columns) => {
         preparedRequest = request;
@@ -92,7 +94,35 @@ describe('initial PTY dimensions in operation options', () => {
       assert.deepStrictEqual(dimensions, [35, 110]);
     } finally {
       _setSpawnBindingSandboxWithPtyImplementation();
+      _setProcessContainerPtyDependencies();
       _setSpawnProcessContainerWithPtyImplementation();
+    }
+  });
+
+  it('leaves non-Windows ProcessContainer requests on the native path', async () => {
+    let preparedRequest: OneShotRequest | undefined;
+    _setProcessContainerPtyDependencies({ platform: () => 'linux' });
+    _setSpawnProcessContainerWithPtyImplementation(() => {
+      assert.fail('non-Windows ProcessContainer PTY must not launch wxc-exec');
+    });
+    _setSpawnBindingSandboxWithPtyImplementation((request) => {
+      preparedRequest = request;
+      return Promise.reject(captured);
+    });
+
+    try {
+      await assert.rejects(
+        spawnWithPty({
+          containment: { type: 'processcontainer' },
+          command: 'echo test',
+        }),
+        captured,
+      );
+      assert.strictEqual(preparedRequest?.containment, 'processcontainer');
+    } finally {
+      _setProcessContainerPtyDependencies();
+      _setSpawnProcessContainerWithPtyImplementation();
+      _setSpawnBindingSandboxWithPtyImplementation();
     }
   });
 
