@@ -58,7 +58,7 @@ jobs:
           $arguments.Add('--dry-run')
           $arguments.Add('--locked')
           $arguments.Add('--registry')
-          $arguments.Add('crates-io')
+          $arguments.Add('Mxc-Azure-Feed')
           $arguments.Add('--manifest-path')
           $arguments.Add('src/Cargo.toml')
           foreach ($crate in $crates)
