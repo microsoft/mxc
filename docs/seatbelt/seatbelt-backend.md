@@ -136,9 +136,9 @@ Seatbelt matches AF_UNIX sockets by **path**, so MXC governs them with the
 | `deniedPaths` | ❌ | ❌ |
 
 Why: Node toolchains (tsx, vite, esbuild, jest workers) need both halves for
-IPC. Gating them behind `allowLocalNetwork` would force real network ingress on
-just to run a build. These rules are path-scoped, so they never widen IP
-networking.
+IPC. Gating them behind `ingress.default: "allow"` would force real network
+ingress on just to run a build. These rules are path-scoped, so they never
+widen IP networking.
 
 > ⚠️ **`connect()` is a capability `file-write*` alone didn't grant.** A broad
 > `readwritePaths` root lets the sandbox talk to any pre-existing listener
@@ -324,26 +324,6 @@ combined with `runtimeConfig.networkProxy`.
 > so the reachability rule also covers the host's non-loopback addresses **on
 > that same port number**. It cannot be narrowed — a literal `127.0.0.1` is a
 > profile syntax error.
-
-### Migrating retired 0.7 network fields
-
-Pre-0.9 contracts fail at version dispatch; none of these fields is accepted
-in a supported request. Translate stored policies before declaring v0.9+:
-
-| Legacy (0.7) | Directional equivalent | Notes |
-|---|---|---|
-| `defaultPolicy: "block"` | `egress.default: "deny"` | Identical profile output |
-| `defaultPolicy: "allow"` | `egress.default: "allow"` | Identical profile output |
-| `allowLocalNetwork: true` | `ingress.default: "allow"` | Identical profile output |
-| `network.proxy.localhost` / loopback `network.proxy.url` | `runtimeConfig.networkProxy` | |
-| `allowedHosts` / `blockedHosts` | *(no direct equivalent)* | Seatbelt has no per-host filter. Configure hostname restrictions on a caller-managed proxy instead. |
-| *(no equivalent)* | `ingress.hostLoopback` | Legacy configs never expressed host-loopback direction explicitly. |
-
-The last row is the one migration hazard: 0.7 has no `hostLoopback` concept, so
-`defaultPolicy: "allow"` leaves loopback **open**. Translating that to
-`egress.default: "allow"` closes it, because `hostLoopback` defaults to `deny`.
-Add `ingress: { "default": "allow", "hostLoopback": "allow" }` to preserve the
-old behavior.
 
 ## UI policy
 
@@ -630,7 +610,6 @@ rejected before Seatbelt validation.
 | `runtimeConfig.networkProxy` + non-empty direct `egress.allow` / `egress.deny` | Direct rules and proxy-only mode are alternatives | Remove direct rules and enforce destination policy at the proxy |
 | `runtimeConfig.networkProxy` with a non-loopback host | The runtime proxy endpoint must be loopback | Use `localhost`, `127.0.0.1`, or `[::1]` |
 | `processContainer.network.allowedProxyPeer` | Peer identity pinning isn't supported | Remove it |
-| `defaultPolicy`, host lists, `network.proxy`, or `enforcementMode` | No supported exact contract defines them | Migrate to directional policy and a caller-managed runtime proxy where needed |
 
 #### Filesystem
 
