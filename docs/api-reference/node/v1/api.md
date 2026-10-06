@@ -23,7 +23,15 @@ covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
 Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
 rejects `guiAccess`.
 Terminal handles give the caller explicit input, output, resize, and process
-ownership; there is no separate attached-console launch API or API accepting ["MXC request JSON"](../../../schema.md#mxc-request-json).
+ownership; there is no separate attached-console launch API. Typed V1 does
+not accept ["MXC request JSON"](../../../schema.md#mxc-request-json); the
+[V1.Dev exact-JSON API](dev.md) accepts caller-authored requests separately.
+Captured existing-container execution closes its output streams on timeout
+and returns the text collected so far with `timedOut: true`.
+Output read failures reject capture without waiting for the workload to exit.
+For executor-backed ProcessContainer PTY, `timeoutMs` reaches `wxc-exec`,
+but its exit channel does not distinguish a timeout from an ordinary exit:
+`wait().timedOut` is `false` when the executor exits in either case.
 
 Read the terminal output concurrently rather than only after waiting. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller

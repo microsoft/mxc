@@ -7,6 +7,7 @@ Filesystem discovery helpers use `Microsoft.Mxc.Sdk.V1.Policy.Filesystem`.
 Discovery, probes, telemetry, and policy helpers use the same versioned boundary.
 
 - [Operation signatures](api.md)
+- [V1.Dev exact-JSON API](dev.md)
 - [Types and fields](types.md)
 - [Cross-SDK requirements](../../README.md)
 
