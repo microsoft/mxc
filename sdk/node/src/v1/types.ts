@@ -496,8 +496,6 @@ export function legacyConfigAliasUnsupportedReason(config: ContainerConfig): str
 
 /** Per-operation controls for the V1 in-process APIs. */
 export interface MxcOptions {
-  /** Enable runtime-gated experimental behavior where supported. */
-  experimental?: boolean;
   /** Validate a lifecycle request without performing the operation. */
   dryRun?: boolean;
 }

@@ -62,8 +62,7 @@ try {
 and disposal operations. Access output streams before awaiting completion; any
 untaken streams are drained internally to avoid pipe-buffer deadlocks.
 Each operation accepts its own optional options type: `RunOptions`,
-`SpawnOptions`, or `SpawnWithPtyOptions`. `experimental` authorizes native
-experimental features; it does not change the SDK-owned wire contract.
+`SpawnOptions`, or `SpawnWithPtyOptions`.
 Execution options do not support `dryRun`.
 
 `ContainerRequest` holds the command, cross-backend filesystem, network, and UI

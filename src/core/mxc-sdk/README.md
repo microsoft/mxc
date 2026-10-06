@@ -39,8 +39,7 @@ output with `WaitResult::TimedOut`.
 
 Creation takes `RunOptions`, `SpawnOptions`, or `SpawnWithPtyOptions` after
 the request. `SpawnWithPtyOptions.size` carries initial dimensions and defaults
-to 24 rows by 80 columns. `experimental` authorizes native experimental
-features without changing the SDK-owned wire contract.
+to 24 rows by 80 columns.
 
 Set the request's typed `Containment` when a specific backend is required.
 Shared restrictions remain on `ContainerRequest`; backend-specific settings

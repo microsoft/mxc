@@ -877,11 +877,10 @@ pub(crate) fn prepare_request(
 
 pub(crate) fn prepare_creation_request(
     request: &ContainerRequest,
-    experimental: bool,
     telemetry: Option<crate::options::TelemetryConfig>,
 ) -> Result<PreparedContainerRequest, crate::Error> {
     let mut prepared = prepare_request(request)?;
-    prepared.inner.experimental_enabled = experimental;
+    prepared.inner.experimental_enabled = false;
     if let Some(telemetry) = telemetry {
         prepared.inner.telemetry = Some(TelemetryConfig {
             enabled: telemetry.enabled,
@@ -924,8 +923,8 @@ mod tests {
             let telemetry = enabled.map(|enabled| crate::options::TelemetryConfig {
                 enabled: Some(enabled),
             });
-            let prepared = super::prepare_creation_request(&request, true, telemetry).unwrap();
-            assert!(prepared.inner.experimental_enabled);
+            let prepared = super::prepare_creation_request(&request, telemetry).unwrap();
+            assert!(!prepared.inner.experimental_enabled);
             assert_eq!(
                 prepared.inner.telemetry.as_ref().and_then(|t| t.enabled),
                 enabled
@@ -949,7 +948,6 @@ mod tests {
         let request = super::ContainerRequest::new(TEST_COMMAND);
         let prepared = super::prepare_creation_request(
             &request,
-            false,
             Some(crate::options::TelemetryConfig::default()),
         )
         .unwrap();

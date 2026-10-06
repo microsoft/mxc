@@ -229,7 +229,6 @@ pub mod v1 {
                 container_id,
                 request,
                 SpawnInContainerOptions {
-                    experimental: options.experimental,
                     telemetry: options.telemetry,
                 },
             )?)
@@ -267,11 +266,7 @@ pub mod v1 {
     /// no pty is allocated. Any stdout/stderr stream the caller does not
     /// `take_*` is drained and discarded by [`wait`](MxcProcess::wait).
     pub fn spawn(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProcess, Error> {
-        let prepared = crate::policy::prepare_creation_request(
-            &request,
-            options.experimental,
-            options.telemetry,
-        )?;
+        let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
         mxc_engine::spawn_execution_request(&prepared.inner).map(MxcProcess::new)
     }
 
@@ -281,11 +276,7 @@ pub mod v1 {
         options: SpawnWithPtyOptions,
     ) -> Result<MxcPtyProcess, Error> {
         options.size.validate()?;
-        let prepared = crate::policy::prepare_creation_request(
-            &request,
-            options.experimental,
-            options.telemetry,
-        )?;
+        let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
         mxc_engine::spawn_with_pty(&prepared.inner, options.size.into())
             .and_then(MxcPtyProcess::new)
     }
@@ -304,7 +295,6 @@ pub mod v1 {
         crate::wait_with_output(spawn(
             request,
             SpawnOptions {
-                experimental: options.experimental,
                 telemetry: options.telemetry,
             },
         )?)

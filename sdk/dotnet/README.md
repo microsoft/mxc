@@ -61,8 +61,7 @@ validated by the native engine.
 Creation methods accept their own `RunOptions`, `SpawnOptions`, or
 `SpawnWithPtyOptions` after the request. Set `SpawnWithPtyOptions.Size` to
 choose initial dimensions; it defaults to 24 rows by 80 columns. Async cancellation
-tokens come last. `Experimental` authorizes native experimental features
-without changing the SDK-owned wire contract.
+tokens come last.
 
 ## Spawn with a caller-controlled terminal
 

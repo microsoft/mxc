@@ -67,8 +67,8 @@ Entries below describe historical release APIs, not the current V1 surface.
 
 - `getPlatformSupport()` now reports `uiCapabilities` on Windows when the
   native probe can determine which UI restrictions the host can enforce.
-- **State-aware lifecycle support for `windows_sandbox`** (Windows-only,
-  still experimental — every call must pass `{ experimental: true }`).
+- **State-aware lifecycle support for `windows_sandbox`** through raw exact
+  contract APIs with explicit experimental authorization (Windows-only).
   The new `WindowsSandboxProvisionConfig` / `WindowsSandboxStartConfig` /
   `WindowsSandboxExecConfig` / `WindowsSandboxStopConfig` /
   `WindowsSandboxDeprovisionConfig` types are exported via

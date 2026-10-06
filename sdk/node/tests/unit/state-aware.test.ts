@@ -218,11 +218,11 @@ describe('lifecycle execution options', () => {
 describe('validation results', () => {
   const id = 'iso:validation' as ContainerId<'isolation_session'>;
   const calls = [
-    () => validateProvision({ containment: 'wslc' }, { experimental: true, telemetry: { enabled: false } }),
-    () => validateStart(id, { experimental: true, telemetry: { enabled: false } }),
-    () => validateStop(id, { experimental: true, telemetry: { enabled: false } }),
-    () => validateDeprovision(id, { experimental: true, telemetry: { enabled: false } }),
-    () => validateProcess(id, { command: 'echo validation' }, { experimental: true, telemetry: { enabled: false } }),
+    () => validateProvision({ containment: 'wslc' }, { telemetry: { enabled: false } }),
+    () => validateStart(id, { telemetry: { enabled: false } }),
+    () => validateStop(id, { telemetry: { enabled: false } }),
+    () => validateDeprovision(id, { telemetry: { enabled: false } }),
+    () => validateProcess(id, { command: 'echo validation' }, { telemetry: { enabled: false } }),
   ];
 
   it('preserves warnings for every phase without executing a workload', async () => {
@@ -233,7 +233,7 @@ describe('validation results', () => {
       const request = installStateAwareReply('{"result":{"warnings":["policy warning","telemetry warning"]}}');
       assert.deepStrictEqual(await call(), { warnings: ['policy warning', 'telemetry warning'] });
       assert.strictEqual(request().dryRun, true);
-      assert.strictEqual(request().experimental, true);
+      assert.strictEqual(request().experimental, false);
       assert.deepStrictEqual(requestEnvelope(request()).telemetry, { enabled: false });
     }
   });
@@ -662,18 +662,16 @@ describe('provisionContainer', () => {
   it('rejects unsupported options', async () => {
     await assert.rejects(
       () => provisionContainer({ containment: 'isolation_session', ...ACK }, {
-        executablePath: 'wxc-exec.exe',
+        experimental: true,
       } as never),
-      (err: unknown) => err instanceof MxcError && err.message.includes("does not support option 'executablePath'"),
+      (err: unknown) => err instanceof MxcError && err.message.includes("does not support option 'experimental'"),
     );
   });
 
-  it('forwards experimental authorization for explicit provision validation', async () => {
+  it('does not authorize experimental provision validation', async () => {
     const request = installStateAwareReply('{"result":{}}');
-    await validateProvision({ containment: 'isolation_session', ...ACK }, {
-      experimental: true,
-    });
-    assert.strictEqual(request().experimental, true);
+    await validateProvision({ containment: 'isolation_session', ...ACK });
+    assert.strictEqual(request().experimental, false);
     assert.strictEqual(request().dryRun, true);
   });
 });
@@ -811,17 +809,16 @@ timeoutMs: 250 },
     assert.strictEqual(exec.binding().freed, true);
   });
 
-  it('forwards experimental authorization to state-aware streaming exec', async () => {
+  it('does not authorize experimental state-aware streaming exec', async () => {
     const exec = installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(17, '', ''),
     );
     const result = await runInContainer(
       'iso:abc' as ContainerId<'isolation_session'>,
       { command: 'echo experimental' },
-      { experimental: true },
     );
     assert.strictEqual(result.exitCode, 0);
-    assert.strictEqual(exec.experimental(), true);
+    assert.strictEqual(exec.experimental(), false);
   });
 
   it('returns ExecResult on script exit != 0 when stdout is plain script output (not an error envelope)', async () => {
@@ -953,16 +950,15 @@ timeoutMs: 123 },
     });
   });
 
-  it('forwards experimental authorization for live exec', async () => {
+  it('does not authorize experimental live exec', async () => {
     const exec = installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(22, '', ''),
     );
     const proc = await spawnInContainer(
       'iso:abc' as ContainerId<'isolation_session'>,
       { command: 'echo live' },
-      { experimental: true },
     );
-    assert.strictEqual(exec.experimental(), true);
+    assert.strictEqual(exec.experimental(), false);
     proc.dispose();
   });
   it('rejects any supplied dryRun because no live process exists', async () => {

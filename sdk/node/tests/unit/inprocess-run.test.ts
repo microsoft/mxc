@@ -124,7 +124,7 @@ describe('in-process asynchronous run routing', () => {
       environment: { SAMPLE: 'value' },
       inheritDefaultEnvironment: true,
       containerName: 'sample',
-    }, { experimental: true, telemetry: { enabled: false } });
+    }, { telemetry: { enabled: false } });
 
     assert.deepStrictEqual(result, {
       stdout: 'out',
@@ -139,7 +139,7 @@ describe('in-process asynchronous run routing', () => {
     assert.strictEqual(bindingRequest?.process.cwd, 'C:\\work');
     assert.deepStrictEqual(bindingRequest?.process.env, ['SAMPLE=value']);
     assert.strictEqual(bindingRequest?.process.inheritDefaultEnv, true);
-    assert.strictEqual(bindingExperimental, true);
+    assert.strictEqual(bindingExperimental, false);
     assert.deepStrictEqual(bindingRequest?.telemetry, { enabled: false });
   });
 
@@ -173,18 +173,22 @@ describe('in-process asynchronous run routing', () => {
 
     const processHandle = await spawn(
       { command: 'echo spawn' },
-      { experimental: true, telemetry: { enabled: true } },
+      { telemetry: { enabled: true } },
     );
 
     assert.ok(processHandle instanceof v1Sdk.MxcProcess);
     assert.strictEqual(bindingRequest?.process.commandLine, 'echo spawn');
     assert.strictEqual(bindingRequest?.version, '1.0.0');
-    assert.strictEqual(bindingExperimental, true);
+    assert.strictEqual(bindingExperimental, false);
     assert.deepStrictEqual(bindingRequest?.telemetry, { enabled: true });
     await processHandle.wait();
   });
 
   it('rejects invalid requests at the SDK boundary', async () => {
+    await assert.rejects(
+      run({ command: 'echo hello' }, { experimental: true } as never),
+      /does not support option 'experimental'/,
+    );
     await assert.rejects(
       run({ command: '' }),
       /command must be a non-empty string/,
