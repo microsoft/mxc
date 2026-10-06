@@ -33,10 +33,6 @@ pub enum BackendCapability {
 }
 ```
 
-`ProxyLoopbackCompatibility` reports the identity-less proxy workaround on
-PSEC 1.0-only hosts, not general ingress support. See
-[proxy compatibility discovery](../../../process-container/networking.md#discovering-proxy-loopback-compatibility).
-
 
 ## `mxc_sdk::v1::BubblewrapNetworkSupport`
 

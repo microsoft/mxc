@@ -33,10 +33,6 @@ export type BackendCapability =
   | 'unknown';
 ```
 
-`proxyLoopbackCompatibility` reports the identity-less proxy workaround on
-PSEC 1.0-only hosts, not general ingress support. See
-[proxy compatibility discovery](../../../process-container/networking.md#discovering-proxy-loopback-compatibility).
-
 ## `@microsoft/mxc-sdk/v1::BaseProcessUiConfig`
 
 BaseProcess-specific UI configuration (Windows only).
