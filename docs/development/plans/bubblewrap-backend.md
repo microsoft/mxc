@@ -306,7 +306,7 @@ the LXC runner: apply rules before execution, remove rules after.
 - `docs/bwrap-support/bubblewrap-backend.md` — user guide
 - Update `docs/schema.md` — new containment value and config block
 - Update `.github/copilot-instructions.md` — add to backend table
-- Update `docs/authoring-a-new-feature.md` if the experimental feature checklist changes
+- Update `docs/development/guides/authoring-a-new-feature.md` if the experimental feature checklist changes
 
 ## Effort Estimate (Complexity)
 

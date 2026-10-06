@@ -4,7 +4,7 @@
 //! Administrative (MDM / Group Policy) telemetry policy.
 //!
 //! See `docs/telemetry/telemetry-administrative-policy.md` for the admin-facing reference and
-//! `docs/telemetry/telemetry-consent-design.md` for how this composes with
+//! `docs/development/architecture/telemetry-consent-design.md` for how this composes with
 //! user consent. In short:
 //!
 //! - An administrator (via Intune, another MDM, or Group Policy) may **deny**

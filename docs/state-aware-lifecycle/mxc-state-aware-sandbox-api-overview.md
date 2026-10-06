@@ -81,8 +81,8 @@ author typed SDK requests.
 ## References
 
 - [Full lifecycle and wire contract](./mxc-state-aware-sandbox-api.md)
-- [Rust SDK](../../src/core/mxc-sdk/README.md)
+- [Rust SDK](../../src/mxc-sdk/README.md)
 - [.NET SDK](../../sdk/dotnet/README.md)
 - [Node SDK](../../sdk/node/README.md)
-- [IsolationSession TypeScript guide](../isolation-session/state-aware-typescript.md)
+- [IsolationSession TypeScript architecture](../development/architecture/isolation-session/state-aware-typescript.md)
 - [WSLC lifecycle guide](../wsl/wslc-state-aware.md)

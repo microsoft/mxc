@@ -9,7 +9,7 @@ cost.
 
 It complements:
 
-- [`wslc-sdk-bindings.md`](wslc-sdk-bindings.md) — regenerating the SDK bindings.
+- [WSLC SDK bindings runbook](../development/build-and-test/wslc-sdk-bindings.md) — regenerating the SDK bindings.
 - [`../state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
 
 The raw WSLc state-aware surface is available in published exact schemas

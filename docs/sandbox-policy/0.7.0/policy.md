@@ -80,7 +80,7 @@ the intent is the same. Fields that only apply to one backend live in ContainerC
 
 ### Principle 4: Version Is a Contract
 
-> See [versioning.md](../../versioning.md) for the full versioning design.
+> See [versioning design](../../development/architecture/versioning.md) for the full versioning design.
 
 The Policy version and ContainerConfig schema version are locked in step. A version number
 guarantees behavior.
@@ -386,7 +386,7 @@ Only `"process"` is end-to-end implemented today.
 
 ## 8. Versioning
 
-> See [versioning.md](../../versioning.md) for full details.
+> See [versioning design](../../development/architecture/versioning.md) for full details.
 
 - Policy version = ContainerConfig schema version. Always bumped together.
 - SDK version is independent. SDK v5.0 can use policy/schema v2.1.
@@ -396,10 +396,10 @@ Only `"process"` is end-to-end implemented today.
 
 ## 9. Development Guide
 
-> See [authoring-a-new-feature.md](../../authoring-a-new-feature.md) for the full workflow and
+> See [authoring a new feature](../../development/guides/authoring-a-new-feature.md) for the full workflow and
 > decision tree.
 >
-> See [process-container/guide.md](../../process-container/guide.md) for OS-level implementation
+> See [adding ProcessContainer OS features](../../development/guides/process-container-adding-os-features.md) for OS-level implementation
 > details.
 
 ---
@@ -535,10 +535,10 @@ the ContainerConfig schema and translate it to OS-level Job
 Object UI restriction flags.
 
 > See
-> [authoring-a-new-feature.md](../../authoring-a-new-feature.md)
+> [Authoring a new feature](../../development/guides/authoring-a-new-feature.md)
 > for the full workflow.
 > See
-> [process-container/guide.md](../../process-container/guide.md) for
+> [Adding ProcessContainer OS features](../../development/guides/process-container-adding-os-features.md) for
 > the executor and OS implementation guide.
 
 ---
@@ -548,7 +548,7 @@ Object UI restriction flags.
 ### "Where does my new feature go: Policy or ContainerConfig?"
 
 Use the decision tree in
-[authoring-a-new-feature.md](../../authoring-a-new-feature.md). In short: if it is a
+[Authoring a new feature](../../development/guides/authoring-a-new-feature.md). In short: if it is a
 cross-platform security intent that works on two or more platforms, it belongs in Policy.
 Backend-specific mechanisms belong in ContainerConfig.
 

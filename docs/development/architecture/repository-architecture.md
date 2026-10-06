@@ -81,11 +81,11 @@ Production parsing selects an exact registered contract. Version-specific
 adapters produce the private `CommonRequestIR` normalization input, and shared
 normalization constructs the runtime `ExecutionRequest`. No rolling
 whole-request parser or model remains. See
-[Versioning](versioning.md) and [Schema code generation](schema-codegen.md).
+[Versioning](versioning.md) and [Schema code generation](../build-and-test/schema-codegen.md).
 
 State-aware requests follow the same parsing path and produce a typed lifecycle
 operation. See the
-[State-aware sandbox API](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
+[State-aware sandbox API](../../state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
 
 ## Execution surfaces
 
@@ -138,5 +138,5 @@ schema tooling.
 |-----------|----------|
 | Rust unit and contract tests | Under `src/mxc-sdk/src/` and `src/mxc-sdk/tests/` |
 | Executor E2E tests | `src/mxc-sdk/tests/wxc_e2e_tests_*` |
-| Host-dependent backend suites | [`tests/scripts/`](../tests/scripts/README.md) |
-| Scheduled backend validation | [CI validation infrastructure](ci-validation-infrastructure.md) |
+| Host-dependent backend suites | [`tests/scripts/`](../../../tests/scripts/README.md) |
+| Scheduled backend validation | [CI validation infrastructure](../build-and-test/ci-validation-infrastructure.md) |

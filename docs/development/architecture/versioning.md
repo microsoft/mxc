@@ -51,8 +51,8 @@ The sections below distinguish the [three version axes](#the-three-version-axes)
 [contract shipping and parsing](#schema-shipping-model),
 [SDK major targets](#high-level-sdk-major-targets), and
 [backend authorization](#experimental-flag). Artifact regeneration belongs in
-[Schema Code Generation](schema-codegen.md); backend execution flow is covered
-by [Architecture](architecture.md).
+[Schema Code Generation](../build-and-test/schema-codegen.md); backend execution flow is covered
+by [Architecture](repository-architecture.md).
 
 ## Core Concepts
 
@@ -187,7 +187,7 @@ Only the v1.1 prerelease file under `schemas/dev/` is a generated development
 artifact. Published v0.9 and v1.0 are represented by exact Rust contracts and
 immutable stable schemas. Exact fixtures and adapter/runtime tests remain
 ordinary mutable tests so they can gain regression coverage as implementations
-evolve. See [Schema Code Generation](schema-codegen.md) for the regeneration
+evolve. See [Schema Code Generation](../build-and-test/schema-codegen.md) for the regeneration
 commands and independent drift/history gates.
 
 ### Typed state-aware dispatch
@@ -362,7 +362,7 @@ the state-aware JSON exports. Typed binding writers select the SDK-owned
 contract; raw APIs preserve the caller's exact document. These exports use
 the registered contract parser and take non-configuration controls, including
 experimental authorization, as typed FFI arguments rather than JSON fields.
-The [SDK conformance fixtures](../tests/policy/README.md#sdk-v1-conformance-fixtures)
+The [SDK conformance fixtures](../../../tests/policy/README.md#sdk-v1-conformance-fixtures)
 pair high-level invocations with independently hand-authored expected exact
 documents to check mapping intent across Rust, Node, and .NET.
 
@@ -419,7 +419,7 @@ The SDK passes `--experimental` to the underlying binary when this option is set
 ### Forking Code for Experimental Features
 
 Developers adding experimental features follow this pattern. For a detailed
-step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
+step-by-step guide, see [Authoring a New Feature](../guides/authoring-a-new-feature.md).
 
 **In the exact development contract (the production parse + schema source of
 truth):**

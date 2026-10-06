@@ -59,7 +59,7 @@ tests/      Test collateral (configs, examples, scripts)
 scripts/    Build and utility scripts
 ```
 
-See [Repository architecture](docs/architecture.md) for the Rust workspace
+See [Repository architecture](docs/development/architecture/repository-architecture.md) for the Rust workspace
 layout, crate responsibilities, dependency direction, and execution surfaces.
 
 ### Full Build
@@ -237,7 +237,7 @@ See the [SDK README](sdk/node/README.md) for full API documentation.
 
 Released, immutable stable schemas live in [`schemas/stable/`](schemas/stable); the in-progress dev schema (experimental backends, state-aware lifecycle) lives in [`schemas/dev/`](schemas/dev). The current stable and dev versions are tracked canonically in [`schemas/schema-version.json`](schemas/schema-version.json).
 
-Pick the latest stable schema for new code on any supported platform. See [docs/versioning.md](docs/versioning.md) for the full versioning design.
+Pick the latest stable schema for new code on any supported platform. See [versioning design](docs/development/architecture/versioning.md) for the full versioning design.
 
 ## Debugging
 
@@ -322,26 +322,29 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 
 ## Documentation
 
+Start with the [MXC documentation index](docs/README.md). Repository contributors
+can browse the [development documentation](docs/development/README.md).
+
 | Document | Description |
 |----------|-------------|
-| [docs/architecture.md](docs/architecture.md) | Repository layout, crate boundaries, and execution surfaces |
+| [Repository architecture](docs/development/architecture/repository-architecture.md) | Repository layout, crate boundaries, and execution surfaces |
 | [docs/schema.md](docs/schema.md) | Full JSON configuration schema reference |
-| [docs/versioning.md](docs/versioning.md) | Schema versioning and experimental feature lifecycle |
+| [Versioning design](docs/development/architecture/versioning.md) | Schema versioning and experimental feature lifecycle |
 | [docs/examples.md](docs/examples.md) | Annotated configuration examples |
-| [docs/ci-validation-infrastructure.md](docs/ci-validation-infrastructure.md) | Scheduled backend validation matrix and CI dispatch |
+| [CI validation infrastructure](docs/development/build-and-test/ci-validation-infrastructure.md) | Scheduled backend validation matrix and CI dispatch |
 | [tests/scripts/README.md](tests/scripts/README.md) | Local and CI backend test suites |
 | [docs/host-prep.md](docs/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
 | [docs/diagnostics.md](docs/diagnostics.md) | Diagnostic logging and ETW |
 | [docs/sandbox-policy/0.7.0/policy.md](docs/sandbox-policy/0.7.0/policy.md) | Sandbox policy 0.7.0 specification |
-| [docs/process-container/guide.md](docs/process-container/guide.md) | Windows AppContainer / BaseContainer guide |
+| [Adding ProcessContainer OS features](docs/development/guides/process-container-adding-os-features.md) | Windows AppContainer / BaseContainer developer guide |
 | [docs/lxc-support/lxc-backend.md](docs/lxc-support/lxc-backend.md) | LXC backend (Linux) |
 | [docs/bwrap-support/bubblewrap-backend.md](docs/bwrap-support/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
 | [docs/seatbelt/seatbelt-backend.md](docs/seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/hyperlight/hyperlight-backend.md](docs/hyperlight/hyperlight-backend.md) | Hyperlight backend (Linux, Windows) |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
-| [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |
-| [docs/telemetry/telemetry-consent-design.md](docs/telemetry/telemetry-consent-design.md) | Telemetry consent contract |
+| [Telemetry architecture](docs/development/architecture/telemetry.md) | TraceLogging telemetry architecture |
+| [Telemetry consent design](docs/development/architecture/telemetry-consent-design.md) | Telemetry consent contract |
 | [docs/telemetry/telemetry-administrative-policy.md](docs/telemetry/telemetry-administrative-policy.md) | Administrative telemetry controls |
 
 ## Contributing

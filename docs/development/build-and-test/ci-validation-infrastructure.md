@@ -9,7 +9,7 @@ retire something.
 This document describes the GitHub Actions validation matrix only. PR-time
 build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
-[`tests/scripts/README.md`](../tests/scripts/README.md).
+[`tests/scripts/README.md`](../../../tests/scripts/README.md).
 
 ## At a glance
 

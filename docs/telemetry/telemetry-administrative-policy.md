@@ -165,5 +165,5 @@ application-specific policy under `SOFTWARE\Policies\Microsoft\<app>`.
 
 ## See also
 
-- [Telemetry overview](telemetry.md)
-- [Telemetry consent design](telemetry-consent-design.md)
+- [Telemetry architecture](../development/architecture/telemetry.md)
+- [Telemetry consent design](../development/architecture/telemetry-consent-design.md)

@@ -105,7 +105,7 @@ Use `v1::container::spawn_in_container` for live piped execution.
 terminal; PTY support is currently available for IsolationSession.
 Attached execution is not exposed by the Rust SDK. Lifecycle operations and
 existing-container execution are synchronous in Rust. Backend support and phase-specific requirements are described in the
-[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/state-aware-rust.md) and
+[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/isolation-session/state-aware-rust.md) and
 [WSLC](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) guides.
 
 Lifecycle calls use distinct `ProvisionOptions`, `StartOptions`, `StopOptions`,
@@ -144,7 +144,7 @@ For host discovery, use
 `mxc_sdk::v1::platform_support` and `mxc_sdk::v1::available_backends`. Errors are
 returned as `mxc_sdk::v1::Error` with an `ErrorCode`.
 Telemetry and policy helpers are also under `v1`. The
-[launch-choice table](../../../docs/reference/rust/v1/api.md#choosing-a-launch-operation)
+[launch-choice table](../../docs/reference/rust/v1/api.md#choosing-a-launch-operation)
 compares captured, piped, and terminal execution.
 
 ## Build features and backend support

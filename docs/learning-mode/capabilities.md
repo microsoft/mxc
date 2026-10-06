@@ -340,7 +340,7 @@ event contains a valid JSON array of complete signatures and document
 reconstruction metadata. Before emission, MXC derives provider GUIDs from the
 closed provider enum and drops every verbose property name and value. MXC does
 not send the actionable denials file, workload-derived properties, or raw ETL
-through telemetry. See [MXC telemetry](../telemetry/telemetry.md).
+through telemetry. See [MXC telemetry](../development/architecture/telemetry.md).
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique

@@ -25,9 +25,9 @@ MXC (Microsoft eXecution Container) is a cross-platform sandboxed code execution
 See:
 
 - [`docs/schema.md`](../docs/schema.md)
-- [`docs/versioning.md`](../docs/versioning.md)
+- [`docs/development/architecture/versioning.md`](../docs/development/architecture/versioning.md)
 - [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
-- [`docs/ci-validation-infrastructure.md`](../docs/ci-validation-infrastructure.md)
+- [`docs/development/build-and-test/ci-validation-infrastructure.md`](../docs/development/build-and-test/ci-validation-infrastructure.md)
 - The relevant backend guide under `docs/`
 
 ## Build and validation
@@ -71,7 +71,7 @@ npm run test:integration
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 
-Prefer the smallest test command covering the change. Host-dependent backend suites live under `tests/scripts/`; use the applicable backend guide and `docs/ci-validation-infrastructure.md` before running or changing them.
+Prefer the smallest test command covering the change. Host-dependent backend suites live under `tests/scripts/`; use the applicable backend guide and `docs/development/build-and-test/ci-validation-infrastructure.md` before running or changing them.
 
 ## Schema and policy rules
 
@@ -94,7 +94,7 @@ Prefer the smallest test command covering the change. Host-dependent backend sui
   serialize/deserialize check to `Microsoft.Mxc.Sdk.AotSmokeTest`; its CI AOT
   publish gate fails on any reflection-dependent path.
 
-See [`docs/schema-codegen.md`](../docs/schema-codegen.md) for regeneration commands.
+See [`docs/development/build-and-test/schema-codegen.md`](../docs/development/build-and-test/schema-codegen.md) for regeneration commands.
 
 ## Error and security behavior
 
@@ -109,12 +109,12 @@ See [`docs/schema-codegen.md`](../docs/schema-codegen.md) for regeneration comma
 Update documentation in the same change when behavior changes:
 
 - Schema or config fields: `docs/schema.md` and the applicable generated development artifacts.
-- Experimental features: `docs/authoring-a-new-feature.md`.
-- Versioning or promotion: `docs/versioning.md`.
+- Experimental features: `docs/development/guides/authoring-a-new-feature.md`.
+- Versioning or promotion: `docs/development/architecture/versioning.md`.
 - Backend behavior: the corresponding guide under `docs/`.
 - SDK APIs: the affected SDK README and versioned references under `docs/reference/{rust,dotnet,node}/v*/`.
 - Telemetry: `docs/telemetry/`.
-- CI validation: `docs/ci-validation-infrastructure.md`.
+- CI validation: `docs/development/build-and-test/ci-validation-infrastructure.md`.
 
 Do not duplicate detailed backend behavior here. Keep the canonical explanation in the subsystem documentation.
 

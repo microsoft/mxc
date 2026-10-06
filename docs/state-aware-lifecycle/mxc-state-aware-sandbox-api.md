@@ -1576,7 +1576,7 @@ cross-cutting field, a column per phase, with values from the closed set
 `applied` / `rejected` / `ignored`. Specific values per backend are documented in each
 backend's plan doc (§11.6). The IsolationSession row set below mirrors the shipped
 backend; the authoritative statement lives in
-[`isolation-session/state-aware-rust.md`](../isolation-session/state-aware-rust.md):
+[IsolationSession state-aware Rust architecture](../development/architecture/isolation-session/state-aware-rust.md):
 
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
@@ -1875,7 +1875,7 @@ calls, and the executor CLI accepts them without `--experimental`. For example, 
 ### 13.3 Versioning
 
 Each backend's graduation event (ephemeral, state-aware, or both at once) triggers a
-schema version bump in `docs/versioning.md`, following the existing MXC convention for
+schema version bump in `docs/development/architecture/versioning.md`, following the existing MXC convention for
 graduating features. The version bump and the associated SDK type changes (such as
 dropping `experimental: true` requirements for graduated containment values) ship as a
 single release.

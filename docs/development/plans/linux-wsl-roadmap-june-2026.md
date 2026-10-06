@@ -219,7 +219,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | 28 | **Resource limits (cgroups v2)** | No CPU / memory / PID / IO governance. Same gap as LXC. *(see [Ext-Dep E7](#external-dependencies))* | L |
 | 29 | **Stable backend surface** | Addressed — Bubblewrap is published in v0.8. | — |
 | 30 | **State-aware lifecycle** | Implement `StatefulSandboxBackend` for bwrap. | L |
-| 31 | **Update plan doc** | `docs/bwrap-support/bubblewrap-backend-plan.md:42-60,295-324` still describes core implementation as "planned" even though it's shipped. | M |
+| 31 | **Update plan doc** | `docs/development/plans/bubblewrap-backend.md:42-60,295-324` still describes core implementation as "planned" even though it's shipped. | M |
 | 32 | **Structured per-host network decision trace** | Surface why each connection attempt was allowed/denied. | M |
 | 33 | **Structured denied-resource diagnostics** | Parity with Process Container's structured denial reporting. | M |
 | 34 | **CI job for `tests/scripts/run_bwrap_all_tests.sh`** | Bwrap E2E suite is manual-only today. *(see [Ext-Dep E3](#external-dependencies))* | M |

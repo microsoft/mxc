@@ -129,8 +129,8 @@ mxc/src/
 ├── mxc-sdk/src/bin/windows_sandbox_guest/   # UNCHANGED
 └── mxc-sdk/src/bin/windows_sandbox_daemon/  # UNCHANGED
 
-mxc/docs/nanvix-microvm/
-└── nanvix-integration-plan.md        # NEW — this document
+mxc/docs/development/plans/
+└── nanvix-integration.md             # NEW — this document
 
 mxc/tests/configs/
 └── microvm_hello.json                # NEW — example microvm config

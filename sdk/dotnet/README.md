@@ -158,7 +158,7 @@ Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. The
 asynchronous methods are convenience wrappers over native operations and
 support cancellation. Backend and phase-specific policy requirements are
 described in the
-[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/state-aware-rust.md) and
+[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/isolation-session/state-aware-rust.md) and
 [WSLC](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) guides.
 `MxcLifecycle.SpawnInContainerWithPty(id, request, options?)` starts an
 IsolationSession exec with a caller-controlled terminal and returns an
@@ -262,4 +262,4 @@ architecture-specific packages under `output\packages`.
 For API details, see the
 [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/reference/README.md).
 Build and validation commands are in the
-[pull request guide](https://github.com/microsoft/mxc/blob/main/docs/pull-requests.md).
+[pull request guide](https://github.com/microsoft/mxc/blob/main/docs/development/build-and-test/pull-requests.md).

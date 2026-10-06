@@ -267,12 +267,12 @@ the `MXC_DIAG_CONSOLE` pipe — never to stdout, so they cannot pollute an SDK
 caller's captured output. With neither sink configured, these JSON records are not emitted and no record
 is built. When Windows ETW telemetry is explicitly enabled, the separate
 `Microsoft.MXC` TraceLogging provider may still receive the bounded M-ETW
-events described in [`docs/telemetry/telemetry.md`](telemetry/telemetry.md);
+events described in [telemetry architecture](development/architecture/telemetry.md);
 those events are local ETW only and are not uploaded by MXC.
 
 These are **local diagnostics, not ETW telemetry**: no provider, no consent gate,
 nothing uploaded. See
-[`docs/telemetry/telemetry.md` § Local audit log records](telemetry/telemetry.md#local-audit-log-records)
+[Telemetry architecture: Local audit log records](development/architecture/telemetry.md#local-audit-log-records)
 for the JSON-lines format, the full record inventory with fields, the content
 rules (bounded vocabularies, config field *paths* but never values, no raw user
 identifiers),

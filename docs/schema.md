@@ -267,7 +267,7 @@ that can be executed independently.
 > it is rejected as an unknown field because lifecycle correlation is internal
 > to MXC and is not part of the request or response contract. See
 > [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
-> and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md).
+> and [telemetry architecture](development/architecture/telemetry.md).
 
 ### Working Directory
 
@@ -398,7 +398,7 @@ refuse any supplied `ui` at every phase on both surfaces**, and each accepts an
 omitted one without applying any UI restriction — so the section's default-deny
 reading does not hold on either. The reasons differ: no `ui` posture is truthful
 for a session-isolated sandbox (see
-[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)),
+[IsolationSession state-aware Rust architecture](development/architecture/isolation-session/state-aware-rust.md)),
 while WSLc has no mechanism to enforce UI restrictions on a container (see
 [`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
 The Windows `processContainer.ui` sub-block carries the ProcessContainer-only

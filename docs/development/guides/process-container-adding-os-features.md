@@ -11,13 +11,13 @@ networking fields remain available under their published contracts. Backend
 selection depends on host capability and requested policy, not schema version.
 
 For which policy aspects this backend can enforce on each Windows 11 release,
-see [Windows OS-version policy support](./os-version-support.md).
+see [Windows OS-version policy support](../../process-container/os-version-support.md).
 
 ## Prerequisites
 
-1. Read the [Sandbox Policy spec](../sandbox-policy/0.7.0/policy.md) to
+1. Read the [Sandbox Policy spec](../../sandbox-policy/0.7.0/policy.md) to
    understand how `SandboxPolicy` maps to `ContainerConfig`.
-2. Read [authoring-a-new-feature.md](../authoring-a-new-feature.md), especially
+2. Read [authoring-a-new-feature.md](authoring-a-new-feature.md), especially
    Step 1 (feature spec) and Step 2 (OS changes).
 3. Submit a feature spec so reviewers understand the end-to-end flow.
 
@@ -65,7 +65,7 @@ src/mxc-sdk/src/core/process_security_environment_spec/
 
 Update the exact development config contract, normalized wire model, runtime
 model, and parser mapping. Follow
-[authoring-a-new-feature.md](../authoring-a-new-feature.md) and regenerate the
+[authoring-a-new-feature.md](authoring-a-new-feature.md) and regenerate the
 development schemas and generated SDK wire types rather than editing generated
 artifacts by hand.
 
