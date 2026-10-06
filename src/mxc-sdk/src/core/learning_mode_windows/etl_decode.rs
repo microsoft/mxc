@@ -2347,8 +2347,8 @@ mod tests {
 
     fn network_event(pid: u32, filetime: u64, kv: &[(&str, &str)]) -> CollectedEvent {
         event_with_provider(
-            super::network_extractors::NETWORK_DECISION_PROVIDER,
-            super::network_extractors::NETWORK_DECISION_EVENT_ID,
+            crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER,
+            crate::learning_mode_windows::network_extractors::NETWORK_DECISION_EVENT_ID,
             pid,
             filetime,
             kv,

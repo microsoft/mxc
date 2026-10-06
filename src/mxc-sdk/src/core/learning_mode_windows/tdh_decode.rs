@@ -1032,6 +1032,8 @@ fn wide_str_at(buf: &[u8], offset: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::learning_mode_core::{DenialDetails, NetworkDenialDetails, NetworkDirection};
+    use crate::learning_mode_windows::network_extractors;
 
     fn utf16_bytes(value: &str) -> Vec<u8> {
         value
@@ -1150,9 +1152,8 @@ mod tests {
         payload.extend(0u32.to_le_bytes());
 
         let mut record = event_record_for_payload(&payload);
-        record.EventHeader.ProviderId = crate::network_extractors::NETWORK_DECISION_PROVIDER;
-        record.EventHeader.EventDescriptor.Id =
-            crate::network_extractors::NETWORK_DECISION_EVENT_ID;
+        record.EventHeader.ProviderId = network_extractors::NETWORK_DECISION_PROVIDER;
+        record.EventHeader.EventDescriptor.Id = network_extractors::NETWORK_DECISION_EVENT_ID;
         let info = unsafe { &*buffer.as_ptr() };
         let props = decode_properties(buffer.as_bytes(), info, &mut record, 8).expect("TDH decode");
         let parts = DecodedEventParts {
@@ -1161,21 +1162,18 @@ mod tests {
             props,
         };
 
-        let denial =
-            crate::network_extractors::extract_network_denial(&parts).expect("network denial");
+        let denial = network_extractors::extract_network_denial(&parts).expect("network denial");
 
         assert_eq!(denial.object_name, "tcp://203.0.113.10:443");
         assert!(matches!(
             denial.details,
-            Some(learning_mode_core::DenialDetails::Network(
-                learning_mode_core::NetworkDenialDetails {
-                    direction: learning_mode_core::NetworkDirection::Outbound,
-                    protocol: Some(6),
-                    remote_port: Some(443),
-                    filter_id: 456,
-                    ..
-                }
-            ))
+            Some(DenialDetails::Network(NetworkDenialDetails {
+                direction: NetworkDirection::Outbound,
+                protocol: Some(6),
+                remote_port: Some(443),
+                filter_id: 456,
+                ..
+            }))
         ));
     }
 

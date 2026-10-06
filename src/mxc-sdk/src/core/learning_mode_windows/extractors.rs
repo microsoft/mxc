@@ -49,7 +49,7 @@
 //!   name; custom hashed capabilities fall back to the SID string).
 
 use crate::learning_mode_core::{
-    AccessType, ResourceType, VerboseLoggingOutcomeReason, VerboseLoggingProvider,
+    AccessType, DenialDetails, ResourceType, VerboseLoggingOutcomeReason, VerboseLoggingProvider,
 };
 use crate::mxc_common::hashing::sha256_hex;
 use windows::core::GUID;
@@ -116,7 +116,7 @@ pub struct RawDenial {
     /// Kernel `FILETIME` of the event.
     pub filetime: u64,
     /// Optional resource-family-specific metadata.
-    pub details: Option<learning_mode_core::DenialDetails>,
+    pub details: Option<DenialDetails>,
     /// Originating ETW event ID (kept for diagnostics).
     pub event_id: u16,
     /// Symbolic category of the originating provider, for verbose logging
