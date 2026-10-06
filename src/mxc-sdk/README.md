@@ -145,7 +145,7 @@ For the PSEC 1.0-only identity-less proxy workaround, check
 `v1::BackendCapability::ProxyLoopbackCompatibility` or, on Windows,
 `v1::probe(None)?.probes.base_container_supports_proxy_loopback_compatibility`.
 This is not general host-loopback ingress support; see
-[proxy compatibility discovery](../../../docs/process-container/networking.md#discovering-proxy-loopback-compatibility).
+[proxy compatibility discovery](../../docs/process-container/networking.md#discovering-proxy-loopback-compatibility).
 Telemetry and policy helpers are also under `v1`. The
 [launch-choice table](../../../docs/reference/rust/v1/api.md#choosing-a-launch-operation)
 compares captured, piped, and terminal execution.
