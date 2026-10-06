@@ -318,7 +318,7 @@ workload.
 The default model will use a pre-built static tar published by
 [`microsoft/nvx`][nvx-readme]. MXC will pin, download or stage, validate, and
 import this tar directly. The tar will match the pinned NVX runtime version
-and will provide the default workload filesystem. 
+and will provide the default workload filesystem.
 **TBD on the workload it will support.**
 
 
