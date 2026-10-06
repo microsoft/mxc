@@ -227,18 +227,22 @@ jobs:
           -RequireWslc
 
     - ${{ if eq(parameters.isOfficialBuild, true) }}:
-      - task: EsrpCodeSigning@5
+      - task: EsrpCodeSigning@6
         displayName: Sign Microsoft.Mxc.Sdk for ${{ package.displayName }}
         inputs:
           ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
           AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
           AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+          esrpClientId: ${{ parameters.ESRPInfo.clientId }}
           AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
           AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
           AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
           FolderPath: $(packageOutput)
           Pattern: Microsoft.Mxc.Sdk.${{ package.version }}.nupkg
           UseMinimatch: true
+          SessionTimeout: '90'
+          MaxConcurrency: '25'
+          ServiceEndpointUrl: https://api.esrp.microsoft.com/api/v2
           signConfigType: inlineSignParams
           inlineOperation: >-
             [
