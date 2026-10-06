@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn dry_run_summary_reports_why_validation_failed() {
-        use crate::models::ScriptResponse;
+        use crate::mxc_common::models::ScriptResponse;
         let summary = super::dry_run_summary(&ScriptResponse::rejected(
             "network.egress allow/deny rules are not supported by the selected backend",
         ));
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn dry_run_summary_keeps_the_bare_verdicts() {
-        use crate::models::ScriptResponse;
+        use crate::mxc_common::models::ScriptResponse;
         assert_eq!(
             super::dry_run_summary(&ScriptResponse {
                 exit_code: 0,
