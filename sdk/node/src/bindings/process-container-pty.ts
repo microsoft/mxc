@@ -35,7 +35,7 @@ function asError(error: unknown): Error {
 }
 
 class NodePtyLifecycleDriver implements NativeLifecycleDriver {
-  readonly id: number;
+  readonly id = 0;
   readonly standardInput: Writable;
   readonly standardOutput = new PassThrough();
   readonly standardError = null;
@@ -51,7 +51,6 @@ class NodePtyLifecycleDriver implements NativeLifecycleDriver {
   private resolveExit!: (result: WaitResult) => void;
 
   constructor(private readonly pty: IPty) {
-    this.id = pty.pid;
     this.standardInput = new Writable({
       write: (chunk: Buffer, _encoding, callback) => {
         try {

@@ -82,6 +82,7 @@ describe('ProcessContainer node-pty binding', () => {
     const terminal = createNodePtyProcess(pty, undefined);
     const output = once(terminal.output, 'data');
 
+    assert.strictEqual(terminal.id, 0);
     terminal.input.write('echo hello\r\n');
     pty.emitData('hello\r\n');
     terminal.resize({ rows: 40, columns: 120 });

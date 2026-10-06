@@ -459,7 +459,8 @@ export async function spawnWithPty(
     );
   }
   const preparedRequest = prepareContainerRequest(request, options.telemetry);
-  const spawnPty = preparedRequest.containment === 'processcontainer'
+  const spawnPty = process.platform === 'win32'
+      && preparedRequest.containment === 'processcontainer'
     ? spawnProcessContainerWithPty
     : spawnBindingSandboxWithPty;
   return spawnPty(

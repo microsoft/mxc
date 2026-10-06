@@ -53,7 +53,9 @@ describe('initial PTY dimensions in operation options', () => {
     }
   });
 
-  it('routes ProcessContainer requests through the wxc-exec PTY binding', async () => {
+  it('routes Windows ProcessContainer requests through the wxc-exec PTY binding', {
+    skip: process.platform !== 'win32',
+  }, async () => {
     let preparedRequest: OneShotRequest | undefined;
     let dimensions: [number, number] | undefined;
     _setSpawnBindingSandboxWithPtyImplementation(() => {
@@ -93,6 +95,33 @@ describe('initial PTY dimensions in operation options', () => {
     } finally {
       _setSpawnBindingSandboxWithPtyImplementation();
       _setSpawnProcessContainerWithPtyImplementation();
+    }
+  });
+
+  it('keeps non-Windows ProcessContainer requests on the native path', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    let preparedRequest: OneShotRequest | undefined;
+    _setSpawnProcessContainerWithPtyImplementation(() => {
+      assert.fail('non-Windows ProcessContainer PTY must not launch wxc-exec');
+    });
+    _setSpawnBindingSandboxWithPtyImplementation((request) => {
+      preparedRequest = request;
+      return Promise.reject(captured);
+    });
+
+    try {
+      await assert.rejects(
+        spawnWithPty({
+          containment: { type: 'processcontainer' },
+          command: 'echo test',
+        }),
+        captured,
+      );
+      assert.strictEqual(preparedRequest?.containment, 'processcontainer');
+    } finally {
+      _setSpawnProcessContainerWithPtyImplementation();
+      _setSpawnBindingSandboxWithPtyImplementation();
     }
   });
 
