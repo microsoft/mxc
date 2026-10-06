@@ -76,10 +76,7 @@ disabled; clipboard and input-injection permissions remain separate.
 
 ## Spawn with a caller-controlled terminal
 
-PTY execution supports ProcessContainer and IsolationSession on Windows,
-Bubblewrap and LXC on Linux, and Seatbelt direct execution on macOS.
-IsolationSession requires explicit unrestricted networking because it cannot
-enforce network restrictions.
+PTY execution supports all backends except WSLc.
 
 ```typescript
 import { spawnWithPty } from '@microsoft/mxc-sdk/v1';
