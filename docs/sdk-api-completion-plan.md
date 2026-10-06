@@ -23,10 +23,10 @@ baseline commit.
 | --- | --- | --- |
 | Contract targeting | All three typed V1 APIs own the published exact `1.0.0` target. `schemas/schema-version.json` has `sdkMajorTargets["1"] = "1.0.0"` while `1.1.0-alpha` remains development. | Keep the target tied to the latest *published stable* contract in the SDK major; do not retarget V1 merely because development opens. |
 | Ingress and ownership | Namespace, exact-JSON FFI, Node/.NET mapper, and private-binding cleanup have merged. #1390 moved the Rust SDK and its internal engine, contract, common, and backend modules into `src/mxc-sdk/`; Rust typed calls still adapt directly, while Node and .NET emit exact JSON before FFI. Shared `tests/policy/sdk-v1/` fixtures exist. | Maintain mapper/typed-equivalence coverage as the contract evolves. Do not confuse internal JSON/FFI entry points with public raw SDK APIs. |
-| Typed execution | All three SDKs expose the six *operation categories*, plus typed lifecycle and validation. One-shot native PTY supports IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution; existing-container PTY supports IsolationSession. Node additionally routes typed ProcessContainer PTY through `wxc-exec` and `node-pty` because its in-process PTY binding does not support that backend. | Prove each advertised mode on each supporting backend and refuse unsupported modes explicitly. Resolve whether raw ProcessContainer PTY can preserve the exact JSON string through an executor path or needs native support. |
-| Raw execution and lifecycle | Native JSON entry points and internal adapters exist, but none of the SDKs exposes the planned complete public six-operation raw family or public raw lifecycle phases. Rust's `mxc_sdk::__ffi` is explicitly internal; Node's package root exports no raw API. | Add the agreed public, caller-authored exact-JSON execution and lifecycle APIs under V1.Dev, reusing the existing FFI for Node/.NET and the in-process exact-JSON path for Rust. |
+| Typed execution | All three SDKs expose the six *operation categories*, plus typed lifecycle and validation. One-shot native PTY supports IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution; existing-container PTY supports IsolationSession. Node additionally routes typed ProcessContainer PTY through `wxc-exec` and `node-pty` because its in-process PTY binding does not support that backend. | Prove each advertised mode on each supporting backend and refuse unsupported modes explicitly. Forward raw ProcessContainer PTY JSON unchanged through the executor. |
+| Raw execution and lifecycle | Native JSON entry points and internal adapters exist, but none of the SDKs exposes the planned complete public six-operation raw family or public raw lifecycle phases. Rust's `mxc_sdk::__ffi` is explicitly internal; Node's package root exports no raw API. | Add the agreed public, caller-authored exact-JSON execution and lifecycle APIs under V1.Dev. Rust uses in-process exact-JSON routing; Node/.NET use the existing FFI except Node ProcessContainer PTY, which launches `wxc-exec`. |
 | Experimental access | #1402 removed `experimental` from typed V1 options in all three SDKs. The current registered development contract is exactly `1.1.0-alpha`; its request types include experimental backends. There is no public raw SDK access to that contract. | Add V1.Dev calls that accept caller-authored `1.1.0-alpha` JSON for experimental features plus an explicit experimental-backend authorization option. Do not route such calls through typed V1. |
-| Results, handles, and async | Public typed APIs use `ExecutionResult`, `ExecutionRequest`, and `MxcPtyProcess`, which are the naming baseline. #1398 made Node plain-verb execution and process waiting Promise-based and removed the redundant blocking/`*Async` execution calls. .NET has synchronous PTY entry points. Rust captured output is bytes; Node and .NET captured results expose strings. | Add Promise-based Node dev operations without restoring blocking aliases; make potentially lengthy .NET dev operations return `Task<T>`; settle captured-result/metadata handling and byte-output follow-up separately. |
+| Results, handles, and async | Public typed APIs use `ExecutionResult`, `ExecutionRequest`, and `MxcPtyProcess`, which are the naming baseline. #1398 made Node plain-verb execution and process waiting Promise-based and removed the redundant blocking/`*Async` execution calls. .NET has synchronous PTY entry points. Rust captured output is bytes; Node and .NET captured results expose strings. | Reuse public V1 result/handle types and per-operation ownership and cancellation behavior; make Node dev calls Promise-based and lengthy .NET dev calls return `Task<T>`. Byte-preserving capture remains a separate follow-up. |
 
 This is an **API/source inventory**, not a claim that all modes have passed
 host-dependent runtime or packaged-consumer verification. The merged API
@@ -89,8 +89,10 @@ different names, but do not satisfy these public SDK requirements.
   validation remains authoritative; reject unsupported requested modes or
   policy before launch rather than falling back to another mode. Validation
   returns validation results, not success-shaped execution output.
-- Use the **existing FFI** for the first public raw API milestone, without
-  changing `MxcRunResult` or introducing a new native byte-buffer ABI.
+- Use the **existing FFI** for the first public raw API milestone, except
+  Node ProcessContainer PTY, which launches `wxc-exec` with the original
+  JSON as described below. Do not change `MxcRunResult` or introduce a new
+  native byte-buffer ABI.
   Node raw APIs return `Promise<T>`, following the plain-verb conventions
   of #1398; a live-handle Promise resolves after startup, not after exit.
   Potentially lengthy .NET dev calls return `Task<T>`, including both PTY
@@ -100,13 +102,14 @@ different names, but do not satisfy these public SDK requirements.
 ### Initial result contract and remaining output work
 
 The first milestone uses the native result and handle families that already
-exist: `MxcRunResult` for captured one-shot and existing-container exec,
-`MxcSandbox` for pipe/PTY handles, and `MxcStateAwareResult.response_json_utf8`
-for non-exec lifecycle and validation. Rust high-level raw entry points
-use the equivalent in-process exact-JSON SDK/engine path, not FFI. All
-populated FFI results and handles must be released with their matching
-destructors, including failures; nonzero workload exit remains a result,
-not an API error. The initial limitations are deliberate and documented:
+exist: FFI `MxcRunResult` for one-shot capture, FFI `MxcSandbox` handles for
+pipe/PTY and Node/.NET SDK in-container capture, and FFI
+`MxcStateAwareResult.response_json_utf8` for non-exec lifecycle and
+validation. Rust SDK raw entry points use the in-process exact-JSON
+SDK/engine path, not FFI. All populated FFI results and handles must be
+released with their matching destructors, including failures; nonzero
+workload exit remains a result, not an API error. The initial limitations
+are deliberate and documented:
 
 - Rust captured `ExecutionResult` has byte-vector stdout/stderr, but the FFI
   `MxcRunResult` uses NUL-terminated UTF-8 strings. Its `alloc_cstring`
@@ -116,18 +119,16 @@ not an API error. The initial limitations are deliberate and documented:
   them byte-preserving or add a result type implying otherwise. Rust still
   returns its existing bytes. See `src/mxc-sdk/src/sandbox.rs:238-249`
   and `src/ffi/mxc_ffi/src/lib.rs:253-263,324-333` at the baseline.
-- Preserve the warnings and output metadata that the existing FFI exposes.
-  A raw mapper must not funnel optional `output_metadata_json_utf8` through
-  a stable-V1-only metadata decoder that rejects development fields or drops
-  them; keep the available native JSON text accessible. Record any metadata
-  that the native runtime itself cannot produce as a separate limitation.
-  Decide the final public raw capture type without requiring a new FFI ABI.
-- Reuse the existing owned `MxcProcess` and `MxcPtyProcess` handles for raw
-  pipe and terminal modes where their contracts suffice; do not create a
-  second lifecycle owner. PTY output is combined, not fabricated separate
-  stdout/stderr. If a live handle offers only stable-V1-decoded metadata,
-  expose the native metadata JSON to dev callers instead of discarding
-  development-specific fields.
+- Return the existing public V1 `ExecutionResult` for captured dev execution
+  and reuse the existing owned `MxcProcess` and `MxcPtyProcess` handles for
+  pipe and terminal modes. Preserve warnings and the metadata MXC actually
+  produces today (`captureDenials` and `captureDenialsError`) using the same
+  public V1 `ExecutionMetadata` shape. This first milestone does **not**
+  promise opaque access to future development-only execution metadata; if
+  the native output model gains new fields, update the public SDKs before
+  exposing them rather than silently dropping them. Raw non-exec lifecycle
+  responses remain complete JSON, as agreed below. Do not create a second
+  process owner. PTY output is combined, not fabricated separate stdout/stderr.
 
 **Agreed lifecycle response:** return the complete native
 `response_json_utf8` envelope as a UTF-8 string (`String` in Rust, `string`
@@ -182,23 +183,27 @@ have to match the public SDK spelling:
 | --- | --- | --- | --- | --- |
 | One-shot capture | `run_json` | `RunJsonAsync` | `runJson` | `mxc_run_json` |
 | One-shot pipes | `spawn_json` | `SpawnJsonAsync` | `spawnJson` | `mxc_spawn_json` |
-| One-shot PTY | `spawn_with_pty_json` | `SpawnWithPtyJsonAsync` | `spawnWithPtyJson` | `mxc_spawn_pty_json` |
-| Existing-container capture | `run_in_container_json` | `RunInContainerJsonAsync` | `runInContainerJson` | `mxc_run_state_aware_exec_json` |
+| One-shot PTY | `spawn_with_pty_json` | `SpawnWithPtyJsonAsync` | `spawnWithPtyJson` | `mxc_spawn_pty_json`, except Node ProcessContainer uses `wxc-exec` |
+| Existing-container capture | `run_in_container_json` | `RunInContainerJsonAsync` | `runInContainerJson` | `mxc_exec_state_aware_json` (Node/.NET SDKs spawn, drain, wait, dispose) |
 | Existing-container pipes | `spawn_in_container_json` | `SpawnInContainerJsonAsync` | `spawnInContainerJson` | `mxc_exec_state_aware_json` |
 | Existing-container PTY | `spawn_in_container_with_pty_json` | `SpawnInContainerWithPtyJsonAsync` | `spawnInContainerWithPtyJson` | `mxc_state_aware_exec_pty` |
 
-Rust calls its in-process exact-JSON adapters instead of the final column.
-Captured calls return the existing `ExecutionResult` shape (`Task<ExecutionResult>`
-in .NET, `Promise<ExecutionResult>` in Node), with lossy text on Node/.NET;
+The Rust SDK calls its in-process exact-JSON adapters instead of the FFI
+exports in the final column. Captured calls return the existing
+`ExecutionResult` shape (`Task<ExecutionResult>` in .NET,
+`Promise<ExecutionResult>` in Node), with lossy text on Node/.NET;
 pipe and PTY calls return the existing `MxcProcess` and `MxcPtyProcess`
 handles (`Task<T>` in .NET, `Promise<T>` in Node) after startup. The complete
 JSON document includes the existing-container identity; do not also require
-a `ContainerId` argument.
+a `ContainerId` argument. The native FFI also exposes
+`mxc_run_state_aware_exec_json`, but the Node/.NET SDK dev in-container
+capture calls use the live FFI `mxc_exec_state_aware_json` handle to match
+typed V1 stream draining, wait, disposal, and .NET cancellation behavior.
 
 For non-exec lifecycle and dry-run, use `mxc_run_state_aware_json` with the
 phase authored in the input document. This function **does not execute**
-non-dry-run `exec`; the three existing-container rows above do. Proposed
-Public phase names follow the existing V1 `provisionContainer`, `startContainer`,
+non-dry-run `exec`; the three existing-container rows above do. Public
+phase names follow the existing V1 `provisionContainer`, `startContainer`,
 `stopContainer`, and `deprovisionContainer` families with a JSON suffix:
 `provision_container_json` (and corresponding phases) in Rust,
 `ProvisionContainerJsonAsync` in .NET, and `provisionContainerJson` in Node.
@@ -218,16 +223,26 @@ IsolationSession-only. Experimental backends require a caller-authored
 `1.1.0-alpha` document and explicit authorization. Do not fall back from
 PTY to pipes or from pipes to capture.
 
-**Node ProcessContainer PTY routing gap:** #1400 added typed one-shot
-ProcessContainer PTY via `wxc-exec` and `node-pty` because
-`mxc_spawn_pty_json` does not support that backend. Its current helper accepts
-a generated stable `OneShotRequest`, runs `JSON.stringify`, and sends base64
-to the executor (`sdk/node/src/bindings/process-container-pty.ts`). Raw dev
-calls must not route through that stable type or reserialize caller JSON.
-Choose and verify an exact-string-preserving executor route, add native PTY
-support, or explicitly document that this mode remains unsupported by raw
-dev calls despite typed Node support. Do not claim both "existing FFI only"
-and raw PTY parity for ProcessContainer without resolving this gap.
+**Node ProcessContainer PTY routing:** #1400 added typed one-shot
+ProcessContainer PTY via the `wxc-exec` executor and `node-pty` because
+the native FFI export `mxc_ffi::mxc_spawn_pty_json` does not support that
+backend. For the public Node SDK method
+`@microsoft/mxc-sdk/v1/dev::spawnWithPtyJson`, launch `wxc-exec` using
+the caller's original JSON
+string, UTF-8 encoded and base64-wrapped for its existing `--config-base64`
+argument. This transport does not parse, stamp, default, or reserialize the
+request; the executor's exact-contract parser remains authoritative. The
+current typed helper instead accepts a generated stable `OneShotRequest`
+and calls `JSON.stringify` (`sdk/node/src/bindings/process-container-pty.ts`);
+do **not** reuse that mapping path for raw input. When the caller explicitly
+authorizes experimental backends, pass the executor's `--experimental`
+command-line flag; otherwise omit it. Do not infer authorization from the
+JSON version or encode it as a JSON field. Keep `node-pty` responsible for
+the terminal and live process handle; do not downgrade to ordinary pipes.
+Test that numeric tokens, unknown fields, the exact version, and
+development-only fields reach the executor unmodified. Preserve any
+warnings or metadata the executor exposes;
+document backend limitations where that channel does not provide them.
 
 ## 2. Settled API contract and implementation questions
 
@@ -236,7 +251,7 @@ and raw PTY parity for ProcessContainer without resolving this gap.
   `MxcPtyProcess`, with language-idiomatic spelling. Do not reopen the older
   `ExecRequest`/`Output`/`MxcPty` naming proposal or move existing V1 types
   as part of the raw API. Dev operations live under V1.Dev; avoid redundant
-  aliases and ambiguous .NET facade imports. Keep distinct `ContainerId`,
+  package-root aliases. Keep distinct `ContainerId`,
   optional one-shot container name, and OS process ID concepts. Do not
   rename published wire fields such as `sandboxId` or backend product names.
 - **Asynchrony:** Node dev calls return Promises, matching merged V1.
@@ -248,6 +263,21 @@ and raw PTY parity for ProcessContainer without resolving this gap.
 - **Lifecycle responses:** Non-exec lifecycle and validation calls return
   the complete native response JSON string, not stable typed lifecycle
   metadata. This is an agreed response contract, not a pending choice.
+- **Execution results and ownership:** Return the existing V1
+  `ExecutionResult`, `MxcProcess`, and `MxcPtyProcess` types, with the known
+  execution metadata fields. Match the corresponding typed V1 operation's
+  capture, timeout, cancellation, stream, wait, kill, and disposal semantics
+  in each language. SDK wrappers free FFI results (including failures);
+  callers own returned live handles. In-container exec never owns or
+  deprovisions the persistent container.
+- **.NET facade placement:** `Microsoft.Mxc.Sdk.V1.Dev` is sufficient to
+  distinguish raw from typed SDK APIs. Follow the existing V1 facade names
+  (`MxcContainer` for one-shot and `MxcLifecycle` for existing-container
+  operations); when an example uses both namespaces, qualify the dev facade,
+  for example `using Dev = Microsoft.Mxc.Sdk.V1.Dev;` and
+  `Dev.MxcContainer.RunJsonAsync(...)`. Importing both namespaces and using
+  an unqualified `MxcContainer` would be ambiguous, but is not an API design
+  blocker.
 - **Experimental and release boundary:** Experimental backend requests use
   caller-authored development JSON (`1.1.0-alpha` at this baseline), plus
   explicit authorization outside JSON; typed V1 calls stay stable and do
@@ -255,28 +285,29 @@ and raw PTY parity for ProcessContainer without resolving this gap.
   the raw API family does not gate the initial v1 release. Separate typed
   experimental convenience APIs, if pursued later, are not part of this
   work.
+- **Node ProcessContainer PTY:** The raw Node SDK launches the `wxc-exec`
+  through `node-pty` for this mode and sends the original JSON through
+  `--config-base64`, bypassing the typed stable mapper. Other applicable
+  Node raw modes continue to use the existing FFI.
 
-The implementation must still resolve the following:
+The implementation must verify these distinctions rather than inventing
+stronger guarantees:
 
-1. **Capture metadata and ownership.** Use the existing text-output FFI in
-   the first milestone, while preserving warnings and development-specific
-   metadata rather than narrowing through stable V1 decoders. Decide how
-   to expose raw capture metadata without changing the chosen public V1
-   result names. Define a separate byte-preserving capture follow-up with
-   explicit text decoding. Specify capture limits, partial output, timeout,
-   cancellation after startup, wait/disposal, and failed-startup cleanup.
-   `mxc_run_json` has no cancellation parameter; do not promise post-start
-   termination without a supported handle-based path. An existing-container
-   exec must never implicitly deprovision its caller-owned container.
-2. **Raw ProcessContainer PTY.** Resolve the Node executor-backed exception
-   above before claiming raw parity with merged typed V1. An exact-string-
-   preserving route must not widen backend policy or silently discard
-   warnings or output metadata. Verify the PTY input, resize, combined-output,
-   and termination contract against each supporting backend.
-3. **.NET dev facade layout.** Follow V1 operation and type names, while
-   arranging `Microsoft.Mxc.Sdk.V1.Dev` entry points so using typed and raw
-   facades together does not create ambiguous class imports. Do not add
-   redundant root-level raw aliases.
+1. **Operation-specific cancellation and cleanup.** The typed .NET SDK's
+   one-shot `MxcContainer.RunAsync` cancellation stops awaiting, not native
+   execution; its dev `RunJsonAsync` mirrors that behavior with the existing
+   FFI `mxc_run_json`. Request timeout still bounds execution. Typed .NET
+   `MxcLifecycle.RunInContainerAsync` instead spawns an owned process and
+   disposes it on cancellation; dev `RunInContainerJsonAsync` follows that
+   handle-based path. Node's V1 run operations have no `AbortSignal`; dev
+   run operations do not add one. Live Node/.NET dev process handles retain
+   V1 `kill`, wait, stream, and disposal behavior; Rust dev run remains
+   synchronous and in-process. A .NET `Task<T>` alone does not require a
+   `CancellationToken`: dev lifecycle and PTY methods without typed async
+   cancellation counterparts need not add one. Test timeout and partial
+   output, concurrent stream draining, capture limits, failed-startup
+   cleanup, and that in-container exec leaves its caller-owned container
+   provisioned.
 
 ## 3. Remaining implementation work
 
@@ -284,7 +315,8 @@ The implementation must still resolve the following:
    add the V1.Dev signatures in Rust, .NET, and Node, and return complete
    native response JSON for lifecycle and validation calls.
    Export Node's `./v1/dev` subpath and its supported type-resolution mapping;
-   do not add a package-root raw alias.
+   do not add a package-root raw alias. Use qualified `.NET` dev facade names
+   in examples that also import typed V1.
    Update `docs/reference/`, SDK READMEs, `docs/versioning.md`, and
    `samples/` with the new dev surface; preserve each operation's
    capture/pipe/PTY behavior.
@@ -295,20 +327,20 @@ The implementation must still resolve the following:
    Check operation/root/phase compatibility before allocation; pass backend
    authorization and terminal invocation controls separately. Use the
    existing FFI JSON exports where they support the requested mode, and
-   resolve the Node ProcessContainer PTY exception above. Keep
-   development-specific response metadata accessible rather than narrowing
-   it to stable V1 types. Rust must expose
-   a supported exact-JSON API rather than asking consumers to import `__ffi`;
+   use the agreed `wxc-exec` path for Node ProcessContainer PTY. Preserve
+   complete JSON for non-exec lifecycle responses, and use existing V1
+   output types for execution. Rust must expose a supported exact-JSON API
+   rather than asking consumers to import `__ffi`;
    .NET and Node need public facades as well as native exports. Ensure the
    Node facade is non-blocking and Promise-returning.
-3. **Close functional and semantic gaps.** Verify owned process/PTY handles,
-   pipe closure, stream pressure, descendant-held endpoints, failed startup,
-   repeated wait/disposal, backend-specific termination scope, and current
-   capture/timeout behavior. Specify unavailable streams and fail unsupported
-   requested modes without downgrading. Preserve FFI cleanup and panic
-   containment. Separately scope byte-preserving native capture and any
-   post-start cancellation guarantee the current blocking capture ABI cannot
-   provide; neither is a claim of the first milestone.
+3. **Verify functional parity.** Check owned process/PTY handles, pipe
+   closure, stream pressure, descendant-held endpoints, failed startup,
+   repeated wait/disposal, backend-specific termination scope, and the
+   typed V1 capture/timeout/cancellation behavior per operation. Specify
+   unavailable streams and fail unsupported requested modes without
+   downgrading. Preserve FFI cleanup and panic containment. Separately
+   scope byte-preserving native capture and any stronger post-start
+   cancellation guarantee; neither is part of the first milestone.
 4. **Verify experimental raw access.** Test caller-authored exact
    `1.1.0-alpha` documents against experimental backends and the separate
    authorization option. Verify that `1.0.0` cannot express their development
