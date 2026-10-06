@@ -350,7 +350,6 @@ fn cooperative_env_appends_managed_keys_after_non_proxy_entries() {
 fn apply_proxy_env_enabled_sets_keys() {
     let proxy = ProxyConfig {
         address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-        builtin_test_server: false,
     };
     let expected_url = proxy.address.as_ref().unwrap().to_url();
     let mut env = vec![
@@ -376,7 +375,6 @@ fn apply_proxy_env_enabled_sets_keys() {
 fn apply_proxy_env_scrubs_bare_valueless_proxy_key() {
     let proxy = ProxyConfig {
         address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-        builtin_test_server: false,
     };
     let mut env = vec!["HTTP_PROXY".to_string(), "PATH=/usr/bin".to_string()];
 

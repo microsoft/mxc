@@ -31,14 +31,15 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::mxc_common::api_set::is_api_set_implemented;
 use crate::mxc_common::audit::{
-    sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
+    sanitize_identity, AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason,
+    TeardownStatus,
 };
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::log_symbols::EMOJI_SECTION;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
-    FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+    FailurePhase, SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -142,6 +143,26 @@ const PSEC_INGRESS_UNSUPPORTED_MSG: &str =
      1.1 with ingress support";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
+
+fn log_base_network_policy_audit(
+    request: &ExecutionRequest,
+    identity: &str,
+    status: OperationStatus,
+    logger: &mut Logger,
+) {
+    if logger.has_diagnostic_sink() {
+        let record =
+            crate::process_container_common::network_policy_helpers::network_policy_applied_record(
+                &request.policy,
+                sanitize_identity(identity),
+                crate::process_container_common::fallback_detector::IsolationTier::BaseContainer
+                    .as_str(),
+                request.policy.network_proxy.address.as_ref(),
+                status,
+            );
+        logger.log_audit_event(&record);
+    }
+}
 
 #[derive(Debug)]
 struct CaptureCleanupError {
@@ -437,36 +458,8 @@ impl BaseContainerRunner {
             ));
         }
 
-        // Launch builtin test proxy if requested (before building spec so we have the port).
-        let mut request = request.clone();
-        if request.policy.network_proxy.builtin_test_server {
-            match self.proxy_coordinator.launch_test_proxy(logger) {
-                Ok(port) => {
-                    let addr = ProxyAddress::new("127.0.0.1".to_string(), port);
-                    request.policy.network_proxy.address = Some(addr);
-                }
-                Err(e) => {
-                    return Err(ScriptResponse::error(&format!(
-                        "Failed to start builtin test proxy: {e}"
-                    )));
-                }
-            }
-        }
-
-        // Log the effective proxy config after resolution.
-        if request.policy.network_proxy.is_enabled() {
-            let addr = request
-                .policy
-                .network_proxy
-                .address
-                .as_ref()
-                .map(|a| a.to_url())
-                .unwrap_or_else(|| "<pending>".to_string());
-            let _ = writeln!(
-                logger,
-                "effective proxy: {} (builtin_test_server={})",
-                addr, request.policy.network_proxy.builtin_test_server
-            );
+        if let Some(addr) = request.policy.network_proxy.address.as_ref() {
+            let _ = writeln!(logger, "effective proxy: {}", addr.to_url());
             let _ = writeln!(
                 logger,
                 "warning: proxy support on Windows is best-effort -- only scripts that use \
@@ -482,7 +475,7 @@ impl BaseContainerRunner {
         let supports_network_ingress = psec_version >= SecurityEnvironmentVersion::V1_1
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress);
         let process_security_environment_spec = build_psec_v1_security_environment_spec(
-            &request,
+            request,
             psec_version,
             supports_network_ingress,
         );
@@ -526,7 +519,7 @@ impl BaseContainerRunner {
         // Resolved via the shared helper so both Windows launch paths agree and
         // neither can pass a NULL cwd (see `working_directory`).
         let working_directory =
-            crate::process_container_common::working_directory::launch_working_directory(&request);
+            crate::process_container_common::working_directory::launch_working_directory(request);
         let _ = writeln!(
             logger,
             "working directory: {}",
@@ -683,7 +676,7 @@ impl BaseContainerRunner {
         // Explicit variables are always isolated from the parent environment.
         // CreateProcessW must receive an explicit clean block or it would
         // inherit all wxc-exec process variables.
-        let env_block = build_child_env_block(&request).map_err(|error| {
+        let env_block = build_child_env_block(request).map_err(|error| {
             ScriptResponse::error(&format!(
                 "failed to create a clean child environment: {error}"
             ))
@@ -734,6 +727,12 @@ impl BaseContainerRunner {
                         let msg =
                             format!("captureDenials: failed to start learning-mode capture: {e}");
                         let _ = writeln!(logger, "Error: {msg}");
+                        log_base_network_policy_audit(
+                            request,
+                            &identity,
+                            OperationStatus::Failure,
+                            logger,
+                        );
                         let failure_phase = if e.is_api_unavailable() {
                             FailurePhase::BackendUnavailable
                         } else {
@@ -763,6 +762,12 @@ impl BaseContainerRunner {
                         let msg =
                             format!("failed to create the process security environment: {error}");
                         let _ = writeln!(logger, "Error: {msg}");
+                        log_base_network_policy_audit(
+                            request,
+                            &identity,
+                            OperationStatus::Failure,
+                            logger,
+                        );
                         let failure_phase = if error.is_api_unavailable() {
                             FailurePhase::BackendUnavailable
                         } else {
@@ -813,6 +818,12 @@ impl BaseContainerRunner {
                     );
                     }
                     let _ = writeln!(logger, "Error: {msg}");
+                    log_base_network_policy_audit(
+                        request,
+                        &identity,
+                        OperationStatus::Failure,
+                        logger,
+                    );
                     let failure_phase = if primary.is_api_unavailable()
                         || cleanup_error.as_ref().is_some_and(
                             crate::learning_mode_windows::LearningModeError::is_api_unavailable,
@@ -1056,42 +1067,7 @@ impl BaseContainerRunner {
                 .map(|address| address.port as u64)
                 .unwrap_or(0),
         );
-        if logger.has_diagnostic_sink() {
-            let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
-                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
-                .str("identity", sanitize_identity(&identity))
-                .str(
-                    "tier",
-                    crate::process_container_common::fallback_detector::IsolationTier::BaseContainer.as_str(),
-                )
-                .str(
-                    "enforcement_mode",
-                    crate::process_container_common::network_policy_helpers::CAPABILITIES_ENFORCEMENT_MODE,
-                )
-                .str(
-                    "default_policy",
-                    crate::process_container_common::network_policy_helpers::audit_egress_default(
-                        &request.policy,
-                    ),
-                )
-                .u64(
-                    "proxy_port",
-                    request
-                        .policy
-                        .network_proxy
-                        .address
-                        .as_ref()
-                        .map(|address| address.port as u64)
-                        .unwrap_or(0),
-                )
-                .u64("firewall_rules_created", 0)
-                .bool("firewall_applied", false)
-                .str(
-                    "status",
-                    crate::mxc_common::audit::OperationStatus::Success.as_str(),
-                );
-            logger.log_audit_event(&record);
-        }
+        log_base_network_policy_audit(request, &identity, OperationStatus::Success, logger);
 
         // Hand ownership to the caller via `BaseChild`, which performs
         // sandbox/proxy teardown after the child exits. `job` is always present
@@ -1164,14 +1140,6 @@ impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::rejected(
-                crate::mxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        crate::process_container_common::network_policy_helpers::reject_retired_network_policy(
-            &request.policy,
-        )?;
         if has_conflicting_proxy_identity(&request.policy) {
             return Err(ScriptResponse::rejected(
                 "processContainer.network.allowedProxyPeer grants loopback access only to the \
@@ -2062,12 +2030,82 @@ mod tests {
     };
     use crate::mxc_common::models::{
         BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr,
-        NetworkPeer, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig, UiPolicy,
+        NetworkEgressPolicy, NetworkPeer, NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress,
+        ProxyConfig, UiPolicy,
     };
     use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
     use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn basecontainer_network_audit_records_proxyless_proxy_and_setup_failure() {
+        for (default, proxy_port, status, expected_default) in [
+            (NetworkAction::Deny, None, OperationStatus::Success, "block"),
+            (
+                NetworkAction::Allow,
+                None,
+                OperationStatus::Success,
+                "allow",
+            ),
+            (
+                NetworkAction::Deny,
+                Some(8080),
+                OperationStatus::Success,
+                "block",
+            ),
+            (
+                NetworkAction::Deny,
+                Some(8080),
+                OperationStatus::Failure,
+                "block",
+            ),
+            (NetworkAction::Deny, None, OperationStatus::Failure, "block"),
+        ] {
+            let mut request = ExecutionRequest::default();
+            request.policy.network_egress = Some(NetworkEgressPolicy {
+                default,
+                ..Default::default()
+            });
+            request.policy.network_proxy.address =
+                proxy_port.map(|port| ProxyAddress::new("127.0.0.1".to_string(), port));
+            let directory = tempfile::tempdir().expect("tempdir");
+            let path = directory.path().join("network-audit.log");
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            logger.enable_file_sink(&path).expect("diagnostic sink");
+
+            log_base_network_policy_audit(
+                &request,
+                "<process-security-environment>",
+                status,
+                &mut logger,
+            );
+            drop(logger);
+
+            let output = std::fs::read_to_string(&path).expect("read audit");
+            let (_, json) = output
+                .trim_end()
+                .split_once("] ")
+                .expect("timestamped audit record");
+            let record: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+            assert_eq!(output.lines().count(), 1);
+            assert_eq!(
+                record,
+                serde_json::json!({
+                    "event": "mxc.NetworkPolicyApplied",
+                    "backend": "processcontainer",
+                    "identity": "redacted",
+                    "tier": "base-container",
+                    "enforcement_mode": "capabilities",
+                    "default_policy": expected_default,
+                    "proxy_port": proxy_port.unwrap_or(0),
+                    "firewall_rules_created": 0,
+                    "firewall_applied": false,
+                    "status": status.as_str(),
+                })
+            );
+        }
+    }
 
     fn enumerate_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
@@ -2592,7 +2630,6 @@ mod tests {
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         request.env = Some(vec!["PATH=C:\\Windows".to_string()]);
 
@@ -2947,7 +2984,6 @@ mod tests {
             request.policy.runtime_network_proxy_specified = runtime_proxy_specified;
             request.policy.network_proxy = ProxyConfig {
                 address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-                builtin_test_server: false,
             };
             request.policy.allowed_proxy_peer = Some("Contoso.Proxy_12345".to_string());
 
@@ -3250,7 +3286,6 @@ mod tests {
         let mut request = ExecutionRequest::default();
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
 
         assert!(
@@ -3268,7 +3303,6 @@ mod tests {
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         assert!(BaseContainerRunner::can_backend_service_request(&request).can_service_request());
     }
@@ -3276,36 +3310,6 @@ mod tests {
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
     use crate::mxc_common::sandbox_process::SandboxBackend;
-
-    #[test]
-    fn validate_runner_rejects_allowed_hosts() {
-        let runner = BaseContainerRunner::new();
-        let mut request = ExecutionRequest {
-            dry_run: true,
-            ..Default::default()
-        };
-        request.policy.allowed_hosts = vec!["example.com".into()];
-
-        let err = runner
-            .validate(&request)
-            .expect_err("allowedHosts is not yet supported");
-        assert!(err.error_message.contains("allowedHosts"));
-    }
-
-    #[test]
-    fn validate_runner_rejects_blocked_hosts() {
-        let runner = BaseContainerRunner::new();
-        let mut request = ExecutionRequest {
-            dry_run: true,
-            ..Default::default()
-        };
-        request.policy.blocked_hosts = vec!["bad.example.com".into()];
-
-        let err = runner
-            .validate(&request)
-            .expect_err("blockedHosts is not yet supported");
-        assert!(err.error_message.contains("blockedHosts"));
-    }
 
     #[test]
     fn validate_runner_accepts_empty_policy() {

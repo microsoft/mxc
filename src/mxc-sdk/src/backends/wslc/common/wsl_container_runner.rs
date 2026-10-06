@@ -24,8 +24,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::mxc_common::logger::{Logger, Mode};
-#[cfg(test)]
-use crate::mxc_common::models::NetworkPolicy;
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse, WslcConfig};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::sandbox_process::StdioMode;
@@ -432,7 +430,6 @@ impl ScriptRunner for WSLContainerRunner {
         policy_mapping::container_working_directory(&request.working_directory)
             .map_err(|msg| WslcError::Rejected(msg).into_response())?;
         policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
-        policy::reject_retired_network_fields(request).map_err(as_wslc_rejection)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, policy::network_policy_support())
@@ -799,7 +796,6 @@ impl WSLContainerRunner {
         logger: &mut Logger,
         output: OutputMode,
     ) -> Result<StartedContainer, ScriptResponse> {
-        policy::reject_retired_network_fields(request).map_err(as_wslc_rejection)?;
         let _ = writeln!(logger, "{START_CONTAINER_BANNER}");
 
         // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -890,15 +886,14 @@ impl WSLContainerRunner {
             return Err(sdk_error("WslcSetProcessSettingsCallbacks failed", hr, ""));
         }
 
-        // Route egress through the cooperative proxy: WSLc cannot apply an
-        // iptables drop-floor (no CAP_NET_ADMIN, no VM-level enforcement hook),
-        // so per-host policy is enforced at the proxy layer by injecting
-        // HTTP(S)_PROXY (and scrubbing caller-supplied proxy vars).
+        // Route cooperative HTTP clients through the caller-managed proxy:
+        // WSLc has no IP-level enforcement hook, so any destination filtering
+        // belongs to the proxy. Inject HTTP(S)_PROXY after scrubbing caller
+        // proxy variables.
         // See crate::mxc_common::proxy_env.
         let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
-            // url-only (also enforced at parse time). Fail fast rather than
-            // inject an empty HTTP_PROXY= for the localhost/builtinTestServer
-            // forms, which carry no routable URL.
+            // A directly constructed request must retain its proxy URL so the
+            // guest receives a routable endpoint instead of an empty setting.
             let proxy_url = match request
                 .policy
                 .network_proxy
@@ -909,9 +904,9 @@ impl WSLContainerRunner {
                 Some(url) => url,
                 None => {
                     return Err(WslcError::Rejected(
-                        "WSLC: network.proxy requires the 'url' form (a routable proxy URL); \
-                         the localhost and builtinTestServer forms are not supported because a \
-                         WSL container runs in its own network namespace."
+                        "WSLC: runtimeConfig.networkProxy requires a URL-backed proxy address. \
+                         For directly constructed requests, use ProxyAddress::from_url so \
+                         the guest can receive HTTP(S)_PROXY."
                             .to_string(),
                     )
                     .into_response());
@@ -1726,60 +1721,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_rejects_retired_allowlist() {
-        // block default + allowlist = per-host filtering WSLc can't enforce.
+    fn both_surfaces_reject_directional_host_filtering() {
         let request = ExecutionRequest {
             containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             policy: crate::mxc_common::models::ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                allowed_hosts: vec!["example.com".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let runner = WSLContainerRunner::new(&WslcConfig::default());
-        let err = runner.validate_runner(&request).unwrap_err();
-        assert!(err.error_message.contains("allowedHosts"));
-    }
-
-    #[test]
-    fn validate_runner_rejects_blocklist_host_filtering() {
-        // allow default + blocklist is the other filtering shape.
-        let request = ExecutionRequest {
-            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::mxc_common::models::ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                blocked_hosts: vec!["evil.com".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let runner = WSLContainerRunner::new(&WslcConfig::default());
-        assert!(runner.validate_runner(&request).is_err());
-    }
-
-    #[test]
-    fn validate_runner_rejects_allow_local_network() {
-        let request = ExecutionRequest {
-            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::mxc_common::models::ContainerPolicy {
-                allow_local_network: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let runner = WSLContainerRunner::new(&WslcConfig::default());
-        let err = runner.validate_runner(&request).unwrap_err();
-        assert!(err.error_message.contains("allowLocalNetwork"));
-    }
-
-    /// Neither surface accepts a retired network field.
-    #[test]
-    fn both_surfaces_reject_retired_allow_local_network() {
-        let request = ExecutionRequest {
-            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::mxc_common::models::ContainerPolicy {
-                allow_local_network: true,
+                network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
+                    allow: vec![Default::default()],
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -1792,7 +1741,7 @@ mod tests {
             one_shot.failure_phase,
             crate::mxc_common::models::FailurePhase::Rejected
         );
-        assert!(one_shot.error_message.contains("allowLocalNetwork"));
+        assert!(one_shot.error_message.contains("network.egress"));
 
         let state_aware =
             crate::wslc_common::policy::validate_provision_policy(&request).unwrap_err();
@@ -1801,7 +1750,7 @@ mod tests {
             crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
         );
         assert!(
-            state_aware.message.contains("allowLocalNetwork"),
+            state_aware.message.contains("allow/deny rules"),
             "got: {}",
             state_aware.message
         );
@@ -1942,44 +1891,6 @@ mod tests {
                 crate::mxc_common::models::FailurePhase::Rejected
             );
         }
-    }
-
-    #[test]
-    fn validate_runner_rejects_unimplementable_enforcement_modes() {
-        let runner = WSLContainerRunner::new(&WslcConfig::default());
-
-        for mode in [
-            crate::mxc_common::models::NetworkEnforcementMode::Firewall,
-            crate::mxc_common::models::NetworkEnforcementMode::Both,
-        ] {
-            let request = ExecutionRequest {
-                containment: crate::mxc_common::models::ContainmentBackend::Wslc,
-                policy: crate::mxc_common::models::ContainerPolicy {
-                    network_enforcement_mode: mode.clone(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let err = runner
-                .validate_runner(&request)
-                .expect_err(&format!("{mode:?} must be rejected"));
-            assert!(
-                err.error_message.contains("enforcementMode"),
-                "got: {}",
-                err.error_message
-            );
-        }
-
-        let request = ExecutionRequest {
-            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
-            policy: crate::mxc_common::models::ContainerPolicy {
-                network_enforcement_mode:
-                    crate::mxc_common::models::NetworkEnforcementMode::Capabilities,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(runner.validate_runner(&request).is_ok());
     }
 
     /// A rejection must abort the request rather than tear a container down

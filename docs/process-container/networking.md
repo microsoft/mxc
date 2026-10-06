@@ -253,7 +253,9 @@ Do not infer otherwise from the schema:
 - Per-source or per-port inbound rules. GA ingress is limited to the
   `default` and `hostLoopback` allow/deny toggles.
 
-See the parent doc on the last 4.
+The egress schema selects numeric destinations, protocols, and ports, not
+durable DNS names or application payloads. Its ingress schema has only
+`default` and `hostLoopback` toggles; it cannot select inbound peers or ports.
 
 ## 2. Supported-contract selection and downlevel behavior
 

@@ -24,7 +24,7 @@ fi
 
 echo "Running Bubblewrap firewall test: hostname rule address rejected..."
 NAME_RC=0
-NAME_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+NAME_OUT=$("$LXC_EXEC" --experimental \
     "$REPO_DIR/tests/configs/bubblewrap_network_firewall_hostname_rejected.json" 2>&1) \
     || NAME_RC=$?
 if [ "$NAME_RC" -eq 0 ] ||
@@ -63,7 +63,7 @@ cat >"$WORK_DIR/reachability_probe.json" <<'PROBE'
 }
 PROBE
 PROBE_RC=0
-PROBE_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+PROBE_OUT=$("$LXC_EXEC" --experimental \
     "$WORK_DIR/reachability_probe.json" 2>&1) || PROBE_RC=$?
 if [ "$PROBE_RC" -ne 0 ] || ! grep -qF "PROBE_WORKLOAD_STARTED" <<<"$PROBE_OUT"; then
     echo "$PROBE_OUT"
@@ -92,7 +92,7 @@ done
 
 echo "Running Bubblewrap firewall test: CIDR allow, deny-wins, and tamper resistance..."
 FIREWALL_RC=0
-FIREWALL_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+FIREWALL_OUT=$("$LXC_EXEC" --experimental \
     "$REPO_DIR/tests/configs/bubblewrap_network_firewall.json" 2>&1) || FIREWALL_RC=$?
 if [ "$FIREWALL_RC" -ne 0 ]; then
     echo "$FIREWALL_OUT"

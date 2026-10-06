@@ -8,9 +8,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Security::PSID;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-use windows::Win32::System::Threading::{
-    CreateEventW, OpenProcess, SetEvent, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
 use crate::mxc_common::error::WxcError;
@@ -205,22 +203,13 @@ fn poll_for_ready_file(
 }
 
 /// Manages the network proxy lifecycle for sandboxed AppContainer workloads.
-///
-/// Handles two proxy modes:
-/// - **External proxy**: user provides a `localhost` port in the config
-/// - **Builtin test server**: wxc launches `wxc-test-proxy.exe` itself to get
-///   an OS-assigned port (for integration testing only)
-///
-/// In both cases, WinHTTP proxy policy is set by an elevated
+/// The caller manages the proxy; WinHTTP proxy policy is set by an elevated
 /// `winhttp-proxy-shim` process launched via UAC.
 pub struct ProxyCoordinator {
-    proxy_address: Option<crate::mxc_common::models::ProxyAddress>,
+    proxy_address: Option<ProxyAddress>,
     shim_process_handle: Option<OwnedHandle>,
     shim_cleanup_event: Option<OwnedHandle>,
     shim_ready_file_path: Option<PathBuf>,
-    test_proxy_handle: Option<OwnedHandle>,
-    test_proxy_cleanup_event: Option<OwnedHandle>,
-    test_proxy_ready_file_path: Option<PathBuf>,
     loopback_container_name: Option<String>,
 }
 
@@ -258,9 +247,6 @@ impl ProxyCoordinator {
             shim_process_handle: None,
             shim_cleanup_event: None,
             shim_ready_file_path: None,
-            test_proxy_handle: None,
-            test_proxy_cleanup_event: None,
-            test_proxy_ready_file_path: None,
             loopback_container_name: None,
         }
     }
@@ -271,15 +257,14 @@ impl ProxyCoordinator {
     }
 
     /// Returns the proxy address (if active).
-    pub fn address(&self) -> Option<&crate::mxc_common::models::ProxyAddress> {
+    pub fn address(&self) -> Option<&ProxyAddress> {
         self.proxy_address.as_ref()
     }
 
     /// Activate the proxy based on the given config.
     ///
-    /// If `builtin_test_server` is set, launches `wxc-test-proxy.exe` first to
-    /// obtain a port. Then sets up loopback exemption and WinHTTP proxy policy
-    /// via the elevated shim.
+    /// Sets up loopback exemption and WinHTTP proxy policy via the elevated
+    /// shim for a caller-managed proxy address.
     pub fn start(
         &mut self,
         proxy_config: &ProxyConfig,
@@ -294,12 +279,7 @@ impl ProxyCoordinator {
             ));
         }
 
-        let address = if proxy_config.builtin_test_server {
-            let port = self.launch_test_proxy(logger)?;
-            ProxyAddress::new("127.0.0.1".to_string(), port)
-        } else if let Some(ref addr) = proxy_config.address {
-            addr.clone()
-        } else {
+        let Some(address) = proxy_config.address.clone() else {
             return Ok(());
         };
 
@@ -323,85 +303,6 @@ impl ProxyCoordinator {
         ));
 
         Ok(())
-    }
-
-    /// Launch `wxc-test-proxy.exe` and read its port from the ready file.
-    pub fn launch_test_proxy(&mut self, logger: &mut Logger) -> Result<u16, WxcError> {
-        logger.log_line(
-            "WARNING: Starting builtin test proxy — this is for integration testing only, \
-             NOT for production use.",
-        );
-
-        let unique_id = generate_unique_id();
-        let ready_file_path =
-            std::env::temp_dir().join(format!("wxc-test-proxy-ready-{}.tmp", unique_id));
-        let event_name = format!("Local\\wxc-test-proxy-{}", unique_id);
-        let event_name_wide = string_util::to_wide(&event_name);
-
-        let event_handle =
-            unsafe { CreateEventW(None, true, false, PCWSTR(event_name_wide.as_ptr())) }.map_err(
-                |err| {
-                    WxcError::NetworkProxy(format!(
-                        "Failed to create test proxy cleanup event: {}",
-                        err
-                    ))
-                },
-            )?;
-
-        self.test_proxy_cleanup_event = Some(OwnedHandle::new(event_handle));
-        self.test_proxy_ready_file_path = Some(ready_file_path.clone());
-
-        let proxy_exe = resolve_sibling_binary("wxc-test-proxy.exe")?;
-
-        let mut child = std::process::Command::new(&proxy_exe)
-            .arg("--ready-file")
-            .arg(&ready_file_path)
-            .arg("--cleanup-event")
-            .arg(&event_name)
-            .arg("--parent-pid")
-            .arg(std::process::id().to_string())
-            .stderr(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::null())
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .map_err(|err| {
-                WxcError::NetworkProxy(format!("Failed to launch wxc-test-proxy.exe: {}", err))
-            })?;
-
-        let child_pid = child.id();
-        let process_handle = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, child_pid) } {
-            Ok(handle) => handle,
-            Err(err) => {
-                let _ = child.kill();
-                return Err(WxcError::NetworkProxy(format!(
-                    "Failed to open handle for test proxy process: {}",
-                    err
-                )));
-            }
-        };
-        self.test_proxy_handle = Some(OwnedHandle::new(process_handle));
-
-        poll_for_ready_file(
-            &ready_file_path,
-            self.test_proxy_handle.as_ref().unwrap(),
-            15,
-            logger,
-            "wxc-test-proxy",
-        )?;
-
-        let content = std::fs::read_to_string(&ready_file_path).map_err(|err| {
-            WxcError::NetworkProxy(format!("Failed to read test proxy ready file: {}", err))
-        })?;
-
-        let port: u16 = content.trim().parse().map_err(|err| {
-            WxcError::NetworkProxy(format!(
-                "Invalid port in test proxy ready file '{}': {}",
-                content.trim(),
-                err
-            ))
-        })?;
-
-        Ok(port)
     }
 
     /// Launch the elevated winhttp-proxy-shim to set the per-AppContainer
@@ -452,7 +353,7 @@ impl ProxyCoordinator {
         )
     }
 
-    /// Stop the proxy: signal shim and test proxy cleanup, remove loopback exemption.
+    /// Stop the shim and remove the loopback exemption; the caller owns the proxy.
     pub fn stop(&mut self, logger: &mut Logger) -> bool {
         let was_active = self.is_active();
         signal_process_cleanup(
@@ -461,18 +362,9 @@ impl ProxyCoordinator {
             "winhttp-proxy-shim",
             logger,
         );
-        signal_process_cleanup(
-            self.test_proxy_cleanup_event.take(),
-            self.test_proxy_handle.take(),
-            "wxc-test-proxy",
-            logger,
-        );
         self.proxy_address = None;
 
         if let Some(path) = self.shim_ready_file_path.take() {
-            let _ = std::fs::remove_file(&path);
-        }
-        if let Some(path) = self.test_proxy_ready_file_path.take() {
             let _ = std::fs::remove_file(&path);
         }
         if let Some(container_name) = self.loopback_container_name.take() {
@@ -518,6 +410,23 @@ mod tests {
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         mgr.stop(&mut logger);
         assert!(!mgr.is_active());
+    }
+
+    #[test]
+    fn disabled_proxy_does_not_start_shim() {
+        let mut mgr = ProxyCoordinator::new();
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        mgr.start(
+            &ProxyConfig::default(),
+            "container",
+            "principal",
+            PSID::default(),
+            &mut logger,
+        )
+        .unwrap();
+        assert!(mgr.address().is_none());
+        assert!(mgr.shim_process_handle.is_none());
+        assert!(mgr.loopback_container_name.is_none());
     }
 
     #[test]

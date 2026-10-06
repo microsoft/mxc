@@ -39,7 +39,7 @@
 //! `-allow-host-networking` to `nanvixd` only when egress.default,
 //! ingress.default, and ingress.hostLoopback all allow. All-deny (including
 //! omitted defaults) stays disconnected; mixed postures, egress rules, proxies,
-//! and retired legacy network fields are rejected before execution.
+//! and unsupported directional network postures are rejected before execution.
 //!
 //! Auto-discovery
 //!
@@ -56,9 +56,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{
-    ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
-};
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction, ScriptResponse};
 use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
@@ -100,9 +98,6 @@ const ERR_DENIED_PATHS: &str = concat!(
     "-- the guest has no host filesystem visibility. ",
     "Only readwrite_paths and readonly_paths are supported",
 );
-const ERR_LEGACY_NETWORK: &str = "NanVix does not support retired legacy network fields \
-    (defaultPolicy, enforcementMode, allowLocalNetwork, allowedHosts, blockedHosts); \
-    use network.egress and network.ingress";
 const ERR_PROXY_POLICY: &str = "network proxy is not supported by the NanVix backend";
 const ERR_DIRECTIONAL_NETWORK: &str = "NanVix supports only fully isolated or explicitly \
     unrestricted directional networking: egress.default, ingress.default and ingress.hostLoopback \
@@ -501,14 +496,6 @@ impl NanVixScriptRunner {
 
     fn resolve_networking_mode(request: &ExecutionRequest) -> Result<bool, NanVixError> {
         let policy = &request.policy;
-        if policy.default_network_policy != NetworkPolicy::Block
-            || policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities
-            || policy.allow_local_network
-            || !policy.allowed_hosts.is_empty()
-            || !policy.blocked_hosts.is_empty()
-        {
-            return Err(NanVixError::Preflight(ERR_LEGACY_NETWORK.to_string()));
-        }
         if policy
             .network_egress
             .as_ref()
@@ -1175,79 +1162,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn directly_constructed_legacy_network_fields_fail_closed() {
-        let legacy_policies = [
-            (
-                "defaultPolicy",
-                ContainerPolicy {
-                    default_network_policy: NetworkPolicy::Allow,
-                    ..Default::default()
-                },
-            ),
-            (
-                "enforcementMode",
-                ContainerPolicy {
-                    network_enforcement_mode: NetworkEnforcementMode::Firewall,
-                    ..Default::default()
-                },
-            ),
-            (
-                "allowLocalNetwork",
-                ContainerPolicy {
-                    allow_local_network: true,
-                    ..Default::default()
-                },
-            ),
-            (
-                "allowedHosts",
-                ContainerPolicy {
-                    allowed_hosts: vec!["192.0.2.1".to_string()],
-                    ..Default::default()
-                },
-            ),
-            (
-                "blockedHosts",
-                ContainerPolicy {
-                    blocked_hosts: vec!["192.0.2.1".to_string()],
-                    ..Default::default()
-                },
-            ),
-        ];
-        for (field, legacy_policy) in legacy_policies {
-            let mut request = directional_request(
-                NetworkAction::Allow,
-                NetworkAction::Allow,
-                NetworkAction::Allow,
-            );
-            request.script_code = "print(1)".to_string();
-            request.policy.default_network_policy = legacy_policy.default_network_policy;
-            request.policy.network_enforcement_mode = legacy_policy.network_enforcement_mode;
-            request.policy.allow_local_network = legacy_policy.allow_local_network;
-            request.policy.allowed_hosts = legacy_policy.allowed_hosts;
-            request.policy.blocked_hosts = legacy_policy.blocked_hosts;
-
-            let error = NanVixScriptRunner::new()
-                .validate_runner(&request)
-                .unwrap_err();
-            assert!(error.error_message.contains(ERR_LEGACY_NETWORK), "{field}");
-            assert!(command_arguments(&request).is_err(), "{field}");
-
-            let mut runner = NanVixScriptRunner::new();
-            let mut logger = Logger::new(Mode::Buffer);
-            let response = runner.run(&request, &mut logger);
-            assert!(
-                response.error_message.contains(ERR_LEGACY_NETWORK),
-                "{field}"
-            );
-            let response = runner.execute(&request, &mut logger);
-            assert!(
-                response.error_message.contains(ERR_LEGACY_NETWORK),
-                "{field}"
-            );
-        }
-    }
-
     // -- Directional network decision tests ------------------------------------
 
     #[test]
@@ -1288,10 +1202,6 @@ mod tests {
         let resp = runner.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(
-            !resp.error_message.contains(ERR_LEGACY_NETWORK),
-            "default request should not trigger network policy rejection"
-        );
-        assert!(
             !resp.error_message.contains(ERR_WORKDIR),
             "default request should not trigger workingDirectory rejection"
         );
@@ -1308,7 +1218,6 @@ mod tests {
                         "127.0.0.1".to_string(),
                         8080,
                     )),
-                    builtin_test_server: false,
                 },
                 ..Default::default()
             },

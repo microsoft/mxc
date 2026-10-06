@@ -99,9 +99,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{
-    ExecutionRequest, HyperlightRuntime, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
-};
+use crate::mxc_common::models::{ExecutionRequest, HyperlightRuntime, ScriptResponse};
 use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
@@ -451,18 +449,6 @@ impl HyperlightScriptRunner {
         if !request.working_directory.is_empty() {
             return Err(RunnerError::Preflight(ERR_WORKDIR.to_string()));
         }
-        if request.policy.default_network_policy != NetworkPolicy::Block
-            || request.policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities
-            || request.policy.allow_local_network
-            || !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
-        {
-            return Err(RunnerError::Preflight(
-                "retired network fields are not supported by Hyperlight; the guest runs without networking"
-                    .to_string(),
-            ));
-        }
-
         // Denied paths: block early if any appears in the allow lists.
         for denied in &request.policy.denied_paths {
             for allowed in request
@@ -1598,7 +1584,7 @@ fn os_data_home() -> PathBuf {
 mod tests {
     use super::*;
     use crate::mxc_common::logger::Mode;
-    use crate::mxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use crate::mxc_common::models::ContainerPolicy;
 
     fn runner() -> HyperlightScriptRunner {
         HyperlightScriptRunner::new()
@@ -2126,39 +2112,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_network_fields_are_rejected_before_boot() {
-        for policy in [
-            ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                ..Default::default()
-            },
-            ContainerPolicy {
-                allowed_hosts: vec!["a.example".to_string()],
-                ..Default::default()
-            },
-            ContainerPolicy {
-                blocked_hosts: vec!["b.example".to_string()],
-                ..Default::default()
-            },
-            ContainerPolicy {
-                network_enforcement_mode: NetworkEnforcementMode::Firewall,
-                ..Default::default()
-            },
-            ContainerPolicy {
-                allow_local_network: true,
-                ..Default::default()
-            },
-        ] {
-            let request = ExecutionRequest {
-                policy,
-                ..Default::default()
-            };
-            let error = runner().validate_runner(&request).unwrap_err();
-            assert!(error.error_message.contains("retired network fields"));
-        }
-    }
-
-    #[test]
     fn explicit_directional_allow_is_rejected_before_boot() {
         let mut request = ExecutionRequest::default();
         request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
@@ -2167,22 +2120,6 @@ mod tests {
         });
         let error = runner().validate_runner(&request).unwrap_err();
         assert!(error.error_message.contains("network.egress.default"));
-    }
-
-    #[test]
-    fn direct_execution_rejects_retired_host_lists_before_boot() {
-        let mut r = runner();
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                allowed_hosts: vec!["a.example".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut logger = Logger::new(Mode::Buffer);
-        let resp = r.execute(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("retired network fields"));
     }
 
     #[test]

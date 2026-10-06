@@ -368,18 +368,6 @@ pub struct RuntimeConfig {
     pub network_proxy: Option<String>,
 }
 
-/// Proxy configuration. Exactly one variant applies.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Proxy {
-    /// External localhost proxy port.
-    pub localhost: Option<u16>,
-    /// Have wxc launch its own built-in test proxy.
-    pub builtin_test_server: Option<bool>,
-    /// Proxy URL (parsed into host:port).
-    pub url: Option<String>,
-}
-
 /// Cross-platform UI isolation policy.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

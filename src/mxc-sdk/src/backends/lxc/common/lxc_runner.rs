@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, ScriptResponse,
+    ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, ScriptResponse,
 };
 use crate::mxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
 use crate::mxc_common::script_runner::ScriptRunner;
@@ -959,18 +958,8 @@ pub const LXC_INHERIT_STDIO_UNSUPPORTED: &str =
 
 pub const LXC_STREAMING_LINUX_ONLY: &str = "LXC: sandboxes can only be launched on Linux.";
 
-fn retired_network_field(policy: &ContainerPolicy) -> Option<&'static str> {
-    if policy.default_network_policy != NetworkPolicy::Block {
-        Some("network.defaultPolicy")
-    } else if policy.network_enforcement_mode != NetworkEnforcementMode::Capabilities {
-        Some("network.enforcementMode")
-    } else if policy.allow_local_network {
-        Some("network.allowLocalNetwork")
-    } else if !policy.allowed_hosts.is_empty() {
-        Some("network.allowedHosts")
-    } else if !policy.blocked_hosts.is_empty() {
-        Some("network.blockedHosts")
-    } else if policy.network_proxy.is_enabled() {
+fn unsupported_network_proxy(policy: &ContainerPolicy) -> Option<&'static str> {
+    if policy.network_proxy.is_enabled() {
         Some("network.proxy")
     } else {
         None
@@ -989,10 +978,10 @@ impl ScriptRunner for LxcScriptRunner {
         if request.policy.runtime_network_proxy_specified {
             return Err(ScriptResponse::error(LXC_RUNTIME_PROXY_UNSUPPORTED));
         }
-        if let Some(field) = retired_network_field(&request.policy) {
+        if let Some(field) = unsupported_network_proxy(&request.policy) {
             return Err(ScriptResponse::error(&format!(
-                "LXC: {field} is retired and cannot be enforced; use network.egress / \
-                 network.ingress instead."
+                "LXC: {field} is not supported and cannot be enforced; \
+                 remove the proxy request."
             )));
         }
         validate_network_policy_support(request, lxc_network_policy_support())?;
@@ -1711,7 +1700,6 @@ mod tests {
                     "proxy.example.com".to_string(),
                     3128,
                 )),
-                ..Default::default()
             },
             ..Default::default()
         });
@@ -2069,55 +2057,17 @@ mod tests {
     }
 
     #[test]
-    fn a_retired_enforcement_mode_is_refused() {
-        let policy = ContainerPolicy {
-            network_enforcement_mode: NetworkEnforcementMode::Firewall,
-            ..Default::default()
-        };
-
-        let refusal = validating_runner()
-            .validate_runner(&request_with_policy(policy))
-            .expect_err("a retired enforcement mode cannot configure LXC");
-
-        assert!(refusal.error_message.contains("network.enforcementMode"));
-    }
-    #[test]
-    fn retired_fields_are_refused_before_container_creation() {
-        type RetiredFieldCase = (&'static str, fn(&mut ContainerPolicy));
-        let cases: &[RetiredFieldCase] = &[
-            ("network.defaultPolicy", |p| {
-                p.default_network_policy = NetworkPolicy::Allow
-            }),
-            ("network.enforcementMode", |p| {
-                p.network_enforcement_mode = NetworkEnforcementMode::Both
-            }),
-            ("network.allowLocalNetwork", |p| {
-                p.allow_local_network = true
-            }),
-            ("network.allowedHosts", |p| {
-                p.allowed_hosts.push("192.0.2.10".into())
-            }),
-            ("network.blockedHosts", |p| {
-                p.blocked_hosts.push("192.0.2.10".into())
-            }),
-            ("network.proxy", |p| {
-                p.network_proxy.builtin_test_server = true
-            }),
-        ];
-
-        for &(field, set_field) in cases {
-            let mut policy = egress_policy_for_tests();
-            set_field(&mut policy);
-            let runner = runner_for_guard_tests(field);
-            let mut logger = Logger::new(Mode::Buffer);
-            let response = runner.run_internal(&request_with_policy(policy), &mut logger);
-            assert!(
-                response.error_message.contains(field),
-                "{field} must fail before creating a container: {}",
-                response.error_message
-            );
-            assert!(!logger.get_buffer().contains("Creating LXC container"));
-        }
+    fn proxy_is_refused_before_container_creation() {
+        let mut policy = egress_policy_for_tests();
+        policy.network_proxy.address = Some(crate::mxc_common::models::ProxyAddress::new(
+            "127.0.0.1".into(),
+            8080,
+        ));
+        let runner = runner_for_guard_tests("network.proxy");
+        let mut logger = Logger::new(Mode::Buffer);
+        let response = runner.run_internal(&request_with_policy(policy), &mut logger);
+        assert!(response.error_message.contains("network.proxy"));
+        assert!(!logger.get_buffer().contains("Creating LXC container"));
     }
 
     #[test]
@@ -2650,7 +2600,6 @@ mod tests {
                 "proxy.example.com".to_string(),
                 8080,
             )),
-            builtin_test_server: false,
         };
         request
     }

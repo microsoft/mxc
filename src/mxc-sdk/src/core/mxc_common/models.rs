@@ -301,44 +301,6 @@ pub struct LxcConfig {
     pub release: String,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkPolicy {
-    Allow,
-    #[default]
-    Block,
-}
-
-impl NetworkPolicy {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Allow => "allow",
-            Self::Block => "block",
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkEnforcementMode {
-    #[default]
-    Capabilities,
-    Firewall,
-    Both,
-}
-
-impl NetworkEnforcementMode {
-    /// Canonical wire string, matching the JSON schema enum. Bounded
-    /// vocabulary for structured logs.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Capabilities => "capabilities",
-            Self::Firewall => "firewall",
-            Self::Both => "both",
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkAction {
@@ -598,16 +560,15 @@ pub fn unbracket_host(host: &str) -> &str {
         .unwrap_or(host)
 }
 
-/// Proxy configuration parsed from the `network.proxy` JSON field.
+/// Normalized runtime proxy configuration.
 #[derive(Debug, Default, Clone)]
 pub struct ProxyConfig {
     pub address: Option<ProxyAddress>,
-    pub builtin_test_server: bool,
 }
 
 impl ProxyConfig {
     pub fn is_enabled(&self) -> bool {
-        self.address.is_some() || self.builtin_test_server
+        self.address.is_some()
     }
 }
 
@@ -718,14 +679,6 @@ pub struct ContainerPolicy {
     pub enumerate_paths: Vec<String>,
     pub denied_paths: Vec<String>,
     pub fallback: FallbackPolicy,
-    pub default_network_policy: NetworkPolicy,
-    pub network_enforcement_mode: NetworkEnforcementMode,
-    /// When true, the sandboxed process may bind() + listen() on local IPs
-    /// and accept incoming connections. Independent of `default_network_policy`
-    /// (which governs outbound traffic).
-    pub allow_local_network: bool,
-    pub allowed_hosts: Vec<String>,
-    pub blocked_hosts: Vec<String>,
     /// Outbound CIDR, protocol, and port policy.
     pub network_egress: Option<NetworkEgressPolicy>,
     /// Inbound and host-loopback policy.
@@ -736,24 +689,21 @@ pub struct ContainerPolicy {
     pub network_proxy: ProxyConfig,
     /// Whether the caller supplied a `network` block on the wire (any field
     /// present), captured at parse time. Distinguishes an absent network policy
-    /// from an explicit one whose values equal the defaults — the other fields
-    /// here cannot, since `default_network_policy` defaults to `Block` either
-    /// way. Used by backends (e.g. IsolationSession) that must reject a network
+    /// from an explicit one whose values equal the defaults. Used by backends
+    /// (e.g. IsolationSession) that must reject a network
     /// policy supplied on a phase where the posture is immutable. Parse-derived,
     /// never on the wire.
     #[serde(skip)]
     pub network_specified: bool,
-    /// Whether the caller supplied network posture fields: the legacy mode
-    /// fields (`defaultPolicy`, `enforcementMode`, `allowLocalNetwork`,
-    /// `allowedHosts`, `blockedHosts`) or directional `egress`/`ingress`.
+    /// Whether the caller supplied directional network posture fields:
+    /// `egress` or `ingress`.
     /// Runtime proxy data is excluded. This lets state-aware backends reject a
     /// post-provision posture change by presence while still accepting a
     /// proxy-only exec request. Parse-derived, never on the wire.
     #[serde(skip)]
     pub network_mode_specified: bool,
-    /// Whether `runtimeConfig.networkProxy` was supplied. Distinguishes the
-    /// schema 0.8 runtime field from the legacy `network.proxy` shape after
-    /// both have been normalized into `network_proxy`.
+    /// Whether `runtimeConfig.networkProxy` was supplied, even if the network
+    /// posture itself was omitted.
     #[serde(skip)]
     pub runtime_network_proxy_specified: bool,
     /// Cross-platform UI policy.
@@ -779,33 +729,6 @@ pub struct ContainerPolicy {
     /// `Some`, the runner records the sandboxed process's ungranted access
     /// attempts to a learning-mode ETL trace. `None` disables capture.
     pub capture_denials: Option<CaptureDenialsConfig>,
-}
-
-/// Do the host lists refine the default egress policy (i.e. require per-host
-/// filtering)? Only the list that can tighten the default matters:
-/// `Block` → allowlist; `Allow` → blocklist. Shared by the config parser and
-/// the WSLc backend so both agree on what "host filtering" means.
-pub fn needs_host_filtering(
-    is_default_block: bool,
-    allowed_hosts: &[String],
-    blocked_hosts: &[String],
-) -> bool {
-    if is_default_block {
-        !allowed_hosts.is_empty()
-    } else {
-        !blocked_hosts.is_empty()
-    }
-}
-
-impl ContainerPolicy {
-    /// True when this policy's host lists require per-host egress filtering.
-    pub fn needs_host_filtering(&self) -> bool {
-        needs_host_filtering(
-            self.default_network_policy == NetworkPolicy::Block,
-            &self.allowed_hosts,
-            &self.blocked_hosts,
-        )
-    }
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
@@ -1023,7 +946,6 @@ pub struct ExecutionRequest {
     /// Direct typed SDK construction has no external contract attribution.
     #[serde(serialize_with = "serialize_source_contract")]
     pub source_contract: Option<crate::mxc_contract::ContractVersion>,
-    /// Whether backends supply the default `process.env` block.
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).
@@ -1083,12 +1005,6 @@ pub struct ExecutionRequest {
     pub hyperlight: Option<HyperlightConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
-    /// Whether the --allow-testing-features flag was passed. Gates testing-only,
-    /// deliberately-permissive helpers (currently `network.proxy.builtinTestServer`)
-    /// that must never activate from a stock production config. This is a distinct
-    /// axis from `experimental_enabled`: "experimental" means unstable/new, whereas
-    /// this means "not-for-production testing scaffolding".
-    pub testing_features_enabled: bool,
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,

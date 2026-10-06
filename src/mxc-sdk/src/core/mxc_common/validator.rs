@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_common::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction, ScriptResponse};
 use crate::mxc_common::mxc_error::MxcError;
 
 /// Declares which optional network policy features a backend enforces.
@@ -55,27 +55,6 @@ impl std::ops::BitOr for NetworkPolicySupport {
     }
 }
 
-fn validate_legacy_host_lists(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-    let policy = &request.policy;
-
-    if policy.default_network_policy == NetworkPolicy::Block
-        && policy.allowed_hosts.is_empty()
-        && !policy.blocked_hosts.is_empty()
-    {
-        return Err(ScriptResponse::error(
-            "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
-        ));
-    }
-
-    if policy.default_network_policy == NetworkPolicy::Allow && !policy.allowed_hosts.is_empty() {
-        return Err(ScriptResponse::error(
-            "allowedHosts requires network.defaultPolicy='block'",
-        ));
-    }
-
-    Ok(())
-}
-
 /// Reject network policy features that the selected backend cannot enforce.
 pub fn validate_network_policy_support(
     request: &ExecutionRequest,
@@ -97,19 +76,6 @@ pub fn validate_network_policy_support(
             "network.egress.default is not supported by the selected backend",
         ));
     }
-    if !support.contains(NetworkPolicySupport::EGRESS_DEFAULT)
-        && request
-            .policy
-            .network_egress
-            .as_ref()
-            .is_some_and(|egress| egress.default == NetworkAction::Deny)
-        && request.policy.default_network_policy == NetworkPolicy::Allow
-    {
-        return Err(ScriptResponse::rejected(
-            "network.egress.default='deny' conflicts with the legacy outbound policy",
-        ));
-    }
-
     if !support.contains(NetworkPolicySupport::EGRESS_RULES)
         && request
             .policy
@@ -135,19 +101,6 @@ pub fn validate_network_policy_support(
             "network.ingress.default is not supported by the selected backend",
         ));
     }
-    if !support.contains(NetworkPolicySupport::INGRESS_DEFAULT)
-        && request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.default == NetworkAction::Deny)
-        && request.policy.allow_local_network
-    {
-        return Err(ScriptResponse::rejected(
-            "network.ingress.default='deny' conflicts with the legacy inbound policy",
-        ));
-    }
-
     if !support.contains(NetworkPolicySupport::HOST_LOOPBACK)
         && request
             .policy
@@ -161,21 +114,6 @@ pub fn validate_network_policy_support(
             "network.ingress.hostLoopback is not supported by the selected backend",
         ));
     }
-    if !support.contains(NetworkPolicySupport::HOST_LOOPBACK)
-        && request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Deny)
-        && request.policy.allow_local_network
-    {
-        return Err(ScriptResponse::rejected(
-            "network.ingress.hostLoopback='deny' conflicts with the legacy inbound policy",
-        ));
-    }
-
-    validate_legacy_host_lists(request)?;
-
     if !support.contains(NetworkPolicySupport::PROXY_PEER_IDENTITY)
         && request.policy.allowed_proxy_peer.is_some()
     {
@@ -210,19 +148,6 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
         return Err(ScriptResponse::error("Script content must not be empty."));
     }
 
-    // Enforce the testing-only-features gate centrally so it applies uniformly
-    // to all backends — every backend runs `validate_common` before executing.
-    // Currently this gates `network.proxy.builtinTestServer` (a deliberately-
-    // permissive test proxy); see `ExecutionRequest::testing_features_enabled`
-    // for the rationale behind the dedicated `--allow-testing-features` axis.
-    if request.policy.network_proxy.builtin_test_server && !request.testing_features_enabled {
-        return Err(ScriptResponse::error(
-            "network.proxy.builtinTestServer is a testing-only feature and requires the \
-             --allow-testing-features flag. For production, point network.proxy at a real \
-             HTTP proxy via 'localhost' or 'url'.",
-        ));
-    }
-
     if !request.policy.enumerate_paths.is_empty()
         && request.containment != crate::mxc_common::models::ContainmentBackend::ProcessContainer
     {
@@ -251,8 +176,8 @@ pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> 
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEgressPolicy,
-        NetworkIngressPolicy, NetworkRule, ProxyAddress, ProxyConfig,
+        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
+        ProxyAddress, ProxyConfig,
     };
     use crate::mxc_common::mxc_error::MxcErrorCode;
 
@@ -341,123 +266,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_builtin_test_server_without_testing_features() {
-        let mut req = ExecutionRequest {
-            script_code: "echo hi".to_string(),
-            ..Default::default()
-        };
-        req.policy.network_proxy.builtin_test_server = true;
-        req.testing_features_enabled = false;
-
-        let err = validate_common(&req).unwrap_err();
-        assert!(
-            err.error_message.contains("builtinTestServer")
-                && err.error_message.contains("--allow-testing-features"),
-            "expected testing-gate error, got: {}",
-            err.error_message
-        );
-    }
-
-    #[test]
-    fn accepts_builtin_test_server_with_testing_features() {
-        let mut req = ExecutionRequest {
-            script_code: "echo hi".to_string(),
-            ..Default::default()
-        };
-        req.policy.network_proxy.builtin_test_server = true;
-        req.testing_features_enabled = true;
-
-        assert!(validate_common(&req).is_ok());
-    }
-
-    #[test]
-    fn network_support_accepts_valid_legacy_host_list_combinations() {
-        for (default_network_policy, allowed_hosts, blocked_hosts) in [
-            (NetworkPolicy::Block, vec![], vec![]),
-            (
-                NetworkPolicy::Block,
-                vec!["203.0.113.7".to_string()],
-                vec![],
-            ),
-            (
-                NetworkPolicy::Block,
-                vec!["203.0.113.0/24".to_string()],
-                vec!["203.0.113.7".to_string()],
-            ),
-            (NetworkPolicy::Allow, vec![], vec![]),
-            (
-                NetworkPolicy::Allow,
-                vec![],
-                vec!["203.0.113.7".to_string()],
-            ),
-        ] {
-            let request = ExecutionRequest {
-                policy: ContainerPolicy {
-                    default_network_policy,
-                    allowed_hosts,
-                    blocked_hosts,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            for support in [NetworkPolicySupport::default(), NetworkPolicySupport::ALL] {
-                assert!(
-                    validate_network_policy_support(&request, support).is_ok(),
-                    "valid legacy host-list policy was rejected for support {support:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn network_support_rejects_legacy_lists_that_do_not_refine_the_default() {
-        let cases = [
-            (
-                NetworkPolicy::Block,
-                vec![],
-                vec!["203.0.113.7".to_string()],
-                "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
-            ),
-            (
-                NetworkPolicy::Allow,
-                vec!["203.0.113.7".to_string()],
-                vec![],
-                "allowedHosts requires network.defaultPolicy='block'",
-            ),
-            (
-                NetworkPolicy::Allow,
-                vec!["203.0.113.7".to_string()],
-                vec!["203.0.113.8".to_string()],
-                "allowedHosts requires network.defaultPolicy='block'",
-            ),
-        ];
-
-        for (default_network_policy, allowed_hosts, blocked_hosts, expected) in cases {
-            let request = ExecutionRequest {
-                policy: ContainerPolicy {
-                    default_network_policy,
-                    allowed_hosts,
-                    blocked_hosts,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            for support in [NetworkPolicySupport::default(), NetworkPolicySupport::ALL] {
-                let error = validate_network_policy_support(&request, support).unwrap_err();
-                assert_eq!(error.error_message, expected);
-            }
-        }
-    }
-
-    #[test]
-    fn network_support_reports_directional_error_before_legacy_host_list_error() {
+    fn network_support_reports_egress_error_before_ingress_error() {
         let mut request = ExecutionRequest::default();
         request.policy.network_mode_specified = true;
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
-        request.policy.default_network_policy = NetworkPolicy::Allow;
-        request.policy.allowed_hosts = vec!["203.0.113.7".to_string()];
+        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
 
         let error =
             validate_network_policy_support(&request, NetworkPolicySupport::default()).unwrap_err();
@@ -517,7 +330,6 @@ mod tests {
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         let error = validate_network_policy_support(
             &request,
@@ -557,7 +369,6 @@ mod tests {
         });
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         request.policy.runtime_network_proxy_specified = true;
         request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
@@ -579,33 +390,6 @@ mod tests {
         let error = validate_network_policy_support(&request, NetworkPolicySupport::EGRESS_DEFAULT)
             .unwrap_err();
         assert!(error.error_message.contains("network.ingress.default"));
-    }
-
-    #[test]
-    fn network_support_rejects_inconsistent_dual_model_defaults() {
-        let mut request = ExecutionRequest::default();
-        request.policy.network_egress = Some(NetworkEgressPolicy::default());
-        request.policy.default_network_policy = NetworkPolicy::Allow;
-        let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::default()).unwrap_err();
-        assert!(error.error_message.contains("legacy outbound policy"));
-
-        let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
-        request.policy.allow_local_network = true;
-        let error = validate_network_policy_support(&request, NetworkPolicySupport::HOST_LOOPBACK)
-            .unwrap_err();
-        assert!(error.error_message.contains("network.ingress.default"));
-        assert!(error.error_message.contains("legacy inbound policy"));
-
-        let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
-        request.policy.allow_local_network = true;
-        let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::INGRESS_DEFAULT)
-                .unwrap_err();
-        assert!(error.error_message.contains("network.ingress.hostLoopback"));
-        assert!(error.error_message.contains("legacy inbound policy"));
     }
 
     #[test]
