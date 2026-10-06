@@ -2,83 +2,264 @@
 
 > **Audience:** MXC consumers
 
-MXC is a **sandboxed code execution system** for running untrusted code (model output, plugins, tools) on Windows, Linux, and macOS. It provides multiple containment backends — from OS-native process sandboxes to full VMs — behind a unified JSON configuration schema and TypeScript SDK.
+MXC is a **sandboxed code execution system** for running untrusted code
+(agentic actions, plugins, and tools) on Windows, Linux, and macOS. It provides
+multiple containment backends, from OS-native process sandboxes to full VMs,
+behind a unified containment model and typed SDKs.
 
 ## Features
 
-- **Cross-platform**: Windows, Linux, and macOS support with platform-appropriate containment backends
-- **JSON-based Configuration**: Define execution parameters and security policies via a versioned JSON schema
-- **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
-- **Policy-driven Sandboxing**:
-    - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
-    - **Network Policy**: Proxy support (cooperative on Linux/macOS), allow/block outbound, and backend-dependent host filtering
-    - **UI Policy**: Clipboard, display, and GUI access controls
-- **State-aware Lifecycle**: Multi-step sandbox lifecycle (provision → start → exec → stop → deprovision) for session sandboxes
-- **TypeScript SDK**: [`@microsoft/mxc-sdk`](https://www.npmjs.com/package/@microsoft/mxc-sdk) npm package with one-shot and state-aware APIs
-- **Diagnostics**: Debug logging and Event Tracing for Windows (ETW) for troubleshooting
+- **Cross-platform**: Windows, Linux, and macOS support with
+  platform-appropriate containment backends
+- **JSON-based configuration**: Versioned container-creation requests and
+  security policies
+- **Multiple containment backends**: ProcessContainer, Windows Sandbox, LXC,
+  Bubblewrap, Seatbelt, MicroVM (Nanvix), Hyperlight, IsolationSession, and WSLC
+- **Policy-driven sandboxing**:
+  - **Filesystem policy**: Read-only, read-write, and denied path lists
+  - **Network policy**: Proxy support, outbound controls, and backend-dependent
+    host filtering
+  - **UI policy**: Clipboard, display, and GUI access controls
+- **State-aware lifecycle**: Provision, start, execute, stop, and deprovision
+  persistent containers
+- **Rust, .NET, and Node SDKs**: Versioned APIs for one-shot and state-aware
+  execution
+- **Diagnostics**: Tools to understand access-denied failures in a container
 
-## Building
+## What is MXC?
 
-MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK README](./sdk/node/README.md) for full API documentation.
+MXC is a dependency built into your app.
 
-### Platforms
-
-| Platform | Default backend | Other backends | Minimum build |
-| --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
-| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | — |
-| macOS ARM64 / x64 (schema `0.9.0-alpha`+) | `seatbelt` | — | — |
-
-
-The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`,
-`seatbelt`, `wslc`, and `isolation_session`) do not require experimental mode;
-Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for
-the default backend, or the lxc toolset for the lxc backend. **Experimental
-backends** (`windows_sandbox`, `microvm`, and `hyperlight`) require
-`{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI
-flag.
-
-For which filesystem, network, and UI-restriction policy aspects the Windows `processcontainer` backend can enforce on each Windows 11 release (23H2 / 24H2 / 25H2 / 25H2+), see [Windows OS-version policy support](./docs/backends/process-container/os-version-support.md).
-
-
-### Requirements
-
-- [Rust toolchain](https://rustup.rs/) — version pinned to **1.93** via `src/rust-toolchain.toml` (auto-selected by `rustup`)
-- Node.js **≥ 24** (Windows requires **24.21.0+ within Node.js 24, or 26.8.0+**; **26.8.0+ is recommended**)
-- npm (for SDK and CLI builds)
-
-### Project Structure
-
-```
-src/        Rust workspace (native binaries + shared library crates)
-sdk/        TypeScript SDK (@microsoft/mxc-sdk npm package)
-samples/    Scenario-based Rust, .NET, and Node SDK samples
-schemas/    JSON configuration schemas (stable + dev)
-docs/       Documentation (schema reference, backend guides, design docs)
-tests/      Test collateral (configs, examples, scripts)
-scripts/    Build and utility scripts
+```mermaid
+flowchart LR
+    App["Your application<br/>Launch API"] --> SDK["MXC SDK<br/>Rust / .NET / Node<br/>(in process)"]
+    SDK --> Engine["MXC engine<br/>(in process)"]
+    Engine --> Backend["Selected backend<br/>(in process)"]
+    Backend --> Container["Isolated workload<br/>ProcessContainer / WSLC / Bubblewrap / ..."]
 ```
 
-See [Repository architecture](docs/development/architecture/repository-architecture.md) for the Rust workspace
-layout, crate responsibilities, dependency direction, and execution surfaces.
+Your application specifies:
 
-### Full Build
+- The container type
+- The containment rules
+- The workload command
+
+MXC validates the request, selects the backend, and launches the workload in
+the resulting container.
+
+### What container types are supported?
+
+MXC runs workloads through platform-appropriate container backends on Windows,
+Linux, and macOS.
+
+| Runtime platform | Default backend | Other backends | Minimum host OS |
+|---|---|---|---|
+| Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
+| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | - |
+| macOS ARM64 / x64 | `seatbelt` | - | - |
+
+**Experimental backends**: `windows_sandbox`, `microvm`, and `hyperlight`.
+
+**Note:** `windows_sandbox` integrates the existing Windows Sandbox product,
+which is a full VM.
+
+See [Windows OS-version policy support](docs/backends/process-container/os-version-support.md)
+for exact filesystem, network, and UI policy support in `processcontainer`.
+
+### The Windows ProcessContainer (24H2+)
+
+ProcessContainer is MXC's default Windows containment backend. It uses
+Windows' strongest OS-native process-containment primitives to enforce
+filesystem, network, and UI policy without the startup and memory cost of a
+VM. This makes it well suited to frequent, short-lived agentic and sandboxed
+workloads. MXC provides the typed, versioned policy model and runtime selection
+needed to use these primitives consistently across supported Windows releases.
+
+## How do I use MXC?
+
+Install an SDK through your package manager. You do not need to clone this
+repository.
+
+| SDK | Install | Public V1 API |
+|---|---|---|
+| Rust | `cargo add mxc-sdk` | `mxc_sdk::v1` |
+| .NET | `dotnet add package Microsoft.Mxc.Sdk` | `Microsoft.Mxc.Sdk.V1` |
+| Node | `npm install @microsoft/mxc-sdk` | `@microsoft/mxc-sdk/v1` |
+
+The Node and .NET packages include the native runtime assets. The Rust crate
+builds the MXC SDK, engine, and selected backends into the consuming
+application.
+
+**Non-SDK consumption:** Platform-specific executor binaries, such as
+`wxc-exec.exe`, accept JSON container-creation requests defined by the
+[stable schema](schemas/stable/). Use an executor for testing or when a typed
+SDK cannot be embedded in the application.
+
+### SDK & runtime requirements
+
+- A supported runtime platform and the prerequisites for the selected backend
+- Rust when consuming `mxc-sdk`, .NET 8 or later for `Microsoft.Mxc.Sdk`, or
+  Node.js 24 or later for `@microsoft/mxc-sdk`
+- On Windows, Node.js 24.21.0 or later within the Node.js 24 release line, or
+  Node.js 26.8.0 or later, for native standard-I/O transfer
+
+## Running a contained workload
+
+For complete SDK samples, see the
+[Rust, .NET, and Node samples](samples/README.md).
+
+### Node SDK
+
+```bash
+npm install @microsoft/mxc-sdk
+```
+
+```typescript
+import { spawn, type ContainerRequest } from '@microsoft/mxc-sdk/v1';
+
+const request: ContainerRequest = {
+  command: 'node -e "console.log(\'hello from container\')"',
+  network: { egress: { default: 'deny' } },
+  timeoutMs: 30_000,
+};
+
+const child = await spawn(request);
+try {
+  child.standardOutput?.on('data', (data) => process.stdout.write(data));
+  child.standardError?.on('data', (data) => process.stderr.write(data));
+  const outcome = await child.wait();
+  console.log('exit:', outcome.exitCode);
+} finally {
+  child.dispose();
+}
+```
+
+See the runnable
+[streaming standard-I/O sample](samples/run-with-io-stdio-streaming/) and the
+[SDK API reference](docs/api-reference/README.md).
+
+### Check containment support (probe)
+
+On Windows, `wxc-exec --probe [config.json]`, Node `probe(request?)`, .NET
+`MxcContainer.Probe(request?)`, and Rust `mxc_sdk::v1::probe(request)` report
+which ProcessContainer tier can enforce a specific request. The probe does not
+create a container. See the
+[support-check samples](samples/dryrun-check-containment-support/).
+
+### Executor binary
+
+Executors accept a JSON container request. See the
+[schema documentation](docs/schema.md) for the complete format.
+
+```bash
+# File path
+wxc-exec.exe config.json
+
+# Base64-encoded request
+wxc-exec.exe --config-base64 <base64-encoded-json>
+```
+
+Arguments after the required `--` separator are the workload command line:
+
+- Windows: `wxc-exec.exe config.json -- powershell.exe -NoProfile -Command "Write-Output 'hello world'"`
+- Linux: `./lxc-exec config.json -- sh -c "printf 'hello world\n'"`
+- macOS: `./mxc-exec-mac config.json -- sh -c "printf 'hello world\n'"`
+
+**Note:** Executor use requires a prebuilt release artifact or a
+[source build](#building-from-source). An SDK package is the preferred path for
+applications.
+
+## Schema
+
+There is a JSON schema underneath the SDK for the containment-workload
+configuration.
+
+The JSON schema defines a complete container-creation request: the workload to
+run, the containment backend, and the filesystem, network, UI, and lifecycle
+policy MXC must enforce.
+
+Released, immutable stable schemas live in [`schemas/stable/`](schemas/stable).
+The in-progress development schema lives in [`schemas/dev/`](schemas/dev). The
+current versions are tracked in
+[`schemas/schema-version.json`](schemas/schema-version.json).
+
+Use the latest stable schema for new JSON requests. SDK consumers do not
+select a schema version; each versioned SDK API owns its matching contract.
+
+## My application won't run in the sandbox!
+
+Your application will hit access issues when running in a sandbox, until you've
+had time to tune your containment rules. We're here to help.
+
+### Debug console mode
+
+Native executors normally reserve standard input, output, and error for the
+workload. Use `--debug` for MXC diagnostic output:
+
+```bash
+wxc-exec.exe --debug config.json
+```
+
+See [MXC diagnostics](docs/development/guides/diagnostics.md) for the complete
+developer reference.
+
+### Audit mode
+
+> **Warning:** `--audit` turns off all sandbox security for the workload being
+> analyzed. Never use it to run untrusted code.
+
+Audit mode helps a policy author find access-denied failures and reconstruct a
+ProcessContainer policy that grants the files and capabilities a trusted tool
+actually needs. On supported Windows releases, run:
+
+```bash
+wxc-exec.exe --audit policy.json
+```
+
+MXC records the observed accesses and produces policy-authoring artifacts. See
+[logging access denied](docs/logging-access-denied.md) for safe
+deny-and-record diagnostics, audit outputs, and supported workflows.
+
+## Telemetry
+
+Official Microsoft builds can send optional diagnostic telemetry to Microsoft.
+Telemetry is off unless the individual run opts in, the Windows user has
+explicitly consented, administrative policy permits collection, and your
+application enables the telemetry option in a contained workload request. An
+administrator can block telemetry but cannot grant consent for the user.
+
+Local open-source builds are not configured to route telemetry to Microsoft,
+and telemetry is a no-op on non-Windows platforms. See
+[telemetry policy and consent](docs/telemetry.md) for controls and privacy
+details.
+
+## Building from source
+
+Build from source when developing MXC, changing the native runtime, or using
+the standalone executor binaries instead of a packaged SDK. Repository builds
+produce the platform-native runtime and executors and stage the native assets
+used by the Node SDK.
+
+Build prerequisites are:
+
+- [Rust](https://rustup.rs/), pinned to version **1.93** by
+  `src/rust-toolchain.toml`
+- Node.js 24 or later and npm
+- The platform toolchain and prerequisites described by the selected backend
+
+### Full build
 
 #### Windows
 
 ```bash
 build.bat                  # Release build for current architecture
-build.bat --debug          # Debug build
 build.bat --all            # Release build for both x64 and ARM64
-build.bat --with-microvm   # Include NanVix micro-VM binaries
 ```
 
 #### Linux
 
 ```bash
 ./build.sh                 # Release build
-./build.sh --debug         # Debug build
-./build.sh --rust-only     # Only Rust binaries, skip SDK/CLI
 ```
 
 #### macOS
@@ -86,264 +267,43 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 ```bash
 ./build-mac.sh             # Release build for native architecture
 ./build-mac.sh --all       # Both Apple Silicon and Intel
-./build-mac.sh --debug     # Debug build
-./build-mac.sh --rust-only # Only Rust binary, skip SDK
 ```
 
-All build scripts:
-1. Build the platform-appropriate Rust binary
-2. Copy the binary into `sdk/node/bin/<arch>/` (for example, `x64` or `arm64`) for SDK bundling
+Component builds, formatting, linting, and tests are documented in the
+[local development guide](docs/development/build-and-test/local-development.md).
 
-3. Build the TypeScript SDK
+### Project structure
 
-### Building Components Individually
-
-```bash
-# Rust workspace (from src/)
-cargo build --release --target x86_64-pc-windows-msvc     # Windows x64
-cargo build --release --target aarch64-pc-windows-msvc    # Windows ARM64
-cargo build --release -p lxc                               # Linux — lxc-exec (serves both LXC and Bubblewrap)
-cargo build --release -p mxc_darwin --target aarch64-apple-darwin  # macOS
-
-# SDK (from sdk/node/)
-npm install && npm run build
+```text
+src/        Rust workspace, native executors, and Rust SDK
+sdk/        Node and .NET SDKs
+samples/    Runnable Rust, .NET, and Node scenarios
+schemas/    Stable and development JSON request schemas
+docs/       Consumer and developer documentation
+tests/      Test collateral, configurations, and host-dependent suites
+scripts/    Build, validation, packaging, and utility scripts
 ```
 
-### Lint and Format
-
-```bash
-# Windows Rust (from src/)
-
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Linux Rust (from src/; matches build.sh's platform-compatible crate set)
-
-cargo clippy -p lxc -p mxc-sdk -p unix_test_proxy --all-targets -- -D warnings
-
-# macOS Rust (from src/)
-
-cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings
-```
-
-### Tests
-
-```bash
-# Rust unit tests (from src/)
-cargo test --workspace
-cargo test -p mxc-sdk --lib                   # Consolidated library unit tests
-cargo test -p mxc-sdk --lib -- config_parser  # Filter by test name
-
-# SDK (from sdk/node/)
-npm test                     # Unit tests
-npm run test:integration     # Integration tests
-
-# E2E (from src/)
-cargo test -p wxc_e2e_tests
-```
-
-Host-dependent backend suites and their prerequisites are documented in
-[`tests/scripts/README.md`](tests/scripts/README.md).
-
-## Usage
-
-MXC uses a JSON configuration to define execution parameters. See the [schema documentation](docs/schema.md) for full reference.
-
-For typed SDK examples, see the [Rust, .NET, and Node samples](samples/README.md).
-
-### Native Binary
-
-On Windows, `wxc-exec.exe --version` (or `-V`) prints the executor version and
-exits successfully without requiring a configuration file or starting a sandbox.
-
-```bash
-# File path
-wxc-exec.exe config.json
-
-# Base64-encoded config
-wxc-exec.exe --config-base64 <base64-encoded-json>
-
-# Debug output
-wxc-exec.exe --debug config.json
-
-# Supply or replace process.commandLine from trailing arguments
-wxc-exec.exe config.json -- python --version
-```
-
-For `wxc-exec.exe`, arguments after the required `--` separator are rendered
-for the selected backend and spliced into `process.commandLine` before the
-request is parsed. They may supply a missing command or replace the policy's
-command. This form is supported for one-shot requests and state-aware `exec`;
-other state-aware phases reject it. A policy that relies on trailing arguments
-is a CLI template rather than a complete request that can be executed
-independently.
-
-On Linux: `./lxc-exec config.json`
-On macOS: `./mxc-exec-mac --experimental config.json`
-
-### TypeScript SDK
-
-```bash
-npm install @microsoft/mxc-sdk
-```
-
-```typescript
-import {
-  getPlatformSupport, spawn, getAvailableToolsPolicy, getTemporaryFilesPolicy,
-} from '@microsoft/mxc-sdk/v1';
-import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
-
-if (!getPlatformSupport().isSupported) {
-  throw new Error('MXC not available on this host');
-}
-
-const tools = getAvailableToolsPolicy(process.env);
-const temp  = getTemporaryFilesPolicy();
-
-const request: ContainerRequest = {
-  command: 'python -c "print(\'hello from container\')"',
-  filesystem: {
-    readonlyPaths:  tools.readonlyPaths,
-    readwritePaths: temp.readwritePaths,
-  },
-  network: {
-    egress:  { default: 'deny' },
-    ingress: { default: 'deny', hostLoopback: 'deny' },
-  },
-  timeoutMs: 30_000,
-};
-
-const child = spawn(request);
-child.standardOutput?.on('data', (data) => process.stdout.write(data));
-try {
-  const outcome = await child.waitAsync();
-  console.log('exit:', outcome.exitCode);
-} finally {
-  child.dispose();
-}
-```
-
-The SDK also provides a **lifecycle** API for persistent containers:
-
-```typescript
-import {
-  provisionContainer, startContainer, runInContainerAsync,
-  stopContainer, deprovisionContainer,
-} from '@microsoft/mxc-sdk/v1';
-```
-
-See the [SDK README](sdk/node/README.md) for full API documentation.
-
-## Schema Versions
-
-Released, immutable stable schemas live in [`schemas/stable/`](schemas/stable); the in-progress dev schema (experimental backends, state-aware lifecycle) lives in [`schemas/dev/`](schemas/dev). The current stable and dev versions are tracked canonically in [`schemas/schema-version.json`](schemas/schema-version.json).
-
-Pick the latest stable schema for new code on any supported platform. See [versioning design](docs/development/architecture/versioning.md) for the full versioning design.
-
-## Debugging
-
-### Debug Console Mode
-
-By default, native binaries run in **silent mode** — stdin/stdout/stderr is coupled directly to the container. Use `--debug` for verbose output:
-
-```bash
-wxc-exec.exe --debug config.json
-```
-
-See [diagnostics](docs/development/guides/diagnostics.md) for the full developer reference.
-
-### Request-aware ProcessContainer probe
-
-On Windows, `wxc-exec --probe [config.json]`, Node.js
-`probeSandboxSupport(config?)`, and .NET `MxcSandbox.Probe(request?)` use the
-shared engine probe to report the ProcessContainer tier and host facts for a
-specific request. The SDK calls use the structured `mxc_ffi` C ABI in process;
-they do not create a sandbox, and preserve native, parse, and unsupported
-containment errors.
-
-### Audit Mode (Permissive Learning Mode)
-
-`--audit` is a compatibility wrapper over `processContainer.captureDenials` in allow mode with ETL retention forced on. It injects `permissiveLearningMode`, so denied operations are recorded but allowed to proceed. On hosts with the complete PSEC/V2 Learning Mode API set, the selected ProcessContainer runner uses native capture without launching PLM or prompting for elevation. Older or policy-incompatible tiers use the guarded-WPR fallback: `wxc-exec.exe` remains unelevated and starts a session-scoped UAC-elevated PLM guardian only for the privileged WPR lifecycle, communicating over an authenticated local named pipe. It is rejected for Windows Sandbox, WSLC, IsolationSession, and every other containment backend.
-
-```bash
-wxc-exec.exe --audit policy.json
-```
-
-Successful non-dry-run audits require capture metadata, actionable denials JSON, its verbose diagnostic sibling, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json`, `denials.verbose.json`, and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the actionable JSON without decoding the ETL again. Base64-only input keeps both JSON files and the ETL but has no source config to snapshot or adjust. Truncated analysis keeps both JSON files, the ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
-
-> **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [logging access denied](docs/logging-access-denied.md) for the three learning-mode flows.
-
-## Telemetry
-
-MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution`, `MXC.Error`, and the sanitized Learning Mode artifact event `MXC.VerboseDenials`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
-
-Telemetry requires:
-1. Top-level `"telemetry": { "enabled": true }` in the JSON config
-2. Explicit per-user telemetry consent on Windows
-3. An administrative policy that permits collection, when a policy is configured
-
-The configuration flag is an additional per-run opt-in; it cannot grant consent
-or bypass an administrative block. Telemetry remains off unless every applicable
-gate is open. MXC does not use the Windows Diagnostics & feedback setting as a
-substitute for application consent.
-
-On non-Windows platforms, all telemetry functions are no-ops.
-
-### Data Collection
-
-The software may collect information about you and your use of the software and send it to Microsoft. Microsoft may use this information to provide services and improve our products and services. You may turn off the telemetry as described in the repository. There are also some features in the software that may enable you and Microsoft to collect data from users of your applications. If you use these features, you must comply with applicable law, including providing appropriate notices to users of your applications together with a copy of Microsoft's privacy statement. Our privacy statement is located at https://go.microsoft.com/fwlink/?LinkID=824704. You can learn more about data collection and use in the help documentation and our privacy statement. Your use of the software operates as your consent to these practices.
-
-#### How to turn telemetry off
-
-Telemetry is **off by default**. To keep it off, do not set
-`"telemetry": { "enabled": true }` for the run.
-
-If telemetry is enabled in config, collection still does not occur unless
-Windows user consent is granted and administrative policy allows collection.
-
-#### What official builds send
-
-Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route `MXC.Execution`, `MXC.Error`, and `MXC.VerboseDenials` events to Microsoft through the UTC pipeline when telemetry is enabled — that same build-time setting also selects the correct Measures keyword and Product-and-Service-Usage privacy tag for the events, so telemetry routing and event classification always agree. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only, use a provider-local keyword with no UTC meaning, and carry no privacy classification tag, and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
-
-No PII is collected. Execution/error events contain only execution metrics
-(duration, backend type, exit code) and a bounded error category
-(`error_type`). When a ProcessContainer run successfully produces a Learning
-Mode verbose artifact, `MXC.VerboseDenials` can include sanitized
-provider/event identifiers, process IDs, closed outcome reasons,
-access/resource classifications, occurrence counts, and truncation state. The
-telemetry projection derives provider GUIDs from a closed provider enum and
-drops all verbose property names and values. MXC never emits commands,
-credentials, complete file paths, usernames, workload-derived properties, sandbox output,
-raw ETL, actionable denial documents, general logger text, or free-form error
-text. The verbose-event data inventory requires explicit privacy/release review
-before shipment. If you use the SDK to build applications, you are responsible
-for providing appropriate telemetry notices to your own users.
-
-Privacy information can be found at https://privacy.microsoft.com and in the Microsoft privacy statement at https://go.microsoft.com/fwlink/?LinkID=824704.
+See [repository architecture](docs/development/architecture/repository-architecture.md)
+for crate responsibilities, dependency direction, and execution surfaces.
 
 ## Documentation
 
-Repository contributors can browse the [development documentation](docs/development/README.md).
+### Consumer documentation
 
-| Document | Description |
-|----------|-------------|
-| [Repository architecture](docs/development/architecture/repository-architecture.md) | Repository layout, crate boundaries, and execution surfaces |
-| [docs/schema.md](docs/schema.md) | Full JSON configuration schema reference |
-| [Versioning design](docs/development/architecture/versioning.md) | Schema versioning and experimental feature lifecycle |
-| [docs/examples.md](docs/examples.md) | Annotated configuration examples |
-| [CI validation infrastructure](docs/development/build-and-test/ci-validation-infrastructure.md) | Scheduled backend validation matrix and CI dispatch |
-| [tests/scripts/README.md](tests/scripts/README.md) | Local and CI backend test suites |
-| [Host preparation](docs/backends/process-container/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
-| [Diagnostics](docs/development/guides/diagnostics.md) | Diagnostic logging and ETW |
-| [Adding ProcessContainer OS features](docs/development/guides/process-container-adding-os-features.md) | Windows AppContainer / BaseContainer developer guide |
-| [docs/backends/lxc/lxc-backend.md](docs/backends/lxc/lxc-backend.md) | LXC backend (Linux) |
-| [docs/backends/bwrap/bubblewrap-backend.md](docs/backends/bwrap/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
-| [docs/backends/seatbelt/seatbelt-backend.md](docs/backends/seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |
-| [docs/backends/windows-sandbox/windows-sandbox.md](docs/backends/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
-| [docs/backends/hyperlight/hyperlight-backend.md](docs/backends/hyperlight/hyperlight-backend.md) | Hyperlight backend (Linux, Windows) |
-| [Container lifecycle](docs/container-lifecycle.md) | Public container lifecycle API |
-| [Telemetry architecture](docs/development/architecture/telemetry.md) | TraceLogging telemetry architecture |
-| [Telemetry consent design](docs/development/architecture/telemetry-consent-design.md) | Telemetry consent contract |
-| [docs/telemetry.md](docs/telemetry.md) | Administrative telemetry controls |
+| Document | Repository location | Purpose |
+|---|---|---|
+| SDK samples | [`samples/`](samples/README.md) | Runnable Rust, .NET, and Node scenarios |
+| SDK API reference | [`docs/api-reference/`](docs/api-reference/README.md) | Supported V1 operations and types |
+| JSON schema | [`docs/schema.md`](docs/schema.md) | Container request and containment policy reference |
+| Configuration examples | [`docs/examples.md`](docs/examples.md) | Annotated JSON requests |
+| Container lifecycle | [`docs/container-lifecycle.md`](docs/container-lifecycle.md) | Persistent container lifecycle overview |
+| Logging access denied | [`docs/logging-access-denied.md`](docs/logging-access-denied.md) | Diagnose blocked accesses and author policy |
+| Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Consent and administrative controls |
+| Backend guides | [`docs/backends/`](docs/backends/) | Platform and backend prerequisites and behavior |
+
+Repository contributors should start with the
+[MXC development documentation](docs/development/README.md).
 
 ## Contributing
 
