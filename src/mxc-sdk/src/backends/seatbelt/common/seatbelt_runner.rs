@@ -264,7 +264,7 @@ impl SandboxBackend for SeatbeltScriptRunner {
     fn network_policy_support(&self) -> NetworkPolicySupport {
         // Seatbelt enforces a single outbound default (no CIDR/port/protocol
         // rules — `EGRESS_RULES` is intentionally omitted), a single inbound
-        // default mapped to the existing `allowLocalNetwork` behavior, and the
+        // default mapped to a local-IP inbound rule, and the
         // loopback-scoped runtime proxy. It has no per-peer proxy identity
         // concept (`PROXY_PEER_IDENTITY` is a ProcessContainer-only feature).
         NetworkPolicySupport::EGRESS_DEFAULT
@@ -297,8 +297,7 @@ impl SandboxBackend for SeatbeltScriptRunner {
 
         // Start the cooperative network proxy (if configured) before building
         // the profile and launching the child: the profile's proxy-reachability
-        // rule is scoped to the proxy's *resolved* address (builtinTestServer
-        // binds a runtime port), and the child needs that address injected as
+        // rule is scoped to the proxy's *resolved* address, and the child needs that address injected as
         // HTTP_PROXY / HTTPS_PROXY. macOS has no WinHTTP-style OS proxy policy,
         // so — like the Bubblewrap backend — enforcement is cooperative:
         // well-behaved HTTP clients honor the env vars; raw-socket clients
@@ -309,9 +308,9 @@ impl SandboxBackend for SeatbeltScriptRunner {
                 .start(
                     &request.policy.network_proxy,
                     "127.0.0.1",
-                    &request.policy.allowed_hosts,
-                    &request.policy.blocked_hosts,
-                    request.policy.default_network_policy.clone(),
+                    &[],
+                    &[],
+                    crate::mxc_common::models::NetworkPolicy::Block,
                     logger,
                 )
                 .map_err(|err| {
@@ -1231,8 +1230,7 @@ fn build_helper_script(
 
 /// Populate `command`'s environment from a cleared baseline: never inherit the
 /// host environment (matching the bubblewrap `--clearenv` and AppContainer
-/// clean-block behaviour). Below schema 0.9 a default `PATH` is set first and
-/// the request vars may override it; from 0.9 [`resolved_env`] owns the whole
+/// clean-block behaviour). [`resolved_env`] supplies the complete child
 /// environment. When a proxy is active its `HTTP_PROXY` / `HTTPS_PROXY` /
 /// `ALL_PROXY` vars are injected and caller-supplied proxy vars stripped (see
 /// [`resolve_environment`]). `PWD` is set separately alongside the cwd.
@@ -1338,8 +1336,7 @@ fn cleanup_files(paths: &[&str]) {
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkPolicy, ProxyAddress,
-        SeatbeltConfig,
+        ExecutionRequest, NetworkAction, NetworkEgressPolicy, ProxyAddress, SeatbeltConfig,
     };
 
     #[allow(clippy::field_reassign_with_default)]
@@ -1477,55 +1474,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_shared_valid_blocked_hosts() {
+    fn rejects_retired_blocked_hosts_bypassing_the_parser() {
         let mut request = base_request();
-        request.policy.default_network_policy = NetworkPolicy::Allow;
         request.policy.blocked_hosts = vec!["evil.example.com".into()];
         let runner = SeatbeltScriptRunner::new();
         let response = runner.validate(&request).unwrap_err();
         assert_eq!(response.exit_code, -1);
-        assert_eq!(
-            response.error_message,
-            "macOS Seatbelt does not support per-host network filtering. \
-             'blockedHosts' cannot be enforced; remove it. To deny all \
-             network, use defaultPolicy: \"block\" without host lists."
-        );
+        assert!(response.error_message.contains("retired network fields"));
     }
 
-    /// The parser is not a door at all for these rules: `validate` is the only
-    /// place they live, and `mxc_engine` will happily take an `ExecutionRequest`
-    /// built by hand. These assert `validate` rejects them without any help from
-    /// the parser, in both the legacy and directional shape.
+    /// Directly constructed requests must receive the same rejection as parsed
+    /// requests, before the profile or any proxy is created.
     #[test]
     fn rejects_proxy_with_egress_allow_bypassing_the_parser() {
         let runner = SeatbeltScriptRunner::new();
-
-        let mut legacy = base_request();
-        legacy.policy.default_network_policy = NetworkPolicy::Allow;
-        legacy.policy.network_proxy.address = Some(ProxyAddress::from_url(
-            "http://127.0.0.1:8080",
-            "127.0.0.1".into(),
-            8080,
-        ));
-        let err = runner.validate(&legacy).unwrap_err();
-        assert!(
-            err.error_message.contains("no enforcement effect"),
-            "{err:?}"
-        );
-
-        let mut directional = base_request();
-        directional.policy.network_egress = Some(NetworkEgressPolicy {
+        let mut request = base_request();
+        request.policy.network_egress = Some(NetworkEgressPolicy {
             default: NetworkAction::Allow,
             ..Default::default()
         });
-        directional.policy.network_proxy.address = Some(ProxyAddress::from_url(
+        request.policy.network_proxy.address = Some(ProxyAddress::from_url(
             "http://127.0.0.1:8080",
             "127.0.0.1".into(),
             8080,
         ));
-        let err = runner.validate(&directional).unwrap_err();
+        let err = runner.validate(&request).unwrap_err();
         assert!(
-            err.error_message.contains("no enforcement effect"),
+            err.error_message
+                .contains("requires network.egress.default='deny'"),
             "{err:?}"
         );
     }
@@ -1533,27 +1509,27 @@ mod tests {
     #[test]
     fn rejects_allowed_hosts_under_deny_bypassing_the_parser() {
         let mut request = base_request();
-        request.policy.default_network_policy = NetworkPolicy::Block;
         request.policy.allowed_hosts = vec!["example.com".into()];
         let runner = SeatbeltScriptRunner::new();
         let err = runner.validate(&request).unwrap_err();
-        assert!(err.error_message.contains("allowedHosts"), "{err:?}");
+        assert!(
+            err.error_message.contains("retired network fields"),
+            "{err:?}"
+        );
     }
 
     #[test]
-    fn accepts_allowed_hosts_under_deny_with_builtin_test_server() {
+    fn rejects_retired_builtin_test_proxy() {
         let mut request = base_request();
-        request.policy.default_network_policy = NetworkPolicy::Block;
-        request.policy.allowed_hosts = vec!["example.com".into()];
         request.policy.network_proxy.builtin_test_server = true;
         let runner = SeatbeltScriptRunner::new();
-        assert!(runner.validate(&request).is_ok());
+        let err = runner.validate(&request).unwrap_err();
+        assert!(err.error_message.contains("builtinTestServer"), "{err:?}");
     }
 
     #[test]
     fn rejects_remote_proxy_under_deny_bypassing_the_parser() {
         let mut request = base_request();
-        request.policy.default_network_policy = NetworkPolicy::Block;
         request.policy.network_proxy.address = Some(ProxyAddress::from_url(
             "http://proxy.corp:3128",
             "proxy.corp".into(),
@@ -1572,7 +1548,6 @@ mod tests {
         let runner = SeatbeltScriptRunner::new();
         for host in ["127.0.0.1", "localhost", "[::1]", "::1"] {
             let mut request = base_request();
-            request.policy.default_network_policy = NetworkPolicy::Block;
             request.policy.network_proxy.address = Some(ProxyAddress::from_url(
                 "http://proxy:8080",
                 host.into(),
@@ -1633,11 +1608,9 @@ mod tests {
     }
 
     /// The two divergent-pair decisions must survive the exact-contract parse,
-    /// not just a hand-built `ContainerPolicy`. The v0.9 cutover rebuilt the
-    /// network adapter, and an adapter that dropped `ingress` (or folded it
-    /// into the legacy `allowLocalNetwork` flag) would leave every other test
-    /// in this module green while the backend silently stopped seeing the
-    /// posture the caller asked for.
+    /// not just a hand-built `ContainerPolicy`. An adapter that dropped
+    /// `ingress` would leave other backend tests green while silently losing
+    /// the posture the caller asked for.
     fn validate_parsed(json: &str) -> Result<(), String> {
         use crate::mxc_common::config_parser::load_mxc_request_from_json;
         use crate::mxc_common::logger::Mode;

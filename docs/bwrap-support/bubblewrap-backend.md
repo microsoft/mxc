@@ -15,6 +15,11 @@ requiring root privileges or a container runtime.
 > old config does not migrate its policy. Legacy `defaultPolicy`,
 > `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy`
 > are not accepted. See [schema migration](../schema.md).
+> Directly constructed runtime requests with non-default retired fields are
+> also rejected before sandbox provisioning. Bubblewrap also rejects
+> directional requests it cannot enforce, such as `ingress.default: "allow"`
+> or direct egress rules combined with a runtime proxy. An omitted `network`
+> section takes the directional deny defaults.
 
 ## Prerequisites
 
@@ -219,11 +224,6 @@ dash (Debian, Ubuntu) fabricates a `PATH` that happens to equal the default
 block's value, while bash (RHEL) fabricates a shorter `/usr/local/bin:/usr/bin`
 plus `TERM=dumb`. So neither reads back as empty from inside the workload,
 whatever MXC passed.
-
-> **Historical (retired pre-v0.9 contracts):** the child received only
-> `process.env`, with no default `PATH`. Those contracts are no longer
-> registered: a request declaring one fails as an unsupported version before
-> `inheritDefaultEnv` or any other process field is evaluated.
 
 ### Filesystem Policy
 

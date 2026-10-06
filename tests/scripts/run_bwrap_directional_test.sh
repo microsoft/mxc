@@ -369,8 +369,9 @@ echo "PASS: directional port narrowing"
 # 3. Proxy-only policy with implicit and explicit ingress denial
 # ---------------------------------------------------------------------------
 # Both fixtures use the supported runtime proxy, but one omits ingress and the
-# other explicitly denies it. Both must enforce proxy-only egress. The first
-# fixture retains its historical filename; it no longer uses legacy fields.
+# other explicitly denies it. Both must enforce proxy-only egress. The
+# repository-owned Bash probe sends an absolute-form HTTP request through the
+# injected proxy endpoint, so this check does not depend on a guest curl binary.
 #
 # The test proxy already running on 127.0.0.1:$LISTENER_PORT doubles as the
 # proxy here; the parser requires a loopback endpoint, and the backend
@@ -391,6 +392,8 @@ run_parity() {
     printf '%s\n' "$out" >"$WORK_DIR/$label.parity.out"
     if [ "$rc" -ne 0 ]; then
         printf '%s\n' "$out" >&2
+        echo "External test proxy log:" >&2
+        cat "$WORK_DIR/listener.log" >&2
         echo "FAIL: proxy-only ingress parity ($label returned $rc)" >&2
         return 1
     fi
@@ -398,7 +401,7 @@ run_parity() {
 }
 
 echo "Running Bubblewrap directional test: proxy-only ingress parity..."
-run_parity "implicit-ingress" "bubblewrap_network_proxy_parity_legacy.json" || exit 1
+run_parity "implicit-ingress" "bubblewrap_network_proxy_parity_implicit_ingress.json" || exit 1
 run_parity "explicit-ingress" "bubblewrap_network_directional_proxy.json" || exit 1
 IMPLICIT_MARKS="$(cat "$WORK_DIR/implicit-ingress.marks")"
 EXPLICIT_MARKS="$(cat "$WORK_DIR/explicit-ingress.marks")"
