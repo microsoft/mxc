@@ -222,7 +222,7 @@ PROBE
 
     local rc=0
     local out
-    out="$("$LXC_EXEC" --experimental --allow-testing-features "$config" 2>&1)" || rc=$?
+    out="$("$LXC_EXEC" --experimental "$config" 2>&1)" || rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "$out"
         echo "FAIL: reachability probe exited $rc; the enforcement path itself is broken."
@@ -270,7 +270,7 @@ run_enforced() {
     sed -e "s/{{LISTENER_PORT}}/$LISTENER_PORT/g" \
         "$REPO_DIR/tests/configs/$config" >"$WORK_DIR/$config"
     local out
-    if ! out=$("$LXC_EXEC" --experimental --allow-testing-features "$WORK_DIR/$config" 2>&1); then
+    if ! out=$("$LXC_EXEC" --experimental "$WORK_DIR/$config" 2>&1); then
         echo "$out"
         echo "FAIL: $label (lxc-exec returned non-zero)"
         exit 1
@@ -351,7 +351,7 @@ cat >"$PORT_CONFIG" <<PORTS
 PORTS
 echo "Running Bubblewrap directional test: directional port narrowing..."
 PORT_OUT=""
-if ! PORT_OUT=$("$LXC_EXEC" --experimental --allow-testing-features "$PORT_CONFIG" 2>&1); then
+if ! PORT_OUT=$("$LXC_EXEC" --experimental "$PORT_CONFIG" 2>&1); then
     echo "$PORT_OUT"
     echo "FAIL: directional port narrowing (lxc-exec returned non-zero)"
     exit 1
@@ -369,8 +369,9 @@ echo "PASS: directional port narrowing"
 # 3. Proxy-only policy with implicit and explicit ingress denial
 # ---------------------------------------------------------------------------
 # Both fixtures use the supported runtime proxy, but one omits ingress and the
-# other explicitly denies it. Both must enforce proxy-only egress. The first
-# fixture retains its historical filename; it no longer uses legacy fields.
+# other explicitly denies it. Both must enforce proxy-only egress. The
+# repository-owned Bash probe sends an absolute-form HTTP request through the
+# injected proxy endpoint, so this check does not depend on a guest curl binary.
 #
 # The test proxy already running on 127.0.0.1:$LISTENER_PORT doubles as the
 # proxy here; the parser requires a loopback endpoint, and the backend
@@ -387,10 +388,12 @@ run_parity() {
         "$REPO_DIR/tests/configs/$config" >"$WORK_DIR/$config"
     local out
     local rc=0
-    out=$("$LXC_EXEC" --experimental --allow-testing-features "$WORK_DIR/$config" 2>&1) || rc=$?
+    out=$("$LXC_EXEC" --experimental "$WORK_DIR/$config" 2>&1) || rc=$?
     printf '%s\n' "$out" >"$WORK_DIR/$label.parity.out"
     if [ "$rc" -ne 0 ]; then
         printf '%s\n' "$out" >&2
+        echo "External test proxy log:" >&2
+        cat "$WORK_DIR/listener.log" >&2
         echo "FAIL: proxy-only ingress parity ($label returned $rc)" >&2
         return 1
     fi
@@ -398,7 +401,7 @@ run_parity() {
 }
 
 echo "Running Bubblewrap directional test: proxy-only ingress parity..."
-run_parity "implicit-ingress" "bubblewrap_network_proxy_parity_legacy.json" || exit 1
+run_parity "implicit-ingress" "bubblewrap_network_proxy_parity_implicit_ingress.json" || exit 1
 run_parity "explicit-ingress" "bubblewrap_network_directional_proxy.json" || exit 1
 IMPLICIT_MARKS="$(cat "$WORK_DIR/implicit-ingress.marks")"
 EXPLICIT_MARKS="$(cat "$WORK_DIR/explicit-ingress.marks")"

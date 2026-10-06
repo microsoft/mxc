@@ -1069,7 +1069,7 @@ function Get-LoopbackFetchCommand {
 # Phase 8 — directional network policy.
 #
 # Asserts the documented contract (docs/backends/process-container/networking.md and
-# docs/containment-configuration/0.8.0/networking/networking.md), not the current code, so
+# docs/schema.md), not the current code, so
 # an assertion that outruns the backend fails by design. Every positive is
 # paired with a negative control on an otherwise identical config: from one run
 # on a host with no connectivity, "reached it" and "blocked by policy" look the

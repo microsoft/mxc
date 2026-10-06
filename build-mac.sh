@@ -96,9 +96,8 @@ echo ""
 echo "=== Building mxc-exec-mac ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
-# mxc-exec-mac is the seatbelt executor. unix-test-proxy is the bundled,
-# testing-only HTTP proxy that backs `network.proxy.builtinTestServer`; it is
-# spawned as a sibling of mxc-exec-mac by the proxy coordinator.
+# mxc-exec-mac is the Seatbelt executor. Keep unix-test-proxy as an
+# externally managed test endpoint for integration probes.
 CARGO_FLAGS=("-p" "mxc_darwin" "-p" "unix_test_proxy" "-p" "mxc_ffi")
 if [ "$BUILD_TYPE" = "release" ]; then
     CARGO_FLAGS+=("--release")
@@ -141,8 +140,7 @@ copy_binary_for_target() {
         echo "Warning: $ffi_src not found, skipping copy"
     fi
 
-    # unix-test-proxy backs network.proxy.builtinTestServer (testing only).
-    # It must sit next to mxc-exec-mac so the proxy coordinator can resolve it.
+    # Retain the test proxy binary for callers that start it independently.
     local proxy_src="$SRC_DIR/target/$triple/$BUILD_TYPE/unix-test-proxy"
     if [ -f "$proxy_src" ]; then
         cp "$proxy_src" "$bin_dir/unix-test-proxy"

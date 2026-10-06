@@ -6,10 +6,9 @@ Supported exact contracts from `0.9.0-alpha` use the shared `network.egress`
 and `network.ingress` policy plus `runtimeConfig.networkProxy` and
 `processContainer.network.allowedProxyPeer` configuration.
 
-Implementation companion to the parent
-[MXC Network Configuration, GA design](../../containment-configuration/0.8.0/networking/networking.md)
-doc. The parent owns the shared policy schema, connectivity models, and GA goal.
-This doc covers only how the Windows ProcessContainer backend enforces them.
+For the shared policy shape and defaults, see
+[directional networking](../../schema.md#directional-networking-supported-contracts).
+This guide covers how the Windows ProcessContainer backend enforces them.
 
 ## 1. What this backend targets at GA
 
@@ -206,7 +205,7 @@ middle rows provide different protections and are not ordered relative to each o
 
 For identity-scoped proxies, the scoped peer rule and `privateNetworkClientServer` do not bypass Windows
 Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
-declaration shown in the [historical schema 0.8 manifest example](examples/0.8.0-schema.md); its application entry uses
+declaration shown in the [proxy package manifest example](examples/0.8.0-schema.md); its application entry uses
 `uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
 requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID, proxy
 executable, and configured port.
@@ -254,7 +253,9 @@ Do not infer otherwise from the schema:
 - Per-source or per-port inbound rules. GA ingress is limited to the
   `default` and `hostLoopback` allow/deny toggles.
 
-See the parent doc on the last 4.
+The egress schema selects numeric destinations, protocols, and ports, not
+durable DNS names or application payloads. Its ingress schema has only
+`default` and `hostLoopback` toggles; it cannot select inbound peers or ports.
 
 ## 2. Supported-contract selection and downlevel behavior
 
@@ -280,7 +281,10 @@ proxy peer identity, and host-loopback allow fail with a typed unsupported-polic
 ## 3. WFP enforcement
 
 PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. AppContainer fallback does not
-install directional WFP filters.
+install directional WFP filters. It uses capabilities for supported direction
+defaults and keeps the external runtime proxy setup. Its network audit records retain the firewall fields with
+`firewall_rules_created` and `firewall_rules_removed` at `0`, `firewall_applied` at `false`, and
+`firewall_removal_ok` at `true`.
 
 WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.
 `privateNetworkClientServer`, selected through `ingress.default`, is the prerequisite for private-network access and

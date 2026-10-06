@@ -147,7 +147,7 @@ run_one() {
     shift 2
     echo "Running Bubblewrap network proxy test: $label..."
     local out sentinel
-    if ! out=$("$LXC_EXEC" --experimental --allow-testing-features "$(render_config "$config")" 2>&1); then
+    if ! out=$("$LXC_EXEC" --experimental "$(render_config "$config")" 2>&1); then
         echo "$out"
         echo "FAIL: $label (lxc-exec returned non-zero)"
         return 1
@@ -170,7 +170,7 @@ run_rejected() {
     local label="$1" config="$2" marker="$3" sentinel="$4"
     local out rc=0
     echo "Running Bubblewrap proxy migration rejection: $label..."
-    out=$("$LXC_EXEC" --experimental --allow-testing-features \
+    out=$("$LXC_EXEC" --experimental \
         "$(render_config "$config")" 2>&1) || rc=$?
     if [ "$rc" -eq 0 ] || ! grep -qF "$marker" <<<"$out" ||
         grep -qF "$sentinel" <<<"$out"; then

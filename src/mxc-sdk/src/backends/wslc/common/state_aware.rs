@@ -22,8 +22,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::mxc_common::logger::{Logger, Mode};
-#[cfg(test)]
-use crate::mxc_common::models::NetworkPolicy;
 use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::{
@@ -602,9 +600,8 @@ fn build_daemon_volumes(request: &ExecutionRequest) -> Result<Vec<VolumeMount>, 
         .collect())
 }
 
-/// Map the request's default network policy to the daemon's binary network
-/// mode. Per-host filtering is rejected in validation, so only the default
-/// policy participates: `Block` → isolated, `Allow` → bridged NAT.
+/// Map the validated directional egress default to the daemon's binary
+/// network mode: `Deny` → isolated, `Allow` → bridged NAT.
 fn map_network(request: &ExecutionRequest) -> NetworkMode {
     if crate::wslc_common::policy::network_is_isolated(request) {
         NetworkMode::None
@@ -626,8 +623,8 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkEgressPolicy,
-        NetworkIngressPolicy, ProxyAddress, ProxyConfig,
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
+        ProxyConfig,
     };
 
     /// The exit code is unrecoverable once dropped, so failing the call must not
@@ -765,63 +762,50 @@ mod tests {
         }
     }
 
-    /// Refused at provision, the only phase where the network posture is
-    /// settable — so neither can be silently dropped into the daemon's
-    /// `ProvisionConfig`, which carries only the binary [`NetworkMode`].
+    /// A rule-based posture cannot be mapped to the daemon's binary
+    /// [`NetworkMode`], so validation must refuse it before provision.
     #[test]
     fn validate_provision_rejects_unimplementable_network_posture() {
         let runner = WslcStateAwareRunner::new();
-        for (policy, needle) in [
-            (
-                ContainerPolicy {
-                    allow_local_network: true,
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    allow: vec![Default::default()],
                     ..Default::default()
-                },
-                "allowLocalNetwork",
-            ),
-            (
-                ContainerPolicy {
-                    network_enforcement_mode:
-                        crate::mxc_common::models::NetworkEnforcementMode::Firewall,
-                    ..Default::default()
-                },
-                "enforcementMode",
-            ),
-        ] {
-            let request = ExecutionRequest {
-                policy,
+                }),
                 ..Default::default()
-            };
-            let err = runner
-                .validate_provision(&request, None)
-                .expect_err(&format!("provision must reject {needle}"));
-            assert_eq!(
-                err.code,
-                crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
-            );
-            assert!(err.message.contains(needle), "got: {}", err.message);
-        }
+            },
+            ..Default::default()
+        };
+        let err = runner.validate_provision(&request, None).unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            err.message.contains("network.egress"),
+            "got: {}",
+            err.message
+        );
     }
 
-    /// Guards against over-rejection. Each value is the near-miss of a rejected
-    /// one, so a gate that flipped between value- and presence-based would fail
-    /// here only.
+    /// Guards against rejecting either supported all-or-nothing posture.
     #[test]
     fn validate_provision_accepts_the_postures_wslc_can_honour() {
         let runner = WslcStateAwareRunner::new();
         for (label, policy) in [
+            ("isolated", ContainerPolicy::default()),
             (
-                "explicit capabilities enforcement mode",
+                "bridged",
                 ContainerPolicy {
-                    network_enforcement_mode:
-                        crate::mxc_common::models::NetworkEnforcementMode::Capabilities,
-                    ..Default::default()
-                },
-            ),
-            (
-                "explicit allowLocalNetwork=false",
-                ContainerPolicy {
-                    allow_local_network: false,
+                    network_egress: Some(NetworkEgressPolicy {
+                        default: NetworkAction::Allow,
+                        ..Default::default()
+                    }),
+                    network_ingress: Some(NetworkIngressPolicy {
+                        default: NetworkAction::Allow,
+                        host_loopback: NetworkAction::Allow,
+                    }),
                     ..Default::default()
                 },
             ),
@@ -846,13 +830,7 @@ mod tests {
 
     #[test]
     fn map_network_maps_block_to_none() {
-        let req = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let req = ExecutionRequest::default();
         assert_eq!(map_network(&req), NetworkMode::None);
     }
 
@@ -860,7 +838,10 @@ mod tests {
     fn map_network_maps_allow_to_bridged() {
         let req = ExecutionRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -1115,7 +1096,6 @@ mod tests {
     fn the_exec_config_carries_the_scope_each_state_of_process_env_selects() {
         struct Case {
             label: &'static str,
-            compatibility: DefaultEnvCompatibility,
             env: Option<Vec<&'static str>>,
             inherit_default_env: bool,
             scope: EnvScope,
@@ -1125,7 +1105,6 @@ mod tests {
         let cases = [
             Case {
                 label: "omitted takes the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: None,
                 inherit_default_env: false,
                 scope: EnvScope::Merge,
@@ -1133,7 +1112,6 @@ mod tests {
             },
             Case {
                 label: "explicitly empty leaves the child nothing",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec![]),
                 inherit_default_env: false,
                 scope: EnvScope::Replace,
@@ -1141,7 +1119,6 @@ mod tests {
             },
             Case {
                 label: "explicitly empty plus inheritDefaultEnv takes the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec![]),
                 inherit_default_env: true,
                 scope: EnvScope::Merge,
@@ -1149,7 +1126,6 @@ mod tests {
             },
             Case {
                 label: "supplied is used verbatim",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec!["FOO=bar"]),
                 inherit_default_env: false,
                 scope: EnvScope::Replace,
@@ -1157,7 +1133,6 @@ mod tests {
             },
             Case {
                 label: "supplied plus inheritDefaultEnv layers over the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec!["FOO=bar"]),
                 inherit_default_env: true,
                 scope: EnvScope::Merge,
@@ -1167,7 +1142,6 @@ mod tests {
 
         for case in cases {
             let request = ExecutionRequest {
-                default_env_compatibility: case.compatibility,
                 env: case.env.map(|e| e.into_iter().map(String::from).collect()),
                 inherit_default_env: case.inherit_default_env,
                 script_code: "echo hi".to_string(),
@@ -1196,7 +1170,6 @@ mod tests {
     #[test]
     fn the_exec_config_keeps_the_cooperative_proxy_out_of_the_callers_reach() {
         let request = ExecutionRequest {
-            default_env_compatibility: DefaultEnvCompatibility::DefaultBlock,
             env: Some(vec![
                 "FOO=bar".to_string(),
                 "HTTP_PROXY=http://attacker.invalid:1".to_string(),
@@ -1208,7 +1181,6 @@ mod tests {
                         "127.0.0.1".to_string(),
                         8888,
                     )),
-                    builtin_test_server: false,
                 },
                 ..Default::default()
             },

@@ -8,8 +8,11 @@ Minimal HTTP CONNECT proxy for `wxc` integration testing. Tunnels HTTPS via `CON
 
 ## Usage
 
-Launched automatically by `wxc-exec` when the config specifies:
+Launch this binary from an integration harness that owns a Windows cleanup
+event and passes its PID. The proxy writes the selected loopback port to the
+ready file; the harness can then supply its URL through
+`runtimeConfig.networkProxy`. MXC does not start this binary from a request.
 
-```json
-{ "network": { "proxy": { "builtinTestServer": true } } }
+```text
+wxc-test-proxy --ready-file <path> --cleanup-event <event-name> --parent-pid <pid>
 ```

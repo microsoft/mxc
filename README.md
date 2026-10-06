@@ -334,7 +334,6 @@ Repository contributors can browse the [development documentation](docs/developm
 | [tests/scripts/README.md](tests/scripts/README.md) | Local and CI backend test suites |
 | [Host preparation](docs/backends/process-container/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
 | [Diagnostics](docs/development/guides/diagnostics.md) | Diagnostic logging and ETW |
-| [Containment configuration 0.7.0](docs/containment-configuration/0.7.0/policy.md) | Containment configuration 0.7.0 specification |
 | [Adding ProcessContainer OS features](docs/development/guides/process-container-adding-os-features.md) | Windows AppContainer / BaseContainer developer guide |
 | [docs/backends/lxc/lxc-backend.md](docs/backends/lxc/lxc-backend.md) | LXC backend (Linux) |
 | [docs/backends/bwrap/bubblewrap-backend.md](docs/backends/bwrap/bubblewrap-backend.md) | Bubblewrap backend (Linux) |

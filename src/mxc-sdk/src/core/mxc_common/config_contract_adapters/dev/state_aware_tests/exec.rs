@@ -47,9 +47,6 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
                     network.ingress.unwrap().default,
                     Some(wire::NetworkAction::Deny)
                 ));
-                assert!(network.allow_local_network.is_none());
-                assert!(network.allowed_hosts.is_none());
-                assert!(network.blocked_hosts.is_none());
                 assert_eq!(
                     common.runtime_config.unwrap().network_proxy.as_deref(),
                     Some("http://127.0.0.1:8080")

@@ -9,21 +9,9 @@
 //! arguments via [`crate::bwrap_common::bwrap_command::build_args`], then spawns `bwrap`
 //! with stdout/stderr capture and optional timeout enforcement.
 //!
-//! For per-host network filtering (`allowedHosts`/`blockedHosts`) the runner
-//! supports two paths:
-//! - **Cooperative env-var proxy** (default, no privilege required): when
-//!   `network.proxy` is configured the runner launches an unprivileged HTTP
-//!   proxy via [`crate::mxc_common::unix_proxy_coordinator::UnixProxyCoordinator`]
-//!   and the command builder injects `HTTP_PROXY` / `HTTPS_PROXY` /
-//!   `NO_PROXY` env vars into the sandbox.
-//! - **iptables firewall** (requires `CAP_NET_ADMIN` / root): when
-//!   `network.enforcementMode` is `firewall` or `both`, the runner reuses
-//!   [`crate::lxc_common::network_iptables::NetworkIptablesManager`] from the LXC
-//!   backend.
-//!
-//! When only `defaultPolicy: "block"` is set (no host lists and no proxy),
-//! the runner uses `--unshare-net` for zero-overhead full isolation
-//! without root.
+//! Directional network rules are programmed inside a private namespace;
+//! ruleless deny uses `--unshare-net` without additional network tooling.
+//! A runtime proxy uses the private namespace and a caller-managed endpoint.
 
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
@@ -34,7 +22,6 @@ use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
@@ -43,7 +30,6 @@ use crate::mxc_common::sandbox_process::{
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
-use crate::mxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
@@ -68,7 +54,7 @@ impl BubblewrapScriptRunner {
 }
 
 impl SandboxBackend for BubblewrapScriptRunner {
-    /// Bubblewrap programs the directional 0.8 posture into iptables chains in
+    /// Bubblewrap programs directional policy into iptables chains in
     /// the sandbox's own network namespace, so it enforces the outbound default,
     /// the allow/deny rules, and both inbound fields.
     ///
@@ -78,13 +64,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
     /// `bwrap_command::directional_network_rejection` below. Declaring them
     /// without that refusal would be a fail-open, so the two belong together.
     ///
-    /// `RUNTIME_PROXY` is declared because the parser normalizes
-    /// `runtimeConfig.networkProxy` into the same `policy.network_proxy` the
-    /// legacy `network.proxy` field feeds, pinned to loopback, and only under
-    /// the `egress.default='deny'` with no direct rules posture. That is
-    /// exactly `ResolvedNetworkMode::ProxyOnly`, which this backend already
-    /// enforces via the proxy's own private-namespace egress chain, so the 0.8
-    /// spelling reaches the identical enforcement as the 0.7 one.
+    /// `RUNTIME_PROXY` is declared because `runtimeConfig.networkProxy` is
+    /// normalized into `policy.network_proxy` and enforced in a private
+    /// namespace with only its pinned endpoint reachable.
     ///
     /// `PROXY_PEER_IDENTITY` stays undeclared: it is a ProcessContainer concept
     /// with no Bubblewrap equivalent, so shared validation refuses it here.
@@ -207,10 +189,6 @@ impl BubblewrapScriptRunner {
             ));
         }
 
-        // `network.proxy.builtinTestServer` is gated centrally in
-        // `validate_common` (ahead of every `ScriptRunner::run`), so no
-        // backend-local check is needed here.
-
         // Refuse a credential-bearing proxy URL here as well as at parse time.
         // The parser guard only covers requests it built; `ExecutionRequest`
         // and `ProxyAddress::from_url` are public, so a caller can hand this
@@ -235,7 +213,7 @@ impl BubblewrapScriptRunner {
                 // Built from the redacted form so the rejection cannot become
                 // the leak it is rejecting.
                 return Err(ScriptResponse::error(&format!(
-                    "Bubblewrap: network.proxy.url must not carry credentials ('{}'). \
+                    "Bubblewrap: runtimeConfig.networkProxy must not carry credentials ('{}'). \
                      Bubblewrap passes the proxy URL to bwrap as a --setenv command-line \
                      argument, and process arguments are world-readable through \
                      /proc/<pid>/cmdline, so the password would be visible to every local \
@@ -247,33 +225,9 @@ impl BubblewrapScriptRunner {
             }
         }
 
-        // Schema 0.8+ fails closed on a network element Bubblewrap cannot
-        // honor, rather than running more permissive than requested. Pre-0.8
-        // keeps the warning, so existing configs are unaffected. Sits with the
-        // input checks so a host without bwrap is still told what is wrong.
-        //
-        // This is the only layer that checks what Bubblewrap can enforce: the
-        // parser validates structure, and it only sees JSON configs, while a
-        // Rust caller can build an `ExecutionRequest` and reach the runner
-        // directly. (The two proxy cases below are the exception — the parser
-        // has rejected those combinations since before this backend gained its
-        // own validation, so both layers refuse them.)
-        //
-        // Order matches the parser's: a proxy with an explicit firewall mode is
-        // also caught by the external-proxy check below (a default policy of
-        // `Block` alone satisfies it), so checking that first would hand the
-        // caller a different message than the parser gives for the same
-        // request.
-        if let Some(reason) = bwrap_command::proxy_with_firewall_rejection(request) {
-            return Err(ScriptResponse::error(reason));
-        }
-        if let Some(reason) = bwrap_command::external_proxy_host_rules_rejection(request) {
-            return Err(ScriptResponse::error(reason));
-        }
-        if let Some(reason) = bwrap_command::unenforced_host_rules_rejection(request) {
-            return Err(ScriptResponse::error(reason));
-        }
-        if let Some(reason) = bwrap_command::local_network_rejection(request) {
+        // Programmatic requests also need the parser's proxy-only restriction:
+        // direct egress must not be accepted and then discarded at launch.
+        if let Some(reason) = bwrap_command::proxy_with_egress_rejection(request) {
             return Err(ScriptResponse::error(reason));
         }
         if let Some(reason) = bwrap_command::directional_network_rejection(request) {
@@ -293,13 +247,10 @@ impl BubblewrapScriptRunner {
         // would either resolve twice or pin an address the egress chain never
         // opened.
         //
-        // The builtin test server has no address until it is started (the
-        // parser leaves a port-0 placeholder), so its endpoint stays on the
-        // runtime check in `run`; this only covers an operator-supplied proxy.
         let proxy_only =
             ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
                 == ResolvedNetworkMode::ProxyOnly;
-        if proxy_only && !request.policy.network_proxy.builtin_test_server {
+        if proxy_only {
             if let Some(address) = request.policy.network_proxy.address.as_ref() {
                 if let Err(error) = proxy_network::SandboxProxy::check_without_resolving(address) {
                     return Err(ScriptResponse::error(&error));
@@ -313,13 +264,8 @@ impl BubblewrapScriptRunner {
             }
         }
 
-        // Firewall enforcement builds its chain from the policy's host lists,
-        // and every rule address must be an IP literal or CIDR: the sandbox
-        // resolves DNS itself, so a name can be mapped to an address the chain
-        // never authorized and is therefore unenforceable. Rejecting here
-        // rather than in the parser covers both callers -- `validate` runs
-        // ahead of every `spawn`, while a programmatic `mxc_engine` caller
-        // never passes through the parser at all.
+        // Validate direct CIDR/port rules before any environment probe or
+        // provisioning; reuse precisely this plan at spawn.
         let firewall_enforced =
             ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
                 == ResolvedNetworkMode::FirewallEnforced;
@@ -340,8 +286,7 @@ impl BubblewrapScriptRunner {
         }
         if proxy_only || firewall_enforced {
             // Proxy and firewall are mutually exclusive, so this names the one
-            // the caller actually asked for; the probe's advice is worded from
-            // it rather than always naming network.proxy.
+            // the caller actually asked for.
             let use_case = if proxy_only {
                 proxy_network::PrivateNetworkUse::ProxyOnlyEgress
             } else {
@@ -368,8 +313,7 @@ fn check_pin_against_denied_hosts(request: &ExecutionRequest) -> Result<(), Stri
     let proxy_only =
         ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
             == ResolvedNetworkMode::ProxyOnly;
-    // The builtin test server is never a hostname, so it is never pinned.
-    if !proxy_only || request.policy.network_proxy.builtin_test_server {
+    if !proxy_only {
         return Ok(());
     }
     match request.policy.network_proxy.address.as_ref() {
@@ -400,7 +344,7 @@ fn warn_unreachable_v6_targets(plan: &network_rules::EgressPlan, logger: &mut Lo
          namespace has no IPv6 connectivity: slirp4netns is launched without \
          '--enable-ipv6', so these rules install and are never traversed. The \
          destination stays unreachable despite the rule. Use an IPv4 address, or \
-         network.proxy, if the workload needs to reach it.",
+         runtimeConfig.networkProxy, if the workload needs to reach it.",
         targets.len(),
         targets.join(", ")
     ));
@@ -420,50 +364,34 @@ impl BubblewrapScriptRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<BwrapChild, ScriptResponse> {
-        // 1. Start the network proxy if configured. Must happen before
-        //    arg-building so the proxy's loopback address can be injected as
-        //    HTTP_PROXY / HTTPS_PROXY into the sandbox environment.
-        let mut proxy = UnixProxyCoordinator::new();
-        if request.policy.network_proxy.is_enabled() {
-            if let Err(err) = proxy.start(
-                &request.policy.network_proxy,
-                "127.0.0.1",
-                &request.policy.allowed_hosts,
-                &request.policy.blocked_hosts,
-                request.policy.default_network_policy.clone(),
-                logger,
-            ) {
-                return Err(ScriptResponse::error(&format!(
-                    "Bubblewrap: failed to start network proxy: {}",
-                    err
-                )));
-            }
+        // The caller manages the proxy; pass its address into the sandbox
+        // environment and restrict direct egress to that endpoint.
+        let configured_proxy = request.policy.network_proxy.address.as_ref();
+        if let Some(address) = configured_proxy {
+            logger.log_line(&format!(
+                "Unix network proxy active: {}",
+                crate::mxc_common::proxy_env::redact_proxy_url(&address.to_url())
+            ));
         }
 
-        let network_mode = ResolvedNetworkMode::from_request(request, proxy.is_active());
+        let network_mode = ResolvedNetworkMode::from_request(request, configured_proxy.is_some());
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
-            match proxy.address() {
-                Some(address) => match proxy_network::SandboxProxy::resolve(address) {
-                    Ok(resolved) => Some(resolved),
-                    Err(error) => {
-                        proxy.stop(logger);
-                        return Err(ScriptResponse::error(&error));
-                    }
-                },
-                None => {
-                    proxy.stop(logger);
-                    return Err(ScriptResponse::error(
-                        "Bubblewrap: proxy mode was selected without a resolved proxy address.",
-                    ));
-                }
-            }
+            let address = configured_proxy.ok_or_else(|| {
+                ScriptResponse::error(
+                    "Bubblewrap: proxy mode was selected without a resolved proxy address.",
+                )
+            })?;
+            Some(
+                proxy_network::SandboxProxy::resolve(address)
+                    .map_err(|error| ScriptResponse::error(&error))?,
+            )
         } else {
             None
         };
         let proxy_address = sandbox_proxy
             .as_ref()
             .map(|resolved| resolved.address())
-            .or_else(|| proxy.address());
+            .or(configured_proxy);
 
         let mut proxy_network = match sandbox_proxy.as_ref() {
             // The workload dials the sandbox-visible address, so that is what
@@ -478,16 +406,10 @@ impl BubblewrapScriptRunner {
                     request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
-                    Err(error) => {
-                        proxy.stop(logger);
-                        return Err(ScriptResponse::error(&error));
-                    }
+                    Err(error) => return Err(ScriptResponse::error(&error)),
                 }
             }
-            // Firewall enforcement without a proxy: the same private namespace,
-            // programmed from the policy's host lists instead of a single
-            // endpoint. There is no hostname to pin because rule addresses are
-            // literals and CIDRs only.
+            // Direct directional egress uses the same private namespace.
             None if network_mode == ResolvedNetworkMode::FirewallEnforced => {
                 // Reuse the validated plan. It is derived from network policy
                 // only, which the filesystem normalization between the two
@@ -497,10 +419,7 @@ impl BubblewrapScriptRunner {
                     Some(plan) => plan,
                     None => match network_rules::EgressPlan::for_request(request) {
                         Ok(plan) => plan,
-                        Err(error) => {
-                            proxy.stop(logger);
-                            return Err(ScriptResponse::error(&error));
-                        }
+                        Err(error) => return Err(ScriptResponse::error(&error)),
                     },
                 };
                 match proxy_network::ProxyNetworkNamespace::start(
@@ -511,10 +430,7 @@ impl BubblewrapScriptRunner {
                     request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
-                    Err(error) => {
-                        proxy.stop(logger);
-                        return Err(ScriptResponse::error(&error));
-                    }
+                    Err(error) => return Err(ScriptResponse::error(&error)),
                 }
             }
             None => None,
@@ -523,11 +439,6 @@ impl BubblewrapScriptRunner {
         // 2. Build the bwrap argument vector. `denied_files` is the file-mask
         //    subset classified during symlink resolution (see
         //    [`resolve_denied_paths`]).
-        if let Some(warning) =
-            bwrap_command::local_network_diagnostic_for_mode(request, network_mode)
-        {
-            let _ = writeln!(logger, "WARNING: {}", warning);
-        }
         let mut args = bwrap_command::build_args_classified_with_mode(
             request,
             proxy_address,
@@ -539,7 +450,6 @@ impl BubblewrapScriptRunner {
                 Ok(startup) => Some(startup),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
-                    proxy.stop(logger);
                     return Err(ScriptResponse::error(&error));
                 }
             },
@@ -551,44 +461,7 @@ impl BubblewrapScriptRunner {
             args.len()
         );
 
-        // 3. Determine whether the host-side firewall manager is needed. Proxy
-        //    mode does not use it: it programs its own rules inside the
-        //    sandbox's network namespace instead (see proxy_network).
-        let needs_iptables = network_mode.requires_host_firewall_manager();
-        let container_name = if request.container_id.is_empty() {
-            format!("bwrap-{:08x}", std::process::id())
-        } else {
-            request.container_id.clone()
-        };
-
-        let fw_manager = if needs_iptables {
-            let _ = writeln!(
-                logger,
-                "Bubblewrap: applying iptables rules for host-level network filtering"
-            );
-            let mut mgr = build_firewall_manager(&container_name);
-            match mgr.apply_firewall_rules(&request.policy, logger) {
-                Ok(true) => {}
-                Ok(false) => {
-                    proxy.stop(logger);
-                    return Err(ScriptResponse::error(
-                        "Bubblewrap: failed to apply iptables firewall rules.",
-                    ));
-                }
-                Err(e) => {
-                    proxy.stop(logger);
-                    return Err(ScriptResponse::error(&format!(
-                        "Bubblewrap: network policy error: {}",
-                        e
-                    )));
-                }
-            }
-            Some(mgr)
-        } else {
-            None
-        };
-
-        // 4. Spawn `bwrap`.
+        // 3. Spawn `bwrap`.
         let mut command = Command::new("bwrap");
         command.args(&args);
         let pty = match stdio {
@@ -620,23 +493,17 @@ impl BubblewrapScriptRunner {
             ) {
                 Ok(pty) => Some(pty),
                 Err(error) => {
-                    let mut fw_manager = fw_manager;
-                    cleanup_iptables(&mut fw_manager, logger);
                     stop_proxy_network(&mut proxy_network, logger);
-                    proxy.stop(logger);
                     return Err(ScriptResponse::error(&format!(
                         "Bubblewrap: failed to allocate PTY: {error}"
                     )));
                 }
             },
         };
-        // Pipes mode: put bwrap in its own process group so a timeout / `kill()`
-        // can tree-kill it with a single `killpg` without touching the host's
-        // group. Inherit mode keeps bwrap in the executor's group (so it retains
-        // the controlling terminal and can't be SIGTTIN-stopped reading it);
-        // there, killing bwrap relies on `--die-with-parent` to take the
-        // sandbox down, since bwrap forks and is not itself PID 1 of the new
-        // pid namespace.
+        // Pipes and PTY modes put bwrap in its own process group so a timeout
+        // or `kill()` can tree-kill it without touching the host's group.
+        // Inherit mode keeps bwrap in the executor's group (so it retains the
+        // controlling terminal); `--die-with-parent` takes its sandbox down.
         let group = stdio != StdioMode::Inherit;
         if stdio == StdioMode::Pipes {
             command.process_group(0);
@@ -648,10 +515,7 @@ impl BubblewrapScriptRunner {
         let mut child = match command.spawn() {
             Ok(process) => process,
             Err(error) => {
-                let mut fw_manager = fw_manager;
-                cleanup_iptables(&mut fw_manager, logger);
                 stop_proxy_network(&mut proxy_network, logger);
-                proxy.stop(logger);
                 return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: failed to spawn bwrap: {}",
                     error
@@ -677,10 +541,7 @@ impl BubblewrapScriptRunner {
             if let Err(error) = startup_result {
                 let _ = child.kill();
                 let _ = child.wait();
-                let mut fw_manager = fw_manager;
-                cleanup_iptables(&mut fw_manager, logger);
                 stop_proxy_network(&mut proxy_network, logger);
-                proxy.stop(logger);
                 return Err(ScriptResponse::error(&error));
             }
         }
@@ -702,10 +563,7 @@ impl BubblewrapScriptRunner {
                 (out_result, err_result) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let mut fw_manager = fw_manager;
-                    cleanup_iptables(&mut fw_manager, logger);
                     stop_proxy_network(&mut proxy_network, logger);
-                    proxy.stop(logger);
                     let error = out_result.err().or(err_result.err());
                     return Err(ScriptResponse::error(&format!(
                         "Bubblewrap: failed to wrap stdio pipes: {}",
@@ -737,9 +595,7 @@ impl BubblewrapScriptRunner {
             stderr_canceller,
             pty,
             group,
-            proxy,
             proxy_network,
-            fw_manager,
             monitor,
             timeout,
             started,
@@ -750,7 +606,7 @@ impl BubblewrapScriptRunner {
 }
 
 /// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
-/// and the per-run network proxy / iptables state torn down once it exits.
+/// and the per-run private network state torn down once it exits.
 struct BwrapChild {
     /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
     /// pid this side has already reaped.
@@ -767,9 +623,7 @@ struct BwrapChild {
     /// termination signals the whole group; `false` for `Inherit` mode, where
     /// killing bwrap relies on `--die-with-parent` to take the sandbox with it.
     group: bool,
-    proxy: UnixProxyCoordinator,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
-    fw_manager: Option<NetworkIptablesManager>,
     monitor: Option<ProviderMonitor>,
     timeout: Option<Duration>,
     started: Instant,
@@ -782,18 +636,15 @@ impl BwrapChild {
         self.child.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Tear down per-run network state (iptables rules + proxy). Idempotent at
-    /// the manager level.
+    /// Tear down per-run private network state.
     fn cleanup(&mut self, logger: &mut Logger) {
         // Stopping the supervisor closes the descriptor the monitor watches, so
         // disarming first is what keeps a normal teardown from reading as a
         // provider that died.
         self.monitor.take();
-        cleanup_iptables(&mut self.fw_manager, logger);
         if let Some(mut network) = self.proxy_network.take() {
             network.stop(logger);
         }
-        self.proxy.stop(logger);
     }
 }
 
@@ -1175,26 +1026,6 @@ impl Drop for BubblewrapSandboxProcess {
     }
 }
 
-/// Build the iptables manager for a Bubblewrap sandbox.
-///
-/// Unprivileged bwrap has no container network namespace MXC can enforce in:
-/// the sandbox either shares the host's, where a chain would filter the host
-/// itself, or holds a private one bwrap created and MXC does not manage (see
-/// `local_network_diagnostic` in `bwrap_command`). The chain is built and
-/// never hooked, which leaves this backend's egress policy unenforced.
-fn build_firewall_manager(container_name: &str) -> NetworkIptablesManager {
-    NetworkIptablesManager::new(container_name, EgressHookPoint::Unhooked)
-}
-
-/// Best-effort iptables cleanup. Called on both success and error paths.
-fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut Logger) {
-    if let Some(ref mut mgr) = manager {
-        if mgr.rules_applied() {
-            let _ = mgr.remove_firewall_rules(logger);
-        }
-    }
-}
-
 /// Tear down the proxy network namespace against the caller's logger.
 ///
 /// `Drop` would also stop it, but only through a throwaway in-memory logger, so
@@ -1336,9 +1167,7 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::{
-        NetworkEnforcementCompatibility, NetworkEnforcementMode, ProxyAddress, ProxyConfig,
-    };
+    use crate::mxc_common::models::{ProxyAddress, ProxyConfig};
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -1357,7 +1186,6 @@ mod tests {
                 "proxy.example.com".into(),
                 3128,
             )),
-            builtin_test_server: false,
         };
         req
     }
@@ -1389,7 +1217,6 @@ mod tests {
             (NetworkAction::Deny, NetworkAction::Allow),
         ] {
             let mut request = base_request();
-            request.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
             request.policy.network_egress = Some(NetworkEgressPolicy::default());
             request.policy.network_ingress = Some(NetworkIngressPolicy {
                 default,
@@ -1451,7 +1278,6 @@ mod tests {
         // produces (`apply_directional_network` fills them in together).
         fn directional() -> ExecutionRequest {
             let mut request = base_request();
-            request.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
             request.policy.network_mode_specified = true;
             request.policy.network_egress = Some(NetworkEgressPolicy::default());
             request.policy.network_ingress = Some(NetworkIngressPolicy::default());
@@ -1558,9 +1384,7 @@ mod tests {
             // The claim the bit makes is that a `runtimeConfig.networkProxy`
             // lands on the proxy machinery this backend already enforces:
             // the env injection, and no refusal on the way there.
-            if crate::bwrap_common::bwrap_command::external_proxy_host_rules_rejection(request)
-                .is_some()
-            {
+            if crate::bwrap_common::bwrap_command::proxy_with_egress_rejection(request).is_some() {
                 return Err(
                     "the runtime-proxy shape is refused before it reaches the proxy".into(),
                 );
@@ -1615,9 +1439,8 @@ mod tests {
                 Some(host_loopback),
             ),
             (
-                // Declared: the parser normalizes `runtimeConfig.networkProxy`
-                // into the same `policy.network_proxy` the legacy field feeds,
-                // so it lands on machinery this backend already enforces.
+                // The normalized runtime proxy reaches the private-namespace
+                // proxy-only enforcement path.
                 NetworkPolicySupport::RUNTIME_PROXY,
                 true,
                 {
@@ -1629,7 +1452,6 @@ mod tests {
                     request.policy.runtime_network_proxy_specified = true;
                     request.policy.network_proxy = ProxyConfig {
                         address: Some(ProxyAddress::new("127.0.0.1".to_string(), 3128)),
-                        builtin_test_server: false,
                     };
                     request
                 },
@@ -1654,7 +1476,7 @@ mod tests {
         // A bit added to `ALL` but not categorized above fails here.
         let categorized = decisions
             .iter()
-            .fold(NetworkPolicySupport::LEGACY, |acc, (bit, ..)| acc | *bit);
+            .fold(NetworkPolicySupport::default(), |acc, (bit, ..)| acc | *bit);
         assert!(
             categorized.contains(NetworkPolicySupport::ALL)
                 && NetworkPolicySupport::ALL.contains(categorized),
@@ -1708,25 +1530,21 @@ mod tests {
     }
 
     #[test]
-    fn the_firewall_manager_this_backend_builds_has_nowhere_to_enforce() {
-        // Unprivileged bwrap leaves MXC no container namespace to hook, so the
-        // manager must say so at construction. A manager that claimed a
-        // namespace would hook an OUTPUT chain in whatever namespace the
-        // process happens to be in -- the host's -- and filter the host itself.
-        let mgr = build_firewall_manager("bwrap-cov");
-
-        assert!(
-            !mgr.is_hooked(),
-            "Bubblewrap has no namespace to enforce in, so the manager it builds \
-             must not claim one"
-        );
-    }
-
-    #[test]
     fn an_ipv6_allow_warns_that_it_cannot_carry_traffic() {
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkPeer, NetworkRule};
+
+        let allow = |cidr: &str| NetworkRule {
+            to: vec![NetworkPeer {
+                cidr: cidr.parse().expect("test CIDR"),
+                except: vec![],
+            }],
+            ports: vec![],
+        };
         let mut req = base_request();
-        req.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
-        req.policy.allowed_hosts = vec!["2001:db8::1".into(), "203.0.113.5".into()];
+        req.policy.network_egress = Some(NetworkEgressPolicy {
+            allow: vec![allow("2001:db8::1/128"), allow("203.0.113.5/32")],
+            ..Default::default()
+        });
         let plan =
             network_rules::EgressPlan::for_request(&req).expect("both literals are enforceable");
 
@@ -1734,7 +1552,7 @@ mod tests {
         warn_unreachable_v6_targets(&plan, &mut logger);
         let out = logger.warnings().join("\n");
         assert!(
-            out.contains("2001:db8::1"),
+            out.contains("2001:db8::1/128"),
             "must name the v6 target: {out}"
         );
         assert!(
@@ -1751,67 +1569,15 @@ mod tests {
 
         // Nothing unreachable, nothing to say.
         let mut v4_only = base_request();
-        v4_only.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
-        v4_only.policy.allowed_hosts = vec!["203.0.113.5".into()];
+        v4_only.policy.network_egress = Some(NetworkEgressPolicy {
+            allow: vec![allow("203.0.113.5/32")],
+            ..Default::default()
+        });
         let plan =
             network_rules::EgressPlan::for_request(&v4_only).expect("a v4 literal is enforceable");
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         warn_unreachable_v6_targets(&plan, &mut logger);
         assert!(logger.warnings().is_empty(), "no v6 allow, no warning");
-    }
-
-    #[test]
-    fn validate_reports_the_proxy_firewall_conflict_ahead_of_the_external_proxy_gate() {
-        // A bare programmatic request trips both gates: the default policy is
-        // `Block`, which on its own satisfies the external-proxy check. The
-        // parser reports the proxy/firewall conflict first, so the runner must
-        // too, or the two layers name different problems for one request.
-        let mut req = base_request();
-        req.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
-            builtin_test_server: false,
-        };
-        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
-
-        // Both gates must fire, or this asserts nothing about ordering.
-        assert!(bwrap_command::external_proxy_host_rules_rejection(&req).is_some());
-        assert!(bwrap_command::proxy_with_firewall_rejection(&req).is_some());
-
-        let runner = BubblewrapScriptRunner::new();
-        let err = runner
-            .validate(&req)
-            .expect_err("the combination is refused");
-        assert!(
-            err.error_message
-                .contains(bwrap_command::BWRAP_PROXY_WITH_FIREWALL),
-            "expected the parser's proxy/firewall message, got: {}",
-            err.error_message
-        );
-    }
-
-    #[test]
-    fn validate_does_not_locally_gate_builtin_test_server() {
-        use crate::mxc_common::models::NetworkEgressPolicy;
-
-        // The builtinTestServer gate moved to `crate::mxc_common::validator::validate_common`
-        // (enforced centrally for every backend). The bwrap runner must therefore no
-        // longer reject it locally. Reaching the injected environment probe
-        // proves this without depending on private-network tools on the host.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.network_egress = Some(NetworkEgressPolicy::default());
-        req.policy.network_proxy = ProxyConfig {
-            address: None,
-            builtin_test_server: true,
-        };
-        req.testing_features_enabled = false;
-
-        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
-        let expected = unavailable.to_string();
-        let err = BubblewrapScriptRunner::new()
-            .validate_prepared_with_probe(&req, || Err(unavailable))
-            .unwrap_err();
-        assert_eq!(err.error_message, expected);
     }
 
     /// Proxy-only mode rewrites the endpoint to slirp's gateway and opens
@@ -1822,11 +1588,9 @@ mod tests {
         use crate::mxc_common::models::NetworkEgressPolicy;
 
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("[::1]".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let runner = BubblewrapScriptRunner::new();
@@ -1869,23 +1633,16 @@ mod tests {
         ];
 
         for egress in unhonorable {
-            for builtin in [false, true] {
-                let mut req = base_request();
-                req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-                req.policy.network_egress = Some(egress.clone());
-                req.policy.network_proxy = ProxyConfig {
-                    address: (!builtin).then(|| ProxyAddress::new("127.0.0.1".into(), 3128)),
-                    builtin_test_server: builtin,
-                };
-
-                let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
-                assert_eq!(
-                    err.error_message,
-                    bwrap_command::BWRAP_PROXY_DIRECTIONAL_EGRESS,
-                    "validate must refuse a proxy that would drop directional rules \
-                     (builtin={builtin})"
-                );
-            }
+            let mut req = base_request();
+            req.policy.network_egress = Some(egress);
+            req.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
+            let err = BubblewrapScriptRunner::new()
+                .validate_prepared_with_probe(&req, || panic!("policy must fail before probe"))
+                .unwrap_err();
+            assert_eq!(
+                err.error_message,
+                bwrap_command::BWRAP_PROXY_DIRECTIONAL_EGRESS
+            );
         }
     }
 
@@ -1896,14 +1653,12 @@ mod tests {
         use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy};
 
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_egress = Some(NetworkEgressPolicy {
             default: NetworkAction::Deny,
             ..Default::default()
         });
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let unavailable = bwrap_version::BwrapUnavailable::NotFound;
@@ -1921,11 +1676,9 @@ mod tests {
         // The egress rules are IPv4-only, so this endpoint could never be
         // opened -- `run` would discover that only after starting slirp.
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("2001:db8::1".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let runner = BubblewrapScriptRunner::new();
@@ -1942,33 +1695,6 @@ mod tests {
         );
     }
 
-    /// The parser leaves a port-0 placeholder address on a `builtinTestServer`
-    /// request; the real endpoint is only known once the server is started. The
-    /// endpoint check must therefore skip it, or every builtin-proxy sandbox is
-    /// rejected at validation with "requires a non-zero proxy port".
-    #[test]
-    fn validate_does_not_apply_the_endpoint_check_to_the_builtin_test_server() {
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".into(), 0)),
-            builtin_test_server: true,
-        };
-
-        let runner = BubblewrapScriptRunner::new();
-        let message = runner
-            .validate(&req)
-            .err()
-            .map(|err| err.error_message)
-            .unwrap_or_default();
-
-        assert!(
-            !message.contains("non-zero proxy port"),
-            "the builtin proxy's placeholder port must not be validated as an \
-             operator-supplied endpoint: {message}"
-        );
-    }
-
     /// A hostname endpoint is reached by pinning it over `/etc/hosts`, and the
     /// pin outranks every policy mount -- so a policy that denies the file must
     /// refuse the combination rather than silently hand the file back.
@@ -1977,12 +1703,10 @@ mod tests {
         use crate::mxc_common::models::NetworkEgressPolicy;
 
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.denied_paths = vec!["/etc/hosts".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let runner = BubblewrapScriptRunner::new();
@@ -2007,10 +1731,8 @@ mod tests {
     #[test]
     fn a_dotdot_spelling_of_a_denied_hosts_file_still_refuses_the_pin() {
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
-            builtin_test_server: false,
         };
 
         // As written, this matches nothing the check looks for.
@@ -2036,12 +1758,10 @@ mod tests {
         use crate::mxc_common::models::NetworkEgressPolicy;
 
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.denied_paths = vec!["/etc/hosts".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
-            builtin_test_server: false,
         };
 
         let unavailable = bwrap_version::BwrapUnavailable::NotFound;
@@ -2052,39 +1772,23 @@ mod tests {
         assert_eq!(err.error_message, expected);
     }
 
-    /// A rule address the backend cannot enforce must be refused, not silently
-    /// approximated. `validate` is the enforcement point rather than the parser
-    /// because it runs ahead of every spawn, including the programmatic
-    /// `mxc_engine` path that never sees the parser.
     #[test]
-    fn validate_rejects_a_programmatic_hostname_firewall_rule_under_strict_policy() {
+    fn validate_accepts_programmatic_directional_cidr_rules() {
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkPeer, NetworkRule};
+
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.network_enforcement_mode =
-            crate::mxc_common::models::NetworkEnforcementMode::Firewall;
-        req.policy.allowed_hosts = vec!["api.github.com".into()];
-
-        let message = BubblewrapScriptRunner::new()
-            .validate_prepared_with_probe(&req, || {
-                panic!("a hostname firewall rule must be rejected before probing bwrap")
-            })
-            .unwrap_err()
-            .error_message;
-
-        assert!(
-            message.contains("api.github.com") && message.contains("not an IP address or CIDR"),
-            "the rejection must name the offending entry and the reason: {message}"
-        );
-    }
-
-    #[test]
-    fn validate_accepts_programmatic_literal_and_cidr_firewall_rules() {
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.network_enforcement_mode =
-            crate::mxc_common::models::NetworkEnforcementMode::Firewall;
-        req.policy.allowed_hosts = vec!["203.0.113.7".into(), "10.0.0.0/8".into()];
-        req.policy.blocked_hosts = vec!["2001:db8::/32".into()];
+        let rule = |cidr: &str| NetworkRule {
+            to: vec![NetworkPeer {
+                cidr: cidr.parse().expect("test CIDR"),
+                except: vec![],
+            }],
+            ports: vec![],
+        };
+        req.policy.network_egress = Some(NetworkEgressPolicy {
+            allow: vec![rule("203.0.113.7/32"), rule("10.0.0.0/8")],
+            deny: vec![rule("2001:db8::/32")],
+            ..Default::default()
+        });
 
         let unavailable = bwrap_version::BwrapUnavailable::NotFound;
         let expected = unavailable.to_string();
@@ -2092,90 +1796,6 @@ mod tests {
             .validate_prepared_with_probe(&req, || Err(unavailable))
             .unwrap_err();
         assert_eq!(err.error_message, expected);
-    }
-
-    #[test]
-    fn validate_rejects_an_unhonorable_local_network_request_under_strict_policy() {
-        // defaultPolicy='allow' shares the host netns, so allowLocalNetwork
-        // =false cannot be honored. Runs ahead of the bwrap probe, so this
-        // holds on hosts without bwrap installed. Host lists are no longer a
-        // vehicle for this: at 0.8 they resolve to a private namespace under
-        // either enforcement mechanism.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Allow;
-
-        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
-        assert!(
-            err.error_message.contains("allowLocalNetwork=false"),
-            "unexpected error: {}",
-            err.error_message
-        );
-    }
-
-    #[test]
-    fn validate_rejects_local_network_under_a_private_netns_with_strict_policy() {
-        // The other half of the local-network contract, and the one the
-        // ingress chain depends on: IngressPlan maps allowLocalNetwork=true to
-        // an inbound NEW ACCEPT, which is only unreachable because validate
-        // refuses the combination. Without this test, relaxing the rejection
-        // would silently open inbound rather than fail a build.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
-        req.policy.allowed_hosts = vec!["10.0.2.2/32".into()];
-        req.policy.allow_local_network = true;
-
-        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
-        assert!(
-            err.error_message.contains("allowLocalNetwork=true"),
-            "unexpected error: {}",
-            err.error_message
-        );
-    }
-
-    #[test]
-    fn validate_rejects_host_rules_no_mechanism_will_enforce_under_strict_policy() {
-        // The gap this closes: host lists suppress --unshare-net, but under
-        // 'capabilities' with no proxy nothing applies them, so a default-deny
-        // policy ran with fully open egress on the host's namespace.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
-        req.policy.allowed_hosts = vec!["api.github.com".into()];
-        req.policy.allow_local_network = true;
-
-        let err = BubblewrapScriptRunner::new()
-            .validate_prepared_with_probe(&req, || {
-                panic!("unenforced host rules must be rejected before probing bwrap")
-            })
-            .unwrap_err();
-        assert_eq!(
-            err.error_message,
-            bwrap_command::BWRAP_UNENFORCED_HOST_RULES
-        );
-    }
-
-    #[test]
-    fn validate_rejects_block_default_blocklist_without_allowlist() {
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
-        req.policy.blocked_hosts = vec!["evil.example.com".into()];
-        req.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
-            builtin_test_server: false,
-        };
-
-        let error = BubblewrapScriptRunner::new()
-            .validate_prepared_with_probe(&req, || {
-                panic!("environment probe must not run for an invalid legacy host list")
-            })
-            .unwrap_err();
-        assert_eq!(
-            error.error_message,
-            "blockedHosts requires allowedHosts when network.defaultPolicy='block'"
-        );
     }
 
     #[test]

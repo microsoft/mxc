@@ -50,13 +50,8 @@ pub use crate::mxc_common::default_env::env_pairs;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::DefaultEnvCompatibility;
-
-    fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
-        ExecutionRequest {
-            default_env_compatibility: compatibility,
-            ..Default::default()
-        }
+    fn request() -> ExecutionRequest {
+        ExecutionRequest::default()
     }
 
     fn value<'a>(entries: &'a [String], key: &str) -> Option<&'a str> {
@@ -78,7 +73,7 @@ mod tests {
 
     #[test]
     fn an_omitted_env_gets_the_default_block() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = None;
         let entries = resolved_env(&r, Some("/workspace"));
         assert_eq!(value(&entries, "PATH"), Some(DEFAULT_SANDBOX_PATH));
@@ -88,7 +83,7 @@ mod tests {
 
     #[test]
     fn an_explicitly_empty_env_stays_empty() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec![]);
         assert!(resolved_env(&r, None).is_empty());
     }
@@ -96,14 +91,14 @@ mod tests {
     #[test]
     fn a_supplied_env_is_used_verbatim() {
         // The 0.9 behavior change: no implicit PATH under a supplied env.
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec!["FOO=bar".into()]);
         assert_eq!(resolved_env(&r, None), vec!["FOO=bar".to_string()]);
     }
 
     #[test]
     fn inherit_default_env_layers_over_the_default_block() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
         r.inherit_default_env = true;
         let entries = resolved_env(&r, None);
@@ -122,7 +117,7 @@ mod tests {
     /// deliberately does not re-derive it from the request.
     #[test]
     fn home_follows_the_directory_the_child_starts_in() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = None;
         assert_eq!(
             value(&resolved_env(&r, Some("/workspace")), "HOME"),
@@ -132,7 +127,7 @@ mod tests {
 
     #[test]
     fn an_unresolved_working_directory_leaves_home_unset() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = None;
         // Set on the request but never resolved by the runner: only what the
         // runner passes in counts.
@@ -147,7 +142,7 @@ mod tests {
 
     #[test]
     fn a_caller_entry_without_a_value_is_dropped_by_both_modes() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec!["FEATURE_FLAG".into(), "FOO=bar".into()]);
 
         let verbatim = resolved_env(&r, None);

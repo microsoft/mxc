@@ -181,70 +181,15 @@ including egress allow with omitted ingress defaults.
 Disabled networking prevents guest socket creation (`OSError: [Errno 134]`).
 Unrestricted networking includes host-backed bind/listen capabilities;
 NanVix cannot independently enforce ingress or host-loopback restrictions.
-Directional egress rules are explicitly rejected because the legacy IPv4
-filter does not implement their full semantics, including default-deny DNS.
+Directional egress rules are explicitly rejected rather than translated to
+the guest's IPv4 host filter, which cannot implement their full semantics,
+including default-deny DNS.
 Runtime proxy configuration is also unsupported.
-
-### Legacy per-host filter implementation (compatibility/reference only)
-
-The following describes the retained legacy runtime filter, not accepted v1.1
-JSON vocabulary. The exact cutover does not silently translate directional
-rules into this weaker contract.
-
-Legacy `defaultPolicy` and host-list interactions follow the
-[backend-agnostic network policy semantics](../../schema.md#legacy-network-host-list-semantics).
-Invalid legacy combinations are rejected by shared policy validation:
-`blockedHosts` requires an `allowedHosts` exception set under a block default,
-and `allowedHosts` cannot be used under an allow default.
-
-NanVix forwards the validated host list to the guest's host-side socket proxy,
-which enforces egress at `connect()`. The guest filter is **allow-XOR-block**,
-so NanVix rejects requests that supply both lists instead of dropping either
-one.
-
-Entries may be IPv4 literals (`93.184.216.34`), IPv4 CIDR blocks
-(`10.0.0.0/8`), or hostnames. Hostnames are resolved to their IPv4 (A-record)
-addresses at preflight; IPv6 (AAAA) results are dropped because the guest filter
-is IPv4-only. Resolution failures are handled per direction so neither list ever
-fails open:
-
-- **allowlist** (deny-by-default): each dropped entry is logged as a warning and
-  the run continues, since dropping an entry only *narrows* access. If the list
-  resolves to **no** IPv4 address at all, the run is rejected at preflight rather
-  than silently allowing all traffic.
-- **blocklist** (allow-by-default): **any** entry that resolves to no IPv4
-  address rejects the run at preflight. Silently dropping a blocked host would
-  let traffic the policy explicitly blocks flow freely, and the static preflight
-  filter cannot enforce a name that does not resolve — so the blocklist
-  fails closed.
-
-**DNS:** in allowlist mode the guest daemon automatically exempts the DNS port
-(53), so name resolution works without adding the resolver to `allowedHosts`.
-
-Network proxies (`network.proxy`) are not supported and are rejected at
-preflight.
-
-```jsonc
-{
-  "containment": "microvm",
-  "process": { "commandLine": "import urllib.request; ..." },
-  // Historical legacy shape, not accepted by the exact v1.1 contract:
-  "network": { "defaultPolicy": "allow" }
-}
-```
-
-```jsonc
-{
-  "containment": "microvm",
-  "process": { "commandLine": "import urllib.request; ..." },
-  // Historical legacy shape, not accepted by the exact v1.1 contract:
-  "network": { "allowedHosts": ["example.com", "10.0.0.0/8"] }
-}
-```
 
 ## Not Supported
 
-| Workload                        | Error                               |
-| ------------------------------- | ----------------------------------- |
-| Both `allowedHosts` + `blockedHosts` | Rejected at preflight (mutually exclusive) |
-| File writing outside `/mnt/rw/` | `OSError: Read-only file system`    |
+| Workload                                     | Error                            |
+| -------------------------------------------- | -------------------------------- |
+| Mixed directional networking or egress rules | Rejected before VM creation      |
+| Runtime proxy                                | Rejected before VM creation      |
+| File writing outside `/mnt/rw/`              | `OSError: Read-only file system` |

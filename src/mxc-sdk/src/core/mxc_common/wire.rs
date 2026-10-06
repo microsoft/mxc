@@ -134,9 +134,8 @@ pub struct ProcessContainer {
     /// process's access attempts to a learning-mode ETL trace for later
     /// inspection. MXC prefers native PSEC plus V2 Learning Mode when that API
     /// set can fully honor the request. Otherwise it retains the highest
-    /// compatible legacy containment tier and uses guarded WPR capture, so
-    /// `leastPrivilege`, `network.proxy`, and deny-path policies can remain
-    /// enforced without weakening the request.
+    /// compatible containment tier and uses guarded WPR capture, so
+    /// `leastPrivilege` and deny-path policies remain enforced.
     pub capture_denials: Option<CaptureDenials>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
@@ -283,18 +282,6 @@ pub struct Fallback {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Network {
-    /// Default outbound policy when no host rule matches.
-    pub default_policy: Option<NetworkPolicy>,
-    /// How the policy is enforced.
-    pub enforcement_mode: Option<NetworkEnforcement>,
-    /// Allow binding/listening on local IPs and accepting inbound connections.
-    pub allow_local_network: Option<bool>,
-    /// Hosts explicitly allowed.
-    pub allowed_hosts: Option<Vec<String>>,
-    /// Hosts explicitly blocked.
-    pub blocked_hosts: Option<Vec<String>>,
-    /// Proxy configuration (one of localhost / builtinTestServer / url).
-    pub proxy: Option<Proxy>,
     /// Outbound network policy.
     pub egress: Option<NetworkEgress>,
     /// Inbound and host-loopback network policy.
@@ -379,38 +366,6 @@ pub enum NetworkProtocol {
 pub struct RuntimeConfig {
     /// HTTP/S loopback proxy URL.
     pub network_proxy: Option<String>,
-}
-
-/// Default network policy.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkPolicy {
-    Allow,
-    Block,
-}
-
-/// Network enforcement mechanism.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkEnforcement {
-    /// Per-process capability-based filtering.
-    Capabilities,
-    /// Host firewall rules.
-    Firewall,
-    /// Both capability and firewall enforcement.
-    Both,
-}
-
-/// Proxy configuration. Exactly one variant applies.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Proxy {
-    /// External localhost proxy port.
-    pub localhost: Option<u16>,
-    /// Have wxc launch its own built-in test proxy.
-    pub builtin_test_server: Option<bool>,
-    /// Proxy URL (parsed into host:port).
-    pub url: Option<String>,
 }
 
 /// Cross-platform UI isolation policy.

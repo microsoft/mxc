@@ -67,7 +67,7 @@ take a caller-supplied schema version. Each v1 SDK targets the published exact
 `1.0.0` contract internally.
 
 Raw configuration APIs require the caller to declare a registered `version`
-to select an immutable historical or mutable development contract.
+to select an immutable published or mutable development contract.
 
 ```typescript
 // sdk/node/src/types.ts
@@ -167,9 +167,9 @@ mxc/schemas/
     └── mxc-config.schema.1.1.0-alpha.json  (exact closed development contract)
 ```
 
-Retired stable schema files are **kept as immutable historical artifacts** — the
-parser simply stops accepting those versions (the supported floor is
-`0.9.0-alpha`). Released schemas are never edited or deleted.
+Published stable schemas remain immutable and cannot be removed, including
+those below the supported floor (`0.9.0-alpha`). The parser rejects retired
+versions even though their schema artifacts remain in the repository.
 
 The development artifact is generated from the exact
 `mxc_contract::dev` model. It describes all eight closed one-shot and
@@ -231,11 +231,11 @@ attribution after exact validation because they did not originate as external
 configuration JSON.
 
 Runtime behavior is selected from explicit normalized semantics rather than by
-comparing contract-version strings. In particular,
-`NetworkEnforcementCompatibility::Strict` is the only mode for registered
-exact contracts and direct typed SDK requests. Retired pre-v0.9 contracts
-cannot select legacy enforcement behavior. Direct typed SDK construction
-clears only source-contract attribution; it does not weaken validation.
+comparing contract-version strings. Registered exact contracts and direct typed
+SDK requests use the same strict network enforcement. Retired pre-v0.9
+contracts cannot select legacy enforcement behavior. Direct typed SDK
+construction clears only source-contract attribution; it does not weaken
+validation.
 
 ### IsolationSession directional networking
 
@@ -715,9 +715,9 @@ all experimental features in the config are active. There is no per-feature
 enable/disable mechanism — simplicity over granularity.
 
 **Migration after promotion:** Promotion changes publication and runtime
-authorization, not the feature's JSON path. Old contracts retain their exact
-historical shapes; new requests must use the shape defined by their declared
-exact version.
+authorization, not the feature's JSON path. Each exact contract retains its
+version-specific shape; requests must use the shape defined by their declared
+version.
 
 ## Deprecation Aliases
 
@@ -730,9 +730,8 @@ schema, generated raw type, and raw SDK validator must agree on the spellings
 accepted by the declared `config.version`; aliases are not version-independent
 parser exceptions.
 
-The historical v0 contracts retain their original compatibility aliases.
-`appcontainer` and `appContainer` are accepted by v0.6-v0.9, while
-`macos_sandbox` is accepted by v0.7-v0.9. The v1 line removes all three
+The supported v0.9 contract accepts `appcontainer`, `appContainer`, and
+`macos_sandbox` as compatibility aliases. The v1 line removes all three
 spellings at its major-version boundary, so raw v1.0 and v1.1 requests must use
 `processcontainer`, `processContainer`, and `seatbelt`.
 
@@ -746,8 +745,8 @@ native parser; the TypeScript SDK validator may still surface a deprecation hint
 via `diagLog` while inspecting raw config.
 
 **Removal.** Removing an accepted alias is a breaking wire change and therefore
-belongs at a major-version boundary. Older immutable contracts continue to
-accept their historical spellings; the new major rejects them with the
+belongs at a major-version boundary. The supported v0.9 contract continues to
+accept its aliases; the new major rejects them with the
 standard exact-contract diagnostic.
 
 ## Open Questions

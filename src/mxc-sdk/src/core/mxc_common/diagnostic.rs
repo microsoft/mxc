@@ -194,20 +194,12 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
         .unwrap_or_else(|e| format!("{{\"error\": \"failed to serialize request: {e}\"}}"));
 
     // Append network_proxy info (skipped by serde).
-    let proxy_info = if request.policy.network_proxy.is_enabled() {
-        let addr = request
-            .policy
-            .network_proxy
-            .address
-            .as_ref()
-            .map(|a| crate::mxc_common::proxy_env::redact_proxy_url(&a.to_url()))
-            .unwrap_or_else(|| "<builtin test server, not yet resolved>".to_string());
-        format!(
-            "\n[network_proxy: enabled, builtin_test_server={}, address={}]",
-            request.policy.network_proxy.builtin_test_server, addr
-        )
-    } else {
-        "\n[network_proxy: disabled]".to_string()
+    let proxy_info = match request.policy.network_proxy.address.as_ref() {
+        Some(address) => format!(
+            "\n[network_proxy: enabled, address={}]",
+            crate::mxc_common::proxy_env::redact_proxy_url(&address.to_url())
+        ),
+        None => "\n[network_proxy: disabled]".to_string(),
     };
 
     format!("{json}{proxy_info}")
@@ -255,9 +247,14 @@ fn redact_secret_fields_at_path(value: &mut serde_json::Value, path: &mut Vec<St
                     *entry = serde_json::Value::String("<redacted>".to_string());
                 } else if key_lower == "env" {
                     redact_environment_values(entry);
-                } else if key_lower == "url" && path.iter().any(|parent| parent == "proxy") {
+                } else if (key_lower == "networkproxy"
+                    && path.last().is_some_and(|parent| parent == "runtimeconfig"))
+                    || (key_lower == "url" && path.iter().any(|parent| parent == "proxy"))
+                {
                     if let serde_json::Value::String(url) = entry {
                         *url = crate::mxc_common::proxy_env::redact_proxy_url(url);
+                    } else {
+                        *entry = serde_json::Value::String("<redacted>".to_string());
                     }
                 } else {
                     // Reuse one mutable path stack across the whole
@@ -431,7 +428,6 @@ mod tests {
         let mut request = ExecutionRequest::default();
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         let json = redacted_request_json(&request);
         assert!(json.contains("network_proxy: enabled"));
@@ -443,6 +439,48 @@ mod tests {
         let request = ExecutionRequest::default();
         let json = redacted_request_json(&request);
         assert!(json.contains("network_proxy: disabled"));
+    }
+
+    #[test]
+    fn runtime_proxy_credentials_are_redacted_in_diagnostics() {
+        let url = format!("http://user:{}@localhost:8080", "pass");
+        let mut request = ExecutionRequest::default();
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::from_url(&url, "localhost".to_string(), 8080)),
+        };
+        let redacted = redacted_request_json(&request);
+        assert!(!redacted.contains(&url));
+        assert!(redacted.contains("http://***@localhost:8080"));
+
+        let raw = serde_json::json!({"runtimeConfig": {"networkProxy": url}}).to_string();
+        let redacted = redact_raw_config_json(&raw);
+        assert!(!redacted.contains(&url));
+        assert!(redacted.contains("http://***@localhost:8080"));
+    }
+
+    #[test]
+    fn non_string_proxy_values_in_comments_are_redacted() {
+        for proxy_value in [
+            serde_json::json!({"password": "diagnostic-canary"}),
+            serde_json::json!([{"password": "diagnostic-canary"}]),
+        ] {
+            let raw = serde_json::json!({
+                "_comment": {
+                    "runtimeConfig": {"networkProxy": proxy_value.clone()},
+                    "proxy": {"url": proxy_value}
+                }
+            })
+            .to_string();
+            let redacted = redact_raw_config_json(&raw);
+            assert!(!redacted.contains("diagnostic-canary"));
+
+            let parsed: serde_json::Value = serde_json::from_str(&redacted).unwrap();
+            assert_eq!(
+                parsed["_comment"]["runtimeConfig"]["networkProxy"],
+                "<redacted>"
+            );
+            assert_eq!(parsed["_comment"]["proxy"]["url"], "<redacted>");
+        }
     }
 
     #[test]

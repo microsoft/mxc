@@ -14,7 +14,12 @@ requiring root privileges or a container runtime.
 > Versions before `0.9.0-alpha` are rejected; changing only the version of an
 > old config does not migrate its policy. Legacy `defaultPolicy`,
 > `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy`
-> are not accepted. See [schema migration](../../schema.md).
+> are rejected by supported exact contracts. Typed Rust requests no longer
+> contain these fields. See [schema migration](../../schema.md).
+> Bubblewrap still rejects enforceable-looking requests it cannot honor
+> (such as `ingress.default: "allow"` or direct egress rules combined with a
+> runtime proxy) before provisioning. An omitted `network` section takes the
+> directional deny defaults.
 
 ## Prerequisites
 
@@ -220,11 +225,6 @@ block's value, while bash (RHEL) fabricates a shorter `/usr/local/bin:/usr/bin`
 plus `TERM=dumb`. So neither reads back as empty from inside the workload,
 whatever MXC passed.
 
-> **Historical (retired pre-v0.9 contracts):** the child received only
-> `process.env`, with no default `PATH`. Those contracts are no longer
-> registered: a request declaring one fails as an unsupported version before
-> `inheritDefaultEnv` or any other process field is evaluated.
-
 ### Filesystem Policy
 
 | Field | bwrap Mapping | Description |
@@ -382,8 +382,8 @@ Be honest about what this buys. It is **not** new protection: nothing outside
 the sandbox can reach in already, because the runner configures no port
 forwarding into the namespace, so there is no path for an inbound packet to
 arrive on. The chain is defense in depth against a future change that adds
-one, and the mechanism the GA networking spec expects a backend to apply
-`ingress.default` through. The terminal `DROP` is deliberately independent of
+one, and a defense-in-depth implementation of `ingress.default`. The terminal
+`DROP` is deliberately independent of
 `egress.default`, which governs outbound traffic only — an open outbound posture
 must not open inbound as a side effect.
 

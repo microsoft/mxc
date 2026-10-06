@@ -4,6 +4,9 @@
 
 Forward-looking work items for the three Linux-side containment backends: **LXC**, **Bubblewrap**, and **WSLC**.
 
+Supported exact contracts start at `0.9.0-alpha`. Use the backend guides for
+current enforcement behavior.
+
 Each item is prioritized within its backend and tagged with an effort tier.
 
 **Effort tiers:**
@@ -14,7 +17,7 @@ Each item is prioritized within its backend and tagged with an effort tier.
 
 **Filesystem policy reference:** items tagged with **(D1)**–**(D8)** trace to the [MXC FS-policy semantics v1](https://github.com/microsoft/mxc/blob/user/gudge/downlevel-fs-projection-plan/docs/proposals/downlevel_support/policy_semantics_v1_summary.md) decisions. Items shared across backends note where the implementation lives (typically `mxc_common`).
 
-**Network policy reference:** items tagged with **(N1)**–**(N8)** trace to the [MXC Network Configuration GA spec](https://microsoft-my.sharepoint-df.com/:w:/p/bbonaby/cQpR4CPfeKqgSLuQGG_a9QA2EgUCrPdXr5J7b-jWip1_VeYFUA) design decisions. The GA schema replaces the current `allowedHosts`/`blockedHosts`/`defaultPolicy` format:
+**Network policy reference:** items tagged with **(N1)**–**(N8)** trace to the [MXC Network Configuration GA spec](https://microsoft-my.sharepoint-df.com/:w:/p/bbonaby/cQpR4CPfeKqgSLuQGG_a9QA2EgUCrPdXr5J7b-jWip1_VeYFUA) design decisions. Supported contracts use the directional shape rather than the retired host-list format:
 
 ```json
 {
@@ -88,7 +91,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
 | 13 | **(N1) Default-deny outbound** | 🟡 Actionable | Already in place: iptables FORWARD hook with default DROP when firewall mode + veth detected. New work: ensure hook is always applied; fail-fast if veth not found rather than silently skipping. | M |
-| 14 | **(N2) Host-loopback control (`hostLoopback`)** | 🟠 Runtime API dependency | `allowLocalNetwork` is parsed but silently ignored. A private network namespace makes sandbox `127.0.0.1`/`::1` different from host loopback, so both directions need explicit cross-namespace plumbing. Container-to-host requires a host-loopback relay or translated gateway endpoint plus OUTPUT enforcement. Host-to-container requires a host-loopback-bound relay or DNAT/forward and an INPUT chain that allows `NEW` only for that forwarded path while dropping direct veth/LAN ingress. The shared allow/deny policy does not identify listener ports, so a separate runtime port-mapping contract is required; `hostLoopback: "allow"` authorizes mappings but cannot create them by itself. Until that contract and dual-stack `iptables`/`ip6tables` or `nftables` enforcement exist, reject `hostLoopback: "allow"` rather than guessing ports or exposing the container IP. `-i lo` remains intra-container only, and `ESTABLISHED,RELATED` remains allowed. Depends on the IPv6 path in item #19. | L |
+| 14 | **(N2) Host-loopback control (`hostLoopback`)** | 🟠 Runtime API dependency | LXC rejects `hostLoopback: "allow"`. A private network namespace makes sandbox `127.0.0.1`/`::1` different from host loopback, so both directions need explicit cross-namespace plumbing. Container-to-host requires a host-loopback relay or translated gateway endpoint plus OUTPUT enforcement. Host-to-container requires a host-loopback-bound relay or DNAT/forward and an INPUT chain that allows `NEW` only for that forwarded path while dropping direct veth/LAN ingress. The shared allow/deny policy does not identify listener ports, so a separate runtime port-mapping contract is required; `hostLoopback: "allow"` authorizes mappings but cannot create them by itself. Until that contract and dual-stack `iptables`/`ip6tables` or `nftables` enforcement exist, reject `hostLoopback: "allow"` rather than guessing ports or exposing the container IP. `-i lo` remains intra-container only, and `ESTABLISHED,RELATED` remains allowed. Depends on the IPv6 path in item #19. | L |
 
 > **Example (N2).** With `ingress.hostLoopback: "deny"` (default), the host cannot reach an MCP server in the container
 > and the container cannot reach a service on host loopback. With `"allow"`, both directions are authorized, but the
@@ -97,13 +100,11 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 15 | **(N3) IP/CIDR only, no DNS names** | ✅ Addressed | Schema 0.8 `network.egress` is lowered into the chain with CIDR peers, `except` carve-outs, ports, and protocols. IPv4 and IPv6 peers are routed to the `iptables` and `ip6tables` chains by address family, which closes the dual-stack bypass for this shape. The legacy `allowedHosts`/`blockedHosts` path is unchanged and still resolves names. Covered end-to-end by `tests/scripts/run_lxc_network_ga_egress_test.sh`. | L |
-
-> **Example (N3).** Today: `allowedHosts: ["api.github.com"]` resolves once to `140.82.112.4`. On a dual-stack host, IPv6 `2606:50c0:8000::64` passes unfiltered. GA: `egress.allow: [{ to: [{ cidr: "140.82.112.0/20" }], ports: [{ protocol: "tcp", port: 443 }] }]` — deterministic, auditable, covers the subnet.
+| 15 | **(N3) IP/CIDR only, no DNS names** | ✅ Addressed | Supported `network.egress` is lowered into the chain with CIDR peers, `except` carve-outs, ports, and protocols. IPv4 and IPv6 peers are routed to the `iptables` and `ip6tables` chains by address family. Covered end-to-end by `tests/scripts/run_lxc_network_ga_egress_test.sh`. | L |
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 16 | **(N4) Deny-wins precedence** | ✅ Addressed | `egress.deny[]` rules are emitted ahead of `egress.allow[]` rules, matching the ordering already used for the legacy host lists. The legacy DNS exemption is not carried into a directional posture — port 53 is governed by the same rules as every other forwarded destination, per GA decision D3. Two paths still sit outside the generated rules: the base chain's `ESTABLISHED,RELATED` accept, and the bridge resolver, which the container reaches through the host's `INPUT` path rather than this chain. Both are stated in `docs/backends/lxc/lxc-backend.md`. | S |
+| 16 | **(N4) Deny-wins precedence** | ✅ Addressed | `egress.deny[]` rules are emitted ahead of `egress.allow[]` rules. Port 53 follows the same rules as every other forwarded destination, per GA decision D3. Two paths still sit outside the generated rules: the base chain's `ESTABLISHED,RELATED` accept, and the bridge resolver, which the container reaches through the host's `INPUT` path rather than this chain. Both are stated in `docs/backends/lxc/lxc-backend.md`. | S |
 | 17 | **(N5) Proxy — env vars + enforcement** | 🟡 Actionable | Schema field exists, backend ignores it. Fix: inject `HTTP_PROXY`/`HTTPS_PROXY`, clear all inherited proxy vars, and restrict egress to proxy port only via iptables. | M |
 
 > **Example (N5).** Consumer starts proxy on `127.0.0.1:8080`. MXC sets `HTTP_PROXY=127.0.0.1:8080` inside the container and applies `iptables -A OUTPUT -d 127.0.0.1 --dport 8080 -j ACCEPT` + default DROP. An app ignoring the env var tries `connect(140.82.112.4:443)` → dropped.
@@ -173,11 +174,9 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 13 | **(N1) Default-deny outbound** | 🟡 Actionable | Already in place: `--unshare-net` provides full cutoff when no proxy/rules. New work: with proxy active (currently shares host netns), switch to `--unshare-net` + route proxy into the namespace (slirp4netns or veth pair). Elevation required. | M |
-| 14 | **(N2) Host-loopback control (`hostLoopback`)** | 🟠 Runtime API dependency | `--unshare-net` blocks both host-loopback directions by default because sandbox loopback is private. N1 must first move proxy mode off the shared host namespace. After that, container-to-host requires a host-loopback relay or translated gateway endpoint plus OUTPUT enforcement; host-to-container requires a host-loopback-bound relay or DNAT/forward plus per-sandbox INPUT filtering that allows `NEW` only for mapped listeners and drops direct veth/LAN ingress. The shared allow/deny policy does not identify listener ports, so a separate runtime port-mapping contract is required; `hostLoopback: "allow"` authorizes mappings but cannot create them by itself. Until that contract, N1, and dual-stack `iptables`/`ip6tables` or `nftables` enforcement exist, reject `hostLoopback: "allow"` rather than retaining the shared host namespace, guessing ports, or exposing the container IP. `-i lo` remains intra-container only, and `ESTABLISHED,RELATED` remains allowed. Depends on item #19. | L |
-| 15 | **(N3) IP/CIDR only, no DNS names** | 🟡 Actionable | Delegates to LXC's `NetworkIptablesManager` — same IPv4-only hostname resolution, same dual-stack bypass. New GA schema needed. | L |
-
-> **Example (N3).** Same IPv6 bypass as LXC: `allowedHosts: ["api.github.com"]` only blocks IPv4; IPv6 traffic passes unfiltered on dual-stack GHA runners (confirmed by probe).
+| 13 | **(N1) Default-deny outbound** | ✅ Addressed | Ruleless deny isolates with `--unshare-net`; proxy-only and rule-bearing directional policies use a slirp-backed private namespace with an enforced egress chain. | M |
+| 14 | **(N2) Host-loopback control (`hostLoopback`)** | 🟠 Runtime API dependency | The private namespace denies host loopback by default. `hostLoopback: "allow"` remains rejected: admitting the host-to-container half requires an explicit port-mapping contract and an inbound relay/filter, while the container-to-host half needs gateway reachability and OUTPUT enforcement. No listener ports may be guessed or opened implicitly. | L |
+| 15 | **(N3) IP/CIDR only, no DNS names** | ✅ Addressed | Bubblewrap lowers supported numeric CIDR, `except`, protocol, and port rules to its private namespace's IPv4/IPv6 chains. The directional host suite exercises filtering and deny precedence. | L |
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
@@ -280,7 +279,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 >
 > The container gets no network interface, so all outbound is denied. Genuine default-deny — but the blunt form, with *zero* connectivity. Use when the workload needs no network at all.
 >
-> **⚠️ Needs to change — deny + allowlist.** An `allow` list → maps to `Bridged` (full NAT), then MXC tries to enforce the list with `iptables` exec'd *inside* the container (`build_iptables_rules`):
+> **⚠️ Needs the VM-level API — deny + allowlist.** WSLC rejects a directional `allow` list before provisioning; it no longer attempts in-container iptables enforcement:
 >
 > ```json
 > {
@@ -295,7 +294,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > }
 > ```
 >
-> Intended: reach **only** `140.82.112.0/20:443`. Actual: the in-container `iptables` calls fail silently because `WslcContainerFlags::Privileged` does **not** grant `CAP_NET_ADMIN`, leaving the container on full Bridged NAT with no firewall — it reaches the allowed host *and everything else*. Closing this needs the VM-level network policy API (SDK dep #1) to enforce default-DROP + allowlist at the VM host.
+> Intended: reach **only** `140.82.112.0/20:443`. Actual: the request is refused rather than broadening access. Enforcing it needs the VM-level network policy API (SDK dep #1) to apply default-DROP + allowlist at the VM host.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
@@ -304,7 +303,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > **Example (N2).** `ingress.hostLoopback` is bidirectional. The port-mapping support below covers the
 > host-to-container half. Container-to-host-loopback access also requires VM-level routing and policy support.
 >
-> **✅ Supported today — explicit per-port forward.** The container runs in the NAT'd WSL2 VM, so by default the host can't reach arbitrary container ports (incidental default-deny). [PR #530](https://github.com/microsoft/mxc/pull/530) adds the per-port primitive via `WslcSetContainerSettingsPortMappings` (`wsl_container_runner.rs:975+`) — an explicit `hostLoopback: "allow"` for one TCP port:
+> **✅ Supported today — explicit per-port forward.** The container runs in the NAT'd WSL2 VM, so by default the host can't reach arbitrary container ports (incidental default-deny). [PR #530](https://github.com/microsoft/mxc/pull/530) added the separate `WslcSetContainerSettingsPortMappings` per-port primitive; this does not authorize directional `hostLoopback: "allow"`:
 >
 > ```json
 > {
@@ -319,11 +318,17 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 >
 > This forwards host port `3000` → container `:3000`. **Host bind address:** MXC does not supply one today — the runner passes `windows_address: null` (`wsl_container_runner.rs:1044-1046`), which delegates to the WSLC SDK's default host bind (`wslc_bindings.rs:242-244`). That default is **not guaranteed to be loopback-only** and may expose a broader host interface set (e.g. `0.0.0.0`), so this is not a verified `127.0.0.1`-only forward until MXC passes an explicit loopback address. TCP only — UDP is rejected at parse time because the shipped WSLC runtime returns `E_NOTIMPL` for UDP port mappings.
 >
-> **⚠️ Needs to change — policy-driven posture.** `allowLocalNetwork: true` is now **rejected at config-parse time** (`config_parser.rs`) and by the WSLc backend's `validate_runner`, because MXC cannot honor a blanket inbound-listen grant inside the NAT'd WSL2 VM; `allowLocalNetwork: false` remains an accepted no-op. Only the imperative `portMappings` list exposes inbound ports today. There is no way to express a blanket `hostLoopback: "allow"` default (host-loopback to every exposed port) or source-scoped inbound filtering (allow `127.0.0.1`/`::1` only, deny other host interfaces). Wiring a policy-driven inbound posture needs the VM-level network policy API (SDK dep #1), since MXC has no host-side access to the container's interface inside the VM.
+> **⚠️ Needs to change — independent inbound policy.** WSLC accepts
+> `egress.default: "allow"`, `ingress.default: "allow"`, and
+> `ingress.hostLoopback: "allow"` together as unrestricted bridged networking.
+> Mixed postures are rejected before provisioning. This all-allow posture does
+> not filter inbound sources or create host-to-container forwards; only explicit
+> `portMappings` expose container listeners today. Source-scoped inbound
+> filtering requires the VM-level network policy API (SDK dep #1).
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 17 | **(N3) IP/CIDR allow/deny rules** | 🟠 With SDK dep | Currently builds iptables rules inside container (requires `CAP_NET_ADMIN` which isn't granted). VM-level API would accept CIDR rules directly. | M |
+| 17 | **(N3) IP/CIDR allow/deny rules** | 🟠 With SDK dep | Directional rules are rejected before provisioning. VM-level API would accept CIDR rules directly. | M |
 
 > **Example (N3).** N3 is the per-host egress filtering — *which* destinations are allowed/blocked. Target GA shape:
 >
@@ -340,13 +345,13 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > }
 > ```
 >
-> **⚠️ Rejected before execution today.** Per-host egress filtering is **rejected up front** — at config-parse time (`config_parser.rs`) and by the WSLc backend's `validate_runner` (`wsl_container_runner.rs`), so no container is ever created. It can't be enforced for **two independent reasons**: (1) the in-container iptables path (`build_iptables_rules` → `apply_iptables_rules`, exec'd via `WslcCreateContainerProcess`) needs `CAP_NET_ADMIN`, which the `Privileged` flag does **not** grant inside the container, so `iptables -A` is rejected; and (2) WSLc cannot expose **VM-level** network enforcement without breaking other security promises (e.g. MDE) — confirmed with the WSLc SDK team — so there is no host-side place to enforce it either, pending a longer-tail design. That rule-building logic is retained for a future privileged / VM-level design but is currently unreachable. Either way the config **fails before the run**, never failing open.
+> **⚠️ Rejected before execution today.** Supported contracts can express CIDR rules, but the WSLc backend rejects them before provisioning. MXC does not grant `CAP_NET_ADMIN` to workloads. VM-level enforcement is not available without breaking other security promises (e.g. MDE), so there is still no host-side primitive to apply the rules. The request fails before the run, never failing open.
 >
-> **✅ Needs the VM-level API.** Move enforcement off in-container iptables entirely. With the VM-level network policy API (SDK dep #1), MXC passes the rule set at `CreateSession` and the VM host enforces it — no container privilege, no image iptables dependency. Today's rules also match only a bare `-d <host>` (whole host, all ports/protocols); CIDR ranges, `--dport`, `-p tcp/udp/icmp`, and hostname rejection are the separate #22/#23/#24 rows, all on the same SDK dependency.
+> **✅ Needs the VM-level API.** With the VM-level network policy API (SDK dep #1), MXC could pass the rule set at `CreateSession` for enforcement at the VM host — no container privilege or image iptables dependency. Future lowering must handle CIDRs, ports, protocols, and both IP families.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 18 | **(N4) Deny-wins precedence** | 🟠 With SDK dep | No `egress.deny[]` path today — the builder does allow-list XOR block-list, never both, so deny-wins ordering isn't expressed. VM-level API + N7 schema needed. | S |
+| 18 | **(N4) Deny-wins precedence** | 🟠 With SDK dep | The schema expresses `egress.deny[]`, but WSLC rejects direct rules until a VM-level enforcement API can apply deny-before-allow ordering. | S |
 
 > **Example (N4).** GA spec D4: when a connection matches both an `egress.allow` and an `egress.deny` rule, **the
 > deny wins** (fail-closed). The canonical case is "allow everything except a few malicious IPs." These rules apply
@@ -368,28 +373,29 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > }
 > ```
 >
-> **❌ Not expressible today.** `build_iptables_rules` (`policy_mapping.rs:183-221`) handles only two shapes — `defaultPolicy: block` + `allowedHosts` (allow-list with trailing DROP) or `defaultPolicy: allow` + `blockedHosts` (block-list) — and **never combines** an allow-list and a deny-list in one chain. So the D4 scenario (broad allow + specific deny) has no representation: the allow side is simply ignored in the block-list branch, and there's no rule interleaving to give deny precedence. On top of that, whatever it does build doesn't enforce and is rejected before the run — no `CAP_NET_ADMIN` for in-container iptables and no VM-level enforcement hook, same as N3).
+> **❌ Expressible but unenforceable on WSLC today.** Supported contracts carry both `egress.allow` and `egress.deny`; WSLC refuses either rule set before provisioning. Future VM-level lowering must enforce deny-before-allow ordering.
 >
-> **✅ Needs the VM-level API + N7 schema.** Two changes: (1) model `egress.allow[]` and `egress.deny[]` together and guarantee deny-rules are evaluated before allows (the N7 migration plus a rule-ordering change), and (2) enforce at the VM host via the VM-level network policy API (SDK dep #1) rather than in-container iptables.
+> **✅ Needs the VM-level API.** The schema already models `egress.allow[]` and `egress.deny[]` together. The missing step is VM-host enforcement with deny precedence (SDK dep #1).
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 19 | **(N5) Proxy — env-var injection** | 🟡 Actionable NOW | Set `HTTP_PROXY`/`HTTPS_PROXY` via `WslcCreateContainerProcess` env parameter. No SDK dependency. | S |
+| 19 | **(N5) Proxy — env-var injection** | ✅ Addressed | Set `HTTP_PROXY`/`HTTPS_PROXY` from the caller-managed runtime proxy when starting a WSLc process. | S |
 | 20 | **(N5) Proxy — egress enforcement** | 🟠 With SDK dep | Restricting egress to proxy port only requires VM-level network policy API. Without it, proxy is advisory (apps can bypass env vars and connect directly). | M |
-| 25 | **(N5) Proxy — env-var hygiene** | 🟡 Actionable NOW | Clear all proxy vars, set only configured proxy. No SDK dependency — env manipulation at process spawn. | S |
+| 25 | **(N5) Proxy — env-var hygiene** | ✅ Addressed | Scrub caller-supplied proxy variables before injecting the configured proxy at process spawn. | S |
 
-> **Example (N5).** The proxy is the **recommended GA path** (model 2, "deny-all-except-proxy"). MXC does **not**
-> run the proxy: the consumer supplies and starts it, while MXC restricts egress to it and sets the proxy environment
-> variables. The variables are an advisory routing hint; the VM-level network policy is the containment boundary.
+> **Example (N5).** The caller starts a proxy and supplies its URL. WSLC injects
+> the proxy environment variables but cannot restrict direct egress to the
+> endpoint; without VM-level network policy, this is cooperative routing, not
+> a proxy-only containment boundary.
 > Direct `egress.allow`/`deny` rules do not apply when `runtimeConfig.networkProxy` is present.
 >
 > ```json
 > {
 >   "network": {
->     "egress": { "default": "deny" },
+>     "egress": { "default": "allow" },
 >     "ingress": {
->       "default": "deny",
->       "hostLoopback": "deny"
+>       "default": "allow",
+>       "hostLoopback": "allow"
 >     }
 >   },
 >   "runtimeConfig": {
@@ -398,30 +404,38 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > }
 > ```
 >
-> The presence of `runtimeConfig.networkProxy` selects the proxy-only runtime path; there is no caller-selected mode.
-> `ingress.hostLoopback` remains denied because the container-to-proxy connection is outbound. WSLC must translate the
-> caller's local endpoint to a VM-reachable address and authorize only that outbound endpoint.
+> `runtimeConfig.networkProxy` supplies execution-time routing metadata.
+> One-shot proxy requests require unrestricted bridged networking; the
+> all-allow posture does not create port mappings or confine direct egress to
+> the proxy. A guest-local proxy can be reached at the container's own
+> `127.0.0.1`; a host-side proxy instead needs a guest-reachable URL and
+> cannot rely on the host's loopback address. State-aware exec omits `network`
+> and inherits the posture configured at provision.
 >
-> **❌ Not implemented today (but #19/#25 are unblocked).** WSLC has no proxy code at all. The env path exists — `request.env` is piped in via `WslcSetProcessSettingsEnvVariables` (`wsl_container_runner.rs:929-942`) — but nothing injects `HTTP_PROXY`/`HTTPS_PROXY` from the proxy config (#19), and the GA-mandated clearing of all inherited proxy vars (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`, `NO_PROXY` + lowercase) isn't done (#25). Both are doable now through the existing env path — no SDK dependency — they're just unwritten.
+> **✅ Routing and hygiene implemented (#19/#25).** WSLC injects the configured
+> proxy URL and scrubs caller-supplied proxy variables, but raw-socket clients
+> can still bypass this cooperative routing.
 >
-> **❌ Enforcement blocked (#20).** The part that *matters* per the GA spec — the iptables rule that restricts egress to only the loopback proxy port and DROPs everything else — can't be done: same dead end as N1/N3 (in-container iptables, `Privileged` ≠ `CAP_NET_ADMIN`). Without it the proxy is **advisory only**, which the GA doc says is insufficient as the enforcement mechanism. Needs the VM-level network policy API (SDK dep #1).
+> **❌ Enforcement blocked (#20).** WSLC cannot restrict direct egress to the
+> proxy endpoint without the VM-level network policy API (SDK dep #1).
 >
-> **⚠️ WSLC-specific wrinkle — NAT reachability.** Unlike Bubblewrap (which shares the host's network namespace, so the container's `127.0.0.1` *is* the host's), the WSLC container runs in the WSL2 VM — a separate kernel with its **own** loopback, behind a NAT. `127.0.0.1` is always machine-local and never routed, so `HTTP_PROXY=127.0.0.1:8080` points at the *container's own* empty loopback, not the host where the proxy listens. The connection fails — the proxy is unreachable, so model 2 is broken outright (not merely advisory). Fixing it means **not** using loopback: MXC must inject the host's VM-visible gateway IP (e.g. the address WSL puts in `/etc/resolv.conf`) instead, and the consumer's proxy must bind on a VM-reachable interface. This is the backend-specific "making the proxy reachable from inside the sandbox" the GA spec assigns to MXC, and it's a prerequisite for the env var (#19) to be of any use.
+> **⚠️ WSLC-specific wrinkle — NAT reachability.** WSLC has its own network
+> namespace; `127.0.0.1` names the guest's own loopback and is valid for a
+> guest-local proxy. It does not reach a proxy listening only on the Windows
+> host's loopback. A host-side proxy must bind to an address the guest can
+> reach and be supplied through a guest-routable URL.
 >
 > **Net:** shipping #19 + #25 alone yields a *cooperative-only* proxy a rogue app bypasses; the GA-meaningful guarantee (unbypassable model 2) needs #20 (SDK-blocked) plus the NAT-reachability plumbing.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 21 | **(N7) Schema migration** | 🟡 Actionable NOW | Same parser + SDK types as LXC/Bwrap. No SDK dependency for schema/parser work. | L |
+| 21 | **(N7) Schema migration** | ✅ Addressed | Supported exact contracts and SDK types use the shared directional fields and runtime proxy; backend enforcement remains a separate dependency. | L |
 
-> **Example (N7).** N7 is the schema/parser/SDK work to accept the GA network block — *expressing* the policy, independent of whether a backend can *enforce* it. It's the same shared parser + SDK types as LXC/Bwrap, so no WSLC SDK dependency.
+> **Example (N7).** Supported contracts and SDK types already express the directional network block, independently of whether WSLC can enforce a requested rule.
 >
-> **⚠️ Today — flat legacy schema only.** The parser accepts only
-> `defaultPolicy`/`allowedHosts`/`blockedHosts` (`config_parser.rs:778-779`, flat string lists), mapped to
-> `policy.allowed_hosts`/`blocked_hosts`. There is no schema 0.8 `egress`/`ingress` structure or per-rule
-> `to[].cidr` + `ports[]`, and no `runtimeConfig.networkProxy`.
->
-> **✅ GA target.** Parse the structured GA block (shared across all backends), with deprecation aliases from the legacy fields:
+> **✅ Current shape.** Exact v0.9+ contracts accept `network.egress`,
+> `network.ingress`, and `runtimeConfig.networkProxy`. Retired host-list fields
+> have no aliases in supported contracts:
 >
 > ```json
 > {
@@ -441,7 +455,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > }
 > ```
 >
-> This is pure schema/parser/SDK work — landing it lets configs *express* CIDR/port/protocol intent. Whether WSLC can *enforce* that intent is the separate #22–#24 + VM-level API story below.
+> The parser and SDKs express CIDR/port/protocol intent; WSLC rejects unsupported enforcement before provisioning. VM-level policy support is still required for #22–#24 below.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
@@ -449,7 +463,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | 23 | **Port filtering** | 🟠 With SDK dep | VM-level API would accept port/port-range rules. | S |
 | 24 | **Protocol filtering** | 🟠 With SDK dep | VM-level API would accept protocol specifiers. | S |
 
-> **Example (#22–#24 — rule granularity).** These are three facets of one GA egress rule — *which* CIDR, *which* ports, *which* protocol — all on the same SDK dependency, because today's WSLC rule builder emits a bare `iptables -A OUTPUT -d <host> -j ACCEPT/DROP` (`policy_mapping.rs:204-219`): whole host, all ports, all protocols, IPv4 only. The GA rule below exercises all three:
+> **Example (#22–#24 — rule granularity).** These are three facets of one supported egress rule — *which* CIDR, *which* ports, *which* protocol — all awaiting VM-level enforcement. The removed in-container rule builder only selected a whole host and could not enforce these facets. The example below exercises all three:
 >
 > ```json
 > {
@@ -503,7 +517,7 @@ These items depend on the WSLC SDK team and are not unilaterally schedulable.
 
 > **Why network enforcement must be container-scoped (host vs. VM vs. container).** Network policy can be enforced at three layers: the Windows **host** (Windows Firewall), the WSL2 **VM**, or the **container** network namespace inside the VM. GA decision **D6 (per-sandbox scoping)** requires every sandbox's policy to be independent — concurrent WSLC containers must not affect each other's access — and names the container network namespace as WSLC's scoping identity. A machine-wide **host** firewall can't attribute traffic to one container vs. another, so it violates D6 (and per **D8**, host firewalls apply *on top of* enforcement, never *as* it). A **VM-wide** rule fails the same way when one utility VM hosts multiple containers — sandbox A's rules would bleed into sandbox B. Only the **container namespace** is inherently per-sandbox, which is why it's the required enforcement point. The catch: MXC can't install rules into that namespace today (`Privileged` doesn't grant `CAP_NET_ADMIN`, and the VM may lack iptables tooling). Hence SDK dep #1 — a VM-level API that applies rules **scoped to a specific container's namespace**: physically enforced at the VM boundary, logically attributed to one container. 
 >
-> **Contrast with Hyperlight/Nanvix, and the state-aware wrinkle.** Hyperlight (host-proxied sockets, per-instance) and Nanvix (per-guest egress filter) get D6 scoping for free because each sandbox *is* its own VM instance/process — no shared surface to bleed across. WSLC today is also effectively 1 sandbox : 1 VM (the one-shot flow creates a session, one container, then tears it down), but the highest-value WSLC optimization — **state-aware session reuse** (Misc #29), keeping a warm VM to amortize startup cost — makes one VM host **multiple** containers, at which point a host- or VM-wide rule genuinely bleeds across co-resident sandboxes. That is exactly when namespace-scoped enforcement (SDK dep #1) stops being merely cleaner and becomes mandatory.
+> **Contrast with Hyperlight/Nanvix, and the state-aware wrinkle.** Hyperlight (network disabled for supported requests, per-instance) and Nanvix (all-deny or unrestricted networking, per-guest) keep their network posture scoped to each VM instance/process — no shared surface to bleed across. WSLC today is also effectively 1 sandbox : 1 VM (the one-shot flow creates a session, one container, then tears it down), but the highest-value WSLC optimization — **state-aware session reuse** (Misc #29), keeping a warm VM to amortize startup cost — makes one VM host **multiple** containers, at which point a host- or VM-wide rule genuinely bleeds across co-resident sandboxes. That is exactly when namespace-scoped enforcement (SDK dep #1) stops being merely cleaner and becomes mandatory.
 
 ---
 

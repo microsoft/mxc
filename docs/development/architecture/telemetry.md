@@ -540,12 +540,24 @@ rejection records from the same invocation. A successful launch emits no
 | `mxc.PolicyHash` | Every launch, after the effective request is resolved | `backend`, `policy_hash`, `config_schema_version` |
 | `mxc.SandboxIdentity` | After a successful state-aware phase | `backend`, `identity`, `phase` |
 | `mxc.EnforcementDegraded` | ProcessContainer dispatch resolved below the preferred tier | `backend`, `identity`, `tier`, `needs_dacl_augmentation`, `effective_enforcement_level`, `degradation_reasons`, `degradation_reason_count` |
-| `mxc.NetworkPolicyApplied` | After network policy setup, on success **and** failure | `backend`, `identity`, `tier` (no `pid` yet), plus `enforcement_mode`, `default_policy`, `proxy_port`, `firewall_rules_created`, `firewall_applied`, `status` |
+| `mxc.NetworkPolicyApplied` | AppContainer: after network setup, before process launch. BaseContainer: success after launch. Both tiers: failure when network setup fails | `backend`, `identity`, `tier` (no `pid` field), plus `enforcement_mode`, `default_policy`, `proxy_port`, `firewall_rules_created`, `firewall_applied`, `status` |
 | `mxc.ProcessExited` | Sandboxed process exited on its own | `exit_code` |
 | `mxc.ProcessTimedOut` | `scriptTimeout` breached | `timeout_ms` |
 | `mxc.ProcessKillFailed` | A kill/terminate call failed (**failure only**) | `kill_method`, `error_code` |
 | `mxc.SandboxTornDown` | Per-run resources released, once per handle | ProcessContainer: `backend`, `identity`, `tier`, `pid`, `status`, `firewall_rules_removed`, `firewall_removal_ok`, `bfs_removed`, `proxy_stopped`, `preserve_policy`, `container_released`, `skip_reason`. IsolationSession: `backend`, `identity`, `phase`, `status`, `session_stopped`, `agent_user_deprovisioned`, `client_unregistered` |
 | `mxc.ConfigRejected` | A request was refused before it could run | `correlation_id`, `backend`, `reason`, `offending_field`, `phase` |
+
+For the ProcessContainer AppContainer fallback, the firewall fields remain in
+these records for compatibility: no local firewall rules are created or
+removed, `firewall_applied` is `false`, and `firewall_removal_ok` is `true`.
+AppContainer proxy-shim startup failures set `mxc.NetworkPolicyApplied.status`
+to `failure` and report `proxy_port: 0` after the coordinator cleans up.
+AppContainer reports network success before spawning the process; a later
+launch failure can therefore follow a successful network record.
+BaseContainer reports `failure` if native PSEC setup (including its proxy
+policy) fails, with the requested proxy port; it emits `success` only after
+launch succeeds. Unrelated pre-setup and process-launch failures do not emit a
+BaseContainer network record.
 
 ### Error semantics: `FallbackError` vs `ActivityError`
 
@@ -636,11 +648,14 @@ Excluded, and why:
 | `source_contract` | External exact-contract provenance used for diagnostics and telemetry attribution, not enforcement. |
 | `telemetry`, internal `test` feature | No enforcement effect. |
 | proxy `original_url` | Can embed `user:password@`. The host and port *are* hashed. |
-| `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+| `dry_run` | Invocation mode, not policy. |
 | `experimental_enabled` | Authorizes selecting an experimental backend, not enforcement; changing it leaves policy identity unchanged. |
 
-`network_enforcement_compatibility` is included because it changes how the
-normalized network policy is interpreted and enforced.
+The retired network compatibility marker, legacy network model fields, and
+built-in test proxy discriminator are no longer part of the projection. Hashes
+from builds that included them can differ even when the supported effective
+policy is unchanged; compare policy hashes across builds only with those
+projection changes in mind.
 
 Enforcement-relevant backend configuration is hashed from
 `ExecutionRequest.windows_sandbox` and `ExecutionRequest.wslc`. The canonical
@@ -708,7 +723,7 @@ that it was skipped.
 | Process outcome (M-ETW-1) | ✅ | ✅ | ✅ | ✅ (shared `create_process`) |
 | Enforcement degradation (M-ETW-2) | ✅ (shared dispatcher; records the tier actually selected) | ✅ | n/a — no tier/fallback ladder exists for this backend | n/a |
 | Policy hash (M-ETW-3) | ✅ | ✅ | ✅ | ✅ |
-| Network policy (M-ETW-4) | ✅ (`enforcement_mode: capabilities` — policy travels in the sandbox spec and the OS enforces it, so `firewall_rules_created` is honestly `0`) | ✅ (`firewall` / `both`) | n/a — MXC rejects network and proxy policy for this backend before provisioning | n/a |
+| Network policy (M-ETW-4) | ✅ (`enforcement_mode: capabilities` — policy travels in the sandbox spec and the OS enforces it, so `firewall_rules_created` is honestly `0`) | ✅ (`enforcement_mode: capabilities` for supported directional requests; egress default is reported as `allow` or `block`) | n/a — MXC rejects network and proxy policy for this backend before provisioning | n/a |
 | Sandbox teardown (M-ETW-5) | ✅ | ✅ | ✅ | ✅ (`stop` and `deprovision` phases) |
 | IsolationSession telemetry (M-ETW-6) | n/a | n/a | ✅ Applicable lifecycle events use `Microsoft.MXC`; no separate OS provider is assumed | ✅ Same provider path |
 | Configuration rejection (M-ETW-7) | ✅ | ✅ | ✅ | ✅ (`phase` names the rejecting phase) |

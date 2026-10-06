@@ -329,7 +329,7 @@ mod tests {
     fn a_backend_that_registers_no_container_publishes_no_ownership() {
         use crate::lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
         use crate::mxc_common::logger::{Logger, Mode};
-        use crate::mxc_common::models::{ContainerPolicy, NetworkEnforcementMode};
+        use crate::mxc_common::models::{ContainerPolicy, NetworkAction, NetworkEgressPolicy};
 
         let _watchdog = Watchdog::installed();
         let _fake = crate::lxc_common::network_iptables::test_firewall::install();
@@ -337,8 +337,10 @@ mod tests {
         let mut manager =
             NetworkIptablesManager::new("mxc-bwrap-publish-test", EgressHookPoint::Unhooked);
         let policy = ContainerPolicy {
-            network_enforcement_mode: NetworkEnforcementMode::Firewall,
-            allowed_hosts: vec!["192.0.2.10".to_string()],
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let mut logger = Logger::new(Mode::Buffer);

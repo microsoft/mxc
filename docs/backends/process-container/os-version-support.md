@@ -9,7 +9,7 @@ document are Windows 11**, and the minimum considered here is Windows 11 23H2.
 
 For the enforcement mechanisms themselves see the
 [UI policy schema](./UIPolicy_Schema.md) and the
-[containment configuration spec](../../containment-configuration/0.7.0/policy.md).
+[supported configuration schema](../../schema.md).
 
 ## Windows 11 releases
 
@@ -125,7 +125,9 @@ Notes:
 
 ## Network policy
 
-The release matrix describes the legacy schema 0.6/0.7 implementation.
+The following release matrix documents the retired schema 0.6/0.7
+implementation, not support for executable requests. For current directional
+policy and tier behavior, see [ProcessContainer networking](networking.md).
 
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------|:--:|:--:|:--:|:--:|
@@ -143,9 +145,10 @@ Notes:
   the forward-looking proxy architecture; support for the model-2 BaseContainer
   contract should replace this fallback in a separate change.
 
-Schema 0.8 support is selected by runtime contract rather than Windows release:
+Supported directional network policy (schema 0.9+) depends on the available
+backend enforcement tier rather than the declared version:
 
-| Schema 0.8 capability | PSEC | AppContainer fallback |
+| Directional capability | PSEC | AppContainer fallback |
 |---|:---:|:---:|
 | Directional defaults represented by capabilities | ✅ | ✅ when the capability mapping preserves the request |
 | Explicit egress IP/CIDR/port/protocol rules | ✅ WFP | ❌ |
@@ -155,7 +158,7 @@ Schema 0.8 support is selected by runtime contract rather than Windows release:
 PSEC owns the WFP policy lifetime through workload completion. The
 AppContainer fallback rejects
 `egress.default: "deny"` with `ingress.default: "allow"` because
-`privateNetworkClientServer` is bidirectional and no schema 0.8 WFP filter is
+`privateNetworkClientServer` is bidirectional and no per-container WFP filter is
 available there to block private-network egress.
 
 ## UI restrictions

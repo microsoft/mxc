@@ -226,8 +226,8 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite, tier-gated to `base-container`. Includes the schema 0.8 directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface) and the legacy 0.7 network lane. Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Windows 23H2 only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). The 0.8 networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
+| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite, tier-gated to `base-container`. Includes supported directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface). Remaining failures are genuine MXC bugs or harness limitations. |
+| Process T3 | ✅ Good | Windows 23H2 only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd) on top of the T3 primitives. The directional networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
