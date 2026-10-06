@@ -58,6 +58,33 @@
       }
     },
     {
+      "id": "windows-26h2",
+      "displayName": "Windows 26H2",
+      "family": "windows",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-pc-windows-msvc",
+          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
+          "pool": "1es-mxc-windows-26h2-pro-x64",
+          "backends": [
+            "process-t1",
+            "wslc",
+            "windows-sandbox",
+            "microvm"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-pc-windows-msvc",
+          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
+          "pool": "1es-mxc-windows-26h2-pro-arm64",
+          "backends": [
+            "process-t1",
+            "isolation-session"
+          ]
+        }
+      }
+    },
+    {
       "id": "windows-prerelease-26h1",
       "displayName": "Windows Prerelease 26H1",
       "family": "windows",
@@ -319,6 +346,13 @@
         "os": "windows-prerelease-isolation-session",
         "backends": [
           "isolation-session"
+        ]
+      },
+      {
+        "os": "windows-26h2",
+        "backends": [
+          "process-t1",
+          "wslc"
         ]
       },
       {
