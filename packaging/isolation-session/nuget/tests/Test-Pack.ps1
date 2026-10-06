@@ -290,6 +290,9 @@ try {
         Assert-True ($nuspecText -match [regex]::Escape("<version>$($releaseInfo.nugetVersion)</version>")) 'package version includes the patch'
         Assert-True ($nuspecText -match '<license type="expression">MIT</license>') `
             'package declares the SPDX MIT license expression'
+        Assert-True (
+            $nuspecText -match '<licenseUrl>https://licenses\.nuget\.org/MIT</licenseUrl>') `
+            'package declares the backward-compatible MIT license URL'
 
         $packagedRuntimeManifestBytes = Get-ZipEntryBytesFromPath `
             -NupkgPath $expectedNupkg `

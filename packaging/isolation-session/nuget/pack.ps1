@@ -298,6 +298,7 @@ $nuspec = @"
     <owners>Microsoft</owners>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <license type="expression">MIT</license>
+    <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
     <description>Pipeline-generated SDK for Windows.AI.IsolationSession. Contains both WinMD metadata files plus the signed x64 IsoSessionApp activation shim and completed runtime manifest consumed by MXC.</description>
     <summary>Windows.AI.IsolationSession SDK metadata and pipeline-completed MXC activation assets.</summary>
     <tags>Windows IsolationSession WinRT WinMD MXC AgenticRuntime sdk</tags>
@@ -389,6 +390,9 @@ try {
     }
     if ($nuspecText -notmatch '<license type="expression">MIT</license>') {
         throw 'Generated nuspec does not declare the MIT license expression.'
+    }
+    if ($nuspecText -notmatch '<licenseUrl>https://licenses\.nuget\.org/MIT</licenseUrl>') {
+        throw 'Generated nuspec does not declare the backward-compatible MIT license URL.'
     }
 
     $packagedRuntimeManifest = Get-ZipEntryText -Archive $verify -EntryName 'runtime/IsoSession.manifest'
