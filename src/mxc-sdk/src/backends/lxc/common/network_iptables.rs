@@ -1,16 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
+use std::net::IpAddr;
 use std::process::Command;
 
 use crate::mxc_common::hashing::sha256;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPolicy,
-    NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyHostPin,
+    ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPort,
+    NetworkProtocol, NetworkRule,
 };
-use crate::mxc_common::network_blocks::{self, AddressBlock, IpFamily, MAX_EGRESS_ENTRIES};
+use crate::mxc_common::network_blocks::{self, IpFamily, MAX_EGRESS_ENTRIES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkPlan {
@@ -29,37 +29,17 @@ impl NetworkPlan {
     }
 }
 
-pub(crate) fn uses_directional_keys(policy: &ContainerPolicy) -> bool {
-    policy.network_egress.is_some() || policy.network_ingress.is_some()
-}
-
 pub(crate) fn plan_network(policy: &ContainerPolicy) -> NetworkPlan {
-    if uses_directional_keys(policy) {
-        plan_directional(policy)
-    } else {
-        plan_legacy(policy)
-    }
-}
-
-fn plan_directional(policy: &ContainerPolicy) -> NetworkPlan {
-    if policy.network_proxy.is_enabled() {
-        return NetworkPlan::Filtered;
-    }
-
-    if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
-        return NetworkPlan::Filtered;
-    }
-
     let egress_permits_nothing = match policy.network_egress.as_ref() {
         Some(egress) => egress.default == NetworkAction::Deny && egress.allow.is_empty(),
-        None => matches!(policy.default_network_policy, NetworkPolicy::Block),
+        None => true,
     };
 
     let ingress_permits_nothing = match policy.network_ingress.as_ref() {
         Some(ingress) => {
             ingress.default == NetworkAction::Deny && ingress.host_loopback == NetworkAction::Deny
         }
-        None => !policy.allow_local_network,
+        None => true,
     };
 
     if egress_permits_nothing && ingress_permits_nothing {
@@ -69,31 +49,8 @@ fn plan_directional(policy: &ContainerPolicy) -> NetworkPlan {
     }
 }
 
-fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
-    if policy.network_proxy.is_enabled() {
-        return NetworkPlan::Filtered;
-    }
-
-    if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
-        return NetworkPlan::Filtered;
-    }
-
-    if matches!(policy.default_network_policy, NetworkPolicy::Block) && !policy.allow_local_network
-    {
-        return NetworkPlan::Isolated;
-    }
-
-    NetworkPlan::Filtered
-}
-
 pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
     !plan_network(policy).omits_interface()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProxyEndpoint {
-    ip: String,
-    port: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +62,7 @@ enum RuleAction {
 // iptables applies first-match-wins; entry order is precedence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EgressEntry {
-    destination: String,
+    destination: NetworkCidr,
     action: RuleAction,
     matching: RuleMatch,
 }
@@ -142,18 +99,6 @@ impl TransportProtocol {
 struct PortRange {
     start: u16,
     end: u16,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct ResolvedDestinations {
-    ipv4: Vec<String>,
-    ipv6: Vec<String>,
-}
-
-impl ResolvedDestinations {
-    fn is_empty(&self) -> bool {
-        self.ipv4.is_empty() && self.ipv6.is_empty()
-    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -272,7 +217,6 @@ pub struct NetworkIptablesManager {
     preserve_policy: bool,
     hook_point: EgressHookPoint,
     created: CreatedResources,
-    proxy_pin: Option<ProxyHostPin>,
 }
 
 // iptables rejects chain names of 29 characters or more.
@@ -348,7 +292,6 @@ impl NetworkIptablesManager {
             preserve_policy: false,
             hook_point,
             created: CreatedResources::default(),
-            proxy_pin: None,
         }
     }
 
@@ -373,135 +316,6 @@ impl NetworkIptablesManager {
     pub fn forget(&mut self) {
         self.created = CreatedResources::default();
         self.rules_applied = false;
-    }
-
-    // The hosts-file pin a proxied container needs before it runs.
-    // DNS round-robin can answer the same name differently on a later lookup.
-    pub fn proxy_host_pin(&self) -> Option<&ProxyHostPin> {
-        self.proxy_pin.as_ref()
-    }
-
-    fn covers_every_address(destination: &str) -> bool {
-        destination
-            .split_once('/')
-            .and_then(|(_, prefix)| prefix.trim().parse::<u8>().ok())
-            .is_some_and(|prefix| prefix == 0)
-    }
-
-    fn resolve_host(host: &str) -> ResolvedDestinations {
-        // Winsock resolves an empty entry formatted as `:0` to every local
-        // interface address.  glibc rejects `:0`.
-        if host.trim().is_empty() {
-            return ResolvedDestinations::default();
-        }
-
-        // Linux emits IPv4-mapped destinations as IPv4 packets.
-        // They must be programmed with iptables.
-        let rewritten = Self::ipv4_mapped_destination(host);
-        let host = rewritten.as_deref().unwrap_or(host);
-
-        if host.contains('/') {
-            return match Self::destination_family(host) {
-                Some(IpFamily::V4) => ResolvedDestinations {
-                    ipv4: vec![host.to_string()],
-                    ipv6: Vec::new(),
-                },
-                Some(IpFamily::V6) => ResolvedDestinations {
-                    ipv4: Vec::new(),
-                    ipv6: vec![host.to_string()],
-                },
-                None => ResolvedDestinations::default(),
-            };
-        }
-
-        if let Ok(addr) = host.parse::<IpAddr>() {
-            return match addr {
-                IpAddr::V4(_) => ResolvedDestinations {
-                    ipv4: vec![host.to_string()],
-                    ipv6: Vec::new(),
-                },
-                IpAddr::V6(_) => ResolvedDestinations {
-                    ipv4: Vec::new(),
-                    ipv6: vec![host.to_string()],
-                },
-            };
-        }
-
-        if let Ok(addrs) = format!("{}:0", host).to_socket_addrs() {
-            return Self::bucket_resolved_addrs(addrs.map(|addr| addr.ip()));
-        }
-        ResolvedDestinations::default()
-    }
-
-    // Split A records, AAAA records, and IPv4-mapped AAAA records into the
-    // table that can match each packet.
-    fn bucket_resolved_addrs<I: IntoIterator<Item = IpAddr>>(addrs: I) -> ResolvedDestinations {
-        let mut resolved = ResolvedDestinations::default();
-        for ip in addrs {
-            match ip {
-                IpAddr::V4(ip) => resolved.ipv4.push(ip.to_string()),
-
-                // A resolver can return a AAAA record in mapped form.
-                // It travels as IPv4 on the wire.
-                IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-                    Some(v4) => resolved.ipv4.push(v4.to_string()),
-                    None => resolved.ipv6.push(ip.to_string()),
-                },
-            }
-        }
-        resolved
-    }
-
-    // Rewrite an IPv4-mapped IPv6 destination to its embedded IPv4 form.
-    // Linux puts a genuine IPv4 packet on the wire for a mapped destination.
-    //
-    // CIDRs inside `::ffff:0:0/96` are handled too: the mapped range is the
-    // final 32 bits of that /96.  A prefix shorter than 96 covers addresses
-    // outside the mapped range and stays IPv6.
-    fn ipv4_mapped_destination(destination: &str) -> Option<String> {
-        let Some((network, prefix)) = destination.split_once('/') else {
-            return destination
-                .parse::<Ipv6Addr>()
-                .ok()?
-                .to_ipv4_mapped()
-                .map(|v4| v4.to_string());
-        };
-
-        if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let mapped = network.parse::<Ipv6Addr>().ok()?.to_ipv4_mapped()?;
-        let v4_prefix = prefix.parse::<u8>().ok()?.checked_sub(96)?;
-        if v4_prefix > 32 {
-            return None;
-        }
-        Some(format!("{}/{}", mapped, v4_prefix))
-    }
-
-    fn destination_family(destination: &str) -> Option<IpFamily> {
-        if let Some((network, prefix)) = destination.split_once('/') {
-            // `u8::from_str` accepts a leading `+`.  iptables canonicalizes
-            // `10.0.0.0/+24` to `10.0.0.0/24`.
-            if network.is_empty()
-                || prefix.is_empty()
-                || !prefix.bytes().all(|b| b.is_ascii_digit())
-            {
-                return None;
-            }
-
-            let addr = network.parse::<IpAddr>().ok()?;
-            let prefix = prefix.parse::<u8>().ok()?;
-            return match addr {
-                IpAddr::V4(_) if prefix <= 32 => Some(IpFamily::V4),
-                IpAddr::V6(_) if prefix <= 128 => Some(IpFamily::V6),
-                _ => None,
-            };
-        }
-
-        match destination.parse::<IpAddr>().ok()? {
-            IpAddr::V4(_) => Some(IpFamily::V4),
-            IpAddr::V6(_) => Some(IpFamily::V6),
-        }
     }
 
     fn rule_action_arg(action: &RuleAction) -> &'static str {
@@ -539,216 +353,36 @@ impl NetworkIptablesManager {
         ]
     }
 
-    // The resolver address is not known when a closed chain's allow list is
-    // written.  Port 53 is opened until the container can resolve names.
-    fn build_dns_resolution_rule_args(chain_name: &str) -> Vec<Vec<String>> {
-        vec![
-            vec![
-                "-A", chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT",
-            ],
-            vec![
-                "-A", chain_name, "-p", "tcp", "--dport", "53", "-j", "ACCEPT",
-            ],
-        ]
-        .into_iter()
-        .map(|args| args.into_iter().map(String::from).collect())
-        .collect()
-    }
-
-    fn default_policy_action(default_policy: NetworkPolicy, proxy_enabled: bool) -> &'static str {
-        if proxy_enabled {
-            return "DROP";
-        }
+    fn default_policy_action(default_policy: NetworkAction) -> &'static str {
         match default_policy {
-            NetworkPolicy::Block => "DROP",
-            NetworkPolicy::Allow => "ACCEPT",
+            NetworkAction::Deny => "DROP",
+            NetworkAction::Allow => "ACCEPT",
         }
     }
 
-    fn build_default_policy_rule_arg(
-        chain_name: &str,
-        policy: NetworkPolicy,
-        proxy_enabled: bool,
-    ) -> Vec<String> {
-        let default_action = Self::default_policy_action(policy, proxy_enabled);
+    fn build_default_policy_rule_arg(chain_name: &str, policy: NetworkAction) -> Vec<String> {
+        let default_action = Self::default_policy_action(policy);
         vec!["-A", chain_name, "-j", default_action]
             .into_iter()
             .map(String::from)
             .collect()
     }
 
-    // Proxy rules are IPv4 only and must not run through `ip6tables`.
-    // A proxied IPv6 chain reaches its closing DROP with only loopback allowed.
-    fn build_proxy_chain_rule_args(
+    fn build_destination_rule_args(
         chain_name: &str,
-        endpoints: &[ProxyEndpoint],
-    ) -> Vec<Vec<String>> {
-        endpoints
-            .iter()
-            .map(|endpoint| {
-                vec![
-                    "-A".to_string(),
-                    chain_name.to_string(),
-                    "-p".to_string(),
-                    "tcp".to_string(),
-                    "-d".to_string(),
-                    endpoint.ip.clone(),
-                    "--dport".to_string(),
-                    endpoint.port.to_string(),
-                    "-j".to_string(),
-                    "ACCEPT".to_string(),
-                ]
-            })
-            .collect()
-    }
-
-    fn host_is_ipv6_literal(host: &str) -> bool {
-        let candidate = crate::mxc_common::models::unbracket_host(host);
-        matches!(candidate.parse::<IpAddr>(), Ok(IpAddr::V6(_)))
-    }
-
-    fn ipv6_proxy_unsupported(host: &str) -> String {
-        format!(
-            "IPv6 network proxy endpoints are not supported: the proxy firewall rule is \
-             emitted with IPv4 iptables only, so '{}' cannot be enforced and would be \
-             silently dropped. Use an IPv4 proxy address.",
-            host
-        )
-    }
-
-    // Cap on how many resolved proxy addresses the chain will open.
-    // A round-robin or CDN answer is unbounded, and every address becomes
-    // its own ACCEPT rule and `iptables` process on the container-start path.
-    const MAX_PROXY_ENDPOINTS: usize = 16;
-
-    fn bound_proxy_addresses<'a>(
-        host: &str,
-        addresses: &'a [String],
-        logger: &mut Logger,
-    ) -> &'a [String] {
-        if addresses.len() <= Self::MAX_PROXY_ENDPOINTS {
-            return addresses;
-        }
-
-        logger.log_line(&format!(
-            "Warning: proxy host '{}' resolved to {} addresses; opening the first {} only. \
-             The container is pinned to the first, so it still reaches the proxy.",
-            host,
-            addresses.len(),
-            Self::MAX_PROXY_ENDPOINTS
-        ));
-
-        &addresses[..Self::MAX_PROXY_ENDPOINTS]
-    }
-
-    // Resolve the proxy with one lookup.  DNS round-robin can answer one
-    // name differently on a later lookup.
-    fn resolve_proxy_endpoints(
-        policy: &ContainerPolicy,
-        logger: &mut Logger,
-    ) -> Result<(Vec<ProxyEndpoint>, Option<ProxyHostPin>), String> {
-        if !policy.network_proxy.is_enabled() {
-            return Ok((Vec::new(), None));
-        }
-
-        let address = policy.network_proxy.address.as_ref().ok_or_else(|| {
-            "Network proxy is enabled but no proxy address is configured".to_string()
-        })?;
-
-        if address.port() == 0 {
-            return Err("Network proxy port must be between 1 and 65535".to_string());
-        }
-
-        if Self::host_is_ipv6_literal(address.host()) {
-            return Err(Self::ipv6_proxy_unsupported(address.host()));
-        }
-
-        let resolved = Self::resolve_host(address.host());
-        if resolved.ipv4.is_empty() {
-            if !resolved.ipv6.is_empty() {
-                return Err(Self::ipv6_proxy_unsupported(address.host()));
-            }
-            return Err(format!(
-                "Could not resolve network proxy host '{}'",
-                address.host()
-            ));
-        }
-
-        let endpoints: Vec<ProxyEndpoint> =
-            Self::bound_proxy_addresses(address.host(), &resolved.ipv4, logger)
-                .iter()
-                .map(|ip| {
-                    logger.log_line(&format!(
-                        "Allowing network proxy egress: {}:{} ({})",
-                        address.host(),
-                        address.port(),
-                        ip
-                    ));
-                    ProxyEndpoint {
-                        ip: ip.clone(),
-                        port: address.port(),
-                    }
-                })
-                .collect();
-
-        let pin = Self::build_proxy_host_pin(address, &endpoints[0].ip, logger)?;
-        Ok((endpoints, pin))
-    }
-
-    // A proxied chain opens no port 53.  The hosts-file pin lets the
-    // container find the proxy without selecting an address the chain never allowed.
-    fn build_proxy_host_pin(
-        address: &ProxyAddress,
-        ip: &str,
-        logger: &mut Logger,
-    ) -> Result<Option<ProxyHostPin>, String> {
-        let parsed: IpAddr = ip.parse().map_err(|_| {
-            format!(
-                "Network proxy host '{}' resolved to '{}', which is not an IP address",
-                address.host(),
-                ip
-            )
-        })?;
-
-        let pin = address
-            .host_pin(parsed)
-            .map_err(|e| format!("Cannot pin network proxy host: {}", e))?;
-
-        if let Some(pin) = pin.as_ref() {
-            logger.log_line(&format!(
-                "Pinning network proxy '{}' to resolved address {} inside the container.",
-                pin.hostname(),
-                pin.ip()
-            ));
-        }
-
-        Ok(pin)
-    }
-
-    fn build_resolved_destination_rule_args(
-        chain_name: &str,
-        destinations: &ResolvedDestinations,
+        destination: &NetworkCidr,
         action: &RuleAction,
         matching: RuleMatch,
     ) -> FirewallRuleArgs {
         let mut args = FirewallRuleArgs::default();
-        for destination in &destinations.ipv4 {
-            args.ipv4.push(Self::build_single_rule_args(
-                chain_name,
-                destination,
-                action,
-                matching,
-                IpFamily::V4,
-            ));
-        }
-        for destination in &destinations.ipv6 {
-            args.ipv6.push(Self::build_single_rule_args(
-                chain_name,
-                destination,
-                action,
-                matching,
-                IpFamily::V6,
-            ));
+        if let Some((family, block)) = network_blocks::resolve(destination) {
+            let destination = format!("{}/{}", block.address(family), block.prefix());
+            let rule =
+                Self::build_single_rule_args(chain_name, &destination, action, matching, family);
+            match family {
+                IpFamily::V4 => args.ipv4.push(rule),
+                IpFamily::V6 => args.ipv6.push(rule),
+            }
         }
         args
     }
@@ -800,96 +434,34 @@ impl NetworkIptablesManager {
     }
 
     #[cfg(test)]
-    fn build_host_rule_args(chain_name: &str, host: &str, action: &RuleAction) -> FirewallRuleArgs {
-        let destinations = Self::resolve_host(host);
-        Self::build_resolved_destination_rule_args(
-            chain_name,
-            &destinations,
-            action,
-            RuleMatch::AnyTraffic,
+    fn build_policy_rule_args(chain_name: &str, policy: &ContainerPolicy) -> FirewallRuleArgs {
+        let mut logger =
+            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        Self::build_policy_rules_logged(chain_name, policy, &mut logger).expect(
+            "test policy should not pair an accepting default with an unresolvable block entry",
         )
     }
 
-    #[cfg(test)]
-    fn build_policy_rule_args(
-        chain_name: &str,
-        policy: &ContainerPolicy,
-        uses_directional_keys: bool,
-    ) -> FirewallRuleArgs {
-        let mut logger =
-            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        Self::build_policy_rules_logged(chain_name, policy, uses_directional_keys, &mut logger)
-            .expect(
-                "test policy should not pair an accepting default with an unresolvable block entry",
-            )
-    }
-
-    fn stated_egress(
-        policy: &ContainerPolicy,
-        uses_directional_keys: bool,
-    ) -> Option<&NetworkEgressPolicy> {
-        if uses_directional_keys {
-            policy.network_egress.as_ref()
-        } else {
-            None
-        }
-    }
-
-    fn effective_default_policy(
-        policy: &ContainerPolicy,
-        uses_directional_keys: bool,
-    ) -> NetworkPolicy {
-        match Self::stated_egress(policy, uses_directional_keys) {
-            Some(egress) => match egress.default {
-                NetworkAction::Allow => NetworkPolicy::Allow,
-                NetworkAction::Deny => NetworkPolicy::Block,
-            },
-            None => policy.default_network_policy.clone(),
-        }
+    fn effective_default_policy(policy: &ContainerPolicy) -> NetworkAction {
+        policy
+            .network_egress
+            .as_ref()
+            .map_or(NetworkAction::Deny, |egress| egress.default)
     }
 
     /// Lower the egress policy for its refusals alone, discarding the rules.
-    pub(crate) fn validate_egress_lowering(
-        policy: &ContainerPolicy,
-        uses_directional_keys: bool,
-    ) -> Result<(), String> {
-        Self::lower_egress(policy, uses_directional_keys).map(|_| ())
+    pub(crate) fn validate_egress_lowering(policy: &ContainerPolicy) -> Result<(), String> {
+        Self::lower_egress(policy).map(|_| ())
     }
 
-    fn lower_egress(
-        policy: &ContainerPolicy,
-        uses_directional_keys: bool,
-    ) -> Result<Vec<EgressEntry>, String> {
-        match Self::stated_egress(policy, uses_directional_keys) {
+    fn lower_egress(policy: &ContainerPolicy) -> Result<Vec<EgressEntry>, String> {
+        match policy.network_egress.as_ref() {
             Some(egress) => Self::lower_directional_egress(egress),
-            None => Ok(Self::lower_legacy_hosts(policy)),
+            None => Ok(Vec::new()),
         }
     }
 
-    // Block entries come first.  Under iptables first-match-wins, exchanging
-    // the two halves reverses overlapping allow and block lists.
-    fn lower_legacy_hosts(policy: &ContainerPolicy) -> Vec<EgressEntry> {
-        policy
-            .blocked_hosts
-            .iter()
-            .map(|host| (host, RuleAction::Deny))
-            .chain(
-                policy
-                    .allowed_hosts
-                    .iter()
-                    .map(|host| (host, RuleAction::Allow)),
-            )
-            .map(|(host, action)| EgressEntry {
-                destination: host.clone(),
-                action,
-
-                matching: RuleMatch::AnyTraffic,
-            })
-            .collect()
-    }
-
-    // Deny rules precede allow rules for the same first-match-wins reason
-    // as the legacy lowering.
+    // Deny rules precede allow rules under iptables first-match-wins.
     fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Result<Vec<EgressEntry>, String> {
         let mut entries = Vec::new();
         let mut remaining = MAX_EGRESS_ENTRIES;
@@ -944,21 +516,20 @@ impl NetworkIptablesManager {
     ///
     /// An `iptables` rule matches one destination block and cannot carry an
     /// exclusion, so the exclusion is subtracted from the peer instead.
-    fn peer_destinations(peer: &NetworkPeer) -> Result<Vec<String>, String> {
+    fn peer_destinations(peer: &NetworkPeer) -> Result<Vec<NetworkCidr>, String> {
         // Passing an out-of-range prefix through unchanged keeps it on the path
         // that reports a destination resolving to no address.
         let Some((family, blocks)) = network_blocks::peer_blocks(peer)? else {
-            return Ok(vec![Self::cidr_destination(&peer.cidr)]);
+            return Ok(vec![peer.cidr.clone()]);
         };
 
         Ok(blocks
             .into_iter()
-            .map(|block| Self::block_destination(block, family))
+            .map(|block| NetworkCidr {
+                address: block.address(family),
+                prefix_length: block.prefix(),
+            })
             .collect())
-    }
-
-    fn block_destination(block: AddressBlock, family: IpFamily) -> String {
-        format!("{}/{}", block.address(family), block.prefix())
     }
 
     // A v4 chain and a v6 chain are programmed separately.  Neither wildcard
@@ -980,10 +551,6 @@ impl NetworkIptablesManager {
                 except: Vec::new(),
             },
         ]
-    }
-
-    fn cidr_destination(cidr: &NetworkCidr) -> String {
-        network_blocks::cidr_text(cidr)
     }
 
     fn lower_port_selectors(ports: &[NetworkPort]) -> Vec<RuleMatch> {
@@ -1028,30 +595,26 @@ impl NetworkIptablesManager {
         }
     }
 
-    // DNS round-robin can answer one name differently on repeated lookups.
-    // Each lowered entry is resolved once before logging and rule generation share the result.
+    // Destinations are typed CIDRs; the shared block arithmetic determines
+    // their firewall family, including IPv4-mapped IPv6 addresses.
     fn build_policy_rules_logged(
         chain_name: &str,
         policy: &ContainerPolicy,
-        uses_directional_keys: bool,
         logger: &mut Logger,
     ) -> Result<FirewallRuleArgs, String> {
-        let default_permits = matches!(
-            Self::effective_default_policy(policy, uses_directional_keys),
-            NetworkPolicy::Allow
-        );
+        let default_permits = Self::effective_default_policy(policy) == NetworkAction::Allow;
         let mut args = FirewallRuleArgs::default();
-        let mut unresolved_denies: Vec<&str> = Vec::new();
-        let mut catch_all_allows: Vec<&str> = Vec::new();
-        let entries = Self::lower_egress(policy, uses_directional_keys)?;
+        let mut unresolved_denies: Vec<String> = Vec::new();
+        let mut catch_all_allows: Vec<String> = Vec::new();
+        let entries = Self::lower_egress(policy)?;
         for entry in &entries {
-            let host = entry.destination.as_str();
+            let host = network_blocks::cidr_text(&entry.destination);
             let action = entry.action;
-            let destinations = Self::resolve_host(host);
-            if destinations.is_empty() {
+            let family = network_blocks::resolve(&entry.destination);
+            if family.is_none() {
                 if default_permits && matches!(action, RuleAction::Deny) {
                     return Err(format!(
-                        "blocked host '{}' resolved to no address, so no rule can be \
+                        "network.egress deny destination '{}' resolved to no address, so no rule can be \
                          programmed to deny it, and the default network policy accepts \
                          what no rule matches; refusing to apply a policy that would \
                          leave it reachable",
@@ -1059,22 +622,21 @@ impl NetworkIptablesManager {
                     ));
                 }
                 if matches!(action, RuleAction::Deny) {
-                    unresolved_denies.push(host);
+                    unresolved_denies.push(host.clone());
                 }
-                logger.log_line(&format!("Warning: could not resolve host '{}'", host));
+                logger.log_line(&format!(
+                    "Warning: could not resolve destination '{}'",
+                    host
+                ));
             } else if matches!(action, RuleAction::Allow)
                 && matches!(entry.matching, RuleMatch::AnyTraffic)
-                && destinations
-                    .ipv4
-                    .iter()
-                    .chain(destinations.ipv6.iter())
-                    .any(|dest| Self::covers_every_address(dest))
+                && entry.destination.prefix_length == 0
             {
-                catch_all_allows.push(host);
+                catch_all_allows.push(host.clone());
             }
-            let rule_args = Self::build_resolved_destination_rule_args(
+            let rule_args = Self::build_destination_rule_args(
                 chain_name,
-                &destinations,
+                &entry.destination,
                 &action,
                 entry.matching,
             );
@@ -1088,8 +650,8 @@ impl NetworkIptablesManager {
         }
         if !unresolved_denies.is_empty() && !catch_all_allows.is_empty() {
             return Err(format!(
-                "blocked host(s) {} resolved to no address, so no rule can be programmed \
-                 to deny them, while allowed host(s) {} accept every address and are \
+                "network.egress deny destination(s) {} resolved to no address, so no rule can be programmed \
+                 to deny them, while allow destination(s) {} accept every address and are \
                  evaluated before the chain's closing DROP; whatever the blocked host \
                  resolves to for the container is therefore accepted, so deny precedence \
                  cannot hold. Fix or remove the unresolvable blocked host, or narrow the \
@@ -1354,10 +916,9 @@ impl NetworkIptablesManager {
         Ok(())
     }
 
-    fn apply_rules_in_dialect(
+    pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
-        uses_directional_keys: bool,
         logger: &mut Logger,
     ) -> Result<bool, String> {
         let plan = plan_network(policy);
@@ -1375,41 +936,8 @@ impl NetworkIptablesManager {
             ));
         }
 
-        let (proxy_endpoints, proxy_pin) = Self::resolve_proxy_endpoints(policy, logger)?;
-        self.proxy_pin = proxy_pin;
-
-        let outcome = self.apply_firewall_rules_inner(
-            policy,
-            uses_directional_keys,
-            &proxy_endpoints,
-            logger,
-        );
+        let outcome = self.apply_firewall_rules_inner(policy, logger);
         self.record_apply_outcome(outcome, logger)
-    }
-
-    pub fn apply_legacy_rules(
-        &mut self,
-        policy: &ContainerPolicy,
-        logger: &mut Logger,
-    ) -> Result<bool, String> {
-        self.apply_rules_in_dialect(policy, false, logger)
-    }
-
-    pub fn apply_directional_rules(
-        &mut self,
-        policy: &ContainerPolicy,
-        logger: &mut Logger,
-    ) -> Result<bool, String> {
-        self.apply_rules_in_dialect(policy, true, logger)
-    }
-
-    pub fn apply_firewall_rules(
-        &mut self,
-        policy: &ContainerPolicy,
-        logger: &mut Logger,
-    ) -> Result<bool, String> {
-        let dialect = uses_directional_keys(policy);
-        self.apply_rules_in_dialect(policy, dialect, logger)
     }
 
     fn record_apply_outcome(
@@ -1450,18 +978,10 @@ impl NetworkIptablesManager {
     fn apply_firewall_rules_inner(
         &self,
         policy: &ContainerPolicy,
-        uses_directional_keys: bool,
-        proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
     ) -> Result<CreatedResources, (String, CreatedResources)> {
         let mut created = CreatedResources::default();
-        match self.install_firewall_rules(
-            policy,
-            uses_directional_keys,
-            proxy_endpoints,
-            logger,
-            &mut created,
-        ) {
+        match self.install_firewall_rules(policy, logger, &mut created) {
             Ok(()) => Ok(created),
             Err(e) => {
                 let residual = self.teardown_created(&self.chain_name, &created, logger);
@@ -1473,8 +993,6 @@ impl NetworkIptablesManager {
     fn install_firewall_rules(
         &self,
         policy: &ContainerPolicy,
-        uses_directional_keys: bool,
-        proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
         created: &mut CreatedResources,
     ) -> Result<(), String> {
@@ -1482,15 +1000,6 @@ impl NetworkIptablesManager {
             "Creating iptables/ip6tables chain: {}",
             self.chain_name
         ));
-
-        if !proxy_endpoints.is_empty() && !policy.blocked_hosts.is_empty() {
-            return Err(
-                "network.proxy cannot be combined with blockedHosts: the proxy can fetch a \
-                 blocked destination on the container's behalf, so the block list would not \
-                 be enforced"
-                    .to_string(),
-            );
-        }
 
         let ipv6_enabled = match self.ip6tables_status(logger) {
             Ip6tablesStatus::Available => true,
@@ -1514,84 +1023,27 @@ impl NetworkIptablesManager {
             Self::publish_created(created);
         }
 
-        let proxy_mode = !proxy_endpoints.is_empty();
+        let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
+        self.run_iptables_rule_args(&base_rules, logger)?;
+        if ipv6_enabled {
+            self.run_ip6tables_rule_args(&base_rules, logger)?;
+        }
 
-        if proxy_mode {
-            // No port 53 accept: the container resolves the proxy through the
-            // hosts-file pin, and an unscoped one would be a standing DNS-tunnel
-            // exfil path.  No ESTABLISHED,RELATED accept: every packet to the
-            // proxy already matches an endpoint ACCEPT.
-            let loopback_rules = vec![Self::build_loopback_accept_rule_args(&self.chain_name)];
-            self.run_iptables_rule_args(&loopback_rules, logger)?;
-            if ipv6_enabled {
-                self.run_ip6tables_rule_args(&loopback_rules, logger)?;
-            }
-            let proxy_rules = Self::build_proxy_chain_rule_args(&self.chain_name, proxy_endpoints);
-            self.run_iptables_rule_args(&proxy_rules, logger)?;
-            for rule in loopback_rules.iter().chain(proxy_rules.iter()) {
-                logger.log_line(&format!("Programmed iptables rule: {}", rule.join(" ")));
-            }
-            if !policy.allowed_hosts.is_empty() {
-                logger.log_line(
-                    "Warning: network.proxy is configured, so allowedHosts is not programmed; \
-                     the container may reach the proxy and nothing else.",
-                );
-            }
-            if ipv6_enabled {
-                logger.log_line(
-                    "IPv6 egress is denied outright while a proxy is configured: the proxy \
-                     endpoint is IPv4, so the IPv6 chain carries its loopback accept and \
-                     its closing DROP.",
-                );
-            }
-        } else {
-            let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
-
-            let mut tail_rules: Vec<Vec<String>> = Vec::new();
-
-            // Only a closed chain naming hosts to allow gets DNS.  An open chain
-            // needs no grant, and the accept would sit ahead of the deny rules.
-            let closed_with_named_hosts = matches!(
-                Self::effective_default_policy(policy, uses_directional_keys),
-                NetworkPolicy::Block
-            ) && !policy.allowed_hosts.is_empty();
-            if !uses_directional_keys && closed_with_named_hosts {
-                tail_rules.extend(Self::build_dns_resolution_rule_args(&self.chain_name));
-            }
-
-            self.run_iptables_rule_args(&base_rules, logger)?;
-            if !tail_rules.is_empty() {
-                self.run_iptables_rule_args(&tail_rules, logger)?;
-            }
-            if ipv6_enabled {
-                self.run_ip6tables_rule_args(&base_rules, logger)?;
-                if !tail_rules.is_empty() {
-                    self.run_ip6tables_rule_args(&tail_rules, logger)?;
-                }
-            }
-
-            let policy_rules = Self::build_policy_rules_logged(
-                &self.chain_name,
-                policy,
-                uses_directional_keys,
-                logger,
-            )?;
-            self.run_iptables_rule_args(&policy_rules.ipv4, logger)?;
-            if ipv6_enabled {
-                self.run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
-            } else if !policy_rules.ipv6.is_empty() {
-                logger.log_line(&format!(
-                    "Warning: {} IPv6 firewall rule(s) not applied because ip6tables \
-                     is unavailable; IPv6 egress is unfiltered on this host.",
-                    policy_rules.ipv6.len()
-                ));
-            }
+        let policy_rules = Self::build_policy_rules_logged(&self.chain_name, policy, logger)?;
+        self.run_iptables_rule_args(&policy_rules.ipv4, logger)?;
+        if ipv6_enabled {
+            self.run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
+        } else if !policy_rules.ipv6.is_empty() {
+            logger.log_line(&format!(
+                "Warning: {} IPv6 firewall rule(s) not applied because ip6tables \
+                 is unavailable; IPv6 egress is unfiltered on this host.",
+                policy_rules.ipv6.len()
+            ));
         }
 
         let default_rule = Self::build_default_policy_rule_arg(
             &self.chain_name,
-            Self::effective_default_policy(policy, uses_directional_keys),
-            proxy_mode,
+            Self::effective_default_policy(policy),
         );
         let default_args: Vec<&str> = default_rule.iter().map(String::as_str).collect();
         let default_action = default_args.last().copied().unwrap_or("ACCEPT");
@@ -1749,14 +1201,6 @@ impl Drop for NetworkIptablesManager {
 }
 
 #[cfg(test)]
-#[path = "network_iptables_deny_precedence_spec.rs"]
-mod deny_precedence_spec;
-
-#[cfg(test)]
-#[path = "network_iptables_proxy_spec.rs"]
-mod proxy_spec;
-
-#[cfg(test)]
 #[path = "network_iptables_ga_egress_spec.rs"]
 mod ga_egress_spec;
 
@@ -1872,15 +1316,15 @@ pub(crate) mod test_firewall {
 mod tests {
     use super::*;
     use crate::mxc_common::logger::{Logger, Mode};
-    use crate::mxc_common::models::{
-        ContainerPolicy, NetworkEnforcementMode, ProxyAddress, ProxyConfig,
-    };
+    use crate::mxc_common::models::{ContainerPolicy, NetworkEgressPolicy};
     use std::io::{Error, ErrorKind};
 
-    fn policy_requesting_mode(mode: NetworkEnforcementMode) -> ContainerPolicy {
+    fn filtered_policy() -> ContainerPolicy {
         ContainerPolicy {
-            network_enforcement_mode: mode,
-            allowed_hosts: vec!["203.0.113.7".to_string()],
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
@@ -1889,24 +1333,7 @@ mod tests {
     fn an_unhooked_caller_is_not_refused_in_firewall_mode() {
         let _fake = super::test_firewall::install();
         let mut manager = NetworkIptablesManager::new("bwrap-nonetns", EgressHookPoint::Unhooked);
-        let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
-        let mut logger = Logger::new(Mode::Buffer);
-
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
-
-        assert!(
-            result.is_ok(),
-            "a caller with no namespace to enforce in must not be failed closed, got {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn an_unhooked_caller_is_not_refused_in_both_mode() {
-        let _fake = super::test_firewall::install();
-        let mut manager =
-            NetworkIptablesManager::new("bwrap-nonetns-both", EgressHookPoint::Unhooked);
-        let policy = policy_requesting_mode(NetworkEnforcementMode::Both);
+        let policy = filtered_policy();
         let mut logger = Logger::new(Mode::Buffer);
 
         let result = manager.apply_firewall_rules(&policy, &mut logger);
@@ -1923,7 +1350,7 @@ mod tests {
         let fake = super::test_firewall::install();
         let mut manager =
             NetworkIptablesManager::new("lxc-forget", EgressHookPoint::ContainerNetns(4242));
-        let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
+        let policy = filtered_policy();
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
@@ -1956,7 +1383,7 @@ mod tests {
         let fake = super::test_firewall::install();
         let mut manager =
             NetworkIptablesManager::new("lxc-hooked", EgressHookPoint::ContainerNetns(4242));
-        let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
+        let policy = filtered_policy();
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
@@ -1988,7 +1415,7 @@ mod tests {
     fn an_unhooked_manager_installs_no_output_hook() {
         let fake = super::test_firewall::install();
         let mut manager = NetworkIptablesManager::new("bwrap-nohook", EgressHookPoint::Unhooked);
-        let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
+        let policy = filtered_policy();
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
@@ -2319,7 +1746,7 @@ mod tests {
             NetworkIptablesManager::new("already-owned", EgressHookPoint::ContainerNetns(4242));
         manager.retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
 
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let policy = filtered_policy();
         let mut logger = Logger::new(Mode::Buffer);
         let result = manager.apply_firewall_rules(&policy, &mut logger);
 
@@ -2339,7 +1766,7 @@ mod tests {
         let fake = test_firewall::install();
         let mut manager =
             NetworkIptablesManager::new("fresh", EgressHookPoint::ContainerNetns(4242));
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let policy = filtered_policy();
         let mut logger = Logger::new(Mode::Buffer);
         let result = manager.apply_firewall_rules(&policy, &mut logger);
 
@@ -2390,65 +1817,25 @@ mod tests {
         assert!(mgr.chain_name.len() <= CHAIN_NAME_MAX_LEN);
     }
 
-    #[test]
-    fn resolve_ip_address() {
-        let ips = NetworkIptablesManager::resolve_host("127.0.0.1");
-        assert_eq!(ips.ipv4, vec!["127.0.0.1"]);
-        assert!(ips.ipv6.is_empty());
-    }
-
-    #[test]
-    fn resolve_host_retains_ipv6_literal() {
-        let ips = NetworkIptablesManager::resolve_host("::1");
-        assert!(ips.ipv4.is_empty());
-        assert_eq!(ips.ipv6, vec!["::1"]);
-    }
-
-    #[test]
-    fn resolve_host_rewrites_ipv4_mapped_ipv6_literal_to_ipv4() {
-        let ips = NetworkIptablesManager::resolve_host("::ffff:127.0.0.1");
-        assert_eq!(ips.ipv4, vec!["127.0.0.1"]);
-        assert!(ips.ipv6.is_empty());
-    }
-
-    #[test]
-    fn resolve_host_keeps_ipv4_literal_unchanged() {
-        let ips = NetworkIptablesManager::resolve_host("10.0.0.1");
-        assert_eq!(ips.ipv4, vec!["10.0.0.1"]);
-        assert!(ips.ipv6.is_empty());
-    }
-
-    #[test]
-    fn resolve_host_retains_valid_cidr_by_family() {
-        let v4 = NetworkIptablesManager::resolve_host("140.82.112.0/20");
-        assert_eq!(v4.ipv4, vec!["140.82.112.0/20"]);
-        assert!(v4.ipv6.is_empty());
-
-        let v6 = NetworkIptablesManager::resolve_host("2606:50c0::/32");
-        assert!(v6.ipv4.is_empty());
-        assert_eq!(v6.ipv6, vec!["2606:50c0::/32"]);
-    }
-
-    #[test]
-    fn resolve_host_rejects_invalid_cidr_prefix() {
-        assert!(NetworkIptablesManager::resolve_host("140.82.112.0/33").is_empty());
-        assert!(NetworkIptablesManager::resolve_host("2606:50c0::/129").is_empty());
-        assert!(NetworkIptablesManager::resolve_host("140.82.112.0/not-a-prefix").is_empty());
-    }
-
-    #[test]
-    fn resolve_host_rejects_malformed_cidr_syntax() {
-        assert!(NetworkIptablesManager::resolve_host("/20").is_empty());
-        assert!(NetworkIptablesManager::resolve_host("140.82.112.0/").is_empty());
-        assert!(NetworkIptablesManager::resolve_host("140.82.112.0/20/8").is_empty());
+    fn cidr(value: &str) -> NetworkCidr {
+        let (address, prefix) = value
+            .split_once('/')
+            .expect("fixture must include a prefix");
+        NetworkCidr {
+            address: address.parse().expect("fixture must include an IP address"),
+            prefix_length: prefix
+                .parse()
+                .expect("fixture must include a numeric prefix"),
+        }
     }
 
     #[test]
     fn host_rule_args_route_ipv4_to_iptables_args() {
-        let args = NetworkIptablesManager::build_host_rule_args(
+        let args = NetworkIptablesManager::build_destination_rule_args(
             "MXC-test",
-            "140.82.112.4",
+            &cidr("140.82.112.4/32"),
             &RuleAction::Allow,
+            RuleMatch::AnyTraffic,
         );
 
         assert_eq!(
@@ -2457,7 +1844,7 @@ mod tests {
                 "-A",
                 "MXC-test",
                 "-d",
-                "140.82.112.4",
+                "140.82.112.4/32",
                 "-j",
                 "ACCEPT",
             ])]
@@ -2467,10 +1854,11 @@ mod tests {
 
     #[test]
     fn host_rule_args_route_ipv6_to_ip6tables_args() {
-        let args = NetworkIptablesManager::build_host_rule_args(
+        let args = NetworkIptablesManager::build_destination_rule_args(
             "MXC-test",
-            "2606:50c0:8000::64",
+            &cidr("2606:50c0:8000::64/128"),
             &RuleAction::Deny,
+            RuleMatch::AnyTraffic,
         );
 
         assert!(args.ipv4.is_empty());
@@ -2480,7 +1868,7 @@ mod tests {
                 "-A",
                 "MXC-test",
                 "-d",
-                "2606:50c0:8000::64",
+                "2606:50c0:8000::64/128",
                 "-j",
                 "DROP",
             ])]
@@ -2489,10 +1877,11 @@ mod tests {
 
     #[test]
     fn host_rule_args_pass_cidr_through_unchanged() {
-        let v4 = NetworkIptablesManager::build_host_rule_args(
+        let v4 = NetworkIptablesManager::build_destination_rule_args(
             "MXC-test",
-            "140.82.112.0/20",
+            &cidr("140.82.112.0/20"),
             &RuleAction::Allow,
+            RuleMatch::AnyTraffic,
         );
         assert_eq!(
             v4.ipv4,
@@ -2507,10 +1896,11 @@ mod tests {
         );
         assert!(v4.ipv6.is_empty());
 
-        let v6 = NetworkIptablesManager::build_host_rule_args(
+        let v6 = NetworkIptablesManager::build_destination_rule_args(
             "MXC-test",
-            "2606:50c0::/32",
+            &cidr("2606:50c0::/32"),
             &RuleAction::Allow,
+            RuleMatch::AnyTraffic,
         );
         assert!(v6.ipv4.is_empty());
         assert_eq!(
@@ -2527,11 +1917,38 @@ mod tests {
     }
 
     #[test]
-    fn host_rule_args_drop_unresolvable_destination() {
-        let args = NetworkIptablesManager::build_host_rule_args(
+    fn direct_mapped_ipv6_cidr_uses_ipv4_destination_in_ipv4_chain() {
+        let args = NetworkIptablesManager::build_destination_rule_args(
             "MXC-test",
-            "140.82.112.0/33",
+            &cidr("::ffff:192.0.2.0/120"),
             &RuleAction::Allow,
+            RuleMatch::AnyTraffic,
+        );
+
+        assert_eq!(
+            args.ipv4,
+            vec![strings(&[
+                "-A",
+                "MXC-test",
+                "-d",
+                "192.0.2.0/24",
+                "-j",
+                "ACCEPT",
+            ])]
+        );
+        assert!(args.ipv6.is_empty());
+    }
+
+    #[test]
+    fn invalid_typed_cidr_does_not_program_a_rule() {
+        let args = NetworkIptablesManager::build_destination_rule_args(
+            "MXC-test",
+            &NetworkCidr {
+                address: IpAddr::from([140, 82, 112, 0]),
+                prefix_length: 33,
+            },
+            &RuleAction::Allow,
+            RuleMatch::AnyTraffic,
         );
 
         assert!(args.ipv4.is_empty());
@@ -2539,354 +1956,45 @@ mod tests {
     }
 
     #[test]
-    fn build_policy_rule_args_splits_allow_and_block_lists_by_family() {
-        let policy = ContainerPolicy {
-            allowed_hosts: vec!["140.82.112.0/20".to_string(), "2606:50c0::/32".to_string()],
-            blocked_hosts: vec!["10.0.0.0/8".to_string(), "2001:db8::/32".to_string()],
-            ..Default::default()
-        };
-
-        let args = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, false);
-
-        let expected_v4 = vec![
-            strings(&["-A", "MXC-test", "-d", "140.82.112.0/20", "-j", "ACCEPT"]),
-            strings(&["-A", "MXC-test", "-d", "10.0.0.0/8", "-j", "DROP"]),
-        ];
-        let expected_v6 = vec![
-            strings(&["-A", "MXC-test", "-d", "2606:50c0::/32", "-j", "ACCEPT"]),
-            strings(&["-A", "MXC-test", "-d", "2001:db8::/32", "-j", "DROP"]),
-        ];
-
-        assert_eq!(args.ipv4.len(), expected_v4.len());
-        for rule in &expected_v4 {
-            assert!(
-                args.ipv4.contains(rule),
-                "IPv4 rules should contain {rule:?}; actual: {:?}",
-                args.ipv4
-            );
-        }
-        assert_eq!(args.ipv6.len(), expected_v6.len());
-        for rule in &expected_v6 {
-            assert!(
-                args.ipv6.contains(rule),
-                "IPv6 rules should contain {rule:?}; actual: {:?}",
-                args.ipv6
-            );
-        }
-    }
-
-    #[test]
     fn base_chain_rule_args_are_family_agnostic() {
         let base = NetworkIptablesManager::build_base_chain_rule_args("MXC-test");
-        let dns = NetworkIptablesManager::build_dns_resolution_rule_args("MXC-test");
 
         assert_eq!(base.len(), 2);
-        assert_eq!(dns.len(), 2);
-        for rule in base.iter().chain(dns.iter()) {
+        for rule in &base {
             assert!(!rule.iter().any(|arg| arg == "icmp"));
             assert!(!rule.iter().any(|arg| arg == "icmpv6"));
         }
     }
 
-    fn assert_resolved_exact(input: &str, expected_ipv4: &[&str], expected_ipv6: &[&str]) {
-        let resolved = NetworkIptablesManager::resolve_host(input);
-        let expected_ipv4: Vec<String> = expected_ipv4
-            .iter()
-            .map(|value| value.to_string())
-            .collect();
-        let expected_ipv6: Vec<String> = expected_ipv6
-            .iter()
-            .map(|value| value.to_string())
-            .collect();
-
-        assert_eq!(
-            resolved.ipv4, expected_ipv4,
-            "unexpected IPv4 destinations for {input:?}"
-        );
-        assert_eq!(
-            resolved.ipv6, expected_ipv6,
-            "unexpected IPv6 destinations for {input:?}"
-        );
-    }
-
-    fn assert_destination_family(input: &str, expected: Option<IpFamily>) {
-        assert_eq!(
-            NetworkIptablesManager::destination_family(input),
-            expected,
-            "unexpected destination family for {input:?}"
-        );
-    }
-
     #[test]
-    fn bare_ip_literals_are_routed_only_to_their_matching_family() {
-        let cases = [
-            ("192.0.2.1", &["192.0.2.1"][..], &[][..]),
-            ("127.0.0.1", &["127.0.0.1"][..], &[][..]),
-            ("2606:50c0::153", &[][..], &["2606:50c0::153"][..]),
-            (
-                "2606:50c0:0000:0000:0000:0000:0000:0153",
-                &[][..],
-                &["2606:50c0:0000:0000:0000:0000:0000:0153"][..],
-            ),
-            ("::1", &[][..], &["::1"][..]),
-        ];
-
-        for (input, expected_ipv4, expected_ipv6) in cases {
-            assert_resolved_exact(input, expected_ipv4, expected_ipv6);
-        }
-    }
-
-    #[test]
-    fn ipv4_mapped_ipv6_literal_is_filed_as_ipv4() {
-        assert_resolved_exact("::ffff:127.0.0.1", &["127.0.0.1"], &[]);
-    }
-
-    #[test]
-    fn ipv4_mapped_cidr_is_translated_to_its_ipv4_prefix() {
-        assert_resolved_exact("::ffff:192.0.2.0/120", &["192.0.2.0/24"], &[]);
-        assert_resolved_exact("::ffff:198.51.100.42/128", &["198.51.100.42/32"], &[]);
-    }
-
-    #[test]
-    fn an_ipv6_prefix_shorter_than_the_mapped_range_stays_ipv6() {
-        assert_resolved_exact("::ffff:0:0/95", &[], &["::ffff:0:0/95"]);
-    }
-
-    #[test]
-    fn valid_cidrs_are_passed_through_unchanged_in_their_matching_family() {
-        let cases = [
-            ("140.82.112.0/20", &["140.82.112.0/20"][..], &[][..]),
-            ("2606:50c0::/32", &[][..], &["2606:50c0::/32"][..]),
-        ];
-
-        for (input, expected_ipv4, expected_ipv6) in cases {
-            assert_resolved_exact(input, expected_ipv4, expected_ipv6);
-        }
-    }
-
-    #[test]
-    fn v4_cidr_with_host_bits_set_is_passed_through_unchanged() {
-        assert_resolved_exact("140.82.112.5/20", &["140.82.112.5/20"], &[]);
-    }
-
-    #[test]
-    fn cidr_prefix_lengths_accept_only_family_specific_bounds() {
-        let cases = [
-            ("0.0.0.0/0", Some(IpFamily::V4), &["0.0.0.0/0"][..], &[][..]),
-            (
-                "192.0.2.1/32",
-                Some(IpFamily::V4),
-                &["192.0.2.1/32"][..],
-                &[][..],
-            ),
-            ("192.0.2.1/33", None, &[][..], &[][..]),
-            ("192.0.2.1/129", None, &[][..], &[][..]),
-            ("::/0", Some(IpFamily::V6), &[][..], &["::/0"][..]),
-            (
-                "2001:db8::1/128",
-                Some(IpFamily::V6),
-                &[][..],
-                &["2001:db8::1/128"][..],
-            ),
-            ("2001:db8::1/129", None, &[][..], &[][..]),
-        ];
-
-        for (input, expected_family, expected_ipv4, expected_ipv6) in cases {
-            assert_resolved_exact(input, expected_ipv4, expected_ipv6);
-            assert_destination_family(input, expected_family);
-        }
-    }
-
-    #[test]
-    fn v6_prefix_length_on_v4_address_is_rejected() {
-        assert_resolved_exact("10.0.0.0/64", &[], &[]);
-        assert_destination_family("10.0.0.0/64", None);
-    }
-
-    #[test]
-    fn malformed_cidr_syntax_and_garbage_resolve_to_nothing() {
-        let cases = [
-            "/24",
-            "10.0.0.0/",
-            "10.0.0.0//24",
-            "10.0.0.0/abc",
-            "10.0.0.0/-1",
-            "10.0.0.0/ 24",
-            "not-a-valid-firewall-destination",
-        ];
-
-        for input in cases {
-            let resolved = NetworkIptablesManager::resolve_host(input);
-            assert!(
-                resolved.is_empty(),
-                "malformed destination {input:?} should resolve to nothing, got {resolved:?}"
+    fn typed_cidrs_route_to_their_firewall_family() {
+        for (input, expected, is_v4) in [
+            ("192.0.2.0/24", "192.0.2.0/24", true),
+            ("2001:db8::/32", "2001:db8::/32", false),
+            ("::ffff:192.0.2.0/120", "192.0.2.0/24", true),
+            ("::ffff:0:0/95", "::fffe:0:0/95", false),
+        ] {
+            let peer = NetworkPeer {
+                cidr: cidr(input),
+                except: Vec::new(),
+            };
+            let lowered =
+                NetworkIptablesManager::peer_destinations(&peer).expect("valid CIDR should lower");
+            assert_eq!(lowered.len(), 1);
+            let args = NetworkIptablesManager::build_destination_rule_args(
+                "MXC-test",
+                &lowered[0],
+                &RuleAction::Allow,
+                RuleMatch::AnyTraffic,
             );
-            assert_destination_family(input, None);
-        }
-    }
-
-    #[test]
-    fn cidr_prefix_with_plus_sign_resolves_to_nothing() {
-        let input = "10.0.0.0/+24";
-        let resolved = NetworkIptablesManager::resolve_host(input);
-        assert!(
-            resolved.is_empty(),
-            "malformed destination {input:?} should resolve to nothing, got {resolved:?}"
-        );
-        assert_destination_family(input, None);
-    }
-
-    #[test]
-    fn leading_plus_does_not_smuggle_an_out_of_range_prefix_past_validation() {
-        let input = "10.0.0.0/+33";
-        let resolved = NetworkIptablesManager::resolve_host(input);
-        assert!(
-            resolved.is_empty(),
-            "a leading `+` must not smuggle an out-of-range prefix past validation, got {resolved:?}"
-        );
-        assert_destination_family(input, None);
-    }
-
-    #[test]
-    fn empty_input_resolves_to_nothing() {
-        let resolved = NetworkIptablesManager::resolve_host("");
-        assert!(
-            resolved.is_empty(),
-            "empty input should resolve to nothing, got {resolved:?}"
-        );
-        assert_destination_family("", None);
-    }
-
-    fn assert_buckets_are_family_pure(input: &str, resolved: &ResolvedDestinations) {
-        for destination in &resolved.ipv4 {
-            assert_eq!(
-                NetworkIptablesManager::destination_family(destination),
-                Some(IpFamily::V4),
-                "{input:?}: {destination:?} is in the ipv4 bucket but is not an IPv4 destination"
-            );
-        }
-        for destination in &resolved.ipv6 {
-            assert_eq!(
-                NetworkIptablesManager::destination_family(destination),
-                Some(IpFamily::V6),
-                "{input:?}: {destination:?} is in the ipv6 bucket but is not an IPv6 destination"
-            );
-        }
-    }
-
-    #[test]
-    fn aaaa_records_land_in_the_v6_bucket_and_never_in_the_v4_bucket() {
-        let injected: Vec<IpAddr> = [
-            "93.184.216.34",
-            "2606:2800:220:1:248:1893:25c8:1946",
-            "8.8.8.8",
-            "2001:4860:4860::8888",
-        ]
-        .iter()
-        .map(|value| {
-            value
-                .parse::<IpAddr>()
-                .expect("injected test address must parse")
-        })
-        .collect();
-
-        let resolved = NetworkIptablesManager::bucket_resolved_addrs(injected);
-
-        assert_eq!(
-            resolved.ipv4.len(),
-            2,
-            "both injected A records must land in the v4 bucket, got {:?}",
-            resolved.ipv4
-        );
-        assert_eq!(
-            resolved.ipv6.len(),
-            2,
-            "both injected AAAA records must land in the v6 bucket, got {:?}",
-            resolved.ipv6
-        );
-        assert!(
-            !resolved.ipv6.is_empty(),
-            "AAAA records must produce at least one v6 destination; an empty v6 \
-             bucket means the IPv6 arm was dropped or misrouted into the v4 bucket"
-        );
-        assert_buckets_are_family_pure("injected A/AAAA mix", &resolved);
-    }
-
-    #[test]
-    fn live_dual_stack_resolution_keeps_buckets_family_pure() {
-        for host in ["dns.google", "one.one.one.one", "localhost"] {
-            let resolved = NetworkIptablesManager::resolve_host(host);
-            assert_buckets_are_family_pure(host, &resolved);
-        }
-    }
-
-    #[test]
-    fn localhost_resolution_populates_available_loopback_families() {
-        let resolved = NetworkIptablesManager::resolve_host("localhost");
-
-        // A minimal host can have a degenerate /etc/hosts.  Accept whichever
-        // localhost family is configured while checking that no other address leaks in.
-        assert!(
-            !resolved.is_empty(),
-            "localhost should resolve to at least one loopback family"
-        );
-        assert!(
-            resolved
-                .ipv4
-                .iter()
-                .all(|destination| destination == "127.0.0.1"),
-            "localhost IPv4 results should all be 127.0.0.1, got {:?}",
-            resolved.ipv4
-        );
-        assert!(
-            resolved.ipv6.iter().all(|destination| destination == "::1"),
-            "localhost IPv6 results should all be ::1, got {:?}",
-            resolved.ipv6
-        );
-        assert_buckets_are_family_pure("localhost", &resolved);
-    }
-
-    #[test]
-    fn unresolvable_invalid_tld_hostname_resolves_to_nothing() {
-        let input = "mxc-resolution-spec-7f3b2d9c4a1e6f80.invalid";
-        let resolved = NetworkIptablesManager::resolve_host(input);
-
-        assert!(
-            resolved.is_empty(),
-            "reserved .invalid hostname {input:?} should resolve to nothing, got {resolved:?}"
-        );
-        assert_destination_family(input, None);
-    }
-
-    #[test]
-    fn destination_family_agrees_with_every_resolved_destination() {
-        let inputs = [
-            "192.0.2.44",
-            "2606:50c0::153",
-            "140.82.112.5/20",
-            "2606:50c0::/32",
-            "::ffff:127.0.0.1",
-            "localhost",
-        ];
-
-        for input in inputs {
-            let resolved = NetworkIptablesManager::resolve_host(input);
-
-            for destination in &resolved.ipv4 {
-                assert_eq!(
-                    NetworkIptablesManager::destination_family(destination),
-                    Some(IpFamily::V4),
-                    "destination_family disagreed with IPv4 filing for input {input:?}, destination {destination:?}"
-                );
-            }
-
-            for destination in &resolved.ipv6 {
-                assert_eq!(
-                    NetworkIptablesManager::destination_family(destination),
-                    Some(IpFamily::V6),
-                    "destination_family disagreed with IPv6 filing for input {input:?}, destination {destination:?}"
-                );
-            }
+            let (present, absent) = if is_v4 {
+                (&args.ipv4, &args.ipv6)
+            } else {
+                (&args.ipv6, &args.ipv4)
+            };
+            assert!(absent.is_empty(), "wrong family for {input}: {args:?}");
+            assert_eq!(present.len(), 1, "missing {input}: {args:?}");
+            assert!(present[0].contains(&expected.to_string()));
         }
     }
 
@@ -2908,88 +2016,6 @@ mod tests {
         );
     }
 
-    fn policy_with_hosts(allowed_hosts: &[&str], blocked_hosts: &[&str]) -> ContainerPolicy {
-        ContainerPolicy {
-            allowed_hosts: strings(allowed_hosts),
-            blocked_hosts: strings(blocked_hosts),
-            ..Default::default()
-        }
-    }
-
-    // `.invalid` is reserved by RFC 2606 and never resolves.
-    const UNRESOLVABLE_HOST: &str = "blocked.invalid";
-
-    #[test]
-    fn an_unresolvable_deny_under_a_blocking_default_is_fatal_beside_a_catch_all_allow() {
-        let policy = ContainerPolicy {
-            default_network_policy: NetworkPolicy::Block,
-            ..policy_with_hosts(&["0.0.0.0/0"], &[UNRESOLVABLE_HOST])
-        };
-        let mut logger =
-            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-
-        let err =
-            NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
-                .expect_err("a catch-all allow must not be able to accept an unresolvable deny");
-
-        assert!(
-            err.contains(UNRESOLVABLE_HOST) && err.contains("deny precedence"),
-            "error should name the host and the invariant, got: {err}"
-        );
-    }
-
-    #[test]
-    fn an_ipv6_catch_all_allow_also_arms_the_deny_precedence_failure() {
-        let policy = ContainerPolicy {
-            default_network_policy: NetworkPolicy::Block,
-            ..policy_with_hosts(&["::/0"], &[UNRESOLVABLE_HOST])
-        };
-        let mut logger =
-            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
-            .expect_err("a v6 catch-all allow accepts the unresolved deny just as a v4 one does");
-    }
-
-    #[test]
-    fn an_unresolvable_deny_beside_a_bounded_allow_stays_a_warning() {
-        let policy = ContainerPolicy {
-            default_network_policy: NetworkPolicy::Block,
-            ..policy_with_hosts(&["192.0.2.10"], &[UNRESOLVABLE_HOST])
-        };
-        let mut logger =
-            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
-            .expect("a bounded allow leaves the closing DROP covering the unresolved deny");
-    }
-
-    #[test]
-    fn a_bounded_cidr_allow_is_not_mistaken_for_a_catch_all() {
-        let policy = ContainerPolicy {
-            default_network_policy: NetworkPolicy::Block,
-            ..policy_with_hosts(&["192.0.2.0/24"], &[UNRESOLVABLE_HOST])
-        };
-        let mut logger =
-            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
-            .expect("a /24 allow covers a bounded set, so it proves nothing about the deny");
-    }
-
-    #[test]
-    fn an_unresolvable_allow_does_not_arm_the_deny_precedence_failure() {
-        let policy = ContainerPolicy {
-            default_network_policy: NetworkPolicy::Block,
-            ..policy_with_hosts(&["allowed.invalid"], &[UNRESOLVABLE_HOST])
-        };
-        let mut logger =
-            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
-            .expect("an allow that programs no rule cannot accept the unresolved deny");
-    }
-
     #[test]
     fn allow_and_deny_actions_map_to_exact_iptables_jump_targets() {
         assert_eq!(
@@ -3005,19 +2031,25 @@ mod tests {
     }
 
     #[test]
-    fn destination_literals_and_cidrs_land_only_in_their_address_family_bucket() {
+    fn cidrs_land_only_in_their_address_family_bucket() {
         let cases = [
-            ("192.0.2.10", "ipv4 bare literal", true),
-            ("192.0.2.10/24", "ipv4 CIDR", true),
-            ("2001:db8::10", "ipv6 bare literal", false),
-            ("2001:db8::10/64", "ipv6 CIDR", false),
+            ("192.0.2.10/32", "192.0.2.10/32", "ipv4 host CIDR", true),
+            ("192.0.2.0/24", "192.0.2.0/24", "ipv4 CIDR", true),
+            (
+                "2001:db8::10/128",
+                "2001:db8::10/128",
+                "ipv6 host CIDR",
+                false,
+            ),
+            ("2001:db8::10/64", "2001:db8::/64", "ipv6 CIDR", false),
         ];
 
-        for (destination, label, is_ipv4) in cases {
-            let rules = NetworkIptablesManager::build_host_rule_args(
+        for (destination, expected, label, is_ipv4) in cases {
+            let rules = NetworkIptablesManager::build_destination_rule_args(
                 "MXC-family-split",
-                destination,
+                &cidr(destination),
                 &RuleAction::Allow,
+                RuleMatch::AnyTraffic,
             );
 
             if is_ipv4 {
@@ -3030,7 +2062,7 @@ mod tests {
                     rules.ipv6.is_empty(),
                     "{label} {destination} should leave IPv6 rules empty; actual: {rules:?}"
                 );
-                assert_rule_contains(&rules.ipv4[0], destination, destination);
+                assert_rule_contains(&rules.ipv4[0], expected, destination);
             } else {
                 assert!(
                     rules.ipv4.is_empty(),
@@ -3041,34 +2073,9 @@ mod tests {
                     1,
                     "{label} {destination} should produce one IPv6 rule; actual: {rules:?}"
                 );
-                assert_rule_contains(&rules.ipv6[0], destination, destination);
+                assert_rule_contains(&rules.ipv6[0], expected, destination);
             }
         }
-    }
-
-    #[test]
-    fn mixed_family_host_list_produces_matching_rule_count_in_each_bucket() {
-        let policy = policy_with_hosts(
-            &[
-                "192.0.2.10",
-                "198.51.100.0/24",
-                "2001:db8::10",
-                "2001:db8:abcd::/48",
-            ],
-            &[],
-        );
-        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-mixed", &policy, false);
-
-        assert_eq!(
-            rules.ipv4.len(),
-            2,
-            "mixed host list should produce two IPv4 rules; actual: {rules:?}"
-        );
-        assert_eq!(
-            rules.ipv6.len(),
-            2,
-            "mixed host list should produce two IPv6 rules; actual: {rules:?}"
-        );
     }
 
     #[test]
@@ -3110,67 +2117,9 @@ mod tests {
     }
 
     #[test]
-    fn resolved_destinations_are_split_into_ipv4_and_ipv6_rule_args() {
-        let destinations = ResolvedDestinations {
-            ipv4: strings(&["192.0.2.10", "198.51.100.0/24"]),
-            ipv6: strings(&["2001:db8::10", "2001:db8:abcd::/48"]),
-        };
-        let rules = NetworkIptablesManager::build_resolved_destination_rule_args(
-            "MXC-resolved",
-            &destinations,
-            &RuleAction::Allow,
-            RuleMatch::AnyTraffic,
-        );
-
-        assert_eq!(
-            rules.ipv4.len(),
-            2,
-            "resolved destinations should keep both IPv4 rules in IPv4 bucket; actual: {rules:?}"
-        );
-        assert_eq!(
-            rules.ipv6.len(),
-            2,
-            "resolved destinations should keep both IPv6 rules in IPv6 bucket; actual: {rules:?}"
-        );
-        for destination in &destinations.ipv4 {
-            assert!(
-                rules.ipv4.iter().any(|rule| rule.contains(destination)),
-                "IPv4 destination {destination} should appear in IPv4 rules; actual: {rules:?}"
-            );
-            assert!(
-                !rules.ipv6.iter().any(|rule| rule.contains(destination)),
-                "IPv4 destination {destination} should not appear in IPv6 rules; actual: {rules:?}"
-            );
-        }
-        for destination in &destinations.ipv6 {
-            assert!(
-                rules.ipv6.iter().any(|rule| rule.contains(destination)),
-                "IPv6 destination {destination} should appear in IPv6 rules; actual: {rules:?}"
-            );
-            assert!(
-                !rules.ipv4.iter().any(|rule| rule.contains(destination)),
-                "IPv6 destination {destination} must not appear in IPv4 rules; actual: {rules:?}"
-            );
-        }
-    }
-
-    #[test]
     fn no_egress_rule_selects_an_incoming_interface() {
         let chain_name = "MXC-sel";
-        let endpoints = vec![ProxyEndpoint {
-            ip: "10.0.3.1".to_string(),
-            port: 3128,
-        }];
-        let mut rules = NetworkIptablesManager::build_base_chain_rule_args(chain_name);
-        rules.extend(NetworkIptablesManager::build_dns_resolution_rule_args(
-            chain_name,
-        ));
-        rules.extend(NetworkIptablesManager::build_proxy_chain_rule_args(
-            chain_name, &endpoints,
-        ));
-        rules.push(NetworkIptablesManager::build_loopback_accept_rule_args(
-            chain_name,
-        ));
+        let rules = NetworkIptablesManager::build_base_chain_rule_args(chain_name);
 
         for rule in &rules {
             assert!(
@@ -3229,48 +2178,18 @@ mod tests {
     }
 
     #[test]
-    fn dns_resolution_is_the_documented_udp_then_tcp_pair() {
-        let chain_name = "MXC-base";
-        let rules = NetworkIptablesManager::build_dns_resolution_rule_args(chain_name);
-        let expected = vec![
-            strings(&[
-                "-A", chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT",
-            ]),
-            strings(&[
-                "-A", chain_name, "-p", "tcp", "--dport", "53", "-j", "ACCEPT",
-            ]),
-        ];
-
-        assert_eq!(
-            rules, expected,
-            "the DNS resolution grant should be the documented udp/tcp pair"
-        );
-        for (index, rule) in rules.iter().enumerate() {
-            assert_rule_omits(rule, "-d", &format!("dns rule {index}"));
-        }
-    }
-
-    #[test]
-    fn default_network_policy_maps_to_exact_terminal_rule_vector() {
+    fn directional_default_maps_to_exact_terminal_rule_vector() {
         let chain_name = "MXC-default";
 
         assert_eq!(
-            NetworkIptablesManager::build_default_policy_rule_arg(
-                chain_name,
-                NetworkPolicy::Block,
-                false
-            ),
+            NetworkIptablesManager::build_default_policy_rule_arg(chain_name, NetworkAction::Deny),
             strings(&["-A", chain_name, "-j", "DROP"]),
-            "NetworkPolicy::Block should produce the exact DROP terminal rule"
+            "egress.default=deny should produce the exact DROP terminal rule"
         );
         assert_eq!(
-            NetworkIptablesManager::build_default_policy_rule_arg(
-                chain_name,
-                NetworkPolicy::Allow,
-                false
-            ),
+            NetworkIptablesManager::build_default_policy_rule_arg(chain_name, NetworkAction::Allow),
             strings(&["-A", chain_name, "-j", "ACCEPT"]),
-            "NetworkPolicy::Allow should produce the exact ACCEPT terminal rule"
+            "egress.default=allow should produce the exact ACCEPT terminal rule"
         );
     }
 
@@ -3301,8 +2220,8 @@ mod tests {
 
     #[test]
     fn empty_policy_produces_no_destination_rules_in_either_bucket() {
-        let policy = policy_with_hosts(&[], &[]);
-        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-empty", &policy, false);
+        let policy = ContainerPolicy::default();
+        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-empty", &policy);
 
         assert!(
             rules.ipv4.is_empty(),
@@ -3311,22 +2230,6 @@ mod tests {
         assert!(
             rules.ipv6.is_empty(),
             "empty policy should produce no IPv6 destination rules; actual: {rules:?}"
-        );
-    }
-
-    #[test]
-    fn unresolvable_invalid_hostname_contributes_no_destination_rules() {
-        let host = "definitely-unresolvable-mxc-rulegen-spec.invalid";
-        let rules =
-            NetworkIptablesManager::build_host_rule_args("MXC-invalid", host, &RuleAction::Allow);
-
-        assert!(
-            rules.ipv4.is_empty(),
-            "unresolvable host {host} should produce no IPv4 rules; actual: {rules:?}"
-        );
-        assert!(
-            rules.ipv6.is_empty(),
-            "unresolvable host {host} should produce no IPv6 rules; actual: {rules:?}"
         );
     }
 
@@ -3345,8 +2248,7 @@ mod tests {
         let mut manager =
             NetworkIptablesManager::new("skip-noop", EgressHookPoint::ContainerNetns(4242));
         let policy = ContainerPolicy {
-            network_enforcement_mode: NetworkEnforcementMode::Firewall,
-            default_network_policy: NetworkPolicy::Block,
+            network_egress: Some(NetworkEgressPolicy::default()),
             ..Default::default()
         };
         let mut logger = Logger::new(Mode::Buffer);
@@ -3365,74 +2267,8 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_policy_naming_reachable_hosts_installs_the_firewall() {
-        for mode in [
-            NetworkEnforcementMode::Firewall,
-            NetworkEnforcementMode::Both,
-        ] {
-            let label = format!("{mode:?}");
-            let policy = ContainerPolicy {
-                network_enforcement_mode: mode,
-                allowed_hosts: vec!["example.com".to_string()],
-                ..Default::default()
-            };
-
-            assert!(
-                plan_network(&policy).installs_firewall(),
-                "{label}: a 0.7 policy naming hosts it may reach must install the chain"
-            );
-        }
-    }
-
-    #[test]
-    fn a_named_host_list_always_installs_the_chain() {
-        for (allowed, blocked) in [
-            (&["140.82.112.0/20"][..], &[][..]),
-            (&[][..], &["140.82.112.0/20"][..]),
-        ] {
-            for default_policy in [NetworkPolicy::Block, NetworkPolicy::Allow] {
-                let policy = ContainerPolicy {
-                    default_network_policy: default_policy.clone(),
-                    ..policy_with_hosts(allowed, blocked)
-                };
-
-                let plan = plan_network(&policy);
-
-                assert!(
-                    plan.installs_firewall(),
-                    "a policy naming hosts to allow or block states a restriction, and \
-                     the default enforcement mode must not discard it; \
-                     allowed={allowed:?} blocked={blocked:?} default={default_policy:?} \
-                     gave {plan:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_legacy_policy_that_permits_nothing_is_given_no_interface() {
+    fn a_directional_policy_installs_the_firewall() {
         let policy = ContainerPolicy {
-            network_enforcement_mode: NetworkEnforcementMode::Firewall,
-            network_mode_specified: true,
-            default_network_policy: NetworkPolicy::Block,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            plan_network(&policy),
-            NetworkPlan::Isolated,
-            "a policy that blocks outbound, allows no local network, and names no \
-             proxy permits nothing, so the container is given no interface rather \
-             than an unfiltered one"
-        );
-    }
-
-    #[test]
-    fn a_directional_policy_installs_the_firewall_under_the_capabilities_default() {
-        let policy = ContainerPolicy {
-            network_enforcement_mode: NetworkEnforcementMode::Capabilities,
-            network_mode_specified: true,
-            default_network_policy: NetworkPolicy::Allow,
             network_egress: Some(NetworkEgressPolicy {
                 default: NetworkAction::Allow,
                 ..Default::default()
@@ -3442,13 +2278,12 @@ mod tests {
 
         assert!(
             plan_network(&policy).installs_firewall(),
-            "a stated 0.8 posture must install the firewall even though enforcementMode \
-             is absent from the 0.8 schema and defaults to capabilities"
+            "a stated directional posture permitting traffic must install the firewall"
         );
     }
 
     #[test]
-    fn a_v08_request_naming_no_network_fields_is_given_no_interface() {
+    fn a_directional_request_naming_no_network_fields_is_given_no_interface() {
         let policy = ContainerPolicy {
             network_egress: Some(NetworkEgressPolicy::default()),
             network_ingress: Some(crate::mxc_common::models::NetworkIngressPolicy::default()),
@@ -3488,24 +2323,10 @@ mod tests {
         assert!(!plan_network(&policy).omits_interface());
     }
 
-    #[test]
-    fn a_legacy_proxy_policy_installs_the_chain_and_needs_the_network() {
-        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        policy.allowed_hosts.clear();
-        policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
-            builtin_test_server: false,
-        };
-
-        assert!(plan_network(&policy).installs_firewall());
-        assert!(needs_network(&policy));
-    }
-
     // Alpine's DHCP lease arrives around ten seconds after LXC marks the container running.
     #[test]
     fn a_plan_that_starts_an_interface_demands_an_address() {
-        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        policy.default_network_policy = NetworkPolicy::Allow;
+        let policy = filtered_policy();
 
         assert!(
             !plan_network(&policy).omits_interface(),
@@ -3530,53 +2351,35 @@ mod tests {
         ];
         let mut omitted = 0;
 
-        for directional in [false, true] {
-            for egress in egress_options {
-                for ingress in ingress_options {
-                    for bits in 0u8..32 {
-                        let policy = ContainerPolicy {
-                            network_proxy: ProxyConfig {
-                                builtin_test_server: bits & 1 != 0,
-                                ..Default::default()
-                            },
-                            allowed_hosts: if bits & 2 != 0 {
-                                vec!["allowed.example".to_string()]
+        for egress in egress_options {
+            for ingress in ingress_options {
+                for allow_entry in [false, true] {
+                    let policy = ContainerPolicy {
+                        network_egress: egress.map(|default| NetworkEgressPolicy {
+                            default,
+                            allow: if allow_entry {
+                                vec![NetworkRule::default()]
                             } else {
                                 Vec::new()
                             },
-                            blocked_hosts: if bits & 4 != 0 {
-                                vec!["blocked.example".to_string()]
-                            } else {
-                                Vec::new()
-                            },
-                            default_network_policy: if bits & 8 != 0 {
-                                NetworkPolicy::Block
-                            } else {
-                                NetworkPolicy::Allow
-                            },
-                            allow_local_network: bits & 16 != 0,
-                            network_egress: egress.map(|default| NetworkEgressPolicy {
-                                default,
-                                ..Default::default()
-                            }),
-                            network_ingress: ingress.map(|(default, host_loopback)| {
-                                crate::mxc_common::models::NetworkIngressPolicy {
-                                    default,
-                                    host_loopback,
-                                }
-                            }),
                             ..Default::default()
-                        };
+                        }),
+                        network_ingress: ingress.map(|(default, host_loopback)| {
+                            crate::mxc_common::models::NetworkIngressPolicy {
+                                default,
+                                host_loopback,
+                            }
+                        }),
+                        ..Default::default()
+                    };
 
-                        if plan_network(&policy).omits_interface() {
-                            omitted += 1;
-                            assert!(
-                                !needs_network(&policy),
-                                "no interface means no address, yet this policy would treat a \
-                                 missing address as fatal: directional={directional}, \
-                                 egress={egress:?}, ingress={ingress:?}, bits={bits:05b}"
-                            );
-                        }
+                    if plan_network(&policy).omits_interface() {
+                        omitted += 1;
+                        assert!(
+                            !needs_network(&policy),
+                            "no interface means no address: egress={egress:?}, \
+                                 ingress={ingress:?}, allow_entry={allow_entry}"
+                        );
                     }
                 }
             }
@@ -3586,43 +2389,6 @@ mod tests {
             omitted > 0,
             "the sweep never produced a no-interface plan and proved nothing"
         );
-    }
-
-    #[test]
-    fn a_proxied_policy_installs_the_chain() {
-        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        policy.allowed_hosts.clear();
-        policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
-            builtin_test_server: false,
-        };
-
-        assert!(plan_network(&policy).installs_firewall());
-    }
-
-    #[test]
-    fn the_builtin_test_server_proxy_installs_the_chain_the_same_way() {
-        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
-        policy.allowed_hosts.clear();
-        policy.network_proxy = ProxyConfig {
-            address: None,
-            builtin_test_server: true,
-        };
-
-        assert!(
-            plan_network(&policy).installs_firewall(),
-            "an address-free proxy is still a proxy and must not go unenforced"
-        );
-    }
-
-    fn policy_with_enforcement_mode(
-        network_enforcement_mode: NetworkEnforcementMode,
-    ) -> ContainerPolicy {
-        ContainerPolicy {
-            network_enforcement_mode,
-            allowed_hosts: vec!["203.0.113.7".to_string()],
-            ..Default::default()
-        }
     }
 
     #[test]
@@ -3934,7 +2700,7 @@ mod tests {
 
         let mut manager =
             NetworkIptablesManager::new("stranded", EgressHookPoint::ContainerNetns(4242));
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let policy = filtered_policy();
         let mut logger = Logger::new(Mode::Buffer);
 
         let outcome = manager.apply_firewall_rules(&policy, &mut logger);
@@ -3962,7 +2728,7 @@ mod tests {
 
         let mut manager =
             NetworkIptablesManager::new("maybe-applied", EgressHookPoint::ContainerNetns(4242));
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let policy = filtered_policy();
         let mut logger = Logger::new(Mode::Buffer);
 
         let outcome = manager.apply_firewall_rules(&policy, &mut logger);
@@ -3991,7 +2757,7 @@ mod tests {
 
         let mut manager =
             NetworkIptablesManager::new("still-hooked", EgressHookPoint::ContainerNetns(4242));
-        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let policy = filtered_policy();
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
             .apply_firewall_rules(&policy, &mut apply_logger)

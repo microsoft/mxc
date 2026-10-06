@@ -4,9 +4,10 @@
 
 The LXC backend provides Linux container isolation using [LXC (Linux Containers)](https://linuxcontainers.org/lxc/).
 
-For exact `0.9.0-alpha`, networking is directional-only: use `network.egress`
-and `network.ingress`. LXC rejects `runtimeConfig.networkProxy`, so a v0.9 LXC
-request has no proxy surface at all — see [Proxy](#proxy) below.
+For every registered contract from `0.9.0-alpha` onward, networking is
+directional-only: use `network.egress` and `network.ingress`. LXC rejects
+`runtimeConfig.networkProxy`, so a supported LXC request has no proxy surface
+at all — see [Proxy](#proxy) below.
 Legacy host lists and enforcement-mode fields in older examples are not
 accepted. Do not relabel an old request as v0.9 without migrating its policy.
 See [the schema migration reference](../../schema.md).
@@ -143,9 +144,6 @@ in `process.env` replaces it.
 > configuration, not just project input. Pass `"HOME=…"` to point elsewhere
 > when the workspace is untrusted.
 
-Below 0.9 only `process.env` is passed through and `inheritDefaultEnv` is
-rejected.
-
 Shells like bash also have a fallback `PATH`, so a truly empty environment is
 not reachable through `process.env`.
 
@@ -173,9 +171,15 @@ The legacy `network.proxy` fields also have no supported exact contract.
 Choose a backend that supports a loopback proxy if the workload needs one;
 relabeling a retired LXC proxy request as v0.9 cannot make its policy enforceable.
 
+The retired host-list, enforcement-mode, local-network, and `network.proxy`
+fields are no longer representable in typed Rust requests. LXC still rejects
+the supported `runtimeConfig.networkProxy` field before creating a container.
+Omitting `network.egress` or `network.ingress` means default deny for that
+direction; retired fields never supply a fallback.
+
 ### No network at all
 
-A request that permits nothing and names no proxy keeps its own loopback and reaches nothing else.
+A request that permits nothing keeps its own loopback and reaches nothing else.
 
 ## Usage
 
@@ -247,7 +251,11 @@ LXC reads a run's network section only when the container starts. Omit
 `containerId` for a generated name. The claim is released when the handle drops.
 
 **Teardown is owed on every terminal path,** including a drop without `wait`:
-the proxy pin and the network chains come down, and the container is released.
+the network chains come down, and the container is released. A reused container
+also has any stale proxy hosts-file pin from an earlier run cleared before its
+new workload launches. MXC checks for marked lines inside the running
+container using `lxc-attach` and removes them if present. A failed check
+refuses to run the workload.
 A teardown failure is reported through `Sandbox::warnings`, which a bare drop
 leaves no handle to read.
 
@@ -336,8 +344,8 @@ The zone query should answer the zone you assigned.
   and anything it starts run unfiltered in both directions for that interval. The
   requested command is attached afterwards. A connection opened during that window
   keeps working once the rules land, because the chains accept established flows.
-- **A filtered container cannot renew a DHCP lease.** The chains permit loopback,
-  established flows, and DNS, with no carve-out for DHCP. A container that
+- **A filtered container cannot renew a DHCP lease.** The chains permit loopback
+  and established flows, with no implicit carve-out for DHCP or DNS. A container that
   outlives its lease loses its address; one that finishes within the lease period
   is unaffected.
 - **A container that needs a network waits for an IPv4 address.** A dual-stack
