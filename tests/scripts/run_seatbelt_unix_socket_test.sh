@@ -42,10 +42,14 @@ pass "the refused bind left no socket behind"
 LISTENER_SRC="$SEATBELT_TMP/listener.py"
 cat >"$LISTENER_SRC" <<'PY'
 import socket, sys, time
+# Hold every socket: a dropped reference is closed at once, and because close()
+# leaves the bound path in place the readiness check below would still pass.
+listeners = []
 for path in sys.argv[1:]:
     s = socket.socket(socket.AF_UNIX)
     s.bind(path)
     s.listen(8)
+    listeners.append(s)
 time.sleep(600)
 PY
 /usr/bin/python3 "$LISTENER_SRC" "$TESTDIR/rw/open/agent.sock" "$TESTDIR/rw/nested/agent.sock" &
