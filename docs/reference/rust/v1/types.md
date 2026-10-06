@@ -31,7 +31,7 @@ pub enum BackendCapability {
   FilesystemEnumeratePaths,
   IngressHostLoopbackAllow,
   ProxyEnforcement,
-  ProxyLoopbackCompatibility,
+  IdentitylessLoopbackProxy,
 }
 ```
 
@@ -536,7 +536,7 @@ pub struct ProbeFacts {
   pub base_container_supports_deny_paths: bool,
   pub base_container_supports_enumerate_paths: bool,
   pub base_container_supports_ingress_host_loopback_allow: bool,
-  pub base_container_supports_proxy_loopback_compatibility: bool,
+  pub base_container_supports_identityless_loopback_proxy: bool,
   pub isolation_session_available: bool,
   pub hyperlight_available: bool,
   pub ui_capabilities: UiCapabilitySupport,

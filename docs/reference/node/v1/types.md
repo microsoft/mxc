@@ -31,7 +31,7 @@ export type BackendCapability =
   | 'filesystemEnumeratePaths'
   | 'ingressHostLoopbackAllow'
   | 'proxyEnforcement'
-  | 'proxyLoopbackCompatibility'
+  | 'identitylessLoopbackProxy'
   | 'unknown';
 ```
 
@@ -579,7 +579,7 @@ export interface ProbeFacts {
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
   baseContainerSupportsIngressHostLoopbackAllow: boolean;
-  baseContainerSupportsProxyLoopbackCompatibility: boolean;
+  baseContainerSupportsIdentitylessLoopbackProxy: boolean;
   isolationSessionAvailable: boolean;
   hyperlightAvailable: boolean;
   uiCapabilities: UiCapabilitySupport;

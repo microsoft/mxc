@@ -237,12 +237,6 @@ sandbox on the current host. `MxcPlatform.GetAvailableBackends()` reports
 host backend capabilities; availability is advisory and launch-time
 validation still applies.
 
-For the PSEC 1.0-only identity-less proxy workaround, check
-`BackendCapability.ProxyLoopbackCompatibility` or, on Windows,
-`MxcContainer.Probe().Probes.BaseContainerSupportsProxyLoopbackCompatibility`.
-This is not general host-loopback ingress support; see
-[proxy compatibility discovery](../../docs/process-container/networking.md#discovering-proxy-loopback-compatibility).
-
 Creation telemetry is supplied through `Telemetry` on `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
 leaves telemetry disabled; `new TelemetryConfig { Enabled = false }`

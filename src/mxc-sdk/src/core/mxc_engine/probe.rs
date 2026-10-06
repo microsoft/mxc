@@ -30,9 +30,9 @@ pub enum BackendCapability {
     IngressHostLoopbackAllow,
     /// Bubblewrap proxy-only egress in a private network namespace.
     ProxyEnforcement,
-    /// Identity-less proxy loopback compatibility on PSEC 1.0-only hosts.
+    /// Identity-less proxy support on loopback.
     /// Requires explicit host-loopback allow; not general ingress support.
-    ProxyLoopbackCompatibility,
+    IdentitylessLoopbackProxy,
 }
 
 /// One host-available backend, plus its effective isolation tier (if any).
@@ -110,10 +110,10 @@ pub fn available_backends() -> Vec<AvailableBackend> {
             ),
             ..Default::default()
         };
-        match BaseContainerRunner::supports_proxy_loopback_compatibility() {
-            Ok(supported) => support.proxy_loopback_compatibility = supported,
+        match BaseContainerRunner::supports_identityless_loopback_proxy() {
+            Ok(supported) => support.identityless_loopback_proxy = supported,
             Err(error) => support.warnings.push(format!(
-                "failed to query PSEC proxy loopback compatibility support: {error}"
+                "failed to query identity-less loopback proxy support: {error}"
             )),
         }
         windows_backends(tier, support)
@@ -180,7 +180,7 @@ struct ProcessContainerCapabilities {
     filesystem_denied_paths: bool,
     filesystem_enumerate_paths: bool,
     ingress_host_loopback_allow: bool,
-    proxy_loopback_compatibility: bool,
+    identityless_loopback_proxy: bool,
     warnings: Vec<String>,
 }
 
@@ -210,8 +210,8 @@ fn windows_backends(
         if support.ingress_host_loopback_allow {
             capabilities.push(BackendCapability::IngressHostLoopbackAllow);
         }
-        if support.proxy_loopback_compatibility {
-            capabilities.push(BackendCapability::ProxyLoopbackCompatibility);
+        if support.identityless_loopback_proxy {
+            capabilities.push(BackendCapability::IdentitylessLoopbackProxy);
         }
     }
     let process_container = AvailableBackend {
@@ -412,9 +412,9 @@ mod tests {
             r#""ingressHostLoopbackAllow""#
         );
         assert_eq!(
-            serde_json::to_string(&BackendCapability::ProxyLoopbackCompatibility)
+            serde_json::to_string(&BackendCapability::IdentitylessLoopbackProxy)
                 .expect("serializes"),
-            r#""proxyLoopbackCompatibility""#
+            r#""identitylessLoopbackProxy""#
         );
     }
 
@@ -550,7 +550,7 @@ mod tests {
                     filesystem_denied_paths: true,
                     filesystem_enumerate_paths: true,
                     ingress_host_loopback_allow: true,
-                    proxy_loopback_compatibility: true,
+                    identityless_loopback_proxy: true,
                     ..Default::default()
                 },
             );
@@ -565,14 +565,15 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_reports_proxy_compatibility_without_general_ingress_support() {
+    fn windows_reports_identityless_proxy_with_or_without_general_ingress_support() {
         use crate::process_container_common::fallback_detector::IsolationTier;
 
-        for supported in [false, true] {
+        for (supported, ingress_supported) in [(false, false), (true, false), (true, true)] {
             let backends = windows_backends(
                 IsolationTier::BaseContainer,
                 ProcessContainerCapabilities {
-                    proxy_loopback_compatibility: supported,
+                    identityless_loopback_proxy: supported,
+                    ingress_host_loopback_allow: ingress_supported,
                     ..Default::default()
                 },
             );
@@ -580,12 +581,15 @@ mod tests {
             assert_eq!(
                 process_container
                     .capabilities
-                    .contains(&BackendCapability::ProxyLoopbackCompatibility),
+                    .contains(&BackendCapability::IdentitylessLoopbackProxy),
                 supported
             );
-            assert!(!process_container
-                .capabilities
-                .contains(&BackendCapability::IngressHostLoopbackAllow));
+            assert_eq!(
+                process_container
+                    .capabilities
+                    .contains(&BackendCapability::IngressHostLoopbackAllow),
+                ingress_supported
+            );
         }
     }
 
@@ -594,7 +598,7 @@ mod tests {
     fn windows_preserves_capability_probe_warnings() {
         use crate::process_container_common::fallback_detector::IsolationTier;
 
-        let warning = "failed to query PSEC proxy loopback compatibility support".to_string();
+        let warning = "failed to query identity-less loopback proxy support".to_string();
         let backends = windows_backends(
             IsolationTier::BaseContainer,
             ProcessContainerCapabilities {
@@ -605,7 +609,7 @@ mod tests {
         assert_eq!(backends[0].warnings, vec![warning]);
         assert!(!backends[0]
             .capabilities
-            .contains(&BackendCapability::ProxyLoopbackCompatibility));
+            .contains(&BackendCapability::IdentitylessLoopbackProxy));
     }
 
     #[cfg(target_os = "windows")]

@@ -31,7 +31,7 @@ const probeFactBooleanFields: readonly (keyof ProbeFacts)[] = [
   'baseContainerSupportsDenyPaths',
   'baseContainerSupportsEnumeratePaths',
   'baseContainerSupportsIngressHostLoopbackAllow',
-  'baseContainerSupportsProxyLoopbackCompatibility',
+  'baseContainerSupportsIdentitylessLoopbackProxy',
   'isolationSessionAvailable',
   'hyperlightAvailable',
 ];

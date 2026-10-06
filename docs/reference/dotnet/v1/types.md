@@ -38,7 +38,7 @@ public enum BackendCapability
     FilesystemDeniedPaths = 3,
     IngressHostLoopbackAllow = 4,
     FilesystemEnumeratePaths = 5,
-    ProxyLoopbackCompatibility = 6,
+    IdentitylessLoopbackProxy = 6,
 }
 ```
 
@@ -955,7 +955,7 @@ public sealed class ProbeFacts
     public bool BaseContainerSupportsDenyPaths { get; init; }
     public bool BaseContainerSupportsEnumeratePaths { get; init; }
     public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
-    public bool BaseContainerSupportsProxyLoopbackCompatibility { get; init; }
+    public bool BaseContainerSupportsIdentitylessLoopbackProxy { get; init; }
     public bool IsolationSessionAvailable { get; init; }
     public bool HyperlightAvailable { get; init; }
     public required UiCapabilitySupport UiCapabilities { get; init; }

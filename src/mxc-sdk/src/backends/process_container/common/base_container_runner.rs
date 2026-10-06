@@ -328,13 +328,26 @@ impl BaseContainerRunner {
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress)
     }
 
-    /// Whether this host supports the identity-less proxy loopback workaround.
+    /// Whether this host supports an identity-less proxy on loopback.
     /// This is not general host-loopback ingress support.
-    pub(crate) fn supports_proxy_loopback_compatibility() -> Result<bool, LearningModeError> {
+    pub(crate) fn supports_identityless_loopback_proxy() -> Result<bool, LearningModeError> {
         if !Self::is_base_container_api_present() {
             return Ok(false);
         }
-        Self::psec_1_0_only(secenv::supports_version)
+        Self::identityless_loopback_proxy_supported(
+            Self::supports_ingress_host_loopback_allow(),
+            secenv::supports_version,
+        )
+    }
+
+    fn identityless_loopback_proxy_supported(
+        ingress_supported: bool,
+        supports_version: impl FnMut(SecurityEnvironmentVersion) -> Result<bool, LearningModeError>,
+    ) -> Result<bool, LearningModeError> {
+        if ingress_supported {
+            return Ok(true);
+        }
+        Self::psec_1_0_only(supports_version)
     }
 
     fn psec_1_0_only(
@@ -468,13 +481,6 @@ impl BaseContainerRunner {
                     ))
                 },
             )?;
-        if proxy_loopback_workaround {
-            let _ = writeln!(
-                logger,
-                "warning: using PSEC 1.0 proxy loopback compatibility; the proxy is \
-                 identified only by its endpoint, not by its host process identity"
-            );
-        }
         let psec_version =
             Self::choose_min_required_psec_version_for_request(request, proxy_loopback_workaround);
         let version_supported =
@@ -2953,31 +2959,67 @@ mod tests {
     }
 
     #[test]
-    fn proxy_loopback_compatibility_requires_base_container_api() {
+    fn identityless_loopback_proxy_requires_base_container_api() {
         let _guard = crate::process_container_common::test_env::BcUsableGuard::set(false);
-        assert!(!BaseContainerRunner::supports_proxy_loopback_compatibility().unwrap());
+        assert!(!BaseContainerRunner::supports_identityless_loopback_proxy().unwrap());
     }
 
     #[test]
-    fn proxy_loopback_compatibility_requires_psec_1_0_only() {
-        for (supports_1_0, supports_1_1, expected) in [
-            (true, false, true),
-            (true, true, false),
-            (false, true, false),
-            (false, false, false),
+    fn identityless_loopback_proxy_supports_ingress_or_psec_1_0_only() {
+        for (supports_1_0, supports_1_1, ingress_supported, expected) in [
+            (true, false, false, true),
+            (true, true, true, true),
+            (true, true, false, false),
+            (false, true, true, true),
+            (false, true, false, false),
+            (false, false, false, false),
         ] {
-            let supported = BaseContainerRunner::psec_1_0_only(|version| {
-                Ok(if version == SecurityEnvironmentVersion::V1_1 {
-                    supports_1_1
-                } else {
-                    supports_1_0
-                })
-            })
+            let supported = BaseContainerRunner::identityless_loopback_proxy_supported(
+                ingress_supported,
+                |version| {
+                    Ok(if version == SecurityEnvironmentVersion::V1_1 {
+                        supports_1_1
+                    } else {
+                        supports_1_0
+                    })
+                },
+            )
             .unwrap();
             assert_eq!(
                 supported, expected,
-                "PSEC 1.0={supports_1_0}, PSEC 1.1={supports_1_1}"
+                "PSEC 1.0={supports_1_0}, PSEC 1.1={supports_1_1}, ingress={ingress_supported}"
             );
+        }
+    }
+
+    #[test]
+    fn identityless_loopback_proxy_with_ingress_does_not_need_compatibility_queries() {
+        assert!(
+            BaseContainerRunner::identityless_loopback_proxy_supported(true, |_| {
+                panic!("ingress support is sufficient for an identity-less loopback proxy")
+            })
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn identityless_loopback_proxy_propagates_version_query_errors() {
+        for failing_version in [
+            SecurityEnvironmentVersion::V1_0,
+            SecurityEnvironmentVersion::V1_1,
+        ] {
+            let result =
+                BaseContainerRunner::identityless_loopback_proxy_supported(false, |version| {
+                    if version == failing_version {
+                        Err(LearningModeError::HResultCall {
+                            function: "IsProcessSecurityEnvironmentVersionSupported",
+                            code: E_NOTIMPL.0,
+                        })
+                    } else {
+                        Ok(false)
+                    }
+                });
+            assert!(matches!(result, Err(LearningModeError::HResultCall { .. })));
         }
     }
 

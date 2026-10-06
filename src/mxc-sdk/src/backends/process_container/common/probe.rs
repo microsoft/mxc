@@ -74,9 +74,9 @@ pub struct ProbeFacts {
     /// Whether BaseContainer can honor
     /// `network.ingress.hostLoopback = "allow"`.
     pub base_container_supports_ingress_host_loopback_allow: bool,
-    /// Whether the PSEC 1.0-only identity-less proxy loopback workaround is
-    /// available. Requires explicit host-loopback allow, not general ingress.
-    pub base_container_supports_proxy_loopback_compatibility: bool,
+    /// Whether BaseContainer supports an identity-less proxy on loopback.
+    /// Requires explicit host-loopback allow; not general ingress support.
+    pub base_container_supports_identityless_loopback_proxy: bool,
     /// Whether the in-proc IsolationSession service can be activated on this
     /// host. Always `false` here — `process_container_common` has no dependency on
     /// the isolation-session backend; `wxc-exec --probe` overrides it when
@@ -140,7 +140,7 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) -> ProbeOutput {
     use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-    let proxy_loopback_compatibility = BaseContainerRunner::supports_proxy_loopback_compatibility();
+    let identityless_loopback_proxy = BaseContainerRunner::supports_identityless_loopback_proxy();
     let probes = ProbeFacts {
         base_container_api_present: BaseContainerRunner::is_base_container_api_present(),
         native_capture_available: BaseContainerRunner::is_native_capture_available(),
@@ -154,8 +154,8 @@ pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) ->
         base_container_supports_enumerate_paths: BaseContainerRunner::supports_enumerate_paths(),
         base_container_supports_ingress_host_loopback_allow:
             BaseContainerRunner::supports_ingress_host_loopback_allow(),
-        base_container_supports_proxy_loopback_compatibility: matches!(
-            proxy_loopback_compatibility,
+        base_container_supports_identityless_loopback_proxy: matches!(
+            identityless_loopback_proxy,
             Ok(true)
         ),
         isolation_session_available: false,
@@ -169,9 +169,9 @@ pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) ->
         probes,
         fallback_detector::choose_backend_tier(request),
     );
-    if let Err(error) = proxy_loopback_compatibility {
+    if let Err(error) = identityless_loopback_proxy {
         output.warnings.push(format!(
-            "failed to query PSEC proxy loopback compatibility support: {error}"
+            "failed to query identity-less loopback proxy support: {error}"
         ));
     }
     output
@@ -283,7 +283,7 @@ mod tests {
             base_container_supports_deny_paths: false,
             base_container_supports_enumerate_paths: false,
             base_container_supports_ingress_host_loopback_allow: false,
-            base_container_supports_proxy_loopback_compatibility: false,
+            base_container_supports_identityless_loopback_proxy: false,
             isolation_session_available: false,
             hyperlight_available: false,
             ui_capabilities: all_ui_capabilities(),
@@ -305,7 +305,7 @@ mod tests {
                 base_container_supports_deny_paths: false,
                 base_container_supports_enumerate_paths: false,
                 base_container_supports_ingress_host_loopback_allow: false,
-                base_container_supports_proxy_loopback_compatibility: true,
+                base_container_supports_identityless_loopback_proxy: true,
                 isolation_session_available: true,
                 hyperlight_available: false,
                 ui_capabilities: all_ui_capabilities(),
@@ -329,7 +329,7 @@ mod tests {
             false
         );
         assert_eq!(
-            v["probes"]["baseContainerSupportsProxyLoopbackCompatibility"],
+            v["probes"]["baseContainerSupportsIdentitylessLoopbackProxy"],
             true
         );
         assert_eq!(v["probes"]["isolationSessionAvailable"], true);
@@ -360,7 +360,7 @@ mod tests {
                 base_container_supports_deny_paths: false,
                 base_container_supports_enumerate_paths: false,
                 base_container_supports_ingress_host_loopback_allow: false,
-                base_container_supports_proxy_loopback_compatibility: false,
+                base_container_supports_identityless_loopback_proxy: false,
                 isolation_session_available: false,
                 hyperlight_available: false,
                 ui_capabilities: UiCapabilitySupport {

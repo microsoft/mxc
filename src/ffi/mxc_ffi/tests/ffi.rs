@@ -78,7 +78,7 @@ fn extern_discovery_returns_owned_json() {
                     | "filesystemEnumeratePaths"
                     | "ingressHostLoopbackAllow"
                     | "proxyEnforcement"
-                    | "proxyLoopbackCompatibility"
+                    | "identitylessLoopbackProxy"
             )
         ));
     }

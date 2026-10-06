@@ -26,7 +26,7 @@ const discoveryBackends: readonly ContainmentBackend[] = [
 const discoveryCapabilities: readonly BackendCapability[] = [
   'captureDenials', 'filesystemDeniedPaths', 'filesystemEnumeratePaths',
   'ingressHostLoopbackAllow', 'proxyEnforcement',
-  'proxyLoopbackCompatibility',
+  'identitylessLoopbackProxy',
 ];
 const discoveryTiers: readonly IsolationTier[] = [
   'base-container', 'appcontainer-bfs', 'appcontainer-dacl',

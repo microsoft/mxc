@@ -351,8 +351,8 @@ function Get-HostCapabilities {
     $enumBit = if ($p.probes.PSObject.Properties['baseContainerSupportsEnumeratePaths']) {
         [bool]$p.probes.baseContainerSupportsEnumeratePaths
     } else { $false }
-    $proxyCompatibilityBit = if ($p.probes.PSObject.Properties['baseContainerSupportsProxyLoopbackCompatibility']) {
-        [bool]$p.probes.baseContainerSupportsProxyLoopbackCompatibility
+    $identitylessProxyBit = if ($p.probes.PSObject.Properties['baseContainerSupportsIdentitylessLoopbackProxy']) {
+        [bool]$p.probes.baseContainerSupportsIdentitylessLoopbackProxy
     } else { $false }
     # uiCapabilities is absent on older binaries / when the detector errored.
     $canInject = $false
@@ -390,7 +390,7 @@ function Get-HostCapabilities {
         # denied tests auto-enable when it ships.
         SupportsDeniedPaths            = (($tier -eq 'appcontainer-dacl') -or $denyBit)
         BaseContainerSupportsEnumeratePaths = $enumBit
-        BaseContainerSupportsProxyLoopbackCompatibility = $proxyCompatibilityBit
+        BaseContainerSupportsIdentitylessLoopbackProxy = $identitylessProxyBit
         # enumeratePaths has NO fallback: it needs PSEC 1.1 plus
         # PSE_SUPPORT_FS_ENUMERATE, and the detector refuses the request
         # outright on every AppContainer tier (FallbackError::

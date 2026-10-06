@@ -177,8 +177,8 @@ public static class MxcContainer
                     probes.BaseContainerSupportsEnumeratePaths,
                 BaseContainerSupportsIngressHostLoopbackAllow =
                     probes.BaseContainerSupportsIngressHostLoopbackAllow,
-                BaseContainerSupportsProxyLoopbackCompatibility =
-                    probes.BaseContainerSupportsProxyLoopbackCompatibility,
+                BaseContainerSupportsIdentitylessLoopbackProxy =
+                    probes.BaseContainerSupportsIdentitylessLoopbackProxy,
                 IsolationSessionAvailable = probes.IsolationSessionAvailable,
                 HyperlightAvailable = probes.HyperlightAvailable,
                 UiCapabilities = new UiCapabilitySupport

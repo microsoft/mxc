@@ -125,17 +125,21 @@ flag; accepting a 1.0 payload does not enable this workaround.
 Requests that do not allow host loopback use the PSEC 1.0 capability mapping.
 Requests the PSEC contract cannot preserve continue to an AppContainer tier.
 
-#### Discovering proxy loopback compatibility
+#### Discovering identity-less loopback proxy support
 
-Backend discovery reports `proxyLoopbackCompatibility` on the ProcessContainer
-`base-container` tier only when the PSEC 1.0-only workaround is available.
+Backend discovery reports `identitylessLoopbackProxy` on the ProcessContainer
+`base-container` tier when the host supports an identity-less proxy on loopback.
 The Windows request probe also reports
-`probes.baseContainerSupportsProxyLoopbackCompatibility`, including when called
-without a request. Both use the same PSEC version gate as execution. A query
-failure omits the capability, sets the probe fact to `false`, and adds a warning.
+`probes.baseContainerSupportsIdentitylessLoopbackProxy`, including when called
+without a request. Support is available on PSEC 1.0-only hosts and on hosts with
+PSEC 1.1 or newer that advertise ingress support. A host that reports
+`baseContainerSupportsIngressHostLoopbackAllow` also supports an identity-less
+loopback proxy. PSEC 1.1 or newer without ingress support does not qualify,
+even if it also accepts PSEC 1.0 payloads. Version-query failures omit the
+capability, set the probe fact to `false`, and add a warning.
 
 This does not grant general `ingressHostLoopbackAllow` support or report that the
-current request uses the workaround. The request must set
+current request uses an identity-less proxy. The request must set
 `runtimeConfig.networkProxy`, omit `processContainer.network.allowedProxyPeer`,
 and explicitly allow host loopback, while retaining the Model 2 network policy.
 Other requested features still require their own host support.

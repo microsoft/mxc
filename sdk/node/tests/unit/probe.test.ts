@@ -30,7 +30,7 @@ const completeProbe = {
     baseContainerSupportsDenyPaths: false,
     baseContainerSupportsEnumeratePaths: false,
     baseContainerSupportsIngressHostLoopbackAllow: false,
-    baseContainerSupportsProxyLoopbackCompatibility: false,
+    baseContainerSupportsIdentitylessLoopbackProxy: false,
     isolationSessionAvailable: false,
     hyperlightAvailable: false,
     uiCapabilities: {
@@ -193,29 +193,30 @@ describe('probe', () => {
     assert.equal(output.needsDaclAugmentation, true);
   });
 
-  it('preserves proxy loopback compatibility independently of general ingress', () => {
-    for (const supported of [false, true]) {
+  it('preserves identity-less proxy support with or without general ingress', () => {
+    for (const [supported, ingressSupported] of [[false, false], [true, false], [true, true]]) {
       const output = runProbeOutput({
         ...completeProbe,
         tier: 'base-container',
         needsDaclAugmentation: false,
         probes: {
           ...completeProbe.probes,
-          baseContainerSupportsProxyLoopbackCompatibility: supported,
+          baseContainerSupportsIdentitylessLoopbackProxy: supported,
+          baseContainerSupportsIngressHostLoopbackAllow: ingressSupported,
         },
       });
-      assert.equal(output.probes.baseContainerSupportsProxyLoopbackCompatibility, supported);
-      assert.equal(output.probes.baseContainerSupportsIngressHostLoopbackAllow, false);
+      assert.equal(output.probes.baseContainerSupportsIdentitylessLoopbackProxy, supported);
+      assert.equal(output.probes.baseContainerSupportsIngressHostLoopbackAllow, ingressSupported);
     }
   });
 
-  it('rejects missing or invalid proxy loopback compatibility facts', () => {
+  it('rejects missing or invalid identity-less loopback proxy facts', () => {
     for (const value of [undefined, null, 'true', 1]) {
       assertProbeOutputRejected({
         ...completeProbe,
         probes: {
           ...completeProbe.probes,
-          baseContainerSupportsProxyLoopbackCompatibility: value,
+          baseContainerSupportsIdentitylessLoopbackProxy: value,
         },
       });
     }
