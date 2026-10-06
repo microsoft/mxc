@@ -13,8 +13,8 @@
 - [ ] Signed the [Contributor License Agreement](https://cla.opensource.microsoft.com)
 - [ ] Linked to an issue
 - [ ] Updated documentation (if applicable)
-- [ ] Updated [Copilot instructions](.github/copilot-instructions.md) (if build, architecture, or conventions changed)
-- [ ] If this PR changes `Cargo.lock`, the `dependency-feed-check` check passes (see [docs/pull-requests.md](https://github.com/microsoft/mxc/blob/main/docs/pull-requests.md))
+- [ ] Updated [Copilot instructions](copilot-instructions.md) (if build, architecture, or conventions changed)
+- [ ] If this PR changes `Cargo.lock`, the `dependency-feed-check` check passes (see [pull request builds](https://github.com/microsoft/mxc/blob/main/docs/development/build-and-test/pull-requests.md))
 
 ## 📋 Issue Type
 <!-- Select the type that best describes this PR -->
@@ -27,8 +27,8 @@
 GitHub Actions runs the PR validation build automatically. The ADO pipeline
 (`MXC-PR-Build`) is the Azure version of the PR pipeline, kept in parity with the GitHub
 Actions build; it runs on merge to `main`, and Microsoft reviewers with write access can trigger it
-on a PR with `/azp run`. See [docs/pull-requests.md](https://github.com/microsoft/mxc/blob/main/docs/pull-requests.md).
+on a PR with `/azp run`. See [pull request builds](https://github.com/microsoft/mxc/blob/main/docs/development/build-and-test/pull-requests.md).
 
 If the `dependency-feed-check` check fails on a new dependency, the crate must be added to
-the feed before the PR can pass. See [docs/pull-requests.md](https://github.com/microsoft/mxc/blob/main/docs/pull-requests.md)
+the feed before the PR can pass. See [pull request builds](https://github.com/microsoft/mxc/blob/main/docs/development/build-and-test/pull-requests.md)
 for the steps.

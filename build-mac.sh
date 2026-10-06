@@ -4,7 +4,7 @@
 # TypeScript SDK. This is the macOS counterpart of build.sh.
 #
 # Codesigning + notarization are NOT performed here — those run later as a
-# release-time step (see docs/seatbelt/seatbelt-backend.md). This script just
+# release-time step (see docs/backends/seatbelt/seatbelt-backend.md). This script just
 # produces an unsigned binary suitable for local development.
 
 set -euo pipefail
@@ -173,4 +173,4 @@ for triple in "${TARGETS[@]}"; do
 done
 echo ""
 echo "Note: this binary is unsigned. Codesigning + notarization happen at"
-echo "release time (see docs/seatbelt/seatbelt-backend.md, codesign-notarize todo)."
+echo "release time (see docs/backends/seatbelt/seatbelt-backend.md, codesign-notarize todo)."

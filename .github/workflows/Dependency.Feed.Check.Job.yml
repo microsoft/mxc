@@ -1,6 +1,6 @@
 # Resolves the locked dependency graph through the public MxcDependencies feed so a crate
 # not yet in the feed fails at PR time. On a 401, seed the crate by running the
-# MXC-Update-Feed-Dependencies pipeline in shine-oss with the PR's number (see docs/pull-requests.md).
+# MXC-Update-Feed-Dependencies pipeline in shine-oss with the PR's number (see docs/development/build-and-test/pull-requests.md).
 
 name: Dependency Feed Check
 
@@ -46,7 +46,7 @@ jobs:
           if grep -qiE '401|failed to get successful HTTP response' fetch.log; then
             echo "::error title=Crate may be missing from the MxcDependencies feed::A locked crate could not be fetched through the feed (HTTP 401 above). If this PR adds a new crates.io dependency, it must be added to the feed before this check can pass."
             echo "To add it: someone with Contributor access to the shine-oss Mxc project runs the MXC-Update-Feed-Dependencies pipeline using the Run pipeline button, with prNumber set to the PR's number."
-            echo "Details: docs/pull-requests.md (Dependency feed check)."
+            echo "Details: docs/development/build-and-test/pull-requests.md (Dependency feed check)."
           else
             echo "::error title=cargo fetch failed::cargo fetch failed for a reason other than a feed 401 (see the log above)."
           fi

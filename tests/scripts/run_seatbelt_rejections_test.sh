@@ -2,7 +2,7 @@
 # Seatbelt policy rejections.
 #
 # Every case here is a config MXC must refuse rather than approximate, per the
-# "What gets rejected" table in docs/seatbelt/seatbelt-backend.md. Each asserts
+# "What gets rejected" table in docs/backends/seatbelt/seatbelt-backend.md. Each asserts
 # both that the run failed and that the workload never started: a policy that
 # is "enforced" by the command failing afterwards is not enforcement.
 #

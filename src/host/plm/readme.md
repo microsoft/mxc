@@ -337,5 +337,5 @@ recorded race) still fails closed and terminates the job.
 
 ## See also
 
-- [`docs/process-container/guide.md`](../../../docs/process-container/guide.md) — process-container backend overview
+- [Adding ProcessContainer OS features](../../../docs/development/guides/process-container-adding-os-features.md) — process-container backend overview
 - [README → Debugging → Audit Mode](../../../README.md#audit-mode-permissive-learning-mode) — `wxc-exec --audit` integration

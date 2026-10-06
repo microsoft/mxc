@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# JOB_OBJECT_UILIMIT_* mitigation matrix (docs/process-container/UIPolicy_Schema.md).
+# JOB_OBJECT_UILIMIT_* mitigation matrix (docs/backends/process-container/UIPolicy_Schema.md).
 #
 # Runs standalone, or under run_processcontainer_all_tests.ps1.
 

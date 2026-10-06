@@ -85,7 +85,7 @@ Entries below describe historical release APIs, not the current V1 surface.
   policy (`readwritePaths` / `readonlyPaths` / `deniedPaths`) is honored
   at provision and is immutable thereafter; `network` / `ui` / Entra
   `user` bundles are not honored on this backend. See
-  [`docs/windows-sandbox/windows-sandbox.md`](../../docs/windows-sandbox/windows-sandbox.md)
+  [`docs/backends/windows-sandbox/windows-sandbox.md`](../../docs/backends/windows-sandbox/windows-sandbox.md)
   for the full per-phase config matrix.
 
 ### Changed

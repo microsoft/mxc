@@ -13,7 +13,7 @@
 #
 # Generated positive configs target published stable 1.0.0. Raw rejection
 # cases select their exact version. Network areas assert the supported
-# directional contract (docs/process-container/networking.md); unsupported
+# directional contract (docs/backends/process-container/networking.md); unsupported
 # policy fails.
 #
 # Prerequisites fail, they do not skip: a -RequireTier mismatch, an unreachable

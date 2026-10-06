@@ -801,7 +801,7 @@ function Assert-RequiredTier {
 
 # Network test infrastructure
 
-# Documented in docs/process-container/networking.md §2: PSEC is the only
+# Documented in docs/backends/process-container/networking.md §2: PSEC is the only
 # ProcessContainer path that receives directional egress filters, proxy peer
 # identity, or host-loopback configuration. The probe does not name the
 # process-creation contract, so the tier stands in for it — `base-container`
@@ -1068,8 +1068,8 @@ function Get-LoopbackFetchCommand {
 
 # Phase 8 — directional network policy.
 #
-# Asserts the documented contract (docs/process-container/networking.md and
-# docs/sandbox-policy/0.8.0/networking/networking.md), not the current code, so
+# Asserts the documented contract (docs/backends/process-container/networking.md and
+# docs/containment-configuration/0.8.0/networking/networking.md), not the current code, so
 # an assertion that outruns the backend fails by design. Every positive is
 # paired with a negative control on an otherwise identical config: from one run
 # on a host with no connectivity, "reached it" and "blocked by policy" look the

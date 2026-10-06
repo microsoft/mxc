@@ -140,7 +140,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // Resolve denied paths that traverse a symlink to their real host path
         // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
         // Only clones the request when a path needs rewriting (common case:
-        // none). See docs/bwrap-support/bubblewrap-backend.md.
+        // none). See docs/backends/bwrap/bubblewrap-backend.md.
         let plan = match resolve_denied_paths(&request.policy, logger) {
             Ok(plan) => plan,
             Err(msg) => return Err(ScriptResponse::error(&msg)),
