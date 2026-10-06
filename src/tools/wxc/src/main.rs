@@ -363,16 +363,6 @@ fn logger_for_cli(cli: &Cli) -> Logger {
     logger
 }
 
-/// On a state-aware dispatch failure, record the error only on the auxiliary
-/// diagnostic sinks (`--log-file` and the diagnostic pipe) via
-/// [`Logger::log_diagnostic_line`]. It is deliberately kept out of the primary
-/// console/buffer output so it never interleaves with the stdout response
-/// envelope; the failure reason still reaches the client through the JSON error
-/// envelope on stdout.
-fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
-    logger.log_diagnostic_line(&error.to_string());
-}
-
 /// Record `mxc.ConfigRejected` for a request that was refused before it could
 /// run.
 ///
@@ -465,9 +455,7 @@ fn rejection_reason_for(error: &MxcError) -> RejectionReason {
 /// that merely *looks* like an MXC-minted `iso:`/`wsb:` id would otherwise
 /// pass `redact_identity`'s shape check unverified. Since MXC has not
 /// confirmed the id yet, the field records only that a caller-provided id was
-/// present, not its value; the later, post-dispatch `SandboxIdentity` audit
-/// record (see `sandbox_id_for_identity_record` below) is unaffected and
-/// still discloses the real, backend-verified identity on success.
+/// present, not its value.
 const UNVERIFIED_SANDBOX_ID_MARKER: &str = "unverified";
 
 fn state_aware_policy_identity(sandbox_id: Option<&str>) -> String {
@@ -477,30 +465,23 @@ fn state_aware_policy_identity(sandbox_id: Option<&str>) -> String {
     }
 }
 
-/// Resolve the sandbox id to report on `mxc.SandboxIdentity` for a completed
-/// state-aware dispatch.
+/// Return a constant diagnostic identity for a successful state-aware phase.
 ///
-/// `provision` mints the id, so it is read out of the result envelope; every
-/// later phase carries the id inbound. Returns `None` when the phase failed —
-/// a failed dispatch produced no sandbox to identify, and emitting an identity
-/// record for one would be a lie.
-fn sandbox_id_for_identity_record(
+/// Lifecycle identifiers can contain account-derived data. Diagnostic records
+/// therefore identify only the backend kind and never inspect the sandbox id.
+fn sandbox_identity_marker(
     outcome: &Result<DispatchOutcome, MxcError>,
-    incoming_sandbox_id: Option<&str>,
-) -> Option<String> {
-    let Ok(outcome) = outcome else {
+    backend: &str,
+) -> Option<&'static str> {
+    if outcome.is_err() {
         return None;
-    };
-    if let DispatchOutcome::Envelope(value) = outcome {
-        if let Some(minted) = value
-            .get("result")
-            .and_then(|r| r.get("sandboxId"))
-            .and_then(|v| v.as_str())
-        {
-            return Some(minted.to_string());
-        }
     }
-    incoming_sandbox_id.map(str::to_string)
+    Some(match backend {
+        "isolation_session" => "isolation-session",
+        "windows_sandbox" => "windows-sandbox",
+        "wslc" => "wslc-sandbox",
+        _ => "state-aware-sandbox",
+    })
 }
 
 /// Drives the state-aware dispatch flow. On envelope success, writes the
@@ -574,6 +555,7 @@ fn run_state_aware_main(
     // State-aware dispatch bypasses the one-shot runner funnel, so anchor the
     // effective lifecycle policy here before the request is consumed.
     let diagnostics_active = logger.has_diagnostic_sink();
+    let mut diagnostic_logger = logger.clone_diagnostic_sink();
     if telemetry_active || diagnostics_active {
         let policy_hash = mxc_sdk::mxc_common::policy_identity::state_aware_policy_hash(
             parsed.request(),
@@ -594,8 +576,15 @@ fn run_state_aware_main(
                     "config_schema_version",
                     parsed.request().source_contract_version(),
                 );
-            logger.log_audit_event(&record);
+            diagnostic_logger.log_audit_event(&record);
         }
+    }
+    for warning in logger.take_warnings() {
+        eprintln!("{warning}");
+    }
+    let buffered = logger.get_buffer().to_string();
+    if !buffered.is_empty() {
+        eprint!("{}", buffered);
     }
     // Publish the driver's diagnostic sinks (--log-file, and the diagnostic
     // console pipe on Windows) on this thread so a backend whose
@@ -606,13 +595,9 @@ fn run_state_aware_main(
     // drops at the end of this scope -- including if `run_state_aware`
     // panics -- so we never leak duplicated handles across independent
     // invocations even on an unwind.
-    let _diag_sink_guard = logger.install_thread_diagnostic_sink();
+    let _diag_sink_guard = diagnostic_logger.install_thread_diagnostic_sink();
     let outcome = mxc_sdk::mxc_engine::run_state_aware(parsed, dry_run);
     drop(_diag_sink_guard);
-    // Post-dispatch records can contain backend lifecycle identities. Keep
-    // those values confined to the auxiliary diagnostic sinks rather than
-    // associating them with the primary stderr buffer.
-    let mut diagnostic_logger = logger.clone_diagnostic_sink();
     let elapsed = started.elapsed();
 
     // Persist (provision) or forget (deprovision) this lifecycle's
@@ -635,17 +620,12 @@ fn run_state_aware_main(
         }
     }
 
-    // Record the sandbox identity join key. For `isolation_session` the
-    // `sandboxId` tail is the OS-side `provisionId`, which is what joins an MXC
-    // record to the `Microsoft.Windows.IsolationSession` OS records. Emitted on
-    // success only: a failed phase produced no sandbox to identify.
-    if let Some(sandbox_id) = sandbox_id_for_identity_record(&outcome, sandbox_id.as_deref()) {
+    // Record only a constant backend marker. Lifecycle ids can contain
+    // account-derived values and must never reach a diagnostic sink.
+    if let Some(identity) = sandbox_identity_marker(&outcome, backend) {
         let record = AuditEvent::new(AuditEventName::SandboxIdentity)
             .str("backend", backend)
-            .str(
-                "identity",
-                &mxc_sdk::mxc_common::policy_identity::redact_identity(&sandbox_id),
-            )
+            .str("identity", identity)
             .str_opt("phase", phase);
         diagnostic_logger.log_audit_event(&record);
     }
@@ -677,21 +657,6 @@ fn run_state_aware_main(
         elapsed,
     );
 
-    // Route dispatch failures to the auxiliary diagnostic sinks only (log file
-    // / diagnostic pipe), so the envelope written below is the single
-    // client-facing copy of the error.
-    if let Err(error) = &outcome {
-        log_state_aware_dispatch_error(&mut diagnostic_logger, error);
-    }
-    for warning in logger.take_warnings() {
-        eprintln!("{warning}");
-    }
-    // Diagnostic buffer flushes to stderr regardless of success/failure so it
-    // never interleaves with the stdout envelope.
-    let buffered = logger.get_buffer().to_string();
-    if !buffered.is_empty() {
-        eprint!("{}", buffered);
-    }
     match finalize_state_aware_outcome(outcome, phase, dry_run) {
         StateAwareExit::Envelope(json) => {
             println!("{}", json);
@@ -1304,7 +1269,6 @@ fn main() {
         Some(Err(error)) => match cli.operation {
             Some(operation) => {
                 let error = lifecycle_input_error(operation, &mut logger, error);
-                log_state_aware_dispatch_error(&mut logger, &error);
                 print_error_envelope(&error);
                 eprint!("{}", logger.get_buffer());
                 process::exit(1);
@@ -1325,7 +1289,6 @@ fn main() {
                         &mut logger,
                         RequestInputError::Source(WxcError::ConfigParse(message.to_string())),
                     );
-                    log_state_aware_dispatch_error(&mut logger, &error);
                     print_error_envelope(&error);
                     eprint!("{}", logger.get_buffer());
                     process::exit(1);
@@ -2062,32 +2025,20 @@ mod tests {
     }
 
     #[test]
-    fn identity_record_reads_the_minted_id_out_of_a_provision_envelope() {
+    fn identity_record_uses_constant_backend_marker_after_provision() {
         let outcome = Ok(DispatchOutcome::Envelope(
-            serde_json::json!({"result": {"sandboxId": "iso:wxc-abcd1234"}}),
+            serde_json::json!({"result": {"sandboxId": "iso:alice@contoso.com"}}),
         ));
         assert_eq!(
-            sandbox_id_for_identity_record(&outcome, None).as_deref(),
-            Some("iso:wxc-abcd1234")
+            sandbox_identity_marker(&outcome, "isolation_session"),
+            Some("isolation-session")
         );
     }
 
     #[test]
-    fn identity_record_falls_back_to_the_inbound_id_for_later_phases() {
-        // Later phases return an envelope with no `sandboxId` (the client
-        // already has it), so the inbound id is the one to report.
-        let outcome = Ok(DispatchOutcome::Envelope(serde_json::json!({"result": {}})));
-        assert_eq!(
-            sandbox_id_for_identity_record(&outcome, Some("iso:wxc-abcd1234")).as_deref(),
-            Some("iso:wxc-abcd1234")
-        );
-
-        // Exec completes without an envelope at all.
+    fn identity_record_uses_constant_backend_marker_after_exec() {
         let exec = Ok(DispatchOutcome::ExecCompleted { exit_code: 0 });
-        assert_eq!(
-            sandbox_id_for_identity_record(&exec, Some("iso:wxc-abcd1234")).as_deref(),
-            Some("iso:wxc-abcd1234")
-        );
+        assert_eq!(sandbox_identity_marker(&exec, "wslc"), Some("wslc-sandbox"));
     }
 
     #[test]
@@ -2095,26 +2046,7 @@ mod tests {
         // A failed dispatch produced no sandbox to identify; claiming one would
         // be a lie.
         let outcome = Err(MxcError::backend_unavailable("nope"));
-        assert!(sandbox_id_for_identity_record(&outcome, Some("iso:wxc-abcd1234")).is_none());
-    }
-
-    #[test]
-    fn entra_provision_ids_are_never_logged_verbatim() {
-        // `state_aware.rs::provision` sets `provision_id = user.upn` for Entra
-        // sandboxes, so the sandboxId tail is a real user identifier. It must not
-        // reach a log file in any recoverable form.
-        let outcome = Ok(DispatchOutcome::Envelope(
-            serde_json::json!({"result": {"sandboxId": "iso:alice@contoso.com"}}),
-        ));
-        let id = sandbox_id_for_identity_record(&outcome, None).expect("id");
-        let rendered = mxc_sdk::mxc_common::policy_identity::redact_identity(&id);
-        assert!(!rendered.contains("alice"), "got: {rendered}");
-        assert!(!rendered.contains('@'), "got: {rendered}");
-        assert_eq!(
-            rendered,
-            mxc_sdk::mxc_common::policy_identity::ENTRA_UPN_MARKER,
-            "got: {rendered}"
-        );
+        assert!(sandbox_identity_marker(&outcome, "isolation_session").is_none());
     }
 
     #[test]
@@ -2512,31 +2444,6 @@ mod tests {
             assert_eq!(error, AUDIT_CAPTURE_DENIALS_CONFLICT_MSG);
             assert!(error.contains(r#"mode: "allow""#));
         }
-    }
-
-    #[test]
-    fn state_aware_dispatch_errors_use_only_auxiliary_diagnostic_sinks() {
-        let directory = tempfile::tempdir().unwrap();
-        let log_path = directory.path().join("mxc.log");
-        let mut logger = test_logger();
-        logger.enable_file_sink(&log_path).unwrap();
-        let error = MxcError::malformed_request(
-            "Invalid configuration at `wslc.provision.portMappings[0].windowsPort`",
-        );
-
-        log_state_aware_dispatch_error(&mut logger, &error);
-
-        assert!(
-            logger.get_buffer().is_empty(),
-            "the JSON envelope must retain primary output ownership"
-        );
-        drop(logger);
-        let log = std::fs::read_to_string(log_path).unwrap();
-        assert_eq!(
-            log.matches("wslc.provision.portMappings[0].windowsPort")
-                .count(),
-            1
-        );
     }
 
     #[test]

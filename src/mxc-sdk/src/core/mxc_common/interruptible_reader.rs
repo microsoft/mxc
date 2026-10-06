@@ -97,8 +97,8 @@ impl InterruptibleReader {
 
     /// Wrap an owned readable pipe and periodically probe it for EOF.
     ///
-    /// This is needed for Darwin FIFOs, where `poll` may not wake when the
-    /// final writer closes even though a non-blocking `read` returns EOF.
+    /// This is needed for Darwin FIFOs and PTYs, where `poll` may not wake when
+    /// the final peer closes even though a non-blocking `read` returns EOF.
     pub fn new_with_periodic_eof_probe(fd: OwnedFd, interval: Duration) -> io::Result<Self> {
         Self::new_with_eof_probe_interval(fd, Some(interval))
     }

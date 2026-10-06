@@ -880,12 +880,7 @@ mod tests {
     fn assert_envelope(outcome: DispatchOutcome) -> Value {
         match outcome {
             DispatchOutcome::Envelope(v) => v,
-            DispatchOutcome::ExecCompleted { exit_code } => {
-                panic!(
-                    "expected envelope, got ExecCompleted {{ exit_code: {} }}",
-                    exit_code
-                )
-            }
+            DispatchOutcome::ExecCompleted { .. } => panic!("expected envelope"),
         }
     }
 

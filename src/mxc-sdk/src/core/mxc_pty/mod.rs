@@ -675,7 +675,13 @@ impl LivePty {
     }
 
     fn reader_from_file(reader: std::fs::File) -> std::io::Result<(PtyReader, PtyReadCanceller)> {
+        #[cfg(target_os = "linux")]
         let reader = InterruptibleReader::new(reader.into())?;
+        #[cfg(target_os = "macos")]
+        let reader = InterruptibleReader::new_with_periodic_eof_probe(
+            reader.into(),
+            std::time::Duration::from_millis(50),
+        )?;
         let canceller = PtyReadCanceller(reader.canceller());
         Ok((PtyReader(reader), canceller))
     }
