@@ -463,12 +463,6 @@ mod proxy_policy_tests {
     fn directional_sections(proxy: &str) -> NetworkSections {
         NetworkSections {
             network: Some(wire::Network {
-                default_policy: None,
-                enforcement_mode: None,
-                allow_local_network: None,
-                allowed_hosts: None,
-                blocked_hosts: None,
-                proxy: None,
                 egress: Some(wire::NetworkEgress {
                     default: Some(wire::NetworkAction::Allow),
                     allow: None,

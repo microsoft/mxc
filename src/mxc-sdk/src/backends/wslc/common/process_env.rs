@@ -88,11 +88,9 @@ pub fn sdk_entries(scope: EnvScope, entries: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::DefaultEnvCompatibility;
 
     fn request(env: Option<Vec<&str>>, inherit_default_env: bool) -> ExecutionRequest {
         ExecutionRequest {
-            default_env_compatibility: DefaultEnvCompatibility::DefaultBlock,
             env: env.map(|e| e.into_iter().map(String::from).collect()),
             inherit_default_env,
             ..Default::default()

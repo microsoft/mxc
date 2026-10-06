@@ -100,10 +100,9 @@ separate ingress defaults:
 
 See
 [`tests/examples/30_network_0_8_directional.json`](../tests/examples/30_network_0_8_directional.json)
-for the complete config and
-[`sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
-for the historical GA design; use the
-[supported schema guide](schema.md) for current backend authoring.
+for the complete config and the
+[supported schema guide](schema.md#directional-networking-supported-contracts)
+for current backend authoring.
 
 ### Network Proxy
 
@@ -146,10 +145,8 @@ their supported ingress policies differ. See their backend guides.
 
 Every supported contract (`0.9.0-alpha` or later) accepts the directional
 shape and rejects the retired `defaultPolicy`, host-list, and `network.proxy`
-fields. This is the cross-backend schema (see
-[`docs/sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
-for the full design and per-backend enforcement matrix), not a
-backend-specific format: it's parsed the same way regardless of
+fields. This is the [cross-backend schema](schema.md#directional-networking-supported-contracts),
+not a backend-specific format: it's parsed the same way regardless of
 `containment`. Each backend independently declares which parts of it — if
 any — it actually enforces; a backend that hasn't declared support for a
 given field rejects a config that sets it.
@@ -158,8 +155,7 @@ Note that `EGRESS_RULES` is what carries per-CIDR/port rules; a backend
 without it accepts only `egress.default`. On Seatbelt,
 `runtimeConfig.networkProxy` covers only loopback endpoints; there is no
 supported equivalent for a remote proxy URL or `builtinTestServer`. See
-[`docs/sandbox-policy/0.8.0/networking/schema-updates.md`](sandbox-policy/0.8.0/networking/schema-updates.md)
-for the full field mapping and [`tests/examples/31_mac_network_0_8.json`](../tests/examples/31_mac_network_0_8.json)
+[`tests/examples/31_mac_network_0_8.json`](../tests/examples/31_mac_network_0_8.json)
 for a complete example:
 
 ```json

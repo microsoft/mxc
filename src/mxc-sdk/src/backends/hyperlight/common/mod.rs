@@ -755,7 +755,7 @@ impl HyperlightScriptRunner {
 impl ScriptRunner for HyperlightScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         Self::validate_policies(request).map_err(|e| e.to_response())?;
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_network_policy_support(request, NetworkPolicySupport::default())?;
         Ok(())
     }
 

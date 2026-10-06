@@ -568,7 +568,7 @@ pub trait SandboxBackend {
     /// Return a named feature constant or compose constants with `|`. Use
     /// [`NetworkPolicySupport::ALL`] only when every feature is enforced.
     fn network_policy_support(&self) -> NetworkPolicySupport {
-        NetworkPolicySupport::LEGACY
+        NetworkPolicySupport::default()
     }
 
     /// Validates shared network support and backend-specific constraints.

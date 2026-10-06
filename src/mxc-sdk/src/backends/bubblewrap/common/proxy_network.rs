@@ -2066,7 +2066,6 @@ fn terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::NetworkEnforcementCompatibility;
 
     /// The reported concern: a hostname proxy resolves through the host's
     /// resolver during setup, before the script timeout applies, so an
@@ -3006,7 +3005,6 @@ mod tests {
     /// public constructor so the count matches what the supervisor installs.
     fn plan_with_rule_count(count: usize) -> EgressPlan {
         let mut request = crate::mxc_common::models::ExecutionRequest {
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::Strict,
             ..Default::default()
         };
         request.policy.allowed_hosts = (0..count)

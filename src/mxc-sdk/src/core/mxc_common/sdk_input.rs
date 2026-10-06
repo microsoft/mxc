@@ -10,7 +10,6 @@ use crate::mxc_contract::ContractVersion;
 
 use crate::mxc_common::common_request_ir::CommonRequestIR;
 use crate::mxc_common::error::WxcError;
-use crate::mxc_common::models::NetworkEnforcementCompatibility;
 use crate::mxc_common::state_aware_input::StateAwareInput;
 use crate::mxc_common::state_aware_operation::StateAwareOperation;
 use crate::mxc_common::wire;
@@ -148,9 +147,6 @@ impl SdkStateAwareInput {
             schema: None,
             comment: None,
             source_contract: self.version,
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::Strict,
-            default_env_compatibility:
-                crate::mxc_common::models::DefaultEnvCompatibility::DefaultBlock,
             phase: None,
             sandbox_id: None,
             container_id: None,
@@ -191,12 +187,6 @@ impl SdkStateAwareInput {
 
 fn map_network(network: SdkNetworkInput) -> wire::Network {
     wire::Network {
-        default_policy: None,
-        enforcement_mode: None,
-        allow_local_network: None,
-        allowed_hosts: None,
-        blocked_hosts: None,
-        proxy: None,
         egress: network.egress.map(|egress| wire::NetworkEgress {
             default: egress.default.map(map_action),
             allow: egress.allow.map(map_rules),

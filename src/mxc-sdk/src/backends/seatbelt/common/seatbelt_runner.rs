@@ -43,7 +43,9 @@ use crate::mxc_common::validator::{
 };
 use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
-use crate::seatbelt_common::default_env::{env_pairs, resolved_env, DEFAULT_SANDBOX_PATH};
+#[cfg(test)]
+use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
+use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
 
 #[link(name = "proc")]
@@ -1241,11 +1243,6 @@ fn apply_clean_environment(
     working_directory: Option<&str>,
 ) {
     command.env_clear();
-    // From 0.9 `resolved_env` carries `PATH`, and an explicitly empty
-    // `process.env` must stay empty rather than keep a floor under it.
-    if !request.supplies_default_env() {
-        command.env("PATH", DEFAULT_SANDBOX_PATH);
-    }
     for (key, value) in resolve_environment(request, proxy_address, working_directory) {
         command.env(key, value);
     }
@@ -1341,8 +1338,8 @@ fn cleanup_files(paths: &[&str]) {
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        DefaultEnvCompatibility, ExecutionRequest, NetworkAction, NetworkEgressPolicy,
-        NetworkPolicy, ProxyAddress, SeatbeltConfig,
+        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkPolicy, ProxyAddress,
+        SeatbeltConfig,
     };
 
     #[allow(clippy::field_reassign_with_default)]
@@ -1389,7 +1386,6 @@ mod tests {
         // The 0.9 default block must not bypass the proxy stripping in
         // `resolve_environment`.
         let mut request = base_request();
-        request.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
         request.env = Some(vec!["HTTP_PROXY=http://attacker.example:9999".into()]);
         request.inherit_default_env = true;
         let addr = ProxyAddress::new("127.0.0.1".into(), 8888);
@@ -1909,16 +1905,7 @@ mod tests {
         assert_eq!(
             env_value(&pairs, "HOME"),
             None,
-            "below 0.9 supplies no HOME"
-        );
-
-        let mut modern = base_request();
-        modern.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
-        let pairs = resolve_environment(&modern, None, None);
-        assert_eq!(
-            env_value(&pairs, "HOME"),
-            None,
-            "0.9 leaves HOME unset when no directory resolves"
+            "HOME stays unset when no directory resolves"
         );
     }
 
@@ -1928,7 +1915,6 @@ mod tests {
     #[test]
     fn home_follows_the_directory_the_child_starts_in() {
         let mut request = base_request();
-        request.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
         let pairs = resolve_environment(&request, None, Some("/Users/someone/work"));
         assert_eq!(env_value(&pairs, "HOME"), Some("/Users/someone/work"));
     }

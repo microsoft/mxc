@@ -38,8 +38,6 @@ fn isolation_session_configuration_presence_matches_explicit_values() {
         assert!(common.filesystem.is_none());
         assert!(common.process.is_none());
         let network = common.network.unwrap();
-        assert!(network.allow_local_network.is_none());
-        assert!(network.default_policy.is_none());
         assert!(matches!(
             network.egress.as_ref().unwrap().default,
             Some(wire::NetworkAction::Allow)
@@ -220,10 +218,8 @@ fn provision_common_fields_are_independent_of_backend_payload() {
     }
     let (common, _) = adapt(&source("wslc", r#","network":{}"#));
     let network = common.network.unwrap();
-    assert!(network.default_policy.is_none());
-    assert!(network.allowed_hosts.is_none());
-    assert!(network.blocked_hosts.is_none());
-    assert!(network.proxy.is_none());
+    assert!(network.egress.is_none());
+    assert!(network.ingress.is_none());
 }
 
 #[test]

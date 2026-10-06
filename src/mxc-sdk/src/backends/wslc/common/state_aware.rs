@@ -626,8 +626,8 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkEgressPolicy,
-        NetworkIngressPolicy, ProxyAddress, ProxyConfig,
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
+        ProxyConfig,
     };
 
     /// The exit code is unrecoverable once dropped, so failing the call must not
@@ -1115,7 +1115,6 @@ mod tests {
     fn the_exec_config_carries_the_scope_each_state_of_process_env_selects() {
         struct Case {
             label: &'static str,
-            compatibility: DefaultEnvCompatibility,
             env: Option<Vec<&'static str>>,
             inherit_default_env: bool,
             scope: EnvScope,
@@ -1125,7 +1124,6 @@ mod tests {
         let cases = [
             Case {
                 label: "omitted takes the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: None,
                 inherit_default_env: false,
                 scope: EnvScope::Merge,
@@ -1133,7 +1131,6 @@ mod tests {
             },
             Case {
                 label: "explicitly empty leaves the child nothing",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec![]),
                 inherit_default_env: false,
                 scope: EnvScope::Replace,
@@ -1141,7 +1138,6 @@ mod tests {
             },
             Case {
                 label: "explicitly empty plus inheritDefaultEnv takes the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec![]),
                 inherit_default_env: true,
                 scope: EnvScope::Merge,
@@ -1149,7 +1145,6 @@ mod tests {
             },
             Case {
                 label: "supplied is used verbatim",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec!["FOO=bar"]),
                 inherit_default_env: false,
                 scope: EnvScope::Replace,
@@ -1157,7 +1152,6 @@ mod tests {
             },
             Case {
                 label: "supplied plus inheritDefaultEnv layers over the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec!["FOO=bar"]),
                 inherit_default_env: true,
                 scope: EnvScope::Merge,
@@ -1167,7 +1161,6 @@ mod tests {
 
         for case in cases {
             let request = ExecutionRequest {
-                default_env_compatibility: case.compatibility,
                 env: case.env.map(|e| e.into_iter().map(String::from).collect()),
                 inherit_default_env: case.inherit_default_env,
                 script_code: "echo hi".to_string(),
@@ -1196,7 +1189,6 @@ mod tests {
     #[test]
     fn the_exec_config_keeps_the_cooperative_proxy_out_of_the_callers_reach() {
         let request = ExecutionRequest {
-            default_env_compatibility: DefaultEnvCompatibility::DefaultBlock,
             env: Some(vec![
                 "FOO=bar".to_string(),
                 "HTTP_PROXY=http://attacker.invalid:1".to_string(),

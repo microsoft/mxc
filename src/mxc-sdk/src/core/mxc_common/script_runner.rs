@@ -19,7 +19,7 @@ use crate::mxc_common::validator::{
 pub trait ScriptRunner {
     /// Validate shared network support and runner-specific constraints.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_network_policy_support(request, NetworkPolicySupport::default())?;
         Ok(())
     }
 
