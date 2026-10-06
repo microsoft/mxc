@@ -432,27 +432,7 @@ impl ScriptRunner for WSLContainerRunner {
         policy_mapping::container_working_directory(&request.working_directory)
             .map_err(|msg| WslcError::Rejected(msg).into_response())?;
         policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
-        if request.policy.needs_host_filtering() {
-            return Err(WslcError::Rejected(
-                "WSLc: per-host egress filtering (allowedHosts with \
-                 defaultPolicy='block', or blockedHosts with defaultPolicy='allow') \
-                 is not supported. A WSL container has no CAP_NET_ADMIN for in-container \
-                 iptables, and VM-level enforcement is not available without breaking other \
-                 security guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
-                 for cooperative host filtering, or remove the host lists."
-                    .to_string(),
-            )
-            .into_response());
-        }
-        if request.policy.allow_local_network {
-            return Err(WslcError::Rejected(
-                "WSLc: network.allowLocalNetwork=true is not supported. Expose specific \
-                 ports with wslc portMappings instead."
-                    .to_string(),
-            )
-            .into_response());
-        }
-        policy::reject_unsupported_enforcement_mode(request).map_err(as_wslc_rejection)?;
+        policy::reject_retired_network_fields(request).map_err(as_wslc_rejection)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, policy::network_policy_support())
@@ -598,105 +578,6 @@ impl WSLContainerRunner {
             sdk.terminate_session_fn(),
             sdk.release_session_fn(),
         ))
-    }
-
-    /// Apply iptables rules inside a running container for host filtering.
-    ///
-    /// # Safety
-    /// `sdk` must contain valid function pointers and `container` must be a
-    /// live container handle for a started container.
-    unsafe fn apply_iptables_rules(
-        sdk: &'static WslcSdk,
-        container: WslcContainer,
-        ipt_cmd: &str,
-        logger: &mut Logger,
-    ) -> Result<(), ScriptResponse> {
-        let _ = writeln!(logger, "[WSLC] Applying iptables rules for host filtering");
-        let mut ipt_settings = std::mem::zeroed::<WslcProcessSettings>();
-        let hr = sdk.WslcInitProcessSettings(&mut ipt_settings);
-        if hr != S_OK {
-            return Err(sdk_error(
-                "WslcInitProcessSettings (iptables) failed",
-                hr,
-                "",
-            ));
-        }
-
-        let ipt_sh = b"/bin/sh\0";
-        let ipt_c = b"-c\0";
-        let ipt_script = format!("{}\0", ipt_cmd);
-        let ipt_script_bytes = ipt_script.as_bytes();
-        let ipt_argv: [PCSTR; 3] = [
-            ipt_sh.as_ptr() as PCSTR,
-            ipt_c.as_ptr() as PCSTR,
-            ipt_script_bytes.as_ptr() as PCSTR,
-        ];
-        let hr =
-            sdk.WslcSetProcessSettingsCmdLine(&mut ipt_settings, ipt_argv.as_ptr(), ipt_argv.len());
-        if hr != S_OK {
-            return Err(sdk_error(
-                "WslcSetProcessSettingsCmdLine (iptables) failed",
-                hr,
-                "",
-            ));
-        }
-
-        let mut ipt_process: WslcProcess = ptr::null_mut();
-        let mut err_msg = CoTaskMemPWSTR::null();
-        let hr = sdk.WslcCreateContainerProcess(
-            container,
-            &mut ipt_settings,
-            &mut ipt_process,
-            err_msg.as_mut_ptr(),
-        );
-        if hr != S_OK {
-            let msg = err_msg.to_string_lossy();
-            return Err(sdk_error("Failed to exec iptables rules", hr, &msg));
-        }
-        let ipt_guard = WslcProcessGuard::from_raw(ipt_process, sdk.release_process_fn());
-
-        // Wait for iptables to complete
-        let mut ipt_exit_event: HANDLE = ptr::null_mut();
-        let hr = sdk.WslcGetProcessExitEvent(ipt_guard.as_raw(), &mut ipt_exit_event);
-        if hr != S_OK {
-            return Err(sdk_error(
-                "WslcGetProcessExitEvent (iptables) failed",
-                hr,
-                "",
-            ));
-        }
-        if !ipt_exit_event.is_null() {
-            let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
-                windows::Win32::Foundation::HANDLE(ipt_exit_event),
-                30_000,
-            );
-            if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
-                return Err(
-                    WslcError::Runtime("iptables rules timed out after 30s".to_string())
-                        .into_response(),
-                );
-            }
-        }
-
-        let mut ipt_exit_code: i32 = -1;
-        let hr = sdk.WslcGetProcessExitCode(ipt_guard.as_raw(), &mut ipt_exit_code);
-        if hr != S_OK {
-            return Err(sdk_error(
-                "WslcGetProcessExitCode (iptables) failed",
-                hr,
-                "",
-            ));
-        }
-        if ipt_exit_code != 0 {
-            return Err(WslcError::Runtime(format!(
-                "iptables rules failed with exit code {} \
-                 (image may not have iptables installed)",
-                ipt_exit_code
-            ))
-            .into_response());
-        }
-        let _ = writeln!(logger, "[WSLC] iptables rules applied successfully");
-        Ok(())
     }
 
     /// Wait for process exit with timeout enforcement.
@@ -918,6 +799,7 @@ impl WSLContainerRunner {
         logger: &mut Logger,
         output: OutputMode,
     ) -> Result<StartedContainer, ScriptResponse> {
+        policy::reject_retired_network_fields(request).map_err(as_wslc_rejection)?;
         let _ = writeln!(logger, "{START_CONTAINER_BANNER}");
 
         // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -1192,12 +1074,7 @@ impl WSLContainerRunner {
         }
 
         let is_default_block = policy::network_is_isolated(request);
-        let has_host_rules = policy_mapping::needs_host_filtering(
-            is_default_block,
-            &request.policy.allowed_hosts,
-            &request.policy.blocked_hosts,
-        );
-        let net_mode = policy_mapping::map_network_policy(is_default_block, has_host_rules);
+        let net_mode = policy_mapping::map_network_policy(is_default_block);
         let hr = sdk.WslcSetContainerSettingsNetworkingMode(&mut container_settings, net_mode);
         if hr != S_OK {
             return Err(sdk_error(
@@ -1208,21 +1085,12 @@ impl WSLContainerRunner {
         }
         let _ = writeln!(logger, "[WSLC] Networking mode: {:?}", net_mode);
 
-        let iptables_cmd = policy_mapping::build_iptables_rules(
-            &request.policy.allowed_hosts,
-            &request.policy.blocked_hosts,
-            is_default_block,
-        );
-
         let mut flags = WslcContainerFlags::WSLC_CONTAINER_FLAG_NONE;
         if request.lifecycle.destroy_on_exit {
             flags |= WslcContainerFlags::WSLC_CONTAINER_FLAG_AUTO_REMOVE;
         }
         if self.config.gpu {
             flags |= WslcContainerFlags::WSLC_CONTAINER_FLAG_ENABLE_GPU;
-        }
-        if has_host_rules {
-            flags |= WslcContainerFlags::WSLC_CONTAINER_FLAG_PRIVILEGED;
         }
         let hr = sdk.WslcSetContainerSettingsFlags(&mut container_settings, flags);
         if hr != S_OK {
@@ -1272,11 +1140,8 @@ impl WSLContainerRunner {
         // reverse declaration order — freeing the callback context (`io_ctx` /
         // `io_ctx_guard`) *before* the session is terminated and the DLL
         // unloaded — so a late callback could dereference freed memory. Every
-        // failure past this point therefore quiesces the container first. This
-        // is not a corner case: `apply_iptables_rules` fails for any host-rule
-        // policy today, since the container is not granted `CAP_NET_ADMIN`.
-        let post_start =
-            Self::attach_init_process(sdk, &container_guard, iptables_cmd.as_deref(), logger);
+        // failure past this point therefore quiesces the container first.
+        let post_start = Self::attach_init_process(sdk, &container_guard);
         let process_guard = match post_start {
             Ok(guard) => guard,
             Err(e) => {
@@ -1306,22 +1171,16 @@ impl WSLContainerRunner {
         })
     }
 
-    /// Apply any host-rule `iptables` chain and take the container's init
-    /// process handle. Split out so every failure between "container started"
-    /// and "handle in hand" funnels through one caller-side cleanup path.
+    /// Take the container's init process handle. Split out so every failure
+    /// between "container started" and "handle in hand" funnels through one
+    /// caller-side cleanup path.
     ///
     /// # Safety
     /// `sdk` must hold valid function pointers and `container` a live handle.
     unsafe fn attach_init_process(
         sdk: &'static WslcSdk,
         container: &WslcContainerGuard,
-        iptables_cmd: Option<&str>,
-        logger: &mut Logger,
     ) -> Result<WslcProcessGuard, ScriptResponse> {
-        if let Some(ipt_cmd) = iptables_cmd {
-            Self::apply_iptables_rules(sdk, container.as_raw(), ipt_cmd, logger)?;
-        }
-
         let mut process: WslcProcess = ptr::null_mut();
         let hr = sdk.WslcGetContainerInitProcess(container.as_raw(), &mut process);
         if hr != S_OK {
@@ -1867,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_rejects_allowlist_host_filtering() {
+    fn validate_runner_rejects_retired_allowlist() {
         // block default + allowlist = per-host filtering WSLc can't enforce.
         let request = ExecutionRequest {
             containment: crate::mxc_common::models::ContainmentBackend::Wslc,
@@ -1880,7 +1739,7 @@ mod tests {
         };
         let runner = WSLContainerRunner::new(&WslcConfig::default());
         let err = runner.validate_runner(&request).unwrap_err();
-        assert!(err.error_message.contains("per-host egress filtering"));
+        assert!(err.error_message.contains("allowedHosts"));
     }
 
     #[test]
@@ -1914,12 +1773,9 @@ mod tests {
         assert!(err.error_message.contains("allowLocalNetwork"));
     }
 
-    /// The two surfaces refuse `allowLocalNetwork` with deliberately different
-    /// remedies: one-shot has `wslc.portMappings` to point at,
-    /// state-aware has no port-mapping primitive at all. Unifying the messages
-    /// would send state-aware users after a dead end.
+    /// Neither surface accepts a retired network field.
     #[test]
-    fn both_surfaces_reject_allow_local_network_with_surface_specific_remedies() {
+    fn both_surfaces_reject_retired_allow_local_network() {
         let request = ExecutionRequest {
             containment: crate::mxc_common::models::ContainmentBackend::Wslc,
             policy: crate::mxc_common::models::ContainerPolicy {
@@ -1936,22 +1792,13 @@ mod tests {
             one_shot.failure_phase,
             crate::mxc_common::models::FailurePhase::Rejected
         );
-        assert!(
-            one_shot.error_message.contains("portMappings"),
-            "one-shot has a port-mapping primitive and must name it; got: {}",
-            one_shot.error_message
-        );
+        assert!(one_shot.error_message.contains("allowLocalNetwork"));
 
         let state_aware =
             crate::wslc_common::policy::validate_provision_policy(&request).unwrap_err();
         assert_eq!(
             state_aware.code,
             crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
-        );
-        assert!(
-            !state_aware.message.contains("portMappings"),
-            "state-aware has no port-mapping primitive to point at; got: {}",
-            state_aware.message
         );
         assert!(
             state_aware.message.contains("allowLocalNetwork"),
@@ -1983,12 +1830,22 @@ mod tests {
 
     #[test]
     fn validate_runner_accepts_bare_defaults() {
-        // Full cutoff / full NAT (no host lists) is enforceable — must pass.
-        for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
+        // Both supported all-or-nothing postures are enforceable.
+        for action in [
+            crate::mxc_common::models::NetworkAction::Allow,
+            crate::mxc_common::models::NetworkAction::Deny,
+        ] {
             let request = ExecutionRequest {
                 containment: crate::mxc_common::models::ContainmentBackend::Wslc,
                 policy: crate::mxc_common::models::ContainerPolicy {
-                    default_network_policy: policy,
+                    network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
+                        default: action,
+                        ..Default::default()
+                    }),
+                    network_ingress: Some(crate::mxc_common::models::NetworkIngressPolicy {
+                        default: action,
+                        host_loopback: action,
+                    }),
                     ..Default::default()
                 },
                 ..Default::default()

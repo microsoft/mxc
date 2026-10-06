@@ -4,8 +4,8 @@
 //! BaseContainer configuration and policy helpers.
 
 use crate::mxc_common::models::{
-    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy,
-    NetworkPort, NetworkProtocol, NetworkRule,
+    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer, NetworkPort,
+    NetworkProtocol, NetworkRule,
 };
 use crate::process_security_environment_spec::process_security_environment_layout::{
     finish_process_security_environment_buffer, DestinationRuleT as PsecDestinationRuleT,
@@ -143,13 +143,10 @@ fn psec_filter_action(action: NetworkAction) -> PsecFilterAction {
 }
 
 fn effective_egress_default(policy: &ContainerPolicy) -> NetworkAction {
-    policy.network_egress.as_ref().map_or(
-        match policy.default_network_policy {
-            NetworkPolicy::Allow => NetworkAction::Allow,
-            NetworkPolicy::Block => NetworkAction::Deny,
-        },
-        |egress| egress.default,
-    )
+    policy
+        .network_egress
+        .as_ref()
+        .map_or(NetworkAction::Deny, |egress| egress.default)
 }
 
 pub(super) fn unrestricted_host_loopback_allowed(policy: &ContainerPolicy) -> bool {

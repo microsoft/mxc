@@ -151,9 +151,9 @@ non-default values.
 | `filesystem.readwritePaths` | Existing directories mapped read-write at the same path |
 | `filesystem.readonlyPaths` | Existing directories mapped read-only at the same path |
 | `filesystem.deniedPaths` | Accepted outside shares; rejected when overlapping a mapped share |
-| Default network policy `block` | Enforced by the guest firewall |
-| Default network policy `allow` | Rejected |
-| `allowedHosts` / `blockedHosts` | Rejected |
+| Omitted network policy | Guest firewall blocks external networking |
+| `network.egress` or `network.ingress` supplied (even empty or deny-only) | Rejected; omit both sections to use guest isolation |
+| Retired `defaultPolicy` and host lists | Rejected by the exact contract |
 | Network proxy | Rejected |
 
 Mapped paths must be absolute existing directories. Files, nested mapped roots,

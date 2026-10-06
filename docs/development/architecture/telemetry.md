@@ -547,6 +547,11 @@ rejection records from the same invocation. A successful launch emits no
 | `mxc.SandboxTornDown` | Per-run resources released, once per handle | ProcessContainer: `backend`, `identity`, `tier`, `pid`, `status`, `firewall_rules_removed`, `firewall_removal_ok`, `bfs_removed`, `proxy_stopped`, `preserve_policy`, `container_released`, `skip_reason`. IsolationSession: `backend`, `identity`, `phase`, `status`, `session_stopped`, `agent_user_deprovisioned`, `client_unregistered` |
 | `mxc.ConfigRejected` | A request was refused before it could run | `correlation_id`, `backend`, `reason`, `offending_field`, `phase` |
 
+For the ProcessContainer AppContainer fallback, the firewall fields remain in
+these records for compatibility: no local firewall rules are created or
+removed, `firewall_applied` is `false`, and `firewall_removal_ok` is `true`.
+Proxy setup failures still set `mxc.NetworkPolicyApplied.status` to failure.
+
 ### Error semantics: `FallbackError` vs `ActivityError`
 
 Tier selection can *degrade* (proceed with weaker enforcement) or *fail*
@@ -710,7 +715,7 @@ that it was skipped.
 | Process outcome (M-ETW-1) | ✅ | ✅ | ✅ | ✅ (shared `create_process`) |
 | Enforcement degradation (M-ETW-2) | ✅ (shared dispatcher; records the tier actually selected) | ✅ | n/a — no tier/fallback ladder exists for this backend | n/a |
 | Policy hash (M-ETW-3) | ✅ | ✅ | ✅ | ✅ |
-| Network policy (M-ETW-4) | ✅ (`enforcement_mode: capabilities` — policy travels in the sandbox spec and the OS enforces it, so `firewall_rules_created` is honestly `0`) | ✅ (`firewall` / `both`) | n/a — MXC rejects network and proxy policy for this backend before provisioning | n/a |
+| Network policy (M-ETW-4) | ✅ (`enforcement_mode: capabilities` — policy travels in the sandbox spec and the OS enforces it, so `firewall_rules_created` is honestly `0`) | ✅ (`enforcement_mode: capabilities` for supported directional requests; egress default is reported as `allow` or `block`) | n/a — MXC rejects network and proxy policy for this backend before provisioning | n/a |
 | Sandbox teardown (M-ETW-5) | ✅ | ✅ | ✅ | ✅ (`stop` and `deprovision` phases) |
 | IsolationSession telemetry (M-ETW-6) | n/a | n/a | ✅ Applicable lifecycle events use `Microsoft.MXC`; no separate OS provider is assumed | ✅ Same provider path |
 | Configuration rejection (M-ETW-7) | ✅ | ✅ | ✅ | ✅ (`phase` names the rejecting phase) |

@@ -422,11 +422,10 @@ rules, but a WSLC container runs **without** `CAP_NET_ADMIN` (the SDK's
 `Privileged` flag does not grant it), so those rules cannot be applied — and MXC
 has no VM-level enforcement hook either (WSLC cannot expose one without breaking
 other security promises such as MDE). Rather than fail the run at exec time,
-such configs are **rejected at config-parse time**:
+such configs are **rejected before provisioning**:
 
 ```
-WSLc: per-host egress filtering (allowedHosts with defaultPolicy='block', or
-blockedHosts with defaultPolicy='allow') is not supported. ...
+WSLc does not support network.egress allow/deny rules; networking is all-or-nothing
 ```
 
 Use a runtime proxy with unrestricted bridged networking for cooperative host

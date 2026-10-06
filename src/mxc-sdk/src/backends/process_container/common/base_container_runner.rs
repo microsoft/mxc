@@ -1044,8 +1044,10 @@ impl BaseContainerRunner {
 
         crate::mxc_common::telemetry::log_network_policy_applied(
             sanitize_identity(&identity),
-            request.policy.network_enforcement_mode.as_str(),
-            request.policy.default_network_policy.as_str(),
+            crate::process_container_common::network_policy_helpers::CAPABILITIES_ENFORCEMENT_MODE,
+            crate::process_container_common::network_policy_helpers::audit_egress_default(
+                &request.policy,
+            ),
             request
                 .policy
                 .network_proxy
@@ -1064,11 +1066,13 @@ impl BaseContainerRunner {
                 )
                 .str(
                     "enforcement_mode",
-                    request.policy.network_enforcement_mode.as_str(),
+                    crate::process_container_common::network_policy_helpers::CAPABILITIES_ENFORCEMENT_MODE,
                 )
                 .str(
                     "default_policy",
-                    request.policy.default_network_policy.as_str(),
+                    crate::process_container_common::network_policy_helpers::audit_egress_default(
+                        &request.policy,
+                    ),
                 )
                 .u64(
                     "proxy_port",
@@ -1165,6 +1169,9 @@ impl SandboxBackend for BaseContainerRunner {
                 crate::mxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
+        crate::process_container_common::network_policy_helpers::reject_retired_network_policy(
+            &request.policy,
+        )?;
         if has_conflicting_proxy_identity(&request.policy) {
             return Err(ScriptResponse::rejected(
                 "processContainer.network.allowedProxyPeer grants loopback access only to the \
@@ -2055,8 +2062,7 @@ mod tests {
     };
     use crate::mxc_common::models::{
         BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr,
-        NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig,
-        UiPolicy,
+        NetworkPeer, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig, UiPolicy,
     };
     use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
@@ -2781,7 +2787,10 @@ mod tests {
     fn build_process_security_environment_spec_ignores_empty_capability() {
         let mut request = ExecutionRequest::default();
         request.policy.capabilities = vec![String::new()];
-        request.policy.default_network_policy = NetworkPolicy::Allow;
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
 
         let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
@@ -2790,9 +2799,8 @@ mod tests {
     }
 
     #[test]
-    fn build_process_security_environment_spec_preserves_allow_egress() {
-        let mut request = ExecutionRequest::default();
-        request.policy.default_network_policy = NetworkPolicy::Allow;
+    fn build_process_security_environment_spec_preserves_implicit_deny_egress() {
+        let request = ExecutionRequest::default();
 
         let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
@@ -2801,8 +2809,8 @@ mod tests {
             .and_then(|policy| policy.egress())
             .expect("PSEC must carry an explicit egress default");
 
-        assert_eq!(egress.default_action(), psec_layout::FilterAction::allow);
-        assert_eq!(spec.capabilities(), Some("internetClient"));
+        assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+        assert!(spec.capabilities().is_none());
     }
 
     #[test]
