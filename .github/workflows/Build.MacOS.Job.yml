@@ -51,9 +51,10 @@ jobs:
       # tests skip via has_platform_exec() if it is missing. sandbox-exec needs
       # no elevation, so they run in this standard macOS job.
       - name: Test
-        run: cargo test --locked --release --target aarch64-apple-darwin
-             -p mxc_darwin -p mxc-sdk --
-             --skip core_modules::mxc_pty::tests::
+        run: |
+          cargo test --locked --release --target aarch64-apple-darwin \
+            -p mxc_darwin -p mxc-sdk -- \
+            --skip 'core_modules::mxc_pty::tests::'
 
       - name: Test state-aware SDK boundaries
         shell: bash
