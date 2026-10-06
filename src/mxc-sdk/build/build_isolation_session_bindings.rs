@@ -136,9 +136,7 @@ fn verify_inbox_bindings_version() {
             )
         });
 
-    let lock_path = Path::new(&manifest_dir)
-        .join("..")
-        .join("Cargo.lock");
+    let lock_path = Path::new(&manifest_dir).join("..").join("Cargo.lock");
     let lock_contents = std::fs::read_to_string(&lock_path).unwrap_or_else(|error| {
         panic!(
             "isolation_session_bindings: read workspace lockfile {}: {error}",

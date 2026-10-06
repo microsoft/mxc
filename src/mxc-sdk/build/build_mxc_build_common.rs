@@ -6,6 +6,10 @@
 //! Stamps `ProductName`, `FileDescription`, `OriginalFilename`, and
 //! `ProductVersion` (with the git commit hash) into MXC PE executables and libraries.
 
+// This source-included helper is also compiled by binaries that do not expose
+// the lifted feature, so their Cargo manifests cannot declare this cfg value.
+#![allow(unexpected_cfgs)]
+
 use std::io;
 use std::path::Path;
 use std::process::Command;

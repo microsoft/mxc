@@ -215,7 +215,7 @@ The lifted path obtains the factory from the shim's `DllGetActivationFactory`
 export and calls
 `IActivationFactory::ActivateInstance` directly — which, unlike the
 inbox `RoActivateInstance` path, does **not** implicitly initialize the
-WinRT/COM apartment. `src/core/wxc/src/main.rs` calls
+WinRT/COM apartment. `src/tools/wxc/src/main.rs` calls
 `CoInitializeEx(COINIT_MULTITHREADED)` at startup, and `regfree.rs`
 additionally calls `CoInitializeEx` before activation so the factory's internal
 COM activation (coresident client → service) has an initialized apartment even

@@ -1558,6 +1558,9 @@ mod tests {
                         || failure.message.contains("lifted activation was not taken")
                         || failure
                             .message
+                            .contains("does not support runtime verification")
+                        || failure
+                            .message
                             .contains("framework verification entry point could not be loaded"),
                     "Expected descriptive error message, got: {}",
                     failure.message

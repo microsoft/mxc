@@ -1558,8 +1558,10 @@ dependencies = [
  "serde",
  "serde_ignored",
  "serde_json",
+ "sha2",
  "tempfile",
  "winresource",
+ "zip",
 ]
 
 [[package]]
@@ -3109,6 +3111,7 @@ dependencies = [
  "mxc-sdk",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "windows",
  "winresource",

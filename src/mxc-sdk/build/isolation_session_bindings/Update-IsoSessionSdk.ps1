@@ -14,8 +14,8 @@
     Path to Microsoft.AI.IsolationSession.SDK.<version>.nupkg.
 
 .PARAMETER DestinationDirectory
-    MXC's external\windows-sdk\isolation-session directory. Defaults to the
-    directory containing this script.
+    MXC's src\mxc-sdk\build\isolation_session_bindings directory. Defaults to
+    the directory containing this script.
 #>
 [CmdletBinding()]
 param(
@@ -226,8 +226,8 @@ finally {
 
 $packageHash = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 $repositoryRoot = [System.IO.Path]::GetFullPath(
-    (Join-Path $DestinationDirectory '..\..\..'))
-$pinPath = Join-Path $repositoryRoot 'src\core\mxc_build_common\src\lib.rs'
+    (Join-Path $DestinationDirectory '..\..\..\..'))
+$pinPath = Join-Path $repositoryRoot 'src\mxc-sdk\build\build_mxc_build_common.rs'
 if (-not (Test-Path -LiteralPath $pinPath -PathType Leaf)) {
     throw "IsolationSession SDK pin file does not exist: '$pinPath'."
 }
