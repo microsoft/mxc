@@ -1,9 +1,8 @@
-# Windows OS-version policy support (`processcontainer`)
+# Windows OS-version support
 
 > **Audience:** MXC consumers and developers
 
-This is the authoritative reference for **Windows OS support of the 
-`processcontainer` and `isolation_session` backends**.
+This is the reference for **Windows OS support of the `processcontainer` and `isolation_session` backends**.
 
 ## Windows 11 releases
 
