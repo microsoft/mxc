@@ -258,8 +258,8 @@ fn start_exec(
         .spawn(move || {
             let job = job;
 
-            // Declared first so it releases the count after the report is
-            // queued: a teardown that sees zero is then guaranteed to find it.
+            // Releasing the count only after the report is queued is what lets a
+            // teardown that sees zero rely on finding it.
             let _counted = counted;
             let sandbox_id = job.config.sandbox_id.clone();
 
@@ -272,8 +272,7 @@ fn start_exec(
             });
 
             // A panic leaves the process's fate unknown, which is what
-            // `Unconfirmed` already means: the worker quarantines the container
-            // rather than handing it to another exec.
+            // `Unconfirmed` already means.
             let report = std::panic::catch_unwind(run).unwrap_or_else(|_| {
                 ExecReport::Unconfirmed("the exec thread panicked".to_string())
             });
@@ -1313,9 +1312,8 @@ impl Worker {
             std::mem::forget(self.sdk.take());
         }
 
-        // Only the handles are abandoned. The bookkeeping drops, closing the
-        // reply channels a client is still awaiting so it observes the worker
-        // is gone instead of waiting out its own deadline.
+        // Only the handles are abandoned, so the reply channels close as the
+        // bookkeeping drops and a waiting client observes the worker is gone.
     }
 
     /// Answer a command pulled off the queue during teardown.
@@ -1486,9 +1484,8 @@ pub fn spawn() -> Result<SessionHandle> {
             let mut worker = Worker::new();
 
             // A panic here would otherwise drop the container handles an exec
-            // thread is still using, so the unwind is caught and the handles are
-            // abandoned instead -- the same trade teardown already makes when a
-            // run outlives its drain budget.
+            // thread is still using, so the unwind is caught and the handles
+            // are abandoned instead.
             let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 while let Some(cmd) = rx.blocking_recv() {
                     match cmd {
@@ -2067,6 +2064,7 @@ mod tests {
             started: false,
             quarantined: false,
             retired: false,
+
             // SAFETY: `release` never dereferences the handle, so the guard owns
             // a value it can release without touching memory.
             container: unsafe { WslcContainerGuard::from_raw(sentinel, release) },

@@ -544,8 +544,7 @@ where
     if delivered.is_err() {
         // The run outlives this handler on a thread of its own, and the permit
         // that bounds exec capacity is released as this returns. Without a kill
-        // a client could disconnect in a loop and leave an unbounded number of
-        // runs going, each holding a container.
+        // a client could disconnect in a loop and leave runs going unbounded.
         session.cancel_exec(&exec_id, &run_token);
     }
 
