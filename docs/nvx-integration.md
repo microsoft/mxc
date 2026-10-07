@@ -480,7 +480,7 @@ request will supply the process configuration.
 
 | MXC phase | How NVX handles it |
 | --- | --- |
-| `provision` | Stores the configuration and returns an NVX sandbox ID |
+| `provision` | Resolves the OCI reference to an immutable digest, selects or creates the converted artifact, persists that identity with the configuration, and returns an NVX sandbox ID |
 | `start` | Launches OpenVMM and waits for the guest agent |
 | `exec` | Runs a workload in the running VM |
 | `stop` | Stops the VM while retaining provisioned state |
