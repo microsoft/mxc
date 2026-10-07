@@ -51,7 +51,7 @@ Linux, and macOS.
 
 | Runtime platform | Default backend | Other backends | Minimum host OS |
 |---|---|---|---|
-| Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`\*, `wslc`, `microvm`\*, `hyperlight`\*, `isolation_session` | `processcontainer`: See [Windows OS-version policy support](docs/backends/process-container/os-version-support.md)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
+| Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`\*, `wslc`, `microvm`\*, `hyperlight`\*, `isolation_session` | [Windows OS-version policy support](docs/backends/process-container/os-version-support.md)|
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | - |
 | macOS ARM64 / x64 | `seatbelt` | - | - |
 
