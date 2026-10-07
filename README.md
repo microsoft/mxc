@@ -3,7 +3,7 @@
 > **Audience:** MXC consumers
 
 MXC is a **sandboxed code execution system** for running untrusted code
-(agentic actions, plugins, and tools) on Windows, Linux, and macOS. It provides
+(model output, plugins, and tools) on Windows, Linux, and macOS. It provides
 multiple containment backends, from OS-native process sandboxes to full VMs,
 behind a unified containment model and typed SDKs.
 
@@ -33,8 +33,7 @@ MXC is a dependency built into your app.
 ```mermaid
 flowchart LR
     App["Your application<br/>Launch API"] --> SDK["MXC SDK<br/>Rust / .NET / Node<br/>(in process)"]
-    SDK --> Engine["MXC engine<br/>(in process)"]
-    Engine --> Backend["Selected backend<br/>(in process)"]
+    SDK --> Backend["Selected backend<br/>(in process)"]
     Backend --> Container["Isolated workload<br/>ProcessContainer / WSLC / Bubblewrap / ..."]
 ```
 
@@ -54,37 +53,22 @@ Linux, and macOS.
 
 | Runtime platform | Default backend | Other backends | Minimum host OS |
 |---|---|---|---|
-| Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
+| Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`\*, `wslc`, `microvm`\*, `hyperlight`\*, `isolation_session` | `processcontainer`: See [Windows OS-version policy support](docs/backends/process-container/os-version-support.md)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | - |
 | macOS ARM64 / x64 | `seatbelt` | - | - |
 
-**Experimental backends**: `windows_sandbox`, `microvm`, and `hyperlight`.
-
-**Note:** `windows_sandbox` integrates the existing Windows Sandbox product,
-which is a full VM.
-
-See [Windows OS-version policy support](docs/backends/process-container/os-version-support.md)
-for exact filesystem, network, and UI policy support in `processcontainer`.
-
-### The Windows ProcessContainer (24H2+)
-
-ProcessContainer is MXC's default Windows containment backend. It uses
-Windows' strongest OS-native process-containment primitives to enforce
-filesystem, network, and UI policy without the startup and memory cost of a
-VM. This makes it well suited to frequent, short-lived agentic and sandboxed
-workloads. MXC provides the typed, versioned policy model and runtime selection
-needed to use these primitives consistently across supported Windows releases.
+\* These backends are **experimental**.
 
 ## How do I use MXC?
 
 Install an SDK through your package manager. You do not need to clone this
 repository.
 
-| SDK | Install | Public V1 API |
-|---|---|---|
-| Rust | `cargo add mxc-sdk` | `mxc_sdk::v1` |
-| .NET | `dotnet add package Microsoft.Mxc.Sdk` | `Microsoft.Mxc.Sdk.V1` |
-| Node | `npm install @microsoft/mxc-sdk` | `@microsoft/mxc-sdk/v1` |
+| SDK | Package |
+|---|---|
+| Rust | [mxc_sdk::v1](https://crates.io/crates/mxc-sdk) |
+| .NET | [Microsoft.Mxc.Sdk.V1](https://www.nuget.org/packages/Microsoft.Mxc.Sdk) |
+| Node | [@microsoft/mxc-sdk/v1](https://www.npmjs.com/package/@microsoft/mxc-sdk) |
 
 The Node and .NET packages include the native runtime assets. The Rust crate
 builds the MXC SDK, engine, and selected backends into the consuming
@@ -92,27 +76,15 @@ application.
 
 **Non-SDK consumption:** Platform-specific executor binaries, such as
 `wxc-exec.exe`, accept JSON container-creation requests defined by the
-[stable schema](schemas/stable/). Use an executor for testing or when a typed
-SDK cannot be embedded in the application.
-
-### SDK & runtime requirements
-
-- A supported runtime platform and the prerequisites for the selected backend
-- Rust when consuming `mxc-sdk`, .NET 8 or later for `Microsoft.Mxc.Sdk`, or
-  Node.js 24 or later for `@microsoft/mxc-sdk`
-- On Windows, Node.js 24.21.0 or later within the Node.js 24 release line, or
-  Node.js 26.8.0 or later, for native standard-I/O transfer
+[stable schema](schemas/stable/). Use for testing or when the
+SDK cannot be embedded in your app.
 
 ## Running a contained workload
 
 For complete SDK samples, see the
 [Rust, .NET, and Node samples](samples/README.md).
 
-### Node SDK
-
-```bash
-npm install @microsoft/mxc-sdk
-```
+### Sample Node snippet
 
 ```typescript
 import { spawn, type ContainerRequest } from '@microsoft/mxc-sdk/v1';
@@ -124,67 +96,11 @@ const request: ContainerRequest = {
 };
 
 const child = await spawn(request);
-try {
-  child.standardOutput?.on('data', (data) => process.stdout.write(data));
-  child.standardError?.on('data', (data) => process.stderr.write(data));
-  const outcome = await child.wait();
-  console.log('exit:', outcome.exitCode);
-} finally {
-  child.dispose();
-}
 ```
 
 See the runnable
 [streaming standard-I/O sample](samples/run-with-io-stdio-streaming/) and the
 [SDK API reference](docs/api-reference/README.md).
-
-### Check containment support (probe)
-
-On Windows, `wxc-exec --probe [config.json]`, Node `probe(request?)`, .NET
-`MxcContainer.Probe(request?)`, and Rust `mxc_sdk::v1::probe(request)` report
-which ProcessContainer tier can enforce a specific request. The probe does not
-create a container. See the
-[support-check samples](samples/dryrun-check-containment-support/).
-
-### Executor binary
-
-Executors accept a JSON container request. See the
-[schema documentation](docs/schema.md) for the complete format.
-
-```bash
-# File path
-wxc-exec.exe config.json
-
-# Base64-encoded request
-wxc-exec.exe --config-base64 <base64-encoded-json>
-```
-
-Arguments after the required `--` separator are the workload command line:
-
-- Windows: `wxc-exec.exe config.json -- powershell.exe -NoProfile -Command "Write-Output 'hello world'"`
-- Linux: `./lxc-exec config.json -- sh -c "printf 'hello world\n'"`
-- macOS: `./mxc-exec-mac config.json -- sh -c "printf 'hello world\n'"`
-
-**Note:** Executor use requires a prebuilt release artifact or a
-[source build](#building-from-source). An SDK package is the preferred path for
-applications.
-
-## Schema
-
-There is a JSON schema underneath the SDK for the containment-workload
-configuration.
-
-The JSON schema defines a complete container-creation request: the workload to
-run, the containment backend, and the filesystem, network, UI, and lifecycle
-policy MXC must enforce.
-
-Released, immutable stable schemas live in [`schemas/stable/`](schemas/stable).
-The in-progress development schema lives in [`schemas/dev/`](schemas/dev). The
-current versions are tracked in
-[`schemas/schema-version.json`](schemas/schema-version.json).
-
-Use the latest stable schema for new JSON requests. SDK consumers do not
-select a schema version; each versioned SDK API owns its matching contract.
 
 ## My application won't run in the sandbox!
 
@@ -247,13 +163,12 @@ Build prerequisites are:
 - Node.js 24 or later and npm
 - The platform toolchain and prerequisites described by the selected backend
 
-### Full build
+### Build
 
 #### Windows
 
 ```bash
 build.bat                  # Release build for current architecture
-build.bat --all            # Release build for both x64 and ARM64
 ```
 
 #### Linux
@@ -266,26 +181,10 @@ build.bat --all            # Release build for both x64 and ARM64
 
 ```bash
 ./build-mac.sh             # Release build for native architecture
-./build-mac.sh --all       # Both Apple Silicon and Intel
 ```
 
 Component builds, formatting, linting, and tests are documented in the
 [local development guide](docs/development/build-and-test/local-development.md).
-
-### Project structure
-
-```text
-src/        Rust workspace, native executors, and Rust SDK
-sdk/        Node and .NET SDKs
-samples/    Runnable Rust, .NET, and Node scenarios
-schemas/    Stable and development JSON request schemas
-docs/       Consumer and developer documentation
-tests/      Test collateral, configurations, and host-dependent suites
-scripts/    Build, validation, packaging, and utility scripts
-```
-
-See [repository architecture](docs/development/architecture/repository-architecture.md)
-for crate responsibilities, dependency direction, and execution surfaces.
 
 ## Documentation
 
