@@ -196,9 +196,9 @@ jobs:
 
       # Exercises the real binary against the real dependencies: launches the
       # slirp4netns supervisor, joins its user namespace, and asserts the
-      # sandbox lands in a private network namespace. Needs unix-test-proxy
-      # (builtinTestServer) alongside lxc-exec, which the two build steps
-      # above place in the same target directory.
+      # sandbox lands in a private network namespace. The test script starts
+      # unix-test-proxy independently alongside lxc-exec; the two build steps
+      # above place them in the same target directory.
       - name: Test Bubblewrap proxy networking (end-to-end)
         working-directory: ${{ github.workspace }}
         env:

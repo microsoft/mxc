@@ -4,6 +4,7 @@
 use super::*;
 use crate::mxc_common::config_parser::load_mxc_request_from_json;
 use crate::mxc_common::logger::{Logger, Mode};
+use crate::mxc_common::models::PortMapping;
 use crate::mxc_common::mxc_error::MxcErrorCode;
 use crate::mxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
@@ -22,7 +23,7 @@ enum Config {
     Absent,
     Unit,
     Isolation(Option<String>),
-    Wslc(Option<String>, Option<String>),
+    Wslc(Option<String>, Option<String>, Option<Vec<PortMapping>>),
 }
 
 trait Case: Sized {
@@ -75,7 +76,11 @@ impl Case for Wslc {
     const PREFIX: &'static str = "wslc";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
         config.map_or(Config::Absent, |config| {
-            Config::Wslc(config.image.clone(), config.image_tar_path.clone())
+            Config::Wslc(
+                config.image.clone(),
+                config.image_tar_path.clone(),
+                config.port_mappings.clone(),
+            )
         })
     }
     fn bind(
@@ -106,7 +111,6 @@ fn common_snapshot(request: &ExecutionRequest) -> Value {
         "proxyAddress": proxy.map(|address| &address.address),
         "proxyPort": proxy.map(|address| address.port),
         "proxyUrl": proxy.and_then(|address| address.original_url.as_ref()),
-        "builtinProxy": request.policy.network_proxy.builtin_test_server,
         "telemetryKind": request.telemetry.as_ref().and_then(|value| value.requested_sandbox_kind),
     })
 }
@@ -439,22 +443,63 @@ fn wslc_provision_preserves_each_backend_observable_configuration() {
     value["wslc"] = json!({});
     assert_dispatch::<Wslc>(&value, Config::Absent);
     for (config, expected) in [
-        (json!({}), Config::Wslc(None, None)),
+        (json!({}), Config::Wslc(None, None, None)),
         (
             json!({"image": "custom"}),
-            Config::Wslc(Some("custom".into()), None),
+            Config::Wslc(Some("custom".into()), None, None),
         ),
         (
             json!({"imageTarPath": "image.tar"}),
-            Config::Wslc(None, Some("image.tar".into())),
+            Config::Wslc(None, Some("image.tar".into()), None),
         ),
         (
             json!({"image": "custom", "imageTarPath": "image.tar"}),
-            Config::Wslc(Some("custom".into()), Some("image.tar".into())),
+            Config::Wslc(Some("custom".into()), Some("image.tar".into()), None),
         ),
         (
             json!({"image": "", "imageTarPath": ""}),
-            Config::Wslc(Some(String::new()), Some(String::new())),
+            Config::Wslc(Some(String::new()), Some(String::new()), None),
+        ),
+        (
+            json!({"portMappings": []}),
+            Config::Wslc(None, None, Some(Vec::new())),
+        ),
+        (
+            json!({"portMappings": [{"windowsPort": 8080, "containerPort": 80}]}),
+            Config::Wslc(
+                None,
+                None,
+                Some(vec![PortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: "tcp".into(),
+                }]),
+            ),
+        ),
+        (
+            json!({
+                "image": "custom",
+                "portMappings": [
+                    {"windowsPort": 8080, "containerPort": 80},
+                    {"windowsPort": 8443, "containerPort": 443},
+                ],
+            }),
+            Config::Wslc(
+                Some("custom".into()),
+                None,
+                Some(vec![
+                    PortMapping {
+                        windows_port: 8080,
+                        container_port: 80,
+                        protocol: "tcp".into(),
+                    },
+                    PortMapping {
+                        windows_port: 8443,
+                        container_port: 443,
+                        protocol: "tcp".into(),
+                    },
+                ]),
+            ),
         ),
     ] {
         value["wslc"] = json!({"provision": config});

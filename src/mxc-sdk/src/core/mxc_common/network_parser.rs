@@ -38,76 +38,32 @@ pub fn host_is_canonical_loopback(host: &str) -> bool {
     )
 }
 
-fn convert_wire_proxy_at(proxy: wire::Proxy, path: &str) -> Result<ProxyConfig, WxcError> {
-    let wire::Proxy {
-        builtin_test_server,
-        localhost,
-        url,
-    } = proxy;
-    let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0);
-
-    if let Some(builtin) = builtin_test_server {
-        if !builtin {
-            return Err(WxcError::ConfigParse(format!(
-                "{path}.builtinTestServer must be true when present"
-            )));
-        }
-        if localhost.is_some() || url.is_some() {
-            return Err(WxcError::ConfigParse(format!(
-                "When {path}.builtinTestServer is true, no other proxy options may be set"
-            )));
-        }
-        return Ok(ProxyConfig {
-            address: Some(proxy_addr),
-            builtin_test_server: true,
-        });
+fn convert_wire_proxy_at(url_str: &str, path: &str) -> Result<ProxyConfig, WxcError> {
+    let redacted = crate::mxc_common::proxy_env::redact_proxy_url(url_str);
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| WxcError::ConfigParse(format!("{path} is invalid: {e}")))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(WxcError::ConfigParse(format!(
+            "{path} must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
+        )));
     }
-
-    if let Some(port) = localhost {
-        if port == 0 {
-            return Err(WxcError::ConfigParse(format!(
-                "{path}.localhost must be a port between 1 and 65535"
-            )));
-        }
-        proxy_addr.port = port;
-        return Ok(ProxyConfig {
-            address: Some(proxy_addr),
-            builtin_test_server: false,
-        });
-    }
-
-    if let Some(url_str) = url {
-        let redacted = crate::mxc_common::proxy_env::redact_proxy_url(&url_str);
-        let parsed = url::Url::parse(&url_str)
-            .map_err(|e| WxcError::ConfigParse(format!("{path} is invalid: {e}")))?;
-        let scheme = parsed.scheme();
-        if scheme != "http" && scheme != "https" {
-            return Err(WxcError::ConfigParse(format!(
-                "{path} must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
-            )));
-        }
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| {
-                WxcError::ConfigParse(format!(
-                    "{path} must include a host (e.g., http://localhost:8080), got: {redacted}"
-                ))
-            })?
-            .to_string();
-        let port = parsed.port().ok_or_else(|| {
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| {
             WxcError::ConfigParse(format!(
-                "{path} must include a port (e.g., http://localhost:8080), got: {redacted}"
+                "{path} must include a host (e.g., http://localhost:8080), got: {redacted}"
             ))
-        })?;
-        return Ok(ProxyConfig {
-            address: Some(ProxyAddress::from_url(&url_str, host, port)),
-            builtin_test_server: false,
-        });
-    }
-
-    Err(WxcError::ConfigParse(format!(
-        "{path} must specify builtinTestServer, localhost, or url"
-    )))
+        })?
+        .to_string();
+    let port = parsed.port().ok_or_else(|| {
+        WxcError::ConfigParse(format!(
+            "{path} must include a port (e.g., http://localhost:8080), got: {redacted}"
+        ))
+    })?;
+    Ok(ProxyConfig {
+        address: Some(ProxyAddress::from_url(url_str, host, port)),
+    })
 }
 
 fn convert_egress(egress: Option<wire::NetworkEgress>) -> Result<NetworkEgressPolicy, WxcError> {
@@ -177,16 +133,7 @@ pub(crate) fn parse_network_policy(
 
     if let Some(url) = runtime.and_then(|runtime| runtime.network_proxy) {
         policy.runtime_network_proxy_specified = true;
-        // Runtime proxy is a 0.8 wire field normalized into the existing
-        // backend-facing proxy configuration.
-        let proxy = convert_wire_proxy_at(
-            wire::Proxy {
-                localhost: None,
-                builtin_test_server: None,
-                url: Some(url),
-            },
-            "runtimeConfig.networkProxy",
-        )?;
+        let proxy = convert_wire_proxy_at(&url, "runtimeConfig.networkProxy")?;
         let host = proxy
             .address
             .as_ref()
@@ -463,12 +410,6 @@ mod proxy_policy_tests {
     fn directional_sections(proxy: &str) -> NetworkSections {
         NetworkSections {
             network: Some(wire::Network {
-                default_policy: None,
-                enforcement_mode: None,
-                allow_local_network: None,
-                allowed_hosts: None,
-                blocked_hosts: None,
-                proxy: None,
                 egress: Some(wire::NetworkEgress {
                     default: Some(wire::NetworkAction::Allow),
                     allow: None,

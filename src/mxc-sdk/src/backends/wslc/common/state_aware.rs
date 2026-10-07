@@ -22,8 +22,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::mxc_common::logger::{Logger, Mode};
-#[cfg(test)]
-use crate::mxc_common::models::NetworkPolicy;
 use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::{
@@ -37,8 +35,8 @@ use crate::wslc_common::daemon_client::{
     truncation_suffix, DaemonClient, DaemonError, DaemonExecOutcome,
 };
 use crate::wslc_common::daemon_protocol::{
-    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
-    VolumeMount,
+    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, PortMapping as DaemonPortMapping,
+    ProvisionConfig, StartConfig, StopConfig, VolumeMount,
 };
 use crate::wslc_common::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
@@ -530,6 +528,19 @@ fn build_provision_config(
         .as_ref()
         .and_then(|c| c.image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+    let port_mappings: Vec<DaemonPortMapping> = config
+        .as_ref()
+        .and_then(|c| c.port_mappings.as_ref())
+        .map(|mappings| {
+            mappings
+                .iter()
+                .map(|mapping| DaemonPortMapping {
+                    windows_port: mapping.windows_port,
+                    container_port: mapping.container_port,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let image_tar_path = config.and_then(|c| c.image_tar_path);
 
     // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -553,11 +564,18 @@ fn build_provision_config(
 
     let volumes = build_daemon_volumes(request)?;
     let network = map_network(request);
+    crate::wslc_common::policy::reject_port_mappings_without_bridged_network(
+        request,
+        "wslc.provision.portMappings",
+        !port_mappings.is_empty(),
+    )?;
+
     Ok(ProvisionConfig {
         image,
         image_tar_path,
         volumes,
         network,
+        port_mappings,
     })
 }
 
@@ -602,9 +620,8 @@ fn build_daemon_volumes(request: &ExecutionRequest) -> Result<Vec<VolumeMount>, 
         .collect())
 }
 
-/// Map the request's default network policy to the daemon's binary network
-/// mode. Per-host filtering is rejected in validation, so only the default
-/// policy participates: `Block` → isolated, `Allow` → bridged NAT.
+/// Map the validated directional egress default to the daemon's binary
+/// network mode: `Deny` → isolated, `Allow` → bridged NAT.
 fn map_network(request: &ExecutionRequest) -> NetworkMode {
     if crate::wslc_common::policy::network_is_isolated(request) {
         NetworkMode::None
@@ -626,8 +643,8 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkEgressPolicy,
-        NetworkIngressPolicy, ProxyAddress, ProxyConfig,
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
+        ProxyConfig,
     };
 
     /// The exit code is unrecoverable once dropped, so failing the call must not
@@ -765,63 +782,50 @@ mod tests {
         }
     }
 
-    /// Refused at provision, the only phase where the network posture is
-    /// settable — so neither can be silently dropped into the daemon's
-    /// `ProvisionConfig`, which carries only the binary [`NetworkMode`].
+    /// A rule-based posture cannot be mapped to the daemon's binary
+    /// [`NetworkMode`], so validation must refuse it before provision.
     #[test]
     fn validate_provision_rejects_unimplementable_network_posture() {
         let runner = WslcStateAwareRunner::new();
-        for (policy, needle) in [
-            (
-                ContainerPolicy {
-                    allow_local_network: true,
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    allow: vec![Default::default()],
                     ..Default::default()
-                },
-                "allowLocalNetwork",
-            ),
-            (
-                ContainerPolicy {
-                    network_enforcement_mode:
-                        crate::mxc_common::models::NetworkEnforcementMode::Firewall,
-                    ..Default::default()
-                },
-                "enforcementMode",
-            ),
-        ] {
-            let request = ExecutionRequest {
-                policy,
+                }),
                 ..Default::default()
-            };
-            let err = runner
-                .validate_provision(&request, None)
-                .expect_err(&format!("provision must reject {needle}"));
-            assert_eq!(
-                err.code,
-                crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
-            );
-            assert!(err.message.contains(needle), "got: {}", err.message);
-        }
+            },
+            ..Default::default()
+        };
+        let err = runner.validate_provision(&request, None).unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            err.message.contains("network.egress"),
+            "got: {}",
+            err.message
+        );
     }
 
-    /// Guards against over-rejection. Each value is the near-miss of a rejected
-    /// one, so a gate that flipped between value- and presence-based would fail
-    /// here only.
+    /// Guards against rejecting either supported all-or-nothing posture.
     #[test]
     fn validate_provision_accepts_the_postures_wslc_can_honour() {
         let runner = WslcStateAwareRunner::new();
         for (label, policy) in [
+            ("isolated", ContainerPolicy::default()),
             (
-                "explicit capabilities enforcement mode",
+                "bridged",
                 ContainerPolicy {
-                    network_enforcement_mode:
-                        crate::mxc_common::models::NetworkEnforcementMode::Capabilities,
-                    ..Default::default()
-                },
-            ),
-            (
-                "explicit allowLocalNetwork=false",
-                ContainerPolicy {
-                    allow_local_network: false,
+                    network_egress: Some(NetworkEgressPolicy {
+                        default: NetworkAction::Allow,
+                        ..Default::default()
+                    }),
+                    network_ingress: Some(NetworkIngressPolicy {
+                        default: NetworkAction::Allow,
+                        host_loopback: NetworkAction::Allow,
+                    }),
                     ..Default::default()
                 },
             ),
@@ -846,13 +850,7 @@ mod tests {
 
     #[test]
     fn map_network_maps_block_to_none() {
-        let req = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let req = ExecutionRequest::default();
         assert_eq!(map_network(&req), NetworkMode::None);
     }
 
@@ -860,7 +858,10 @@ mod tests {
     fn map_network_maps_allow_to_bridged() {
         let req = ExecutionRequest {
             policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -899,6 +900,7 @@ mod tests {
         let phase = WslcProvisionConfig {
             image: Some("custom/image:tag".to_string()),
             image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+            port_mappings: None,
         };
         let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
         assert_eq!(cfg.image, "custom/image:tag");
@@ -914,6 +916,91 @@ mod tests {
             let cfg = build_provision_config(&ExecutionRequest::default(), phase).unwrap();
             assert_eq!(cfg.image, "alpine:latest");
             assert!(cfg.image_tar_path.is_none());
+            assert!(cfg.port_mappings.is_empty());
+        }
+    }
+
+    #[test]
+    fn build_provision_config_forwards_port_mappings_to_the_daemon() {
+        let phase = WslcProvisionConfig {
+            port_mappings: Some(vec![
+                crate::mxc_common::models::PortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: "tcp".to_string(),
+                },
+                crate::mxc_common::models::PortMapping {
+                    windows_port: 8443,
+                    container_port: 443,
+                    protocol: "tcp".to_string(),
+                },
+            ]),
+            ..Default::default()
+        };
+        let cfg = build_provision_config(&bridged_request(), Some(phase)).unwrap();
+        assert_eq!(
+            cfg.port_mappings,
+            vec![
+                DaemonPortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                },
+                DaemonPortMapping {
+                    windows_port: 8443,
+                    container_port: 443,
+                },
+            ]
+        );
+    }
+
+    fn bridged_request() -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                }),
+                network_ingress: Some(NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: NetworkAction::Allow,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn isolated_networking_rejects_port_mappings_before_the_daemon_sees_them() {
+        let phase = WslcProvisionConfig {
+            port_mappings: Some(vec![crate::mxc_common::models::PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+                protocol: "tcp".to_string(),
+            }]),
+            ..Default::default()
+        };
+        let err = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            err.message.contains("portMappings"),
+            "the message must name the field to remove; got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn build_provision_config_distinguishes_absent_from_empty_port_mappings() {
+        for mappings in [None, Some(Vec::new())] {
+            let phase = WslcProvisionConfig {
+                port_mappings: mappings,
+                ..Default::default()
+            };
+            let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+            assert!(cfg.port_mappings.is_empty());
         }
     }
 
@@ -924,6 +1011,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: Some("custom/image:tag".to_string()),
                     image_tar_path: None,
+                    port_mappings: None,
                 },
                 "custom/image:tag",
                 None,
@@ -932,6 +1020,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: None,
                     image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                    port_mappings: None,
                 },
                 "alpine:latest",
                 Some("C:\\images\\custom.tar"),
@@ -940,6 +1029,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: Some(String::new()),
                     image_tar_path: Some(String::new()),
+                    port_mappings: None,
                 },
                 "",
                 Some(""),
@@ -1115,7 +1205,6 @@ mod tests {
     fn the_exec_config_carries_the_scope_each_state_of_process_env_selects() {
         struct Case {
             label: &'static str,
-            compatibility: DefaultEnvCompatibility,
             env: Option<Vec<&'static str>>,
             inherit_default_env: bool,
             scope: EnvScope,
@@ -1125,7 +1214,6 @@ mod tests {
         let cases = [
             Case {
                 label: "omitted takes the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: None,
                 inherit_default_env: false,
                 scope: EnvScope::Merge,
@@ -1133,7 +1221,6 @@ mod tests {
             },
             Case {
                 label: "explicitly empty leaves the child nothing",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec![]),
                 inherit_default_env: false,
                 scope: EnvScope::Replace,
@@ -1141,7 +1228,6 @@ mod tests {
             },
             Case {
                 label: "explicitly empty plus inheritDefaultEnv takes the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec![]),
                 inherit_default_env: true,
                 scope: EnvScope::Merge,
@@ -1149,7 +1235,6 @@ mod tests {
             },
             Case {
                 label: "supplied is used verbatim",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec!["FOO=bar"]),
                 inherit_default_env: false,
                 scope: EnvScope::Replace,
@@ -1157,7 +1242,6 @@ mod tests {
             },
             Case {
                 label: "supplied plus inheritDefaultEnv layers over the image environment",
-                compatibility: DefaultEnvCompatibility::DefaultBlock,
                 env: Some(vec!["FOO=bar"]),
                 inherit_default_env: true,
                 scope: EnvScope::Merge,
@@ -1167,7 +1251,6 @@ mod tests {
 
         for case in cases {
             let request = ExecutionRequest {
-                default_env_compatibility: case.compatibility,
                 env: case.env.map(|e| e.into_iter().map(String::from).collect()),
                 inherit_default_env: case.inherit_default_env,
                 script_code: "echo hi".to_string(),
@@ -1196,7 +1279,6 @@ mod tests {
     #[test]
     fn the_exec_config_keeps_the_cooperative_proxy_out_of_the_callers_reach() {
         let request = ExecutionRequest {
-            default_env_compatibility: DefaultEnvCompatibility::DefaultBlock,
             env: Some(vec![
                 "FOO=bar".to_string(),
                 "HTTP_PROXY=http://attacker.invalid:1".to_string(),
@@ -1208,7 +1290,6 @@ mod tests {
                         "127.0.0.1".to_string(),
                         8888,
                     )),
-                    builtin_test_server: false,
                 },
                 ..Default::default()
             },

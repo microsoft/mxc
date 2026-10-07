@@ -10,7 +10,6 @@ use crate::mxc_contract::ContractVersion;
 
 use crate::mxc_common::common_request_ir::CommonRequestIR;
 use crate::mxc_common::error::WxcError;
-use crate::mxc_common::models::NetworkEnforcementCompatibility;
 use crate::mxc_common::state_aware_input::StateAwareInput;
 use crate::mxc_common::state_aware_operation::StateAwareOperation;
 use crate::mxc_common::wire;
@@ -132,6 +131,14 @@ impl SdkStateAwareInput {
                     .to_string(),
             ));
         }
+        if wslc_port_mappings_requested(&operation) && version != ContractVersion::V1_1_0Alpha {
+            return Err(WxcError::ConfigParse(format!(
+                "WSLC state-aware provision port mappings require schema version \
+                 1.1.0-alpha, got {}",
+                version.as_str()
+            )));
+        }
+        operation.validate()?;
         Ok(Self {
             version,
             operation,
@@ -148,9 +155,6 @@ impl SdkStateAwareInput {
             schema: None,
             comment: None,
             source_contract: self.version,
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::Strict,
-            default_env_compatibility:
-                crate::mxc_common::models::DefaultEnvCompatibility::DefaultBlock,
             phase: None,
             sandbox_id: None,
             container_id: None,
@@ -189,14 +193,18 @@ impl SdkStateAwareInput {
     }
 }
 
+/// WSLC port mappings exist only in the `1.1.0-alpha` exact contract.
+fn wslc_port_mappings_requested(operation: &StateAwareOperation) -> bool {
+    matches!(
+        operation,
+        StateAwareOperation::Provision(crate::mxc_common::state_aware_operation::StateAwareProvision::Wslc(
+            Some(config)
+        )) if config.port_mappings.is_some()
+    )
+}
+
 fn map_network(network: SdkNetworkInput) -> wire::Network {
     wire::Network {
-        default_policy: None,
-        enforcement_mode: None,
-        allow_local_network: None,
-        allowed_hosts: None,
-        blocked_hosts: None,
-        proxy: None,
         egress: network.egress.map(|egress| wire::NetworkEgress {
             default: egress.default.map(map_action),
             allow: egress.allow.map(map_rules),
@@ -275,6 +283,77 @@ mod tests {
             let error = SdkStateAwareInput::new(ContractVersion::V1_0_0, operation)
                 .expect_err("typed v1 must keep Windows Sandbox on the raw exact lane");
             assert!(error.to_string().contains("do not support Windows Sandbox"));
+        }
+    }
+
+    fn mapping(windows_port: u16, container_port: u16) -> crate::mxc_common::models::PortMapping {
+        crate::mxc_common::models::PortMapping {
+            windows_port,
+            container_port,
+            protocol: "tcp".to_string(),
+        }
+    }
+
+    fn wslc_provision(
+        port_mappings: Option<Vec<crate::mxc_common::models::PortMapping>>,
+    ) -> StateAwareOperation {
+        StateAwareOperation::Provision(
+            crate::mxc_common::state_aware_operation::StateAwareProvision::Wslc(Some(
+                crate::mxc_common::models::WslcProvisionConfig {
+                    image: None,
+                    image_tar_path: None,
+                    port_mappings,
+                },
+            )),
+        )
+    }
+
+    #[test]
+    fn the_stable_contract_rejects_port_mappings_even_when_the_list_is_empty() {
+        for mappings in [Vec::new(), vec![mapping(8080, 80)]] {
+            let error =
+                SdkStateAwareInput::new(ContractVersion::V1_0_0, wslc_provision(Some(mappings)))
+                    .expect_err("1.0.0 does not declare the field");
+            assert!(
+                error.to_string().contains("1.1.0-alpha"),
+                "the message must name the version that declares it; got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_alpha_contract_accepts_port_mappings() {
+        SdkStateAwareInput::new(
+            ContractVersion::V1_1_0Alpha,
+            wslc_provision(Some(vec![mapping(8080, 80)])),
+        )
+        .expect("1.1.0-alpha declares the field");
+    }
+
+    #[test]
+    fn absent_port_mappings_are_accepted_on_both_contracts() {
+        for version in [ContractVersion::V1_0_0, ContractVersion::V1_1_0Alpha] {
+            SdkStateAwareInput::new(version, wslc_provision(None))
+                .expect("an absent list clears the gate on every supported contract");
+        }
+    }
+
+    #[test]
+    fn the_constructor_validates_ports_before_normalization() {
+        for mappings in [
+            vec![mapping(0, 80)],
+            vec![mapping(8080, 0)],
+            vec![mapping(8080, 80), mapping(8080, 81)],
+        ] {
+            let error = SdkStateAwareInput::new(
+                ContractVersion::V1_1_0Alpha,
+                wslc_provision(Some(mappings)),
+            )
+            .expect_err("a direct caller bypasses the exact contract's structural checks");
+            assert!(
+                error.to_string().contains("portMappings"),
+                "the message must name the field; got: {error}"
+            );
         }
     }
 }

@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use crate::mxc_common::models::{ExecutionRequest, NetworkPolicy};
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction};
 
 use crate::windows_sandbox_lifecycle::error::OneShotError;
 use crate::windows_sandbox_lifecycle::vm::MappedFolder;
@@ -30,33 +30,34 @@ pub(crate) fn plan_policy(request: &ExecutionRequest) -> Result<WsbPolicyPlan, O
     Ok(WsbPolicyPlan { mapped_folders })
 }
 
-/// Validate the network portion of the policy. `Block` (the schema default) is
-/// honored natively by the guest agent's firewall lockdown, so it needs no
-/// host-side action. Everything else the backend cannot express is rejected.
+/// The guest agent enforces network lockdown; it cannot open a requested
+/// connection or implement network rules.
 fn validate_network(request: &ExecutionRequest) -> Result<(), OneShotError> {
     let policy = &request.policy;
 
-    if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
-        return Err(OneShotError::Policy(
-            "per-host network filtering (allowedHosts/blockedHosts) is not supported by the \
-             Windows Sandbox backend; the guest agent enforces all-or-nothing network isolation"
-                .to_string(),
-        ));
-    }
     if policy.network_proxy.is_enabled() {
         return Err(OneShotError::Policy(
             "a network proxy is not supported by the Windows Sandbox backend".to_string(),
         ));
     }
 
-    match policy.default_network_policy {
-        NetworkPolicy::Block => Ok(()),
-        NetworkPolicy::Allow => Err(OneShotError::Policy(
-            "outbound network access (network policy 'allow') is not supported by the Windows \
-             Sandbox backend; the guest agent enforces network isolation"
+    if policy.network_mode_specified
+        || policy.network_egress.as_ref().is_some_and(|egress| {
+            egress.default == NetworkAction::Allow
+                || !egress.allow.is_empty()
+                || !egress.deny.is_empty()
+        })
+        || policy.network_ingress.as_ref().is_some_and(|ingress| {
+            ingress.default == NetworkAction::Allow || ingress.host_loopback == NetworkAction::Allow
+        })
+    {
+        return Err(OneShotError::Policy(
+            "directional network policy is not supported by the Windows Sandbox backend; \
+             the guest agent enforces network isolation"
                 .to_string(),
-        )),
+        ));
     }
+    Ok(())
 }
 
 /// A mapped root in normalized form: the cleaned absolute string used for the
@@ -295,7 +296,10 @@ fn is_descendant(child: &[String], ancestor: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
+    use crate::mxc_common::models::{
+        ContainerPolicy, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkRule,
+        ProxyAddress, ProxyConfig,
+    };
 
     fn request_with(policy: ContainerPolicy) -> ExecutionRequest {
         ExecutionRequest {
@@ -313,43 +317,96 @@ mod tests {
         }
     }
 
+    fn assert_rejects_direct_network(policy: ContainerPolicy) {
+        assert!(!policy.network_mode_specified);
+        let err = plan_policy(&request_with(policy)).unwrap_err();
+        assert_policy_err_contains(err, "directional network policy");
+    }
+
+    fn sample_rule() -> NetworkRule {
+        NetworkRule {
+            to: vec![NetworkPeer {
+                cidr: "192.0.2.1/32".parse().unwrap(),
+                except: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
+
     // ===== network =====
 
     #[test]
-    fn default_policy_blocks_network_and_maps_nothing() {
-        // Schema default is Block, which is honored natively (guest enforces).
+    fn omitted_network_defaults_to_guest_firewall_isolation() {
         let plan = plan_policy(&ExecutionRequest::default()).unwrap();
         assert!(plan.mapped_folders.is_empty());
     }
 
     #[test]
+    fn explicitly_supplied_network_posture_is_not_silently_ignored() {
+        let err = plan_policy(&request_with(ContainerPolicy {
+            network_mode_specified: true,
+            network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy::default()),
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert_policy_err_contains(err, "directional network policy");
+    }
+
+    #[test]
     fn allow_network_rejected() {
         let err = plan_policy(&request_with(ContainerPolicy {
-            default_network_policy: NetworkPolicy::Allow,
+            network_egress: Some(crate::mxc_common::models::NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
             ..Default::default()
         }))
         .unwrap_err();
-        assert_policy_err_contains(err, "outbound network access");
+        assert_policy_err_contains(err, "directional network policy");
     }
 
     #[test]
-    fn allowed_hosts_rejected() {
-        let err = plan_policy(&request_with(ContainerPolicy {
-            allowed_hosts: vec!["example.com".to_string()],
+    fn direct_egress_allow_rule_rejected_without_presence_flag() {
+        assert_rejects_direct_network(ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                allow: vec![sample_rule()],
+                ..Default::default()
+            }),
             ..Default::default()
-        }))
-        .unwrap_err();
-        assert_policy_err_contains(err, "per-host network filtering");
+        });
     }
 
     #[test]
-    fn blocked_hosts_rejected() {
-        let err = plan_policy(&request_with(ContainerPolicy {
-            blocked_hosts: vec!["evil.com".to_string()],
+    fn direct_egress_deny_rule_rejected_without_presence_flag() {
+        assert_rejects_direct_network(ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                deny: vec![sample_rule()],
+                ..Default::default()
+            }),
             ..Default::default()
-        }))
-        .unwrap_err();
-        assert_policy_err_contains(err, "per-host network filtering");
+        });
+    }
+
+    #[test]
+    fn direct_ingress_allow_rejected_without_presence_flag() {
+        assert_rejects_direct_network(ContainerPolicy {
+            network_ingress: Some(NetworkIngressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn direct_host_loopback_allow_rejected_without_presence_flag() {
+        assert_rejects_direct_network(ContainerPolicy {
+            network_ingress: Some(NetworkIngressPolicy {
+                host_loopback: NetworkAction::Allow,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
     }
 
     #[test]
@@ -367,7 +424,6 @@ mod tests {
         let err = plan_policy(&request_with(ContainerPolicy {
             network_proxy: ProxyConfig {
                 address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-                builtin_test_server: false,
             },
             ..Default::default()
         }))

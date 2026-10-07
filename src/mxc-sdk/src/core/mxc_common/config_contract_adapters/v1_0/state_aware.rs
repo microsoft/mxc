@@ -39,12 +39,6 @@ fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -
         host_loopback: contract::IsolationSessionNetworkAllow,
     } = ingress;
     wire::Network {
-        allow_local_network: None,
-        default_policy: None,
-        allowed_hosts: None,
-        enforcement_mode: None,
-        blocked_hosts: None,
-        proxy: None,
         egress: Some(wire::NetworkEgress {
             default: Some(wire::NetworkAction::Allow),
             allow: None,
@@ -65,6 +59,7 @@ fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig
     WslcProvisionConfig {
         image: image.into_option(),
         image_tar_path: image_tar_path.into_option(),
+        port_mappings: None,
     }
 }
 
@@ -83,9 +78,6 @@ fn state_aware_common(
         schema: schema.into_option(),
         comment: comment.into_option(),
         source_contract: crate::mxc_contract::ContractVersion::V1_0_0,
-        default_env_compatibility: crate::mxc_common::models::DefaultEnvCompatibility::DefaultBlock,
-        network_enforcement_compatibility:
-            crate::mxc_common::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
         test_feature: None,
         windows_sandbox: None,

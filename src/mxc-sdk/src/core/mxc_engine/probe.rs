@@ -30,6 +30,9 @@ pub enum BackendCapability {
     IngressHostLoopbackAllow,
     /// Bubblewrap proxy-only egress in a private network namespace.
     ProxyEnforcement,
+    /// Identity-less proxy support on loopback.
+    /// Requires explicit host-loopback allow; not general ingress support.
+    IdentitylessLoopbackProxy,
 }
 
 /// One host-available backend, plus its effective isolation tier (if any).
@@ -96,18 +99,24 @@ pub fn available_backends() -> Vec<AvailableBackend> {
             BaseContainerRunner::is_base_container_api_present(),
             cfg!(feature = "tier2_bfs"),
         );
-        windows_backends(
-            tier,
-            ProcessContainerCapabilities {
-                capture_denials: capture_denials_available(
-                    crate::process_container_common::base_container_runner::BaseContainerRunner::is_native_capture_available(),
-                    guarded_capture::is_available(),
-                ),
-                filesystem_denied_paths: crate::process_container_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
-                filesystem_enumerate_paths: crate::process_container_common::base_container_runner::BaseContainerRunner::supports_enumerate_paths(),
-                ingress_host_loopback_allow: crate::process_container_common::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(),
-            },
-        )
+        let mut support = ProcessContainerCapabilities {
+            capture_denials: capture_denials_available(
+                BaseContainerRunner::is_native_capture_available(),
+                guarded_capture::is_available(),
+            ),
+            filesystem_denied_paths: BaseContainerRunner::supports_native_denied_paths(),
+            filesystem_enumerate_paths: BaseContainerRunner::supports_enumerate_paths(),
+            ingress_host_loopback_allow: BaseContainerRunner::supports_ingress_host_loopback_allow(
+            ),
+            ..Default::default()
+        };
+        match BaseContainerRunner::supports_identityless_loopback_proxy() {
+            Ok(supported) => support.identityless_loopback_proxy = supported,
+            Err(error) => support.warnings.push(format!(
+                "failed to query identity-less loopback proxy support: {error}"
+            )),
+        }
+        windows_backends(tier, support)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -165,12 +174,14 @@ fn bubblewrap_backend(proxy_enforcement: Result<(), String>) -> AvailableBackend
 }
 
 #[cfg(target_os = "windows")]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct ProcessContainerCapabilities {
     capture_denials: bool,
     filesystem_denied_paths: bool,
     filesystem_enumerate_paths: bool,
     ingress_host_loopback_allow: bool,
+    identityless_loopback_proxy: bool,
+    warnings: Vec<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -199,12 +210,15 @@ fn windows_backends(
         if support.ingress_host_loopback_allow {
             capabilities.push(BackendCapability::IngressHostLoopbackAllow);
         }
+        if support.identityless_loopback_proxy {
+            capabilities.push(BackendCapability::IdentitylessLoopbackProxy);
+        }
     }
     let process_container = AvailableBackend {
         backend: ContainmentBackend::ProcessContainer.wire_name().to_string(),
         tier: Some(tier.as_str().to_string()),
         capabilities,
-        warnings: Vec::new(),
+        warnings: support.warnings,
     };
     let mut backends = vec![process_container];
 
@@ -397,6 +411,11 @@ mod tests {
                 .expect("serializes"),
             r#""ingressHostLoopbackAllow""#
         );
+        assert_eq!(
+            serde_json::to_string(&BackendCapability::IdentitylessLoopbackProxy)
+                .expect("serializes"),
+            r#""identitylessLoopbackProxy""#
+        );
     }
 
     #[test]
@@ -531,6 +550,7 @@ mod tests {
                     filesystem_denied_paths: true,
                     filesystem_enumerate_paths: true,
                     ingress_host_loopback_allow: true,
+                    identityless_loopback_proxy: true,
                     ..Default::default()
                 },
             );
@@ -541,6 +561,55 @@ mod tests {
 
             assert!(process_container.capabilities.is_empty());
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reports_identityless_proxy_with_or_without_general_ingress_support() {
+        use crate::process_container_common::fallback_detector::IsolationTier;
+
+        for (supported, ingress_supported) in [(false, false), (true, false), (true, true)] {
+            let backends = windows_backends(
+                IsolationTier::BaseContainer,
+                ProcessContainerCapabilities {
+                    identityless_loopback_proxy: supported,
+                    ingress_host_loopback_allow: ingress_supported,
+                    ..Default::default()
+                },
+            );
+            let process_container = &backends[0];
+            assert_eq!(
+                process_container
+                    .capabilities
+                    .contains(&BackendCapability::IdentitylessLoopbackProxy),
+                supported
+            );
+            assert_eq!(
+                process_container
+                    .capabilities
+                    .contains(&BackendCapability::IngressHostLoopbackAllow),
+                ingress_supported
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_preserves_capability_probe_warnings() {
+        use crate::process_container_common::fallback_detector::IsolationTier;
+
+        let warning = "failed to query identity-less loopback proxy support".to_string();
+        let backends = windows_backends(
+            IsolationTier::BaseContainer,
+            ProcessContainerCapabilities {
+                warnings: vec![warning.clone()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(backends[0].warnings, vec![warning]);
+        assert!(!backends[0]
+            .capabilities
+            .contains(&BackendCapability::IdentitylessLoopbackProxy));
     }
 
     #[cfg(target_os = "windows")]

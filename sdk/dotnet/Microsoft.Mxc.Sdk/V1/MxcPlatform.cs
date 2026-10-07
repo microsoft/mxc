@@ -118,6 +118,7 @@ public static class MxcPlatform
             "filesystemEnumeratePaths" => BackendCapability.FilesystemEnumeratePaths,
             "ingressHostLoopbackAllow" => BackendCapability.IngressHostLoopbackAllow,
             "proxyEnforcement" => BackendCapability.ProxyEnforcement,
+            "identitylessLoopbackProxy" => BackendCapability.IdentitylessLoopbackProxy,
             _ => BackendCapability.Unknown,
         };
 

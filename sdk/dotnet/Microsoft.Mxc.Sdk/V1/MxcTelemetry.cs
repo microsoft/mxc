@@ -11,7 +11,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// Administers MXC telemetry consent. See
-/// docs/telemetry/telemetry-consent-design.md for the contract.
+/// docs/development/architecture/telemetry-consent-design.md for the contract.
 /// </summary>
 public static class MxcTelemetry
 {

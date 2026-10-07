@@ -466,118 +466,12 @@ fn validate_denied_path_overlap_with(
 /// - `None` — no network interface, fully isolated
 /// - `Bridged` — NAT networking through the WSL2 VM's virtual adapter
 ///
-/// Per-host filtering (`allowedHosts`/`blockedHosts` that need enforcement) is
-/// rejected before this runs — see `build_iptables_rules`. This only maps the
-/// bare-default posture:
-///
-/// - `Block` with no host rules → `None` (fully isolated)
-/// - `Allow` → `Bridged` (NAT)
-pub fn map_network_policy(is_block: bool, has_host_rules: bool) -> WslcContainerNetworkingMode {
-    if is_block && !has_host_rules {
+/// Directional egress selects the all-or-nothing network mode.
+pub fn map_network_policy(is_block: bool) -> WslcContainerNetworkingMode {
+    if is_block {
         WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE
     } else {
         WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
-    }
-}
-
-/// Returns true if the policy requests per-host filtering (which WSLc cannot
-/// enforce — such configs are rejected before execution).
-///
-/// Thin wrapper over [`crate::mxc_common::models::needs_host_filtering`] so the parser
-/// and this backend share one definition:
-/// - `Block` → only `allowed_hosts` matter (allowlist)
-/// - `Allow` → only `blocked_hosts` matter (blocklist)
-pub fn needs_host_filtering(
-    is_default_block: bool,
-    allowed_hosts: &[String],
-    blocked_hosts: &[String],
-) -> bool {
-    crate::mxc_common::models::needs_host_filtering(is_default_block, allowed_hosts, blocked_hosts)
-}
-
-/// Validate that a host string is safe for use in an iptables command.
-/// Accepts hostnames (a-z, 0-9, dots, hyphens) and IPv4/IPv6 addresses
-/// (digits, dots, colons, brackets, slash for CIDR).
-/// Rejects empty strings and anything containing shell metacharacters.
-fn is_valid_host(host: &str) -> bool {
-    !host.is_empty()
-        && host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-:[]/_".contains(&b))
-}
-
-/// Build iptables commands for per-host network filtering.
-///
-/// **NOTE: WSLC per-host filtering is non-functional.** Two independent
-/// blockers prevent it from working:
-/// 1. WSLC containers lack `CAP_NET_ADMIN` — the SDK's `Privileged` flag does
-///    **not** grant it — so the in-container `iptables` exec is rejected.
-/// 2. WSLC cannot expose VM-level network enforcement without breaking other
-///    security guarantees (e.g. MDE); a host-enforced design is longer-tail.
-///
-/// Configs that require per-host filtering are therefore **rejected at
-/// config-parse time** (and by `WSLContainerRunner::validate_runner`) before
-/// this function is reached. This function is retained for reference but its
-/// output is never applied.
-///
-/// When `defaultPolicy` is `Block` + `allowedHosts`:
-///   - Default DROP all outbound
-///   - ACCEPT to each allowed host
-///   - ACCEPT established/related (for return traffic)
-///   - ACCEPT loopback
-///
-/// When `defaultPolicy` is `Allow` + `blockedHosts`:
-///   - DROP to each blocked host
-///
-/// Returns a shell command string to be exec'd inside the container.
-///
-/// Host values are validated to prevent shell command injection.
-pub fn build_iptables_rules(
-    allowed_hosts: &[String],
-    blocked_hosts: &[String],
-    is_default_block: bool,
-) -> Option<String> {
-    if allowed_hosts.is_empty() && blocked_hosts.is_empty() {
-        return None;
-    }
-
-    let mut rules = Vec::new();
-
-    if is_default_block && !allowed_hosts.is_empty() {
-        // Allow loopback and established connections first
-        rules.push("iptables -A OUTPUT -o lo -j ACCEPT".to_string());
-        rules.push("iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT".to_string());
-
-        // Allow DNS (needed to resolve hostnames)
-        rules.push("iptables -A OUTPUT -p udp --dport 53 -j ACCEPT".to_string());
-        rules.push("iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT".to_string());
-
-        // Allow each specified host
-        for host in allowed_hosts {
-            if !is_valid_host(host) {
-                continue;
-            }
-            rules.push(format!("iptables -A OUTPUT -d {} -j ACCEPT", host));
-        }
-
-        // Default drop everything else
-        rules.push("iptables -A OUTPUT -j DROP".to_string());
-    } else if !is_default_block && !blocked_hosts.is_empty() {
-        // Block specific hosts
-        for host in blocked_hosts {
-            if !is_valid_host(host) {
-                continue;
-            }
-            rules.push(format!("iptables -A OUTPUT -d {} -j DROP", host));
-        }
-    }
-
-    if rules.is_empty() {
-        None
-    } else {
-        // Join with shell && so each rule must succeed before the next runs.
-        // If any iptables command fails, the chain stops and the error propagates.
-        Some(rules.join(" && "))
     }
 }
 
@@ -1190,57 +1084,19 @@ mod tests {
     // -- Network policy tests --
 
     #[test]
-    fn network_block_no_hosts_maps_to_none() {
+    fn denied_egress_maps_to_none() {
         assert_eq!(
-            map_network_policy(true, false),
+            map_network_policy(true),
             WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE
         );
     }
 
     #[test]
-    fn network_block_with_hosts_maps_to_bridged() {
+    fn allowed_egress_maps_to_bridged() {
         assert_eq!(
-            map_network_policy(true, true),
+            map_network_policy(false),
             WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
         );
-    }
-
-    #[test]
-    fn network_allow_maps_to_bridged() {
-        assert_eq!(
-            map_network_policy(false, false),
-            WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
-        );
-    }
-
-    // -- Host filtering tests --
-
-    #[test]
-    fn needs_host_filtering_empty() {
-        assert!(!needs_host_filtering(true, &[], &[]));
-        assert!(!needs_host_filtering(false, &[], &[]));
-    }
-
-    #[test]
-    fn needs_host_filtering_block_with_allowed() {
-        assert!(needs_host_filtering(true, &["1.2.3.4".to_string()], &[]));
-    }
-
-    #[test]
-    fn needs_host_filtering_allow_with_blocked() {
-        assert!(needs_host_filtering(false, &[], &["evil.com".to_string()]));
-    }
-
-    #[test]
-    fn needs_host_filtering_block_with_blocked_only_is_false() {
-        // block + blockedHosts makes no sense — blocking is already the default
-        assert!(!needs_host_filtering(true, &[], &["evil.com".to_string()]));
-    }
-
-    #[test]
-    fn needs_host_filtering_allow_with_allowed_only_is_false() {
-        // allow + allowedHosts makes no sense — everything is already allowed
-        assert!(!needs_host_filtering(false, &["1.2.3.4".to_string()], &[]));
     }
 
     // -- Path edge case tests --
@@ -1258,77 +1114,5 @@ mod tests {
             windows_path_to_container_path("C:"),
             Some("/mnt/c".to_string())
         );
-    }
-
-    #[test]
-    fn iptables_none_when_no_hosts() {
-        assert!(build_iptables_rules(&[], &[], true).is_none());
-        assert!(build_iptables_rules(&[], &[], false).is_none());
-    }
-
-    #[test]
-    fn iptables_block_with_allowed_hosts() {
-        let rules = build_iptables_rules(
-            &["1.2.3.4".to_string(), "example.com".to_string()],
-            &[],
-            true,
-        )
-        .unwrap();
-        assert!(rules.contains("iptables -A OUTPUT -o lo -j ACCEPT"));
-        assert!(rules.contains("iptables -A OUTPUT -d 1.2.3.4 -j ACCEPT"));
-        assert!(rules.contains("iptables -A OUTPUT -d example.com -j ACCEPT"));
-        assert!(rules.contains("iptables -A OUTPUT -j DROP"));
-    }
-
-    #[test]
-    fn iptables_allow_with_blocked_hosts() {
-        let rules = build_iptables_rules(
-            &[],
-            &["evil.com".to_string(), "10.0.0.1".to_string()],
-            false,
-        )
-        .unwrap();
-        assert!(rules.contains("iptables -A OUTPUT -d evil.com -j DROP"));
-        assert!(rules.contains("iptables -A OUTPUT -d 10.0.0.1 -j DROP"));
-        assert!(!rules.contains("-j ACCEPT"));
-    }
-
-    #[test]
-    fn is_valid_host_accepts_valid_entries() {
-        assert!(is_valid_host("example.com"));
-        assert!(is_valid_host("192.168.1.1"));
-        assert!(is_valid_host("10.0.0.0/8"));
-        assert!(is_valid_host("my-host.example.com"));
-        assert!(is_valid_host("::1"));
-        assert!(is_valid_host("[::1]"));
-        assert!(is_valid_host("2001:db8::1"));
-    }
-
-    #[test]
-    fn is_valid_host_rejects_injection() {
-        assert!(!is_valid_host(""));
-        assert!(!is_valid_host("; rm -rf /"));
-        assert!(!is_valid_host("host && echo pwned"));
-        assert!(!is_valid_host("host | cat /etc/passwd"));
-        assert!(!is_valid_host("$(whoami)"));
-        assert!(!is_valid_host("host`id`"));
-        assert!(!is_valid_host("host name with spaces"));
-    }
-
-    #[test]
-    fn iptables_skips_invalid_hosts() {
-        let rules = build_iptables_rules(
-            &[],
-            &[
-                "good.com".to_string(),
-                "; rm -rf /".to_string(),
-                "10.0.0.1".to_string(),
-            ],
-            false,
-        )
-        .unwrap();
-        assert!(rules.contains("good.com"));
-        assert!(rules.contains("10.0.0.1"));
-        assert!(!rules.contains("rm"));
     }
 }

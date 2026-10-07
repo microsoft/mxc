@@ -58,4 +58,4 @@ environment variable.
    `include/wslcsdk.h` (struct sizes, exported symbol names, signatures) — the
    SDK is in preview and its ABI can change between releases.
 5. Update the required WSL runtime floor in
-   `docs/wsl/wsl-container-getting-started.md` if it changed.
+   `docs/backends/wslc/wsl-container-getting-started.md` if it changed.

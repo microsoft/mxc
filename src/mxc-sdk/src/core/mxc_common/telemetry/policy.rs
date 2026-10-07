@@ -3,8 +3,8 @@
 
 //! Administrative (MDM / Group Policy) telemetry policy.
 //!
-//! See `docs/telemetry/telemetry-administrative-policy.md` for the admin-facing reference and
-//! `docs/telemetry/telemetry-consent-design.md` for how this composes with
+//! See `docs/telemetry.md` for the admin-facing reference and
+//! `docs/development/architecture/telemetry-consent-design.md` for how this composes with
 //! user consent. In short:
 //!
 //! - An administrator (via Intune, another MDM, or Group Policy) may **deny**
@@ -144,7 +144,7 @@ mod platform {
     /// Microsoft's own ADMX-ingestion documentation uses for third-party apps.
     ///
     /// This is the administrator-facing contract documented in
-    /// `docs/telemetry/telemetry-administrative-policy.md`; changing it breaks deployed
+    /// `docs/telemetry.md`; changing it breaks deployed
     /// policy.
     const POLICY_SUBKEY: &str = r"SOFTWARE\Policies\Mxc";
     const POLICY_VALUE_NAME: &str = "AllowTelemetry";
@@ -384,7 +384,7 @@ mod platform {
                     !upper.starts_with(blocked),
                     "policy key {POLICY_SUBKEY:?} sits under {blocked:?}, which Windows \
                      forbids ADMX-ingested policies from writing; see \
-                     docs/telemetry/telemetry-administrative-policy.md"
+                     docs/telemetry.md"
                 );
             }
         }

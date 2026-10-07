@@ -62,9 +62,3 @@ pub const DENIED_PATHS_FEATURE_DISABLED_MSG: &str =
      QueryProcessSecurityEnvironmentSupport. Run on a build with \
      BaseContainer deny support, or use the ProcessContainer dispatcher so it can select \
      the AppContainer + DACL fallback (which enforces deniedPaths via DENY ACEs).";
-
-#[cfg(target_os = "windows")]
-pub const HOST_LISTS_NOT_SUPPORTED_MSG: &str =
-    "network.allowedHosts / network.blockedHosts are not yet supported on Windows. \
-     Remove the host list(s) and rely on network.defaultPolicy (allow / block) or a \
-     proxy instead.";

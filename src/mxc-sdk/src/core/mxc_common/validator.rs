@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::mxc_common::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
+use crate::mxc_common::error::WxcError;
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction, PortMapping, ScriptResponse};
 use crate::mxc_common::mxc_error::MxcError;
+use std::collections::HashSet;
 
 /// Declares which optional network policy features a backend enforces.
 ///
@@ -13,9 +15,6 @@ use crate::mxc_common::mxc_error::MxcError;
 pub struct NetworkPolicySupport(u8);
 
 impl NetworkPolicySupport {
-    /// Support for the legacy network policy without additive 0.8 features.
-    pub const LEGACY: Self = Self(0);
-
     /// Support for the outbound network default policy.
     pub const EGRESS_DEFAULT: Self = Self(1 << 4);
 
@@ -58,27 +57,6 @@ impl std::ops::BitOr for NetworkPolicySupport {
     }
 }
 
-fn validate_legacy_host_lists(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-    let policy = &request.policy;
-
-    if policy.default_network_policy == NetworkPolicy::Block
-        && policy.allowed_hosts.is_empty()
-        && !policy.blocked_hosts.is_empty()
-    {
-        return Err(ScriptResponse::error(
-            "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
-        ));
-    }
-
-    if policy.default_network_policy == NetworkPolicy::Allow && !policy.allowed_hosts.is_empty() {
-        return Err(ScriptResponse::error(
-            "allowedHosts requires network.defaultPolicy='block'",
-        ));
-    }
-
-    Ok(())
-}
-
 /// Reject network policy features that the selected backend cannot enforce.
 pub fn validate_network_policy_support(
     request: &ExecutionRequest,
@@ -100,19 +78,6 @@ pub fn validate_network_policy_support(
             "network.egress.default is not supported by the selected backend",
         ));
     }
-    if !support.contains(NetworkPolicySupport::EGRESS_DEFAULT)
-        && request
-            .policy
-            .network_egress
-            .as_ref()
-            .is_some_and(|egress| egress.default == NetworkAction::Deny)
-        && request.policy.default_network_policy == NetworkPolicy::Allow
-    {
-        return Err(ScriptResponse::rejected(
-            "network.egress.default='deny' conflicts with the legacy outbound policy",
-        ));
-    }
-
     if !support.contains(NetworkPolicySupport::EGRESS_RULES)
         && request
             .policy
@@ -138,19 +103,6 @@ pub fn validate_network_policy_support(
             "network.ingress.default is not supported by the selected backend",
         ));
     }
-    if !support.contains(NetworkPolicySupport::INGRESS_DEFAULT)
-        && request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.default == NetworkAction::Deny)
-        && request.policy.allow_local_network
-    {
-        return Err(ScriptResponse::rejected(
-            "network.ingress.default='deny' conflicts with the legacy inbound policy",
-        ));
-    }
-
     if !support.contains(NetworkPolicySupport::HOST_LOOPBACK)
         && request
             .policy
@@ -164,21 +116,6 @@ pub fn validate_network_policy_support(
             "network.ingress.hostLoopback is not supported by the selected backend",
         ));
     }
-    if !support.contains(NetworkPolicySupport::HOST_LOOPBACK)
-        && request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Deny)
-        && request.policy.allow_local_network
-    {
-        return Err(ScriptResponse::rejected(
-            "network.ingress.hostLoopback='deny' conflicts with the legacy inbound policy",
-        ));
-    }
-
-    validate_legacy_host_lists(request)?;
-
     if !support.contains(NetworkPolicySupport::PROXY_PEER_IDENTITY)
         && request.policy.allowed_proxy_peer.is_some()
     {
@@ -213,19 +150,6 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
         return Err(ScriptResponse::error("Script content must not be empty."));
     }
 
-    // Enforce the testing-only-features gate centrally so it applies uniformly
-    // to all backends — every backend runs `validate_common` before executing.
-    // Currently this gates `network.proxy.builtinTestServer` (a deliberately-
-    // permissive test proxy); see `ExecutionRequest::testing_features_enabled`
-    // for the rationale behind the dedicated `--allow-testing-features` axis.
-    if request.policy.network_proxy.builtin_test_server && !request.testing_features_enabled {
-        return Err(ScriptResponse::error(
-            "network.proxy.builtinTestServer is a testing-only feature and requires the \
-             --allow-testing-features flag. For production, point network.proxy at a real \
-             HTTP proxy via 'localhost' or 'url'.",
-        ));
-    }
-
     if !request.policy.enumerate_paths.is_empty()
         && request.containment != crate::mxc_common::models::ContainmentBackend::ProcessContainer
     {
@@ -250,12 +174,52 @@ pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> 
     Ok(())
 }
 
+/// Reject WSLC port mappings the WSLC runtime cannot apply.
+///
+/// The exact JSON contract rejects a zero port and a non-TCP protocol
+/// structurally, but a caller building the runtime config directly hands over
+/// a plain `u16` and `String`, so the checks have to live here too. The daemon
+/// wire format carries no protocol and the worker rebuilds every mapping as
+/// TCP, so accepting anything else here would silently apply a different
+/// mapping than the caller asked for.
+pub fn validate_port_mappings(field_path: &str, mappings: &[PortMapping]) -> Result<(), WxcError> {
+    for (index, mapping) in mappings.iter().enumerate() {
+        for (name, port) in [
+            ("windowsPort", mapping.windows_port),
+            ("containerPort", mapping.container_port),
+        ] {
+            if port == 0 {
+                return Err(WxcError::ConfigParse(format!(
+                    "{field_path}[{index}]: '{name}' must be > 0"
+                )));
+            }
+        }
+        if mapping.protocol != "tcp" {
+            return Err(WxcError::ConfigParse(format!(
+                "{field_path}[{index}]: 'protocol' must be 'tcp', got '{}'",
+                mapping.protocol
+            )));
+        }
+    }
+
+    let mut seen: HashSet<(u16, &str)> = HashSet::with_capacity(mappings.len());
+    for mapping in mappings {
+        if !seen.insert((mapping.windows_port, mapping.protocol.as_str())) {
+            return Err(WxcError::ConfigParse(format!(
+                "{field_path}: duplicate windowsPort {} for protocol '{}'",
+                mapping.windows_port, mapping.protocol
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEgressPolicy,
-        NetworkIngressPolicy, NetworkRule, ProxyAddress, ProxyConfig,
+        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
+        ProxyAddress, ProxyConfig,
     };
     use crate::mxc_common::mxc_error::MxcErrorCode;
 
@@ -266,6 +230,84 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_common(&req).is_err());
+    }
+
+    fn port_mapping(windows_port: u16, container_port: u16) -> PortMapping {
+        PortMapping {
+            windows_port,
+            container_port,
+            protocol: "tcp".to_string(),
+        }
+    }
+
+    #[test]
+    fn port_mapping_messages_name_the_caller_supplied_field_path() {
+        for field_path in ["wslc.portMappings", "wslc.provision.portMappings"] {
+            let zero = validate_port_mappings(field_path, &[port_mapping(0, 80)]).unwrap_err();
+            assert!(
+                zero.to_string()
+                    .ends_with(&format!("{field_path}[0]: 'windowsPort' must be > 0")),
+                "{zero}"
+            );
+
+            let duplicate =
+                validate_port_mappings(field_path, &[port_mapping(80, 8080), port_mapping(80, 81)])
+                    .unwrap_err();
+            assert!(
+                duplicate.to_string().ends_with(&format!(
+                    "{field_path}: duplicate windowsPort 80 for protocol 'tcp'"
+                )),
+                "{duplicate}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_port_outranks_an_earlier_duplicate() {
+        // Both surfaces share this helper, so changing the order would reword a
+        // user-facing rejection on each of them.
+        let mappings = [
+            port_mapping(8080, 80),
+            port_mapping(8080, 81),
+            port_mapping(0, 82),
+        ];
+        let error = validate_port_mappings("wslc.portMappings", &mappings).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .ends_with("wslc.portMappings[2]: 'windowsPort' must be > 0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn distinct_host_ports_and_an_empty_list_are_accepted() {
+        assert!(validate_port_mappings("wslc.portMappings", &[]).is_ok());
+        assert!(validate_port_mappings(
+            "wslc.portMappings",
+            &[port_mapping(8080, 80), port_mapping(8081, 80)]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_protocol_the_daemon_cannot_carry_is_rejected() {
+        // The daemon wire format drops the protocol and the worker rebuilds
+        // every mapping as TCP, so anything else would be applied as something
+        // the caller did not ask for.
+        for protocol in ["udp", "UDP", "Tcp", "sctp", ""] {
+            let mapping = PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+                protocol: protocol.to_string(),
+            };
+            let error = validate_port_mappings("wslc.portMappings", &[mapping])
+                .expect_err("only 'tcp' is applicable");
+            assert!(
+                error.to_string().contains("'protocol' must be 'tcp'"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -344,126 +386,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_builtin_test_server_without_testing_features() {
-        let mut req = ExecutionRequest {
-            script_code: "echo hi".to_string(),
-            ..Default::default()
-        };
-        req.policy.network_proxy.builtin_test_server = true;
-        req.testing_features_enabled = false;
-
-        let err = validate_common(&req).unwrap_err();
-        assert!(
-            err.error_message.contains("builtinTestServer")
-                && err.error_message.contains("--allow-testing-features"),
-            "expected testing-gate error, got: {}",
-            err.error_message
-        );
-    }
-
-    #[test]
-    fn accepts_builtin_test_server_with_testing_features() {
-        let mut req = ExecutionRequest {
-            script_code: "echo hi".to_string(),
-            ..Default::default()
-        };
-        req.policy.network_proxy.builtin_test_server = true;
-        req.testing_features_enabled = true;
-
-        assert!(validate_common(&req).is_ok());
-    }
-
-    #[test]
-    fn network_support_accepts_valid_legacy_host_list_combinations() {
-        for (default_network_policy, allowed_hosts, blocked_hosts) in [
-            (NetworkPolicy::Block, vec![], vec![]),
-            (
-                NetworkPolicy::Block,
-                vec!["203.0.113.7".to_string()],
-                vec![],
-            ),
-            (
-                NetworkPolicy::Block,
-                vec!["203.0.113.0/24".to_string()],
-                vec!["203.0.113.7".to_string()],
-            ),
-            (NetworkPolicy::Allow, vec![], vec![]),
-            (
-                NetworkPolicy::Allow,
-                vec![],
-                vec!["203.0.113.7".to_string()],
-            ),
-        ] {
-            let request = ExecutionRequest {
-                policy: ContainerPolicy {
-                    default_network_policy,
-                    allowed_hosts,
-                    blocked_hosts,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            for support in [NetworkPolicySupport::LEGACY, NetworkPolicySupport::ALL] {
-                assert!(
-                    validate_network_policy_support(&request, support).is_ok(),
-                    "valid legacy host-list policy was rejected for support {support:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn network_support_rejects_legacy_lists_that_do_not_refine_the_default() {
-        let cases = [
-            (
-                NetworkPolicy::Block,
-                vec![],
-                vec!["203.0.113.7".to_string()],
-                "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
-            ),
-            (
-                NetworkPolicy::Allow,
-                vec!["203.0.113.7".to_string()],
-                vec![],
-                "allowedHosts requires network.defaultPolicy='block'",
-            ),
-            (
-                NetworkPolicy::Allow,
-                vec!["203.0.113.7".to_string()],
-                vec!["203.0.113.8".to_string()],
-                "allowedHosts requires network.defaultPolicy='block'",
-            ),
-        ];
-
-        for (default_network_policy, allowed_hosts, blocked_hosts, expected) in cases {
-            let request = ExecutionRequest {
-                policy: ContainerPolicy {
-                    default_network_policy,
-                    allowed_hosts,
-                    blocked_hosts,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            for support in [NetworkPolicySupport::LEGACY, NetworkPolicySupport::ALL] {
-                let error = validate_network_policy_support(&request, support).unwrap_err();
-                assert_eq!(error.error_message, expected);
-            }
-        }
-    }
-
-    #[test]
-    fn network_support_reports_directional_error_before_legacy_host_list_error() {
+    fn network_support_reports_egress_error_before_ingress_error() {
         let mut request = ExecutionRequest::default();
         request.policy.network_mode_specified = true;
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
-        request.policy.default_network_policy = NetworkPolicy::Allow;
-        request.policy.allowed_hosts = vec!["203.0.113.7".to_string()];
+        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
 
         let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
+            validate_network_policy_support(&request, NetworkPolicySupport::default()).unwrap_err();
         assert_eq!(
             error.error_message,
             "network.egress.default is not supported by the selected backend"
@@ -478,7 +408,7 @@ mod tests {
             ..Default::default()
         });
         let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
+            validate_network_policy_support(&request, NetworkPolicySupport::default()).unwrap_err();
         assert!(error.error_message.contains("network.egress.default"));
 
         let mut request = ExecutionRequest::default();
@@ -520,7 +450,6 @@ mod tests {
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         let error = validate_network_policy_support(
             &request,
@@ -560,7 +489,6 @@ mod tests {
         });
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         request.policy.runtime_network_proxy_specified = true;
         request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
@@ -585,39 +513,12 @@ mod tests {
     }
 
     #[test]
-    fn network_support_rejects_inconsistent_dual_model_defaults() {
-        let mut request = ExecutionRequest::default();
-        request.policy.network_egress = Some(NetworkEgressPolicy::default());
-        request.policy.default_network_policy = NetworkPolicy::Allow;
-        let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
-        assert!(error.error_message.contains("legacy outbound policy"));
-
-        let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
-        request.policy.allow_local_network = true;
-        let error = validate_network_policy_support(&request, NetworkPolicySupport::HOST_LOOPBACK)
-            .unwrap_err();
-        assert!(error.error_message.contains("network.ingress.default"));
-        assert!(error.error_message.contains("legacy inbound policy"));
-
-        let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
-        request.policy.allow_local_network = true;
-        let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::INGRESS_DEFAULT)
-                .unwrap_err();
-        assert!(error.error_message.contains("network.ingress.hostLoopback"));
-        assert!(error.error_message.contains("legacy inbound policy"));
-    }
-
-    #[test]
-    fn network_support_accepts_implicit_directional_defaults_for_legacy_backends() {
+    fn network_support_accepts_implicit_directional_defaults_without_declared_features() {
         let mut request = ExecutionRequest::default();
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
         request.policy.network_ingress = Some(NetworkIngressPolicy::default());
 
-        assert!(validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).is_ok());
+        assert!(validate_network_policy_support(&request, NetworkPolicySupport::default()).is_ok());
     }
 
     #[test]
@@ -641,7 +542,7 @@ mod tests {
         });
 
         let error =
-            validate_state_aware_network_policy_support(&request, NetworkPolicySupport::LEGACY)
+            validate_state_aware_network_policy_support(&request, NetworkPolicySupport::default())
                 .unwrap_err();
 
         assert_eq!(error.code, MxcErrorCode::PolicyValidation);

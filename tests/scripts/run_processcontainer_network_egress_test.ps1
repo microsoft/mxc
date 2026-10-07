@@ -25,7 +25,7 @@ Initialize-WpcContext @PSBoundParameters
 
 # Phase 8c — explicit WFP egress rules (PSEC only).
 #
-# From docs/process-container/networking.md §3 and the shared spec's D4: a
+# From docs/backends/process-container/networking.md §3 and the shared spec's D4: a
 # CIDR/port allow permits that destination and still blocks everything else,
 # and an explicit deny beats an overlapping allow. Off PSEC the documented
 # behavior is a typed rejection — a silently dropped rule set would leave the
@@ -149,4 +149,3 @@ function Phase-NetworkEgressRules {
 
 Invoke-WpcPhase -Key 'NetworkEgressRules' -Body { Phase-NetworkEgressRules }
 Complete-WpcChild
-

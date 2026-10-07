@@ -852,6 +852,10 @@ export interface WslcProvision {
    * Optional path to a local container image archive.
    */
   imageTarPath?: string;
+  /**
+   * Optional host-to-container TCP port mappings.
+   */
+  portMappings?: PortMapping[];
 }
 
 /**

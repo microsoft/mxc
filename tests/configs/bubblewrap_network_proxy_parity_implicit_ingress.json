@@ -1,0 +1,17 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Proxy-Parity-Implicit-Ingress",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; pu=\"${HTTP_PROXY:-${http_proxy:-}}\"; if [ -z \"$pu\" ]; then echo PARITY_NO_PROXY_ENV; exit 1; fi; echo PARITY_PROXY_ENV_OK; pa=\"${pu#*://}\"; pa=\"${pa%%/*}\"; ph=\"${pa%%:*}\"; pp=\"${pa##*:}\"; if [ \"$pp\" = \"$ph\" ]; then pp=80; fi; if ! timeout 6 bash -c \"exec 3<>/dev/tcp/$ph/$pp\" >/dev/null 2>&1; then echo PARITY_PROXY_UNREACHABLE; exit 1; fi; echo PARITY_PROXY_REACHABLE_OK; timeout 6 bash -c \"exec 3<>/dev/tcp/10.0.2.2/{{CONTROL_PORT}}\" >/dev/null 2>&1; if [ $? = 0 ]; then echo PARITY_DIRECT_LEAKED; exit 1; fi; echo PARITY_DIRECT_BLOCKED_OK; if ! timeout 15 bash -c \"exec 3<>/dev/tcp/$ph/$pp; printf \\\"GET http://mxc-test.invalid/ HTTP/1.1\\\\r\\\\nHost: mxc-test.invalid\\\\r\\\\nConnection: close\\\\r\\\\n\\\\r\\\\n\\\" >&3; grep -q MXC_TEST_ORIGIN_OK <&3\"; then echo PARITY_PROXIED_FETCH_FAILED; exit 1; fi; echo PARITY_PROXIED_FETCH_OK'"
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://{{PROXY_HOST}}:{{PROXY_PORT}}"
+  }
+}

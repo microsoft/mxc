@@ -129,7 +129,7 @@ impl WindowsSandboxRunner {
 
 impl ScriptRunner for WindowsSandboxRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_network_policy_support(request, NetworkPolicySupport::default())?;
         Ok(())
     }
 

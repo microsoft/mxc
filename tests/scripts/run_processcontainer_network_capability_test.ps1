@@ -24,7 +24,7 @@ Initialize-WpcContext @PSBoundParameters
 
 
 # Phase 8a — the documented egress x ingress capability matrix.
-# docs/process-container/networking.md §1 gives the mapping. The deny/allow
+# docs/backends/process-container/networking.md §1 gives the mapping. The deny/allow
 # row is the one combination the doc says a non-PSEC tier must REFUSE rather
 # than approximate: privateNetworkClientServer is bidirectional, so accepting
 # it there would grant inbound access the caller never asked for.

@@ -40,7 +40,7 @@ assert_rejected() {
     echo "Running Bubblewrap localnet test: $label..."
     local out
     local rc=0
-    out=$("$LXC_EXEC" --experimental --allow-testing-features \
+    out=$("$LXC_EXEC" --experimental \
         "$REPO_DIR/tests/configs/$config" 2>&1) || rc=$?
     if [ "$rc" = 0 ]; then
         echo "$out"
@@ -73,7 +73,7 @@ assert_rejected "ingress.hostLoopback=allow is refused" \
 # network namespace rather than accidentally sharing the host's.
 echo "Running Bubblewrap localnet test: omitted ingress defaults to deny..."
 IMPLICIT_RC=0
-IMPLICIT_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+IMPLICIT_OUT=$("$LXC_EXEC" --experimental \
     "$REPO_DIR/tests/configs/bubblewrap_network_localnet_implicit_deny.json" 2>&1) \
     || IMPLICIT_RC=$?
 if [ "$IMPLICIT_RC" -ne 0 ]; then

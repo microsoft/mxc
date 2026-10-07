@@ -10,10 +10,7 @@
 use std::collections::HashSet;
 
 use crate::mxc_common::filesystem_resolve::FsIntent;
-use crate::mxc_common::models::{
-    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementCompatibility,
-    NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
-};
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction, ProxyAddress};
 use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
 /// The fixed prefix of the command bwrap is asked to run.
@@ -102,177 +99,41 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
 pub(crate) enum ResolvedNetworkMode {
     /// A private network namespace with no external connectivity.
     Isolated,
-    /// The host network namespace without MXC firewall filtering.
-    Shared,
-    /// Pre-0.8 cooperative proxy routing in the host network namespace.
-    LegacyProxy,
-    /// The host network namespace with per-destination iptables filtering.
-    ///
-    /// Pre-0.8 only. The rules land on the *host* chain, which the sandbox
-    /// never traverses, so this filters nothing; it is retained unchanged
-    /// because pre-0.8 callers already run under it.
-    FirewallFiltered,
-    /// Per-destination iptables filtering inside a slirp-backed private
-    /// namespace, with no proxy. 0.8+ only.
+    /// Directional iptables filtering inside a slirp-backed private namespace.
     FirewallEnforced,
     /// Cooperative proxy routing inside a slirp-backed private namespace, with
     /// egress closed to everything but the proxy.
     ProxyOnly,
 }
 
-/// Whether this request uses strict network-contract behavior.
-fn uses_strict_network_contract(request: &ExecutionRequest) -> bool {
-    request.network_enforcement_compatibility == NetworkEnforcementCompatibility::Strict
-}
-
-/// Whether the policy carries the 0.8 directional shape.
-///
-/// Either section is enough: the parser fills both together, but checking only
-/// one would route an ingress-only policy into the legacy path, where its
-/// directional intent is silently discarded. Shared by every site that splits
-/// directional from legacy so the fail-closed reading cannot drift apart.
-///
-/// Distinct from `crate::mxc_common::validator::directional_posture_supplied`, which
-/// also folds in `network_mode_specified` and the proxy; the two are not
-/// interchangeable.
-pub(crate) fn is_directional(policy: &ContainerPolicy) -> bool {
-    policy.network_egress.is_some() || policy.network_ingress.is_some()
-}
-
 impl ResolvedNetworkMode {
     /// Classify the internal request using the proxy's resolved runtime state.
     pub(crate) fn from_request(request: &ExecutionRequest, proxy_active: bool) -> Self {
         if proxy_active {
-            return if uses_strict_network_contract(request) {
-                Self::ProxyOnly
-            } else {
-                Self::LegacyProxy
-            };
+            return Self::ProxyOnly;
         }
 
-        // The directional 0.8 posture is authoritative when present: the parser
-        // fills these sections only on that path and leaves every legacy field
-        // at its default, so classifying from the legacy fields below would
-        // read a policy that never said either as `Isolated` and take the
-        // sandbox offline with the requested rules programmed nowhere.
-        //
-        // Either section makes it directional (see `is_directional`); a missing
-        // egress defaults to deny, failing closed.
-        //
-        // Directional never selects `Shared`: the host namespace has no inbound
-        // primitive, and `network_ingress` has no `_specified` twin, so a
-        // defaulted `ingress.default='deny'` is indistinguishable from one the
-        // caller wrote and could not be refused without refusing every
-        // "allow all outbound" policy with it. The private namespace honors
-        // both directions, so an open egress posture becomes an accept-all
-        // chain rather than an unfiltered namespace.
-        if is_directional(&request.policy) {
-            // Off the 0.8 contract there is no private namespace to program.
-            // Report the unfiltered truth and let `validate` refuse it rather
-            // than pretending the posture was applied.
-            if !uses_strict_network_contract(request) {
-                return Self::Shared;
-            }
-            let egress = request.policy.network_egress.clone().unwrap_or_default();
-            // A bare deny is `--unshare-net`: cheaper than slirp plus a
-            // deny-all chain, identical in effect, and inbound is denied by
-            // the absence of connectivity rather than by a rule.
-            let ruleless = egress.allow.is_empty() && egress.deny.is_empty();
-            return if ruleless && egress.default == NetworkAction::Deny {
-                Self::Isolated
-            } else {
-                Self::FirewallEnforced
-            };
-        }
-
-        let uses_firewall = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        );
-        let has_host_rules =
-            !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
-
-        if uses_firewall && has_host_rules {
-            if uses_strict_network_contract(request) {
-                Self::FirewallEnforced
-            } else {
-                Self::FirewallFiltered
-            }
-        } else if request.policy.default_network_policy == NetworkPolicy::Block && !has_host_rules {
+        // An absent egress section is the supported deny default. Only a
+        // ruleless deny can omit slirp and the namespace-local firewall.
+        let egress = request.policy.network_egress.as_ref();
+        if egress.is_none_or(|egress| {
+            egress.default == NetworkAction::Deny
+                && egress.allow.is_empty()
+                && egress.deny.is_empty()
+        }) {
             Self::Isolated
         } else {
-            Self::Shared
+            Self::FirewallEnforced
         }
-    }
-
-    /// Whether current behavior gives the sandbox a private network namespace.
-    pub(crate) fn uses_private_netns(self) -> bool {
-        matches!(
-            self,
-            Self::Isolated | Self::ProxyOnly | Self::FirewallEnforced
-        )
     }
 
     /// Whether the runner supplies a pre-created user namespace to Bubblewrap.
     pub(crate) fn uses_external_userns(self) -> bool {
         matches!(self, Self::ProxyOnly | Self::FirewallEnforced)
     }
-
-    /// Whether the mode uses the host-side firewall manager.
-    ///
-    /// False for `ProxyOnly` and `FirewallEnforced`, which are *not*
-    /// iptables-free: they program rules directly into the sandbox's own
-    /// network namespace from the supervisor (see `proxy_network`) rather than
-    /// going through the host manager.
-    #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn requires_host_firewall_manager(self) -> bool {
-        matches!(self, Self::FirewallFiltered)
-    }
-
-    /// Whether this mode actually applies the policy's host lists.
-    ///
-    /// `FirewallEnforced` filters by address in the sandbox's own namespace.
-    /// `ProxyOnly` closes egress to everything but the proxy endpoint, so the
-    /// lists are enforced at the proxy — true only for the builtin proxy; an
-    /// external one is refused by [`external_proxy_host_rules_rejection`].
-    /// Every other mode leaves the lists unapplied.
-    pub(crate) fn enforces_host_rules(self) -> bool {
-        matches!(self, Self::FirewallEnforced | Self::ProxyOnly)
-    }
 }
 
-/// Rejection text for host lists no mechanism will enforce, on schema 0.8+.
-///
-/// Owned here rather than in the parser: this is a statement about what
-/// Bubblewrap can enforce, so it belongs with the backend that enforces it.
-pub const BWRAP_UNENFORCED_HOST_RULES: &str =
-    "Bubblewrap: network.allowedHosts and network.blockedHosts require an enforcement \
-     mechanism. With enforcementMode='capabilities' (the default) and no network.proxy, \
-     nothing applies them: the host lists suppress the --unshare-net full block, so the \
-     sandbox shares the host network namespace with no filtering at all. Set \
-     network.enforcementMode to 'firewall' to filter by address inside the sandbox's own \
-     network namespace, set network.proxy to enforce host filtering at the proxy layer, or \
-     drop the host lists to get the namespace-level block that defaultPolicy='block' applies \
-     on its own.";
-
-/// Rejection text for `allowLocalNetwork=false` under a shared namespace.
-pub const BWRAP_LOCAL_NETWORK_SHARED_NS: &str =
-    "Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
-     sandbox shares the host network namespace (defaultPolicy='allow'). \
-     The sandboxed process can still bind, listen and accept on host-local addresses. For \
-     an unreachable sandbox use defaultPolicy='block' with no host rules and no proxy, \
-     which applies --unshare-net; to keep the shared namespace, acknowledge the exposure \
-     with allowLocalNetwork=true.";
-
-/// Rejection text for `allowLocalNetwork=true` under a private namespace.
-pub const BWRAP_LOCAL_NETWORK_PRIVATE_NS: &str =
-    "Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
-     network namespace. Isolated, proxy and firewall modes apply --unshare-net, so a \
-     listener inside the sandbox is reachable only from within it, never from the host. \
-     Use defaultPolicy='allow' with no host rules and no proxy to share the host network \
-     namespace.";
-
-/// Refuse a directional 0.8 posture Bubblewrap cannot honor.
+/// Refuse an inbound posture Bubblewrap cannot honor.
 ///
 /// The backend declares `INGRESS_DEFAULT` and `HOST_LOOPBACK` in
 /// [`network_policy_support`], which tells shared validation it understands
@@ -281,20 +142,11 @@ pub const BWRAP_LOCAL_NETWORK_PRIVATE_NS: &str =
 /// only thing standing between an unsupported value and a silent drop, so they
 /// ship in the same change as the declaration.
 ///
-/// Deliberately *not* schema-gated. The pre-0.8 warning path exists for configs
-/// that predate a rule; a directional section is a 0.8 construct, so seeing one
-/// on an older schema is a caller error rather than a legacy config to carry
-/// forward — and the mode resolver reports `Shared` for it, meaning nothing
-/// would be programmed.
 pub fn directional_network_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     let egress = request.policy.network_egress.as_ref();
     let ingress = request.policy.network_ingress.as_ref();
     if egress.is_none() && ingress.is_none() {
         return None;
-    }
-
-    if !uses_strict_network_contract(request) {
-        return Some(BWRAP_DIRECTIONAL_PRE_0_8);
     }
 
     if let Some(ingress) = ingress {
@@ -308,14 +160,6 @@ pub fn directional_network_rejection(request: &ExecutionRequest) -> Option<&'sta
 
     None
 }
-
-/// Rejection text for a directional section on a pre-0.8 schema.
-pub const BWRAP_DIRECTIONAL_PRE_0_8: &str =
-    "Bubblewrap: network.egress/network.ingress require schema 0.9.0-alpha or later. \
-     Earlier schemas run the sandbox in the host network namespace, where the \
-     directional posture would be accepted and then never programmed. Raise the \
-     config's version field, or express the policy with defaultPolicy, \
-     allowedHosts and blockedHosts.";
 
 /// Rejection text for an inbound-accepting directional posture.
 pub const BWRAP_INGRESS_DEFAULT_ALLOW: &str =
@@ -332,85 +176,25 @@ pub const BWRAP_HOST_LOOPBACK_ALLOW: &str =
      cannot dial a sandbox listener and nothing bridges the two. Use \
      network.ingress.hostLoopback='deny'.";
 
-/// Reject host lists that no mechanism will apply, on schema 0.8+.
-///
-/// Host lists suppress the `Isolated` mode, so a mode that does not apply them
-/// leaves the sandbox on the host namespace unfiltered. This is the only layer
-/// that checks it: the parser validates structure, and every caller — CLI,
-/// SDK, FFI, or a Rust caller handing `mxc_engine` a hand-built
-/// `ExecutionRequest` — reaches a runner, while only JSON configs reach the
-/// parser.
-pub fn unenforced_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
-    if !uses_strict_network_contract(request) {
-        return None;
-    }
-    let has_host_rules =
-        !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
-    let mode =
-        ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled());
-
-    (has_host_rules && !mode.enforces_host_rules()).then_some(BWRAP_UNENFORCED_HOST_RULES)
-}
-
-/// Rejection text for an external proxy combined with host lists.
-///
-/// Duplicated (verbatim) from the parser's pre-existing check of the same
-/// combination. The parser keeps its copy for JSON configs; this one covers
-/// callers who hand a runner an `ExecutionRequest` directly.
-pub const BWRAP_EXTERNAL_PROXY_HOST_RULES: &str =
-    "Bubblewrap: an external network.proxy (url/localhost) cannot be combined with \
-     allowedHosts, blockedHosts, or defaultPolicy='block'. The external proxy is expected to \
-     enforce its own host policy; MXC does not forward host lists to it. Use \
-     'network.proxy.builtinTestServer: true' (testing only) for MXC-enforced host filtering, \
-     or remove the host policy.";
-
-/// Rejection text for a proxy combined with firewall enforcement.
-///
-/// Duplicated (verbatim) from the parser's pre-existing check of the same
-/// combination, exactly as [`BWRAP_EXTERNAL_PROXY_HOST_RULES`] is. The parser
-/// keeps its copy for JSON configs; this one covers callers who hand a runner
-/// an `ExecutionRequest` directly. Keep the two strings identical.
-pub const BWRAP_PROXY_WITH_FIREWALL: &str = "Bubblewrap: network.proxy cannot be combined with \
-     network.enforcementMode='firewall' or 'both'. The cooperative \
-     env-var proxy enforces hosts at the proxy layer; iptables-based \
-     enforcement requires privilege and is mutually exclusive.";
-
-/// Rejection text for a proxy combined with a directional egress rule set.
-///
-/// Distinct from [`BWRAP_EXTERNAL_PROXY_HOST_RULES`] because the two describe
-/// different mistakes: that one names the legacy host-list fields, none of
-/// which a directional caller has set. A caller told to remove `allowedHosts`
-/// when they wrote `network.egress` would have nothing to act on.
-pub const BWRAP_PROXY_DIRECTIONAL_EGRESS: &str =
-    "Bubblewrap: network.proxy cannot be combined with a directional network.egress rule set. \
+/// Rejection text for a proxy combined with direct egress.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const BWRAP_PROXY_DIRECTIONAL_EGRESS: &str =
+    "Bubblewrap: runtimeConfig.networkProxy cannot be combined with direct network.egress rules \
+     or default='allow'. \
      A proxy resolves to proxy-only egress, whose chain opens the proxy endpoint alone and \
      never reads network.egress, so the rules would be dropped in silence. Use \
      network.egress.default='deny' with no allow/deny rules (the proxy-only posture), or \
-     remove network.proxy and express the policy with network.egress.";
+     remove runtimeConfig.networkProxy and express the policy with network.egress.";
 
-/// Validate-time twin of the parser's external-proxy host-list rejection.
-///
-/// MXC applies the host lists itself only for the builtin test proxy; an
-/// operator-supplied proxy is never handed them, so accepting the combination
-/// would drop the requested policy silently. Not schema-gated, matching the
-/// parser.
-pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+/// Reject direct egress that proxy-only routing would otherwise discard.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn proxy_with_egress_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     let proxy = &request.policy.network_proxy;
     if !proxy.is_enabled() {
         return None;
     }
 
-    // Checked ahead of the builtin exemption because it binds to *every*
-    // enabled proxy. Both proxy flavors resolve to `ResolvedNetworkMode::
-    // ProxyOnly`, whose chain comes from `EgressPlan::for_proxy` and never
-    // reads `network_egress` -- so a directional rule set is dropped in
-    // silence either way. The exemption below is about host *lists*, which
-    // MXC does apply itself for the builtin proxy; nothing applies directional
-    // rules under a proxy, so the exemption must not extend to them.
-    //
-    // JSON configs cannot reach this (the parser constrains the same posture),
-    // which leaves programmatic callers: precisely who this twin exists for.
-    let directional_conflicts = request
+    request
         .policy
         .network_egress
         .as_ref()
@@ -418,114 +202,8 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
             egress.default != NetworkAction::Deny
                 || !egress.allow.is_empty()
                 || !egress.deny.is_empty()
-        });
-    if directional_conflicts {
-        return Some(BWRAP_PROXY_DIRECTIONAL_EGRESS);
-    }
-
-    if proxy.builtin_test_server {
-        return None;
-    }
-    let has_host_rules =
-        !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
-    // `default_network_policy` is a legacy-shape field: the directional path
-    // never writes it, so it sits at its `Block` default whether or not the
-    // caller said anything about egress. Reading it as a caller statement
-    // would refuse every directional runtime proxy -- the one posture the
-    // parser already constrains to `egress.default='deny'` with no direct
-    // rules, which *is* proxy-only egress and carries no host lists that could
-    // be silently dropped.
-    let legacy_shape = !is_directional(&request.policy);
-    let conflicts = has_host_rules
-        || (legacy_shape && request.policy.default_network_policy == NetworkPolicy::Block);
-
-    conflicts.then_some(BWRAP_EXTERNAL_PROXY_HOST_RULES)
-}
-
-/// Validate-time twin of the parser's proxy + firewall-enforcement rejection.
-///
-/// [`ResolvedNetworkMode::from_request`] tests the proxy first and returns
-/// `ProxyOnly`, so `enforcementMode` is never consulted on that path: without
-/// this gate the runner silently discards an explicitly-set, security-relevant
-/// field. Public SDK policy entry points validate through the exact parser:
-/// `mxc_sdk::v1::build_request*` constructs an exact `1.0.0` Rust contract
-/// value and normalizes it through `config_parser`, and `SandboxRequest`'s
-/// inner `ExecutionRequest` is `pub(crate)`. This gate also protects direct
-/// engine callers holding an `ExecutionRequest`. Not schema-gated, matching
-/// the parser.
-pub fn proxy_with_firewall_rejection(request: &ExecutionRequest) -> Option<&'static str> {
-    let conflicts = request.policy.network_proxy.is_enabled()
-        && matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        );
-    conflicts.then_some(BWRAP_PROXY_WITH_FIREWALL)
-}
-
-/// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
-/// only for schemas that reject it rather than warn.
-///
-/// Keys off proxy *enablement* rather than a resolved address because
-/// `builtinTestServer` has no address until the proxy starts, which is after
-/// validation.
-///
-/// Rejects on the value, not on whether the caller wrote the field. `false` is
-/// the schema default *and* a deny, so an omitted `allowLocalNetwork` still
-/// asks for inbound denial. Callers wanting the shared namespace acknowledge
-/// the exposure with `allowLocalNetwork=true`. The warning path keeps the
-/// looser check: it only logs.
-pub fn local_network_rejection(request: &ExecutionRequest) -> Option<&'static str> {
-    if !uses_strict_network_contract(request) {
-        return None;
-    }
-    let mode =
-        ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled());
-    local_network_diagnostic_for_mode(request, mode)
-}
-
-/// Describe a `network.allowLocalNetwork` setting Bubblewrap cannot honor, or
-/// `None` when the sandbox's namespace already matches the request.
-///
-/// `allowLocalNetwork` governs whether the sandboxed process may bind/listen on
-/// local IPs and accept **inbound** connections (it says nothing about outbound
-/// reachability of local addresses — that is `defaultPolicy`/`allowedHosts`).
-/// Bubblewrap has no inbound-only primitive: the sandbox either gets a private
-/// network namespace or shares the host's, and neither can be narrowed further.
-/// Unprivileged bwrap has no veth to scope iptables to, and seccomp cannot
-/// dereference the `sockaddr` passed to `bind`, so an AF_INET-only filter is not
-/// expressible. The namespace choice therefore decides the outcome, and this
-/// returns the mismatch so the runner can say so out loud rather than dropping
-/// the field silently.
-///
-/// The private-namespace arm satisfies `false` only at the sandbox boundary:
-/// bwrap brings `lo` up inside the new namespace, so sandbox processes can still
-/// bind and connect to each other over their own loopback. That stays inside the
-/// caller's trust boundary — those processes already share pipes, files and the
-/// mount namespace — so it is not warned about.
-pub fn local_network_diagnostic(
-    request: &ExecutionRequest,
-    proxy_address: Option<&ProxyAddress>,
-) -> Option<&'static str> {
-    let network_mode = ResolvedNetworkMode::from_request(request, proxy_address.is_some());
-    local_network_diagnostic_for_mode(request, network_mode)
-}
-
-/// Describe an inbound-policy mismatch using a previously resolved mode.
-///
-/// The text carries no severity prefix so it can serve both the pre-0.8
-/// warning and the 0.8+ rejection; callers add "WARNING: " when logging.
-pub(crate) fn local_network_diagnostic_for_mode(
-    request: &ExecutionRequest,
-    network_mode: ResolvedNetworkMode,
-) -> Option<&'static str> {
-    match (
-        request.policy.allow_local_network,
-        network_mode.uses_private_netns(),
-    ) {
-        (false, false) => Some(BWRAP_LOCAL_NETWORK_SHARED_NS),
-        (true, true) => Some(BWRAP_LOCAL_NETWORK_PRIVATE_NS),
-        _ => None,
-    }
+        })
+        .then_some(BWRAP_PROXY_DIRECTIONAL_EGRESS)
 }
 
 /// `PATH` for the sandboxed child, from schema 0.9.
@@ -547,8 +225,7 @@ const DEFAULT_TERM: &str = "xterm-256color";
 /// directories — a relative `--chdir` would otherwise resolve against whatever
 /// cwd bwrap carried into the namespace, leaving `HOME` naming a different
 /// directory than the one the child landed in. Normalizing against the sandbox
-/// root is what makes them agree, so it is gated on the schema that introduced
-/// `HOME`; below 0.9 the caller's spelling reaches `--chdir` untouched.
+/// root is what makes them agree for every supported contract.
 ///
 /// A policy grant is deliberately *not* consulted: bwrap enters one only when
 /// `process.cwd` names it, so treating it as the start directory would put
@@ -556,13 +233,7 @@ const DEFAULT_TERM: &str = "xterm-256color";
 fn start_directory(request: &ExecutionRequest) -> Option<String> {
     Some(request.working_directory.as_str())
         .filter(|dir| !dir.is_empty())
-        .map(|dir| {
-            if request.supplies_default_env() {
-                crate::mxc_common::models::sandbox_absolute_path(dir)
-            } else {
-                dir.to_string()
-            }
-        })
+        .map(crate::mxc_common::models::sandbox_absolute_path)
 }
 
 /// The default environment: `PATH`, `TERM`, and — when one resolves — `HOME`.
@@ -587,8 +258,8 @@ fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
 /// The entries the child should get, as `KEY=VALUE` strings.
 ///
 /// The state dispatch and overlay merge are shared; see
-/// [`crate::mxc_common::default_env::resolve_env`]. Below 0.9 the caller's entries are
-/// passed through untouched.
+/// [`crate::mxc_common::default_env::resolve_env`]. Explicit replacement entries
+/// are passed through untouched.
 fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
     crate::mxc_common::default_env::resolve_env(request, || default_env(request))
 }
@@ -600,7 +271,7 @@ fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
 /// I/O and so stays unit-testable on every host. Unit tests and any caller that
 /// has not stat'd the denied paths use it. The Bubblewrap runner uses
 /// [`build_args_classified`] instead. See
-/// docs/bwrap-support/bubblewrap-backend.md for how denied paths are masked.
+/// docs/backends/bwrap/bubblewrap-backend.md for how denied paths are masked.
 pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> Vec<String> {
     build_args_classified(request, proxy_address, &HashSet::new())
 }
@@ -610,8 +281,7 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
 /// The returned vector does **not** include the `bwrap` binary name itself —
 /// callers pass it to `Command::new("bwrap").args(&args)`.
 ///
-/// `proxy_address` is the proxy endpoint visible from the sandbox (if the
-/// request has `network.proxy` configured).
+/// `proxy_address` is the sandbox-visible runtime proxy endpoint, if configured.
 /// When `Some`, the builder:
 /// - emits `--unshare-net` and expects the runner to provide `--userns FD`
 ///   plus slirp-backed connectivity,
@@ -623,7 +293,7 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
 /// `denied_files` is the set of `deniedPaths` entries the runner classified as
 /// files (built by `symlink_metadata`-probing each denied path, so this function
 /// performs no filesystem I/O and stays unit-testable on every host). See
-/// docs/bwrap-support/bubblewrap-backend.md for how denied paths are masked.
+/// docs/backends/bwrap/bubblewrap-backend.md for how denied paths are masked.
 pub fn build_args_classified(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
@@ -649,7 +319,7 @@ pub(crate) fn build_args_classified_with_mode(
     // unsharing, leaving that descriptor open in the workload. It is inert only
     // because bwrap empties the capability sets before exec — asserted by
     // run_bwrap_network_proxy_test.sh, explained in
-    // docs/bwrap-support/bubblewrap-backend.md.
+    // docs/backends/bwrap/bubblewrap-backend.md.
     args.extend(
         ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
             .into_iter()
@@ -663,12 +333,9 @@ pub(crate) fn build_args_classified_with_mode(
     // removed the network enforcement it was sandboxed by.
     args.push("--die-with-parent".into());
 
-    // Network: full-block and proxy modes use a private namespace. Proxy mode
-    // receives rootless connectivity from the runner's slirp supervisor.
-    // Per-host firewall mode continues to share the host namespace.
-    if network_mode.uses_private_netns() {
-        args.push("--unshare-net".into());
-    }
+    // Every supported mode has a private namespace; slirp provides connectivity
+    // only after its firewall is installed.
+    args.push("--unshare-net".into());
 
     // -- Base filesystem (deny-by-default; see `BASELINE_RO_BIND_PATHS`) ---
     // bwrap applies mounts in order; later mounts at the same path shadow
@@ -747,11 +414,8 @@ pub(crate) fn build_args_classified_with_mode(
     }
 
     // -- Network proxy env vars -------------------------------------------
-    // Cooperative env-var proxying: well-behaved tools (curl, requests,
-    // etc.) honor these and route through the proxy where allow / block
-    // enforcement happens. Tools that bypass these variables (raw sockets)
-    // are NOT enforced -- this is a documented limitation of the
-    // unprivileged proxy model.
+    // Cooperating tools route through the externally managed proxy; raw
+    // sockets cannot bypass the namespace-local default-DROP chain.
     //
     // We deliberately do NOT set NO_PROXY here. Exempting any destination
     // would let cooperating clients bypass the configured proxy policy.
@@ -772,7 +436,6 @@ pub(crate) fn build_args_classified_with_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::ContainerPolicy;
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -785,13 +448,8 @@ mod tests {
     /// `process.env` resolution, which schema 0.9 gave a default block.
     mod env {
         use super::*;
-        use crate::mxc_common::models::DefaultEnvCompatibility;
-
-        fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
-            ExecutionRequest {
-                default_env_compatibility: compatibility,
-                ..Default::default()
-            }
+        fn request() -> ExecutionRequest {
+            ExecutionRequest::default()
         }
 
         fn value<'a>(entries: &'a [String], key: &str) -> Option<&'a str> {
@@ -810,7 +468,7 @@ mod tests {
 
         #[test]
         fn an_omitted_env_gets_the_default_block() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = None;
             r.working_directory = "/workspace".into();
             let entries = resolved_env(&r);
@@ -832,21 +490,21 @@ mod tests {
 
         #[test]
         fn an_explicitly_empty_env_stays_empty() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = Some(vec![]);
             assert!(resolved_env(&r).is_empty());
         }
 
         #[test]
         fn a_supplied_env_is_used_verbatim() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = Some(vec!["FOO=bar".into()]);
             assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
         }
 
         #[test]
         fn inherit_default_env_layers_over_the_default_block() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
             r.inherit_default_env = true;
             let entries = resolved_env(&r);
@@ -864,7 +522,7 @@ mod tests {
 
         #[test]
         fn home_follows_the_directory_the_child_starts_in() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = None;
             r.working_directory = "/workspace".into();
             assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
@@ -875,7 +533,6 @@ mod tests {
         fn a_caller_entry_without_a_value_reaches_no_setenv() {
             for inherit in [false, true] {
                 let mut r = base_request();
-                r.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
                 r.env = Some(vec!["FEATURE_FLAG".into(), "FOO=bar".into()]);
                 r.inherit_default_env = inherit;
                 let args = build_args(&r, None);
@@ -897,7 +554,7 @@ mod tests {
         /// enters must not become its `HOME`.
         #[test]
         fn a_policy_grant_alone_does_not_become_home() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            let mut r = request();
             r.env = None;
             r.working_directory = String::new();
             // A real directory, so the shared resolver's `is_dir` probe would
@@ -917,7 +574,7 @@ mod tests {
         #[test]
         fn home_and_chdir_agree() {
             for cwd in ["", "/workspace", "work", "./work", "a/../b", "/x/../y/./z"] {
-                let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+                let mut r = request();
                 r.env = None;
                 r.working_directory = cwd.into();
                 let args = build_args(&r, None);
@@ -942,7 +599,7 @@ mod tests {
                 ("a/../b", "/b"),
                 ("/x/../y/./z", "/y/z"),
             ] {
-                let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+                let mut r = request();
                 r.env = None;
                 r.working_directory = cwd.into();
                 assert_eq!(value(&resolved_env(&r), "HOME"), Some(expected));
@@ -952,7 +609,6 @@ mod tests {
         #[test]
         fn the_default_block_reaches_the_argument_list() {
             let mut r = base_request();
-            r.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
             r.env = None;
             let args = build_args(&r, None);
 
@@ -969,14 +625,8 @@ mod tests {
     }
 
     #[test]
-    fn the_schema_gate_does_not_apply_when_no_proxy_is_active() {
-        // Without an active proxy the version is irrelevant — a 0.8 request
-        // still classifies on policy alone (default policy is block, so this
-        // lands on the plain isolated namespace, not the proxy one).
-        let request = ExecutionRequest {
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::Strict,
-            ..base_request()
-        };
+    fn an_omitted_network_policy_is_isolated() {
+        let request = ExecutionRequest { ..base_request() };
         assert_eq!(
             ResolvedNetworkMode::from_request(&request, false),
             ResolvedNetworkMode::Isolated
@@ -1001,501 +651,12 @@ mod tests {
         assert!(args.contains(&"--die-with-parent".to_string()));
     }
 
-    struct NetworkPlanCase {
-        name: &'static str,
-        compatibility: NetworkEnforcementCompatibility,
-        default_policy: NetworkPolicy,
-        enforcement_mode: NetworkEnforcementMode,
-        allowed_hosts: &'static [&'static str],
-        blocked_hosts: &'static [&'static str],
-        proxy_active: bool,
-        expected: ResolvedNetworkMode,
-    }
-
-    #[test]
-    fn classifies_current_network_policy_modes() {
-        let cases = [
-            NetworkPlanCase {
-                name: "default block is isolated",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Block,
-                enforcement_mode: NetworkEnforcementMode::Capabilities,
-                allowed_hosts: &[],
-                blocked_hosts: &[],
-                proxy_active: false,
-                expected: ResolvedNetworkMode::Isolated,
-            },
-            NetworkPlanCase {
-                name: "default allow is shared",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Allow,
-                enforcement_mode: NetworkEnforcementMode::Capabilities,
-                allowed_hosts: &[],
-                blocked_hosts: &[],
-                proxy_active: false,
-                expected: ResolvedNetworkMode::Shared,
-            },
-            NetworkPlanCase {
-                name: "firewall allow rules are enforced in-namespace at 0.8",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Block,
-                enforcement_mode: NetworkEnforcementMode::Firewall,
-                allowed_hosts: &["203.0.113.7"],
-                blocked_hosts: &[],
-                proxy_active: false,
-                expected: ResolvedNetworkMode::FirewallEnforced,
-            },
-            NetworkPlanCase {
-                name: "firewall allow rules are enforced for host rules",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Block,
-                enforcement_mode: NetworkEnforcementMode::Firewall,
-                allowed_hosts: &["example.com"],
-                blocked_hosts: &[],
-                proxy_active: false,
-                expected: ResolvedNetworkMode::FirewallEnforced,
-            },
-            NetworkPlanCase {
-                name: "combined enforcement block rules are enforced at 0.8",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Allow,
-                enforcement_mode: NetworkEnforcementMode::Both,
-                allowed_hosts: &[],
-                blocked_hosts: &["198.51.100.9"],
-                proxy_active: false,
-                expected: ResolvedNetworkMode::FirewallEnforced,
-            },
-            NetworkPlanCase {
-                name: "combined enforcement block rules are enforced for host rules",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Allow,
-                enforcement_mode: NetworkEnforcementMode::Both,
-                allowed_hosts: &[],
-                blocked_hosts: &["example.com"],
-                proxy_active: false,
-                expected: ResolvedNetworkMode::FirewallEnforced,
-            },
-            NetworkPlanCase {
-                name: "capabilities mode with host rules stays shared",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Block,
-                enforcement_mode: NetworkEnforcementMode::Capabilities,
-                allowed_hosts: &["example.com"],
-                blocked_hosts: &[],
-                proxy_active: false,
-                expected: ResolvedNetworkMode::Shared,
-            },
-            NetworkPlanCase {
-                name: "proxy takes precedence over isolation",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Block,
-                enforcement_mode: NetworkEnforcementMode::Capabilities,
-                allowed_hosts: &[],
-                blocked_hosts: &[],
-                proxy_active: true,
-                expected: ResolvedNetworkMode::ProxyOnly,
-            },
-            NetworkPlanCase {
-                name: "proxy takes precedence over firewall filtering",
-                compatibility: NetworkEnforcementCompatibility::Strict,
-                default_policy: NetworkPolicy::Allow,
-                enforcement_mode: NetworkEnforcementMode::Firewall,
-                allowed_hosts: &[],
-                blocked_hosts: &["example.com"],
-                proxy_active: true,
-                expected: ResolvedNetworkMode::ProxyOnly,
-            },
-        ];
-
-        for case in cases {
-            let mut request = ExecutionRequest {
-                network_enforcement_compatibility: case.compatibility,
-                ..Default::default()
-            };
-            request.policy.default_network_policy = case.default_policy;
-            request.policy.network_enforcement_mode = case.enforcement_mode;
-            request.policy.allowed_hosts = case
-                .allowed_hosts
-                .iter()
-                .map(|host| (*host).into())
-                .collect();
-            request.policy.blocked_hosts = case
-                .blocked_hosts
-                .iter()
-                .map(|host| (*host).into())
-                .collect();
-
-            let actual = ResolvedNetworkMode::from_request(&request, case.proxy_active);
-            assert_eq!(actual, case.expected, "{}", case.name);
-        }
-    }
-
-    #[test]
-    fn resolved_network_mode_capabilities_match_current_behavior() {
-        assert!(ResolvedNetworkMode::Isolated.uses_private_netns());
-        assert!(ResolvedNetworkMode::ProxyOnly.uses_private_netns());
-        assert!(ResolvedNetworkMode::ProxyOnly.uses_external_userns());
-        assert!(!ResolvedNetworkMode::Isolated.uses_external_userns());
-        assert!(!ResolvedNetworkMode::LegacyProxy.uses_private_netns());
-        assert!(ResolvedNetworkMode::FirewallFiltered.requires_host_firewall_manager());
-        assert!(!ResolvedNetworkMode::Shared.requires_host_firewall_manager());
-        // ProxyOnly enforces via in-netns rules, not the host manager.
-        assert!(!ResolvedNetworkMode::ProxyOnly.requires_host_firewall_manager());
-        // FirewallEnforced is the same shape as ProxyOnly minus the proxy: its
-        // rules are programmed from inside the sandbox's own namespace, which
-        // is the whole reason it filters where FirewallFiltered does not.
-        assert!(ResolvedNetworkMode::FirewallEnforced.uses_private_netns());
-        assert!(ResolvedNetworkMode::FirewallEnforced.uses_external_userns());
-        assert!(!ResolvedNetworkMode::FirewallEnforced.requires_host_firewall_manager());
-    }
-
-    #[test]
-    fn network_block_adds_unshare_net() {
-        let mut r = base_request();
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        let args = build_args(&r, None);
-        assert!(args.contains(&"--unshare-net".to_string()));
-    }
-
-    #[test]
-    fn network_allow_omits_unshare_net() {
-        let mut r = base_request();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        let args = build_args(&r, None);
-        assert!(!args.contains(&"--unshare-net".to_string()));
-    }
-
-    #[test]
-    fn network_block_with_host_rules_omits_unshare_net() {
-        let mut r = base_request();
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        r.policy.allowed_hosts = vec!["example.com".into()];
-        let args = build_args(&r, None);
-        assert!(
-            !args.contains(&"--unshare-net".to_string()),
-            "should omit --unshare-net when host rules require iptables"
-        );
-    }
-
-    // ------- allowLocalNetwork diagnostic tests -------------------------
-
-    #[test]
-    fn local_network_denied_under_private_netns_is_not_warned() {
-        // Default policy (block, no host lists, no proxy) applies
-        // --unshare-net: nothing outside can reach in, so allowLocalNetwork=false
-        // is satisfied at the sandbox boundary and needs no warning.
-        let r = base_request();
-        assert!(!r.policy.allow_local_network);
-        assert!(local_network_diagnostic(&r, None).is_none());
-    }
-
-    #[test]
-    fn local_network_denied_on_shared_netns_warns() {
-        let mut r = base_request();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        let msg = local_network_diagnostic(&r, None).expect("shared netns cannot honor the deny");
-        assert!(msg.contains("allowLocalNetwork=false"));
-    }
-
-    #[test]
-    fn local_network_denied_with_host_rules_warns() {
-        let mut r = base_request();
-        r.policy.blocked_hosts = vec!["evil.example.com".into()];
-        assert!(local_network_diagnostic(&r, None).is_some());
-    }
-
-    #[test]
-    fn local_network_denied_with_0_8_proxy_is_not_warned() {
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
-        assert!(local_network_diagnostic(&r, Some(&addr)).is_none());
-    }
-
-    #[test]
-    fn local_network_allowed_under_private_netns_warns() {
-        let mut r = base_request();
-        r.policy.allow_local_network = true;
-        let msg = local_network_diagnostic(&r, None).expect("--unshare-net isolates the listener");
-        assert!(msg.contains("allowLocalNetwork=true"));
-    }
-
-    #[test]
-    fn local_network_allowed_on_shared_netns_is_honored() {
-        let mut r = base_request();
-        r.policy.allow_local_network = true;
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        assert!(local_network_diagnostic(&r, None).is_none());
-    }
-
-    // ------- allowLocalNetwork rejection (schema 0.8+) ------------------
-
-    #[test]
-    fn local_network_mismatch_is_rejected_at_0_8() {
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        let msg = local_network_rejection(&r).expect("shared netns cannot honor the deny");
-        assert!(msg.contains("allowLocalNetwork=false"));
-        // The text is reused verbatim as an error, so it must carry no severity.
-        assert!(!msg.contains("WARNING"));
-    }
-
-    #[test]
-    fn an_omitted_local_network_is_rejected_like_an_explicit_deny_at_0_8() {
-        // `false` is the schema default *and* a deny, so silence still asks for
-        // inbound denial.
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        assert!(!r.policy.allow_local_network, "default is the deny posture");
-        let msg = local_network_rejection(&r).expect("an omitted deny is still a deny");
-        assert!(msg.contains("allowLocalNetwork=false"));
-        // Actionable only if it names the acknowledgment.
-        assert!(msg.contains("allowLocalNetwork=true"));
-    }
-
-    #[test]
-    fn acknowledged_local_network_exposure_is_accepted_at_0_8() {
-        // The escape hatch from the rejection above.
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        r.policy.allow_local_network = true;
-        assert!(local_network_rejection(&r).is_none());
-    }
-
-    #[test]
-    fn honored_local_network_is_not_rejected_at_0_8() {
-        // block + no host rules + no proxy is a private netns, which satisfies
-        // allowLocalNetwork=false; nothing to reject.
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        assert!(local_network_rejection(&r).is_none());
-    }
-
-    #[test]
-    fn builtin_test_server_counts_as_an_active_proxy_when_rejecting() {
-        // builtinTestServer has no address until the proxy starts, which is
-        // after validation, so the rejection keys off enablement instead.
-        // defaultPolicy='allow' would be a shared namespace on its own, so the
-        // rejection fires only if the proxy is recognized without an address.
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        r.policy.allow_local_network = true;
-        assert!(local_network_rejection(&r).is_none());
-
-        r.policy.network_proxy.builtin_test_server = true;
-        assert!(r.policy.network_proxy.address.is_none());
-        assert!(local_network_rejection(&r).is_some());
-    }
-
-    /// Without this twin a programmatic caller would sail past the parser's
-    /// rejection and have the host policy dropped on the floor.
-    #[test]
-    fn external_proxy_with_host_rules_is_rejected() {
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        r.policy.network_proxy.address = Some(ProxyAddress::new("proxy.example.com".into(), 3128));
-        assert!(external_proxy_host_rules_rejection(&r).is_none());
-
-        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
-        let msg = external_proxy_host_rules_rejection(&r).expect("lists are never forwarded");
-        assert!(msg.contains("external network.proxy"));
-
-        r.policy.allowed_hosts.clear();
-        r.policy.blocked_hosts = vec!["10.0.0.1".into()];
-        assert!(external_proxy_host_rules_rejection(&r).is_some());
-
-        r.policy.blocked_hosts.clear();
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        assert!(external_proxy_host_rules_rejection(&r).is_some());
-    }
-
-    /// The builtin test proxy *is* handed the lists, so it must stay accepted.
-    #[test]
-    fn builtin_test_server_with_host_rules_is_not_rejected() {
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        r.policy.network_proxy.builtin_test_server = true;
-        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
-        assert!(external_proxy_host_rules_rejection(&r).is_none());
-    }
-
-    /// The parser refuses this pairing, and every public entry point reaches
-    /// the runner through the parser -- so this pins the runner's own twin
-    /// rather than a live bypass. Without it, `from_request` returns
-    /// `ProxyOnly` before `enforcementMode` is read, and an in-tree caller
-    /// holding an `ExecutionRequest` has the field dropped without a word.
-    #[test]
-    fn a_proxy_with_firewall_enforcement_is_rejected() {
-        let mut r = base_request();
-        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
-
-        for mode in [
-            NetworkEnforcementMode::Firewall,
-            NetworkEnforcementMode::Both,
-        ] {
-            r.policy.network_enforcement_mode = mode.clone();
-            assert_eq!(
-                proxy_with_firewall_rejection(&r),
-                Some(BWRAP_PROXY_WITH_FIREWALL),
-                "{mode:?} must be refused with the parser's own message"
-            );
-        }
-
-        // `is_enabled()` covers both proxy flavors, so the builtin refuses too.
-        let mut builtin = base_request();
-        builtin.policy.network_proxy.builtin_test_server = true;
-        builtin.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
-        assert!(proxy_with_firewall_rejection(&builtin).is_some());
-
-        // Negative controls: the default mode never invokes iptables, and the
-        // gate must key on the proxy rather than on the mode alone.
-        r.policy.network_enforcement_mode = NetworkEnforcementMode::Capabilities;
-        assert!(proxy_with_firewall_rejection(&r).is_none());
-
-        r.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
-        r.policy.network_proxy.address = None;
-        assert!(proxy_with_firewall_rejection(&r).is_none());
-    }
-
-    /// A directional runtime proxy must not trip the legacy host-list guard.
-    ///
-    /// `default_network_policy` is a legacy-shape field the directional path
-    /// never writes, so it sits at its `Block` default. Reading it as if the
-    /// caller had asked for `defaultPolicy='block'` refused *every* directional
-    /// runtime proxy -- which made `RUNTIME_PROXY` declarable but unusable,
-    /// since the parser requires exactly `egress.default='deny'` with no direct
-    /// rules for that field. The guard must still fire on the legacy shape, and
-    /// still fire on real host lists in either shape, so all three are pinned
-    /// here.
-    #[test]
-    fn a_directional_runtime_proxy_is_not_refused_by_the_legacy_host_list_guard() {
-        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkRule};
-
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
-
-        // Legacy shape, defaulted `Block`: still refused, as before.
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        assert!(
-            external_proxy_host_rules_rejection(&r).is_some(),
-            "the legacy shape must keep its refusal"
-        );
-
-        // Directional shape: the same defaulted `Block` is not a caller
-        // statement, so it must no longer refuse.
-        r.policy.network_egress = Some(NetworkEgressPolicy {
-            default: NetworkAction::Deny,
-            ..Default::default()
-        });
-        assert!(
-            external_proxy_host_rules_rejection(&r).is_none(),
-            "a directional proxy-only posture carries no host lists to drop"
-        );
-
-        // An ingress-only directional request is directional too: keying the
-        // legacy discriminator on `egress` alone read the defaulted `Block` as
-        // a caller statement and refused it.
-        r.policy.network_egress = None;
-        r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy::default());
-        assert!(
-            external_proxy_host_rules_rejection(&r).is_none(),
-            "an absent egress section is not a legacy `defaultPolicy='block'`"
-        );
-        r.policy.network_ingress = None;
-        r.policy.network_egress = Some(NetworkEgressPolicy {
-            default: NetworkAction::Deny,
-            ..Default::default()
-        });
-
-        // Real host lists are still refused even on the directional shape --
-        // the parser forbids the mix, so this only reaches a programmatic
-        // caller, which is exactly who this twin exists for.
-        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
-        assert!(
-            external_proxy_host_rules_rejection(&r).is_some(),
-            "host lists are never forwarded to an external proxy"
-        );
-        r.policy.allowed_hosts.clear();
-
-        // Directional egress that is *not* the proxy-only posture must fail
-        // closed. `ProxyOnly` builds its chain from `EgressPlan::for_proxy` and
-        // never reads `network_egress`, so accepting these would drop the
-        // requested rules in silence -- the same class of bug the host-list
-        // half of this guard prevents.
-        for unhonorable in [
-            NetworkEgressPolicy {
-                default: NetworkAction::Allow,
-                ..Default::default()
-            },
-            NetworkEgressPolicy {
-                default: NetworkAction::Deny,
-                allow: vec![NetworkRule::default()],
-                ..Default::default()
-            },
-            NetworkEgressPolicy {
-                default: NetworkAction::Deny,
-                deny: vec![NetworkRule::default()],
-                ..Default::default()
-            },
-        ] {
-            r.policy.network_egress = Some(unhonorable.clone());
-            assert_eq!(
-                external_proxy_host_rules_rejection(&r),
-                Some(BWRAP_PROXY_DIRECTIONAL_EGRESS),
-                "a directional rule set combined with a proxy would be dropped in silence"
-            );
-
-            // The builtin proxy takes the same chain from `for_proxy`, so the
-            // exemption it enjoys for host *lists* -- which MXC applies itself
-            // -- must not extend to directional rules, which nothing applies.
-            let mut builtin = r.clone();
-            builtin.policy.network_proxy.address = None;
-            builtin.policy.network_proxy.builtin_test_server = true;
-            assert_eq!(
-                external_proxy_host_rules_rejection(&builtin),
-                Some(BWRAP_PROXY_DIRECTIONAL_EGRESS),
-                "the builtin proxy drops directional rules just as silently"
-            );
-        }
-
-        // The builtin proxy keeps its host-list exemption: that is the whole
-        // point of the flag, and narrowing it would be a behavior change.
-        r.policy.network_egress = Some(NetworkEgressPolicy {
-            default: NetworkAction::Deny,
-            ..Default::default()
-        });
-        r.policy.network_proxy.address = None;
-        r.policy.network_proxy.builtin_test_server = true;
-        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
-        assert!(
-            external_proxy_host_rules_rejection(&r).is_none(),
-            "MXC enforces host lists itself for the builtin proxy"
-        );
-    }
-
     /// A directional egress policy must land on the one mode whose chains the
     /// sandbox actually traverses.
     ///
-    /// This is the invariant that was broken: `ResolvedNetworkMode` classified
-    /// from the legacy fields alone, which the directional parse path leaves at
-    /// their defaults, so a rule-bearing policy resolved to `Isolated` and the
-    /// runner — which builds the egress chain only under `FirewallEnforced`
-    /// (bwrap_runner.rs) — never programmed the rules at all. Unit tests on
-    /// `EgressPlan` cannot see this: they call the plan directly and so skip
-    /// the gate that decides whether it is ever called.
     #[test]
     fn a_directional_rule_selects_the_namespace_whose_chain_is_programmed() {
-        let request = directional_egress_request(
-            NetworkEnforcementCompatibility::Strict,
-            NetworkAction::Deny,
-            true,
-        );
+        let request = directional_egress_request(NetworkAction::Deny, true);
         assert_eq!(
             ResolvedNetworkMode::from_request(&request, false),
             ResolvedNetworkMode::FirewallEnforced
@@ -1509,43 +670,27 @@ mod tests {
     /// because the host namespace could not deny inbound at all.
     #[test]
     fn a_ruleless_directional_policy_still_honors_the_inbound_posture() {
-        let denied = directional_egress_request(
-            NetworkEnforcementCompatibility::Strict,
-            NetworkAction::Deny,
-            false,
-        );
+        let denied = directional_egress_request(NetworkAction::Deny, false);
         assert_eq!(
             ResolvedNetworkMode::from_request(&denied, false),
             ResolvedNetworkMode::Isolated
         );
 
-        let allowed = directional_egress_request(
-            NetworkEnforcementCompatibility::Strict,
-            NetworkAction::Allow,
-            false,
-        );
+        let allowed = directional_egress_request(NetworkAction::Allow, false);
         let mode = ResolvedNetworkMode::from_request(&allowed, false);
         assert_eq!(mode, ResolvedNetworkMode::FirewallEnforced);
-        assert!(mode.uses_private_netns());
+        assert!(build_args(&allowed, None).contains(&"--unshare-net".to_string()));
     }
 
-    /// No directional posture may share the host network namespace under the
-    /// 0.8 contract: there is no inbound primitive there, and a defaulted
-    /// `ingress.default='deny'` is indistinguishable from a written one, so
-    /// `Shared` would silently drop the inbound half of the policy.
+    /// Neither default nor rules may share the host namespace.
     #[test]
     fn no_directional_posture_shares_the_host_namespace() {
         for default in [NetworkAction::Allow, NetworkAction::Deny] {
             for with_rule in [false, true] {
-                let request = directional_egress_request(
-                    NetworkEnforcementCompatibility::Strict,
-                    default,
-                    with_rule,
-                );
-                let mode = ResolvedNetworkMode::from_request(&request, false);
+                let request = directional_egress_request(default, with_rule);
                 assert!(
-                    mode.uses_private_netns(),
-                    "default={default:?} with_rule={with_rule} resolved to {mode:?}"
+                    build_args(&request, None).contains(&"--unshare-net".to_string()),
+                    "default={default:?} with_rule={with_rule} omitted --unshare-net"
                 );
             }
         }
@@ -1556,86 +701,31 @@ mod tests {
     /// mode derives its chain from the resolved proxy endpoint.
     #[test]
     fn a_directional_section_does_not_divert_a_proxy_run() {
-        let mut request = directional_egress_request(
-            NetworkEnforcementCompatibility::Strict,
-            NetworkAction::Deny,
-            true,
-        );
-        request.policy.network_proxy.builtin_test_server = true;
+        let mut request = directional_egress_request(NetworkAction::Deny, false);
+        request.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
         assert_eq!(
             ResolvedNetworkMode::from_request(&request, true),
             ResolvedNetworkMode::ProxyOnly
         );
     }
 
-    /// An ingress-only directional request must not fall to the legacy arm.
-    ///
-    /// It did: keying on `network_egress` alone sent it there, where a leftover
-    /// `defaultPolicy='allow'` resolved to `Shared` -- the host namespace, with
-    /// no chain at all -- silently discarding both the ingress denial and the
-    /// host-loopback drop.
+    /// An ingress-only request retains isolation with implicit egress deny.
     #[test]
     fn an_ingress_only_directional_request_still_gets_a_private_namespace() {
-        use crate::mxc_common::models::{NetworkIngressPolicy, NetworkPolicy};
+        use crate::mxc_common::models::NetworkIngressPolicy;
 
         let mut request = base_request();
-        request.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         request.policy.network_ingress = Some(NetworkIngressPolicy::default());
-        request.policy.default_network_policy = NetworkPolicy::Allow;
-
         let mode = ResolvedNetworkMode::from_request(&request, false);
-        assert_ne!(
-            mode,
-            ResolvedNetworkMode::Shared,
-            "the host namespace programs no chain, so the deny posture would be lost"
-        );
-        assert!(mode.uses_private_netns(), "{mode:?}");
+        assert_eq!(mode, ResolvedNetworkMode::Isolated);
+        assert!(build_args(&request, None).contains(&"--unshare-net".to_string()));
     }
 
-    /// The predicate is now shared by three call sites, so pin it directly:
-    /// a per-site test would let one drift without failing the others.
-    #[test]
-    fn either_directional_section_alone_marks_the_policy_directional() {
-        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
-
-        let cases = [
-            (None, None, false),
-            (Some(NetworkEgressPolicy::default()), None, true),
-            (None, Some(NetworkIngressPolicy::default()), true),
-            (
-                Some(NetworkEgressPolicy::default()),
-                Some(NetworkIngressPolicy::default()),
-                true,
-            ),
-        ];
-
-        for (egress, ingress, expected) in cases {
-            let policy = ContainerPolicy {
-                network_egress: egress.clone(),
-                network_ingress: ingress.clone(),
-                ..Default::default()
-            };
-            assert_eq!(
-                is_directional(&policy),
-                expected,
-                "egress={:?} ingress={:?}",
-                egress.is_some(),
-                ingress.is_some()
-            );
-        }
-    }
-
-    /// Build a directional request: no legacy network field is touched, which
-    /// is exactly what the parser produces on that path.
-    fn directional_egress_request(
-        compatibility: NetworkEnforcementCompatibility,
-        default: NetworkAction,
-        with_rule: bool,
-    ) -> ExecutionRequest {
+    /// Build a supported egress request.
+    fn directional_egress_request(default: NetworkAction, with_rule: bool) -> ExecutionRequest {
         use crate::mxc_common::models::{NetworkEgressPolicy, NetworkRule};
 
         let mut request = base_request();
-        request.network_enforcement_compatibility = compatibility;
         request.policy.network_egress = Some(NetworkEgressPolicy {
             default,
             allow: if with_rule {
@@ -1650,14 +740,12 @@ mod tests {
 
     /// Build a directional request carrying both sections.
     fn directional_request(
-        compatibility: NetworkEnforcementCompatibility,
         ingress_default: NetworkAction,
         host_loopback: NetworkAction,
     ) -> ExecutionRequest {
         use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
 
         let mut request = base_request();
-        request.network_enforcement_compatibility = compatibility;
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
         request.policy.network_ingress = Some(NetworkIngressPolicy {
             default: ingress_default,
@@ -1670,11 +758,7 @@ mod tests {
     /// list to forward one, so an inbound-accepting posture cannot be honored.
     #[test]
     fn an_inbound_accepting_directional_posture_is_refused() {
-        let request = directional_request(
-            NetworkEnforcementCompatibility::Strict,
-            NetworkAction::Allow,
-            NetworkAction::Deny,
-        );
+        let request = directional_request(NetworkAction::Allow, NetworkAction::Deny);
         assert_eq!(
             directional_network_rejection(&request),
             Some(BWRAP_INGRESS_DEFAULT_ALLOW)
@@ -1684,11 +768,7 @@ mod tests {
     /// The sandbox's loopback is its own namespace's, not the host's.
     #[test]
     fn a_host_loopback_accepting_posture_is_refused() {
-        let request = directional_request(
-            NetworkEnforcementCompatibility::Strict,
-            NetworkAction::Deny,
-            NetworkAction::Allow,
-        );
+        let request = directional_request(NetworkAction::Deny, NetworkAction::Allow);
         assert_eq!(
             directional_network_rejection(&request),
             Some(BWRAP_HOST_LOOPBACK_ALLOW)
@@ -1699,70 +779,23 @@ mod tests {
     /// just refusing every directional config.
     #[test]
     fn a_fully_denied_directional_posture_is_accepted() {
-        let request = directional_request(
-            NetworkEnforcementCompatibility::Strict,
-            NetworkAction::Deny,
-            NetworkAction::Deny,
+        let request = directional_request(NetworkAction::Deny, NetworkAction::Deny);
+        assert_eq!(directional_network_rejection(&request), None);
+    }
+
+    #[test]
+    fn only_external_runtime_proxies_are_accepted() {
+        let mut request = directional_egress_request(NetworkAction::Deny, false);
+        request.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
+        assert!(proxy_with_egress_rejection(&request).is_none());
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        assert_eq!(
+            proxy_with_egress_rejection(&request),
+            Some(BWRAP_PROXY_DIRECTIONAL_EGRESS)
         );
-        assert_eq!(directional_network_rejection(&request), None);
-    }
-
-    /// A programmatic request with no directional sections does not reach
-    /// the directional gate. Exact v0.9 JSON cannot supply these legacy fields.
-    #[test]
-    fn a_programmatic_request_without_directional_fields_bypasses_the_directional_gate() {
-        let mut request = base_request();
-        request.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        request.policy.default_network_policy = NetworkPolicy::Allow;
-        request.policy.allowed_hosts = vec!["10.0.0.1".into()];
-        assert_eq!(directional_network_rejection(&request), None);
-    }
-
-    /// Pin the strict mode resolver's namespace choice against explicit
-    /// expectations. These are programmatic policies, not v0.9 JSON: the
-    /// runner separately rejects combinations it cannot enforce.
-    #[test]
-    fn strict_programmatic_network_modes_use_the_expected_namespace_across_the_matrix() {
-        for proxy in [false, true] {
-            for mode in [
-                NetworkEnforcementMode::Capabilities,
-                NetworkEnforcementMode::Firewall,
-                NetworkEnforcementMode::Both,
-            ] {
-                for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
-                    for hosts in [false, true] {
-                        let mut r = base_request();
-                        r.network_enforcement_compatibility =
-                            NetworkEnforcementCompatibility::Strict;
-                        r.policy.network_proxy.builtin_test_server = proxy;
-                        r.policy.network_enforcement_mode = mode.clone();
-                        r.policy.default_network_policy = policy.clone();
-                        r.policy.allowed_hosts = if hosts {
-                            vec!["10.0.0.1".into()]
-                        } else {
-                            vec![]
-                        };
-
-                        // A proxy or enforceable firewall rule needs a private
-                        // namespace; ruleless block is isolated without slirp.
-                        let uses_firewall = matches!(
-                            mode,
-                            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-                        );
-                        let expected = proxy
-                            || (uses_firewall && hosts)
-                            || (policy == NetworkPolicy::Block && !hosts);
-
-                        let resolved = ResolvedNetworkMode::from_request(&r, proxy);
-                        assert_eq!(
-                            resolved.uses_private_netns(),
-                            expected,
-                            "proxy={proxy} mode={mode:?} policy={policy:?} hosts={hosts}"
-                        );
-                    }
-                }
-            }
-        }
     }
 
     #[test]
@@ -2028,9 +1061,7 @@ mod tests {
 
     #[test]
     fn proxy_active_uses_private_network_and_external_user_namespace() {
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        r.policy.default_network_policy = NetworkPolicy::Block;
+        let r = base_request();
         let addr = ProxyAddress::new("127.0.0.1".into(), 12345);
         let args = build_args(&r, Some(&addr));
         assert!(
@@ -2074,7 +1105,7 @@ mod tests {
     fn proxy_active_does_not_exempt_loopback_via_no_proxy() {
         // Setting NO_PROXY=localhost,127.0.0.1 would let cooperating HTTP
         // clients bypass the proxy for host-loopback destinations.
-        // Any bypass would silently defeat allowedHosts/blockedHosts.
+        // Any bypass would silently defeat externally managed proxy policy.
         let r = base_request();
         let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
         let args = build_args(&r, Some(&addr));

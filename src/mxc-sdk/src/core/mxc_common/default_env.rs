@@ -94,7 +94,6 @@ pub fn env_pairs(entries: &[String]) -> Vec<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::DefaultEnvCompatibility;
 
     fn defaults() -> Vec<(String, String)> {
         vec![
@@ -103,11 +102,8 @@ mod tests {
         ]
     }
 
-    fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
-        ExecutionRequest {
-            default_env_compatibility: compatibility,
-            ..Default::default()
-        }
+    fn request() -> ExecutionRequest {
+        ExecutionRequest::default()
     }
 
     fn resolved(request: &ExecutionRequest) -> Vec<String> {
@@ -116,27 +112,27 @@ mod tests {
 
     #[test]
     fn an_omitted_env_takes_the_default_block() {
-        let r = request(DefaultEnvCompatibility::DefaultBlock);
+        let r = request();
         assert_eq!(resolved(&r), ["PATH=/default/bin", "TERM=xterm-256color"]);
     }
 
     #[test]
     fn an_explicitly_empty_env_stays_empty() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(Vec::new());
         assert!(resolved(&r).is_empty());
     }
 
     #[test]
     fn a_supplied_env_is_used_verbatim() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec!["FOO=bar".to_string()]);
         assert_eq!(resolved(&r), ["FOO=bar"]);
     }
 
     #[test]
     fn an_overlay_replaces_in_place_and_appends_in_order() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec![
             "TERM=vt100".to_string(),
             "FOO=bar".to_string(),
@@ -152,7 +148,7 @@ mod tests {
 
     #[test]
     fn a_repeated_caller_key_collapses_to_the_last_value() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec![
             "FOO=first".to_string(),
             "FOO=second".to_string(),
@@ -169,7 +165,7 @@ mod tests {
 
     #[test]
     fn an_empty_caller_value_still_replaces_the_default() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec!["PATH=".to_string()]);
         r.inherit_default_env = true;
 
@@ -178,7 +174,7 @@ mod tests {
 
     #[test]
     fn a_caller_entry_without_a_value_is_dropped_by_the_overlay() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
         r.env = Some(vec!["FEATURE_FLAG".to_string(), "FOO=bar".to_string()]);
         r.inherit_default_env = true;
 
@@ -189,7 +185,7 @@ mod tests {
 
     #[test]
     fn each_state_of_process_env_resolves_to_its_own_outcome() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+        let mut r = request();
 
         r.env = None;
         assert_eq!(EnvResolution::of(&r), EnvResolution::Default);

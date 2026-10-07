@@ -22,7 +22,7 @@
 //! | Script delivery     | `AppSandbox::run`, or `submit` + `step` under a deadline  |
 //! | Cold start          | Snapshot restore (~50–60 ms)                               |
 //! | Filesystem          | Host dir mounts via `Mount`                               |
-//! | Networking          | Host-proxied sockets via `NetworkPolicy`                  |
+//! | Networking          | Disabled for supported requests                           |
 //! | Script I/O          | Host's stdout/stderr (HostPrint)                          |
 //! | stdlib coverage     | Full CPython + preloaded ML stack (numpy, pandas, etc.)   |
 //!
@@ -99,16 +99,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{
-    ExecutionRequest, HyperlightRuntime, NetworkPolicy, ScriptResponse,
-};
+use crate::mxc_common::models::{ExecutionRequest, HyperlightRuntime, ScriptResponse};
 use crate::mxc_common::script_runner::ScriptRunner;
-use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
+use crate::mxc_common::validator::{
+    validate_common, validate_network_policy_support, NetworkPolicySupport,
+};
 
 use hyperlight_unikraft::hyperlight_host::HyperlightError;
-use hyperlight_unikraft::{
-    AllowList, AppSandbox, BlockList, Mount, SandboxBuilder, Snapshot, Yield,
-};
+use hyperlight_unikraft::{AppSandbox, Mount, SandboxBuilder, Snapshot, Yield};
 
 // -- Availability probe -------------------------------------------------------
 
@@ -259,34 +257,6 @@ pub struct HyperlightScriptRunner {
     rewind: Option<Arc<Snapshot>>,
     active_home: Option<PathBuf>,
     active_mounts: Vec<Mount>,
-    active_policy: Option<hyperlight_unikraft::NetworkPolicy>,
-    active_network: NetworkKey,
-}
-
-/// The request's network policy as the runner keys a booted guest on it.
-/// Both host lists are kept, so an allow list and a block list of the
-/// same hosts key differently.
-#[derive(Clone, Debug, PartialEq, Default)]
-struct NetworkKey {
-    allowed: Vec<String>,
-    blocked: Vec<String>,
-    default: NetworkPolicy,
-}
-
-impl NetworkKey {
-    fn from_request(request: &ExecutionRequest) -> Self {
-        let sorted = |hosts: &[String]| {
-            let mut hosts = hosts.to_vec();
-            hosts.sort();
-            hosts.dedup();
-            hosts
-        };
-        Self {
-            allowed: sorted(&request.policy.allowed_hosts),
-            blocked: sorted(&request.policy.blocked_hosts),
-            default: request.policy.default_network_policy.clone(),
-        }
-    }
 }
 
 /// A booted guest, parked at a boundary between calls.
@@ -405,8 +375,6 @@ impl HyperlightScriptRunner {
             rewind: None,
             active_home: None,
             active_mounts: Vec::new(),
-            active_policy: None,
-            active_network: NetworkKey::default(),
         }
     }
 
@@ -473,8 +441,7 @@ impl HyperlightScriptRunner {
         os_data_home().join(DEFAULT_HOME_LEAF)
     }
 
-    /// Reject only policies that the hyperlight backend genuinely cannot honor.
-    /// Filesystem mounts and network policies ARE supported.
+    /// Reject policies the guest cannot enforce before any sandbox is booted.
     fn validate_policies(request: &ExecutionRequest) -> Result<(), RunnerError> {
         if request.policy.network_proxy.is_enabled() {
             return Err(RunnerError::Preflight(ERR_PROXY_POLICY.to_string()));
@@ -482,15 +449,6 @@ impl HyperlightScriptRunner {
         if !request.working_directory.is_empty() {
             return Err(RunnerError::Preflight(ERR_WORKDIR.to_string()));
         }
-        if request.policy.default_network_policy == NetworkPolicy::Block
-            && !request.policy.allowed_hosts.is_empty()
-            && !request.policy.blocked_hosts.is_empty()
-        {
-            return Err(RunnerError::Preflight(
-                "allowedHosts and blockedHosts are mutually exclusive".to_string(),
-            ));
-        }
-
         // Denied paths: block early if any appears in the allow lists.
         for denied in &request.policy.denied_paths {
             for allowed in request
@@ -522,35 +480,6 @@ impl HyperlightScriptRunner {
         }
 
         Ok(())
-    }
-
-    /// Translate MXC's network policy fields into a guest `NetworkPolicy`.
-    ///
-    /// - `allowed_hosts` non-empty → `AllowList` (only listed hosts reachable)
-    /// - `blocked_hosts` non-empty → `BlockList` (listed hosts denied, rest allowed)
-    /// - `default_network_policy == Block`, no host lists → `None` (networking disabled)
-    /// - `default_network_policy == Allow`, no host lists → `AllowAll`
-    fn network_policy_from_key(
-        key: &NetworkKey,
-    ) -> Result<Option<hyperlight_unikraft::NetworkPolicy>, RunnerError> {
-        if !key.allowed.is_empty() {
-            let allow_list = AllowList::from_hosts(&key.allowed)
-                .map_err(|e| RunnerError::Preflight(format!("resolve allowed_hosts: {e}")))?;
-            return Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowList(
-                allow_list,
-            )));
-        }
-        if !key.blocked.is_empty() {
-            let block_list = BlockList::from_hosts(&key.blocked)
-                .map_err(|e| RunnerError::Preflight(format!("resolve blocked_hosts: {e}")))?;
-            return Ok(Some(hyperlight_unikraft::NetworkPolicy::BlockList(
-                block_list,
-            )));
-        }
-        if key.default == NetworkPolicy::Block {
-            return Ok(None);
-        }
-        Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowAll))
     }
 
     /// Translate `ContainerPolicy.{readwrite,readonly}Paths` into
@@ -636,28 +565,22 @@ impl HyperlightScriptRunner {
     ///
     /// The guest restores the persisted snapshot (warming and persisting
     /// one first if only the rootfs is present, a cold boot once per
-    /// image) with the request's mounts and network policy; the kernel
-    /// builds its mount table from them on resume. Later calls on the
+    /// image) with the request's mounts; the kernel builds its mount table
+    /// from them on resume. Later calls on the
     /// same runner rewind rather than boot.
     ///
-    /// The mount set and network policy are fixed at boot; a change in
-    /// either boots another guest from the same image.
+    /// The mount set is fixed at boot; changing it boots another guest from
+    /// the same image.
     fn ensure_runtime(
         &mut self,
         home: &Path,
         runtime: HyperlightRuntime,
         mounts: Vec<Mount>,
-        network: NetworkKey,
         logger: &mut Logger,
     ) -> Result<(&mut Guest, Arc<Snapshot>), RunnerError> {
-        let same_config = self.active_home.as_deref() == Some(home)
-            && mounts_equal(&self.active_mounts, &mounts)
-            && self.active_network == network;
+        let same_config =
+            self.active_home.as_deref() == Some(home) && mounts_equal(&self.active_mounts, &mounts);
         if !same_config {
-            // Host lists resolve names here, once per configuration, so a
-            // guest that is already up is not held to the resolver on
-            // every call.
-            let policy = Self::network_policy_from_key(&network)?;
             // Nothing booted so far applies to the new configuration; the
             // image still does, unless the home changed.
             self.guest = None;
@@ -666,8 +589,6 @@ impl HyperlightScriptRunner {
             }
             self.active_home = Some(home.to_path_buf());
             self.active_mounts = mounts;
-            self.active_policy = policy;
-            self.active_network = network;
         }
         let rewind = match self.rewind.clone() {
             Some(rewind) => rewind,
@@ -682,7 +603,7 @@ impl HyperlightScriptRunner {
             Some(guest) => guest,
             None => {
                 configure_surrogates();
-                Self::boot_from_snapshot(rewind.clone(), &self.active_mounts, &self.active_policy)?
+                Self::boot_from_snapshot(rewind.clone(), &self.active_mounts)?
             }
         };
         Ok((self.guest.insert(guest), rewind))
@@ -691,13 +612,9 @@ impl HyperlightScriptRunner {
     /// Restore the warm image into a new sandbox with `mounts` and
     /// `policy`: the kernel builds its mount table from them on resume,
     /// and the host serves them.
-    fn boot_from_snapshot(
-        rewind: Arc<Snapshot>,
-        mounts: &[Mount],
-        policy: &Option<hyperlight_unikraft::NetworkPolicy>,
-    ) -> Result<Guest, RunnerError> {
+    fn boot_from_snapshot(rewind: Arc<Snapshot>, mounts: &[Mount]) -> Result<Guest, RunnerError> {
         let builder = SandboxBuilder::from_snapshot(rewind).mounts(mounts.iter().cloned());
-        let sandbox = with_network(builder, policy)
+        let sandbox = builder
             .boot()
             .map_err(|e| RunnerError::Runtime(format!("restore hyperlight snapshot: {e}")))?;
         Ok(Guest {
@@ -750,16 +667,12 @@ impl HyperlightScriptRunner {
         }
         Ok(timing)
     }
-}
 
-impl ScriptRunner for HyperlightScriptRunner {
-    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        Self::validate_policies(request).map_err(|e| e.to_response())?;
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
-        Ok(())
-    }
-
-    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+    fn execute_validated(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> ScriptResponse {
         let runtime = request
             .hyperlight
             .as_ref()
@@ -779,13 +692,7 @@ impl ScriptRunner for HyperlightScriptRunner {
                 return e.to_response();
             }
         };
-        let (guest, rewind) = match self.ensure_runtime(
-            &home,
-            runtime,
-            mounts,
-            NetworkKey::from_request(request),
-            logger,
-        ) {
+        let (guest, rewind) = match self.ensure_runtime(&home, runtime, mounts, logger) {
             Ok(pair) => pair,
             Err(e) => {
                 logger.log_line(&e.to_string());
@@ -827,6 +734,37 @@ impl ScriptRunner for HyperlightScriptRunner {
                 err.to_response()
             }
         }
+    }
+}
+
+impl ScriptRunner for HyperlightScriptRunner {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        Self::validate_policies(request).map_err(|e| e.to_response())?;
+        validate_network_policy_support(request, NetworkPolicySupport::default())?;
+        Ok(())
+    }
+
+    fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        if let Err(response) = validate_common(request) {
+            return response;
+        }
+        if let Err(response) = self.validate_runner(request) {
+            return response;
+        }
+        if request.dry_run {
+            return ScriptResponse {
+                exit_code: 0,
+                ..Default::default()
+            };
+        }
+        self.execute_validated(request, logger)
+    }
+
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        if let Err(response) = self.validate_runner(request) {
+            return response;
+        }
+        self.execute_validated(request, logger)
     }
 }
 
@@ -1062,16 +1000,6 @@ fn load_persisted_snapshot(
 fn rootfs_builder(home: &Path, runtime: HyperlightRuntime) -> SandboxBuilder {
     SandboxBuilder::from_initrd(home.join(INITRD_FILE))
         .scratch_mb(runtime_image(runtime).scratch_mb)
-}
-
-fn with_network(
-    builder: SandboxBuilder,
-    policy: &Option<hyperlight_unikraft::NetworkPolicy>,
-) -> SandboxBuilder {
-    match policy {
-        Some(policy) => builder.network(policy.clone()),
-        None => builder,
-    }
 }
 
 /// Pull the rootfs CPIO out of the published image into `dst`, straight
@@ -1656,7 +1584,7 @@ fn os_data_home() -> PathBuf {
 mod tests {
     use super::*;
     use crate::mxc_common::logger::Mode;
-    use crate::mxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use crate::mxc_common::models::ContainerPolicy;
 
     fn runner() -> HyperlightScriptRunner {
         HyperlightScriptRunner::new()
@@ -2177,152 +2105,56 @@ mod tests {
     }
 
     #[test]
-    fn network_key_tells_an_allow_list_from_a_block_list() {
-        let allow = ExecutionRequest {
-            policy: ContainerPolicy {
-                allowed_hosts: vec!["a.example".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let block = ExecutionRequest {
-            policy: ContainerPolicy {
-                blocked_hosts: vec!["a.example".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_ne!(
-            NetworkKey::from_request(&allow),
-            NetworkKey::from_request(&block)
-        );
-        assert_eq!(
-            NetworkKey::from_request(&allow),
-            NetworkKey::from_request(&allow)
-        );
+    fn omitted_network_policy_is_valid_and_keeps_guest_disconnected() {
+        runner()
+            .validate_runner(&ExecutionRequest::default())
+            .unwrap();
     }
 
     #[test]
-    fn network_policy_allow_all_when_default_allow() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                ..Default::default()
-            },
+    fn explicit_directional_allow_is_rejected_before_boot() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
             ..Default::default()
-        };
-        let policy =
-            HyperlightScriptRunner::network_policy_from_key(&NetworkKey::from_request(&request))
-                .unwrap();
-        assert!(matches!(
-            policy,
-            Some(hyperlight_unikraft::NetworkPolicy::AllowAll)
-        ));
-    }
-
-    #[test]
-    fn network_policy_allowlist_from_allowed_hosts() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                allowed_hosts: vec!["127.0.0.1".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let policy =
-            HyperlightScriptRunner::network_policy_from_key(&NetworkKey::from_request(&request))
-                .unwrap();
-        assert!(matches!(
-            policy,
-            Some(hyperlight_unikraft::NetworkPolicy::AllowList(_))
-        ));
-    }
-
-    #[test]
-    fn network_policy_none_when_blocked() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let policy =
-            HyperlightScriptRunner::network_policy_from_key(&NetworkKey::from_request(&request))
-                .unwrap();
-        assert!(policy.is_none());
-    }
-
-    #[test]
-    fn network_policy_blocklist_from_blocked_hosts() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                blocked_hosts: vec!["127.0.0.1".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let policy =
-            HyperlightScriptRunner::network_policy_from_key(&NetworkKey::from_request(&request))
-                .unwrap();
-        assert!(matches!(
-            policy,
-            Some(hyperlight_unikraft::NetworkPolicy::BlockList(_))
-        ));
-    }
-
-    #[test]
-    fn policy_rejects_blocklist_without_allowlist_under_block_default() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                blocked_hosts: vec!["127.0.0.1".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
+        });
         let error = runner().validate_runner(&request).unwrap_err();
-        assert_eq!(
-            error.error_message,
-            "blockedHosts requires allowedHosts when network.defaultPolicy='block'"
-        );
+        assert!(error.error_message.contains("network.egress.default"));
     }
 
     #[test]
-    fn policy_rejects_allowlist_under_allow_default() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allowed_hosts: vec!["127.0.0.1".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let error = runner().validate_runner(&request).unwrap_err();
-        assert_eq!(
-            error.error_message,
-            "allowedHosts requires network.defaultPolicy='block'"
-        );
-    }
-
-    #[test]
-    fn policy_rejects_allowed_and_blocked_hosts() {
-        let mut r = runner();
-        let request = ExecutionRequest {
+    fn direct_execute_rejects_network_policy_before_boot() {
+        let mut request = ExecutionRequest {
             script_code: "print('x')".to_string(),
-            policy: ContainerPolicy {
-                allowed_hosts: vec!["a.com".to_string()],
-                blocked_hosts: vec!["b.com".to_string()],
-                ..Default::default()
-            },
             ..Default::default()
         };
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        let mut r = runner();
         let mut logger = Logger::new(Mode::Buffer);
-        let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("mutually exclusive"));
+        let response = r.execute(&request, &mut logger);
+        assert!(response.error_message.contains("network.egress.default"));
+    }
+
+    #[test]
+    fn dry_run_validates_without_booting() {
+        let mut request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            dry_run: true,
+            ..Default::default()
+        };
+        let mut r = runner();
+        let mut logger = Logger::new(Mode::Buffer);
+        assert_eq!(r.run(&request, &mut logger).exit_code, 0);
+
+        request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        let response = r.run(&request, &mut logger);
+        assert!(response.error_message.contains("network.egress.default"));
     }
 
     #[test]

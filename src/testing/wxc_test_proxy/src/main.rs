@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Standalone binary for the builtin test proxy.
+//! Standalone test proxy binary for external integration harnesses.
 //!
 //! **This is a testing-only tool.** It launches a minimal HTTP CONNECT proxy
 //! on an OS-assigned port, writes the port to a ready file, and waits for a
@@ -17,7 +17,7 @@ mod proxy;
 #[derive(Parser)]
 #[command(
     name = "wxc-test-proxy",
-    about = "Builtin test proxy for wxc integration testing (NOT for production use)"
+    about = "Standalone test proxy for integration testing (NOT for production use)"
 )]
 struct Cli {
     /// Path where the proxy writes its port number once ready.

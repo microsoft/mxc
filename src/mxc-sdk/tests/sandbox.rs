@@ -216,13 +216,13 @@ fn seatbelt_defaults_cwd_to_allowed_path_without_getcwd_leak() {
 // AppContainer by host capability; these guards hold for whichever backend the
 // host selects.
 // They run a real sandbox, so they require an elevated, host-prepped Windows
-// host (see docs/host-prep.md) and are therefore `#[ignore]`d — run them with
+// host (see docs/backends/process-container/host-prep.md) and are therefore `#[ignore]`d — run them with
 // `cargo test -p mxc-sdk -- --ignored` on such a host.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
+#[ignore = "requires an elevated, host-prepped Windows host (see docs/backends/process-container/host-prep.md)"]
 fn process_container_captures_stdout() {
     // Regression guard: a valid exit code and captured stdout prove the
     // process handle was not closed out from under the wait.
@@ -241,7 +241,7 @@ fn process_container_captures_stdout() {
 
 #[cfg(target_os = "windows")]
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
+#[ignore = "requires an elevated, host-prepped Windows host (see docs/backends/process-container/host-prep.md)"]
 fn process_container_finite_timeout_fires() {
     // Regression guard: a finite timeout must fire even when the command
     // spawns a descendant that keeps the inherited stdout write-end open. If
@@ -290,7 +290,7 @@ fn run_reports_timeout_seatbelt() {
 
 #[cfg(target_os = "windows")]
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
+#[ignore = "requires an elevated, host-prepped Windows host (see docs/backends/process-container/host-prep.md)"]
 fn run_captures_stdout_process_container() {
     // `run` spawns, waits, and returns captured stdout/stderr in one call.
     let output = mxc_sdk::v1::run(

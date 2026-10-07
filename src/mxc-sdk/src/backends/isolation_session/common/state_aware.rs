@@ -728,7 +728,6 @@ mod tests {
             policy: ContainerPolicy {
                 network_proxy: ProxyConfig {
                     address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-                    builtin_test_server: false,
                 },
                 ..Default::default()
             },

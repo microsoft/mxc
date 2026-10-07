@@ -116,8 +116,10 @@ function Phase-NetworkHostLoopback {
                     -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); neither reached the anchor nor produced a typed rejection"
             }
         } else {
-            Record-Result -Phase 'P8d' -Name 'non-PSEC tier rejects hostLoopback=allow' -Status 'skip' `
-                -Detail "hostLoopback='allow' is not supported on this Windows version; verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); tier=$($Script:ExpectedTier)"
+            $rejected = Test-WasRejected $allow
+            Record-Result -Phase 'P8d' -Name 'non-PSEC tier rejects hostLoopback=allow' `
+                -Pass $rejected `
+                -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); tier=$($Script:ExpectedTier)"
         }
     } finally {
         & $listener.Stop

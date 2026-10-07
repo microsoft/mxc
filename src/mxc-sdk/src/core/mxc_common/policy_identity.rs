@@ -40,14 +40,12 @@
 //! | `telemetry`, internal `test_feature` | No enforcement effect. |
 //! | `network_proxy.original_url` | A proxy URL can embed `user:password@`. The host and port *are* hashed. |
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
-//! | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+//! | `dry_run` | Invocation mode, not policy. |
 //! | `experimental_enabled` | Authorizes selecting an experimental backend; it does not change the selected backend's enforcement. |
-//! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. Normalized network compatibility is hashed separately. |
-//! | `default_env_compatibility` | Decides whether a default environment block is supplied, which is process launch behavior rather than enforcement. |
+//! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. |
 //!
-//! `network_enforcement_compatibility` is hashed because it changes how the
-//! normalized network policy is enforced. WSLC and Windows Sandbox
-//! configuration is hashed at the `wslc` and `windowsSandbox` root keys.
+//! WSLC and Windows Sandbox configuration is hashed at the `wslc` and
+//! `windowsSandbox` root keys.
 //!
 //! `ContainerPolicy::network_proxy` is `#[serde(skip)]`, so the proxy's
 //! credential-bearing URL cannot reach the hash through the blanket policy
@@ -142,6 +140,7 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(WslcProvisionConfig {
             image,
             image_tar_path,
+            port_mappings,
         }))) => {
             let mut config = Map::new();
             if let Some(image) = image {
@@ -149,6 +148,21 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             if let Some(image_tar_path) = image_tar_path {
                 config.insert("imageTarPath".into(), Value::String(image_tar_path.clone()));
+            }
+
+            // A forwarded host port is policy, so it belongs in the identity.
+            if let Some(port_mappings) = port_mappings {
+                let mappings = port_mappings
+                    .iter()
+                    .map(|mapping| {
+                        let mut entry = Map::new();
+                        entry.insert("windowsPort".into(), Value::from(mapping.windows_port));
+                        entry.insert("containerPort".into(), Value::from(mapping.container_port));
+                        entry.insert("protocol".into(), Value::String(mapping.protocol.clone()));
+                        Value::Object(entry)
+                    })
+                    .collect();
+                config.insert("portMappings".into(), Value::Array(mappings));
             }
             Value::Object(config)
         }
@@ -191,10 +205,8 @@ fn hash_canonical_json(canonical: &str) -> String {
 fn policy_projection(request: &ExecutionRequest) -> Value {
     let ExecutionRequest {
         // External contract provenance is diagnostics/telemetry attribution,
-        // not enforcement. The normalized compatibility value below is.
+        // not enforcement.
         source_contract: _excluded_source_contract,
-        network_enforcement_compatibility,
-        default_env_compatibility: _excluded_default_env_compatibility,
         container_id,
         working_directory,
         script_timeout,
@@ -223,15 +235,10 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         inherit_default_env: _excluded_environment_mode,
         // Invocation modes, not policy.
         dry_run: _excluded_dry_run,
-        testing_features_enabled: _excluded_testing_features,
     } = request;
 
     let mut root = Map::new();
 
-    root.insert(
-        "networkEnforcementCompatibility".into(),
-        Value::String(network_enforcement_compatibility.as_str().to_string()),
-    );
     root.insert(
         "containment".into(),
         Value::String(containment.wire_name().to_string()),
@@ -305,10 +312,6 @@ fn proxy_projection(request: &ExecutionRequest) -> Value {
     let proxy = &request.policy.network_proxy;
     let mut out = Map::new();
     out.insert("enabled".into(), Value::Bool(proxy.is_enabled()));
-    out.insert(
-        "builtinTestServer".into(),
-        Value::Bool(proxy.builtin_test_server),
-    );
     match &proxy.address {
         Some(addr) => {
             out.insert("address".into(), Value::String(addr.address.clone()));
@@ -452,8 +455,6 @@ mod tests {
     fn request() -> ExecutionRequest {
         let mut r = ExecutionRequest {
             source_contract: Some(crate::mxc_contract::ContractVersion::V0_9_0Alpha),
-            network_enforcement_compatibility:
-                crate::mxc_common::models::NetworkEnforcementCompatibility::Strict,
             container_id: "test".to_string(),
             script_code: "echo hello".to_string(),
             working_directory: "C:\\work".to_string(),
@@ -531,7 +532,6 @@ mod tests {
                 "containment",
                 "lifecycle",
                 "lxc",
-                "networkEnforcementCompatibility",
                 "policy",
                 "proxy",
                 "scriptTimeout",
@@ -591,7 +591,17 @@ mod tests {
     fn changing_the_network_policy_changes_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();
-        changed.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Allow;
+        changed.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        assert_ne!(baseline, policy_hash(&changed));
+
+        changed.policy.network_egress = None;
+        changed.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
+            default: crate::mxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
         assert_ne!(baseline, policy_hash(&changed));
     }
 
@@ -729,7 +739,6 @@ mod tests {
         let baseline = policy_hash(&request());
         let mut changed = request();
         changed.dry_run = true;
-        changed.testing_features_enabled = true;
         changed.experimental_enabled = true;
         assert_eq!(baseline, policy_hash(&changed));
     }
@@ -988,6 +997,50 @@ mod tests {
                 serde_json::json!({
                     "image": "alpine:latest",
                     "imageTarPath": "C:\\images\\custom.tar",
+                }),
+            ),
+            (
+                "wslc",
+                Some(r#"{"portMappings":[]}"#),
+                serde_json::json!({"portMappings": []}),
+            ),
+            (
+                "wslc",
+                Some(r#"{"portMappings":[{"windowsPort":8080,"containerPort":80}]}"#),
+                serde_json::json!({
+                    "portMappings": [
+                        {"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"},
+                    ],
+                }),
+            ),
+            (
+                "wslc",
+                Some(r#"{"portMappings":[{"windowsPort":8081,"containerPort":80}]}"#),
+                serde_json::json!({
+                    "portMappings": [
+                        {"windowsPort": 8081, "containerPort": 80, "protocol": "tcp"},
+                    ],
+                }),
+            ),
+            (
+                "wslc",
+                Some(r#"{"portMappings":[{"windowsPort":8080,"containerPort":81}]}"#),
+                serde_json::json!({
+                    "portMappings": [
+                        {"windowsPort": 8080, "containerPort": 81, "protocol": "tcp"},
+                    ],
+                }),
+            ),
+            (
+                "wslc",
+                Some(
+                    r#"{"image":"alpine:latest","portMappings":[{"windowsPort":8080,"containerPort":80}]}"#,
+                ),
+                serde_json::json!({
+                    "image": "alpine:latest",
+                    "portMappings": [
+                        {"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"},
+                    ],
                 }),
             ),
         ] {

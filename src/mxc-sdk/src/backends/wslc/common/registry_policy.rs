@@ -247,7 +247,7 @@ mod platform {
                 assert!(
                     !upper.starts_with(blocked),
                     "{POLICY_SUBKEY} is under {blocked}, which no MDM can deploy; see \
-                     docs/wsl/wslc-registry-allowlist-policy.md"
+                     docs/backends/wslc/wslc-registry-allowlist-policy.md"
                 );
             }
         }

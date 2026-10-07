@@ -52,7 +52,7 @@ const XTABLES_LOCK_PATH: &str = "/run/xtables.lock";
 /// A large policy needs more than one transaction per family, so this scales
 /// with the rendered payload count -- but only up to [`RULE_INSTALL_CEILING`].
 /// Scaling without a ceiling is what made the previous per-rule budget
-/// unusable: a long host list could push startup past any sane bound. The
+/// unusable: a large rule set could push startup past any sane bound. The
 /// ceiling keeps a wedged host bounded, and it is generous enough that a
 /// policy reaching it is contending for the lock rather than merely large.
 ///
@@ -184,7 +184,7 @@ ns="/proc/$child_pid/ns/net"
 # the *last* transaction of a family, so a hook is never live over a partially
 # built chain and the rules cannot be observed half-installed. Splitting is
 # forced by the kernel: one restore is one bounded netlink transaction, and a
-# large host list would otherwise exceed it and install nothing. The payloads
+# large directional rule set would otherwise exceed it and install nothing. The payloads
 # are rendered in Rust from parsed addresses, so nothing here echoes caller
 # text.
 #
@@ -1467,13 +1467,8 @@ fn insert_hosts_bind(args: &mut Vec<String>, hosts_path: &str) -> Result<bool, S
 
 /// What pulled this request into a private network namespace.
 ///
-/// The dependency probe is shared by proxy-only egress and firewall
-/// enforcement, but the remedy it should suggest is not: telling a caller who
-/// set `enforcementMode: "firewall"` to "omit network.proxy" names a field they
-/// never set. Carries the caller's own words into every probe message.
-///
-/// The two are mutually exclusive — the parser rejects a proxy combined with a
-/// firewall mode — so a request always maps to exactly one.
+/// The dependency probe is shared by runtime proxy egress and directional
+/// firewall enforcement, with actionable advice for either posture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrivateNetworkUse {
     ProxyOnlyEgress,
@@ -1484,16 +1479,16 @@ impl PrivateNetworkUse {
     /// The config element that made the private namespace necessary.
     fn requirement(self) -> &'static str {
         match self {
-            Self::ProxyOnlyEgress => "network.proxy",
-            Self::FirewallEnforcement => "network.enforcementMode='firewall'",
+            Self::ProxyOnlyEgress => "runtimeConfig.networkProxy",
+            Self::FirewallEnforcement => "network.egress",
         }
     }
 
     /// What the caller can drop to stop needing these dependencies.
     fn remedy(self) -> &'static str {
         match self {
-            Self::ProxyOnlyEgress => "omit network.proxy",
-            Self::FirewallEnforcement => "select a different network.enforcementMode",
+            Self::ProxyOnlyEgress => "omit runtimeConfig.networkProxy",
+            Self::FirewallEnforcement => "use ruleless network.egress.default='deny'",
         }
     }
 
@@ -1509,7 +1504,7 @@ impl PrivateNetworkUse {
 /// Whether this host can enforce proxy-only egress, and why not when it cannot.
 ///
 /// Pre-flight counterpart to the launch-path check in
-/// [`crate::bwrap_runner`]: schema 0.8 proxy policy has no fallback, so a
+/// [`crate::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
 /// caller that cannot ask this ahead of time only learns the answer when the
 /// run fails. Advisory — the runner still probes before it launches.
 ///
@@ -1729,7 +1724,7 @@ enum SupervisorCommandCoverage {
 /// Digest of the reviewed [`SUPERVISOR_SCRIPT`], line-ending independent.
 /// Bumping it acknowledges that the command list below was re-checked.
 #[cfg(test)]
-const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0x5855_540d_dc42_997c;
+const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xaaf9_be3f_4367_b7d8;
 
 /// Every external command [`SUPERVISOR_SCRIPT`] runs, and how the pre-flight
 /// walk accounts for it.
@@ -2066,7 +2061,6 @@ fn terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::NetworkEnforcementCompatibility;
 
     /// The reported concern: a hostname proxy resolves through the host's
     /// resolver during setup, before the script timeout applies, so an
@@ -3002,17 +2996,38 @@ mod tests {
         assert!(rule_install_timeout(2, 0) > RULE_INSTALL_FLOOR);
     }
 
-    /// A plan whose rule count is what the test cares about. Sized through the
-    /// public constructor so the count matches what the supervisor installs.
-    fn plan_with_rule_count(count: usize) -> EgressPlan {
-        let mut request = crate::mxc_common::models::ExecutionRequest {
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::Strict,
-            ..Default::default()
+    fn directional_plan(
+        default: crate::mxc_common::models::NetworkAction,
+        allowed: &[&str],
+        denied: &[&str],
+    ) -> EgressPlan {
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkPeer, NetworkRule};
+        let rule = |cidr: &&str| NetworkRule {
+            to: vec![NetworkPeer {
+                cidr: cidr.parse().expect("test CIDR"),
+                except: vec![],
+            }],
+            ports: vec![],
         };
-        request.policy.allowed_hosts = (0..count)
-            .map(|n| format!("10.0.{}.{}", n / 256, n % 256))
+        let mut request = crate::mxc_common::models::ExecutionRequest::default();
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default,
+            allow: allowed.iter().map(rule).collect(),
+            deny: denied.iter().map(rule).collect(),
+        });
+        EgressPlan::for_request(&request).expect("directional rules must build a plan")
+    }
+
+    /// A plan whose rule count crosses restore transaction boundaries.
+    fn plan_with_rule_count(count: usize) -> EgressPlan {
+        let addresses: Vec<String> = (0..count)
+            .map(|n| format!("10.0.{}.{}/32", n / 256, n % 256))
             .collect();
-        EgressPlan::for_policy(&request).expect("literal addresses must build a plan")
+        directional_plan(
+            crate::mxc_common::models::NetworkAction::Deny,
+            &addresses.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[],
+        )
     }
 
     /// A rejected transaction installs nothing, so the supervisor must fail
@@ -3585,14 +3600,14 @@ mod tests {
                 "a missing '{tool}' must be named, got: {error}"
             );
             assert!(
-                error.contains("network.proxy"),
+                error.contains("runtimeConfig.networkProxy"),
                 "the refusal must name the config that required it, got: {error}"
             );
         }
     }
 
-    /// The wording differs by use case, so firewall mode must not be told to
-    /// drop `network.proxy`.
+    /// The wording differs by use case, so direct egress must not be told to
+    /// drop the runtime proxy.
     #[test]
     fn a_refusal_names_the_use_case_that_required_the_tool() {
         let error = probe_dependencies_with(
@@ -3602,8 +3617,11 @@ mod tests {
         )
         .expect_err("a missing tool must fail the walk");
 
-        assert!(error.contains("enforcementMode"), "got: {error}");
-        assert!(!error.contains("omit network.proxy"), "got: {error}");
+        assert!(error.contains("network.egress"), "got: {error}");
+        assert!(
+            !error.contains("omit runtimeConfig.networkProxy"),
+            "got: {error}"
+        );
     }
 
     /// Present but broken is a different diagnosis from absent, and the walk
@@ -4041,10 +4059,8 @@ mod tests {
         );
     }
 
-    /// Firewall enforcement shares this probe with proxy-only egress, so a
-    /// missing dependency used to advise a caller to "omit network.proxy" --
-    /// a field a firewall-only request never set. The advice must name what
-    /// the caller actually configured.
+    /// Directional enforcement shares this probe with runtime proxy egress;
+    /// the advice must name the policy the caller actually configured.
     #[test]
     fn a_firewall_request_is_never_advised_about_the_proxy() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4058,11 +4074,11 @@ mod tests {
         .expect_err("a legacy backend with an unreachable lock cannot install rules");
 
         assert!(
-            !error.contains("network.proxy"),
+            !error.contains("runtimeConfig.networkProxy"),
             "a firewall-only request must not be told about a field it never set: {error}"
         );
         assert!(
-            error.contains("network.enforcementMode='firewall'"),
+            error.contains("network.egress"),
             "the error must name what the caller configured: {error}"
         );
     }
@@ -4081,7 +4097,7 @@ mod tests {
         .expect_err("a legacy backend with an unreachable lock cannot install rules");
 
         assert!(
-            error.contains("network.proxy") && !error.contains("enforcementMode"),
+            error.contains("runtimeConfig.networkProxy") && !error.contains("network.egress"),
             "a proxy request must keep the proxy wording: {error}"
         );
     }
@@ -4639,7 +4655,7 @@ exec sleep 30
     }
 
     /// Batching is the point: an ordinary policy costs two transactions however
-    /// many host rules it carries.
+    /// many directional rules it carries.
     #[test]
     fn a_policy_plan_installs_a_fixed_number_of_commands() {
         for rule_count in [0, 1, 5, 50] {
@@ -4662,8 +4678,9 @@ exec sleep 30
                     .iter()
                     .filter(|rule| rule.contains(" -d "))
                     .count(),
-                rule_count,
-                "a {rule_count}-rule policy reached iptables with the wrong rule count"
+                rule_count + 1,
+                "a {rule_count}-rule policy plus the host-loopback drop reached iptables \
+                 with the wrong rule count"
             );
         }
     }
@@ -4689,7 +4706,7 @@ exec sleep 30
         let installed: Vec<String> = supervisor
             .chain_rules()
             .into_iter()
-            .filter(|rule| rule.contains(" -d "))
+            .filter(|rule| rule.contains(" -d ") && rule.ends_with(" -j ACCEPT"))
             .collect();
         assert_eq!(
             installed.len(),
@@ -4699,11 +4716,12 @@ exec sleep 30
         );
         // Order is the policy, so the split must preserve it end to end.
         for (index, rule) in installed.iter().enumerate() {
-            let expected = format!(" -d 10.0.{}.{} ", index / 256, index % 256);
-            assert!(
-                rule.contains(&expected),
-                "rule {index} arrived out of order: {rule}"
+            let expected = format!(
+                "iptables -d 10.0.{}.{}/32 -j ACCEPT",
+                index / 256,
+                index % 256
             );
+            assert_eq!(rule, &expected, "rule {index} arrived out of order");
         }
     }
 
@@ -4747,11 +4765,12 @@ exec sleep 30
     /// because in a first-match chain a correct set of rules in the wrong order
     /// is a different policy.
     #[test]
-    fn a_block_policy_accepts_only_its_allowlist_and_closes_both_families() {
-        let mut request = crate::mxc_common::models::ExecutionRequest::default();
-        request.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
-        request.policy.allowed_hosts = vec!["203.0.113.7".into(), "2001:db8::/32".into()];
-        let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
+    fn a_deny_policy_accepts_only_its_allow_rules_and_closes_both_families() {
+        let plan = directional_plan(
+            crate::mxc_common::models::NetworkAction::Deny,
+            &["203.0.113.7/32", "2001:db8::/32"],
+            &[],
+        );
 
         let mut supervisor = spawn_fake_supervisor_with_plan(&plan, &denied_ingress(), None, false);
         supervisor.publish_sandbox_pid();
@@ -4761,7 +4780,8 @@ exec sleep 30
             supervisor.chain_rules(),
             vec![
                 "iptables -o lo -j ACCEPT".to_string(),
-                "iptables -d 203.0.113.7 -j ACCEPT".to_string(),
+                "iptables -d 10.0.2.2/32 -j DROP".to_string(),
+                "iptables -d 203.0.113.7/32 -j ACCEPT".to_string(),
                 "iptables -j DROP".to_string(),
                 "ip6tables -o lo -j ACCEPT".to_string(),
                 "ip6tables -d 2001:db8::/32 -j ACCEPT".to_string(),
@@ -4776,12 +4796,12 @@ exec sleep 30
     /// purely a question of which rule is appended first, so it is asserted
     /// against what reached iptables rather than against the plan alone.
     #[test]
-    fn an_allow_policy_denies_its_blocklist_before_the_open_terminal() {
-        let mut request = crate::mxc_common::models::ExecutionRequest::default();
-        request.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Allow;
-        request.policy.blocked_hosts = vec!["198.51.100.0/24".into()];
-        request.policy.allowed_hosts = vec!["198.51.100.9".into()];
-        let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
+    fn an_allow_policy_denies_its_deny_rules_before_the_open_terminal() {
+        let plan = directional_plan(
+            crate::mxc_common::models::NetworkAction::Allow,
+            &["198.51.100.9/32"],
+            &["198.51.100.0/24"],
+        );
 
         let mut supervisor = spawn_fake_supervisor_with_plan(&plan, &denied_ingress(), None, false);
         supervisor.publish_sandbox_pid();
@@ -4794,7 +4814,7 @@ exec sleep 30
             .expect("the deny must be installed");
         let allow = rules
             .iter()
-            .position(|rule| rule == "iptables -d 198.51.100.9 -j ACCEPT")
+            .position(|rule| rule == "iptables -d 198.51.100.9/32 -j ACCEPT")
             .expect("the allow must be installed");
         let terminal = rules
             .iter()
@@ -4838,10 +4858,11 @@ exec sleep 30
     /// silent v6 exit that no rule in the config mentions.
     #[test]
     fn a_v4_only_policy_still_closes_ipv6() {
-        let mut request = crate::mxc_common::models::ExecutionRequest::default();
-        request.policy.default_network_policy = crate::mxc_common::models::NetworkPolicy::Block;
-        request.policy.allowed_hosts = vec!["203.0.113.7".into()];
-        let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
+        let plan = directional_plan(
+            crate::mxc_common::models::NetworkAction::Deny,
+            &["203.0.113.7/32"],
+            &[],
+        );
 
         let mut supervisor = spawn_fake_supervisor_with_plan(&plan, &denied_ingress(), None, false);
         supervisor.publish_sandbox_pid();

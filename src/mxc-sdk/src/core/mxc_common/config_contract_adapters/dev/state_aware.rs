@@ -39,12 +39,6 @@ fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -
         host_loopback: contract::IsolationSessionNetworkAllow,
     } = ingress;
     wire::Network {
-        allow_local_network: None,
-        default_policy: None,
-        allowed_hosts: None,
-        enforcement_mode: None,
-        blocked_hosts: None,
-        proxy: None,
         egress: Some(wire::NetworkEgress {
             default: Some(wire::NetworkAction::Allow),
             allow: None,
@@ -57,14 +51,38 @@ fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -
     }
 }
 
+fn convert_wslc_port_mapping(
+    value: contract::PortMapping,
+) -> crate::mxc_common::models::PortMapping {
+    let contract::PortMapping {
+        windows_port,
+        container_port,
+        protocol,
+    } = value;
+    crate::mxc_common::models::PortMapping {
+        windows_port: windows_port.get(),
+        container_port: container_port.get(),
+        protocol: match protocol.into_option() {
+            Some(contract::TransportProtocol::Tcp) | None => "tcp".to_string(),
+        },
+    }
+}
+
 fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig {
     let contract::WslcProvision {
         image,
         image_tar_path,
+        port_mappings,
     } = value;
     WslcProvisionConfig {
         image: image.into_option(),
         image_tar_path: image_tar_path.into_option(),
+        port_mappings: port_mappings.into_option().map(|mappings| {
+            mappings
+                .into_iter()
+                .map(convert_wslc_port_mapping)
+                .collect()
+        }),
     }
 }
 
@@ -83,9 +101,6 @@ fn state_aware_common(
         schema: schema.into_option(),
         comment: comment.into_option(),
         source_contract: crate::mxc_contract::ContractVersion::V1_1_0Alpha,
-        default_env_compatibility: crate::mxc_common::models::DefaultEnvCompatibility::DefaultBlock,
-        network_enforcement_compatibility:
-            crate::mxc_common::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
         test_feature: None,
         windows_sandbox: None,

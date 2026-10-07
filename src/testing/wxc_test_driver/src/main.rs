@@ -65,18 +65,6 @@ fn run_configs(config_path: &std::path::Path, debug: bool) -> anyhow::Result<()>
             if config.get("containment").and_then(|c| c.as_str()) == Some("windows_sandbox") {
                 cmd.arg("--experimental");
             }
-
-            // builtinTestServer is testing-only scaffolding gated behind
-            // --allow-testing-features — pass it when the config opts in.
-            let builtin_test_server = config
-                .get("network")
-                .and_then(|n| n.get("proxy"))
-                .and_then(|p| p.get("builtinTestServer"))
-                .and_then(|b| b.as_bool())
-                .unwrap_or(false);
-            if builtin_test_server {
-                cmd.arg("--allow-testing-features");
-            }
         }
 
         let output = cmd.output()?;

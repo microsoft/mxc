@@ -3,7 +3,6 @@
 
 //! Common request intermediate representation assembled by exact contract adapters.
 
-use crate::mxc_common::models::{DefaultEnvCompatibility, NetworkEnforcementCompatibility};
 use crate::mxc_common::wire;
 use crate::mxc_contract::ContractVersion;
 
@@ -12,8 +11,6 @@ pub(crate) struct CommonRequestIR {
     pub(crate) schema: Option<String>,
     pub(crate) comment: Option<serde_json::Value>,
     pub(crate) source_contract: ContractVersion,
-    pub(crate) network_enforcement_compatibility: NetworkEnforcementCompatibility,
-    pub(crate) default_env_compatibility: DefaultEnvCompatibility,
     pub(crate) phase: Option<wire::Phase>,
     pub(crate) sandbox_id: Option<String>,
     pub(crate) container_id: Option<String>,
