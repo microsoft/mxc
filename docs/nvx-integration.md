@@ -186,8 +186,14 @@ For .NET, `Microsoft.Mxc.Sdk` will be the only package that owns
 but will report `microvm` as unavailable when the NVX assets are absent.
 `Microsoft.Mxc.Sdk.Nvx.Runtime` will contain only the RID-specific `nvx`
 directory and will declare an exact-version dependency on
-`Microsoft.Mxc.Sdk`. NuGet will copy both into the application output without
-a native-library collision:
+`Microsoft.Mxc.Sdk`.
+
+NuGet's default RID-native asset handling flattens files beneath
+`runtimes/{rid}/native`, so the runtime package will not place the NVX tree
+there. It will package the assets under `runtimes/{rid}/nvx/**` and include a
+`buildTransitive/Microsoft.Mxc.Sdk.Nvx.Runtime.targets` file. That target will
+recursively copy the selected RID's complete `nvx` tree, preserving
+`%(RecursiveDir)`, into both normal build and publish outputs:
 
 ```text
 <application output>\
@@ -202,7 +208,8 @@ a native-library collision:
 ```
 
 The native MXC layer will resolve the `nvx` directory relative to the loaded
-`mxc_ffi.dll`.
+`mxc_ffi.dll`. The copy target will reject unsupported RID and architecture
+combinations rather than producing a partial runtime.
 
 The MXC SDK, `mxc_ffi.dll`, and NVX runtime package versions must match.
 Before launch, MXC will verify the required files, Windows architecture,
@@ -726,7 +733,7 @@ executor is not an NVX developer-facing surface.
 | Network | Defaults, allow/deny precedence, CIDRs, exclusions, TCP/UDP ranges, and rejection of unsupported rules |
 | Process | Command, CWD, environment, timeout, cancellation, output limits, nonzero exits, and descendant cleanup |
 | PTY | Confirm unsupported in the initial implementation; add terminal tests when implemented |
-| Packaging | Rust crate, npm, and NuGet installation; single ownership of `mxc_ffi.dll` in npm and NuGet; npm runtime-package resolution and native directory registration; inclusion of the NVX implementation DLL, OpenVMM, image tool, kernel, initramfs, source manifest, Alpine package inventory, licences, and notices; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that matching Linux and Alpine source artifacts are published and referenced |
+| Packaging | Rust crate, npm, and NuGet installation; single ownership of `mxc_ffi.dll` in npm and NuGet; npm runtime-package resolution and native directory registration; NuGet `buildTransitive` recursive copy into `nvx/**` for both build and publish outputs; rejection of unsupported RID/package combinations; inclusion of the NVX implementation DLL, OpenVMM, image tool, kernel, initramfs, source manifest, Alpine package inventory, licences, and notices; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that matching Linux and Alpine source artifacts are published and referenced |
 | Signing | Authenticate the runtime manifest, validate the Authenticode chain and Microsoft signer for signed NVX binaries, verify all remaining file checksums, and reject untrusted runtime directories |
 | Host | Real execution on Windows x64 with WHP installed and enabled; ARM remains planned |
 | Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, and generated SDK types |
