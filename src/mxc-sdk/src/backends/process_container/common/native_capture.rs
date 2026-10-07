@@ -8,8 +8,8 @@
 //! The ordering the OS requires is:
 //!
 //! 1. `CreateProcessSecurityEnvironment(spec)` → env handle
-//! 2. `StartLearningModeTrace(env)` → trace handle (**before** the child launches, so no
-//!    early denials are missed)
+//! 2. invoke the selected Learning Mode start export for `env` → trace handle
+//!    (**before** the child launches, so no early denials are missed)
 //! 3. attach `env` as `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`, then call
 //!    `CreateProcessW` (**runner's job**; the session exposes the handle via
 //!    [`CaptureSession::environment`])
@@ -31,7 +31,9 @@ use windows::Win32::Foundation::HANDLE;
 
 #[cfg(test)]
 use crate::learning_mode_windows::LearningModeApi;
-use crate::learning_mode_windows::{start_trace, LearningModeError, LearningModeTraceHandle};
+use crate::learning_mode_windows::{
+    start_trace, LearningModeError, LearningModeTraceHandle, LearningModeTraceSources,
+};
 
 #[cfg(test)]
 use crate::process_container_common::secenv::SecurityEnvironmentApi;
@@ -59,8 +61,9 @@ impl CaptureSession {
     ///
     /// # Errors
     /// - [`LearningModeError::HResultCall`] if `CreateProcessSecurityEnvironment` fails.
-    /// - [`LearningModeError::HResultCall`] if `StartLearningModeTrace` fails — in which
-    ///   case the just-created environment is closed before returning so it is not leaked.
+    /// - [`LearningModeError::HResultCall`] if the selected Learning Mode start export
+    ///   fails — in which case the just-created environment is closed before returning
+    ///   so it is not leaked.
     pub fn begin(sandbox_specification: &[u8], flags: u32) -> Result<Self, LearningModeError> {
         let environment = secenv::create(sandbox_specification, flags)?;
         // SAFETY: `environment` was just created and remains live until this
@@ -116,6 +119,18 @@ impl CaptureSession {
                 panic!("CaptureSession::environment called after the environment was torn down")
             }
         }
+    }
+
+    /// Event sources collected by the native trace.
+    ///
+    /// Callers can use this to distinguish a legacy access-only trace from an
+    /// option-aware trace that also collected network decisions.
+    #[must_use]
+    pub fn trace_sources(&self) -> LearningModeTraceSources {
+        self.trace
+            .as_ref()
+            .expect("a live CaptureSession always owns its trace")
+            .sources()
     }
 
     /// Stop the trace and deliver it to `output_path` (or skip delivery when
@@ -212,6 +227,19 @@ mod tests {
         result
     }
 
+    unsafe extern "system" fn fake_start_with_options(
+        _: HANDLE,
+        _: i32,
+        out: *mut HANDLE,
+    ) -> HRESULT {
+        record("start_options");
+        let result = HRESULT(START_RESULT.load(Ordering::SeqCst));
+        if result.is_ok() {
+            unsafe { *out = dangling_handle() };
+        }
+        result
+    }
+
     unsafe extern "system" fn fake_stop(_: HANDLE, _: *const u16) -> HRESULT {
         record("stop");
         if STOP_FAILURES_REMAINING
@@ -250,6 +278,14 @@ mod tests {
         LearningModeApi::from_raw_parts(fake_start, fake_stop, fake_trace_close)
     }
 
+    fn fake_options_learning_mode_api() -> LearningModeApi {
+        LearningModeApi::from_options_raw_parts(
+            fake_start_with_options,
+            fake_stop,
+            fake_trace_close,
+        )
+    }
+
     fn begin_session() -> Result<CaptureSession, LearningModeError> {
         CaptureSession::begin_with_apis(
             fake_secenv_api(),
@@ -267,8 +303,32 @@ mod tests {
         // The environment must be created first so the trace keys on a live handle.
         assert_eq!(take_events(), vec!["create", "start"]);
         assert_eq!(session.environment(), dangling_handle());
+        assert_eq!(
+            session.trace_sources(),
+            LearningModeTraceSources::AccessOnly
+        );
 
         // Tidy up deterministically so Drop bookkeeping does not leak into siblings.
+        drop(session);
+    }
+
+    #[test]
+    fn begin_exposes_option_aware_trace_sources() {
+        let _guard = reset();
+        let session = CaptureSession::begin_with_apis(
+            fake_secenv_api(),
+            fake_options_learning_mode_api(),
+            b"PSEC-fake-spec",
+            crate::process_container_common::secenv::PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+        )
+        .expect("begin should succeed with option-aware fakes");
+
+        assert_eq!(take_events(), vec!["create", "start_options"]);
+        assert_eq!(
+            session.trace_sources(),
+            LearningModeTraceSources::AccessAndNetwork
+        );
+
         drop(session);
     }
 

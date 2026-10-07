@@ -67,7 +67,7 @@ pub use extractors::DecodedEventParts;
 #[cfg(target_os = "windows")]
 pub use ffi::{
     is_learning_mode_api_available, start_trace, LearningModeApi, LearningModeTraceHandle,
-    LEARNING_MODE_API_SET,
+    LearningModeTraceSources, LEARNING_MODE_API_SET,
 };
 #[cfg(target_os = "windows")]
 pub use process_lifetime::{
