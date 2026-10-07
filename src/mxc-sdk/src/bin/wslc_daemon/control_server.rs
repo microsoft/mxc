@@ -43,7 +43,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use mxc_sdk::wslc_common::container_steps::OutStream;
 use mxc_sdk::wslc_common::daemon_protocol::{
     encode_frame, DaemonRequest, DaemonResponse, DeprovisionConfig, ExecTerminal, StreamFrame,
-    MAX_FRAME_SIZE,
+    MAX_EXEC_ID_BYTES, MAX_FRAME_SIZE,
 };
 
 use crate::session_manager::{ExecSlotGuard, ExecStream, SessionHandle, WorkerError};
@@ -87,10 +87,14 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 /// connection cannot hold a cancellation slot for the general one.
 const LANE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Upper bound on a cancel-lane request frame, leaving room above the 304
-/// bytes a worst-case `cancel_exec` encodes to with both identifiers at
-/// [`MAX_EXEC_ID_BYTES`].
-const LANE_MAX_FRAME_BYTES: usize = 1024;
+/// Upper bound on a cancel-lane request frame, large enough for every
+/// `cancel_exec` the protocol admits: [`MAX_EXEC_ID_BYTES`] caps an
+/// identifier's decoded length, not the escaped length it occupies on the wire.
+const LANE_MAX_FRAME_BYTES: usize = 2 * MAX_EXEC_ID_BYTES * JSON_MAX_ESCAPE_BYTES + 256;
+
+/// Longest JSON escape a single byte of an identifier can produce, a control
+/// character with no short form becoming `\u00XX`.
+const JSON_MAX_ESCAPE_BYTES: usize = 6;
 
 /// Bound on how long shutdown waits for in-flight handlers to finish before
 /// abandoning them, so a wedged handler cannot block daemon exit forever.
@@ -1100,6 +1104,50 @@ mod tests {
             cancelled,
             "a cancellation behind stalled lane connections took longer than \
              {CANCEL_BUDGET:?}"
+        );
+        clients.shutdown().await;
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_escaped_cancellation_still_fits_the_lane() {
+        // Each byte escapes to its longest JSON form, at the longest identifier
+        // the protocol admits.
+        let escaped = "\u{1}".repeat(MAX_EXEC_ID_BYTES);
+        assert_eq!(escaped.len(), MAX_EXEC_ID_BYTES);
+
+        let frame = encode_frame(&DaemonRequest::CancelExec(CancelExecConfig {
+            exec_id: escaped.clone(),
+            run_token: escaped.clone(),
+        }))
+        .unwrap();
+        assert!(
+            frame.len() - 4 <= LANE_MAX_FRAME_BYTES,
+            "a {} byte cancellation does not fit the lane's {LANE_MAX_FRAME_BYTES} byte bound",
+            frame.len() - 4
+        );
+
+        let session = spawn().unwrap();
+        let cancel_limiter = Arc::new(Semaphore::new(1));
+        let mut clients = JoinSet::new();
+        let mut client =
+            connection_past_general_capacity(&session, &mut clients, &cancel_limiter).await;
+
+        write_frame(
+            &mut client,
+            &DaemonRequest::CancelExec(CancelExecConfig {
+                exec_id: escaped.clone(),
+                run_token: escaped,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(
+            response,
+            DaemonResponse::Ok,
+            "the lane must carry every cancellation the protocol admits"
         );
         clients.shutdown().await;
         session.shutdown().await.unwrap();

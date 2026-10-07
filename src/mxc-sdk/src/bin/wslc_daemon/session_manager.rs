@@ -1372,12 +1372,12 @@ impl Worker {
         Ok(())
     }
 
-    /// Give up the SDK handles rather than release them, when a run thread may
-    /// still be using one.
+    /// Give up the SDK handles rather than release them, when an off-worker
+    /// thread may still be using one.
     ///
     /// Reached only on an unwind, where [`Worker::shutdown`]'s drain never ran.
-    fn abandon_if_execs_running(mut self, in_flight: usize) {
-        if in_flight > 0 {
+    fn abandon_if_borrowed(mut self, execs_in_flight: usize, pull_outstanding: bool) {
+        if execs_in_flight > 0 || pull_outstanding {
             std::mem::forget(std::mem::take(&mut self.containers));
             std::mem::forget(self.session.take());
             std::mem::forget(self.sdk.take());
@@ -1590,7 +1590,10 @@ pub fn spawn() -> Result<SessionHandle> {
 
             if served.is_err() {
                 let in_flight = worker.execs_in_flight.load(Ordering::SeqCst);
-                worker.abandon_if_execs_running(in_flight);
+
+                // A pull borrows the SDK and session the same way a run does.
+                let pull_outstanding = !image::wait_for_pulls_in_flight(Duration::ZERO);
+                worker.abandon_if_borrowed(in_flight, pull_outstanding);
             }
         })
         .map_err(|e| anyhow::anyhow!("spawn WSLc worker thread: {e}"))?;
@@ -2864,7 +2867,7 @@ mod tests {
             },
         );
 
-        worker.abandon_if_execs_running(1);
+        worker.abandon_if_borrowed(1, false);
 
         assert!(
             matches!(done.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
@@ -2902,11 +2905,33 @@ mod tests {
             .containers
             .insert("wslc:busy".to_string(), flagged_entry(release));
 
-        worker.abandon_if_execs_running(1);
+        worker.abandon_if_borrowed(1, false);
 
         assert!(
             !RELEASED.load(Ordering::SeqCst),
             "a handle the run thread is still using must not be released"
+        );
+    }
+
+    #[test]
+    fn an_unwind_with_a_pull_outstanding_keeps_container_handles() {
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+
+        unsafe extern "C" fn release(_: mxc_sdk::wslc_common::wslc_bindings::WslcContainer) -> i32 {
+            RELEASED.store(true, Ordering::SeqCst);
+            0
+        }
+
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:pulling".to_string(), flagged_entry(release));
+
+        worker.abandon_if_borrowed(0, true);
+
+        assert!(
+            !RELEASED.load(Ordering::SeqCst),
+            "a pull still borrows the SDK and session, so the handles must be kept"
         );
     }
 
@@ -2924,7 +2949,7 @@ mod tests {
             .containers
             .insert("wslc:idle".to_string(), flagged_entry(release));
 
-        worker.abandon_if_execs_running(0);
+        worker.abandon_if_borrowed(0, false);
 
         assert!(
             RELEASED.load(Ordering::SeqCst),
