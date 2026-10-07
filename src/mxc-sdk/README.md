@@ -10,6 +10,24 @@ configures the backend.
 
 See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
+## ProcessContainer policy errors
+
+On capable Windows BaseContainer hosts, policy-denied creation (`0x800704EC`)
+retrieves the calling thread's cached refusal and adds available outcome/action
+details to the ordinary `v1::Error::message`. This applies to `v1::run` and
+`v1::spawn` without a new request setting or additional experimental
+authorization. Existing error codes and successful result types are unchanged.
+Missing or failed retrieval cannot replace the creation error; success and
+non-policy failures are not queried.
+
+Always log the message or the error's `Display` representation. The operation
+and HRESULT are included in the message, while optional `operation` and
+`native_code` fields need not be populated. MXC neither mutates the request nor
+retries a policy refusal. Returned constraints are non-exhaustive; unknown or
+incomplete data is not an instruction to guess a repair. Diagnostic prose is
+not a stable parsing API. See the
+[backend guide](../../docs/development/guides/process-container-adding-os-features.md#detailed-policy-errors).
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or

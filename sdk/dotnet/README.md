@@ -8,6 +8,24 @@ versioned public API is in `Microsoft.Mxc.Sdk.V1`. All request and policy types
 in this API use the SDK-selected contract version; callers do not select
 that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
+## ProcessContainer policy errors
+
+On capable Windows BaseContainer hosts, policy-denied creation (`0x800704EC`)
+automatically retrieves the calling thread's cached refusal and includes
+available outcome/action details in `MxcException.Message`. Use ordinary V1
+`MxcContainer.Run`, `RunAsync`, `Spawn`, or `SpawnAsync` errors.
+No new request option, report DTO, or additional experimental authorization
+is required. Successful outputs and existing exception codes are unchanged.
+
+The message includes the native operation and HRESULT; the optional
+`Operation` and `NativeCode` properties can still be null. Always preserve the
+message, not only optional metadata. Missing or failed retrieval cannot
+replace the creation error; success and non-policy failures are not queried.
+MXC does not mutate the request or retry a policy refusal. Returned
+constraints are non-exhaustive and can be unknown or incomplete; the prose
+is not a supported parsing contract. See
+[detailed policy errors](../../docs/development/guides/process-container-adding-os-features.md#detailed-policy-errors).
+
 ## Run to completion
 
 ```csharp

@@ -507,6 +507,36 @@ mod tests {
     }
 
     #[test]
+    fn creation_policy_text_survives_the_existing_error_message_path() {
+        use crate::mxc_common::models::{FailurePhase, ScriptResponse};
+
+        let message = "CreateProcessSecurityEnvironment failed (HRESULT = 0x800704EC)\n\
+                       Windows creation-policy outcome: blocked (1).\n\
+                       1. action=restrictFilesystemAccess (2); required=no access (0).\n\
+                       Resource 1: \"C:\\\\work\"\n\
+                       2. action=removeCapability (1); required=18446744073709551615.";
+        for capture in [false, true] {
+            let message = if capture {
+                format!("captureDenials: {message}")
+            } else {
+                message.into()
+            };
+            let response = ScriptResponse {
+                exit_code: -1,
+                error_message: message.clone(),
+                standard_err: message.clone(),
+                failure_phase: FailurePhase::LaunchFailed,
+                ..Default::default()
+            };
+            let error = map_spawn_error(response);
+            assert_eq!(error.code, MxcErrorCode::BackendError);
+            assert_eq!(error.message, message);
+            let sdk_error = crate::v1::Error::from(error);
+            assert_eq!(sdk_error.message, message);
+        }
+    }
+
+    #[test]
     fn streaming_rejects_dry_run() {
         // `dry_run` ("validate, don't execute") has no process to stream, so
         // the streaming spawn rejects it.

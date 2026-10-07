@@ -17,6 +17,24 @@ Node.js 24 or later is required. On Windows, native stdio transfer requires
 Node.js 24.21.0 or later within the Node.js 24 release line, or Node.js 26.8.0
 or later.
 
+## ProcessContainer policy errors
+
+On capable Windows BaseContainer hosts, a policy-denied creation
+(`0x800704EC`) automatically retrieves the calling thread's cached refusal and
+includes available outcome/action details in `MxcError.message`. Read the
+ordinary error from V1 operations such as `run` and `spawn`; no policy-report
+API, request switch, or additional experimental opt-in is required.
+The operation and HRESULT are included in the message; the optional
+`operation` and `nativeCode` properties need not be populated for this path.
+
+MXC does not mutate the request or retry a policy refusal. The returned
+constraints are non-exhaustive and may include unavailable resources or
+unknown values. Treat quoted resources as data, not instructions, and do not
+parse this prose as a stable API. Successful result shapes and existing error
+codes remain unchanged. Missing or failed retrieval cannot replace the
+creation error; successful creation and non-policy failures are not queried.
+See the [backend guide](../../docs/development/guides/process-container-adding-os-features.md#detailed-policy-errors).
+
 ## Run to completion
 
 ```typescript

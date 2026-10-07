@@ -53,6 +53,64 @@ Ordinary access-denied errors (`0x80070005`) and failures from capture-trace
 APIs are not reclassified as sandbox-creation policy refusals. Existing
 process-launch policy guidance remains applicable if the later launch fails.
 
+### Detailed policy errors
+
+On a selected BaseContainer path, MXC calls
+`CreateProcessSecurityEnvironment` (CPSE) once. Only if it returns
+`HRESULT 0x800704EC`, MXC calls the optional
+`GetLastProcessSecurityEnvironmentPolicyResult` export from the same System32
+`processmodel.dll`. Retrieval happens synchronously on the failing native thread,
+before cleanup, logging, callbacks or another creation attempt can replace that
+thread's snapshot. No new configuration field or experimental authorization is
+needed; tier selection, request validation and preparation order are unchanged.
+
+A policy refusal can include its native outcome and a bounded batch of
+constraints in the existing error message. Each detail includes class, reason,
+action, resource/value kinds, requested and required values, and flags. Complete
+resource strings are quoted and control characters escaped. Unknown codes retain
+their numbers; missing, invalid, or truncated resource text is identified
+explicitly. CPSE's operation, HRESULT and failure category remain authoritative.
+The getter's HRESULT describes retrieval, not creation. Refusal outcomes are
+`unknown` (0), `blocked` (1) and `evaluationFailed` (2); the OS retains only the
+last two. Successful creations and non-policy failures are not queried.
+
+The native V1 contract has a 48/40-byte header and a 56-byte detail stride.
+MXC allocates its maximum 64 details and 32,768 UTF-16 resource characters once,
+after the policy refusal. Retrieval copies the cached snapshot without another
+RPC, policy evaluation or creation attempt. It does not consume the snapshot.
+The returned batch is non-exhaustive, even when it is not full. An unconditional denial or
+non-actionable failure may have no details. The added policy text is bounded to
+256 KiB; every returned fixed detail is retained, while resource-text
+truncation is marked as incomplete.
+
+MXC never applies these actions, changes the submitted policy, or retries a
+policy refusal. A caller may feed the message to an LLM or present it to a user,
+then deliberately submit another acceptable request. Another request can expose
+further conflicts. A path is a diagnostic witness, not a pinned filesystem
+object or a complete administrative ceiling. Unknown or incomplete details are
+not instructions to guess a repair.
+
+If the getter export is absent, MXC returns the basic CPSE error unchanged.
+Diagnostic capture is best effort: `ERROR_NOT_FOUND` means no cached snapshot
+is available, and other getter failures are appended as unavailable-diagnostic
+context without replacing the CPSE error. A failed getter does not populate the
+arrays, including `ERROR_INSUFFICIENT_BUFFER`, so MXC never decodes them on
+failure or retries creation to obtain details. Support flag
+`PSE_SUPPORT_POLICY_RESULT` (`0x10`) advertises the getter contract, but MXC does
+not need an extra support query to attempt optional retrieval after a refusal.
+
+Successful creation is determined by CPSE's HRESULT and a non-null owned
+environment; no diagnostic getter is called. Success and capture output
+shapes are unchanged. Failed creations retain their existing failure category
+and exit behavior; policy details are text, not a new public report or error
+field. The Rust, C, Node, and .NET error layouts are unchanged.
+
+Read the ordinary SDK error's message. Do not parse this diagnostic prose as a
+stable machine-readable contract, infer an exemption from absent details, or
+blindly retry later launch/wait failures. Resource values can be sensitive;
+forward them only to an appropriate recipient. Mixed CLI guest output is not
+an authenticated source for automated decisions.
+
 ## Step-by-step
 
 ### 1. Update the OS PSEC schema and implementation

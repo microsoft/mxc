@@ -141,6 +141,29 @@ mod tests {
         error
     }
 
+    #[test]
+    fn creation_policy_text_uses_the_existing_owned_message_without_an_abi_change() {
+        let message = "CreateProcessSecurityEnvironment failed (HRESULT = 0x800704EC)\n\
+                       Returned constraints: 2 (non-exhaustive).\n\
+                       Resource 1: \"C:\\\\work\"\n\
+                       Resource 2: \"C:\\\\\u{65e5}\u{672c}\"\n\
+                       required=18446744073709551615.";
+        let mut detail = {
+            let error = Error::new(ErrorCode::BackendError, message);
+            MxcErrorDetail::from_error(&error)
+        };
+        assert_eq!(read(detail.message_utf8).as_deref(), Some(message));
+        assert_eq!(
+            std::mem::size_of::<MxcErrorDetail>(),
+            4 * std::mem::size_of::<*mut c_char>()
+        );
+        assert!(detail.operation_utf8.is_null());
+        assert!(detail.native_code_utf8.is_null());
+        assert!(detail.remediation_utf8.is_null());
+        detail.free_strings();
+        assert!(detail.message_utf8.is_null());
+    }
+
     /// The whole detail crosses the boundary, not just the message.
     ///
     /// The regression this pins: the C ABI used to expose a bare `error_utf8`,

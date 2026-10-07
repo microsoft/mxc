@@ -604,6 +604,10 @@ mod tests {
             ("CreateProcessSecurityEnvironment", E_NOTIMPL.0),
             ("CreateProcessSecurityEnvironment", 1260),
             (
+                "GetLastProcessSecurityEnvironmentPolicyResult",
+                ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult().0,
+            ),
+            (
                 "StartLearningModeTrace",
                 ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult().0,
             ),
