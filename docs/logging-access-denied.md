@@ -278,15 +278,14 @@ Malformed events, unknown reasons, identity mismatches, and incomplete
 endpoints are also verbose-only.
 Reason `65535` remains `unknownNetworkReason`.
 
-Actionable network records include an additive `details` object with
-`kind: "network"` and the normalized source, reason, direction, protocol,
-endpoint, application ID, and runtime filter ID. The WFP event does not provide
-a reliable workload PID, so these records use `pid: 0`; the broker-provided
-package, user, and application identities remain available to the decoder for
-validation and diagnostics. `filetime` is the original WFP event timestamp
-carried in the normalized payload, not the later ETW emission time.
+Actionable network records use the existing `DeniedResource` shape. The
+normalized protocol, remote address, and optional remote port are encoded in
+`resource`; no network-specific field is added to the public Rust type or JSON
+record. The WFP event does not provide a reliable workload PID, so these
+records use `pid: 0`. `filetime` is the original WFP event timestamp carried
+in the normalized payload, not the later ETW emission time.
 
-The current caller-facing network details contract is:
+The caller-facing network record is:
 
 ```json
 {
@@ -294,27 +293,17 @@ The current caller-facing network details contract is:
   "resourceType": "network",
   "accessType": "unknown",
   "pid": 0,
-  "filetime": "132847890123512345",
-  "details": {
-    "kind": "network",
-    "source": "processContainerNetworkPolicy",
-    "reason": "directDefaultDeny",
-    "direction": "outbound",
-    "protocol": 6,
-    "remoteAddress": "203.0.113.10",
-    "remotePort": 443,
-    "applicationId": "\\Device\\HarddiskVolume3\\app.exe",
-    "filterId": "9001"
-  }
+  "filetime": "132847890123512345"
 }
 ```
 
-`source` is currently `processContainerNetworkPolicy`; the internal Tessera
-component name is not exposed in the public JSON. The actionable reason is
-`directDefaultDeny`. Direction is `outbound`, `inbound`, or `unknown`.
-`filterId` is a decimal string so JavaScript consumers retain all 64 bits.
-Optional protocol, local endpoint, remote port, and application fields are
-omitted when the event does not supply them.
+The existing `(resource, accessType)` deduplication contract still applies.
+When repeated events describe the same endpoint, the actionable record retains
+the first observation's `pid` and `filetime`. Per-event source properties such
+as direction, filter ID, local endpoint, package identity, and application ID
+remain available only in the bounded verbose logging signature. Complete
+application paths are redacted there as `<REDACTED>`; timestamps are omitted
+from the signature so repeated observations can aggregate.
 
 This source is available only through option-aware native managed broker
 capture. The guarded-WPR fallback filters ETW by exact workload process
