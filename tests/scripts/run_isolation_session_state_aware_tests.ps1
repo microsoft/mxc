@@ -1903,7 +1903,7 @@ try {
                 # as a harness crash instead of a network verdict.
                 $prevPref = $ErrorActionPreference
                 $ErrorActionPreference = "Continue"
-                $hostProbe = & curl.exe --silent --show-error --max-time 15 $script:gAnchor.Url 2>&1 | Out-String
+                $hostProbe = & curl.exe --silent --show-error --noproxy "*" --max-time 15 $script:gAnchor.Url 2>&1 | Out-String
                 $ErrorActionPreference = $prevPref
                 Assert-True ("$hostProbe" -match [regex]::Escape($script:gAnchor.Body)) `
                     "the harness itself reaches the anchor (the oracle is live)"

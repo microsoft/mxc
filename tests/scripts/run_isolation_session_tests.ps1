@@ -691,7 +691,7 @@ try {
         # it into the output stream, so flip it for the fetch.
         $prevPref = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        $hostProbe = & curl.exe --silent --show-error --max-time 15 $anchor.Url 2>&1 | Out-String
+        $hostProbe = & curl.exe --silent --show-error --noproxy "*" --max-time 15 $anchor.Url 2>&1 | Out-String
         $ErrorActionPreference = $prevPref
         $anchorLive = "$hostProbe" -match [regex]::Escape($anchor.Body)
         if (-not $anchorLive) {

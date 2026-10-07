@@ -77,5 +77,5 @@ function Get-LoopbackAnchorCommand {
         [int]$TimeoutSec = 15
     )
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
-    "$curl --silent --show-error --fail --max-time $TimeoutSec $Url"
+    "$curl --silent --show-error --fail --noproxy * --max-time $TimeoutSec $Url"
 }
