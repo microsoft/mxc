@@ -2937,7 +2937,6 @@ mod tests {
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         request.policy.network_egress = Some(NetworkEgressPolicy {
             default: NetworkAction::Deny,
