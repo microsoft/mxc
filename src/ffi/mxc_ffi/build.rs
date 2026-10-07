@@ -35,19 +35,27 @@ fn main() {
 
 #[cfg(all(windows, feature = "isolation_session"))]
 fn reconcile_isolation_session_runtime() {
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let target_dir = out_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .expect("could not determine target directory from OUT_DIR");
+
+    // Feature configurations share the final profile directory but have
+    // separate build-script fingerprints. A missing tracked path keeps this
+    // reconciliation active whenever Cargo switches fingerprints.
+    println!(
+        "cargo:rerun-if-changed={}",
+        target_dir.join(".isosession-payload-state").display()
+    );
+
     #[cfg(feature = "isolation_session_lifted")]
     mxc_build_common::isolation_session_sdk::stage_runtime()
         .unwrap_or_else(|error| panic!("IsolationSession SDK staging failed: {error}"));
 
     #[cfg(not(feature = "isolation_session_lifted"))]
     {
-        let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-        let target_dir = out_dir
-            .parent()
-            .and_then(|path| path.parent())
-            .and_then(|path| path.parent())
-            .expect("could not determine target directory from OUT_DIR");
-
         for file_name in [
             "IsoSessionApp.dll",
             "IsoSession.manifest",

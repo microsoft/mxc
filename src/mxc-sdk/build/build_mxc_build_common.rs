@@ -27,6 +27,9 @@ pub mod isolation_session_sdk {
         "b387c9d11808bf8864d3d7e4d6924f79bdcd6e7c4c54c4e2e49ab0e3525b3d2e";
     pub const PACKAGE_PATH_ENV: &str = "ISOLATION_SESSION_SDK_PACKAGE";
 
+    const RESTORE_PROJECT: &str =
+        "build/isolation_session_bindings/IsolationSessionSdk.Restore.csproj";
+    const NUGET_CONFIG: &str = "build/isolation_session_bindings/NuGet.Config";
     const APP_DLL: &str = "IsoSessionApp.dll";
     const RUNTIME_MANIFEST: &str = "IsoSession.manifest";
     const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
@@ -42,12 +45,8 @@ pub mod isolation_session_sdk {
             return Ok(path);
         }
 
-        let package_name = format!(
-            "{}.{}.nupkg",
-            PACKAGE_ID.to_ascii_lowercase(),
-            PACKAGE_VERSION
-        );
-        let package_dir = nuget_cache_root()?
+        let package_name = package_file_name();
+        let package_dir = mxc_nuget_cache_root()?
             .join(PACKAGE_ID.to_ascii_lowercase())
             .join(PACKAGE_VERSION);
         let package_path = package_dir.join(&package_name);
@@ -58,69 +57,8 @@ pub mod isolation_session_sdk {
             return Ok(package_path);
         }
 
-        std::fs::create_dir_all(&package_dir).map_err(|e| {
-            format!(
-                "create IsolationSession NuGet cache directory {}: {e}",
-                package_dir.display()
-            )
-        })?;
-
-        let download_path =
-            package_dir.join(format!("{package_name}.download.{}", std::process::id()));
-        let url = format!(
-            "https://api.nuget.org/v3-flatcontainer/{}/{}/{}",
-            PACKAGE_ID.to_ascii_lowercase(),
-            PACKAGE_VERSION,
-            package_name
-        );
-        let status = Command::new("curl")
-            .args([
-                "--fail",
-                "--location",
-                "--retry",
-                "3",
-                "--silent",
-                "--show-error",
-            ])
-            .arg("--output")
-            .arg(&download_path)
-            .arg(&url)
-            .status()
-            .map_err(|e| format!("launch curl to download {PACKAGE_ID} {PACKAGE_VERSION}: {e}"))?;
-
-        if !status.success() {
-            let _ = std::fs::remove_file(&download_path);
-            return Err(format!(
-                "download {PACKAGE_ID} {PACKAGE_VERSION} from NuGet.org failed with {status}; \
-                 set {PACKAGE_PATH_ENV} to a pre-fetched package for an offline build"
-            ));
-        }
-
-        if let Err(e) = verify_package(&download_path) {
-            let _ = std::fs::remove_file(&download_path);
-            return Err(e);
-        }
-
-        match std::fs::rename(&download_path, &package_path) {
-            Ok(()) => {}
-            Err(e) if package_path.exists() => {
-                let _ = std::fs::remove_file(&download_path);
-                verify_package(&package_path).map_err(|verify_error| {
-                    format!(
-                        "another build populated {}, but it is invalid ({verify_error}); \
-                         original rename error: {e}",
-                        package_path.display()
-                    )
-                })?;
-            }
-            Err(e) => {
-                let _ = std::fs::remove_file(&download_path);
-                return Err(format!(
-                    "publish downloaded package to {}: {e}",
-                    package_path.display()
-                ));
-            }
-        }
+        restore_package()?;
+        verify_package(&package_path)?;
 
         println!("cargo:rerun-if-changed={}", package_path.display());
         Ok(package_path)
@@ -272,19 +210,77 @@ pub mod isolation_session_sdk {
         Ok(())
     }
 
-    fn nuget_cache_root() -> Result<PathBuf, String> {
-        if let Ok(path) = std::env::var("NUGET_PACKAGES") {
-            return Ok(PathBuf::from(path));
-        }
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .map_err(|_| {
+    fn package_file_name() -> String {
+        format!(
+            "{}.{}.nupkg",
+            PACKAGE_ID.to_ascii_lowercase(),
+            PACKAGE_VERSION
+        )
+    }
+
+    fn mxc_nuget_cache_root() -> Result<PathBuf, String> {
+        Ok(target_profile_dir()?.join(".mxc-nuget").join("packages"))
+    }
+
+    fn restore_package() -> Result<(), String> {
+        let manifest_dir = PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR")
+                .map_err(|e| format!("CARGO_MANIFEST_DIR is not set: {e}"))?,
+        );
+        let restore_project = manifest_dir.join(RESTORE_PROJECT);
+        let nuget_config = manifest_dir.join(NUGET_CONFIG);
+        let cache_root = target_profile_dir()?.join(".mxc-nuget");
+        let packages_root = cache_root.join("packages");
+        let restore_output = PathBuf::from(
+            std::env::var("OUT_DIR").map_err(|e| format!("OUT_DIR is not set: {e}"))?,
+        )
+        .join("isolation-session-nuget-obj");
+
+        println!("cargo:rerun-if-changed={}", restore_project.display());
+        println!("cargo:rerun-if-changed={}", nuget_config.display());
+
+        std::fs::create_dir_all(&cache_root).map_err(|e| {
+            format!(
+                "create IsolationSession NuGet restore directory {}: {e}",
+                cache_root.display()
+            )
+        })?;
+
+        let output = Command::new("dotnet")
+            .arg("restore")
+            .arg(&restore_project)
+            .arg("--configfile")
+            .arg(&nuget_config)
+            .arg("--packages")
+            .arg(&packages_root)
+            .arg(format!(
+                "--property:RestoreOutputPath={}",
+                restore_output.display()
+            ))
+            .arg(format!(
+                "--property:IsolationSessionSdkVersion={PACKAGE_VERSION}"
+            ))
+            .args(["--nologo", "--verbosity", "minimal"])
+            .output()
+            .map_err(|e| {
                 format!(
-                    "neither NUGET_PACKAGES, USERPROFILE, nor HOME is set; set \
-                     {PACKAGE_PATH_ENV} to a pre-fetched package"
+                    "launch dotnet restore for {PACKAGE_ID} {PACKAGE_VERSION}: {e}; \
+                     set {PACKAGE_PATH_ENV} to a pre-fetched package if dotnet is unavailable"
                 )
             })?;
-        Ok(PathBuf::from(home).join(".nuget").join("packages"))
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "restore {PACKAGE_ID} {PACKAGE_VERSION} through {} failed with {}:\n{}\n{}\
+             \nSet {PACKAGE_PATH_ENV} to a pre-fetched package for an offline build.",
+            nuget_config.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 
     fn verify_package(path: &Path) -> Result<(), String> {
@@ -309,8 +305,8 @@ pub mod isolation_session_sdk {
     #[cfg(test)]
     mod tests {
         use super::{
-            package_runtime_instance, validate_runtime_architecture, validate_runtime_manifest,
-            IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
+            package_file_name, package_runtime_instance, validate_runtime_architecture,
+            validate_runtime_manifest, IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
         };
 
         const MANIFEST: &str = "\
@@ -323,6 +319,14 @@ pub mod isolation_session_sdk {
         #[test]
         fn package_version_maps_to_runtime_instance() {
             assert_eq!(package_runtime_instance().unwrap(), "2026.10");
+        }
+
+        #[test]
+        fn package_file_name_uses_nuget_global_packages_layout() {
+            assert_eq!(
+                package_file_name(),
+                "microsoft.ai.isolationsession.sdk.0.202610.5.nupkg"
+            );
         }
 
         #[test]

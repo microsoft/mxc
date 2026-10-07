@@ -18,7 +18,9 @@ use windows::core::{s, HSTRING, PCSTR, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     ERROR_NOT_SUPPORTED, ERROR_PROC_NOT_FOUND, REGDB_E_CLASSNOTREG, S_OK,
 };
-use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
+};
 use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
@@ -33,6 +35,27 @@ type DllGetActivationFactory =
     unsafe extern "system" fn(*mut std::ffi::c_void, *mut *mut std::ffi::c_void) -> HRESULT;
 
 static GET_ACTIVATION_FACTORY: OnceLock<DllGetActivationFactory> = OnceLock::new();
+
+struct ComApartment;
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
+
+thread_local! {
+    static COM_APARTMENT: Result<Option<ComApartment>, HRESULT> = {
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if result.is_ok() {
+            Ok(Some(ComApartment))
+        } else if result.0 as u32 == RPC_E_CHANGED_MODE {
+            Ok(None)
+        } else {
+            Err(result)
+        }
+    };
+}
 
 /// Flat-C export on the staged shim that answers whether the matching
 /// IsolationSession runtime is installed and loadable on this machine. The
@@ -86,10 +109,10 @@ where
     T: Interface + RuntimeName,
 {
     // Some callers enter through a native thread without initializing COM.
-    // RPC_E_CHANGED_MODE only means another apartment model is already active.
-    let initialize_result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    if initialize_result.is_err() && initialize_result.0 as u32 != RPC_E_CHANGED_MODE {
-        return Some(Err(windows_core::Error::from_hresult(initialize_result)));
+    // Keep any initialization owned here alive until that same thread exits,
+    // then balance it with CoUninitialize.
+    if let Err(error) = ensure_com_apartment() {
+        return Some(Err(error));
     }
 
     let directory = adjacent_runtime_directory()?;
@@ -100,6 +123,13 @@ where
     };
 
     Some(activate_from_factory(factory))
+}
+
+fn ensure_com_apartment() -> windows_core::Result<()> {
+    COM_APARTMENT.with(|apartment| match apartment {
+        Ok(_) => Ok(()),
+        Err(result) => Err(windows_core::Error::from_hresult(*result)),
+    })
 }
 
 /// Confirms the IsolationSession runtime is installed before any session work.

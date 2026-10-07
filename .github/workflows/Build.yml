@@ -42,9 +42,7 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.Windows.Job.yml
     with:
-      # Opt in to the additional build that restores the pinned public SDK,
-      # generates its bindings, and validates the adjacent activation payload.
-      run_isolation_session_lifted: ${{ vars.MXC_ISOLATION_SESSION_LIFTED_CI == 'true' }}
+      run_isolation_session_lifted: true
 
   linux:
     needs: dependency-feed-check

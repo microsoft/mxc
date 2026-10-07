@@ -67,10 +67,9 @@ const CLASS_E_CLASSNOTAVAILABLE_HRESULT: u32 = 0x80040111;
 const REGDB_E_CLASSNOTREG_HRESULT: u32 = 0x80040154;
 
 /// `E_NOINTERFACE` — the activator produced an object that does not implement
-/// the requested interface. In this backend that is the signature of a
-/// winmd/MSI version-pin mismatch: `IsoSessionApp.dll` activated, but the
-/// interface IID the Preview WinMD was built against does not match the IID
-/// the MSI-installed runtime exposes. See [`activation_error`].
+/// the requested interface. In lifted mode this is the signature of a
+/// WinMD/runtime version-pin mismatch. Inbox activation does not have enough
+/// information to make that diagnosis. See [`activation_error`].
 const E_NOINTERFACE_HRESULT: u32 = 0x80004002;
 
 /// Renders an HRESULT for the wire `nativeCode` field.
@@ -320,13 +319,20 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
          the OS feature gate is enabled and the platform supports isolation sessions."
                 .to_string()
         } else if code == E_NOINTERFACE_HRESULT {
-            "the co-located IsoSessionApp.dll activated but returned an object that does not \
-         implement the expected IsolationSession interface. This is the classic winmd/MSI \
-         version-pin mismatch: the Preview WinMD wxc-exec was built against and the \
-         MSI-installed IsolationSession runtime were produced from different OS versions, so \
-         their interface IIDs differ. Rebuild the MSI and the \
-         Microsoft.AI.IsolationSession.SDK NuGet from the same OS commit."
-                .to_string()
+            #[cfg(feature = "lifted_msi")]
+            {
+                "the co-located IsoSessionApp.dll activated but returned an object that does not \
+                 implement the expected IsolationSession interface. This is the classic WinMD/MSI \
+                 version-pin mismatch: the Preview WinMD wxc-exec was built against and the \
+                 MSI-installed IsolationSession runtime were produced from different OS versions, \
+                 so their interface IIDs differ. Rebuild the MSI and the \
+                 Microsoft.AI.IsolationSession.SDK NuGet from the same OS commit."
+                    .to_string()
+            }
+            #[cfg(not(feature = "lifted_msi"))]
+            {
+                format!("IsolationSession runtime API activation failed: {detail}")
+            }
         } else {
             format!("IsolationSession runtime API activation failed: {detail}")
         };
@@ -876,9 +882,10 @@ mod tests {
         assert!(mapped.message.contains("catastrophic failure"));
     }
 
-    /// `E_NOINTERFACE` from activation is the winmd/MSI version-pin mismatch
+    /// `E_NOINTERFACE` from lifted activation is the WinMD/MSI version-pin mismatch
     /// signature: the mapping must name that cause rather than echo the bare
     /// COM detail, so the message points at rebuilding both from one commit.
+    #[cfg(feature = "lifted_msi")]
     #[test]
     fn e_nointerface_activation_names_version_pin_mismatch() {
         let mapped = map_lifecycle_error(activation_error(E_NOINTERFACE_HRESULT, "ignored"));
@@ -886,6 +893,19 @@ mod tests {
         assert_eq!(mapped.native_code(), Some("0x80004002"));
         assert!(mapped.message.contains("version-pin mismatch"));
         assert!(mapped.message.contains("same OS commit"));
+    }
+
+    #[cfg(not(feature = "lifted_msi"))]
+    #[test]
+    fn inbox_e_nointerface_activation_preserves_platform_detail() {
+        let mapped = map_lifecycle_error(activation_error(
+            E_NOINTERFACE_HRESULT,
+            "platform activation detail",
+        ));
+        assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(mapped.native_code(), Some("0x80004002"));
+        assert!(mapped.message.contains("platform activation detail"));
+        assert!(!mapped.message.contains("version-pin mismatch"));
     }
 
     /// The hard error raised when the lifted payload is absent must carry the

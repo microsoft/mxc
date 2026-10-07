@@ -1566,22 +1566,17 @@ mod tests {
                     failure.message
                 );
 
-                #[cfg(feature = "lifted_msi")]
-                {
-                    assert_eq!(failure.operation, op::VERIFY_FRAMEWORK);
-                    assert!(
+                match failure.operation.as_str() {
+                    #[cfg(feature = "lifted_msi")]
+                    op::VERIFY_FRAMEWORK => assert!(
                         failure.code.is_none(),
                         "framework refusal unexpectedly carried an HRESULT"
-                    );
-                }
-
-                #[cfg(not(feature = "lifted_msi"))]
-                {
-                    assert_eq!(failure.operation, op::ACTIVATE);
-                    assert!(
+                    ),
+                    op::ACTIVATE => assert!(
                         failure.code.is_some(),
                         "activation failure carries no HRESULT"
-                    );
+                    ),
+                    operation => panic!("unexpected availability operation: {operation}"),
                 }
             }
             Err(other) => {

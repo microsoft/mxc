@@ -18,9 +18,9 @@ session. Use cases that need this — per the broader claw-on-MXC scenario — c
 
 ## Proposed Solution
 
-Add an **IsolationSession runner** to `wxc-exec.exe`, behind `--experimental`.
+Add an **IsolationSession runner** to `wxc-exec.exe`.
 When the JSON config specifies `"containment": "isolation_session"` and the
-experimental flag is set, the binary routes to a new `IsolationSessionRunner`
+the backend is selected, the binary routes to a new `IsolationSessionRunner`
 (implementing the existing `ScriptRunner` trait). The runner orchestrates the
 full lifecycle against the OS-side Isolation Session API: provision an
 agent user, start a session, run the script (capturing stdout / stderr /
@@ -38,13 +38,13 @@ reuse the manager's methods individually.
 ## How It Works
 
 ```
-User: wxc-exec.exe --experimental config.json
+User: wxc-exec.exe config.json
        (config.json sets containment = "isolation_session")
    │
    ▼
 wxc-exec.exe (Rust — single binary, multiple backends)
    ├── Parses JSON config → sees containment = "isolation_session"
-   ├── Checks --experimental flag → instantiates IsolationSessionRunner
+   ├── Instantiates IsolationSessionRunner
    ├── Calls IsolationSessionManager methods 1:1 with the OS-side service:
    │     add_user(...)               → Step 1 — creates agent user
    │     start_session(...)          → Step 2 — boots session
@@ -69,14 +69,9 @@ Dispatch in `wxc/src/main.rs`:
 ```rust
 let mut runner: Box<dyn ScriptRunner> = match request.containment {
     ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
-    // ... existing stable + experimental backends ...
-    ContainmentBackend::IsolationSession => {
-        if !request.experimental_enabled {
-            eprintln!("Error: IsolationSession is experimental. Use --experimental.");
-            process::exit(1);
-        }
-        Box::new(IsolationSessionRunner::new(/* ... */))
-    }
+    // ... other containment backends ...
+    ContainmentBackend::IsolationSession =>
+        Box::new(IsolationSessionRunner::new(/* ... */)),
 };
 ```
 
@@ -122,34 +117,34 @@ invocations, without changing the manager's interface. See
 
 ```json
 {
-    "version": "0.6.0-alpha",
+    "version": "0.9.0-alpha",
     "containerId": "MyIsolationSessionRun",
     "containment": "isolation_session",
     "process": {
         "commandLine": "echo hello & whoami",
         "cwd": "C:\\Windows",
         "env": ["MYVAR=hello"],
+        "inheritDefaultEnv": true,
         "timeout": 30000
     },
     "network": {
-        "defaultPolicy": "allow",
-        "allowLocalNetwork": true
-    },
-    "experimental": {
-        "isolation_session": {}
+        "egress": { "default": "allow" },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
     }
 }
 ```
 
-The one-shot surface takes **no backend configuration at all** — there is no
-`experimental.isolation_session` field the one-shot path reads. The Entra
-`user` bundle is state-aware-only, so supplying it here is just an
-unrecognised key in the deliberately permissive `experimental` block and is
-ignored (the run proceeds as a local, non-Entra agent). Process options
-(`cwd`, `env`, `timeout`) read from the existing top-level `process` section,
-matching the contract every other backend honors.
+The directional shape explicitly describes the backend's actual unrestricted
+posture across egress, ingress, and host loopback. All three values are
+required; rules, proxies, mixed postures, and omission are rejected.
 
-Run with: `wxc-exec.exe --experimental config.json`.
+Legacy network fields are rejected.
+
+`appId` and the nested `provision` section are state-aware-only and are
+rejected on one-shot requests. Process options (`cwd`, `env`, `timeout`) remain
+in the top-level `process` section.
+
+Run with: `wxc-exec.exe config.json`.
 
 ## OS API Dependency
 
@@ -158,70 +153,19 @@ The runner calls into the WinRT API namespaced
 Session service (running as SYSTEM via `svchost.exe`). The API is gated
 on an internal Windows feature flag.
 
-### Activation path and the no-fallback rule
+Activation goes through the WinRT activation factory for the
+`Windows.AI.IsolationSession.Preview` `IsoSessionOps` runtime class.
 
-The runtime class `IsoSessionOps` (and `IsoSessionProcessOptions`) is activated
-through a single mechanism in
-`src/backends/isolation_session/common/src/regfree.rs`:
+MXC supports two explicit IsolationSession build modes:
 
-**Direct shim activation.** `regfree::activate_from_adjacent_shim` loads the
-co-located `IsoSessionApp.dll` by absolute path, resolves its
-`DllGetActivationFactory` export, and requests the projected runtime class
-factory directly. The co-located stamped `IsoSession.manifest` selects the
-matching version under `%ProgramFiles%\Microsoft\Agentic Runtime`. The shim
-then loads that version's `IsoSessionClient.dll` and binds the matching
-side-by-side service instance. This bypasses the inbox WinRT catalog without
-machine-wide registration or private classic-COM classes.
+- `isolation_session` uses the checked-in bindings and activates the inbox
+  Windows runtime.
+- `isolation_session_lifted` generates bindings from the pinned
+  `Microsoft.AI.IsolationSession.SDK` package and stages the package's
+  registration-free activation payload beside the executable.
 
-**No-fallback rule.** `activate_from_adjacent_shim` returns
-`Option<Result<T>>`, and the callers
-(`manager::check_service_available_and_activate`,
-`process_options::build_iso_process_options`) treat it as:
-
-- **`None`** — the adjacent shim/manifest activation unit is absent (an
-  inbox-only build). This is turned into a
-  **hard, actionable error** (`error::lifted_payload_missing`). MXC deliberately
-  does **not** fall back to the inbox `System32` runtime — silently binding a
-  different, unversioned binary set is exactly the failure this design prevents.
-- **`Some(Err(e))`** — any other activation failure (including a fused-but-
-  broken MSI) is **surfaced** unchanged, never redirected to the inbox binaries.
-  An `E_NOINTERFACE` here is mapped to a version-pin-mismatch message (rebuild
-  the MSI and the SDK nuget from the same OS commit).
-- **`Some(Ok(factory))`** — the coresident factory is used.
-
-### Framework verification
-
-Before any session work, MXC asks the co-located `IsoSessionApp.dll` whether the
-matching IsolationSession runtime is actually installed and loadable on this
-machine. MXC refuses to continue on any failure result, and raises
-`error::framework_unavailable`.
-
-### Runtime folder resolution
-
-Runtime-folder resolution is owned entirely by `IsoSessionApp.dll` (C++,
-`onecoreuap/windows/core/isoenvbroker/src/app/dll.cpp`), **not** by MXC. There
-is no MXC-side environment override — the earlier `MXC_ISOSESSION_RUNTIME_DIR`
-knob has been removed so the runtime location is a single authoritative
-per-machine fact owned by the MSI:
-
-| Source | Effect |
-|---|---|
-| HKLM `InstallDir` (`REG_EXPAND_SZ`) under the runtime install key | Authoritative per-machine install directory recorded by the MSI. Read via `wil::reg::try_get_value_expanded_string`. |
-| Hardcoded fallback in the App DLL | Used only when the HKLM value is absent, so a correctly-installed MSI always wins. |
-
-### Apartment initialization
-
-The lifted path obtains the factory from the shim's `DllGetActivationFactory`
-export and calls
-`IActivationFactory::ActivateInstance` directly — which, unlike the
-inbox `RoActivateInstance` path, does **not** implicitly initialize the
-WinRT/COM apartment. `src/tools/wxc/src/main.rs` calls
-`CoInitializeEx(COINIT_MULTITHREADED)` at startup, and `regfree.rs`
-additionally calls `CoInitializeEx` before activation so the factory's internal
-COM activation (coresident client → service) has an initialized apartment even
-on the `--probe` path, which returns before `main`'s initialization.
-`RPC_E_CHANGED_MODE` is benign because the thread already has an apartment;
-other initialization failures are propagated.
+The lifted mode verifies the packaged framework before activation and does not
+fall back to the inbox runtime. Default builds enable neither mode.
 
 The API surface includes the lifecycle methods plus
 `IsoSessionProcess` (the running-process handle). The runner uses the
@@ -232,43 +176,60 @@ flag when `wxc-exec`'s stdout is a TTY.
 
 ## Bindings Workflow
 
-MXC supports two explicit metadata paths:
+**Inbox bindings.** The inbox mode uses a WinMD from an internal Windows OS
+build (the exact file name and provenance are recorded in
+`GENERATION_INFO.toml`). MXC stores the generated Rust bindings in the
+workspace and tracks their provenance.
 
-- **Inbox mode (`isolation_session`)** uses the committed OS-generated
-  `bindings.rs` and normal inbox WinRT activation. The private source WinMD is
-  not committed; its provenance is recorded in `GENERATION_INFO.toml`.
-- **Lifted mode (`isolation_session_lifted`)** resolves the pinned
-  `Microsoft.AI.IsolationSession.SDK` package, generates Rust bindings
-  from its Preview WinMD at build time, and stages the package's activation
-  shim and manifest. The package itself is not committed.
+**Lifted bindings and runtime.** The lifted mode pins
+`Microsoft.AI.IsolationSession.SDK` version `0.202610.5`. The build restores it
+through NuGet using the repository's configured `MxcDependencies` source into
+an MXC-owned cache under the Cargo target directory, verifies the package hash,
+generates bindings from the packaged WinMD, and stages `IsoSessionApp.dll` and
+its activation manifest beside the consuming binary. For offline builds,
+`ISOLATION_SESSION_SDK_PACKAGE` can point to a pre-fetched package with the
+same expected hash.
 
-**Generated bindings are committed.**
+**Future direction.** The OS API is expected to land in the public Windows
+SDK eventually, at which point the `windows` crate (auto-generated from
+the public Windows SDK metadata) will pick it up automatically. When that
+happens, MXC can drop this private bindings crate and consume the API
+through the standard `windows` crate dependency. That milestone is
+currently far off — the private bindings remain the working approach for
+the foreseeable future.
+
+**Inbox generated bindings are committed.**
 `src/mxc-sdk/src/backends/isolation_session/bindings/bindings.rs` is a checked-in artifact.
-The WinMD itself is **not** committed (binary, frequently updated). All
-provenance lives in `GENERATION_INFO.toml`.
-`windows-bindgen` must remain compatible with the workspace `windows` crate.
-The generated APIs use the stable
-`Windows.AI.IsolationSession.Preview` namespace, including `IsoSessionOps`.
+The private WinMD itself is **not** committed (binary, frequently updated).
+All provenance lives in `GENERATION_INFO.toml`. Lifted bindings are generated
+from the restored package during the build and are not committed.
 
-To update lifted mode, run
-`src/mxc-sdk/build/isolation_session_bindings/Update-IsoSessionSdk.ps1` with the new
-package. The script validates the package, updates the version and SHA-256 pin,
-and regenerates `GENERATION_INFO.toml`; use
-`ISOLATION_SESSION_SDK_PACKAGE` until the exact package is published. Then
-build and test both inbox and lifted configurations. The lifted build validates
-the package hash, runtime-instance manifest, and native shim architecture and
-fails rather than falling back to inbox behavior.
+**Regeneration.** When the inbox OS-side API changes (or the consumed OS build
+moves), the committed bindings must be regenerated by a Microsoft engineer
+with access to the private WinMD. `windows-bindgen` X.Y generates code that
+targets the `windows` X.Y crate, so both inbox regeneration and lifted
+build-time generation must use a `windows-bindgen` release whose major.minor
+matches the workspace `windows` crate. The generated bindings and the Rust
+code in this repo use the `Windows.AI.IsolationSession.Preview` namespace (for
+example, `IsoSessionOps`).
+
+**`build.rs` version check.** `isolation_session_bindings/build.rs` reads
+the expected `windows` crate version from `GENERATION_INFO.toml`
+(`target_windows_crate`) and compares against the actual workspace
+`Cargo.lock`. A mismatch panics the build with a message naming both
+versions and stating that the bindings must be regenerated.
 
 ## v0.1 Scope
 
 **Implemented:**
 
 - Single-shot `provision → start → run → stop → deprovision` lifecycle,
-  gated by `--experimental`.
+  selected directly by the exact v0.9 contract.
 - `process.commandLine` (the script command, wrapped via `cmd.exe /c "..."`
   — the same pattern the LXC runner uses with `/bin/sh -c`).
 - `process.cwd` (working directory inside the session).
-- `process.env` (environment variables forwarded via the OS-side
+- `process.env` with `process.inheritDefaultEnv: true` (the entries are layered
+  over the agent user's default environment through the OS-side
   `IsoSessionProcessOptions`).
 - `process.timeout` (forwarded to the OS-side per-process timeout
   enforcement).
@@ -279,12 +240,15 @@ fails rather than falling back to inbox behavior.
 - `lifecycle.destroyOnExit: false` and `lifecycle.preservePolicy: true`. The
   in-proc API exposes no session-lifetime knob, so the backend cannot vary
   teardown: the one-shot path always stops the session and removes the agent
-  user before returning. `destroyOnExit: true` (the default) is therefore
+  user. `destroyOnExit: true` (the default) is therefore
   accepted because it matches actual behavior; `false` is refused. There is no
   filesystem or network policy to preserve (both are rejected outright), so
   `preservePolicy: true` is refused as meaningless here.
 - `ui` (any value). The backend has no UI-restriction primitive — see the
   cross-cutting policy honor matrix below.
+- `process.env` without `process.inheritDefaultEnv: true`, including `[]`.
+  Every process starts from the agent user's default environment, which the
+  backend cannot replace or empty.
 
 ## Cross-cutting policy honor matrix (one-shot)
 
@@ -295,23 +259,24 @@ the rationale for each disposition, and the error mapping live in
 | Field | one-shot disposition |
 |---|---|
 | `process.commandLine` | **honored** (required) |
-| `process.cwd` / `process.env` / `process.timeout` | **honored** |
+| `process.cwd` / `process.timeout` | **honored** |
+| `process.env` | **honored** with `process.inheritDefaultEnv: true`; rejected without it, including `[]` |
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
-| `network` — canonical unrestricted acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules, no proxy, default enforcement) | **required** |
-| `network` — anything else, including absent (defaults to the unenforceable `block`) | rejected |
+| `network` — directional all-allow (`egress.default`, `ingress.default`, and `ingress.hostLoopback` all `allow`, no rules) | **required** |
+| `network` — legacy fields, absent, empty, restrictive, mixed, rule-bearing, or proxy-bearing | rejected |
 | `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
 | `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
-| `experimental.isolation_session.user` | accepted, ignored — Entra is state-aware-only, and one-shot reads no backend config |
-| `experimental.isolation_session.{provision,start}` | accepted, ignored — per-phase config is state-aware-only |
+| `isolationSession` / one-shot `appId` | rejected as `malformed_request` — IsolationSession one-shot configuration uses only the stable top-level policy |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
 Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
 typed policy error code: the envelope carries `error.code = "backend_error"` with
-the reason in the message, unlike the state-aware surface which emits
-`policy_validation`.
+the reason in the message. On the state-aware surface, structurally
+representable backend policy failures emit `policy_validation`; fields excluded
+by an exact phase root fail earlier as `malformed_request`.
 
 **Why every supplied `ui` is refused.** The `ui` section states intent about the
 contained code's relationship to the *user's* environment, and was modelled on a
@@ -331,12 +296,11 @@ The full field-by-field table is in
 
 **Deferred to follow-up work:**
 
-- **TypeScript SDK exposure.** Adding a one-shot isolation-session config
-  surface to `SandboxSpawnOptions` so the SDK can spawn isolation-session
-  workloads programmatically **on the one-shot path**. Today the one-shot
-  backend is reachable only via JSON config (`spawnSandboxFromConfig` or
-  `wxc-exec` directly), and it takes no backend configuration; the
-  state-aware lifecycle *is* SDK-exposed.
+- **C# one-shot SDK support.** The Rust SDK already supports one-shot `run` and
+  `spawn_sandbox` behind the `isolation_session` feature. The Node JSON/config
+  path (`spawnSandboxFromConfig`) and
+  `wxc-exec` support the required network posture. The C# SDK still reaches
+  IsolationSession only through the state-aware lifecycle APIs.
 
 ## Test Plan
 
@@ -344,8 +308,8 @@ The full field-by-field table is in
 
 | Category | Location | What it verifies |
 |---|---|---|
-| Config parsing | `config_parser.rs` | The `"isolation_session"` containment value; a stray `experimental.isolation_session` payload is accepted and ignored |
-| Policy validation | `policy.rs` | Filesystem fields (`readwritePaths` / `readonlyPaths` / `deniedPaths`) are rejected at every phase; the network policy must be the canonical unrestricted-network acknowledgment (`defaultPolicy=allow` + `allowLocalNetwork=true`, no host rules or proxy) at provision, and any supplied network policy is rejected post-provision |
+| Config parsing | `config_parser.rs` | Directional network shape, closure, legacy-field removal, and phase-specific field rejection |
+| Policy validation | `policy.rs` | Filesystem/UI rejection; directional unrestricted form; empty/restrictive/mixed policy rejection; unchanged post-provision rules; `process.env` without `inheritDefaultEnv` rejection |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 
@@ -366,7 +330,7 @@ Two end-to-end configs live under `tests/configs/`:
   exit code 42 propagates to `ScriptResponse.exit_code`.
 
 A test runner at `tests/scripts/run_isolation_session_tests.ps1` invokes
-both configs via `wxc-exec.exe --experimental`, validates exit codes and
+both configs via `wxc-exec.exe`, validates exit codes and
 expected output substrings, and reports a pass/fail summary. Pattern
 follows the existing per-backend integration scripts (e.g.
 `run_microvm_tests.ps1`, `run_wslc_all_tests.ps1`).
@@ -404,37 +368,34 @@ The following were observed during VM testing and are accepted for v0.1.
 | Risk | Mitigation |
 |---|---|
 | Bindings tied to a specific OS API version | `GENERATION_INFO.toml` records the `windows-bindgen` version and target `windows` crate version; `build.rs` panics if the workspace `windows` crate drifts from the recorded `target_windows_crate`. Regeneration is a manual step performed by a Microsoft engineer with WinMD access |
-| OS API not present on older Windows builds | the IsolationSession feature is OS-side; the runner reports a hard, actionable error when the lifted activation payload or MSI runtime is missing or fails to bind — it never silently falls back to the inbox binaries. Feature-unavailable test exercises this on CI |
+| OS API not present on older Windows builds | the IsolationSession feature is OS-side; runner reports a clean error when the activation factory fails. Feature-unavailable test exercises this on CI |
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
-| One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path; the experimental flag indicates rough edges. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
-| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user before returning |
+| One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
+| Session lifetime is not caller-controllable | The in-proc API exposes no lifetime knob, so `lifecycle.destroyOnExit: false` cannot be honored. The one-shot path always stops the session and removes the agent user |
 
 ## Prerequisites
 
 **For end users:**
 
 - A Windows build with the IsolationSession feature enabled.
-- Inbox mode (`isolation_session`): nothing else; MXC activates the OS
-  runtime through normal WinRT activation.
-- Lifted mode (`isolation_session_lifted`): the version-matched runtime MSI
-  (`winget install Microsoft.AI.IsolationSession`). The build stages the SDK's
-  `IsoSessionApp.dll` shim and stamped `IsoSession.manifest` beside
-  `wxc-exec` / `mxc_ffi.dll`; MXC loads the shim's `DllGetActivationFactory`
-  by absolute path, and the shim binds the MSI runtime recorded in HKLM
-  `InstallDir`. A missing payload or runtime is a hard, actionable error — MXC
-  does **not** silently fall back to the inbox `System32` runtime.
-- WinRT/COM initialized as MTA (handled by `wxc-exec` and `regfree.rs`).
+- For inbox builds, the OS-side isolation-session host binary present in
+  `%SystemRoot%\System32\` (ships with Windows as part of the OS-side
+  service).
+- For lifted builds, the generated activation manifest and
+  `IsoSessionApp.dll` distributed beside the executable.
+- WinRT initialized as MTA (handled by `wxc-exec`).
 
 **For developers:**
 
 - Standard Rust toolchain.
-- `cargo build --features isolation_session` (inbox) or
-  `--features isolation_session_lifted` (lifted SDK + MSI) to build the
-  feature into `wxc-exec`. Default builds skip it — no impact on existing
-  workflows. Lifted builds restore the version- and hash-pinned SDK package
-  from NuGet.org, the standard NuGet cache, or
-  `ISOLATION_SESSION_SDK_PACKAGE`.
+- `cargo build --features isolation_session` to build against the inbox
+  runtime, or `cargo build --features isolation_session_lifted` to restore the
+  pinned package and stage the lifted runtime. Default builds enable neither
+  mode.
+- .NET SDK 10 for the lifted package restore. The normal restore uses the
+  configured `MxcDependencies` feed and an MXC-owned cache; use
+  `ISOLATION_SESSION_SDK_PACKAGE` only for an explicitly pre-fetched package.
 - A private WinMD only when **regenerating** bindings. As long as the OS
   API hasn't changed, no regen is needed.
 
@@ -442,14 +403,14 @@ The following were observed during VM testing and are accepted for v0.1.
 
 ```powershell
 # Minimal config: print the agent identity inside the session
-wxc-exec.exe --experimental hello.json
+wxc-exec.exe hello.json
 ```
 
 `hello.json`:
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "Hello",
   "containment": "isolation_session",
   "process": {
@@ -457,11 +418,8 @@ wxc-exec.exe --experimental hello.json
     "timeout": 30000
   },
   "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
-  },
-  "experimental": {
-    "isolation_session": {}
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   }
 }
 ```
