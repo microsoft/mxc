@@ -2,7 +2,7 @@
 
 This is the reference for **Windows OS support of the `processcontainer` and `isolation_session` backends**.
 
-## Windows 11 releases
+## Releases
 
 | Windows 11 release | Process Isolation | Session Isolation |
 |--------------------|-------------------|------------------|
