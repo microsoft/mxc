@@ -20,6 +20,7 @@ pub const MAX_VERBOSE_LOGGING_SIGNATURE_BYTES: usize = 16 * 1024 * 1024;
 /// Stable category for a known Learning Mode ETW provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum VerboseLoggingProvider {
     /// Microsoft-Windows-Kernel-General.
     KernelGeneral,
@@ -32,6 +33,7 @@ pub enum VerboseLoggingProvider {
 /// Closed reason describing how a decoder outcome was handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum VerboseLoggingOutcomeReason {
     /// The event produced a valid actionable denial.
     Actionable,
@@ -193,25 +195,14 @@ impl VerboseLoggingSummary {
             return;
         }
 
-        let actionable = signature.reason.is_actionable();
-        let can_evict_nonactionable = actionable
-            && self
-                .signatures
-                .iter()
-                .any(|group| !group.signature.reason.is_actionable());
-        if (self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS || *retained_bytes >= max_bytes)
-            && !can_evict_nonactionable
-        {
-            self.record_overflow(actionable);
-            return;
-        }
-
         let serialized_len = Self::serialized_signature_len(&signature);
         while self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
             || retained_bytes.saturating_add(serialized_len) > max_bytes
         {
-            if !actionable || !self.evict_one_nonactionable_group(Some(retained_bytes)) {
-                self.record_overflow(actionable);
+            if !signature.reason.is_actionable()
+                || !self.evict_one_nonactionable_group(Some(retained_bytes))
+            {
+                self.record_overflow(signature.reason.is_actionable());
                 return;
             }
         }
@@ -229,6 +220,25 @@ impl VerboseLoggingSummary {
         );
         self.total_occurrences = self.total_occurrences.saturating_add(1);
         *retained_bytes = retained_bytes.saturating_add(serialized_len);
+    }
+
+    /// Records an actionable outcome after the caller has established that
+    /// retention is saturated and every retained group is actionable.
+    pub(crate) fn record_actionable_after_saturation(
+        &mut self,
+        signature: VerboseLoggingSignature,
+    ) {
+        debug_assert!(signature.reason.is_actionable());
+        match self
+            .signatures
+            .binary_search_by(|group| group.signature.cmp(&signature))
+        {
+            Ok(index) => {
+                self.total_occurrences = self.total_occurrences.saturating_add(1);
+                self.signatures[index].count = self.signatures[index].count.saturating_add(1);
+            }
+            Err(_) => self.record_overflow(true),
+        }
     }
 
     /// Counts an outcome whose new signature could not be retained at a bound.
@@ -534,7 +544,7 @@ mod tests {
     #[test]
     fn saturated_actionable_groups_still_count_retained_repeats() {
         let mut summary = VerboseLoggingSummary::default();
-        let mut retained_bytes = MAX_VERBOSE_LOGGING_SIGNATURE_BYTES;
+        let retained_bytes = MAX_VERBOSE_LOGGING_SIGNATURE_BYTES;
         for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS as u16 {
             summary.signatures.push(VerboseLoggingAggregate {
                 signature: VerboseLoggingSignature {
@@ -553,29 +563,22 @@ mod tests {
         summary.total_occurrences = MAX_VERBOSE_LOGGING_GROUPS as u64;
 
         let retained = summary.signatures[0].signature.clone();
-        summary.record_with_byte_budget(
-            retained,
-            &mut retained_bytes,
-            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
-        );
-        summary.record_with_byte_budget(
-            VerboseLoggingSignature {
-                provider: VerboseLoggingProvider::LearningModeNetworkDecision,
-                provider_guid: "network".to_string(),
-                event_id: u16::MAX,
-                reason: VerboseLoggingOutcomeReason::Actionable,
-                pid: 0,
-                access_type: Some(crate::learning_mode_core::AccessType::Unknown),
-                resource_type: Some(crate::learning_mode_core::ResourceType::Network),
-                properties: vec![("RemoteAddress".to_string(), "203.0.113.10".to_string())],
-            },
-            &mut retained_bytes,
-            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
-        );
+        summary.record_actionable_after_saturation(retained);
+        summary.record_actionable_after_saturation(VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::LearningModeNetworkDecision,
+            provider_guid: "network".to_string(),
+            event_id: u16::MAX,
+            reason: VerboseLoggingOutcomeReason::Actionable,
+            pid: 0,
+            access_type: Some(crate::learning_mode_core::AccessType::Unknown),
+            resource_type: Some(crate::learning_mode_core::ResourceType::Network),
+            properties: vec![("RemoteAddress".to_string(), "203.0.113.10".to_string())],
+        });
 
         assert_eq!(summary.signatures[0].count, 2);
         assert_eq!(summary.overflow_occurrences, 1);
         assert_eq!(summary.actionable_overflow_occurrences, 1);
+        assert_eq!(retained_bytes, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES);
     }
 
     #[test]

@@ -149,6 +149,7 @@ struct Accumulator<'visitor> {
     verbose_logging: VerboseLoggingSummary,
     verbose_logging_signature_bytes: usize,
     skip_relog_header: bool,
+    verbose_logging_actionable_only_saturated: bool,
 }
 
 impl<'visitor> Accumulator<'visitor> {
@@ -173,6 +174,7 @@ impl<'visitor> Accumulator<'visitor> {
             verbose_logging: VerboseLoggingSummary::default(),
             verbose_logging_signature_bytes: 0,
             skip_relog_header: false,
+            verbose_logging_actionable_only_saturated: false,
         }
     }
 
@@ -204,6 +206,7 @@ impl<'visitor> Accumulator<'visitor> {
             verbose_logging: VerboseLoggingSummary::default(),
             verbose_logging_signature_bytes: 0,
             skip_relog_header: false,
+            verbose_logging_actionable_only_saturated: false,
         }
     }
 
@@ -228,6 +231,7 @@ impl<'visitor> Accumulator<'visitor> {
             verbose_logging: VerboseLoggingSummary::default(),
             verbose_logging_signature_bytes: 0,
             skip_relog_header: false,
+            verbose_logging_actionable_only_saturated: false,
         }
     }
 
@@ -391,11 +395,27 @@ impl<'visitor> Accumulator<'visitor> {
             resource_type,
             properties,
         };
+        if self.verbose_logging_actionable_only_saturated && reason.is_actionable() {
+            self.verbose_logging
+                .record_actionable_after_saturation(signature);
+            return;
+        }
+        let overflow_before = self.verbose_logging.overflow_occurrences;
         self.verbose_logging.record_with_byte_budget(
             signature,
             &mut self.verbose_logging_signature_bytes,
             MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
         );
+        if reason.is_actionable()
+            && self.verbose_logging.overflow_occurrences > overflow_before
+            && self
+                .verbose_logging
+                .signatures
+                .iter()
+                .all(|group| group.signature.reason.is_actionable())
+        {
+            self.verbose_logging_actionable_only_saturated = true;
+        }
     }
 
     fn event_in_scope(&self, pid: u32, filetime: u64) -> bool {
