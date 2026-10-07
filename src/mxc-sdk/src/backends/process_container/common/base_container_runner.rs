@@ -14,7 +14,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::learning_mode_core::DenialAnalyzer;
-use crate::learning_mode_windows::{EtlDenialAnalyzer, LearningModeError, LEARNING_MODE_API_SET};
+use crate::learning_mode_windows::{EtlDenialAnalyzer, LearningModeApi, LearningModeError};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
     HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -315,14 +315,23 @@ impl BaseContainerRunner {
         *PRESENT.get_or_init(|| is_api_set_implemented(SECURITY_ENVIRONMENT_API_SET))
     }
 
-    /// Whether the native PSEC plus Learning Mode API set is available.
+    /// Whether native capture has both PSEC and a complete Learning Mode ABI.
     pub fn is_native_capture_available() -> bool {
         #[cfg(test)]
         if let Ok(forced) = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE") {
             return forced == "1";
         }
 
-        Self::is_base_container_api_present() && is_api_set_implemented(LEARNING_MODE_API_SET)
+        Self::native_capture_available_with(Self::is_base_container_api_present(), || {
+            LearningModeApi::load().is_ok()
+        })
+    }
+
+    fn native_capture_available_with(
+        base_container_available: bool,
+        learning_mode_abi_available: impl FnOnce() -> bool,
+    ) -> bool {
+        base_container_available && learning_mode_abi_available()
     }
 
     /// Whether PSEC can enforce `filesystem.deniedPaths`.
@@ -2102,6 +2111,22 @@ mod tests {
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
     use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn native_capture_probe_requires_base_container_and_complete_learning_mode_abi() {
+        assert!(!BaseContainerRunner::native_capture_available_with(
+            false,
+            || panic!("Learning Mode must not be probed when PSEC is unavailable")
+        ));
+        assert!(!BaseContainerRunner::native_capture_available_with(
+            true,
+            || false
+        ));
+        assert!(BaseContainerRunner::native_capture_available_with(
+            true,
+            || true
+        ));
+    }
 
     #[test]
     fn basecontainer_network_audit_records_proxyless_proxy_and_setup_failure() {
