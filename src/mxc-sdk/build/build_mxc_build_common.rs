@@ -36,9 +36,8 @@ pub mod isolation_session_sdk {
         "b387c9d11808bf8864d3d7e4d6924f79bdcd6e7c4c54c4e2e49ab0e3525b3d2e";
     pub const PACKAGE_PATH_ENV: &str = "ISOLATION_SESSION_SDK_PACKAGE";
 
-    const RESTORE_PROJECT: &str =
-        "build/isolation_session_bindings/IsolationSessionSdk.Restore.csproj";
-    const NUGET_CONFIG: &str = "build/isolation_session_bindings/NuGet.Config";
+    const RESTORE_PROJECT: &str = "IsolationSessionSdk.Restore.csproj";
+    const NUGET_CONFIG: &str = "NuGet.Config";
     const APP_DLL: &str = "IsoSessionApp.dll";
     const RUNTIME_MANIFEST: &str = "IsoSession.manifest";
 
@@ -143,8 +142,9 @@ pub mod isolation_session_sdk {
             std::env::var("CARGO_MANIFEST_DIR")
                 .map_err(|e| format!("CARGO_MANIFEST_DIR is not set: {e}"))?,
         );
-        let restore_project = manifest_dir.join(RESTORE_PROJECT);
-        let nuget_config = manifest_dir.join(NUGET_CONFIG);
+        let restore_inputs = restore_inputs_dir(&manifest_dir)?;
+        let restore_project = restore_inputs.join(RESTORE_PROJECT);
+        let nuget_config = restore_inputs.join(NUGET_CONFIG);
         let cache_root = target_profile_dir()?.join(".mxc-nuget");
         let packages_root = cache_root.join("packages");
         let restore_output = PathBuf::from(
@@ -196,6 +196,29 @@ pub mod isolation_session_sdk {
             output.status,
             String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+
+    fn restore_inputs_dir(manifest_dir: &Path) -> Result<PathBuf, String> {
+        for ancestor in manifest_dir.ancestors() {
+            for relative in [
+                Path::new("build").join("isolation_session_bindings"),
+                Path::new("mxc-sdk")
+                    .join("build")
+                    .join("isolation_session_bindings"),
+            ] {
+                let candidate = ancestor.join(relative);
+                if candidate.join(RESTORE_PROJECT).is_file()
+                    && candidate.join(NUGET_CONFIG).is_file()
+                {
+                    return Ok(candidate);
+                }
+            }
+        }
+
+        Err(format!(
+            "cannot locate the shared IsolationSession NuGet restore inputs from {}",
+            manifest_dir.display()
         ))
     }
 

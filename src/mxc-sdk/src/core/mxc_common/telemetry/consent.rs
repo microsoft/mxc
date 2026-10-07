@@ -1578,7 +1578,7 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let waker = std::task::Waker::from(std::sync::Arc::new(SignalWaker(sender)));
         let mut context = std::task::Context::from_waker(&waker);
-        let mut task = std::pin::pin!(BlockingTask::spawn(|| -> () { panic!("worker panic") }));
+        let mut task = std::pin::pin!(BlockingTask::spawn(|| panic!("worker panic")));
 
         let propagated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if std::future::Future::poll(task.as_mut(), &mut context).is_pending() {
