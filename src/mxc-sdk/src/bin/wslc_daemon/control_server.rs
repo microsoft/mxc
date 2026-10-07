@@ -83,6 +83,15 @@ const CANCEL_LANE_SLOTS: usize = MAX_CONCURRENT_EXECS;
 /// concurrency slot — indefinitely.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Deadline for a cancel-lane client to send its first frame, so a stalled
+/// connection cannot hold a cancellation slot for the general one.
+const LANE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Upper bound on a cancel-lane request frame, leaving room above the 304
+/// bytes a worst-case `cancel_exec` encodes to with both identifiers at
+/// [`MAX_EXEC_ID_BYTES`].
+const LANE_MAX_FRAME_BYTES: usize = 1024;
+
 /// Bound on how long shutdown waits for in-flight handlers to finish before
 /// abandoning them, so a wedged handler cannot block daemon exit forever.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -476,7 +485,8 @@ where
 ///
 /// `cancel_only` marks a connection admitted into the cancellation lane because
 /// the general client bound was reached; anything other than a
-/// [`DaemonRequest::CancelExec`] is refused there.
+/// [`DaemonRequest::CancelExec`] is refused there, and its request frame is held
+/// to a lane-sized bound and deadline.
 async fn handle_client<S>(
     mut pipe: S,
     session: SessionHandle,
@@ -488,7 +498,12 @@ where
 {
     // Bound the wait for the request frame so a client that connects and then
     // stalls cannot pin this handler (and its concurrency slot) indefinitely.
-    let request: DaemonRequest = timeout(FIRST_FRAME_TIMEOUT, read_frame(&mut pipe))
+    let (deadline, max_frame) = if cancel_only {
+        (LANE_FIRST_FRAME_TIMEOUT, LANE_MAX_FRAME_BYTES)
+    } else {
+        (FIRST_FRAME_TIMEOUT, MAX_FRAME_SIZE)
+    };
+    let request: DaemonRequest = timeout(deadline, read_frame_capped(&mut pipe, max_frame))
         .await
         .context("timed out waiting for the client's first frame")??;
     if cancel_only && !matches!(request, DaemonRequest::CancelExec(_)) {
@@ -730,12 +745,22 @@ fn worker_err_response(e: WorkerError) -> DaemonResponse {
 }
 
 /// Read one length-prefixed frame and deserialise it.
+#[cfg(test)]
 async fn read_frame<S: AsyncRead + Unpin, T: DeserializeOwned>(pipe: &mut S) -> Result<T> {
+    read_frame_capped(pipe, MAX_FRAME_SIZE).await
+}
+
+/// Read one length-prefixed frame, refusing a declared length above `max`
+/// before allocating for it.
+async fn read_frame_capped<S: AsyncRead + Unpin, T: DeserializeOwned>(
+    pipe: &mut S,
+    max: usize,
+) -> Result<T> {
     let mut len_buf = [0u8; 4];
     pipe.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_SIZE {
-        bail!("incoming frame length {len} exceeds maximum {MAX_FRAME_SIZE}");
+    if len > max {
+        bail!("incoming frame length {len} exceeds maximum {max}");
     }
     let mut body = vec![0u8; len];
     pipe.read_exact(&mut body).await?;
@@ -1030,6 +1055,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancellation_survives_a_lane_saturated_by_stalled_connections() {
+        // Well past the lane's deadline and well inside the general one, so
+        // only a lane-sized deadline gets a cancellation through in time.
+        const CANCEL_BUDGET: Duration = Duration::from_secs(10);
+
+        let session = spawn().unwrap();
+        let cancel_limiter = Arc::new(Semaphore::new(CANCEL_LANE_SLOTS));
+        let mut clients = JoinSet::new();
+
+        // Every lane slot taken by a connection that sends a length prefix and
+        // then nothing, so each one is mid-frame rather than idle.
+        let mut stalled = Vec::new();
+        for _ in 0..CANCEL_LANE_SLOTS {
+            let mut client =
+                connection_past_general_capacity(&session, &mut clients, &cancel_limiter).await;
+            client.write_all(&300u32.to_le_bytes()).await.unwrap();
+            stalled.push(client);
+        }
+
+        let started = std::time::Instant::now();
+        let mut cancelled = false;
+        while started.elapsed() < CANCEL_BUDGET {
+            let mut client =
+                connection_past_general_capacity(&session, &mut clients, &cancel_limiter).await;
+            if write_frame(
+                &mut client,
+                &DaemonRequest::CancelExec(CancelExecConfig {
+                    exec_id: "stuck".to_string(),
+                    run_token: "stuck-run".to_string(),
+                }),
+            )
+            .await
+            .is_ok()
+            {
+                if let Ok(DaemonResponse::Ok) = read_frame::<_, DaemonResponse>(&mut client).await {
+                    cancelled = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            cancelled,
+            "a cancellation behind stalled lane connections took longer than \
+             {CANCEL_BUDGET:?}"
+        );
+        clients.shutdown().await;
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_connection_past_general_capacity_refuses_a_non_cancellation() {
         let session = spawn().unwrap();
         let cancel_limiter = Arc::new(Semaphore::new(1));
@@ -1087,6 +1163,89 @@ mod tests {
         let response: DaemonResponse = read_frame(&mut client).await.unwrap();
         assert_eq!(response, DaemonResponse::Ok);
         clients.shutdown().await;
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stalled_lane_connection_gives_up_its_slot_quickly() {
+        let session = spawn().unwrap();
+        let (_client, server) = duplex(64 * 1024);
+
+        let started = std::time::Instant::now();
+        let outcome =
+            handle_client(server, session.clone(), Arc::new(Semaphore::new(0)), true).await;
+        let waited = started.elapsed();
+
+        assert!(
+            outcome.is_err(),
+            "a client that sends nothing must not be serviced"
+        );
+        assert!(
+            waited < FIRST_FRAME_TIMEOUT,
+            "a stalled lane connection held its slot for {waited:?}, the general deadline"
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_oversized_lane_frame_is_refused_before_it_is_allocated() {
+        // Trivial for the general bound, so only a lane-sized bound refuses it.
+        const MODEST_FRAME_BYTES: usize = 64 * 1024;
+
+        let session = spawn().unwrap();
+        let (mut client, server) = duplex(64 * 1024);
+
+        // A length prefix alone: a lane that accepted this would wait for a
+        // body that never comes.
+        client
+            .write_all(&(MODEST_FRAME_BYTES as u32).to_le_bytes())
+            .await
+            .unwrap();
+
+        let outcome =
+            handle_client(server, session.clone(), Arc::new(Semaphore::new(0)), true).await;
+
+        let message = outcome
+            .expect_err("an oversized lane frame must be refused")
+            .to_string();
+        assert!(
+            message.contains("exceeds maximum"),
+            "a {MODEST_FRAME_BYTES}-byte frame must exceed the lane's bound of \
+             {LANE_MAX_FRAME_BYTES}, got {message:?}"
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_general_connection_keeps_the_full_frame_bound() {
+        let session = spawn().unwrap();
+        let (mut client, server) = duplex(64 * 1024);
+
+        // Serviced concurrently so the body below cannot outgrow the pipe
+        // buffer with nothing draining it.
+        let handler = tokio::spawn(handle_client(
+            server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        ));
+
+        let past_lane = LANE_MAX_FRAME_BYTES * 2;
+        client
+            .write_all(&(past_lane as u32).to_le_bytes())
+            .await
+            .unwrap();
+        client.write_all(&vec![b' '; past_lane]).await.unwrap();
+
+        let message = handler
+            .await
+            .unwrap()
+            .expect_err("whitespace is not a request")
+            .to_string();
+        assert!(
+            !message.contains("exceeds maximum"),
+            "a general connection must not be held to the lane's bound, got {message:?}"
+        );
         session.shutdown().await.unwrap();
     }
 

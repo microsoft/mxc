@@ -170,7 +170,9 @@ Up to eight additional control connections can be serviced while every exec slot
 is occupied. Beyond that, a connection is admitted only to cancel: cancellation
 is the one request that never waits on the worker, and the only way to end a run
 with no timeout, so it keeps capacity of its own that lifecycle work cannot
-consume.
+consume. A connection on that lane must send its request within two seconds and
+in under 1 KB, so one that connects and stalls cannot hold a cancellation slot
+for the general deadline.
 
 `start` / `stop` / `deprovision` naming a container with an exec in flight
 **wait** for that run, because deleting the container would free a handle the
