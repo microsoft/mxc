@@ -593,11 +593,22 @@ The complete request in section 4.1 is an example of this model:
 The integration will reuse the existing WSLC cache and registry pattern:
 
 1. Use the image from the local cache when it is already available.
-2. Otherwise, resolve the registry host and check a shared backend-neutral MXC
+2. On a cache miss, reject normal execution when the request uses
+   deny-by-default egress. MXC will not perform host registry traffic on behalf
+   of that request before the VM exists.
+3. Otherwise, resolve the registry host and check a shared backend-neutral MXC
    administrative registry policy.
-3. When the registry is permitted, invoke the signed NVX image tool to pull
+4. When the registry is permitted, invoke the signed NVX image tool to pull
    the image and resolve its immutable digest.
-4. Convert and cache the NVX-compatible artifact.
+5. Convert and cache the NVX-compatible artifact.
+
+An administrator or deployment pipeline can warm the same cache through a
+separate explicit MXC host-setup operation. That operation will invoke the
+signed NVX image tool, enforce the machine registry policy, and report the
+resolved digest and converted-artifact identity. It will not create a sandbox
+or inherit a sandbox request's workload network policy. After prefetch,
+deny-by-default requests can use the cached artifact without host network
+traffic.
 
 Image references without an explicit registry will resolve against Docker Hub.
 Explicit registry references will be permitted only when the registry is
@@ -735,7 +746,7 @@ executor is not an NVX developer-facing surface.
 | Packaging | Rust crate, npm, and NuGet installation; single ownership of `mxc_ffi.dll` in npm and NuGet; npm runtime-package resolution and native directory registration; NuGet `buildTransitive` recursive copy into `nvx/**` for both build and publish outputs; rejection of unsupported RID/package combinations; inclusion of the NVX implementation DLL, OpenVMM, image tool, kernel, initramfs, source manifest, Alpine package inventory, licences, and notices; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that matching Linux and Alpine source artifacts are published and referenced |
 | Signing | Authenticate the runtime manifest, validate the Authenticode chain and Microsoft signer for signed NVX binaries, verify all remaining file checksums, and reject untrusted runtime directories |
 | Host | Real execution on Windows x64 with WHP installed and enabled; ARM remains planned |
-| Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, and generated SDK types |
+| Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, generated SDK types, cache-miss rejection without host traffic for deny-by-default egress, explicit prefetch followed by offline cache use, and permitted execution-time pull |
 
 Negative filesystem and network tests must include a working positive control
 so infrastructure failures are not mistaken for policy enforcement.
@@ -777,6 +788,8 @@ so infrastructure failures are not mistaken for policy enforcement.
 | --- | --- |
 | Input identity | Resolve the OCI reference to an immutable digest and record the registry or source |
 | Registry authorisation | MXC validates the registry against a shared backend-neutral administrative allowlist before invoking the NVX image tool |
+| Execution-time host fetch | A cache miss under deny-by-default request egress is rejected without registry traffic; automatic pull is available only when the request permits egress |
+| Explicit prefetch | A separate MXC host-setup operation pulls and converts the image under the machine registry policy without creating a sandbox, then stores it in the same runtime cache |
 | Redirects | The image tool follows a redirect to another registry host only when that host is also permitted |
 | Credentials | No private-registry credentials in the initial contract; future credentials must come from an approved host provider and remain out of requests, command lines, logs, and telemetry |
 | Conversion timing | Pull and convert before VM start; reuse a compatible cached conversion when available |
