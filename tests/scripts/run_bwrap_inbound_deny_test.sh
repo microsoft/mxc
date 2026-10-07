@@ -141,7 +141,7 @@ cat >"$CONFIG" <<'CONFIG_JSON'
 CONFIG_JSON
 
 echo "Running Bubblewrap inbound default-deny test..."
-"$LXC_EXEC" --experimental --allow-testing-features "$CONFIG" >"$WORK_DIR/run.out" 2>&1 &
+"$LXC_EXEC" --experimental "$CONFIG" >"$WORK_DIR/run.out" 2>&1 &
 RUN_PID=$!
 
 SANDBOX_NETNS=""

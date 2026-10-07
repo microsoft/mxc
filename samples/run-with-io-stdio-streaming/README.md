@@ -5,6 +5,8 @@
 Spawns a live process in a transient container using the host's native
 process-isolation backend. It forwards stdout and stderr as they arrive. Both
 streams are drained concurrently before the process handle is released.
+The Node sample demonstrates the `Readable.on('data', ...)` callback exposed by
+`MxcProcess.standardOutput` and `standardError`.
 
 ## Run
 

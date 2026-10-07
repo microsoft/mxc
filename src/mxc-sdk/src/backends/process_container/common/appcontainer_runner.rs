@@ -39,7 +39,8 @@ use crate::mxc_common::audit::{
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    ContainmentBackend, ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse,
+    ContainerPolicy, ContainmentBackend, ExecutionRequest, FailurePhase, ProxyAddress,
+    SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -67,6 +68,7 @@ use crate::process_container_common::network_policy_helpers::{
     add_default_network_capabilities, allows_network_egress,
 };
 use crate::process_container_common::process_mitigation;
+use crate::process_container_common::proxy_coordinator::ProxyCoordinator;
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
     "captureDenials requires either the native BaseContainer learning-mode APIs or an \
@@ -477,8 +479,7 @@ pub(crate) fn derive_sid_string(profile_name: &str) -> Result<String, WxcError> 
 /// instead.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum FilesystemMode {
-    /// Configure the AppContainer's BFS policy via `bfscfg.exe` (default
-    /// historical behavior).
+    /// Configure the AppContainer's BFS policy via `bfscfg.exe` (default).
     #[default]
     Bfs,
     /// Skip BFS setup; the caller has handled filesystem policy via host
@@ -627,9 +628,9 @@ pub struct AppContainerScriptRunner {
     denied_paths_enforced_externally: bool,
     /// Optional pre-derived SID string supplied by the dispatcher.
     ///
-    /// When `Some`, the runner uses this value for the firewall
-    /// principal-id and any other capability-string lookups instead of
-    /// re-running `ConvertSidToStringSidW` on its owned `PSID`. The
+    /// When `Some`, the runner uses this value for proxy setup and
+    /// diagnostics instead of re-running `ConvertSidToStringSidW` on its
+    /// owned `PSID`. The
     /// `PSID` itself is still derived by [`create_app_container_sid`]
     /// at run time because `windows-rs` does not expose a safe
     /// "string → PSID" conversion with the same ownership semantics as
@@ -1328,7 +1329,7 @@ impl AppContainerScriptRunner {
         Ok(())
     }
 
-    /// Return the SID string for firewall rule association.
+    /// Return the SID string for proxy setup and diagnostics.
     fn get_principal_id(&self) -> String {
         // Prefer the dispatcher-supplied string when present — saves a
         // `ConvertSidToStringSidW` round-trip (the dispatcher has
@@ -1503,12 +1504,38 @@ impl Drop for AppContainerScriptRunner {
 // Shared setup/teardown + streaming (handle-based) execution
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Per-run resources (firewall + filesystem policy) whose lifetime is tied to
+/// Per-run resources (proxy + filesystem policy) whose lifetime is tied to
 /// the sandboxed child. Created by [`AppContainerScriptRunner::prepare`] and
 /// torn down by [`AppContainerScriptRunner::teardown`] after the child exits.
 struct Prepared {
-    network_manager: crate::process_container_common::network_manager::NetworkManager,
+    proxy_coordinator: ProxyCoordinator,
     bfs_manager: crate::process_container_common::filesystem_bfs::FileSystemBfsManager,
+}
+
+fn log_app_network_policy_audit(
+    policy: &ContainerPolicy,
+    identity: &str,
+    tier: &str,
+    proxy_address: Option<&ProxyAddress>,
+    network_result: &Result<(), WxcError>,
+    logger: &mut Logger,
+) {
+    if logger.has_diagnostic_sink() {
+        let status = if network_result.is_ok() {
+            OperationStatus::Success
+        } else {
+            OperationStatus::Failure
+        };
+        let record =
+            crate::process_container_common::network_policy_helpers::network_policy_applied_record(
+                policy,
+                sanitize_identity(identity),
+                tier,
+                proxy_address,
+                status,
+            );
+        logger.log_audit_event(&record);
+    }
 }
 
 impl AppContainerScriptRunner {
@@ -1521,7 +1548,6 @@ impl AppContainerScriptRunner {
         logger: &mut Logger,
     ) -> Result<Prepared, ScriptResponse> {
         use crate::process_container_common::filesystem_bfs::FileSystemBfsManager;
-        use crate::process_container_common::network_manager::NetworkManager;
 
         if request.experimental_enabled {
             if let Some(ref test) = request.test_feature {
@@ -1575,58 +1601,35 @@ impl AppContainerScriptRunner {
             );
         }
 
-        let mut network_manager = NetworkManager::new();
-        let network_result = network_manager.start(
-            &principal_id,
-            &self.app_container_name,
+        let mut proxy_coordinator = ProxyCoordinator::new();
+        let network_result = if request.policy.network_proxy.is_enabled() {
+            proxy_coordinator.start(
+                &request.policy.network_proxy,
+                &self.app_container_name,
+                &principal_id,
+                self.app_container_sid,
+                logger,
+            )
+        } else {
+            Ok(())
+        };
+        log_app_network_policy_audit(
             &request.policy,
-            self.app_container_sid,
+            &self.app_container_name,
+            self.tier_str(),
+            proxy_coordinator.address(),
+            &network_result,
             logger,
         );
-        if logger.has_diagnostic_sink() {
-            let firewall_applied = network_manager.firewall_applied();
-            let plan = NetworkManager::describe_policy(&request.policy);
-            let firewall_ok = !plan.rules_will_be_installed
-                || matches!(network_manager.firewall_apply_ok(), Some(true));
-            let status = if network_result.is_ok() && firewall_ok {
-                OperationStatus::Success
-            } else {
-                OperationStatus::Failure
-            };
-            let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
-                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
-                .str("identity", sanitize_identity(&self.app_container_name))
-                .str("tier", self.tier_str())
-                .str(
-                    "enforcement_mode",
-                    request.policy.network_enforcement_mode.as_str(),
-                )
-                .str(
-                    "default_policy",
-                    request.policy.default_network_policy.as_str(),
-                )
-                .u64(
-                    "proxy_port",
-                    network_manager
-                        .proxy_address()
-                        .map(|address| address.port as u64)
-                        .unwrap_or(0),
-                )
-                .u64(
-                    "firewall_rules_created",
-                    network_manager.rule_count() as u64,
-                )
-                .bool("firewall_applied", firewall_applied)
-                .str("status", status.as_str());
-            logger.log_audit_event(&record);
-        }
         if crate::mxc_common::telemetry::is_active() {
             crate::mxc_common::telemetry::log_network_policy_applied(
                 sanitize_identity(&self.app_container_name),
-                request.policy.network_enforcement_mode.as_str(),
-                request.policy.default_network_policy.as_str(),
-                network_manager
-                    .proxy_address()
+                crate::process_container_common::network_policy_helpers::CAPABILITIES_ENFORCEMENT_MODE,
+                crate::process_container_common::network_policy_helpers::audit_egress_default(
+                    &request.policy,
+                ),
+                proxy_coordinator
+                    .address()
                     .map(|address| address.port as u64)
                     .unwrap_or(0),
             );
@@ -1634,7 +1637,7 @@ impl AppContainerScriptRunner {
 
         match network_result {
             Ok(()) => {
-                self.proxy_address = network_manager.proxy_address().cloned();
+                self.proxy_address = proxy_coordinator.address().cloned();
             }
             Err(err) => {
                 return Err(ScriptResponse::error(&err.to_string()));
@@ -1642,15 +1645,14 @@ impl AppContainerScriptRunner {
         }
 
         Ok(Prepared {
-            network_manager,
+            proxy_coordinator,
             bfs_manager,
         })
     }
 
-    /// Tear down the per-run firewall and filesystem policy. Idempotent at the
-    /// manager level; called once after the child exits.
+    /// Tear down the per-run proxy and filesystem policy after the child exits.
     fn teardown(&self, prepared: &mut Prepared, preserve_policy: bool, logger: &mut Logger) {
-        let network = prepared.network_manager.stop_all(!preserve_policy, logger);
+        let proxy_stopped = prepared.proxy_coordinator.stop(logger);
         let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && prepared.bfs_manager.configured()
             && !preserve_policy;
@@ -1659,22 +1661,18 @@ impl AppContainerScriptRunner {
         } else {
             false
         };
-        let (status, skip_reason) = appcontainer_teardown_status_with_bfs(
-            preserve_policy,
-            network.firewall_removal_ok,
-            bfs_requested,
-            bfs_removed,
-        );
+        let (status, skip_reason) =
+            appcontainer_teardown_status_with_bfs(preserve_policy, bfs_requested, bfs_removed);
         if logger.has_diagnostic_sink() {
             let mut record = AuditEvent::new(AuditEventName::SandboxTornDown)
                 .str("backend", ContainmentBackend::ProcessContainer.wire_name())
                 .str("identity", sanitize_identity(&self.app_container_name))
                 .str("tier", self.tier_str())
                 .str("status", status.as_str())
-                .u64("firewall_rules_removed", network.rules_removed as u64)
-                .bool("firewall_removal_ok", network.firewall_removal_ok)
+                .u64("firewall_rules_removed", 0)
+                .bool("firewall_removal_ok", true)
                 .bool("bfs_removed", bfs_removed)
-                .bool("proxy_stopped", network.proxy_stopped)
+                .bool("proxy_stopped", proxy_stopped)
                 .bool("preserve_policy", preserve_policy)
                 .bool("container_released", false);
             if let Some(reason) = skip_reason {
@@ -1686,11 +1684,7 @@ impl AppContainerScriptRunner {
             crate::mxc_common::telemetry::log_sandbox_torn_down(
                 sanitize_identity(&self.app_container_name),
                 status.as_str(),
-                &format_released_resources(
-                    network.rules_removed,
-                    bfs_removed,
-                    network.proxy_stopped,
-                ),
+                &format_released_resources(bfs_removed, proxy_stopped),
             );
         }
     }
@@ -1700,20 +1694,15 @@ impl AppContainerScriptRunner {
     }
 }
 
-fn format_released_resources(
-    firewall_rules_removed: usize,
-    bfs_removed: bool,
-    proxy_stopped: bool,
-) -> String {
+fn format_released_resources(bfs_removed: bool, proxy_stopped: bool) -> String {
     format!(
-        "firewall_rules_removed={firewall_rules_removed},bfs_removed={bfs_removed},\
+        "firewall_rules_removed=0,bfs_removed={bfs_removed},\
          proxy_stopped={proxy_stopped},container_released=false"
     )
 }
 
 fn appcontainer_teardown_status_with_bfs(
     preserve_policy: bool,
-    firewall_removal_ok: bool,
     bfs_requested: bool,
     bfs_removed: bool,
 ) -> (TeardownStatus, Option<TeardownSkipReason>) {
@@ -1723,7 +1712,7 @@ fn appcontainer_teardown_status_with_bfs(
             Some(TeardownSkipReason::PreservePolicy),
         );
     }
-    if firewall_removal_ok && (!bfs_requested || bfs_removed) {
+    if !bfs_requested || bfs_removed {
         (TeardownStatus::Success, None)
     } else {
         (TeardownStatus::Failure, None)
@@ -1803,11 +1792,6 @@ impl SandboxBackend for AppContainerScriptRunner {
                 crate::mxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
         }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::rejected(
-                crate::mxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
-        }
         Ok(())
     }
 
@@ -1863,7 +1847,7 @@ impl SandboxBackend for AppContainerScriptRunner {
 
 /// A running AppContainer-sandboxed process exposed as a [`SandboxProcess`].
 /// Owns the process/job handles, the parent-side pipes, and the per-run
-/// firewall/filesystem policy, which it tears down once the child exits.
+/// proxy/filesystem policy, which it tears down once the child exits.
 struct AppContainerSandboxProcess {
     process: SendOwnedHandle,
     _thread: SendOwnedHandle,
@@ -1908,17 +1892,9 @@ struct AppContainerSandboxProcess {
 // and this handle is owned exclusively by the caller (not shared), so it is
 // only ever touched from one thread at a time.
 //
-// The one historically thread-affine field was the `NetworkManager` inside
-// `prepared`: it used to cache an STA `INetFwPolicy2` interface plus its
-// `CoInitializeEx` state and reuse them at teardown, which is unsound when
-// `wait()`/`kill()`/`Drop` run on a different thread (e.g. a tokio
-// `spawn_blocking` worker) than `spawn`. That no longer happens: each firewall
-// apply/remove is apartment-self-contained (it opens its own COM apartment,
-// creates a fresh interface, and uninitializes — all on whichever thread runs
-// it), so no COM interface or apartment state is moved across threads. The only
-// remaining OS state the manager keeps is the process-global Winsock refcount,
-// which is thread-agnostic. Moving this handle across threads is therefore
-// sound.
+// `ProxyCoordinator` owns only process-global handles and paths; no
+// thread-affine COM interface or apartment state is retained.
+// Moving this handle across threads is therefore sound.
 unsafe impl Send for AppContainerSandboxProcess {}
 
 impl AppContainerSandboxProcess {
@@ -2016,10 +1992,7 @@ impl AppContainerSandboxProcess {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
-        let network = self
-            .prepared
-            .network_manager
-            .stop_all(!self.preserve_policy, &mut self.audit_logger);
+        let proxy_stopped = self.prepared.proxy_coordinator.stop(&mut self.audit_logger);
         let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && self.prepared.bfs_manager.configured()
             && !self.preserve_policy;
@@ -2056,12 +2029,8 @@ impl AppContainerSandboxProcess {
             Ok(())
         };
         let result = result.map_err(|error| error.to_string());
-        let (mut status, skip_reason) = appcontainer_teardown_status_with_bfs(
-            self.preserve_policy,
-            network.firewall_removal_ok,
-            bfs_requested,
-            bfs_removed,
-        );
+        let (mut status, skip_reason) =
+            appcontainer_teardown_status_with_bfs(self.preserve_policy, bfs_requested, bfs_removed);
         if result.is_err() {
             status = TeardownStatus::Failure;
         }
@@ -2069,10 +2038,10 @@ impl AppContainerSandboxProcess {
             let mut record = self
                 .audit(AuditEventName::SandboxTornDown)
                 .str("status", status.as_str())
-                .u64("firewall_rules_removed", network.rules_removed as u64)
-                .bool("firewall_removal_ok", network.firewall_removal_ok)
+                .u64("firewall_rules_removed", 0)
+                .bool("firewall_removal_ok", true)
                 .bool("bfs_removed", bfs_removed)
-                .bool("proxy_stopped", network.proxy_stopped)
+                .bool("proxy_stopped", proxy_stopped)
                 .bool("preserve_policy", self.preserve_policy)
                 .bool("container_released", false);
             if let Some(reason) = skip_reason {
@@ -2084,11 +2053,7 @@ impl AppContainerSandboxProcess {
             crate::mxc_common::telemetry::log_sandbox_torn_down(
                 &self.identity,
                 status.as_str(),
-                &format_released_resources(
-                    network.rules_removed,
-                    bfs_removed,
-                    network.proxy_stopped,
-                ),
+                &format_released_resources(bfs_removed, proxy_stopped),
             );
         }
         self.teardown_result = Some(result.clone());
@@ -2255,10 +2220,10 @@ impl SandboxProcess for AppContainerSandboxProcess {
         };
 
         // Tree-kill the job so any backgrounded descendant dies *before*
-        // `run_teardown()` removes the firewall / BFS enforcement (keyed to the
-        // shared AppContainer package SID) — upholding the same invariant as
-        // `Drop`. The foreground child has already exited on the success path; on
-        // a timeout or wait failure this also terminates it. Then reap the root
+        // `run_teardown()` removes BFS enforcement (keyed to the shared
+        // AppContainer package SID). The foreground child has already exited
+        // on the success path; on a timeout or wait failure this terminates it.
+        // Then reap the root
         // (immediate once it has exited) before releasing the pipe drains — and
         // killing the tree closes the descendant's pipe write-ends, so the drains
         // can finish.
@@ -2281,7 +2246,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
 
 impl Drop for AppContainerSandboxProcess {
     fn drop(&mut self) {
-        // Kill the tree and reap before tearing down firewall/filesystem
+        // Kill the tree and reap before tearing down filesystem
         // policy, so an abandoned-but-running sandbox cannot outlive its
         // enforcement (or leak as an orphan). `kill()` terminates the job.
         if let Err(error) = self.kill() {
@@ -2307,45 +2272,110 @@ mod tests {
     use crate::mxc_common::audit::{TeardownSkipReason, TeardownStatus};
 
     #[test]
+    fn appcontainer_network_audit_records_proxyless_proxy_and_start_failure() {
+        use super::*;
+        use crate::mxc_common::models::{NetworkAction, NetworkEgressPolicy};
+
+        for (default, configured_proxy, start_failed, expected_default, expected_port, status) in [
+            (NetworkAction::Deny, false, false, "block", 0, "success"),
+            (NetworkAction::Allow, false, false, "allow", 0, "success"),
+            (NetworkAction::Deny, true, false, "block", 8080, "success"),
+            (NetworkAction::Deny, true, true, "block", 0, "failure"),
+        ] {
+            let mut policy = ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    default,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            if configured_proxy {
+                policy.network_proxy.address =
+                    Some(ProxyAddress::new("127.0.0.1".to_string(), 8080));
+            }
+            let active_address = if start_failed {
+                None
+            } else {
+                policy.network_proxy.address.as_ref()
+            };
+            let result = if start_failed {
+                Err(WxcError::NetworkProxy("shim startup failed".to_string()))
+            } else {
+                Ok(())
+            };
+            let directory = tempfile::tempdir().expect("tempdir");
+            let path = directory.path().join("network-audit.log");
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            logger.enable_file_sink(&path).expect("diagnostic sink");
+
+            log_app_network_policy_audit(
+                &policy,
+                "untrusted-profile-name",
+                FilesystemMode::Dacl.isolation_tier().as_str(),
+                active_address,
+                &result,
+                &mut logger,
+            );
+            drop(logger);
+
+            let output = std::fs::read_to_string(&path).expect("read audit");
+            let (_, json) = output
+                .trim_end()
+                .split_once("] ")
+                .expect("timestamped audit record");
+            let record: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+            assert_eq!(output.lines().count(), 1);
+            assert_eq!(
+                record,
+                serde_json::json!({
+                    "event": "mxc.NetworkPolicyApplied",
+                    "backend": "processcontainer",
+                    "identity": "redacted",
+                    "tier": "appcontainer-dacl",
+                    "enforcement_mode": "capabilities",
+                    "default_policy": expected_default,
+                    "proxy_port": expected_port,
+                    "firewall_rules_created": 0,
+                    "firewall_applied": false,
+                    "status": status,
+                })
+            );
+        }
+    }
+
+    #[test]
     fn released_resources_format_is_stable() {
         assert_eq!(
-            super::format_released_resources(2, true, false),
-            "firewall_rules_removed=2,bfs_removed=true,proxy_stopped=false,container_released=false"
+            super::format_released_resources(true, false),
+            "firewall_rules_removed=0,bfs_removed=true,proxy_stopped=false,container_released=false"
         );
     }
 
     #[test]
     fn teardown_status_reports_preserve_policy_as_skipped() {
-        for firewall_ok in [true, false] {
-            for (bfs_requested, bfs_ok) in [(false, false), (true, true), (true, false)] {
-                assert_eq!(
-                    super::appcontainer_teardown_status_with_bfs(
-                        true,
-                        firewall_ok,
-                        bfs_requested,
-                        bfs_ok,
-                    ),
-                    (
-                        TeardownStatus::Skipped,
-                        Some(TeardownSkipReason::PreservePolicy)
-                    )
-                );
-            }
+        for (bfs_requested, bfs_ok) in [(false, false), (true, true), (true, false)] {
+            assert_eq!(
+                super::appcontainer_teardown_status_with_bfs(true, bfs_requested, bfs_ok),
+                (
+                    TeardownStatus::Skipped,
+                    Some(TeardownSkipReason::PreservePolicy)
+                )
+            );
         }
     }
 
     #[test]
     fn teardown_status_distinguishes_cleanup_failures() {
         assert_eq!(
-            super::appcontainer_teardown_status_with_bfs(false, true, false, false),
+            super::appcontainer_teardown_status_with_bfs(false, false, false),
             (TeardownStatus::Success, None)
         );
         assert_eq!(
-            super::appcontainer_teardown_status_with_bfs(false, false, false, false),
-            (TeardownStatus::Failure, None)
+            super::appcontainer_teardown_status_with_bfs(false, true, true),
+            (TeardownStatus::Success, None)
         );
         assert_eq!(
-            super::appcontainer_teardown_status_with_bfs(false, true, true, false),
+            super::appcontainer_teardown_status_with_bfs(false, true, false),
             (TeardownStatus::Failure, None)
         );
     }
@@ -2898,30 +2928,6 @@ mod tests {
         });
         let _ = session.discard();
         assert_eq!(*events.lock().unwrap(), vec!["discard".to_string()]);
-    }
-
-    #[test]
-    fn validate_runner_rejects_allowed_hosts() {
-        let runner = AppContainerScriptRunner::new();
-        let mut request = ExecutionRequest::default();
-        request.policy.allowed_hosts = vec!["example.com".into()];
-
-        let err = runner
-            .validate(&request)
-            .expect_err("allowedHosts is not yet supported");
-        assert!(err.error_message.contains("allowedHosts"));
-    }
-
-    #[test]
-    fn validate_runner_rejects_blocked_hosts() {
-        let runner = AppContainerScriptRunner::new();
-        let mut request = ExecutionRequest::default();
-        request.policy.blocked_hosts = vec!["bad.example.com".into()];
-
-        let err = runner
-            .validate(&request)
-            .expect_err("blockedHosts is not yet supported");
-        assert!(err.error_message.contains("blockedHosts"));
     }
 
     #[test]

@@ -398,7 +398,7 @@ fn pull_failure(
              retry once it is available. Otherwise set wslc.imageTarPath to a local tar, \
              or warm this cache from a machine that can reach the registry with: \
              wxc-exec.exe --setup-wslc --image {}{}. \
-             See docs/wsl/wsl-container-getting-started.md.",
+             See docs/backends/wslc/wsl-container-getting-started.md.",
             image,
             detail,
             image,
@@ -719,7 +719,7 @@ pub unsafe fn begin_resolve(
              container exists and outside the policy the request declares. Warm the \
              cache first with wxc-exec.exe --setup-wslc --image {}{}, set \
              wslc.imageTarPath to a local tar, or allow egress. \
-             See docs/wsl/wsl-container-getting-started.md.",
+             See docs/backends/wslc/wsl-container-getting-started.md.",
             image,
             image,
             storage_arg(storage_path),

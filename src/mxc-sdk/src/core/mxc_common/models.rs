@@ -287,8 +287,12 @@ pub struct IsolationSessionProvisionConfig {
 pub struct WslcProvisionConfig {
     /// Container image reference. The backend selects its default when absent.
     pub image: Option<String>,
+
     /// Local image tarball to import instead of pulling an image.
     pub image_tar_path: Option<String>,
+
+    /// Host-to-container TCP forwards applied to the sandbox's own container.
+    pub port_mappings: Option<Vec<PortMapping>>,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -299,53 +303,6 @@ pub struct LxcConfig {
     pub distribution: String,
     /// Distribution release version (e.g., "3.20", "24.04"). Required.
     pub release: String,
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkPolicy {
-    Allow,
-    #[default]
-    Block,
-}
-
-impl NetworkPolicy {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Allow => "allow",
-            Self::Block => "block",
-        }
-    }
-}
-
-impl From<crate::mxc_common::wire::NetworkPolicy> for NetworkPolicy {
-    fn from(p: crate::mxc_common::wire::NetworkPolicy) -> Self {
-        match p {
-            crate::mxc_common::wire::NetworkPolicy::Allow => Self::Allow,
-            crate::mxc_common::wire::NetworkPolicy::Block => Self::Block,
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkEnforcementMode {
-    #[default]
-    Capabilities,
-    Firewall,
-    Both,
-}
-
-impl NetworkEnforcementMode {
-    /// Canonical wire string, matching the JSON schema enum. Bounded
-    /// vocabulary for structured logs.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Capabilities => "capabilities",
-            Self::Firewall => "firewall",
-            Self::Both => "both",
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,16 +383,6 @@ pub struct NetworkEgressPolicy {
 pub struct NetworkIngressPolicy {
     pub default: NetworkAction,
     pub host_loopback: NetworkAction,
-}
-
-impl From<crate::mxc_common::wire::NetworkEnforcement> for NetworkEnforcementMode {
-    fn from(m: crate::mxc_common::wire::NetworkEnforcement) -> Self {
-        match m {
-            crate::mxc_common::wire::NetworkEnforcement::Capabilities => Self::Capabilities,
-            crate::mxc_common::wire::NetworkEnforcement::Firewall => Self::Firewall,
-            crate::mxc_common::wire::NetworkEnforcement::Both => Self::Both,
-        }
-    }
 }
 
 /// A hostname-to-IP mapping that makes a sandbox resolve the proxy to exactly
@@ -617,16 +564,15 @@ pub fn unbracket_host(host: &str) -> &str {
         .unwrap_or(host)
 }
 
-/// Proxy configuration parsed from the `network.proxy` JSON field.
+/// Normalized runtime proxy configuration.
 #[derive(Debug, Default, Clone)]
 pub struct ProxyConfig {
     pub address: Option<ProxyAddress>,
-    pub builtin_test_server: bool,
 }
 
 impl ProxyConfig {
     pub fn is_enabled(&self) -> bool {
-        self.address.is_some() || self.builtin_test_server
+        self.address.is_some()
     }
 }
 
@@ -737,14 +683,6 @@ pub struct ContainerPolicy {
     pub enumerate_paths: Vec<String>,
     pub denied_paths: Vec<String>,
     pub fallback: FallbackPolicy,
-    pub default_network_policy: NetworkPolicy,
-    pub network_enforcement_mode: NetworkEnforcementMode,
-    /// When true, the sandboxed process may bind() + listen() on local IPs
-    /// and accept incoming connections. Independent of `default_network_policy`
-    /// (which governs outbound traffic).
-    pub allow_local_network: bool,
-    pub allowed_hosts: Vec<String>,
-    pub blocked_hosts: Vec<String>,
     /// Outbound CIDR, protocol, and port policy.
     pub network_egress: Option<NetworkEgressPolicy>,
     /// Inbound and host-loopback policy.
@@ -755,24 +693,21 @@ pub struct ContainerPolicy {
     pub network_proxy: ProxyConfig,
     /// Whether the caller supplied a `network` block on the wire (any field
     /// present), captured at parse time. Distinguishes an absent network policy
-    /// from an explicit one whose values equal the defaults — the other fields
-    /// here cannot, since `default_network_policy` defaults to `Block` either
-    /// way. Used by backends (e.g. IsolationSession) that must reject a network
+    /// from an explicit one whose values equal the defaults. Used by backends
+    /// (e.g. IsolationSession) that must reject a network
     /// policy supplied on a phase where the posture is immutable. Parse-derived,
     /// never on the wire.
     #[serde(skip)]
     pub network_specified: bool,
-    /// Whether the caller supplied network posture fields: the legacy mode
-    /// fields (`defaultPolicy`, `enforcementMode`, `allowLocalNetwork`,
-    /// `allowedHosts`, `blockedHosts`) or directional `egress`/`ingress`.
+    /// Whether the caller supplied directional network posture fields:
+    /// `egress` or `ingress`.
     /// Runtime proxy data is excluded. This lets state-aware backends reject a
     /// post-provision posture change by presence while still accepting a
     /// proxy-only exec request. Parse-derived, never on the wire.
     #[serde(skip)]
     pub network_mode_specified: bool,
-    /// Whether `runtimeConfig.networkProxy` was supplied. Distinguishes the
-    /// schema 0.8 runtime field from the legacy `network.proxy` shape after
-    /// both have been normalized into `network_proxy`.
+    /// Whether `runtimeConfig.networkProxy` was supplied, even if the network
+    /// posture itself was omitted.
     #[serde(skip)]
     pub runtime_network_proxy_specified: bool,
     /// Cross-platform UI policy.
@@ -798,33 +733,6 @@ pub struct ContainerPolicy {
     /// `Some`, the runner records the sandboxed process's ungranted access
     /// attempts to a learning-mode ETL trace. `None` disables capture.
     pub capture_denials: Option<CaptureDenialsConfig>,
-}
-
-/// Do the host lists refine the default egress policy (i.e. require per-host
-/// filtering)? Only the list that can tighten the default matters:
-/// `Block` → allowlist; `Allow` → blocklist. Shared by the config parser and
-/// the WSLc backend so both agree on what "host filtering" means.
-pub fn needs_host_filtering(
-    is_default_block: bool,
-    allowed_hosts: &[String],
-    blocked_hosts: &[String],
-) -> bool {
-    if is_default_block {
-        !allowed_hosts.is_empty()
-    } else {
-        !blocked_hosts.is_empty()
-    }
-}
-
-impl ContainerPolicy {
-    /// True when this policy's host lists require per-host egress filtering.
-    pub fn needs_host_filtering(&self) -> bool {
-        needs_host_filtering(
-            self.default_network_policy == NetworkPolicy::Block,
-            &self.allowed_hosts,
-            &self.blocked_hosts,
-        )
-    }
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
@@ -866,7 +774,7 @@ pub enum CaptureDenialsMode {
 }
 
 /// Port mapping for host↔container port forwarding.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PortMapping {
     /// Port on the Windows host.
     pub windows_port: u16,
@@ -1042,11 +950,6 @@ pub struct ExecutionRequest {
     /// Direct typed SDK construction has no external contract attribution.
     #[serde(serialize_with = "serialize_source_contract")]
     pub source_contract: Option<crate::mxc_contract::ContractVersion>,
-    /// Whether backends preserve pre-v0.8 network compatibility behavior or
-    /// enforce the current strict posture.
-    pub network_enforcement_compatibility: NetworkEnforcementCompatibility,
-    /// Whether backends supply the default `process.env` block.
-    pub default_env_compatibility: DefaultEnvCompatibility,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).
@@ -1070,18 +973,16 @@ pub struct ExecutionRequest {
     ///   process's variables must merge them in themselves, or set
     ///   [`ExecutionRequest::inherit_default_env`].
     ///
-    /// The Windows process container honors the distinction at every schema
-    /// version; LXC, Bubblewrap, Seatbelt, and WSLc honor it from 0.9, and
-    /// below 0.9 treat `None` and `Some(vec![])` alike. IsolationSession starts
-    /// every process from the agent user's default environment, so it rejects
-    /// `Some` without [`ExecutionRequest::inherit_default_env`].
+    /// IsolationSession starts every process from the agent user's default
+    /// environment, so it rejects `Some` without
+    /// [`ExecutionRequest::inherit_default_env`].
     pub env: Option<Vec<String>>,
 
     /// Layer [`ExecutionRequest::env`] on top of the backend's default
     /// environment instead of replacing it (from `process.inheritDefaultEnv`).
     ///
     /// Only meaningful when `env` is `Some`: with `None` the child already gets
-    /// the default. Rejected below schema 0.9 by the config parser.
+    /// the default.
     pub inherit_default_env: bool,
     pub script_code: String,
     pub working_directory: String,
@@ -1108,34 +1009,9 @@ pub struct ExecutionRequest {
     pub hyperlight: Option<HyperlightConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
-    /// Whether the --allow-testing-features flag was passed. Gates testing-only,
-    /// deliberately-permissive helpers (currently `network.proxy.builtinTestServer`)
-    /// that must never activate from a stock production config. This is a distinct
-    /// axis from `experimental_enabled`: "experimental" means unstable/new, whereas
-    /// this means "not-for-production testing scaffolding".
-    pub testing_features_enabled: bool,
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
-}
-
-/// Backend network behavior after exact contract normalization.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum NetworkEnforcementCompatibility {
-    /// Enforce the current network posture.
-    #[default]
-    Strict,
-}
-
-/// Backend `process.env` behavior for registered contracts and typed requests.
-/// Every supported request uses the default block.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DefaultEnvCompatibility {
-    /// Supply the default block and keep the four states of `process.env` distinct.
-    #[default]
-    DefaultBlock,
 }
 
 fn serialize_source_contract<S>(
@@ -1148,15 +1024,6 @@ where
     value
         .map(crate::mxc_contract::ContractVersion::as_str)
         .serialize(serializer)
-}
-
-impl NetworkEnforcementCompatibility {
-    /// Stable diagnostic spelling for policy identity and tests.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Strict => "strict",
-        }
-    }
 }
 
 /// Where a [`ResolvedWorkingDirectory`] came from.
@@ -1211,21 +1078,14 @@ impl ExecutionRequest {
             .unwrap_or_default()
     }
 
-    /// Whether this request's contract supplies the backend default
-    /// environment block, introduced by `0.9.0-alpha`.
-    pub fn supplies_default_env(&self) -> bool {
-        self.default_env_compatibility == DefaultEnvCompatibility::DefaultBlock
-    }
-
     /// The caller's environment entries, with "not supplied" and "supplied but
     /// empty" flattened to the same empty slice.
     ///
-    /// Only for backends that have no default environment to distinguish them
-    /// against — every backend below schema 0.9. A backend with a default block
-    /// must match on [`ExecutionRequest::env`] directly, since `None` means
-    /// "give the child the default" and `Some(vec![])` means "give the child
-    /// nothing". A backend whose default MXC cannot enumerate takes the state
-    /// from `env` and the entries from here: WSLc, whose default is the
+    /// Backends with an enumerable default must match on
+    /// [`ExecutionRequest::env`] directly, since `None` means "give the child
+    /// the default" and `Some(vec![])` means "give the child nothing". A
+    /// backend whose default MXC cannot enumerate takes the state from `env`
+    /// and the entries from here: WSLc, whose default is the
     /// container image's `ENV`, and IsolationSession, which starts every
     /// process from the agent user's default environment.
     pub fn env_entries(&self) -> &[String] {

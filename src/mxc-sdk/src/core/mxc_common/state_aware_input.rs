@@ -61,6 +61,7 @@ impl StateAwareInput {
                 contradictory.join(", "),
             )));
         }
+        operation.validate()?;
         Ok(Self { common, operation })
     }
 

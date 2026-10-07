@@ -1429,13 +1429,11 @@ mod tests {
     }
 
     #[test]
-    fn proxy_disabled_keeps_caller_proxy_env_and_still_clears_inherited_env() {
-        use crate::mxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
-        let mut env = vec![
+    fn caller_proxy_env_is_preserved_and_host_env_is_cleared() {
+        let env = vec![
             "HTTP_PROXY=http://caller-proxy.example:9999".to_string(),
             "PATH=/usr/bin".to_string(),
         ];
-        apply_proxy_env(&mut env, &ProxyConfig::default());
         let args = build_attach_args_with_env_control(&env, "", "cmd", true);
         assert!(
             args.iter().any(|a| a == "--clear-env"),
@@ -1449,34 +1447,6 @@ mod tests {
         assert!(
             args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
             "PATH must survive; got {args:?}"
-        );
-    }
-
-    #[test]
-    fn proxy_enabled_emits_clear_env_and_proxy_keys_in_attach_args() {
-        use crate::mxc_common::{
-            models::{ProxyAddress, ProxyConfig},
-            proxy_env::apply_proxy_env,
-        };
-        let proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
-            builtin_test_server: false,
-        };
-        let mut env = vec!["PATH=/usr/bin".to_string()];
-        apply_proxy_env(&mut env, &proxy);
-        let args = build_attach_args_with_env_control(&env, "", "cmd", true);
-        assert!(
-            args.iter().any(|a| a == "--clear-env"),
-            "proxy enabled must emit --clear-env; got {args:?}"
-        );
-        assert!(
-            args.iter()
-                .any(|a| a.starts_with("--set-var=HTTP_PROXY=http://") && a.contains(":3128")),
-            "proxy enabled must set HTTP_PROXY (with port 3128); got {args:?}"
-        );
-        assert!(
-            args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
-            "PATH must survive the proxy-env merge; got {args:?}"
         );
     }
 

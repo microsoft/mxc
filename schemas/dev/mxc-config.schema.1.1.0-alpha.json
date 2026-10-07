@@ -1494,6 +1494,13 @@
         "imageTarPath": {
           "description": "Optional path to a local container image archive.",
           "type": "string"
+        },
+        "portMappings": {
+          "description": "Optional host-to-container TCP port mappings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
         }
       },
       "type": "object"

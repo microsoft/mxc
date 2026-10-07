@@ -60,6 +60,13 @@ built tree, which is the fastest way to iterate on one area:
 tests\scripts\run_processcontainer_network_proxy_test.ps1 -RequireTier base-container
 ```
 
+When the host probe reports `baseContainerSupportsIdentitylessLoopbackProxy`,
+the proxy area requires workload launch and a successful proxied fetch on both
+PSEC 1.0-only hosts and hosts with PSEC 1.1 ingress support.
+A clean policy rejection is a failure on these hosts.
+Older binaries that omit this probe fact do not enable the capability-specific
+assertions; the existing proxy assertions still apply.
+
 Shared helpers live in `tests/scripts/lib/WinProcessContainer.Common.ps1`. It
 must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`
 publishes the suite context into the calling script's scope, which only works

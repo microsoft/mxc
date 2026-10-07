@@ -340,7 +340,7 @@ fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
                 //
                 // This deny survives the unfiltered `(allow network-outbound)`
                 // that `write_network_rules` emits below under
-                // `defaultPolicy: "allow"`: last-match-wins applies between
+                // `egress.default: "allow"`: last-match-wins applies between
                 // rules that carry a filter, and an unfiltered rule does not
                 // override a path-filtered one. Pinned by
                 // `readonly_socket_strip_survives_a_default_allow_outbound`.
@@ -360,8 +360,7 @@ fn write_filesystem_deny(out: &mut String, paths: &ResolvedPaths) {
         // `network-outbound` is denied here for two reasons. A denied path can
         // sit inside a broader `readwritePaths` subtree, whose allow covers it;
         // and `write_outbound_allow_rules` emits an *unfiltered* `(allow
-        // network-outbound)` under `defaultPolicy: "allow"` and the
-        // remote-proxy fallback. Either would otherwise let the sandbox
+        // network-outbound)` under `egress.default: "allow"`. Either would otherwise let the sandbox
         // `connect()` to a UNIX socket inside a denied subtree and talk to
         // whatever listens there. A Docker / ssh-agent / gpg-agent socket is a
         // control plane, so that would be an escape.
@@ -390,37 +389,13 @@ fn write_network_rules(
 ) {
     let policy = &request.policy;
     let allow_outbound = seatbelt_policy::egress_allowed(policy);
-    let has_allowed_hosts = !policy.allowed_hosts.is_empty();
-
-    // blocked_hosts is rejected at the runner level before reaching the
-    // profile builder, so it isn't handled here.
-    match (allow_outbound, has_allowed_hosts) {
-        (false, false) => {
+    match allow_outbound {
+        false => {
             // Pure deny — implicit from `(deny default)`.
             out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
         }
-        (false, true) => {
-            // An allowlist under deny must never widen to allow-all. This is
-            // reached only with builtinTestServer — the one proxy MXC hands the
-            // host list to — so the profile keeps the deny baseline plus
-            // port-scoped proxy reachability, making the proxy the only way out.
-            out.push_str(";; --- network: default-deny; allowedHosts enforced by the MXC-run\n");
-            out.push_str(";;     builtin test proxy, not the profile (Seatbelt cannot filter\n");
-            out.push_str(";;     by host) ---\n");
-        }
-        (true, false) => {
+        true => {
             out.push_str(";; --- network: outbound allowed (any host) ---\n");
-            write_outbound_allow_rules(out);
-        }
-        (true, true) => {
-            // Seatbelt only accepts `*` or `localhost` in `(remote ...)` filters —
-            // per-hostname filtering isn't possible. The default is already
-            // allow-all here, so the allowlist is a no-op superset rather than a
-            // weakening, and allow-all remains the honest rendering.
-            out.push_str(
-                ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
-            );
-            out.push_str(";;     default is already allow, so all outbound stays allowed ---\n");
             write_outbound_allow_rules(out);
         }
     }
@@ -455,10 +430,7 @@ fn write_network_rules(
 /// deny-under-deny is already covered by `(deny default)`, and allow-under-allow
 /// is already covered by the blanket outbound allow.
 fn write_host_loopback_rules(out: &mut String, policy: &ContainerPolicy, allow_outbound: bool) {
-    // The legacy shape has no hostLoopback concept — leave 0.6/0.7 untouched.
-    let Some(loopback_allowed) = seatbelt_policy::host_loopback_allowed(policy) else {
-        return;
-    };
+    let loopback_allowed = seatbelt_policy::host_loopback_allowed(policy);
 
     match (loopback_allowed, allow_outbound) {
         (false, true) => {
@@ -527,11 +499,11 @@ fn write_proxy_reachability_rules(out: &mut String, proxy_address: &ProxyAddress
 /// on macOS — the `network-bind` rule alone is not enough; the kernel rejects
 /// `listen()` with EPERM without `network-inbound`. Scoped to `(local ip)` so
 /// it only covers IP sockets, never UNIX-domain or Mach sockets.
-fn write_local_network_rules(out: &mut String, allow_local_network: bool) {
-    if !allow_local_network {
+fn write_local_network_rules(out: &mut String, allow_ingress: bool) {
+    if !allow_ingress {
         return;
     }
-    out.push_str(";; --- network: allowLocalNetwork — accept inbound on local IPs ---\n");
+    out.push_str(";; --- network: ingress.default=allow — accept inbound on local IPs ---\n");
     out.push_str("(allow network-inbound (local ip))\n");
 }
 
@@ -846,7 +818,7 @@ fn escape_for_quotes(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::{NetworkAction, NetworkPolicy, SeatbeltConfig, UiPolicy};
+    use crate::mxc_common::models::{NetworkAction, SeatbeltConfig, UiPolicy};
 
     fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
@@ -913,37 +885,37 @@ mod tests {
     #[test]
     fn default_deny_network_emits_no_allow_network() {
         let mut r = req();
-        // Default policy is Allow per NetworkPolicy::default(); flip it.
-        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("(allow network-outbound"));
         assert!(p.contains("network: default-deny"));
     }
 
     #[test]
-    fn block_with_allowed_hosts_never_widens_to_allow_all() {
-        // `allowedHosts` under a deny default must not flip the profile to
-        // allow-all outbound — that would be the inverse of the requested
-        // policy. `config_parser` rejects this combination except with the
-        // MXC-run builtin test proxy, which is the only proxy actually given
-        // the host list, so the profile keeps its deny baseline.
+    fn unsupported_directional_egress_rule_never_widens_to_allow_all() {
+        // Backend validation rejects rules, and even a direct profile build
+        // must not turn a denied default into allow-all.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        r.policy.allowed_hosts = vec!["api.github.com".into(), "registry.npmjs.org".into()];
+        r.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
+            allow: vec![crate::mxc_common::models::NetworkRule {
+                to: vec![crate::mxc_common::models::NetworkPeer {
+                    cidr: "192.0.2.1/32".parse().unwrap(),
+                    except: Vec::new(),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("(allow network-outbound)"));
-        assert!(p.contains("enforced by the MXC-run"));
-        // Should NOT have per-host remote rules.
+        assert!(p.contains("network: default-deny"));
         assert!(!p.contains("(remote"));
     }
 
     #[test]
-    fn block_with_allowed_hosts_and_proxy_keeps_deny_plus_proxy_reachability() {
-        // The builtin-test-proxy case: the proxy filters the host list, so the
-        // profile must stay deny-all except port-scoped proxy reachability.
+    fn deny_with_loopback_proxy_keeps_port_scoped_reachability() {
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        r.policy.allowed_hosts = vec!["api.github.com".into()];
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
         let address = ProxyAddress::new("127.0.0.1".into(), 8080);
         let p = build_profile_with_proxy(&r, Some(&address)).unwrap();
         assert!(!p.contains("(allow network-outbound)"));
@@ -966,7 +938,7 @@ mod tests {
             "LocalHost",
         ] {
             let mut r = req();
-            r.policy.default_network_policy = NetworkPolicy::Block;
+            r.policy.network_egress = Some(egress(NetworkAction::Deny));
             let address = ProxyAddress::new(host.into(), 8080);
             let p = build_profile_with_proxy(&r, Some(&address)).unwrap();
 
@@ -989,7 +961,7 @@ mod tests {
     fn remote_proxy_under_deny_fails_closed() {
         for host in ["proxy.corp.example", "10.0.0.5", "[2001:db8::1]"] {
             let mut r = req();
-            r.policy.default_network_policy = NetworkPolicy::Block;
+            r.policy.network_egress = Some(egress(NetworkAction::Deny));
             let address = ProxyAddress::new(host.into(), 8080);
             let p = build_profile_with_proxy(&r, Some(&address)).unwrap();
             assert!(
@@ -1003,31 +975,20 @@ mod tests {
     #[test]
     fn allow_outbound_no_hosts_emits_open_network_outbound() {
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow network-outbound)"));
     }
 
     #[test]
-    fn allow_outbound_with_hosts_emits_per_host_remote_rules() {
+    fn directional_allow_outbound_still_closes_host_loopback() {
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        r.policy.allowed_hosts = vec!["api.github.com".into(), "1.2.3.4".into()];
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Deny));
         let p = build_profile(&r).unwrap();
-        assert!(p.contains("Seatbelt cannot filter by host"));
         assert!(p.contains("(allow network-outbound)"));
-        assert!(!p.contains("(remote"));
-    }
-
-    #[test]
-    fn blocked_hosts_not_emitted_in_profile() {
-        // blocked_hosts is rejected at the runner level, but verify the
-        // profile builder doesn't crash if called with them anyway.
-        let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        r.policy.blocked_hosts = vec!["evil.example.com".into()];
-        let p = build_profile(&r).unwrap();
-        assert!(!p.contains("(deny network-outbound"));
+        assert!(p.contains("(deny network-outbound (remote ip \"localhost:*\"))"));
+        assert!(!p.contains("(allow network-inbound"));
     }
 
     #[test]
@@ -1036,7 +997,7 @@ mod tests {
         // is default-deny — but only the proxy's exact port, not all of
         // loopback and not the whole network.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
         let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
         let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
         assert!(p.contains("(allow network-outbound (remote ip \"localhost:8080\"))"));
@@ -1046,25 +1007,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_test_proxy_under_default_deny_scopes_outbound_to_proxy_port() {
-        // builtinTestServer binds a loopback port at runtime; the runner passes
-        // that *resolved* address here, so the rule is scoped to the real port
-        // just like an explicit loopback proxy.
-        let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        let addr = ProxyAddress::new("127.0.0.1".into(), 54321);
-        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
-        assert!(p.contains("(allow network-outbound (remote ip \"localhost:54321\"))"));
-        assert!(!p.contains("localhost:*"));
-        assert!(!p.contains("(allow network-outbound)\n"));
-    }
-
-    #[test]
     fn remote_proxy_under_default_deny_emits_no_outbound_allow() {
         // A remote proxy can't be expressed as a reachability rule, so it fails
         // closed. Rejected upstream, so this only pins the fallback behavior.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
         let addr = ProxyAddress::from_url(
             "http://proxy.example.com:8080",
             "proxy.example.com".into(),
@@ -1077,14 +1024,15 @@ mod tests {
 
     #[test]
     fn proxy_under_default_allow_does_not_add_scoped_rule() {
-        // When outbound is already open (defaultPolicy allow), the proxy
+        // When outbound is already open (egress.default allow), the proxy
         // reachability rule is redundant and must not be emitted.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
         let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
         let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
         assert!(p.contains("(allow network-outbound)\n"));
-        assert!(!p.contains("localhost:"));
+        assert!(!p.contains("(allow network-outbound (remote ip \"localhost:8080\"))"));
+        assert!(p.contains("(deny network-outbound (remote ip \"localhost:*\"))"));
     }
 
     #[test]
@@ -1093,10 +1041,9 @@ mod tests {
         // configured proxy address (localhost:<port>), scoping the reachability
         // rule to that exact port under default-deny — not silently dropping it.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
         r.policy.network_proxy = crate::mxc_common::models::ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 9091)),
-            builtin_test_server: false,
         };
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow network-outbound (remote ip \"localhost:9091\"))"));
@@ -1104,34 +1051,38 @@ mod tests {
     }
 
     #[test]
-    fn allow_local_network_emits_inbound_rule() {
+    fn directional_ingress_allow_emits_inbound_rule() {
         // server.listen() on macOS is governed by `network-inbound`, not
         // `network-bind` — with only `network-bind (local ip)` the bind()
         // succeeds and the kernel then rejects listen() with EPERM.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
-        r.policy.allow_local_network = true;
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
+        });
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow network-inbound (local ip))"));
-        assert!(p.contains("allowLocalNetwork"));
+        assert!(p.contains("ingress.default=allow"));
     }
 
     #[test]
-    fn allow_local_network_default_omits_inbound_rule() {
-        // Default (allow_local_network=false) must not emit any inbound rule.
+    fn omitted_ingress_default_omits_inbound_rule() {
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("network-inbound"));
     }
 
     #[test]
-    fn allow_local_network_works_with_default_deny_outbound() {
-        // allow_local_network is independent of outbound: a process can be
+    fn ingress_allow_works_with_default_deny_outbound() {
+        // Ingress is independent of outbound: a process can be
         // a pure server (no client traffic) and still accept local inbound.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        r.policy.allow_local_network = true;
+        r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
+        });
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow network-inbound (local ip))"));
         assert!(!p.contains("(allow network-outbound)"));
@@ -1139,11 +1090,7 @@ mod tests {
 
     #[test]
     fn directional_egress_deny_emits_no_allow_network() {
-        // Schema-0.8 directional shape: network_egress.default is consulted
-        // instead of the legacy default_network_policy field (which stays at
-        // its Block default under this shape and must not be read directly).
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow; // must be ignored
         r.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Deny,
             ..Default::default()
@@ -1166,10 +1113,8 @@ mod tests {
 
     #[test]
     fn directional_ingress_default_allow_emits_inbound_rule() {
-        // Seatbelt maps ingress.default (not hostLoopback) to the existing
-        // allowLocalNetwork behavior — see network_parser and validate().
+        // Seatbelt maps ingress.default (not hostLoopback) to the inbound rule.
         let mut r = req();
-        r.policy.allow_local_network = false; // must be ignored
         r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Allow,
@@ -1181,7 +1126,6 @@ mod tests {
     #[test]
     fn directional_ingress_default_deny_omits_inbound_rule() {
         let mut r = req();
-        r.policy.allow_local_network = true; // must be ignored
         r.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Deny,
             host_loopback: NetworkAction::Deny,
@@ -1299,18 +1243,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shape_emits_no_host_loopback_rule() {
-        // 0.6/0.7 configs have no hostLoopback concept and must be untouched.
-        for allow_local in [false, true] {
-            let mut r = req();
-            r.policy.default_network_policy = NetworkPolicy::Allow;
-            r.policy.allow_local_network = allow_local;
-            let p = build_profile(&r).unwrap();
-            assert!(
-                !p.contains("localhost:*"),
-                "legacy shape must not gain a host-loopback rule"
-            );
-        }
+    fn omitted_ingress_under_open_egress_closes_host_loopback() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(deny network-outbound (remote ip \"localhost:*\"))"));
     }
 
     #[test]
@@ -1358,9 +1295,7 @@ mod tests {
 
     #[test]
     fn directional_deny_with_loopback_proxy_scopes_outbound_to_proxy_port() {
-        // Same proxy-reachability behavior as the legacy shape must be
-        // preserved when the directional shape selects deny + loopback proxy
-        // (the only combination the GA schema allows with a runtime proxy).
+        // Deny + loopback proxy must grant only the selected proxy port.
         let mut r = req();
         r.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Deny,
@@ -1464,11 +1399,10 @@ mod tests {
     #[test]
     fn readwrite_unix_socket_ops_are_independent_of_network_policy() {
         // AF_UNIX bind/connect follow the filesystem policy, so a default-deny
-        // network policy with allowLocalNetwork off must still permit them.
+        // network policy with denied ingress must still permit them.
         let mut r = req();
         r.policy.readwrite_paths = vec!["/tmp/output".into()];
-        r.policy.default_network_policy = NetworkPolicy::Block;
-        r.policy.allow_local_network = false;
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
         let p = build_profile(&r).unwrap();
         assert!(p.contains(RW_RULE));
         assert!(!p.contains("network-inbound"));
@@ -1477,7 +1411,7 @@ mod tests {
 
     #[test]
     fn denied_paths_deny_outbound_under_default_allow() {
-        // `defaultPolicy: allow` emits a bare `(allow network-outbound)`, which
+        // `egress.default: allow` emits a bare `(allow network-outbound)`, which
         // on its own grants AF_UNIX `connect()`. A denied subtree must still
         // deny it. Position relative to that unfiltered allow is deliberately
         // not asserted: an unfiltered rule cannot override a path-filtered one
@@ -1487,7 +1421,7 @@ mod tests {
         // `denied_paths_appear_after_allows_to_override` and
         // `denied_paths_deny_unix_socket_ops_after_allows`.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
         r.policy.denied_paths = vec!["/tmp/secret".into()];
         let p = build_profile(&r).unwrap();
         let deny_idx = p.find(DENY_RULE).expect("deny must cover network-outbound");
@@ -1615,7 +1549,7 @@ mod tests {
 
     #[test]
     fn readonly_socket_strip_survives_a_default_allow_outbound() {
-        // `defaultPolicy: "allow"` emits an unfiltered `(allow
+        // `egress.default: "allow"` emits an unfiltered `(allow
         // network-outbound)`. The read-only strip still governs AF_UNIX
         // `connect()` under that subtree, because an unfiltered rule does not
         // override a path-filtered one. Verified end-to-end against
@@ -1626,7 +1560,7 @@ mod tests {
         // Emission order relative to the unfiltered allow is deliberately not
         // asserted — it has no bearing on the outcome.
         let mut r = req();
-        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
         r.policy.readonly_paths = vec!["/tmp/ro".into()];
         let p = build_profile(&r).unwrap();
 

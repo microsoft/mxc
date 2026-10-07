@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 use super::*;
-use crate::mxc_common::models::NetworkEnforcementMode;
 
 fn directional_policy(
     default: NetworkAction,
@@ -182,7 +181,7 @@ fn explicit_deny_precedes_an_overlapping_allow_in_both_families() {
         vec![matching_rule()],
         vec![matching_rule()],
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         destination_actions(&rules.ipv4, ipv4),
@@ -207,7 +206,7 @@ fn an_allow_peer_exclusion_is_not_accepted_alongside_its_parent() {
         vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -244,7 +243,7 @@ fn a_deny_peer_exclusion_remains_outside_the_deny() {
         Vec::new(),
         vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -281,7 +280,7 @@ fn an_exclusion_inside_an_allow_rule_under_an_allow_default_stays_reachable() {
         vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -312,7 +311,7 @@ fn an_exclusion_inside_a_deny_rule_under_a_deny_default_stays_blocked() {
         Vec::new(),
         vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -343,7 +342,7 @@ fn each_cidr_is_emitted_only_in_its_matching_address_family() {
         vec![rule(vec![peer(ipv4, &[]), peer(ipv6, &[])], Vec::new())],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         destination_actions(&rules.ipv4, ipv4),
@@ -379,7 +378,7 @@ fn an_omitted_to_matches_destinations_in_both_address_families() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         new_connection_action(
@@ -413,7 +412,7 @@ fn omitted_ports_match_every_protocol_and_port() {
         vec![rule(vec![peer(destination, &[])], Vec::new())],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
     let address = packet_address("192.0.2.25");
 
     for (protocol, port) in [("tcp", Some(443)), ("udp", Some(53)), ("icmp", None)] {
@@ -437,7 +436,7 @@ fn explicit_any_without_a_port_matches_every_protocol_and_port() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
     let address = packet_address("192.0.2.25");
 
     for (protocol, port) in [
@@ -470,7 +469,7 @@ fn any_with_a_port_expands_to_tcp_and_udp_rules() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
     let address = packet_address("192.0.2.25");
     let mut selectors = rules
         .ipv4
@@ -528,7 +527,7 @@ fn icmp_ignores_a_written_port() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
     let emitted_rule = rules.ipv4.iter().find(|rule| {
         argument_after(rule, "-d") == Some(destination)
             && argument_after(rule, "-j") == Some("ACCEPT")
@@ -561,7 +560,7 @@ fn a_single_port_and_an_inclusive_range_restrict_their_protocols() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
     let address = packet_address("192.0.2.25");
 
     for (protocol, packet_port, expected_action) in [
@@ -599,7 +598,7 @@ fn each_peer_combines_with_each_port_selector() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     for (destination, address) in [
         (first_destination, "192.0.2.25"),
@@ -633,7 +632,7 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
     let ipv4_rule = rules.ipv4.iter().find(|rule| {
         argument_after(rule, "-d") == Some(ipv4) && argument_after(rule, "-j") == Some("ACCEPT")
     });
@@ -793,21 +792,6 @@ fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
 }
 
 #[test]
-fn a_legacy_policy_still_opens_dns() {
-    let policy = ContainerPolicy {
-        network_enforcement_mode: NetworkEnforcementMode::Firewall,
-        allowed_hosts: vec!["example.com".to_string()],
-        ..Default::default()
-    };
-    let rules = appended_ipv4_chain_rules("legacy-dns", &policy);
-
-    assert!(
-        opens_base_dns_exemption(&rules),
-        "input=legacy defaultPolicy=block; expected the documented port 53 accept; output={rules:?}"
-    );
-}
-
-#[test]
 fn a_parsed_directional_request_drops_the_dns_exemption() {
     let policy = policy_from_json(
         r#"{"version": "0.9.0-alpha",
@@ -819,12 +803,12 @@ fn a_parsed_directional_request_drops_the_dns_exemption() {
 
     assert!(
         !opens_base_dns_exemption(&rules),
-        "input=0.8 egress.default=deny; expected no port 53 accept; output={rules:?}"
+        "input=v0.9 egress.default=deny; expected no port 53 accept; output={rules:?}"
     );
 }
 
 #[test]
-fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
+fn a_parsed_request_without_a_network_section_drops_the_dns_exemption() {
     let policy = policy_from_json(
         r#"{"version": "0.9.0-alpha",
             "process": {"commandLine": "echo hi"}}"#,
@@ -832,7 +816,7 @@ fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
 
     assert!(
         !plan_network(&policy).installs_firewall(),
-        "input=0.8 with no network section; expected no chain at all, so no rule can open DNS"
+        "input=v0.9 with no network section; expected no chain at all, so no rule can open DNS"
     );
 }
 #[test]
@@ -845,7 +829,7 @@ fn an_exclusion_does_not_shadow_a_later_rule_that_names_it() {
             rule(vec![peer("10.10.1.0/24", &[])], Vec::new()),
         ],
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -883,7 +867,7 @@ fn the_emitted_blocks_cover_the_peer_without_its_exclusion() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     for reachable in ["10.0.0.1", "10.9.255.255", "10.11.0.0", "10.255.255.255"] {
         assert_eq!(
@@ -926,7 +910,7 @@ fn an_ipv6_exclusion_is_subtracted_within_its_own_family() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -972,11 +956,10 @@ fn a_peer_that_expands_past_the_block_ceiling_is_refused() {
     );
     let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
-    let error =
-        NetworkIptablesManager::build_policy_rules_logged("MXC-test", &policy, true, &mut logger)
-            .expect_err(
-                "a peer expanding past the ceiling must be refused rather than partly installed",
-            );
+    let error = NetworkIptablesManager::build_policy_rules_logged("MXC-test", &policy, &mut logger)
+        .expect_err(
+            "a peer expanding past the ceiling must be refused rather than partly installed",
+        );
 
     assert!(
         error.contains("except"),
@@ -994,7 +977,7 @@ fn an_ipv4_mapped_peer_still_reaches_the_ipv4_chain_after_subtraction() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -1042,7 +1025,6 @@ fn unresolvable_peer() -> NetworkPeer {
 #[test]
 fn an_unresolvable_directional_deny_is_fatal_under_an_allow_egress_default() {
     let policy = ContainerPolicy {
-        default_network_policy: NetworkPolicy::Block,
         ..directional_policy(
             NetworkAction::Allow,
             Vec::new(),
@@ -1051,15 +1033,10 @@ fn an_unresolvable_directional_deny_is_fatal_under_an_allow_egress_default() {
     };
     let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
-    let error = NetworkIptablesManager::build_policy_rules_logged(
-        "MXC-test",
-        &policy,
-        uses_directional_keys(&policy),
-        &mut logger,
-    )
-    .expect_err(
-        "input=egress.default=allow with an unresolvable deny, legacy default_network_policy=block; expected a refusal, since reading the legacy field instead would close the chain with ACCEPT and leave the denied destination reachable",
-    );
+    let error = NetworkIptablesManager::build_policy_rules_logged("MXC-test", &policy, &mut logger)
+        .expect_err(
+            "egress.default=allow must refuse an unresolvable deny rather than leave it reachable",
+        );
 
     assert!(
         error.contains("deny"),
@@ -1070,7 +1047,6 @@ fn an_unresolvable_directional_deny_is_fatal_under_an_allow_egress_default() {
 #[test]
 fn an_unresolvable_directional_deny_is_tolerated_under_a_deny_egress_default() {
     let policy = ContainerPolicy {
-        default_network_policy: NetworkPolicy::Allow,
         ..directional_policy(
             NetworkAction::Deny,
             Vec::new(),
@@ -1082,17 +1058,16 @@ fn an_unresolvable_directional_deny_is_tolerated_under_a_deny_egress_default() {
     NetworkIptablesManager::build_policy_rules_logged(
         "MXC-test",
         &policy,
-        uses_directional_keys(&policy),
         &mut logger,
     )
     .expect(
-        "input=egress.default=deny with an unresolvable deny, legacy default_network_policy=allow; expected no refusal, since the closing DROP already covers what the deny could not program",
+        "input=egress.default=deny with an unresolvable deny, expected no refusal, since the closing DROP already covers what the deny could not program",
     );
 }
 
 fn lowering_error(policy: &ContainerPolicy) -> String {
     let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-    NetworkIptablesManager::build_policy_rules_logged("MXC-test", policy, true, &mut logger)
+    NetworkIptablesManager::build_policy_rules_logged("MXC-test", policy, &mut logger)
         .expect_err("expected the policy to be refused")
 }
 
@@ -1118,7 +1093,7 @@ fn an_ipv6_peer_whose_exclusion_names_the_mapped_range_is_refused() {
 #[test]
 fn an_ipv4_peer_subtracts_an_exclusion_written_in_mapped_notation() {
     let policy = allow_peer_policy(vec![peer("10.0.0.0/8", &["::ffff:10.10.0.0/112"])]);
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -1149,7 +1124,7 @@ fn an_ipv4_peer_subtracts_an_exclusion_written_in_mapped_notation() {
 #[test]
 fn a_mapped_peer_subtracts_an_exclusion_written_in_plain_ipv4() {
     let policy = allow_peer_policy(vec![peer("::ffff:10.0.0.0/104", &["10.10.0.0/16"])]);
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert_eq!(
         chain_verdict(
@@ -1215,7 +1190,7 @@ fn an_ipv6_peer_whose_exclusion_neighbours_the_mapped_range_is_refused() {
 #[test]
 fn an_ipv6_peer_far_from_the_mapped_range_still_subtracts() {
     let policy = allow_peer_policy(vec![peer("2001:db8::/32", &["2001:db8:1::/48"])]);
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert!(
         rules.ipv4.is_empty(),
@@ -1239,7 +1214,7 @@ fn an_ipv6_peer_far_from_the_mapped_range_still_subtracts() {
 #[test]
 fn an_ipv6_catch_all_without_an_exclusion_is_untouched_by_the_guard() {
     let policy = allow_peer_policy(vec![peer("::/0", &[])]);
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
 
     assert!(
         rules.ipv4.is_empty(),

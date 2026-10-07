@@ -38,8 +38,8 @@ use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::{FailurePhase, ScriptResponse};
 use mxc_sdk::wslc_common::container_steps::{self, OutStream, OutputSink, ProcessSettings};
 use mxc_sdk::wslc_common::daemon_protocol::{
-    DeprovisionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode, ProvisionConfig,
-    StartConfig, StopConfig,
+    DeprovisionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode, PortMapping,
+    ProvisionConfig, StartConfig, StopConfig,
 };
 use mxc_sdk::wslc_common::image;
 use mxc_sdk::wslc_common::policy_mapping;
@@ -715,6 +715,7 @@ impl Worker {
                 WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
             }
         };
+        let port_mappings = to_model_port_mappings(&config.port_mappings);
 
         // SAFETY: `sdk`/`session` are valid; every buffer the SDK stores pointers
         // into is owned by a stationary local (`keepalive`) until create returns.
@@ -736,6 +737,7 @@ impl Worker {
                 session,
                 &config.image,
                 &mounts,
+                &port_mappings,
                 net_mode,
                 &mut keepalive,
                 &mut self.logger,
@@ -1145,6 +1147,20 @@ impl Drop for ComApartment {
     }
 }
 
+/// The daemon IPC frame carries no protocol, so every mapping is rebuilt as TCP.
+fn to_model_port_mappings(
+    mappings: &[PortMapping],
+) -> Vec<mxc_sdk::mxc_common::models::PortMapping> {
+    mappings
+        .iter()
+        .map(|mapping| mxc_sdk::mxc_common::models::PortMapping {
+            windows_port: mapping.windows_port,
+            container_port: mapping.container_port,
+            protocol: "tcp".to_string(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,6 +1170,41 @@ mod tests {
     }
 
     // ---- No-WSL unit tests (run everywhere, never touch the SDK) ----
+
+    #[test]
+    fn port_mappings_convert_to_tcp_models_in_order() {
+        let converted = to_model_port_mappings(&[
+            PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+            },
+            PortMapping {
+                windows_port: 8443,
+                container_port: 443,
+            },
+        ]);
+
+        assert_eq!(
+            converted,
+            vec![
+                mxc_sdk::mxc_common::models::PortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: "tcp".to_string(),
+                },
+                mxc_sdk::mxc_common::models::PortMapping {
+                    windows_port: 8443,
+                    container_port: 443,
+                    protocol: "tcp".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn no_port_mappings_convert_to_an_empty_list() {
+        assert!(to_model_port_mappings(&[]).is_empty());
+    }
 
     /// Build a worker entry around a handle that is never dereferenced.
     fn test_entry(retired: bool) -> ContainerEntry {
@@ -1210,6 +1261,7 @@ mod tests {
                     image_tar_path: None,
                     volumes: Vec::new(),
                     network: Default::default(),
+                    port_mappings: Vec::new(),
                 },
                 reply,
                 _retire_deadline: std::sync::mpsc::channel().0,
@@ -1236,6 +1288,7 @@ mod tests {
                     image_tar_path: None,
                     volumes: Vec::new(),
                     network: Default::default(),
+                    port_mappings: Vec::new(),
                 },
                 reply,
                 _retire_deadline: std::sync::mpsc::channel().0,
@@ -1601,6 +1654,7 @@ mod tests {
                 image_tar_path: None,
                 volumes: Vec::new(),
                 network: Default::default(),
+                port_mappings: Vec::new(),
             })
             .await
             .unwrap();
@@ -1663,6 +1717,7 @@ mod tests {
                 image_tar_path: None,
                 volumes: Vec::new(),
                 network: Default::default(),
+                port_mappings: Vec::new(),
             })
             .await
             .unwrap();

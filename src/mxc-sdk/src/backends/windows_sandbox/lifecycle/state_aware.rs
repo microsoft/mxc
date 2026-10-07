@@ -223,9 +223,8 @@ fn reject_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcErr
     let p = &request.policy;
     if !p.readwrite_paths.is_empty()
         || !p.readonly_paths.is_empty()
+        || !p.enumerate_paths.is_empty()
         || !p.denied_paths.is_empty()
-        || !p.allowed_hosts.is_empty()
-        || !p.blocked_hosts.is_empty()
         || p.network_proxy.is_enabled()
         || p.network_mode_specified
         || p.network_egress.is_some()
@@ -1013,7 +1012,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::default())?;
         policy::plan_policy(request)
             .map(|_| ())
             .map_err(map_policy_error)
@@ -1063,7 +1062,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::{ContainerPolicy, NetworkEgressPolicy, NetworkPolicy};
+    use crate::mxc_common::models::{ContainerPolicy, NetworkEgressPolicy};
     use crate::mxc_common::mxc_error::MxcErrorCode;
 
     /// A `Piped` exec is refused before the backend looks for the daemon.
@@ -1308,6 +1307,19 @@ mod tests {
     }
 
     #[test]
+    fn reject_post_provision_policy_rejects_enumerate_paths() {
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                enumerate_paths: vec!["C:\\work".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = reject_post_provision_policy(&req).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
     fn map_policy_error_maps_policy_to_validation() {
         let err = map_policy_error(OneShotError::Policy("nope".into()));
         assert_eq!(err.code, MxcErrorCode::PolicyValidation);
@@ -1318,8 +1330,10 @@ mod tests {
         let backend = WindowsSandboxRunner::new();
         let req = ExecutionRequest {
             policy: ContainerPolicy {
-                allowed_hosts: vec!["example.com".into()],
-                default_network_policy: NetworkPolicy::Block,
+                network_egress: Some(NetworkEgressPolicy {
+                    default: crate::mxc_common::models::NetworkAction::Allow,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -1897,22 +1911,17 @@ mod tests {
         let backend = WindowsSandboxRunner::new();
         let bad_req = ExecutionRequest {
             policy: ContainerPolicy {
-                // A network proxy enabled with no proxy spec triggers a
-                // policy error in plan_policy.
-                allowed_hosts: vec!["nonsense::not-a-host".into()],
-                default_network_policy: NetworkPolicy::Block,
+                enumerate_paths: vec!["C:\\work".into()],
                 ..Default::default()
             },
             ..Default::default()
         };
-        // We cannot easily produce a policy error via plan_policy from outside
-        // the policy module without coupling to its internals; instead assert
-        // the default-valued request passes and skip the negative case here.
-        // (Pure-helper coverage already lives in policy module tests.)
+        let err = backend.validate_provision(&bad_req, None).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains("enumeratePaths"));
         backend
             .validate_provision(&ExecutionRequest::default(), None)
             .expect("default request must pass validate_provision");
-        let _ = bad_req; // suppress unused warning; intentional placeholder.
     }
 
     #[test]

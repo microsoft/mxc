@@ -19,13 +19,15 @@ async function forward(
   destination: Writable,
 ): Promise<void> {
   if (stream === null) {
-    throw new Error('The selected backend did not provide an expected output stream.');
+    return Promise.reject(
+      new Error('The selected backend did not provide an expected output stream.'),
+    );
   }
-  for await (const chunk of stream) {
-    if (!destination.write(chunk)) {
-      await new Promise<void>((resolve) => destination.once('drain', resolve));
-    }
-  }
+  return new Promise<void>((resolve, reject) => {
+    stream.on('data', (chunk) => destination.write(chunk));
+    stream.once('end', resolve);
+    stream.once('error', reject);
+  });
 }
 
 async function main(): Promise<number> {

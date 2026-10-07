@@ -702,7 +702,7 @@ pub fn has_bwrap() -> bool {
 /// Opt-in switch for the Windows ProcessContainer characterization tests.
 ///
 /// AppContainer/BaseContainer execution requires an elevated, host-prepped
-/// Windows host (see `docs/host-prep.md`). Standard CI runners are NOT capable,
+/// Windows host (see `docs/backends/process-container/host-prep.md`). Standard CI runners are NOT capable,
 /// so these tests are skipped unless a host-prepped lane explicitly sets
 /// `MXC_E2E_HOST_PREPPED=1`. This keeps them from ever red-failing on incapable
 /// CI while still being runnable on a prepared box.

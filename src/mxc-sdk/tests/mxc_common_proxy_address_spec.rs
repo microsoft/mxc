@@ -27,7 +27,7 @@
 //!   field) has live callers today.  `appcontainer_runner::inject_proxy_vars`
 //!   turns `to_url()` into the `HTTP_PROXY` / `HTTPS_PROXY` values injected into
 //!   the sandboxed process, `proxy_coordinator` uses it to launch the elevated
-//!   shim, `unix_proxy_coordinator` logs it, `config_parser` produces addresses
+//!   shim, Unix backends log redacted URLs, `config_parser` produces addresses
 //!   via `from_url`, and `wsl_container_runner` reads the `original_url` field
 //!   directly.
 //! * The pin surface (`host_pin`, `hosts_line`, `ProxyHostPin`) still has no

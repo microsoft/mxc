@@ -5,6 +5,7 @@
     <version>$version$</version>
     <authors>Microsoft</authors>
     <owners>Microsoft</owners>
+    <copyright>&#169; Microsoft Corporation. All rights reserved.</copyright>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <license type="file">LICENSE.md</license>
     <readme>README.md</readme>

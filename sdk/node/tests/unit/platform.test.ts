@@ -71,6 +71,19 @@ describe('native backend discovery', () => {
     }]);
   });
 
+  it('reports identity-less loopback proxy support without general ingress support', () => {
+    assert.deepStrictEqual(parseAvailableBackends(JSON.stringify([{
+      backend: 'processcontainer',
+      tier: 'base-container',
+      capabilities: ['identitylessLoopbackProxy'],
+    }])), [{
+      backend: 'processcontainer',
+      tier: 'base-container',
+      capabilities: ['identitylessLoopbackProxy'],
+      warnings: [],
+    }]);
+  });
+
   it('rejects malformed discovery results instead of returning no backends', () => {
     for (const payload of [
       null, {}, [null], [[]], [{}], [{ backend: 1 }],

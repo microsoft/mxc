@@ -114,6 +114,108 @@ fn accepts_provision_string_values() {
 }
 
 #[test]
+fn accepts_provision_port_mappings() {
+    for mappings in [
+        "[]",
+        r#"[{"windowsPort": 8080, "containerPort": 80}]"#,
+        r#"[{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}]"#,
+        r#"[{"windowsPort": 8080, "containerPort": 80}, {"windowsPort": 8443, "containerPort": 443}]"#,
+        r#"[{"windowsPort": 65535, "containerPort": 1}]"#,
+    ] {
+        assert_valid(&request_with_additional_fields(&format!(
+            r#""wslc": {{"provision": {{"portMappings": {mappings}}}}}"#
+        )));
+    }
+}
+
+#[test]
+fn accepts_port_mappings_alongside_image_selection() {
+    assert_valid(&request_with_additional_fields(
+        r#""wslc": {"provision": {
+            "image": "alpine:latest",
+            "imageTarPath": "C:\\images\\alpine.tar",
+            "portMappings": [{"windowsPort": 8080, "containerPort": 80}]
+        }}"#,
+    ));
+}
+
+#[test]
+fn rejects_port_mappings_missing_required_ports() {
+    for mapping in [r#"{"containerPort": 80}"#, r#"{"windowsPort": 8080}"#, "{}"] {
+        assert_invalid(&request_with_additional_fields(&format!(
+            r#""wslc": {{"provision": {{"portMappings": [{mapping}]}}}}"#
+        )));
+    }
+}
+
+#[test]
+fn rejects_zero_and_out_of_range_ports() {
+    for value in ["0", "65536", "-1", "1.5"] {
+        for field in ["windowsPort", "containerPort"] {
+            let other = if field == "windowsPort" {
+                "containerPort"
+            } else {
+                "windowsPort"
+            };
+            assert_invalid(&request_with_additional_fields(&format!(
+                r#""wslc": {{"provision": {{"portMappings": [{{"{field}": {value}, "{other}": 80}}]}}}}"#
+            )));
+        }
+    }
+}
+
+#[test]
+fn rejects_non_tcp_port_mapping_protocol() {
+    for protocol in [r#""udp""#, r#""TCP""#, r#""sctp""#, r#""""#, "123", "true"] {
+        assert_invalid(&request_with_additional_fields(&format!(
+            r#""wslc": {{"provision": {{"portMappings": [
+                {{"windowsPort": 8080, "containerPort": 80, "protocol": {protocol}}}
+            ]}}}}"#
+        )));
+    }
+}
+
+#[test]
+fn rejects_invalid_port_mappings_container_types() {
+    for value in [r#""8080:80""#, "123", "true", "{}"] {
+        assert_invalid(&request_with_additional_fields(&format!(
+            r#""wslc": {{"provision": {{"portMappings": {value}}}}}"#
+        )));
+    }
+    for item in ["123", "true", r#""8080:80""#, "[]"] {
+        assert_invalid(&request_with_additional_fields(&format!(
+            r#""wslc": {{"provision": {{"portMappings": [{item}]}}}}"#
+        )));
+    }
+}
+
+#[test]
+fn rejects_null_port_mapping_fields() {
+    for field in [
+        r#""wslc": {"provision": {"portMappings": null}}"#,
+        r#""wslc": {"provision": {"portMappings": [null]}}"#,
+        r#""wslc": {"provision": {"portMappings": [{"windowsPort": null, "containerPort": 80}]}}"#,
+        r#""wslc": {"provision": {"portMappings": [{"windowsPort": 8080, "containerPort": null}]}}"#,
+        r#""wslc": {"provision": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": null}]}}"#,
+    ] {
+        assert_invalid(&request_with_additional_fields(field));
+    }
+}
+
+#[test]
+fn rejects_unknown_and_duplicate_port_mapping_fields() {
+    for field in [
+        r#""wslc": {"provision": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "unknownField": true}]}}"#,
+        r#""wslc": {"provision": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "hostPort": 90}]}}"#,
+        r#""wslc": {"provision": {"portMappings": [{"windowsPort": 8080, "windowsPort": 8081, "containerPort": 80}]}}"#,
+        r#""wslc": {"provision": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "containerPort": 81}]}}"#,
+        r#""wslc": {"provision": {"portMappings": [], "portMappings": []}}"#,
+    ] {
+        assert_invalid(&request_with_additional_fields(field));
+    }
+}
+
+#[test]
 fn phase_accepts_exact_and_escaped_spelling() {
     for phase in ["provision", "provis\\u0069on"] {
         assert_valid(&format!(
@@ -215,6 +317,7 @@ fn rejects_null_optional_fields() {
         r#""wslc": {"provision": null}"#,
         r#""wslc": {"provision": {"image": null}}"#,
         r#""wslc": {"provision": {"imageTarPath": null}}"#,
+        r#""wslc": {"provision": {"portMappings": null}}"#,
     ] {
         assert_invalid(&request_with_additional_fields(field));
     }
@@ -234,6 +337,7 @@ fn rejects_unknown_fields_at_each_object_level() {
         r#""telemetry": {"unknownField": true}"#,
         r#""wslc": {"unknownField": true}"#,
         r#""wslc": {"provision": {"unknownField": true}}"#,
+        r#""wslc": {"provision": {"portMappings": [{"windowsPort": 1, "containerPort": 2, "unknownField": true}]}}"#,
     ] {
         assert_invalid(&request_with_additional_fields(field));
     }
@@ -306,6 +410,7 @@ fn rejects_duplicate_nested_fields() {
         r#""wslc": {"provision": {}, "provision": {}}"#,
         r#""wslc": {"provision": {"image": "a", "image": "b"}}"#,
         r#""wslc": {"provision": {"imageTarPath": "a", "imageTarPath": "b"}}"#,
+        r#""wslc": {"provision": {"portMappings": [], "portMappings": []}}"#,
     ] {
         assert_invalid(&request_with_additional_fields(field));
     }

@@ -16,7 +16,7 @@
 # only decidable where the host can actually perform the operation: a permissive
 # knob omits the matching UILIMIT bit, it does not grant the capability, and the
 # rest of the process-container security environment may still deny it
-# (docs/process-container/UIPolicy_Schema.md). Measure-UiGrantable establishes
+# (docs/backends/process-container/UIPolicy_Schema.md). Measure-UiGrantable establishes
 # which capabilities are reachable at all, and the cases below skip the allow
 # direction for the rest.
 #

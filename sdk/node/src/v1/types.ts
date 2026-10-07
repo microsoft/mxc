@@ -711,6 +711,7 @@ export type BackendCapability =
   | 'filesystemEnumeratePaths'
   | 'ingressHostLoopbackAllow'
   | 'proxyEnforcement'
+  | 'identitylessLoopbackProxy'
   | 'unknown';
 
 /** One host-available backend and its native capabilities. */
@@ -784,6 +785,8 @@ export interface ProbeFacts {
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
   baseContainerSupportsIngressHostLoopbackAllow: boolean;
+  /** Identity-less proxy support on loopback; requires explicit host-loopback allow. */
+  baseContainerSupportsIdentitylessLoopbackProxy: boolean;
   /** True when this executor includes IsolationSession and the host can activate it. */
   isolationSessionAvailable: boolean;
   /** True when this executor includes Hyperlight and its host runtime is available. */
@@ -798,7 +801,7 @@ export interface ProbeFacts {
  * namespace and default-drop everything except the proxy endpoint. That
  * requires host tooling (slirp4netns, util-linux unshare, nsenter, the
  * iptables family) plus unprivileged user and network namespaces the kernel
- * will actually grant; see `docs/bwrap-support/bubblewrap-backend.md` for the
+ * will actually grant; see `docs/backends/bwrap/bubblewrap-backend.md` for the
  * full list. There is deliberately no fallback to the weaker shared-host-network
  * model, so a request that cannot configure private networking fails rather
  * than silently degrading. This reports, before launching, whether the host

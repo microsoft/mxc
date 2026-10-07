@@ -258,9 +258,6 @@ pub(super) fn into_common_request_ir(
         schema: schema.into_option(),
         comment: comment.into_option(),
         source_contract: crate::mxc_contract::ContractVersion::V0_9_0Alpha,
-        default_env_compatibility: crate::mxc_common::models::DefaultEnvCompatibility::DefaultBlock,
-        network_enforcement_compatibility:
-            crate::mxc_common::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
         sandbox_id: None,
         container_id: container_id.into_option(),

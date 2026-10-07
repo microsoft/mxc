@@ -46,15 +46,21 @@ and put the loopback proxy endpoint in runtime configuration:
 ```
 
 Direct egress rules and `runtimeConfig.networkProxy` select different
-connectivity models and cannot be combined. Both ingress controls deny when
-omitted, and `hostLoopback` resolves independently of `ingress.default` rather
-than inheriting it, so host-loopback access must be requested explicitly.
+connectivity models and cannot be combined. Direct mode applies numeric CIDR,
+protocol, and port rules where the backend supports them. A runtime proxy
+names a caller-managed HTTP/S endpoint; the proxy owns any destination
+filtering. Whether MXC can restrict raw-socket traffic to that endpoint
+depends on the backend; see its guide. When `network`, `network.egress`, or
+`network.egress.default` is omitted, `egress.default` resolves to `deny`.
+Both ingress controls also default to `deny` when omitted. `hostLoopback`
+resolves independently of `ingress.default`, so host-loopback access must
+be requested explicitly.
 A ProcessContainer proxy requires `ingress.default: "allow"`. Identity-scoped
 proxies set a non-blank `allowedProxyPeer` and keep `hostLoopback: "deny"`;
 identity-less host proxies omit `allowedProxyPeer` and require
 `hostLoopback: "allow"`. The identity-less route is a weaker development/testing
-compatibility deployment because it opens both host-loopback directions; it is
-not the strict proxy-endpoint exception defined by the shared model-2 policy.
+deployment: it opens both host-loopback directions without restricting access
+to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
 
 ```json
 {
@@ -84,26 +90,6 @@ No supported exact contract accepts them. Migrate existing policies to
 directional fields and `runtimeConfig.networkProxy` rather than changing
 the version string alone.
 
-#### Historical legacy network host-list semantics (retired)
-
-In the retired contracts, host lists refined `defaultPolicy`; they did not
-replace it. This table describes historical behavior, not supported authoring:
-
-| `defaultPolicy` | `allowedHosts` | `blockedHosts` | Result |
-| --- | --- | --- | --- |
-| `block` | empty | empty | Valid: no egress |
-| `block` | non-empty | empty | Valid: allow only listed destinations |
-| `block` | empty | non-empty | Invalid: a blocklist cannot refine a block default without an allowlist |
-| `block` | non-empty | non-empty | Valid shared policy: explicit blocks override allowed destinations; backends may reject if they cannot represent both lists |
-| `allow` | empty | empty | Valid: unrestricted egress |
-| `allow` | empty | non-empty | Valid: allow all except listed destinations |
-| `allow` | non-empty | empty | Invalid: an allowlist cannot refine an allow default |
-| `allow` | non-empty | non-empty | Invalid: `allowedHosts` cannot be used with an allow default |
-
-For the valid block-default combination containing both lists, explicit blocks
-take precedence over allowed destinations. A backend that cannot represent both
-lists must reject the combination rather than dropping either list.
-
 ### IsolationSession unrestricted networking (0.9)
 
 IsolationSession cannot restrict networking. Exact v0.9 requests must describe
@@ -127,8 +113,7 @@ that actual posture through the standard directional network fields:
 All three directional values must be explicitly `allow`; omission defaults to
 deny. Legacy network fields, rules, mixed postures, and proxies are rejected.
 An absent or empty `network` object is rejected. Exact v0.9 IsolationSession
-does not require an experimental execution opt-in. Earlier published contracts
-remain immutable history but are no longer accepted.
+does not require an experimental execution opt-in.
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
 that field when the command is supplied after `--`; `wxc-exec.exe` inserts or
@@ -266,8 +251,8 @@ that can be executed independently.
 > is rejected with a parse error. Callers cannot supply `correlationVector`;
 > it is rejected as an unknown field because lifecycle correlation is internal
 > to MXC and is not part of the request or response contract. See
-> [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
-> and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md).
+> [Container lifecycle architecture](development/architecture/container-lifecycle.md)
+> and [telemetry architecture](development/architecture/telemetry.md).
 
 ### Working Directory
 
@@ -284,8 +269,8 @@ use:
 |---------|----------------------------------------|
 | Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
-| Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/bwrap-support/bubblewrap-backend.md`](bwrap-support/bubblewrap-backend.md). |
-| LXC / WSL Container | The container root — see [`docs/lxc-support/lxc-backend.md`](lxc-support/lxc-backend.md). |
+| Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
+| LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
 | MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
@@ -296,7 +281,7 @@ Windows drive path, which is mapped under `/mnt/<drive>` (for example
 `C:\work` becomes `/mnt/c/work`); any other value is rejected before the
 container is created. WSL Container state-aware `exec` takes an absolute
 in-container path instead. See
-[`docs/wsl/wsl-container-getting-started.md`](wsl/wsl-container-getting-started.md).
+[`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md).
 
 ### Environment
 
@@ -326,7 +311,7 @@ launch.
 What the default block contains is backend-specific; see the backend's guide.
 On the WSL Container backend it is the container image's own `ENV`, which MXC
 neither authors nor enumerates — see
-[`docs/wsl/wsl-container-getting-started.md`](wsl/wsl-container-getting-started.md#environment).
+[`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md#environment).
 
 ### Filesystem Policy
 
@@ -390,7 +375,7 @@ documentation before relying on the default.
 
 **Per-backend support.** `ui` is enforced by the Windows ProcessContainer
 backend (via job-object UI restrictions plus the Win32k mitigation — see
-[`process-container/UIPolicy_Schema.md`](process-container/UIPolicy_Schema.md))
+[`backends/process-container/UIPolicy_Schema.md`](backends/process-container/UIPolicy_Schema.md))
 and by the macOS Seatbelt backend (via the generated sandbox profile). Other
 backends do not implement UI restrictions; each backend's documentation states
 whether it applies, rejects, or ignores the section. **IsolationSession and WSLc
@@ -398,9 +383,9 @@ refuse any supplied `ui` at every phase on both surfaces**, and each accepts an
 omitted one without applying any UI restriction — so the section's default-deny
 reading does not hold on either. The reasons differ: no `ui` posture is truthful
 for a session-isolated sandbox (see
-[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)),
+[IsolationSession state-aware Rust architecture](development/architecture/backends/isolation-session/state-aware-rust.md)),
 while WSLc has no mechanism to enforce UI restrictions on a container (see
-[`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
+[`backends/wslc/wslc-state-aware.md`](backends/wslc/wslc-state-aware.md)).
 The Windows `processContainer.ui` sub-block carries the ProcessContainer-only
 fields `isolation`, `desktopSystemControl`, `systemSettings`, and `ime`.
 `processContainer.filesystem` carries `enumeratePaths`. Both sub-blocks are
@@ -440,8 +425,8 @@ force a particular backend.
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session. Dual-mode: one-shot and state-aware. |
-| `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md). |
-| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/bwrap-support/bubblewrap-backend.md`](bwrap-support/bubblewrap-backend.md). |
+| `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |
+| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 
 Only the backend section matching the selected `containment` value is accepted;
 a config that also carries an unrelated backend's section is **rejected** with a
@@ -458,7 +443,8 @@ phase is being driven against an existing provisioned sandbox.
 State-aware envelopes use an exact backend-specific contract:
 
 - IsolationSession uses published `0.9.0-alpha`.
-- WSLC uses published `0.9.0-alpha`; Windows Sandbox uses development
+- WSLC uses published `0.9.0-alpha`, or development `1.1.0-alpha` for
+  `wslc.provision.portMappings`; Windows Sandbox uses development
   `1.1.0-alpha`.
 
 Contracts before `0.9.0-alpha` are retired. The supported published
@@ -499,7 +485,40 @@ State-aware-capable backends today are `isolation_session`, `windows_sandbox`,
 and `wslc` (all Windows-only). IsolationSession does not require runtime
 experimental authorization; Windows Sandbox does.
 
-Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
+WSLC `provision` accepts `wslc.provision.portMappings`, the same
+`windowsPort` / `containerPort` / `protocol` entries as the one-shot
+`wslc.portMappings` list, applied to the sandbox's own container:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "network": {
+        "egress": { "default": "allow" },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
+    },
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest",
+            "portMappings": [
+                { "windowsPort": 8080, "containerPort": 80 }
+            ]
+        }
+    }
+}
+```
+
+Mappings require the bridged (all-`allow`) posture shown above; the isolated
+posture is rejected at provision.
+
+Two entries claiming the same `windowsPort` are rejected on both surfaces. The
+session sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) stay
+one-shot-only, because the state-aware daemon shares one WSL session across
+every sandbox and cannot size them individually.
+
+Full lifecycle API: [container lifecycle](container-lifecycle.md).
 
 ### Schema Versioning
 

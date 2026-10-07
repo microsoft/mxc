@@ -27,9 +27,7 @@
 //! therefore refused wherever a process is launched: one-shot and exec.
 
 use crate::mxc_common::default_env::EnvResolution;
-use crate::mxc_common::models::{
-    ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
-};
+use crate::mxc_common::models::{ExecutionRequest, NetworkAction};
 
 use super::error::IsolationSessionError;
 
@@ -43,8 +41,8 @@ const ERR_UI_POLICY: &str = "UI policy is not supported by the isolation session
     backend that enforces UI policy if you need one";
 const ERR_NETWORK_POLICY: &str = "the network is unrestricted and cannot be filtered or denied; \
     describe that posture with network.egress.default=allow, \
-    network.ingress.default=allow, and network.ingress.hostLoopback=allow; do not supply rules, \
-    proxy settings, or legacy network fields, or use a backend that enforces network policy";
+    network.ingress.default=allow, and network.ingress.hostLoopback=allow; do not supply rules \
+    or proxy settings, or use a backend that enforces network policy";
 const ERR_PROXY_POLICY: &str =
     "the network cannot be routed through a proxy; remove network.proxy \
     (the container's network is unrestricted and unproxied)";
@@ -140,19 +138,11 @@ fn validate_provision_network_policy(
     request: &ExecutionRequest,
 ) -> Result<(), IsolationSessionError> {
     let policy = &request.policy;
-    let is_directional_allow = policy.default_network_policy == NetworkPolicy::Block
-        && !policy.allow_local_network
-        && policy.allowed_hosts.is_empty()
-        && policy.blocked_hosts.is_empty()
-        && policy.network_enforcement_mode == NetworkEnforcementMode::Capabilities
-        && policy.network_egress.as_ref().is_some_and(|egress| {
-            egress.default == NetworkAction::Allow
-                && egress.allow.is_empty()
-                && egress.deny.is_empty()
-        })
-        && policy.network_ingress.as_ref().is_some_and(|ingress| {
-            ingress.default == NetworkAction::Allow && ingress.host_loopback == NetworkAction::Allow
-        });
+    let is_directional_allow = policy.network_egress.as_ref().is_some_and(|egress| {
+        egress.default == NetworkAction::Allow && egress.allow.is_empty() && egress.deny.is_empty()
+    }) && policy.network_ingress.as_ref().is_some_and(|ingress| {
+        ingress.default == NetworkAction::Allow && ingress.host_loopback == NetworkAction::Allow
+    });
     if !is_directional_allow {
         return Err(IsolationSessionError::Policy(
             ERR_NETWORK_POLICY.to_string(),
@@ -168,8 +158,8 @@ fn validate_provision_network_policy(
 mod tests {
     use super::*;
     use crate::mxc_common::models::{
-        ContainerPolicy, DefaultEnvCompatibility, NetworkEgressPolicy, NetworkIngressPolicy,
-        ProxyAddress, ProxyConfig, UiPolicy,
+        ContainerPolicy, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress, ProxyConfig,
+        UiPolicy,
     };
     use crate::mxc_common::mxc_error::MxcErrorCode;
 
@@ -179,15 +169,6 @@ mod tests {
                 assert!(msg.contains(expected), "expected '{}' in {}", expected, msg)
             }
             other => panic!("expected Policy variant, got {:?}", other),
-        }
-    }
-
-    /// The removed legacy unrestricted-network spelling.
-    fn canonical_allow_policy() -> ContainerPolicy {
-        ContainerPolicy {
-            default_network_policy: NetworkPolicy::Allow,
-            allow_local_network: true,
-            ..Default::default()
         }
     }
 
@@ -308,18 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn provision_policy_rejects_legacy_allow() {
-        let request = ExecutionRequest {
-            policy: canonical_allow_policy(),
-            ..Default::default()
-        };
-        assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
-            ERR_NETWORK_POLICY,
-        );
-    }
-
-    #[test]
     fn provision_policy_accepts_directional_allow() {
         let request = ExecutionRequest {
             policy: directional_allow_policy(),
@@ -347,11 +316,6 @@ mod tests {
                 ..directional_allow_policy()
             },
             ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allow_local_network: true,
-                ..directional_allow_policy()
-            },
-            ContainerPolicy {
                 network_egress: Some(NetworkEgressPolicy {
                     default: NetworkAction::Allow,
                     allow: vec![Default::default()],
@@ -373,8 +337,8 @@ mod tests {
 
     #[test]
     fn provision_policy_rejects_default_request() {
-        // Absent network policy → domain default `Block`, which the backend
-        // cannot enforce, so provision refuses it.
+        // Absent network policy defaults to deny, which the backend cannot
+        // enforce, so provision refuses it.
         let request = ExecutionRequest::default();
         assert_policy_err_contains(
             validate_provision_policy(&request).unwrap_err(),
@@ -383,105 +347,12 @@ mod tests {
     }
 
     #[test]
-    fn provision_policy_rejects_block_even_with_local_network() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Block,
-                allow_local_network: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
-            ERR_NETWORK_POLICY,
-        );
-    }
-
-    #[test]
-    fn provision_policy_rejects_allow_without_local_network() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                default_network_policy: NetworkPolicy::Allow,
-                allow_local_network: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
-            ERR_NETWORK_POLICY,
-        );
-    }
-
-    #[test]
-    fn provision_policy_rejects_allowed_hosts() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                allowed_hosts: vec!["example.com".to_string()],
-                ..directional_allow_policy()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
-            ERR_NETWORK_POLICY,
-        );
-    }
-
-    #[test]
-    fn provision_policy_rejects_blocked_hosts() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                blocked_hosts: vec!["evil.com".to_string()],
-                ..directional_allow_policy()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
-            ERR_NETWORK_POLICY,
-        );
-    }
-
-    #[test]
-    fn provision_policy_rejects_firewall_enforcement() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                network_enforcement_mode: NetworkEnforcementMode::Firewall,
-                ..canonical_allow_policy()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
-            ERR_NETWORK_POLICY,
-        );
-    }
-
-    #[test]
-    fn provision_policy_rejects_both_enforcement() {
-        let request = ExecutionRequest {
-            policy: ContainerPolicy {
-                network_enforcement_mode: NetworkEnforcementMode::Both,
-                ..canonical_allow_policy()
-            },
-            ..Default::default()
-        };
-        assert_policy_err_contains(
-            validate_provision_policy(&request).unwrap_err(),
-            ERR_NETWORK_POLICY,
-        );
-    }
-
-    #[test]
     fn provision_policy_rejects_proxy() {
-        // Canonical on the network axis, but a proxy the backend cannot route.
+        // Unrestricted on the network axis, but a proxy the backend cannot route.
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 network_proxy: ProxyConfig {
                     address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-                    builtin_test_server: false,
                 },
                 ..directional_allow_policy()
             },
@@ -517,7 +388,7 @@ mod tests {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 ui_specified: true,
-                ..canonical_allow_policy()
+                ..directional_allow_policy()
             },
             ..Default::default()
         };
@@ -547,7 +418,7 @@ mod tests {
             policy: ContainerPolicy {
                 ui_specified: true,
                 ui: UiPolicy::default(),
-                ..canonical_allow_policy()
+                ..directional_allow_policy()
             },
             ..Default::default()
         };
@@ -673,11 +544,11 @@ mod tests {
     #[test]
     fn post_provision_policy_rejects_specified_network() {
         // Any supplied network policy is refused post-provision (fixed at
-        // provision), regardless of value — here a canonical allow.
+        // provision), regardless of value — here a directional allow.
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 network_specified: true,
-                ..canonical_allow_policy()
+                ..directional_allow_policy()
             },
             ..Default::default()
         };
@@ -689,9 +560,8 @@ mod tests {
 
     #[test]
     fn post_provision_policy_rejects_specified_network_even_when_block() {
-        // Closes the presence-signal blind spot: an explicit default-valued
-        // (Block) network is indistinguishable from absent in the domain model,
-        // so the `network_specified` flag — not the value — drives the refusal.
+        // Even an explicit default-valued (deny) network is rejected on
+        // presence, not just on its values.
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 network_specified: true,
@@ -746,13 +616,8 @@ mod tests {
 
     // ====== process.env (refused when it would replace the default) ======
 
-    fn request_with_env(
-        compatibility: DefaultEnvCompatibility,
-        env: Option<Vec<&str>>,
-        inherit_default_env: bool,
-    ) -> ExecutionRequest {
+    fn request_with_env(env: Option<Vec<&str>>, inherit_default_env: bool) -> ExecutionRequest {
         ExecutionRequest {
-            default_env_compatibility: compatibility,
             env: env.map(|e| e.into_iter().map(String::from).collect()),
             inherit_default_env,
             ..Default::default()
@@ -761,21 +626,18 @@ mod tests {
 
     #[test]
     fn only_an_environment_that_would_replace_the_default_is_refused() {
-        use DefaultEnvCompatibility::DefaultBlock;
-
         let cases = [
-            (None, false, DefaultBlock, true),
-            (None, true, DefaultBlock, true),
-            (Some(vec![]), false, DefaultBlock, false),
-            (Some(vec![]), true, DefaultBlock, true),
-            (Some(vec!["FOO=bar"]), false, DefaultBlock, false),
-            (Some(vec!["FOO=bar"]), true, DefaultBlock, true),
+            (None, false, true),
+            (None, true, true),
+            (Some(vec![]), false, false),
+            (Some(vec![]), true, true),
+            (Some(vec!["FOO=bar"]), false, false),
+            (Some(vec!["FOO=bar"]), true, true),
         ];
 
-        for (env, inherit_default_env, compatibility, accepted) in cases {
-            let state =
-                format!("{env:?}, inherit_default_env={inherit_default_env}, {compatibility:?}");
-            let request = request_with_env(compatibility, env, inherit_default_env);
+        for (env, inherit_default_env, accepted) in cases {
+            let state = format!("{env:?}, inherit_default_env={inherit_default_env}");
+            let request = request_with_env(env, inherit_default_env);
             match (reject_unhonorable_environment(&request), accepted) {
                 (Ok(()), true) => {}
                 (Err(err), false) => assert_policy_err_contains(err, ERR_ENVIRONMENT_POLICY),

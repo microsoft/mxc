@@ -1132,7 +1132,6 @@ mod tests {
         let mut policy = empty_policy();
         policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
         };
         let req = test_request(policy);
 

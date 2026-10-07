@@ -101,6 +101,16 @@ fn rejects_null_unknown_and_foreign_fields() {
 }
 
 #[test]
+fn rejects_the_development_only_port_mappings_field() {
+    for fields in [
+        r#","wslc": {"provision": {"portMappings": []}}"#,
+        r#","wslc": {"provision": {"portMappings": [{"windowsPort": 8080, "containerPort": 80}]}}"#,
+    ] {
+        assert_invalid(&request(fields));
+    }
+}
+
+#[test]
 fn rejects_duplicate_wslc_provision_fields() {
     for fields in [
         r#","wslc": {}, "wslc": {}"#,

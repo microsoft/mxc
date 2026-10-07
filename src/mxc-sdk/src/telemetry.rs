@@ -5,7 +5,7 @@
 //!
 //! A host supplies presentation for the canonical consent resource; the SDK
 //! persists the typed decision. See
-//! `docs/telemetry/telemetry-consent-design.md`.
+//! `docs/development/architecture/telemetry-consent-design.md`.
 //!
 //! ```no_run
 //! use std::error::Error;

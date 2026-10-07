@@ -977,6 +977,7 @@ mod tests {
             Some(crate::mxc_common::models::WslcProvisionConfig {
                 image,
                 image_tar_path,
+                port_mappings: None,
             })
         };
         let mut input = sdk_input(StateAwareOperation::Provision(RuntimeProvision::Wslc(

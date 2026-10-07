@@ -157,8 +157,8 @@ IsolationSession exec with a caller-driven terminal and returns a
 to 24 rows by 80 columns.
 IsolationSession provision requires an explicit unrestricted directional
 network posture; WSLC network posture is fixed at provision. See the
-[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/state-aware-typescript.md) and
-[WSLC](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) guides for backend and phase
+[IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-typescript.md) and
+[WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides for backend and phase
 requirements.
 
 Provisioning takes a discriminated `ProvisionRequest` and optional
@@ -214,10 +214,10 @@ remain on the selected containment configuration.
 | Host consent presenter | `TelemetryConsentPresenter` |
 
 Network policy details are in the
-[networking guide](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/networking/networking.md);
+[networking guide](https://github.com/microsoft/mxc/blob/main/docs/schema.md#directional-networking-supported-contracts)
 host-specific behavior and supported capabilities are documented in the
 backend guides under [`docs/`](https://github.com/microsoft/mxc/tree/main/docs).
-See the [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/reference/README.md)
+See the [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md)
 for complete signatures and types.
 
 ## Errors, warnings, and telemetry

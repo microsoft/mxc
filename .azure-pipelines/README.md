@@ -55,5 +55,5 @@ setting `dryRun` to `false`.
   request — it mirrors the ADO build stages on native hardware for faster
   developer iteration.
 - The ADO pipeline can also be triggered on PRs via `/azp run`
-  (see [docs/pull-requests.md](../docs/pull-requests.md)) when reviewers want
+  (see [pull request builds](../docs/development/build-and-test/pull-requests.md)) when reviewers want
   to run the official build against a change before merge.
