@@ -187,20 +187,19 @@ pub enum WorkerCommand {
     Shutdown { reply: oneshot::Sender<()> },
 }
 
-/// A resource the admitting client handler holds on an exec's behalf, released
-/// when the run reports back.
+/// A resource an exec holds against the daemon's capacity, shared by the client
+/// handler and the run so it is released only once both are done with it.
 ///
 /// Opaque so the worker never names the control server's permit type.
-pub type ExecSlotGuard = Box<dyn Send>;
+pub type ExecSlotGuard = Arc<dyn Send + Sync>;
 
 /// Everything an admitted exec needs, kept together so it travels as one value
 /// from the pipe handler to the run thread.
 pub struct ExecRequest {
     pub config: ExecConfig,
 
-    /// Live-output sink the worker hands to `exec_in_container`; the SDK's
-    /// stdout/stderr callbacks push chunks through it to the pipe handler as
-    /// bytes arrive, alongside the capped capture buffers.
+    /// Live-output sink the worker hands to `exec_in_container`, carrying the
+    /// SDK's stdout/stderr chunks to the pipe handler as bytes arrive.
     pub sink: OutputSink,
     pub cancellation: Arc<AtomicBool>,
     pub(crate) registration: Arc<ExecRegistration>,
@@ -667,6 +666,10 @@ struct ContainerEntry {
     /// and deletes the container.
     retired: bool,
     container: WslcContainerGuard,
+
+    /// Keeps a quarantined sandbox counted against exec capacity, because a run
+    /// whose termination was never confirmed may still hold a live process.
+    exec_slot: Option<ExecSlotGuard>,
 }
 
 /// A provision waiting on its image to arrive from a registry.
@@ -732,6 +735,50 @@ impl ContainerWork {
     }
 }
 
+/// How [`Worker::begin_exec`] puts a claimed run on its own thread, injected so
+/// a worker with no SDK loaded can still reach the claim.
+type RunStarter = fn(
+    &Worker,
+    ExecConfig,
+    WslcContainer,
+    OutputSink,
+    Arc<AtomicBool>,
+    &mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<(), WorkerError>;
+
+/// Hand a claimed run to its own MTA thread using the SDK this worker loaded.
+fn start_run_on_sdk(
+    state: &Worker,
+    config: ExecConfig,
+    container: WslcContainer,
+    sink: OutputSink,
+    cancellation: Arc<AtomicBool>,
+    worker: &mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<(), WorkerError> {
+    let Some(sdk) = state.sdk.as_ref() else {
+        return Err(WorkerError::Backend(anyhow::anyhow!(
+            "no active WSLc session"
+        )));
+    };
+
+    let sandbox_id = config.sandbox_id.clone();
+    let job = ExecJob {
+        // The box's contents, not the field: teardown may take the field while
+        // this run is still dereferencing the SDK.
+        sdk: &**sdk as *const WslcSdk,
+        container,
+        config,
+        sink,
+        cancellation,
+    };
+
+    start_exec(job, worker.clone(), &state.execs_in_flight).map_err(|e| {
+        WorkerError::Backend(anyhow::anyhow!(
+            "could not start a thread to run exec on sandbox {sandbox_id}: {e}"
+        ))
+    })
+}
+
 /// An exec running on its own thread, and the work that parked behind it.
 ///
 /// `container` is the handle that run is using, so nothing may delete or
@@ -744,7 +791,7 @@ struct InFlightExec {
     _registration: Arc<ExecRegistration>,
 
     /// Held only so the run counts against exec capacity until it reports back.
-    _slot: Option<ExecSlotGuard>,
+    slot: Option<ExecSlotGuard>,
     parked: Vec<ContainerWork>,
 }
 
@@ -756,6 +803,8 @@ struct InFlightExec {
 /// so.
 struct Worker {
     logger: Logger,
+    start_run: RunStarter,
+
     // Field order is load-bearing on implicit drop: `containers` and `session`
     // hold handles whose Drop calls into the SDK, so they must drop before `sdk`
     // unloads `wslcsdk.dll`.
@@ -779,6 +828,7 @@ impl Worker {
     fn new() -> Self {
         Self {
             logger: Logger::new(Mode::Console),
+            start_run: start_run_on_sdk,
             sdk: None,
             session: None,
             containers: HashMap::new(),
@@ -1029,6 +1079,7 @@ impl Worker {
                 quarantined: false,
                 retired: false,
                 container,
+                exec_slot: None,
             },
         );
         Ok(sandbox_id)
@@ -1149,28 +1200,10 @@ impl Worker {
             return;
         }
 
-        let Some(sdk) = self.sdk.as_ref() else {
-            let _ = done.send(Err(WorkerError::Backend(anyhow::anyhow!(
-                "no active WSLc session"
-            ))));
-            return;
-        };
-
         let sandbox_id = config.sandbox_id.clone();
-        let job = ExecJob {
-            // The box's contents, not the field: teardown may take the field
-            // while this run is still dereferencing the SDK.
-            sdk: &**sdk as *const WslcSdk,
-            container,
-            config,
-            sink,
-            cancellation,
-        };
-
-        if let Err(e) = start_exec(job, worker.clone(), &self.execs_in_flight) {
-            let _ = done.send(Err(WorkerError::Backend(anyhow::anyhow!(
-                "could not start a thread to run exec on sandbox {sandbox_id}: {e}"
-            ))));
+        let start_run = self.start_run;
+        if let Err(e) = start_run(self, config, container, sink, cancellation, worker) {
+            let _ = done.send(Err(e));
             return;
         }
 
@@ -1180,7 +1213,7 @@ impl Worker {
                 container,
                 done,
                 _registration: registration,
-                _slot: slot,
+                slot,
                 parked: Vec::new(),
             },
         );
@@ -1211,7 +1244,7 @@ impl Worker {
         let outcome = match report {
             ExecReport::Finished(outcome) => outcome,
             ExecReport::Unconfirmed(detail) => {
-                Err(self.quarantine(sandbox_id, in_flight.container, &detail))
+                Err(self.quarantine(sandbox_id, in_flight.container, &detail, in_flight.slot))
             }
         };
 
@@ -1233,6 +1266,7 @@ impl Worker {
         sandbox_id: &str,
         container: WslcContainer,
         detail: &str,
+        slot: Option<ExecSlotGuard>,
     ) -> WorkerError {
         let delete_result = self.sdk.as_ref().map(|sdk| {
             // SAFETY: `sdk` is valid and `container` is the live handle stored
@@ -1242,6 +1276,9 @@ impl Worker {
 
         match delete_result {
             Some(Ok(())) => {
+                // Deleting the container ends anything still running inside it,
+                // so this exec stops counting against capacity.
+                drop(slot);
                 self.containers.remove(sandbox_id);
                 WorkerError::Backend(anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
@@ -1251,6 +1288,7 @@ impl Worker {
             Some(Err(delete_error)) => {
                 if let Some(entry) = self.containers.get_mut(sandbox_id) {
                     entry.quarantined = true;
+                    entry.exec_slot = slot;
                 }
                 WorkerError::Backend(anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
@@ -1262,6 +1300,7 @@ impl Worker {
             None => {
                 if let Some(entry) = self.containers.get_mut(sandbox_id) {
                     entry.quarantined = true;
+                    entry.exec_slot = slot;
                 }
                 WorkerError::Backend(anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
@@ -1666,6 +1705,7 @@ mod tests {
             // SAFETY: `release_noop` never dereferences the handle, so the guard
             // owns a value it can release without touching memory.
             container: unsafe { WslcContainerGuard::from_raw(sentinel, release_noop) },
+            exec_slot: None,
         }
     }
 
@@ -2106,6 +2146,7 @@ mod tests {
             // SAFETY: `release` never dereferences the handle, so the guard owns
             // a value it can release without touching memory.
             container: unsafe { WslcContainerGuard::from_raw(sentinel, release) },
+            exec_slot: None,
         }
     }
 
@@ -2127,7 +2168,7 @@ mod tests {
                 container: std::ptr::dangling_mut(),
                 done,
                 _registration: registration,
-                _slot: None,
+                slot: None,
                 parked: Vec::new(),
             },
             done_rx,
@@ -2143,6 +2184,14 @@ mod tests {
     }
 
     fn exec_work(sandbox_id: &str, exec_id: &str) -> TestExec {
+        exec_work_with_slot(sandbox_id, exec_id, None)
+    }
+
+    fn exec_work_with_slot(
+        sandbox_id: &str,
+        exec_id: &str,
+        slot: Option<ExecSlotGuard>,
+    ) -> TestExec {
         let (admit, admit_rx) = oneshot::channel();
         let (done, done_rx) = oneshot::channel();
         let active_execs: ActiveExecs = Arc::new(Mutex::new(HashMap::new()));
@@ -2167,7 +2216,7 @@ mod tests {
                 registration,
                 admit,
                 done,
-                slot: None,
+                slot,
             }),
             admit: admit_rx,
             done: done_rx,
@@ -2187,6 +2236,28 @@ mod tests {
             .exec_in_flight
             .insert("wslc:busy".to_string(), in_flight);
         (worker, done)
+    }
+
+    /// A worker holding one started container it can start runs on without an
+    /// SDK loaded.
+    fn worker_that_can_run() -> Worker {
+        fn start_nothing(
+            _: &Worker,
+            _: ExecConfig,
+            _: WslcContainer,
+            _: OutputSink,
+            _: Arc<AtomicBool>,
+            _: &mpsc::UnboundedSender<WorkerCommand>,
+        ) -> Result<(), WorkerError> {
+            Ok(())
+        }
+
+        let mut worker = Worker::new();
+        worker.start_run = start_nothing;
+        worker
+            .containers
+            .insert("wslc:ready".to_string(), started_entry());
+        worker
     }
 
     fn start_work(sandbox_id: &str) -> (ContainerWork, oneshot::Receiver<Result<(), WorkerError>>) {
@@ -2333,7 +2404,7 @@ mod tests {
                         env_scope: EnvScope::Merge,
                         timeout_ms: 0,
                     },
-                    Some(Box::new(permit)),
+                    Some(Arc::new(permit)),
                 )
                 .await
         });
@@ -2349,7 +2420,7 @@ mod tests {
         // Stand in for the worker: claim the slot for the run, then drop the
         // client's end as a disconnect would.
         let (mut worker, _done) = worker_with_exec_in_flight();
-        worker.exec_in_flight.get_mut("wslc:busy").unwrap()._slot = request.slot;
+        worker.exec_in_flight.get_mut("wslc:busy").unwrap().slot = request.slot;
         let _ = request.admit.send(Ok(()));
         exec.await.unwrap().unwrap();
         assert_eq!(
@@ -2370,6 +2441,62 @@ mod tests {
             1,
             "the slot must be released once the run reports back"
         );
+    }
+
+    #[test]
+    fn the_worker_claims_the_slot_when_it_starts_the_run() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut worker = worker_that_can_run();
+        let limiter = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&limiter).try_acquire_owned().unwrap();
+        let exec = exec_work_with_slot("wslc:ready", "claimed", Some(Arc::new(permit)));
+
+        worker.dispatch(exec.work, &tx);
+
+        assert_eq!(
+            limiter.available_permits(),
+            0,
+            "the started run must hold the slot its request carried"
+        );
+
+        worker.finish_exec(
+            "wslc:ready",
+            ExecReport::Finished(Ok(ExecTerminal::Exited(0))),
+            &tx,
+        );
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "retiring the run must release the slot"
+        );
+    }
+
+    #[test]
+    fn parked_lifecycle_work_replays_in_the_order_it_arrived() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut worker, _done) = worker_with_exec_in_flight();
+        let (stop, mut stop_reply) = stop_work("wslc:busy");
+        let (deprovision, mut deprovision_reply) = deprovision_work("wslc:busy");
+        worker.dispatch(stop, &tx);
+        worker.dispatch(deprovision, &tx);
+
+        worker.finish_exec(
+            "wslc:busy",
+            ExecReport::Finished(Ok(ExecTerminal::Exited(0))),
+            &tx,
+        );
+
+        let stopped = stop_reply
+            .try_recv()
+            .expect("the parked stop must be answered");
+        assert!(
+            !matches!(stopped, Err(WorkerError::NotProvisioned(_))),
+            "the stop must run while its container still exists, got {stopped:?}"
+        );
+        assert!(deprovision_reply
+            .try_recv()
+            .expect("the parked deprovision must be answered")
+            .is_ok());
     }
 
     #[test]
@@ -2435,6 +2562,92 @@ mod tests {
         assert!(
             !worker.exec_in_flight.contains_key("wslc:idle"),
             "a cancelled exec must not claim the container's slot"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_exec_never_reaches_the_runner() {
+        static STARTED: AtomicBool = AtomicBool::new(false);
+
+        fn record_start(
+            _: &Worker,
+            _: ExecConfig,
+            _: WslcContainer,
+            _: OutputSink,
+            _: Arc<AtomicBool>,
+            _: &mpsc::UnboundedSender<WorkerCommand>,
+        ) -> Result<(), WorkerError> {
+            STARTED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut worker = worker_that_can_run();
+        worker.start_run = record_start;
+        let mut queued = exec_work("wslc:ready", "cancelled-before-start");
+        queued.cancellation.store(true, Ordering::Release);
+
+        worker.dispatch(queued.work, &tx);
+
+        assert!(
+            !STARTED.load(Ordering::SeqCst),
+            "a cancelled exec must not reach the runner that creates the process"
+        );
+        assert_eq!(
+            queued.done.try_recv().unwrap().unwrap(),
+            ExecTerminal::Cancelled
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_exec_keeps_its_slot_claimed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut worker, _done) = worker_with_exec_in_flight();
+        let limiter = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&limiter).try_acquire_owned().unwrap();
+        worker.exec_in_flight.get_mut("wslc:busy").unwrap().slot = Some(Arc::new(permit));
+
+        worker.finish_exec(
+            "wslc:busy",
+            ExecReport::Unconfirmed("the exit callback never fired".to_string()),
+            &tx,
+        );
+
+        assert_eq!(
+            limiter.available_permits(),
+            0,
+            "a quarantined sandbox whose process may still be running must keep its slot"
+        );
+    }
+
+    #[test]
+    fn deprovisioning_a_quarantined_sandbox_frees_its_slot() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (mut worker, _done) = worker_with_exec_in_flight();
+        let limiter = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&limiter).try_acquire_owned().unwrap();
+        worker.exec_in_flight.get_mut("wslc:busy").unwrap().slot = Some(Arc::new(permit));
+        worker.finish_exec(
+            "wslc:busy",
+            ExecReport::Unconfirmed("the exit callback never fired".to_string()),
+            &tx,
+        );
+        assert_eq!(
+            limiter.available_permits(),
+            0,
+            "the quarantine holds a slot"
+        );
+
+        worker
+            .deprovision(DeprovisionConfig {
+                sandbox_id: "wslc:busy".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "deprovisioning the quarantined sandbox must return its slot"
         );
     }
 
@@ -2800,6 +3013,35 @@ mod tests {
         }
     }
 
+    /// A run that prints an epoch second either side of its sleep.
+    fn stamped_sleep_exec(exec_id: &str, sandbox_id: &str, seconds: u32) -> ExecConfig {
+        ExecConfig {
+            script_code: format!("date +%s; sleep {seconds}; date +%s"),
+            ..sleep_exec(exec_id, sandbox_id, seconds)
+        }
+    }
+
+    /// Drain a stamped run's output and return the epoch seconds it reported
+    /// either side of its sleep.
+    async fn stamped_interval(exec: &mut ExecStream) -> (i64, i64) {
+        let mut stdout = Vec::new();
+        while let Some((stream, data)) = exec.output.recv().await {
+            if stream == OutStream::Stdout {
+                stdout.extend_from_slice(&data);
+            }
+        }
+        let text = String::from_utf8_lossy(&stdout);
+        let stamps: Vec<i64> = text
+            .lines()
+            .filter_map(|line| line.trim().parse::<i64>().ok())
+            .collect();
+        assert!(
+            stamps.len() >= 2,
+            "a stamped run must report a start and an end, got {text:?}"
+        );
+        (stamps[0], stamps[stamps.len() - 1])
+    }
+
     // Exercises the real SDK path end to end: provision (boot VM + create
     // container) → start → exec → stop → deprovision → refcount back to 0. It
     // provisions with the default isolated posture, which refuses a registry
@@ -3019,22 +3261,26 @@ mod tests {
         let first_id = provisioned_and_started(&handle).await;
         let second_id = provisioned_and_started(&handle).await;
 
-        let started = Instant::now();
-        let first = handle
-            .exec(sleep_exec("overlap-first", &first_id, 3), None)
+        let mut first = handle
+            .exec(stamped_sleep_exec("overlap-first", &first_id, 6), None)
             .await
             .unwrap();
-        let second = handle
-            .exec(sleep_exec("overlap-second", &second_id, 3), None)
+        let mut second = handle
+            .exec(stamped_sleep_exec("overlap-second", &second_id, 6), None)
             .await
             .unwrap();
+
+        // Both sandboxes share one utility VM, so their clocks agree.
+        let (first_start, first_end) = stamped_interval(&mut first).await;
+        let (second_start, second_end) = stamped_interval(&mut second).await;
         assert_eq!(first.done.await.unwrap().unwrap(), ExecTerminal::Exited(0));
         assert_eq!(second.done.await.unwrap().unwrap(), ExecTerminal::Exited(0));
-        let elapsed = started.elapsed();
 
+        let overlap = first_end.min(second_end) - first_start.max(second_start);
         assert!(
-            elapsed < Duration::from_secs(5),
-            "two 3s runs finished in {elapsed:?}, so they were serialized"
+            overlap >= 2,
+            "the two 6s runs overlapped by {overlap}s, so they were serialized: \
+             first {first_start}..{first_end}, second {second_start}..{second_end}"
         );
 
         stop_and_deprovision(&handle, first_id).await;

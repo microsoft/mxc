@@ -207,8 +207,10 @@ fn two_clients_exec_concurrently_over_the_pipe() {
 #[test]
 #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
 fn the_global_exec_cap_refuses_the_excess() {
-    // Above the daemon's exec cap, which is private to the control server.
-    const CLIENTS: usize = 10;
+    // The control server's own cap, which a client can observe only as the
+    // number of simultaneous runs the daemon admits.
+    const EXEC_CAP: usize = 8;
+    const CLIENTS: usize = EXEC_CAP + 2;
 
     let _daemon = DaemonProcess::spawn_ready();
     let client = DaemonClient::connect().expect("connect to daemon");
@@ -217,6 +219,8 @@ fn the_global_exec_cap_refuses_the_excess() {
         .map(|_| provisioned_and_started(&client))
         .collect();
 
+    // Long enough that every client has had its admission answered before the
+    // first run frees a slot.
     let runs: Vec<_> = sandboxes
         .iter()
         .enumerate()
@@ -246,19 +250,14 @@ fn the_global_exec_cap_refuses_the_excess() {
         })
         .count();
 
-    assert!(
-        admitted >= 2,
-        "the daemon must admit concurrent execs, got {admitted} of {CLIENTS}"
-    );
-    assert!(
-        refused >= 1,
-        "the exec cap must refuse the excess, got {admitted} admitted and {refused} refused \
-         of {CLIENTS}"
+    assert_eq!(
+        admitted, EXEC_CAP,
+        "the daemon must admit exactly its cap, got {admitted} of {CLIENTS}"
     );
     assert_eq!(
-        admitted + refused,
-        CLIENTS,
-        "every client must be admitted or refused as busy, not fail some other way"
+        refused,
+        CLIENTS - EXEC_CAP,
+        "every client past the cap must be refused as busy, got {refused} of {CLIENTS}"
     );
 
     deprovision_all(&client, sandboxes);

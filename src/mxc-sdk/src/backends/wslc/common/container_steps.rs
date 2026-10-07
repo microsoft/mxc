@@ -118,11 +118,8 @@ pub enum OutStream {
     Stderr,
 }
 
-/// Optional live-output sink invoked from the SDK's stdout/stderr callbacks in
-/// addition to the capped capture buffers. The daemon supplies one to stream a
-/// container's output to the client as bytes arrive; paths that only need the
-/// final captured blob (one-shot, detached init) leave it unset. It receives
-/// the full callback bytes, independent of the capped buffers' truncation.
+/// Optional live-output sink that replaces the capped capture buffers, so a
+/// caller that sets one gets empty captured stdout/stderr.
 ///
 /// **Two distinct live-output architectures — why they don't share plumbing.**
 /// The one-shot runner streams via `OutputMode::Stream` (in `wsl_container_runner`)
@@ -137,7 +134,7 @@ pub enum OutStream {
 /// block** — the same SDK thread also delivers the process-exit callback, so the
 /// daemon path uses a non-blocking `try_send` that drops on overflow rather than
 /// stalling teardown. Keep the two paths separate for those reasons; share only
-/// the leaf primitives ([`OutStream`], the capped capture buffers).
+/// the leaf primitives ([`OutStream`], [`IoContext`]).
 pub type OutputSink = Box<dyn Fn(OutStream, &[u8]) + Send + Sync>;
 
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are

@@ -46,7 +46,7 @@ use mxc_sdk::wslc_common::daemon_protocol::{
     MAX_FRAME_SIZE,
 };
 
-use crate::session_manager::{ExecStream, SessionHandle, WorkerError};
+use crate::session_manager::{ExecSlotGuard, ExecStream, SessionHandle, WorkerError};
 
 /// Exec streams admitted at once; a further request is refused rather than
 /// queued behind a workload of unknown duration.
@@ -564,9 +564,8 @@ where
 /// sandbox therefore comes back as a pre-admission typed
 /// [`DaemonResponse::Err`] rather than a post-admission stream `Error` frame.
 ///
-/// The exec permit travels into the worker, which releases it when the run
-/// reports back: a client that disconnects mid-run leaves its thread and
-/// container process going, and they must keep counting against exec capacity.
+/// The exec permit is shared with the run, so capacity frees only once the run
+/// has reported back and this handler has finished writing.
 ///
 /// Output streaming (process -> `Stdout`/`Stderr`) is live. Client `Stdin`
 /// frames are NOT forwarded: the WSLc SDK consumes all process IO handles once
@@ -586,10 +585,11 @@ where
 {
     let exec_id = config.exec_id.clone();
     let run_token = config.run_token.clone();
+    let slot: ExecSlotGuard = Arc::new(exec_permit);
 
     // Await the worker's admission decision before writing anything: a rejected
     // exec is a pre-admission typed error, never a post-admission stream frame.
-    let admission = session.exec(config, Some(Box::new(exec_permit))).await;
+    let admission = session.exec(config, Some(slot.clone())).await;
     let delivered = write_exec_result(&mut pipe, admission).await;
 
     if delivered.is_err() {
@@ -598,6 +598,7 @@ where
         session.cancel_exec(&exec_id, &run_token);
     }
 
+    drop(slot);
     delivered
 }
 
@@ -934,10 +935,158 @@ mod tests {
         assert!(delivered.is_err(), "the broken pipe must fail delivery");
         assert!(
             cancellation.load(Ordering::Acquire),
-            "a run the client can no longer read must be cancelled, or it keeps \
-             going after its capacity permit is released"
+            "a run the client can no longer read must be cancelled rather than \
+             left going"
         );
         drop(registration);
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_exec_slot_outlives_a_handler_that_is_still_writing() {
+        let session = spawn().unwrap();
+        let limiter = Arc::new(Semaphore::new(1));
+        let permit = limiter.clone().try_acquire_owned().unwrap();
+
+        // One byte of pipe, never drained, so the handler cannot finish writing.
+        let (server, mut client) = duplex(1);
+        let handler = tokio::spawn(handle_exec(
+            server,
+            session.clone(),
+            ExecConfig {
+                exec_id: "exec-writing".to_string(),
+                run_token: "run-writing".to_string(),
+                sandbox_id: "wslc:never-provisioned".to_string(),
+                script_code: "echo hi".to_string(),
+                working_directory: String::new(),
+                env: Vec::new(),
+                env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
+                timeout_ms: 0,
+            },
+            permit,
+        ));
+
+        // One byte proves the handler is into its frame, and the rest of that
+        // frame cannot fit behind it.
+        let mut first = [0u8; 1];
+        client.read_exact(&mut first).await.unwrap();
+        assert_eq!(
+            limiter.available_permits(),
+            0,
+            "a handler still writing to its client must not free its exec slot"
+        );
+
+        let mut rest = Vec::new();
+        client.read_to_end(&mut rest).await.unwrap();
+        handler.await.unwrap().unwrap();
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "the slot must come back once the handler has finished writing"
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    /// A pipe name unique to this test run, so tests do not collide on one
+    /// instance.
+    fn test_pipe_name() -> String {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        format!(
+            r"\\.\pipe\mxc-wslc-lane-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// Route one accepted connection through the router with every general slot
+    /// taken, and hand back the client end of it.
+    async fn connection_past_general_capacity(
+        session: &SessionHandle,
+        clients: &mut JoinSet<()>,
+        cancel_limiter: &Arc<Semaphore>,
+    ) -> tokio::net::windows::named_pipe::NamedPipeClient {
+        let name = test_pipe_name();
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .unwrap();
+        let client = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(&name)
+            .unwrap();
+        server.connect().await.unwrap();
+
+        let client_limiter = Arc::new(Semaphore::new(1));
+        let _held = client_limiter.clone().try_acquire_owned().unwrap();
+        spawn_client_handler(
+            clients,
+            &client_limiter,
+            cancel_limiter,
+            &Arc::new(Semaphore::new(MAX_CONCURRENT_EXECS)),
+            session,
+            &Arc::new(AtomicUsize::new(0)),
+            server,
+        );
+        client
+    }
+
+    #[tokio::test]
+    async fn a_connection_past_general_capacity_refuses_a_non_cancellation() {
+        let session = spawn().unwrap();
+        let cancel_limiter = Arc::new(Semaphore::new(1));
+        let mut clients = JoinSet::new();
+        let mut client =
+            connection_past_general_capacity(&session, &mut clients, &cancel_limiter).await;
+
+        write_frame(
+            &mut client,
+            &DaemonRequest::Exec(ExecConfig {
+                exec_id: "exec-lane".to_string(),
+                run_token: "run-lane".to_string(),
+                sandbox_id: "wslc:test".to_string(),
+                script_code: "echo hi".to_string(),
+                working_directory: String::new(),
+                env: Vec::new(),
+                env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
+                timeout_ms: 0,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(
+            response,
+            DaemonResponse::Err {
+                kind: ErrKind::Busy,
+                message: "WSLc daemon client capacity is exhausted".to_string(),
+            }
+        );
+        clients.shutdown().await;
+        session.shutdown().await.unwrap();
+    }
+
+    /// Cancellation is the only way to end a run with no timeout.
+    #[tokio::test]
+    async fn a_connection_past_general_capacity_still_serves_a_cancellation() {
+        let session = spawn().unwrap();
+        let cancel_limiter = Arc::new(Semaphore::new(1));
+        let mut clients = JoinSet::new();
+        let mut client =
+            connection_past_general_capacity(&session, &mut clients, &cancel_limiter).await;
+
+        write_frame(
+            &mut client,
+            &DaemonRequest::CancelExec(CancelExecConfig {
+                exec_id: "unknown-exec".to_string(),
+                run_token: "unknown-run".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+        clients.shutdown().await;
         session.shutdown().await.unwrap();
     }
 

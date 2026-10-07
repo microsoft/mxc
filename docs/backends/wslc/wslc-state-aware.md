@@ -150,22 +150,27 @@ before any admission reaches the client; the outward SDK error is
 `backend_error`. The bound of eight comes from memory: a streaming exec's output
 lives only in its bounded live-output queue, so the persistent per-user daemon
 stays near 128 MB of live output even against clients that never drain. An
-exec's slot is held until the run reports back, so a client that disconnects
-mid-run keeps counting against that bound while its process is still going.
+exec's slot is held until the run has reported back and its client has been
+written to, so a client that disconnects mid-run keeps counting against that
+bound while its process is still going, and one that drains slowly keeps
+counting while its output is still queued. A run whose termination could not be
+confirmed leaves its sandbox quarantined and keeps the slot until that sandbox
+is deprovisioned, because the process may still be alive.
 
-Two conditions surface as `busy`, and both reach an SDK caller as
+Three conditions surface as `busy`, and all reach an SDK caller as
 `backend_error`:
 
 | Condition | Message | Retry |
 | --- | --- | --- |
 | The daemon's eight exec slots are all occupied | `WSLc daemon exec capacity is exhausted` | Succeeds once any exec finishes |
 | The named container already has an exec in flight | `sandbox <id> already has an exec in flight` | Succeeds once that container's run finishes |
+| Every client slot is occupied and the request is not a cancellation | `WSLc daemon client capacity is exhausted` | Succeeds once any client disconnects |
 
 Up to eight additional control connections can be serviced while every exec slot
 is occupied. Beyond that, a connection is admitted only to cancel: cancellation
 is the one request that never waits on the worker, and the only way to end a run
 with no timeout, so it keeps capacity of its own that lifecycle work cannot
-consume. Anything else arriving on that lane is refused with `busy`.
+consume.
 
 `start` / `stop` / `deprovision` naming a container with an exec in flight
 **wait** for that run, because deleting the container would free a handle the

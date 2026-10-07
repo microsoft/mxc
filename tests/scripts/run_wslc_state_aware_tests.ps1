@@ -311,6 +311,106 @@ function Wait-StateAware {
     }
 }
 
+# Start a phase like Start-StateAware but leave stdout unread, so a caller can
+# watch for a marker line while the process is still running. Pair with
+# Wait-StateAwareLines, which returns the same shape as Wait-StateAware.
+function Start-StateAwareLines {
+    [CmdletBinding()]
+    param(
+        [hashtable]$Request,
+        [string]$ConfigFile,
+        [string]$SandboxId,
+        [int]$WindowsPort
+    )
+
+    $invocation = ConvertTo-StateAwareInvocation `
+        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId -WindowsPort $WindowsPort
+
+    $argList = @('--operation', $invocation.Operation)
+    if ($invocation.Operation -ne 'provision') {
+        $argList += @('--container-id', $invocation.SandboxId)
+    }
+    if ($Debug) { $argList += '--debug' }
+    $argList += @('--config-base64', $invocation.ConfigBase64)
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $WxcExec
+    foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    $null = $proc.Start()
+
+    # Stderr drains async so a large stderr cannot stall the child while this
+    # caller is reading stdout a line at a time.
+    @{
+        Process     = $proc
+        StderrTask  = $proc.StandardError.ReadToEndAsync()
+        Buffered    = New-Object System.Collections.Generic.List[string]
+        PendingLine = $null
+        StartedAt   = [DateTime]::UtcNow
+    }
+}
+
+# Read stdout lines until one matches $Marker, keeping them for the eventual
+# Wait-StateAwareLines. $false if the stream ends or the wait runs out.
+function Wait-StateAwareMarker {
+    param(
+        [hashtable]$Handle,
+        [string]$Marker,
+        [int]$TimeoutSec = 60
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($null -eq $Handle.PendingLine) {
+            $Handle.PendingLine = $Handle.Process.StandardOutput.ReadLineAsync()
+        }
+        if (-not $Handle.PendingLine.Wait(250)) { continue }
+        $line = $Handle.PendingLine.GetAwaiter().GetResult()
+        $Handle.PendingLine = $null
+        if ($null -eq $line) { return $false }
+        $null = $Handle.Buffered.Add($line)
+        if ($line -match $Marker) { return $true }
+    }
+    $false
+}
+
+# Complete a Start-StateAwareLines handle, rejoining the lines already read with
+# the rest of the stream.
+function Wait-StateAwareLines {
+    param([hashtable]$Handle)
+
+    if ($null -ne $Handle.PendingLine) {
+        $pending = $Handle.PendingLine.GetAwaiter().GetResult()
+        $Handle.PendingLine = $null
+        if ($null -ne $pending) { $null = $Handle.Buffered.Add($pending) }
+    }
+    $rest = $Handle.Process.StandardOutput.ReadToEndAsync().GetAwaiter().GetResult()
+    $stderrText = $Handle.StderrTask.GetAwaiter().GetResult()
+    $Handle.Process.WaitForExit()
+    $endedAt = [DateTime]::UtcNow
+    $exitCode = $Handle.Process.ExitCode
+    $Handle.Process.Dispose()
+
+    $stdout = [string]::Join([Environment]::NewLine, $Handle.Buffered)
+    if (-not [string]::IsNullOrEmpty($rest)) {
+        if ($stdout.Length -gt 0) { $stdout += [Environment]::NewLine }
+        $stdout += $rest
+    }
+    @{
+        ExitCode  = $exitCode
+        Stdout    = $stdout
+        Stderr    = if ($null -eq $stderrText) { "" } else { [string]$stderrText }
+        StartedAt = $Handle.StartedAt
+        EndedAt   = $endedAt
+    }
+}
+
 # Parse or clone a state-aware request, move lifecycle routing to executor
 # arguments, encode the remaining phase-specific payload, and run wxc-exec.
 # A `wslc:{{SANDBOX_ID}}` fixture placeholder retains backend identity during
@@ -1643,11 +1743,12 @@ try {
     # envelope on stderr rather than a terminal stream frame.
     if ($ccAReady) {
         Run-StateAwareTest "J: second exec on the same sandbox is refused as busy" {
-            $blocker = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = "sh -c 'sleep 4; echo blocker-done'"; timeout = 30000 } }
+            $blocker = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = "sh -c 'echo blocker-ready; sleep 6; echo blocker-done'"; timeout = 30000 } }
             $second = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = 'echo should-not-run'; timeout = 30000 } }
 
-            $blockerHandle = Start-StateAware -Request $blocker
-            Start-Sleep -Milliseconds 1500
+            $blockerHandle = Start-StateAwareLines -Request $blocker
+            $ready = Wait-StateAwareMarker -Handle $blockerHandle -Marker 'blocker-ready'
+            Assert-True $ready "the first exec reported running inside its container"
             $rs = Invoke-StateAware -Request $second
 
             Assert-True ($rs.ExitCode -ne 0) "the refused exec exits non-zero"
@@ -1659,7 +1760,7 @@ try {
             Assert-True ($message -match 'already has an exec in flight') `
                 "the message names the single-flight slot (got '$message')"
 
-            $rb = Wait-StateAware $blockerHandle
+            $rb = Wait-StateAwareLines $blockerHandle
             Assert-True ($rb.ExitCode -eq 0) "the first exec is unaffected by the refusal"
             Assert-True ($rb.Stdout -match 'blocker-done') "the first exec ran to completion"
         } | Out-Null
@@ -1668,13 +1769,14 @@ try {
     # J3: stop must wait for the run instead of deleting the container under it,
     # so its wall clock covers the rest of the 4s exec.
     if ($ccBReady) {
-        $ccStopWaited = Run-StateAwareTest "J: stop during an in-flight exec waits for the run" {            $longRun = @{ phase = 'exec'; sandboxId = $script:ccSandboxB; process = @{ commandLine = "sh -c 'sleep 4; echo run-survived'"; timeout = 30000 } }
+        $ccStopWaited = Run-StateAwareTest "J: stop during an in-flight exec waits for the run" {            $longRun = @{ phase = 'exec'; sandboxId = $script:ccSandboxB; process = @{ commandLine = "sh -c 'echo run-ready; sleep 6; echo run-survived'"; timeout = 30000 } }
 
-            $execHandle = Start-StateAware -Request $longRun
-            Start-Sleep -Milliseconds 1500
+            $execHandle = Start-StateAwareLines -Request $longRun
+            $ready = Wait-StateAwareMarker -Handle $execHandle -Marker 'run-ready'
+            Assert-True $ready "the exec reported running inside its container"
             $stopHandle = Start-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:ccSandboxB
             $rstop = Wait-StateAware $stopHandle
-            $rexec = Wait-StateAware $execHandle
+            $rexec = Wait-StateAwareLines $execHandle
 
             Assert-True ($rexec.ExitCode -eq 0) "the in-flight exec still exits 0"
             Assert-True ($rexec.Stdout -match 'run-survived') "the run was not cut short by the stop"
@@ -1686,14 +1788,17 @@ try {
     }
 
     # J4: a long exec on A must not delay a full lifecycle on another sandbox,
-    # so that lifecycle completes while A is still running.
+    # so C's own run has to fall inside A's. Both sandboxes share one utility VM,
+    # so their in-container stamps are on the same clock.
     if ($ccAReady) {
         Run-StateAwareTest "J: a long exec on A does not block lifecycle work on another sandbox" {
-            $blocker = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = "sh -c 'sleep 25; echo blocker-done'"; timeout = 60000 } }
-            $blockerHandle = Start-StateAware -Request $blocker
-            Start-Sleep -Milliseconds 1500
+            $blocker = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = "sh -c 'echo blocker-ready; date +%s; sleep 25; date +%s; echo blocker-done'"; timeout = 60000 } }
+            $blockerHandle = Start-StateAwareLines -Request $blocker
+            $ready = Wait-StateAwareMarker -Handle $blockerHandle -Marker 'blocker-ready'
+            Assert-True $ready "A's exec reported running inside its container"
 
             $sandboxC = $null
+            $icC = $null
             try {
                 $rp = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
                 $envObj = Assert-ResultEnvelope $rp "C provision during A's exec"
@@ -1703,10 +1808,11 @@ try {
                     $rs = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $sandboxC
                     $null = Assert-ResultEnvelope $rs "C start during A's exec"
 
-                    $req = @{ phase = 'exec'; sandboxId = $sandboxC; process = @{ commandLine = 'echo C-ran-during-A'; timeout = 30000 } }
+                    $req = @{ phase = 'exec'; sandboxId = $sandboxC; process = @{ commandLine = "sh -c 'date +%s; echo C-ran-during-A; date +%s'"; timeout = 30000 } }
                     $re = Invoke-StateAware -Request $req
                     Assert-True ($re.ExitCode -eq 0) "C exec during A's exec exits 0"
                     Assert-True ($re.Stdout -match 'C-ran-during-A') "C produced its own output"
+                    $icC = Get-ExecInterval -Stdout $re.Stdout
 
                     $rstop = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $sandboxC
                     $null = Assert-ResultEnvelope $rstop "C stop during A's exec"
@@ -1716,15 +1822,17 @@ try {
                     try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $sandboxC } catch { }
                 }
             }
-            $cEnded = [DateTime]::UtcNow
 
-            $rb = Wait-StateAware $blockerHandle
+            $rb = Wait-StateAwareLines $blockerHandle
             Assert-True ($rb.ExitCode -eq 0) "A's exec still exits 0"
             Assert-True ($rb.Stdout -match 'blocker-done') "A's exec ran to completion"
 
-            $leadSec = [math]::Round(($rb.EndedAt - $cEnded).TotalSeconds, 2)
-            Assert-True ($cEnded -lt $rb.EndedAt) `
-                "C's whole lifecycle finished ${leadSec}s before A's exec did"
+            $iaA = Get-ExecInterval -Stdout $rb.Stdout
+            Assert-True ($null -ne $iaA -and $null -ne $icC) "both runs reported in-container stamps"
+            if ($null -ne $iaA -and $null -ne $icC) {
+                Assert-True ($icC.Start -ge $iaA.Start -and $icC.End -le $iaA.End) `
+                    "C ran inside A's run: A $($iaA.Start)..$($iaA.End), C $($icC.Start)..$($icC.End)"
+            }
         } | Out-Null
     }
 
