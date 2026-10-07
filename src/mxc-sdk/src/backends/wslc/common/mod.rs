@@ -26,6 +26,8 @@ pub mod registry_policy;
 pub mod sandbox;
 pub mod sdk_init;
 pub mod state_aware;
+#[cfg(all(test, windows))]
+mod store_model_probe;
 mod stream_buffer;
 pub mod wsl_container_runner;
 pub mod wslc_bindings;
