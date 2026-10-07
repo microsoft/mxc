@@ -522,8 +522,7 @@ state does not survive `stop`, while changes to mapped host files do.
 - NVX runs one workload at a time. A second `exec` waits for up to 60 seconds
   by default.
 - `stop` waits for up to 30 seconds before forcing the VM to shut down.
-- Cancelling an SDK operation must cancel the NVX workload, not only stop the
-  SDK from waiting.
+- Cancelling an SDK wait preserves existing SDK semantics and does not kill the workload; explicit kill or cancel operations on an execution handle must cancel the NVX workload and its descendants.
 
 ## 5. UI and other support
 
