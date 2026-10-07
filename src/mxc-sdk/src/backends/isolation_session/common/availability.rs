@@ -10,7 +10,7 @@
 use std::sync::OnceLock;
 
 use crate::isolation_session_bindings::bindings::{IsoSessionFeature, IsoSessionOps};
-#[cfg(feature = "lifted_msi")]
+#[cfg(feature = "isolation_session_lifted")]
 use windows::Win32::Foundation::REGDB_E_CLASSNOTREG;
 use windows_core::HRESULT;
 
@@ -41,12 +41,12 @@ fn available_from(probe: Result<i32, HRESULT>) -> bool {
 fn probe_feature_level() -> Result<i32, HRESULT> {
     // Report unavailable if the framework runtime is not verified, so callers
     // never attempt a session they cannot complete.
-    #[cfg(feature = "lifted_msi")]
+    #[cfg(feature = "isolation_session_lifted")]
     if super::regfree::verify_framework().is_err() {
         return Err(REGDB_E_CLASSNOTREG);
     }
 
-    #[cfg(feature = "lifted_msi")]
+    #[cfg(feature = "isolation_session_lifted")]
     let ops = match super::regfree::activate_from_adjacent_shim::<IsoSessionOps>() {
         Some(result) => result.map_err(|error| {
             eprintln!(
@@ -57,7 +57,7 @@ fn probe_feature_level() -> Result<i32, HRESULT> {
         })?,
         None => return Err(REGDB_E_CLASSNOTREG),
     };
-    #[cfg(not(feature = "lifted_msi"))]
+    #[cfg(not(feature = "isolation_session_lifted"))]
     let ops = IsoSessionOps::new().map_err(|e| e.code())?;
 
     ops.GetFeatureLevel(IsoSessionFeature::LocalAgentUser)

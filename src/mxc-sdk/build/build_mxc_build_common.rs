@@ -21,6 +21,15 @@ pub mod isolation_session_sdk {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    mod package_validation {
+        include!("isolation_session_bindings/package_validation.rs");
+    }
+
+    use package_validation::{
+        package_file_name, package_runtime_instance, validate_runtime_architecture,
+        validate_runtime_manifest,
+    };
+
     pub const PACKAGE_ID: &str = "Microsoft.AI.IsolationSession.SDK";
     pub const PACKAGE_VERSION: &str = "0.202610.5";
     pub const PACKAGE_SHA256: &str =
@@ -32,8 +41,6 @@ pub mod isolation_session_sdk {
     const NUGET_CONFIG: &str = "build/isolation_session_bindings/NuGet.Config";
     const APP_DLL: &str = "IsoSessionApp.dll";
     const RUNTIME_MANIFEST: &str = "IsoSession.manifest";
-    const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
-    const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
 
     pub fn resolve_package() -> Result<PathBuf, String> {
         println!("cargo:rerun-if-env-changed={PACKAGE_PATH_ENV}");
@@ -45,7 +52,7 @@ pub mod isolation_session_sdk {
             return Ok(path);
         }
 
-        let package_name = package_file_name();
+        let package_name = package_file_name(PACKAGE_ID, PACKAGE_VERSION);
         let package_dir = mxc_nuget_cache_root()?
             .join(PACKAGE_ID.to_ascii_lowercase())
             .join(PACKAGE_VERSION);
@@ -71,7 +78,7 @@ pub mod isolation_session_sdk {
         let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
             .map_err(|e| format!("CARGO_CFG_TARGET_ARCH is not set: {e}"))?;
         validate_runtime_architecture(&app_dll, &target_arch)?;
-        let instance = package_runtime_instance()?;
+        let instance = package_runtime_instance(PACKAGE_VERSION)?;
         validate_runtime_manifest(&manifest, &instance)?;
 
         let target_dir = target_profile_dir()?;
@@ -79,47 +86,6 @@ pub mod isolation_session_sdk {
             .map_err(|e| format!("stage {APP_DLL} to {}: {e}", target_dir.display()))?;
         std::fs::write(target_dir.join(RUNTIME_MANIFEST), manifest)
             .map_err(|e| format!("stage {RUNTIME_MANIFEST} to {}: {e}", target_dir.display()))?;
-        Ok(())
-    }
-
-    fn validate_runtime_architecture(binary: &[u8], target_arch: &str) -> Result<(), String> {
-        let expected_machine = match target_arch {
-            "x86_64" => IMAGE_FILE_MACHINE_AMD64,
-            "aarch64" => IMAGE_FILE_MACHINE_ARM64,
-            other => {
-                return Err(format!(
-                    "IsolationSession lifted runtime does not support target architecture {other:?}"
-                ));
-            }
-        };
-
-        if binary.len() < 0x40 || &binary[..2] != b"MZ" {
-            return Err(format!("{APP_DLL} is not a valid PE image"));
-        }
-        let pe_offset = u32::from_le_bytes(
-            binary[0x3c..0x40]
-                .try_into()
-                .expect("slice length is checked"),
-        ) as usize;
-        let machine_end = pe_offset
-            .checked_add(6)
-            .ok_or_else(|| format!("{APP_DLL} has an invalid PE header offset"))?;
-        if machine_end > binary.len() || &binary[pe_offset..pe_offset + 4] != b"PE\0\0" {
-            return Err(format!("{APP_DLL} has an invalid PE header"));
-        }
-
-        let actual_machine = u16::from_le_bytes(
-            binary[pe_offset + 4..machine_end]
-                .try_into()
-                .expect("slice length is checked"),
-        );
-        if actual_machine != expected_machine {
-            return Err(format!(
-                "{APP_DLL} machine type 0x{actual_machine:04X} does not match Cargo target \
-                 architecture {target_arch:?} (expected 0x{expected_machine:04X}); publish a \
-                 matching runtime payload before building this target"
-            ));
-        }
         Ok(())
     }
 
@@ -166,56 +132,6 @@ pub mod isolation_session_sdk {
                     out_dir.display()
                 )
             })
-    }
-
-    fn package_runtime_instance() -> Result<String, String> {
-        let mut parts = PACKAGE_VERSION.split('.');
-        let prefix = parts.next();
-        let release = parts.next();
-        let patch = parts.next();
-        if prefix != Some("0")
-            || parts.next().is_some()
-            || !patch.is_some_and(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
-            || !release.is_some_and(|value| {
-                value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit())
-            })
-        {
-            return Err(format!(
-                "IsolationSession SDK package version must use 0.YYYYMM.patch, got {PACKAGE_VERSION:?}"
-            ));
-        }
-
-        let release = release.unwrap();
-        Ok(format!("{}.{}", &release[..4], &release[4..]))
-    }
-
-    fn validate_runtime_manifest(manifest: &[u8], instance: &str) -> Result<(), String> {
-        let content = std::str::from_utf8(manifest)
-            .map_err(|e| format!("{RUNTIME_MANIFEST} is not valid UTF-8: {e}"))?;
-        for required in [
-            "<assemblyIdentity name=\"IsoSession.Runtime\"",
-            "<file name=\"IsoSessionApp.dll\"",
-        ] {
-            if !content.contains(required) {
-                return Err(format!("{RUNTIME_MANIFEST} is missing {required:?}"));
-            }
-        }
-
-        let expected_instance = format!("name=\"{instance}\"");
-        if !content.contains(&expected_instance) {
-            return Err(format!(
-                "{RUNTIME_MANIFEST} does not identify runtime instance {instance:?}"
-            ));
-        }
-        Ok(())
-    }
-
-    fn package_file_name() -> String {
-        format!(
-            "{}.{}.nupkg",
-            PACKAGE_ID.to_ascii_lowercase(),
-            PACKAGE_VERSION
-        )
     }
 
     fn mxc_nuget_cache_root() -> Result<PathBuf, String> {
@@ -299,90 +215,6 @@ pub mod isolation_session_sdk {
                 PACKAGE_SHA256,
                 actual
             ))
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{
-            package_file_name, package_runtime_instance, validate_runtime_architecture,
-            validate_runtime_manifest, IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
-        };
-
-        const MANIFEST: &str = "\
-<assembly>
-  <assemblyIdentity name=\"IsoSession.Runtime\" />
-  <file name=\"IsoSessionApp.dll\" />
-  <iso:instance name=\"2026.10\" />
-</assembly>";
-
-        #[test]
-        fn package_version_maps_to_runtime_instance() {
-            assert_eq!(package_runtime_instance().unwrap(), "2026.10");
-        }
-
-        #[test]
-        fn package_file_name_uses_nuget_global_packages_layout() {
-            assert_eq!(
-                package_file_name(),
-                "microsoft.ai.isolationsession.sdk.0.202610.5.nupkg"
-            );
-        }
-
-        #[test]
-        fn completed_runtime_manifest_is_accepted() {
-            validate_runtime_manifest(MANIFEST.as_bytes(), "2026.10").unwrap();
-        }
-
-        #[test]
-        fn mismatched_runtime_manifest_is_rejected() {
-            let error = validate_runtime_manifest(MANIFEST.as_bytes(), "2026.11").unwrap_err();
-            assert!(error.contains("does not identify runtime instance"));
-        }
-
-        fn pe_image(machine: u16) -> Vec<u8> {
-            let mut image = vec![0; 0x80];
-            image[..2].copy_from_slice(b"MZ");
-            image[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
-            image[0x40..0x44].copy_from_slice(b"PE\0\0");
-            image[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
-            image
-        }
-
-        #[test]
-        fn runtime_architecture_accepts_matching_targets() {
-            validate_runtime_architecture(&pe_image(IMAGE_FILE_MACHINE_AMD64), "x86_64").unwrap();
-            validate_runtime_architecture(&pe_image(IMAGE_FILE_MACHINE_ARM64), "aarch64").unwrap();
-        }
-
-        #[test]
-        fn runtime_architecture_rejects_mismatched_target() {
-            let error =
-                validate_runtime_architecture(&pe_image(IMAGE_FILE_MACHINE_AMD64), "aarch64")
-                    .unwrap_err();
-            assert!(error.contains("does not match Cargo target architecture"));
-        }
-
-        #[test]
-        fn runtime_architecture_rejects_invalid_pe() {
-            let error = validate_runtime_architecture(b"not a PE", "x86_64").unwrap_err();
-            assert!(error.contains("not a valid PE image"));
-        }
-
-        #[test]
-        fn runtime_architecture_rejects_truncated_pe_header() {
-            let mut image = pe_image(IMAGE_FILE_MACHINE_AMD64);
-            image.truncate(0x44);
-
-            let error = validate_runtime_architecture(&image, "x86_64").unwrap_err();
-            assert!(error.contains("invalid PE header"));
-        }
-
-        #[test]
-        fn runtime_architecture_rejects_unsupported_target() {
-            let error = validate_runtime_architecture(&pe_image(IMAGE_FILE_MACHINE_AMD64), "x86")
-                .unwrap_err();
-            assert!(error.contains("does not support target architecture"));
         }
     }
 }

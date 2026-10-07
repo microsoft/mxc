@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Validates the package payload and release identity, updates MXC's package
-    version and SHA-256 pin, and regenerates GENERATION_INFO.toml. The package
+    version and SHA-256 pin, and regenerates LIFTED_SDK_INFO.toml. The package
     itself is not copied into the repository. The script fails before modifying
     tracked files when the package is incomplete or internally inconsistent.
 
@@ -267,8 +267,8 @@ elseif ($generatedDateValue -and
 else {
     throw 'Package GENERATION_INFO.toml has no valid generated_utc or generated_date value.'
 }
-$generationInfo = @"
-# Provenance for the isolation_session_bindings crate.
+$liftedSdkInfo = @"
+# Provenance for the lifted IsolationSession SDK package.
 #
 # Bindings are regenerated at build time from the Preview WinMD in the pinned
 # SDK package. Run Update-IsoSessionSdk.ps1 rather than editing this file.
@@ -280,24 +280,25 @@ generated_date = "$generatedDate"
 
 [source]
 nupkg = "$canonicalFileName"
+nupkg_sha256 = "$packageHash"
 winmd = "metadata/windows.ai.isolationsession.preview.winmd"
 winmd_sha256 = "$previewHash"
 namespace = "Windows.AI.IsolationSession.Preview"
 runtime_version = "$runtimeVersion"
 "@
 if ($osBuild) {
-    $generationInfo += "`nos_build = `"$osBuild`""
+    $liftedSdkInfo += "`nos_build = `"$osBuild`""
 }
 if ($buildGuid) {
-    $generationInfo += "`nbuild_guid = `"$buildGuid`""
+    $liftedSdkInfo += "`nbuild_guid = `"$buildGuid`""
 }
 
-$generationInfoPath = Join-Path $DestinationDirectory 'GENERATION_INFO.toml'
+$liftedSdkInfoPath = Join-Path $DestinationDirectory 'LIFTED_SDK_INFO.toml'
 $utf8WithoutBom = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText($pinPath, $pinContent, $utf8WithoutBom)
 [System.IO.File]::WriteAllText(
-    $generationInfoPath,
-    "$generationInfo`n",
+    $liftedSdkInfoPath,
+    "$liftedSdkInfo`n",
     $utf8WithoutBom)
 
 [pscustomobject][ordered]@{

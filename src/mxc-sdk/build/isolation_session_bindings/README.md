@@ -5,18 +5,23 @@ MXC supports two explicit IsolationSession build modes:
 | Cargo feature | Metadata and runtime |
 |---|---|
 | `isolation_session` | Uses the committed OS-generated Rust bindings and normal inbox WinRT activation. |
-| `isolation_session_lifted` | Restores the pinned SDK package from NuGet.org, generates bindings from its Preview WinMD, and stages its lifted activation payload. This feature implies `isolation_session`. |
+| `isolation_session_lifted` | Restores the pinned SDK package through the configured `MxcDependencies` feed, generates bindings from its Preview WinMD, and stages its lifted activation payload. This feature implies `isolation_session`. |
 
-The repository does not contain the SDK `.nupkg`. Lifted builds download the
-exact package version pinned in
-`src/mxc-sdk/build/build_mxc_build_common.rs` from the NuGet.org V3 flat-container
-endpoint, verify its SHA-256, and cache it in the standard global NuGet package
-directory.
+The repository does not contain the SDK `.nupkg`. Lifted builds run normal
+`dotnet restore` using the checked-in `NuGet.Config`, which clears implicit
+sources and selects the `MxcDependencies` feed. NuGet restores the exact package
+version pinned in `src/mxc-sdk/build/build_mxc_build_common.rs` into the
+Cargo target profile's `.mxc-nuget/packages` directory. MXC then independently
+verifies the restored `.nupkg` SHA-256 before reading it.
 
-1. `ISOLATION_SESSION_SDK_PACKAGE`, if set, for validating a different local
-   copy of the same package.
-2. The standard global NuGet package cache, then the NuGet.org V3
-   flat-container endpoint (cached after download).
+Set `ISOLATION_SESSION_SDK_PACKAGE` to use a local package without restoring.
+The local package must still match the pinned version, contents, and SHA-256.
+Normal builds never contact NuGet.org directly.
+
+Before updating the pin, seed both the package and locked Cargo dependencies
+into the configured feeds by running the `MXC-Update-Feed-Dependencies`
+pipeline with this PR number. Builds without the local override fail until the
+new package version is available from `MxcDependencies`.
 
 ## Runtime prerequisite
 
@@ -28,9 +33,14 @@ winget install Microsoft.AI.IsolationSession
 ```
 
 The build stages `IsoSessionApp.dll` and `IsoSession.manifest` beside
-`wxc-exec.exe` and `mxc_ffi.dll`. MXC never falls back to the inbox runtime
+the current MXC native module. MXC never falls back to the inbox runtime
 when the payload or MSI is missing; it reports `BackendUnavailable` with this
 remediation.
+
+The published package contains one AMD64 `IsoSessionApp.dll`, so lifted mode
+currently supports only x64 (`x86_64-pc-windows-msvc` / `win-x64`). Inbox mode
+continues to support both Windows architectures. Lifted ARM64 and multi-RID
+builds are rejected before compilation or packaging.
 
 ## Build commands
 
@@ -60,12 +70,16 @@ shim for the wrong target architecture.
 
 1. Run `Update-IsoSessionSdk.ps1 -PackagePath <path-to-package>`. The script
    validates the package, updates `PACKAGE_VERSION` and `PACKAGE_SHA256`, and
-   regenerates `GENERATION_INFO.toml` without copying the package into Git.
-2. Build and test both feature configurations. Set
-   `ISOLATION_SESSION_SDK_PACKAGE` to the validated local package until that
-   exact version is available from NuGet.org.
+   regenerates `LIFTED_SDK_INFO.toml` without copying the package into Git.
+2. Run the dependency-feed update pipeline, then build and test both feature
+   configurations. Set `ISOLATION_SESSION_SDK_PACKAGE` to the validated local
+   package while feed seeding is pending.
 
 `windows-bindgen` is pinned to `=0.62.1` in `src/mxc-sdk/Cargo.toml`
 and must stay in lockstep with the workspace `windows` crate's major.minor
-(`target_windows_crate` in `GENERATION_INFO.toml`). If you bump the `windows`
+(`target_windows_crate` in both provenance files). If you bump the `windows`
 crate, bump `windows-bindgen` to the matching version in the same change.
+
+`GENERATION_INFO.toml` describes the committed inbox projection and changes
+only when those bindings are regenerated. `LIFTED_SDK_INFO.toml` describes the
+pinned lifted package and is updated by `Update-IsoSessionSdk.ps1`.

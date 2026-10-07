@@ -33,7 +33,7 @@ use super::error::{
     activation_error, check_result, format_iso_error, lifecycle_err, op, transport_err,
     IsolationSessionError, StalePromotion,
 };
-#[cfg(feature = "lifted_msi")]
+#[cfg(feature = "isolation_session_lifted")]
 use super::error::{framework_unavailable, lifted_payload_missing};
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
@@ -90,7 +90,7 @@ unsafe impl Sync for MtaReference {}
 /// There is **no inbox fallback**: if the lifted payload is not staged beside
 /// this module or executable, this returns a hard [`lifted_payload_missing`]
 /// error rather than silently binding the inbox `System32` runtime.
-#[cfg(feature = "lifted_msi")]
+#[cfg(feature = "isolation_session_lifted")]
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
     // Refuse before touching the runtime if the framework is not verified.
     super::regfree::verify_framework().map_err(framework_unavailable)?;
@@ -109,7 +109,7 @@ fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSess
 
 /// Inbox mode: activates the system-registered OS API through normal WinRT
 /// activation.
-#[cfg(not(feature = "lifted_msi"))]
+#[cfg(not(feature = "isolation_session_lifted"))]
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
     IsoSessionOps::new().map_err(|e| activation_error(e.code().0 as u32, &e.message()))
 }
@@ -1567,7 +1567,7 @@ mod tests {
                 );
 
                 match failure.operation.as_str() {
-                    #[cfg(feature = "lifted_msi")]
+                    #[cfg(feature = "isolation_session_lifted")]
                     op::VERIFY_FRAMEWORK => assert!(
                         failure.code.is_none(),
                         "framework refusal unexpectedly carried an HRESULT"

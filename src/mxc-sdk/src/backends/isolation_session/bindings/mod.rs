@@ -5,10 +5,11 @@
 //!
 //! Inbox builds use the committed OS-generated projection. Builds with the
 //! `isolation_session_lifted` feature regenerate the projection from the pinned SDK package
-//! restored from NuGet.org.
+//! restored through the configured MxcDependencies feed into an MXC-owned cache.
 //!
 //! See `build/isolation_session_bindings/GENERATION_INFO.toml`
-//! for provenance details.
+//! for inbox-binding provenance and `LIFTED_SDK_INFO.toml` for lifted-package
+//! provenance.
 
 #[allow(
     non_snake_case,

@@ -48,7 +48,7 @@ pub(super) mod op {
 
     /// The staged shim's runtime-verification export, called before any session
     /// work to confirm the IsolationSession framework is installed.
-    #[cfg(feature = "lifted_msi")]
+    #[cfg(feature = "isolation_session_lifted")]
     pub(crate) const VERIFY_FRAMEWORK: &str = "IsoSessionApp.VerifyIsoSessionFramework";
 }
 
@@ -319,17 +319,18 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
          the OS feature gate is enabled and the platform supports isolation sessions."
                 .to_string()
         } else if code == E_NOINTERFACE_HRESULT {
-            #[cfg(feature = "lifted_msi")]
+            #[cfg(feature = "isolation_session_lifted")]
             {
                 "the co-located IsoSessionApp.dll activated but returned an object that does not \
                  implement the expected IsolationSession interface. This is the classic WinMD/MSI \
-                 version-pin mismatch: the Preview WinMD wxc-exec was built against and the \
+                 version-pin mismatch: the Preview WinMD the current MXC native module was built \
+                 against and the \
                  MSI-installed IsolationSession runtime were produced from different OS versions, \
                  so their interface IIDs differ. Rebuild the MSI and the \
                  Microsoft.AI.IsolationSession.SDK NuGet from the same OS commit."
                     .to_string()
             }
-            #[cfg(not(feature = "lifted_msi"))]
+            #[cfg(not(feature = "isolation_session_lifted"))]
             {
                 format!("IsolationSession runtime API activation failed: {detail}")
             }
@@ -367,7 +368,7 @@ pub(super) fn identity_refusal(err: windows_core::Error) -> IsolationSessionErro
 /// different, unversioned binary set is exactly the failure mode this design
 /// exists to prevent — so the missing payload surfaces as a hard,
 /// actionable error instead.
-#[cfg(feature = "lifted_msi")]
+#[cfg(feature = "isolation_session_lifted")]
 pub(super) fn lifted_payload_missing(operation: &str) -> IsolationSessionError {
     IsolationSessionError::ServiceUnavailable(IsoApiFailure::new(
         operation,
@@ -396,7 +397,7 @@ pub(super) fn lifted_payload_missing(operation: &str) -> IsolationSessionError {
 /// surfaces in the one-shot `ScriptResponse` string and as the state-aware
 /// `MxcError` message), and the shim's ready-to-display fix text, when present,
 /// becomes the `remediation`.
-#[cfg(feature = "lifted_msi")]
+#[cfg(feature = "isolation_session_lifted")]
 pub(super) fn framework_unavailable(
     refusal: super::regfree::FrameworkRefusal,
 ) -> IsolationSessionError {
@@ -885,7 +886,7 @@ mod tests {
     /// `E_NOINTERFACE` from lifted activation is the WinMD/MSI version-pin mismatch
     /// signature: the mapping must name that cause rather than echo the bare
     /// COM detail, so the message points at rebuilding both from one commit.
-    #[cfg(feature = "lifted_msi")]
+    #[cfg(feature = "isolation_session_lifted")]
     #[test]
     fn e_nointerface_activation_names_version_pin_mismatch() {
         let mapped = map_lifecycle_error(activation_error(E_NOINTERFACE_HRESULT, "ignored"));
@@ -895,7 +896,7 @@ mod tests {
         assert!(mapped.message.contains("same OS commit"));
     }
 
-    #[cfg(not(feature = "lifted_msi"))]
+    #[cfg(not(feature = "isolation_session_lifted"))]
     #[test]
     fn inbox_e_nointerface_activation_preserves_platform_detail() {
         let mapped = map_lifecycle_error(activation_error(
@@ -911,7 +912,7 @@ mod tests {
     /// The hard error raised when the lifted payload is absent must carry the
     /// class-not-registered code, an operation, a message that refuses the
     /// inbox fallback, and an actionable remediation.
-    #[cfg(feature = "lifted_msi")]
+    #[cfg(feature = "isolation_session_lifted")]
     #[test]
     fn lifted_payload_missing_is_a_hard_actionable_error() {
         let mapped = map_lifecycle_error(lifted_payload_missing(op::ACTIVATE));

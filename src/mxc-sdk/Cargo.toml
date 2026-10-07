@@ -36,11 +36,9 @@ isolation_session = [
 ]
 isolation_session_lifted = [
     "isolation_session",
-    "lifted_msi",
     "dep:windows-bindgen",
     "dep:zip",
 ]
-lifted_msi = []
 test-support = []
 microvm = []
 hyperlight = [

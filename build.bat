@@ -39,6 +39,17 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
     )
 )
 
+if "%WITH_ISOLATION_SESSION_LIFTED%"=="1" (
+    if "%BUILD_ALL%"=="1" (
+        echo ERROR: Lifted IsolationSession currently supports x64 only because the pinned SDK package contains one AMD64 IsoSessionApp.dll. Use --x64 instead of --all.
+        exit /b 1
+    )
+    if /i "%BUILD_ARCH%"=="aarch64-pc-windows-msvc" (
+        echo ERROR: Lifted IsolationSession currently supports x64 only because the pinned SDK package contains one AMD64 IsoSessionApp.dll.
+        exit /b 1
+    )
+)
+
 :: Build flags
 set "CARGO_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
@@ -351,7 +362,7 @@ echo   --all             Build both Windows architectures and create the .NET Nu
 echo   --with-microvm    Download and include NanVix micro-VM binaries
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (inbox OS API)
-echo   --with-isolation-session-lifted   Build with lifted IsolationSession (NuGet SDK + MSI runtime)
+echo   --with-isolation-session-lifted   Build with lifted IsolationSession (x64-only NuGet SDK + MSI runtime)
 echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)
 echo   -h, --help        Show this help
 echo.

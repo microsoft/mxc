@@ -5,7 +5,8 @@
 //!
 //! Inbox builds use the committed OS-generated bindings and verify their
 //! `windows` crate compatibility. Lifted builds restore the pinned SDK package
-//! from NuGet.org and regenerate bindings from its Preview WinMD.
+//! through the configured MxcDependencies feed and regenerate bindings from
+//! its Preview WinMD.
 
 use std::path::Path;
 

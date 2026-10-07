@@ -171,6 +171,8 @@
            Text="mxc: PlatformTarget '$(PlatformTarget)' is not this host's '$(MxcHostArch)', and cargo builds the native unit for the host. Drop the PlatformTarget, or set it to '$(MxcHostArch)'." />
     <Error Condition="'$(MxcUnsupportedOptionalBackends)' == 'true'"
            Text="mxc: MxcWithIsolationSession and MxcWithWslc are Windows-only build switches." />
+    <Error Condition="'$(MxcIsolationSessionLifted)' == 'true' and '$(MxcHostRid)' != 'win-x64'"
+           Text="mxc: lifted IsolationSession currently supports only win-x64 because the pinned SDK package contains one AMD64 IsoSessionApp.dll." />
     <!-- Pinning keeps cargo on the host the guards above validated; a
          CARGO_BUILD_TARGET or a `[build] target` would otherwise choose it. -->
     <Exec Command="rustc -vV"
@@ -237,6 +239,8 @@
   <Target Name="MxcLoadPrebuiltNativeUnit"
           BeforeTargets="CoreCompile"
           Condition="'$(MxcUsePrebuiltNativeUnit)' == 'true'">
+    <Error Condition="'$(MxcIsolationSessionLifted)' == 'true' and '$(MxcHostRid)' != 'win-x64'"
+           Text="mxc: lifted IsolationSession currently supports only win-x64 because the pinned SDK package contains one AMD64 IsoSessionApp.dll." />
     <Error Condition="!Exists('$(MxcGeneratedBindings)')"
            Text="mxc: prebuilt native mode requires generated bindings at $(MxcGeneratedBindings)." />
     <Error Condition="!Exists('$(MxcPrebuiltNativeDir)/$(MxcNativeFileName)')"
@@ -322,8 +326,14 @@
   <PropertyGroup>
     <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);MxcAddNativeUnitToPackage</TargetsForTfmSpecificContentInPackage>
   </PropertyGroup>
+  <Target Name="MxcValidateLiftedPackage">
+    <Error Condition="'$(MxcIsolationSessionLifted)' == 'true' and '$(MxcPackageRid)' != 'win-x64'"
+           Text="mxc: lifted IsolationSession can only be packaged for win-x64 because the pinned SDK package contains one AMD64 IsoSessionApp.dll." />
+    <Error Condition="'$(MxcIsolationSessionLifted)' == 'true' and '$(MxcPackSingleRid)' != 'true'"
+           Text="mxc: lifted IsolationSession requires a single-RID win-x64 package until architecture-specific runtime payloads are published." />
+  </Target>
   <Target Name="MxcAddNativeUnitToPackage"
-          DependsOnTargets="GenerateNativeBindings;MxcLoadPrebuiltNativeUnit">
+          DependsOnTargets="MxcValidateLiftedPackage;GenerateNativeBindings;MxcLoadPrebuiltNativeUnit">
     <ItemGroup>
     <MxcOtherRidNative Include="runtimes/$(MxcOtherWindowsRid)/native/*"
                        Condition="'$(MxcPackSingleRid)' != 'true' and '$(MxcOtherWindowsRid)' != ''" />

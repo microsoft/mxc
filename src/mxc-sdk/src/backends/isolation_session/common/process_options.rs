@@ -10,7 +10,7 @@ use crate::mxc_common::models::ExecutionRequest;
 use crate::isolation_session_bindings::bindings::IsoSessionProcessOptions;
 use windows_core::HSTRING;
 
-#[cfg(feature = "lifted_msi")]
+#[cfg(feature = "isolation_session_lifted")]
 use super::error::lifted_payload_missing;
 use super::error::{op, transport_err, IsolationSessionError};
 
@@ -216,7 +216,7 @@ pub(super) fn build_iso_process_options(
     Ok(proc_options)
 }
 
-#[cfg(feature = "lifted_msi")]
+#[cfg(feature = "isolation_session_lifted")]
 fn new_iso_process_options() -> Result<IsoSessionProcessOptions, IsolationSessionError> {
     match super::regfree::activate_from_adjacent_shim::<IsoSessionProcessOptions>() {
         Some(result) => result.map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e)),
@@ -224,7 +224,7 @@ fn new_iso_process_options() -> Result<IsoSessionProcessOptions, IsolationSessio
     }
 }
 
-#[cfg(not(feature = "lifted_msi"))]
+#[cfg(not(feature = "isolation_session_lifted"))]
 fn new_iso_process_options() -> Result<IsoSessionProcessOptions, IsolationSessionError> {
     IsoSessionProcessOptions::new()
         .map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e))
