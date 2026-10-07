@@ -34,6 +34,13 @@ NVX will ship a Rust crate containing:
 - the Linux kernel and initramfs with the NVX init agent; and
 - manifests, checksums, provenance, licences, and package inventories.
 
+Because the crate distributes `vmlinux`, the NVX team will publish the exact
+corresponding Linux kernel source for every runtime version. The crate will
+include the Linux licence, third-party notices, and a source manifest that
+identifies the kernel version, configuration, patches, source artifact, and
+hashes. The source may be a separate published artifact rather than part of
+every SDK package.
+
 ### 2.2 How MXC will consume NVX
 
 MXC will use a pinned NVX crate version. The crate will expose the Rust
@@ -47,6 +54,11 @@ MXC will be implementing:
 - checksum and signature verification;
 - offline builds using a pre-fetched crate and dependencies; and
 - packaging for the executor, Node SDK, and .NET SDK.
+
+Before packaging the NVX runtime, MXC will verify that the NVX source manifest
+references an available corresponding-source artifact for the shipped
+`vmlinux`. Packaging will fail when the reference is absent or does not match
+the runtime version.
 
 ### 2.3 Key NVX files that MXC will use
 
@@ -134,20 +146,47 @@ checksums, and runtime manifest compatibility. A missing or incompatible
 runtime will return `backend_unavailable` with remediation identifying the
 required runtime package or version.
 
+The co-located checksum manifest will not be trusted by itself. The pinned NVX
+crate will provide the expected runtime-manifest identity, and the compiled
+native integration will authenticate that manifest before using its file
+hashes. MXC will then:
+
+1. validate the Authenticode certificate chain and expected Microsoft signer
+   for the NVX implementation DLL, `openvmm.exe`, and image tool;
+2. verify `vmlinux`, the initramfs, and all other runtime files against the
+   authenticated manifest; and
+3. reject a missing signature, invalid certificate chain, unexpected signer,
+   manifest mismatch, checksum mismatch, or runtime directory that is writable
+   by an untrusted user.
+
 The integration will add a new typed MicroVM configuration to each SDK. This
 configuration describes which backend and OCI image to use. Developers will
 pass that configuration to the existing run, spawn, and lifecycle operations;
 the integration will not introduce separate NVX-specific execution methods.
 
-| SDK | New typed configuration | Existing operations that will use it |
-| --- | --- | --- |
-| Rust | `MicrovmConfig { image: String }` and `Containment::Microvm(MicrovmConfig)`; add `microvm` to lifecycle containment choices | `v1::run`, `v1::spawn`, and `v1::container::*` |
-| Node | `{ type: 'microvm', config: { image: string } }`; add `'microvm'` to `LifecycleContainmentKind` | `run`, `spawn`, `provisionContainer`, and the existing lifecycle functions |
-| .NET | `Microvm : Containment` with required `Image`; add `Microvm` to `ContainmentBackend` and lifecycle choices | `MxcContainer.Run`, `MxcContainer.Spawn`, and the existing `MxcLifecycle` methods |
+| SDK | One-shot configuration | State-aware provision addition | Existing operations that will use it |
+| --- | --- | --- | --- |
+| Rust | `MicrovmConfig { image: String }` and `Containment::Microvm(MicrovmConfig)` | Add `ProvisionRequest::microvm(image: String, memory_mb: Option<u64>)` | `v1::run`, `v1::spawn`, and `v1::container::*` |
+| Node | `{ type: 'microvm', config: { image: string } }` | Add `MicrovmProvisionConfig { image: string; memoryMb?: number; filesystem?; network? }` to `LifecycleConfigRegistry`, and include `'microvm'` in `LifecycleContainmentKind` | `run`, `spawn`, `provisionContainer`, and the existing lifecycle functions |
+| .NET | `Microvm : Containment` with required `Image` | Add `MicrovmProvisionRequest : ProvisionRequest` with required `Image`, optional `MemoryMb`, `Filesystem`, and `Network`; register its JSON discriminator as `microvm` | `MxcContainer.Run`, `MxcContainer.Spawn`, and the existing `MxcLifecycle` methods |
 
-These will be new versioned SDK types. The SDKs will map the typed requests to
-the `1.1.0-alpha` wire contract shown in section 4.1. The backend will continue
-to require experimental authorisation until it is promoted.
+The wire and SDK changes will be delivered in this order:
+
+1. Add `microvm.image`, state-aware MicroVM provision, engine binding, and
+   runtime tests to the development `1.1.0-alpha` contract.
+2. Keep the wire work development-only while that contract remains mutable.
+3. Publish the fields in stable `1.1.0` when the contract is ready.
+4. Advance `schemas/schema-version.json` `sdkMajorTargets["1"]` from `1.0.0`
+   to `1.1.0`.
+5. Publish the new Rust, Node, and .NET V1 MicroVM types and update their
+   versioned references.
+
+Schema publication and runtime authorisation are independent. Even after
+stable `1.1.0` becomes the V1 SDK target, `microvm` may continue to require
+the experimental option until the backend meets its promotion bar.
+
+The existing lifecycle operation methods will remain unchanged; only the
+backend-specific request types they accept will expand.
 
 ## 3. Architecture
 
@@ -519,8 +558,8 @@ packaged MXC executor and all three SDKs on Windows x64 with WHP.
 | Network | Defaults, allow/deny precedence, CIDRs, exclusions, TCP/UDP ranges, and rejection of unsupported rules |
 | Process | Command, CWD, environment, timeout, cancellation, output limits, nonzero exits, and descendant cleanup |
 | PTY | Confirm unsupported in the initial implementation; add terminal tests when implemented |
-| Packaging | Rust crate, npm, and NuGet installation; inclusion of the DLL, OpenVMM, image tool, kernel, and initramfs; OCI image conversion; automatic runtime discovery; and missing/corrupt artifacts |
-| Signing | Validate signatures and checksums and reject unapproved or tampered artifacts |
+| Packaging | Rust crate, npm, and NuGet installation; inclusion of the DLL, OpenVMM, image tool, kernel, and initramfs; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that the exact corresponding kernel source is published and referenced |
+| Signing | Authenticate the runtime manifest, validate the Authenticode chain and Microsoft signer for signed NVX binaries, verify all remaining file checksums, and reject untrusted runtime directories |
 | Host | Real execution on Windows x64 with WHP installed and enabled; ARM remains planned |
 | Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, and generated SDK types |
 
