@@ -630,6 +630,15 @@ invoking the image tool. The signed NVX image tool will own DNS resolution,
 TLS, registry protocol, redirects, download, digest resolution, and
 conversion while enforcing the policy supplied by MXC.
 
+The NVX team will also own the converter's security model for processing
+untrusted OCI manifests and layers. This includes its threat model,
+least-privilege containment or no-host-extraction design, archive and path
+handling, resource limits, staging and cache boundaries, failure cleanup, and
+adversarial security tests. Signing authenticates the converter but does not
+by itself contain parser or archive-processing vulnerabilities. MXC will not
+enable arbitrary OCI image input until the NVX conversion-security contract
+has completed security review.
+
 `microvm.image` will accept an OCI image reference rather than an arbitrary
 URL. Redirects to another registry host will require that host to be permitted
 by the same policy. Private-registry credentials will not be part of the
@@ -746,7 +755,7 @@ executor is not an NVX developer-facing surface.
 | Packaging | Rust crate, npm, and NuGet installation; single ownership of `mxc_ffi.dll` in npm and NuGet; npm runtime-package resolution and native directory registration; NuGet `buildTransitive` recursive copy into `nvx/**` for both build and publish outputs; rejection of unsupported RID/package combinations; inclusion of the NVX implementation DLL, OpenVMM, image tool, kernel, initramfs, source manifest, Alpine package inventory, licences, and notices; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that matching Linux and Alpine source artifacts are published and referenced |
 | Signing | Authenticate the runtime manifest, validate the Authenticode chain and Microsoft signer for signed NVX binaries, verify all remaining file checksums, and reject untrusted runtime directories |
 | Host | Real execution on Windows x64 with WHP installed and enabled; ARM remains planned |
-| Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, generated SDK types, cache-miss rejection without host traffic for deny-by-default egress, explicit prefetch followed by offline cache use, and permitted execution-time pull |
+| Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, generated SDK types, cache-miss rejection without host traffic for deny-by-default egress, explicit prefetch followed by offline cache use, permitted execution-time pull, the NVX-owned adversarial conversion-security suite, and MXC rejection of malformed or incompatible converter output |
 
 Negative filesystem and network tests must include a working positive control
 so infrastructure failures are not mistaken for policy enforcement.
@@ -793,6 +802,7 @@ so infrastructure failures are not mistaken for policy enforcement.
 | Redirects | The image tool follows a redirect to another registry host only when that host is also permitted |
 | Credentials | No private-registry credentials in the initial contract; future credentials must come from an approved host provider and remain out of requests, command lines, logs, and telemetry |
 | Conversion timing | Pull and convert before VM start; reuse a compatible cached conversion when available |
+| Converter security ownership | NVX defines and security-reviews the least-privilege containment or no-host-extraction model, archive/path rules, resource bounds, output confinement, cleanup, and adversarial tests for untrusted OCI input |
 | Converted artifact | Produce a versioned NVX artifact with a manifest identifying the source digest, converter version, runtime compatibility, and checksums |
 | Guest integration | Attach the converted artifact to OpenVMM and make it the workload root while `/init` and the managed agent remain in the initramfs outside the workload root |
 | OCI metadata | Define how `ENTRYPOINT`, `CMD`, `ENV`, `WORKDIR`, and `USER` interact with MXC `process` settings |
@@ -800,14 +810,16 @@ so infrastructure failures are not mistaken for policy enforcement.
 | Cache identity | Key conversions by image digest plus converter and runtime format version rather than by mutable image tag alone |
 | Failures | Surface registry, conversion, compatibility, and attachment failures through actionable MXC errors |
 
-The signed image tool, image schema, converted-artifact format, and runtime
-attachment are required deliverables before `microvm.image` is usable.
+The signed image tool, reviewed conversion-security contract, image schema,
+converted-artifact format, and runtime attachment are required deliverables
+before `microvm.image` is usable.
 
 ## References and open decisions
 
 ### Awaited support
 
 - Initial permitted registry set and migration from the existing WSLC-specific policy name
+- NVX-owned OCI converter threat model, containment and bounded-extraction contract, security review, and adversarial test evidence
 - NVX signed binaries support
 - NVX crate binary packaging and extraction contract
 - Windows ARM runtime and SDK package availability
