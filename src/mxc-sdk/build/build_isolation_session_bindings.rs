@@ -111,6 +111,7 @@ fn verify_inbox_bindings_version() {
         .join("build")
         .join("isolation_session_bindings")
         .join("GENERATION_INFO.toml");
+    println!("cargo:rerun-if-changed={}", info_path.display());
     let contents = std::fs::read_to_string(&info_path).unwrap_or_else(|error| {
         panic!(
             "isolation_session_bindings: read provenance {}: {error}",
@@ -136,10 +137,25 @@ fn verify_inbox_bindings_version() {
             )
         });
 
-    let lock_path = Path::new(&manifest_dir).join("..").join("Cargo.lock");
+    let lock_candidates = [
+        Path::new(&manifest_dir).join("Cargo.lock"),
+        Path::new(&manifest_dir).join("..").join("Cargo.lock"),
+    ];
+    let lock_path = lock_candidates
+        .iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "isolation_session_bindings: no Cargo.lock found at the package root ({}) \
+                 or workspace root ({})",
+                lock_candidates[0].display(),
+                lock_candidates[1].display()
+            )
+        });
+    println!("cargo:rerun-if-changed={}", lock_path.display());
     let lock_contents = std::fs::read_to_string(&lock_path).unwrap_or_else(|error| {
         panic!(
-            "isolation_session_bindings: read workspace lockfile {}: {error}",
+            "isolation_session_bindings: read lockfile {}: {error}",
             lock_path.display()
         )
     });
