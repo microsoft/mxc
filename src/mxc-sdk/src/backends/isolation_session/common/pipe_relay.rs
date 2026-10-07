@@ -6,11 +6,12 @@
 //! desktop-session boundary.
 //!
 //! Two relay variants:
-//! - [`create_relay_thread`] — cancellable; used for stdout / stderr. Ends at
-//!   EOF or when its [`PipeReadCanceller`] fires.
-//! - [`create_relay_thread_with_stop`] — stop-event-aware; used for stdin
-//!   in TTY (ConPTY) mode where the agent can exit while the local stdin
-//!   handle remains open.
+//! - [`create_relay_thread`] — cancellable; used for stdout / stderr and for
+//!   pipe/file-backed stdin. Ends at EOF or when its [`PipeReadCanceller`]
+//!   fires.
+//! - [`create_relay_thread_with_stop`] — stop-event-aware; used for
+//!   console-backed stdin when the agent can exit while the local stdin handle
+//!   remains open.
 
 use std::io::Read;
 
@@ -132,10 +133,9 @@ pub(super) unsafe fn create_relay_thread(
 
 // ── Stop-event-aware pipe relay ────────────────────────────────────────────
 //
-// Used for the IsolationSession stdin relay in TTY (ConPTY) mode, where the
-// agent process can exit naturally while wxc-exec's stdin remains open (held
-// by the parent: node-pty, shell, etc.). Without an external signal the relay
-// sits in `ReadFile` forever.
+// Used for the IsolationSession stdin relay when wxc-exec's stdin is a console
+// handle and the agent process can exit naturally while that handle remains
+// open. Without an external signal the relay sits in `ReadFile` forever.
 //
 // `CancelSynchronousIo` is the obvious alternative but has documented edge
 // cases on console handles, and wxc-exec's stdin is a console handle in the
@@ -149,7 +149,7 @@ pub(super) unsafe fn create_relay_thread(
 // signalled when open", so the wait returns immediately, the relay enters
 // `ReadFile`, and from there the stop event cannot interrupt it. For
 // pipe-backed stdin (the non-TTY case), use the simpler EOF-driven
-// `create_relay_thread` and rely on natural EOF or process exit for cleanup.
+// `create_relay_thread` and rely on natural EOF or its canceller for cleanup.
 
 /// Parameters for a stop-event-aware relay thread. The thread loops
 /// `WaitForMultipleObjects({h_stop_event, h_read})`; copies a chunk when
@@ -405,6 +405,39 @@ mod tests {
             WAIT_OBJECT_0,
             "the cancelled relay should exit without EOF"
         );
+    }
+
+    /// Pipe-backed stdin uses `create_relay_thread` so shutdown can cancel the
+    /// blocked source read. Once cancelled, the relay must also release its
+    /// duplicate of the agent stdin write handle so the reader observes EOF.
+    #[test]
+    fn a_cancelled_stdin_pipe_relay_releases_its_destination_handle() {
+        let (source_read, _source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+
+        let (relay_thread, canceller) =
+            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+
+        // Mirror `process.Close()`: the caller drops its original agent-stdin
+        // write handle while the relay's duplicate is still live.
+        drop(dest_write);
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay_thread.get(), 250) },
+            WAIT_TIMEOUT,
+            "the relay should still be blocked before the cancel"
+        );
+
+        canceller.close();
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay_thread.get(), 5000) },
+            WAIT_OBJECT_0,
+            "the cancelled stdin relay should exit promptly"
+        );
+
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        assert_eq!(read_from_pipe(dest_send.get()), "");
     }
 
     /// Closing the source handle the relay was built from does not disturb it:
