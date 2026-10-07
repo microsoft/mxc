@@ -26,7 +26,7 @@ behind a unified containment model and typed SDKs.
 
 ## What is MXC?
 
-MXC is a dependency built into your app.
+MXC is an SDK dependency that builds into your app.
 
 ```mermaid
 flowchart LR
@@ -64,9 +64,9 @@ repository.
 
 | SDK | Package |
 |---|---|
-| Rust | [mxc_sdk::v1](https://crates.io/crates/mxc-sdk) |
-| .NET | [Microsoft.Mxc.Sdk.V1](https://www.nuget.org/packages/Microsoft.Mxc.Sdk) |
-| Node | [@microsoft/mxc-sdk/v1](https://www.npmjs.com/package/@microsoft/mxc-sdk) |
+| Rust | [https://crates.io/crates/mxc-sdk](https://crates.io/crates/mxc-sdk) |
+| .NET | [https://www.nuget.org/packages/Microsoft.Mxc.Sdk](https://www.nuget.org/packages/Microsoft.Mxc.Sdk) |
+| Node | [https://www.npmjs.com/package/@microsoft/mxc-sdk](https://www.npmjs.com/package/@microsoft/mxc-sdk) |
 
 The Node and .NET packages include the native runtime assets. The Rust crate
 builds the MXC SDK, engine, and selected backends into the consuming
@@ -166,19 +166,19 @@ Build prerequisites are:
 #### Windows
 
 ```bash
-build.bat                  # Release build for current architecture
+build.bat --all             # Release build for current architecture
 ```
 
 #### Linux
 
 ```bash
-./build.sh                 # Release build
+./build.sh --all            # Release build
 ```
 
 #### macOS
 
 ```bash
-./build-mac.sh             # Release build for native architecture
+./build-mac.sh --all        # Release build for native architecture
 ```
 
 ## Documentation
