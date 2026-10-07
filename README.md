@@ -183,9 +183,6 @@ build.bat                  # Release build for current architecture
 ./build-mac.sh             # Release build for native architecture
 ```
 
-Component builds, formatting, linting, and tests are documented in the
-[local development guide](docs/development/build-and-test/local-development.md).
-
 ## Documentation
 
 ### Consumer documentation

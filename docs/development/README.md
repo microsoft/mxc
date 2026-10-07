@@ -19,7 +19,6 @@ work. Consumer documentation remains under `docs/`; start with the
 
 ## Build and test
 
-- [Local development](build-and-test/local-development.md)
 - [CI validation infrastructure](build-and-test/ci-validation-infrastructure.md)
 - [Pull request builds](build-and-test/pull-requests.md)
 - [Schema code generation](build-and-test/schema-codegen.md)
