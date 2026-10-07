@@ -92,6 +92,10 @@ pub fn build_profile_with_proxy(
 }
 
 /// Baseline allow rules required for any sandboxed process to start.
+///
+/// The unfiltered `(allow file-read-metadata)` is what path resolution needs —
+/// the kernel reads metadata on every ancestor directory. `deniedPaths` names
+/// `file-read-metadata` explicitly so it outranks this grant.
 const BASELINE_ALLOW: &str = "\
 ;; --- baseline (required for any process to start) ---
 (allow process-fork)
@@ -364,10 +368,16 @@ fn write_filesystem_deny(out: &mut String, paths: &ResolvedPaths) {
         // `connect()` to a UNIX socket inside a denied subtree and talk to
         // whatever listens there. A Docker / ssh-agent / gpg-agent socket is a
         // control plane, so that would be an escape.
+        //
+        // `file-read-metadata` is named explicitly even though `file-read*`
+        // nominally spans it: the baseline emits an unfiltered `(allow
+        // file-read-metadata)`, and a rule naming the operation outranks one
+        // that only reaches it through the wildcard. Without it a denied path
+        // still answers `stat()` with its real size and timestamps.
         out.push_str(";; --- policy.deniedPaths (override broader allow rules) ---\n");
         write_path_rule(
             out,
-            "deny file-read* file-write* network-bind network-outbound",
+            "deny file-read* file-read-metadata file-write* network-bind network-outbound",
             &paths.denied,
         );
     }
@@ -874,7 +884,9 @@ mod tests {
         r.policy.denied_paths = vec!["/tmp/secret".into()];
         let p = build_profile(&r).unwrap();
         let allow_idx = p.find("(allow file-read* file-write*").unwrap();
-        let deny_idx = p.find("(deny file-read* file-write*").unwrap();
+        let deny_idx = p
+            .find("(deny file-read* file-read-metadata file-write*")
+            .unwrap();
         assert!(
             deny_idx > allow_idx,
             "deny rules must come after allow rules so they win on last-match"
@@ -1385,7 +1397,8 @@ mod tests {
             .unwrap_or("")
     }
     const RW_RULE: &str = "(allow file-read* file-write* network-bind network-outbound\n";
-    const DENY_RULE: &str = "(deny file-read* file-write* network-bind network-outbound\n";
+    const DENY_RULE: &str =
+        "(deny file-read* file-read-metadata file-write* network-bind network-outbound\n";
 
     #[test]
     fn readwrite_paths_emit_unix_socket_ops() {
@@ -1451,6 +1464,23 @@ mod tests {
             deny_idx > allow_idx,
             "deny must follow allow so last-match-wins re-denies the socket path"
         );
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn denied_paths_name_metadata_reads_explicitly() {
+        // The baseline emits an unfiltered `(allow file-read-metadata)` for
+        // path resolution. A rule naming that operation outranks one that only
+        // reaches it through `file-read*`, so the deny has to name it too or a
+        // denied path still answers `stat()`.
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow file-read-metadata)"));
+        let deny_idx = p
+            .find(DENY_RULE)
+            .expect("deny must name file-read-metadata");
         assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
     }
 
