@@ -7,7 +7,7 @@
 mod mxc_build_common;
 
 fn main() {
-    #[cfg(all(windows, feature = "isolation_session"))]
+    #[cfg(feature = "isolation_session")]
     reconcile_isolation_session_runtime();
 
     mxc_build_common::embed_version_info("MXC sandbox executor", "wxc-exec.exe");
@@ -31,8 +31,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PATH");
 }
 
-#[cfg(all(windows, feature = "isolation_session"))]
+#[cfg(feature = "isolation_session")]
 fn reconcile_isolation_session_runtime() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let target_dir = out_dir
         .parent()

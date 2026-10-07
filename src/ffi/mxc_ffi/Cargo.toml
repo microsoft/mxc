@@ -51,9 +51,9 @@ required-features = ["isolation_session"]
 
 [build-dependencies]
 csbindgen = { version = "1", optional = true }
+sha2.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"
-sha2.workspace = true
 winresource.workspace = true
-zip = { version = "2", default-features = false, features = ["deflate"] }

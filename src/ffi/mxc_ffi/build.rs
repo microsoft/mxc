@@ -26,15 +26,19 @@ fn main() {
     println!("cargo:rerun-if-changed=src/state_aware.rs");
     println!("cargo:rerun-if-changed=build.rs");
 
-    #[cfg(all(windows, feature = "isolation_session"))]
+    #[cfg(feature = "isolation_session")]
     reconcile_isolation_session_runtime();
 
     #[cfg(feature = "dotnetsdk")]
     generate_csharp_bindings();
 }
 
-#[cfg(all(windows, feature = "isolation_session"))]
+#[cfg(feature = "isolation_session")]
 fn reconcile_isolation_session_runtime() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let target_dir = out_dir
         .parent()

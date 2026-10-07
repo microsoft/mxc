@@ -285,6 +285,7 @@ popd
 
 echo.
 echo Building SDK integration tests...
+set "MXC_EXPECT_ISOLATION_SESSION_LIFTED=%WITH_ISOLATION_SESSION_LIFTED%"
 pushd sdk\node\tests\integration
 :: npm caches `file:` deps by package.json version. The local SDK version
 :: rarely bumps between builds, so a plain `npm install` keeps reusing the
@@ -292,6 +293,13 @@ pushd sdk\node\tests\integration
 :: type-checking sees the dist we just rebuilt above.
 if exist node_modules\@microsoft\mxc-sdk rmdir /s /q node_modules\@microsoft\mxc-sdk
 call npm install & call npm run build
+if "%WITH_ISOLATION_SESSION_LIFTED%"=="1" (
+    node --test --test-name-pattern="lifted IsolationSession|unexpected binaries" dist\package.test.js
+    if errorlevel 1 (
+        popd
+        goto :error_root
+    )
+)
 popd
 
 echo.

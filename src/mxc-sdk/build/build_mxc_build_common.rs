@@ -14,7 +14,7 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
-#[cfg(all(windows, feature = "isolation_session_lifted"))]
+#[cfg(feature = "isolation_session_lifted")]
 pub mod isolation_session_sdk {
     use sha2::{Digest, Sha256};
     use std::io::Read;

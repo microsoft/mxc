@@ -136,9 +136,15 @@ export const EXPECTED_MACOS_BINARIES = [
   'unix-test-proxy',
 ];
 
+export const ISOLATION_SESSION_LIFTED_BINARIES = [
+  'IsoSessionApp.dll',
+  'IsoSession.manifest',
+];
+
 // Binaries that are optional (feature-gated or only present in certain builds)
 // but still legitimate if found in the package.
 const OPTIONAL_BINARIES = [
+  ...ISOLATION_SESSION_LIFTED_BINARIES,
   'wslcsdk.dll',          // Only built with --with-wslc
   'wxc-wslc-daemon.exe',  // Only built with --with-wslc
   'nanvixd.exe',           // Only built with --with-microvm

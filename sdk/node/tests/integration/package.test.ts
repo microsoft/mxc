@@ -11,6 +11,7 @@ import {
   EXPECTED_WINDOWS_BINARIES,
   EXPECTED_LINUX_BINARIES,
   EXPECTED_MACOS_BINARIES,
+  ISOLATION_SESSION_LIFTED_BINARIES,
   ALL_KNOWN_BINARIES,
   platformName,
 } from './test-helpers.js';
@@ -55,6 +56,19 @@ describe('SDK package binaries', () => {
       `Missing binaries in ${binDir}: ${missing.join(', ')}`,
     );
   });
+
+  if (process.env.MXC_EXPECT_ISOLATION_SESSION_LIFTED === '1') {
+    it('should include the lifted IsolationSession runtime payload', () => {
+      const missing = ISOLATION_SESSION_LIFTED_BINARIES.filter(
+        binary => !fs.existsSync(path.join(binDir, binary)),
+      );
+      assert.deepStrictEqual(
+        missing,
+        [],
+        `Missing lifted IsolationSession binaries in ${binDir}: ${missing.join(', ')}`,
+      );
+    });
+  }
 
   it('should not contain unexpected binaries', () => {
     if (!fs.existsSync(binDir)) {
