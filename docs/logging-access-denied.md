@@ -349,6 +349,10 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 }
 ```
 
+Version `3` adds the managed network-decision provider and its closed outcome
+reasons. Consumers must reject unsupported document versions rather than
+interpreting an unknown provider or reason with an older vocabulary.
+
 Signatures are keyed by symbolic provider category, provider GUID,
 provider-scoped event ID, schema name, outcome reason from a fixed list, PID, and
 sorted sanitized properties. SIDs, capability names, GUIDs, PIDs/process identifiers, and
