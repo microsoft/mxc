@@ -194,7 +194,6 @@ mod tests {
             access_type,
             pid: 42,
             filetime: 1,
-            details: None,
         }
     }
 

@@ -4,8 +4,7 @@
 //! Extractors for the OS-managed Learning Mode WFP decision event.
 
 use crate::learning_mode_core::{
-    AccessType, DenialDetails, NetworkDenialDetails, NetworkDenialReason, NetworkDenialSource,
-    NetworkDirection, ResourceType, VerboseLoggingOutcomeReason as VerboseLoggingExclusionReason,
+    AccessType, ResourceType, VerboseLoggingOutcomeReason as VerboseLoggingExclusionReason,
     VerboseLoggingProvider,
 };
 use std::net::IpAddr;
@@ -124,7 +123,6 @@ fn extract_app_isolation(
         object_name: capability.to_string(),
         access_type: AccessType::Unknown,
         filetime,
-        details: None,
         event_id: parts.event_id,
         provider: VerboseLoggingProvider::LearningModeNetworkDecision,
         verbose_logging_properties: sanitize_properties(&parts.props),
@@ -136,7 +134,7 @@ fn extract_tessera(
     reason: u16,
     field_flags: u32,
     filetime: u64,
-    filter_id: u64,
+    _filter_id: u64,
 ) -> Result<RawDenial, VerboseLoggingExclusionReason> {
     if !property_eq(parts, "ProviderGuid", TESSERA_PROVIDER)
         || !property_eq(parts, "SublayerGuid", TESSERA_SUBLAYER)
@@ -163,13 +161,13 @@ fn extract_tessera(
     let remote_address = required_ip_string(parts, "RemoteAddress")?;
 
     let protocol = optional_u8(parts, field_flags, FIELD_PROTOCOL, "Protocol")?;
-    let local_address =
+    let _local_address =
         optional_ip_string(parts, field_flags, FIELD_LOCAL_ADDRESS, "LocalAddress")?;
-    let local_port = optional_u16(parts, field_flags, FIELD_LOCAL_PORT, "LocalPort")?;
+    let _local_port = optional_u16(parts, field_flags, FIELD_LOCAL_PORT, "LocalPort")?;
     let remote_port = optional_u16(parts, field_flags, FIELD_REMOTE_PORT, "RemotePort")?;
-    let application_id =
+    let _application_id =
         optional_string(parts, field_flags, FIELD_APPLICATION_ID, "ApplicationId")?;
-    let direction = required_u32(parts, "Direction").map(network_direction)?;
+    let _direction = required_u32(parts, "Direction")?;
     let resource = format_network_resource(protocol, &remote_address, remote_port);
 
     Ok(RawDenial {
@@ -178,30 +176,10 @@ fn extract_tessera(
         object_name: resource,
         access_type: AccessType::Unknown,
         filetime,
-        details: Some(DenialDetails::Network(NetworkDenialDetails {
-            source: NetworkDenialSource::ProcessContainerNetworkPolicy,
-            reason: NetworkDenialReason::DirectDefaultDeny,
-            direction,
-            protocol,
-            local_address,
-            local_port,
-            remote_address,
-            remote_port,
-            application_id,
-            filter_id,
-        })),
         event_id: parts.event_id,
         provider: VerboseLoggingProvider::LearningModeNetworkDecision,
         verbose_logging_properties: sanitize_properties(&parts.props),
     })
-}
-
-fn network_direction(value: u32) -> NetworkDirection {
-    match value {
-        0 => NetworkDirection::Outbound,
-        1 => NetworkDirection::Inbound,
-        _ => NetworkDirection::Unknown,
-    }
 }
 
 fn format_network_resource(protocol: Option<u8>, address: &str, port: Option<u16>) -> String {
@@ -464,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn tessera_direct_default_deny_preserves_network_details() {
+    fn tessera_direct_default_deny_builds_stable_network_resource() {
         let flags =
             FIELD_APPLICATION_ID | FIELD_PROTOCOL | FIELD_REMOTE_ADDRESS | FIELD_REMOTE_PORT;
         let mut parts = event(
@@ -482,25 +460,11 @@ mod tests {
         let denial = extract_network_denial(&parts).unwrap();
         assert_eq!(denial.object_name, "tcp://203.0.113.10:443");
         assert_eq!(denial.resource_type, ResourceType::Network);
-        assert!(matches!(
-            denial.details,
-            Some(DenialDetails::Network(NetworkDenialDetails {
-                direction: NetworkDirection::Outbound,
-                protocol: Some(6),
-                remote_port: Some(443),
-                filter_id: 456,
-                ..
-            }))
-        ));
     }
 
     #[test]
-    fn tessera_direction_values_map_to_stable_variants() {
-        for (direction, expected) in [
-            (0, NetworkDirection::Outbound),
-            (1, NetworkDirection::Inbound),
-            (u32::MAX, NetworkDirection::Unknown),
-        ] {
+    fn tessera_accepts_provider_direction_values_without_exposing_a_public_enum() {
+        for direction in [0, 1, u32::MAX] {
             let mut parts = event(
                 SOURCE_TESSERA,
                 REASON_TESSERA_DIRECT_DEFAULT_DENY,
@@ -512,13 +476,7 @@ mod tests {
             replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
 
             let denial = extract_network_denial(&parts).unwrap();
-            assert!(matches!(
-                denial.details,
-                Some(DenialDetails::Network(NetworkDenialDetails {
-                    direction: actual,
-                    ..
-                })) if actual == expected
-            ));
+            assert_eq!(denial.object_name, "ip://203.0.113.10");
         }
     }
 
@@ -621,6 +579,32 @@ mod tests {
             extract_network_denial(&parts).unwrap_err(),
             VerboseLoggingExclusionReason::UnsupportedEventSchema
         );
+    }
+
+    #[test]
+    fn schema_and_decision_guards_fail_closed_independently() {
+        for (name, value) in [
+            ("SchemaVersion", "2"),
+            ("Mode", "0"),
+            ("NormalDecision", "0"),
+            ("EffectiveDecision", "0"),
+            ("OriginalTimestamp", "0"),
+            ("FilterId", "0"),
+        ] {
+            let mut parts = event(
+                SOURCE_TESSERA,
+                REASON_TESSERA_DIRECT_DEFAULT_DENY,
+                &[("RemoteAddress", "203.0.113.10")],
+            );
+            replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
+            replace(&mut parts, name, value);
+
+            assert_eq!(
+                extract_network_denial(&parts).unwrap_err(),
+                VerboseLoggingExclusionReason::UnsupportedEventSchema,
+                "guard {name}={value} must fail closed"
+            );
+        }
     }
 
     #[test]

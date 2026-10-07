@@ -2372,7 +2372,6 @@ mod tests {
                 access_type: AccessType::Read,
                 pid: 42,
                 filetime: 99,
-                details: None,
             }])),
         };
 

@@ -1032,7 +1032,6 @@ fn wide_str_at(buf: &[u8], offset: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::learning_mode_core::{DenialDetails, NetworkDenialDetails, NetworkDirection};
     use crate::learning_mode_windows::network_extractors;
 
     fn utf16_bytes(value: &str) -> Vec<u8> {
@@ -1165,16 +1164,6 @@ mod tests {
         let denial = network_extractors::extract_network_denial(&parts).expect("network denial");
 
         assert_eq!(denial.object_name, "tcp://203.0.113.10:443");
-        assert!(matches!(
-            denial.details,
-            Some(DenialDetails::Network(NetworkDenialDetails {
-                direction: NetworkDirection::Outbound,
-                protocol: Some(6),
-                remote_port: Some(443),
-                filter_id: 456,
-                ..
-            }))
-        ));
     }
 
     #[test]

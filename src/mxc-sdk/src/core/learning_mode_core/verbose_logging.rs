@@ -193,14 +193,25 @@ impl VerboseLoggingSummary {
             return;
         }
 
+        let actionable = signature.reason.is_actionable();
+        let can_evict_nonactionable = actionable
+            && self
+                .signatures
+                .iter()
+                .any(|group| !group.signature.reason.is_actionable());
+        if (self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS || *retained_bytes >= max_bytes)
+            && !can_evict_nonactionable
+        {
+            self.record_overflow(actionable);
+            return;
+        }
+
         let serialized_len = Self::serialized_signature_len(&signature);
         while self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
             || retained_bytes.saturating_add(serialized_len) > max_bytes
         {
-            if !signature.reason.is_actionable()
-                || !self.evict_one_nonactionable_group(Some(retained_bytes))
-            {
-                self.record_overflow(signature.reason.is_actionable());
+            if !actionable || !self.evict_one_nonactionable_group(Some(retained_bytes)) {
+                self.record_overflow(actionable);
                 return;
             }
         }
@@ -518,6 +529,53 @@ mod tests {
             .signatures
             .iter()
             .any(|group| { group.signature.reason == VerboseLoggingOutcomeReason::ComActivation }));
+    }
+
+    #[test]
+    fn saturated_actionable_groups_still_count_retained_repeats() {
+        let mut summary = VerboseLoggingSummary::default();
+        let mut retained_bytes = MAX_VERBOSE_LOGGING_SIGNATURE_BYTES;
+        for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS as u16 {
+            summary.signatures.push(VerboseLoggingAggregate {
+                signature: VerboseLoggingSignature {
+                    provider: VerboseLoggingProvider::KernelGeneral,
+                    provider_guid: "kernel".to_string(),
+                    event_id,
+                    reason: VerboseLoggingOutcomeReason::Actionable,
+                    pid: 1,
+                    access_type: Some(crate::learning_mode_core::AccessType::Read),
+                    resource_type: Some(crate::learning_mode_core::ResourceType::File),
+                    properties: Vec::new(),
+                },
+                count: 1,
+            });
+        }
+        summary.total_occurrences = MAX_VERBOSE_LOGGING_GROUPS as u64;
+
+        let retained = summary.signatures[0].signature.clone();
+        summary.record_with_byte_budget(
+            retained,
+            &mut retained_bytes,
+            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+        );
+        summary.record_with_byte_budget(
+            VerboseLoggingSignature {
+                provider: VerboseLoggingProvider::LearningModeNetworkDecision,
+                provider_guid: "network".to_string(),
+                event_id: u16::MAX,
+                reason: VerboseLoggingOutcomeReason::Actionable,
+                pid: 0,
+                access_type: Some(crate::learning_mode_core::AccessType::Unknown),
+                resource_type: Some(crate::learning_mode_core::ResourceType::Network),
+                properties: vec![("RemoteAddress".to_string(), "203.0.113.10".to_string())],
+            },
+            &mut retained_bytes,
+            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+        );
+
+        assert_eq!(summary.signatures[0].count, 2);
+        assert_eq!(summary.overflow_occurrences, 1);
+        assert_eq!(summary.actionable_overflow_occurrences, 1);
     }
 
     #[test]

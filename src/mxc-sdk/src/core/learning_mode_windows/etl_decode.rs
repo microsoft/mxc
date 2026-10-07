@@ -305,7 +305,6 @@ impl<'visitor> Accumulator<'visitor> {
             access_type: raw.access_type,
             pid: raw.pid,
             filetime: raw.filetime,
-            details: raw.details,
         });
     }
 
@@ -1111,10 +1110,7 @@ fn normalized_filetime(timestamp: i64, acc: &mut Accumulator<'_>) -> Option<u64>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::learning_mode_core::{
-        AccessType, DenialDetails, NetworkDenialDetails, NetworkDenialReason, NetworkDenialSource,
-        NetworkDirection, ResourceType,
-    };
+    use crate::learning_mode_core::{AccessType, ResourceType};
 
     const SCOPED_PID: u32 = 42;
     const SCOPED_START_FILETIME: u64 = 100;
@@ -2016,7 +2012,6 @@ mod tests {
             object_name: path.to_string(),
             access_type: access,
             filetime: 1,
-            details: None,
             event_id: 4907,
             provider:
                 crate::learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
@@ -2049,6 +2044,26 @@ mod tests {
         let out = dedup_to_resources(denials).denials;
         assert_eq!(out[0].resource, r"C:\z");
         assert_eq!(out[1].resource, r"C:\a");
+    }
+
+    #[test]
+    fn dedup_retains_first_observation_metadata() {
+        let mut first = raw(
+            "tcp://203.0.113.10:443",
+            AccessType::Unknown,
+            ResourceType::Network,
+        );
+        first.pid = 10;
+        first.filetime = 100;
+        let mut later = first.clone();
+        later.pid = 20;
+        later.filetime = 200;
+
+        let out = dedup_to_resources([first, later]).denials;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pid, 10);
+        assert_eq!(out[0].filetime, 100);
     }
 
     #[test]
@@ -2152,7 +2167,6 @@ mod tests {
                 access_type: AccessType::Read,
                 pid: 1,
                 filetime: 1,
-                details: None,
             })
             .collect();
         accumulator.seen = (0..MAX_UNIQUE_DENIALS)
@@ -2414,21 +2428,27 @@ mod tests {
         assert_eq!(analysis.denials[0].pid, 0);
         assert_eq!(analysis.denials[0].filetime, 500);
         assert_eq!(analysis.denials[1].resource, "tcp://203.0.113.10:443");
-        assert_eq!(
-            analysis.denials[1].details,
-            Some(DenialDetails::Network(NetworkDenialDetails {
-                source: NetworkDenialSource::ProcessContainerNetworkPolicy,
-                reason: NetworkDenialReason::DirectDefaultDeny,
-                direction: NetworkDirection::Outbound,
-                protocol: Some(6),
-                local_address: None,
-                local_port: None,
-                remote_address: "203.0.113.10".to_string(),
-                remote_port: Some(443),
-                application_id: Some(r"\Device\HarddiskVolume3\app.exe".to_string()),
-                filter_id: 9001,
-            }))
-        );
+        let network_signature = analysis
+            .verbose_logging
+            .signatures
+            .iter()
+            .find(|aggregate| {
+                aggregate.signature.provider == VerboseLoggingProvider::LearningModeNetworkDecision
+                    && aggregate.signature.reason == VerboseLoggingOutcomeReason::Actionable
+                    && aggregate.signature.resource_type == Some(ResourceType::Network)
+            })
+            .expect("actionable network signature");
+        assert!(network_signature
+            .signature
+            .properties
+            .iter()
+            .any(|(name, value)| name == "ApplicationId"
+                && value == crate::learning_mode_windows::extractors::REDACTED_PATH));
+        assert!(network_signature
+            .signature
+            .properties
+            .iter()
+            .all(|(_, value)| value != r"\Device\HarddiskVolume3\app.exe"));
         assert!(analysis.verbose_logging.signatures.iter().any(|aggregate| {
             aggregate.signature.provider == VerboseLoggingProvider::LearningModeNetworkDecision
                 && aggregate.signature.reason
