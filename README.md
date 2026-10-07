@@ -189,8 +189,6 @@ build.bat --all             # Release build for current architecture
 |---|---|---|
 | SDK samples | [`samples/`](samples/README.md) | Runnable Rust, .NET, and Node scenarios |
 | SDK API reference | [`docs/api-reference/`](docs/api-reference/README.md) | Supported V1 operations and types |
-| JSON schema | [`docs/schema.md`](docs/schema.md) | Container request and containment policy reference |
-| Configuration examples | [`docs/examples.md`](docs/examples.md) | Annotated JSON requests |
 | Container lifecycle | [`docs/container-lifecycle.md`](docs/container-lifecycle.md) | Persistent container lifecycle overview |
 | Logging access denied | [`docs/logging-access-denied.md`](docs/logging-access-denied.md) | Diagnose blocked accesses and author policy |
 | Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Consent and administrative controls |
