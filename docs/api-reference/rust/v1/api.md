@@ -11,20 +11,29 @@ Attached execution is not exposed by the V1 SDK.
 
 ## Choosing a launch operation
 
-| Output | Create and run a container | Run in an existing container | Result |
+| Output | Create a new container and run a workload | Run in an MXC-provisioned container | Result |
 |---|---|---|---|
 | Capture stdout and stderr | `v1::run` | `v1::container::run_in_container` | `ExecutionResult` |
 | Live standard pipes | `v1::spawn` | `v1::container::spawn_in_container` | `MxcProcess` |
 | Interactive terminal | `v1::spawn_with_pty` | `v1::container::spawn_in_container_with_pty` | `MxcPtyProcess` |
 
-Creation takes `ContainerRequest` and operation options. Existing-container
-execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
-and operation options. One-shot PTY support covers IsolationSession, Bubblewrap,
-LXC, and Seatbelt direct execution. Existing-container PTY support remains
-IsolationSession-only. Seatbelt PTY rejects `guiAccess` and legacy
-`launchMethod: "open"`. A PTY gives the
-caller explicit input, output, resize, and process ownership instead of
-attaching the workload to the host process's global console streams.
+Use `ContainerRequest` when the operation should create a new container for the
+workload. Use `ExecutionRequest` with the `ContainerId` returned by
+`v1::container::provision_container` when the workload should run in that
+persistent, MXC-provisioned container.
+
+`run*` captures output and waits for completion. `spawn*` returns live standard
+streams. `spawn*with_pty` returns a terminal process with merged output,
+writable input, and resize support.
+
+## Common parameters
+
+| Parameter | Meaning |
+|---|---|
+| `request: ContainerRequest` | Workload command, shared policy, and backend selection for a newly created container. |
+| `container_id: &ContainerId` | Opaque identity returned by `provision_container`; use it only with subsequent lifecycle calls for that container. |
+| `request: ExecutionRequest` | Workload command and execution-time settings for an MXC-provisioned container. |
+| `options` | Per-call controls such as telemetry and initial PTY size. Options do not change the request's container policy. |
 
 ## Discovery and validation
 
@@ -59,7 +68,7 @@ pub fn available_tools_policy(environment: Option<&[(String, String)]>, options:
 
 ## `mxc_sdk::v1::container::deprovision_container`
 
-Deprovision an existing container.
+Deprovision a container created by `provision_container`.
 
 ```rust
 pub fn deprovision_container(
@@ -83,7 +92,8 @@ options: ProvisionOptions,
 
 ## `mxc_sdk::v1::container::spawn_in_container_with_pty`
 
-Spawn a workload in an existing container with a caller-controlled PTY.
+Spawn a workload with a caller-controlled PTY in a container created by
+`provision_container`.
 
 ```rust
 pub fn spawn_in_container_with_pty(
@@ -96,7 +106,7 @@ options: SpawnInContainerWithPtyOptions,
 
 ## `mxc_sdk::v1::container::start_container`
 
-Start an existing container.
+Start a container created by `provision_container`.
 
 ```rust
 pub fn start_container(container_id: &ContainerId, options: StartOptions) -> Result<LifecycleResult, Error>;
@@ -105,7 +115,7 @@ pub fn start_container(container_id: &ContainerId, options: StartOptions) -> Res
 
 ## `mxc_sdk::v1::container::stop_container`
 
-Stop an existing container.
+Stop a container created by `provision_container`.
 
 ```rust
 pub fn stop_container(container_id: &ContainerId, options: StopOptions) -> Result<LifecycleResult, Error>;
@@ -193,7 +203,8 @@ pub fn probe(request: Option<&ContainerRequest>) -> Result<crate::ProbeOutput, E
 
 ## `mxc_sdk::v1::run`
 
-Run a [ContainerRequest] to completion and capture its output.
+Run the workload described by `ContainerRequest` to completion and capture its
+output.
 
 ```rust
 pub fn run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionResult, Error>;
@@ -202,7 +213,8 @@ pub fn run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionRe
 
 ## `mxc_sdk::v1::container::run_in_container`
 
-Run a workload in an existing container to completion and capture output.
+Run a workload to completion in a started container created by
+`provision_container`.
 
 ```rust
 pub fn run_in_container(
@@ -215,7 +227,8 @@ options: RunInContainerOptions,
 
 ## `mxc_sdk::v1::spawn`
 
-Spawn a [ContainerRequest] and return its live process.
+Create a container for the workload described by `ContainerRequest` and return
+its live process.
 
 ```rust
 pub fn spawn(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProcess, Error>;
@@ -224,7 +237,8 @@ pub fn spawn(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProc
 
 ## `mxc_sdk::v1::container::spawn_in_container`
 
-Spawn a workload in an existing container and return its live process.
+Spawn a workload in a started container created by `provision_container` and
+return its live process.
 
 ```rust
 pub fn spawn_in_container(
@@ -237,7 +251,8 @@ options: SpawnInContainerOptions,
 
 ## `mxc_sdk::v1::spawn_with_pty`
 
-Spawn a [ContainerRequest] attached to a caller-controlled PTY.
+Create a container for the workload described by `ContainerRequest` and attach
+it to a caller-controlled PTY.
 
 ```rust
 pub fn spawn_with_pty(
@@ -308,7 +323,7 @@ F: FnOnce(&ConsentPrompt) -> Result<ConsentDecision, String>;
 
 ## `mxc_sdk::v1::telemetry::request_consent_async`
 
-Asynchronous counterpart to [request_consent].
+Asynchronous counterpart to `request_consent`.
 
 ```rust
 pub async fn request_consent_async<F, Fut>(

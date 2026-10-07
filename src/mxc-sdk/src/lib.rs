@@ -249,7 +249,7 @@ pub mod v1 {
         };
     }
 
-    /// V1 policy authoring types.
+    /// V1 policy helper namespaces.
     pub mod policy {
         /// Host filesystem-policy discovery helpers and their options.
         pub mod filesystem {
@@ -258,12 +258,6 @@ pub mod v1 {
                 FilesystemPolicyResult, ToolsPolicyContainerType, ToolsPolicyOptions,
             };
         }
-
-        pub use crate::policy::{
-            ClipboardPolicy, Containment, FilesystemPolicy, NetworkAction, NetworkEgressPolicy,
-            NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy, NetworkPortPolicy,
-            NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig, UiPolicy,
-        };
     }
 
     /// V1 typed lifecycle entry points.

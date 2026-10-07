@@ -9,20 +9,29 @@ Callers do not supply JSON or a schema version.
 
 ## Choosing a launch operation
 
-| Output | Create and run a container | Run in an existing container | Result |
+| Output | Create a new container and run a workload | Run in an MXC-provisioned container | Result |
 |---|---|---|---|
 | Capture stdout and stderr | `run` | `runInContainer` | `Promise<ExecutionResult>` |
 | Live standard pipes | `spawn` | `spawnInContainer` | `Promise<MxcProcess>` |
 | Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `Promise<MxcPtyProcess>` |
 
-Creation takes `ContainerRequest` and operation options. Existing-container
-execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
-and operation options. PTY operations are asynchronous. One-shot PTY support
-covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
-Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
-rejects `guiAccess` and legacy `launchMethod: "open"`.
-Terminal handles give the caller explicit input, output, resize, and process
-ownership; there is no separate attached-console or raw-JSON launch API.
+Use `ContainerRequest` when the operation should create a new container for the
+workload. Use `ExecutionRequest` with the `ContainerId` returned by
+`provisionContainer` when the workload should run in that persistent,
+MXC-provisioned container.
+
+`run*` captures output and waits for completion. `spawn*` returns live standard
+streams. `spawn*WithPty` returns a terminal process with merged output,
+writable input, and resize support.
+
+## Common parameters
+
+| Parameter | Meaning |
+|---|---|
+| `request: ContainerRequest` | Workload command, shared policy, and backend selection for a newly created container. |
+| `containerId: ContainerId<C>` | Opaque identity returned by `provisionContainer`; use it only with subsequent lifecycle calls for that container. |
+| `request: ExecutionRequest<C>` | Workload command and execution-time settings for an MXC-provisioned container. |
+| `options` | Per-call controls such as telemetry and initial PTY size. Options do not change the request's container policy. |
 
 ## Discovery and validation
 
@@ -154,7 +163,8 @@ export async function run(request: ContainerRequest, options: RunOptions = {}): 
 
 ## `@microsoft/mxc-sdk/v1::runInContainer`
 
-Execute in an existing IsolationSession or WSLC container and capture output.
+Execute in a started container created by `provisionContainer` and capture
+output. The typed backend must support piped execution.
 Dispatch failures reject with `MxcError`; workload exit codes and timeouts are
 returned in `ExecutionResult`.
 
@@ -174,8 +184,8 @@ export async function spawn(request: ContainerRequest, options: SpawnOptions = {
 
 ## `@microsoft/mxc-sdk/v1::spawnInContainer`
 
-Spawn a workload asynchronously inside a started IsolationSession or WSLC
-container with live standard pipes.
+Spawn a workload asynchronously inside a started container created by
+`provisionContainer`. The typed backend must support live standard pipes.
 
 ```typescript
 export async function spawnInContainer<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
@@ -184,7 +194,8 @@ export async function spawnInContainer<C extends PipedExecuteBackend>(containerI
 
 ## `@microsoft/mxc-sdk/v1::spawnInContainerWithPty`
 
-Execute a request in an existing container with an MXC-owned PTY.
+Execute a request with an MXC-owned PTY in a started container created by
+`provisionContainer`.
 
 ```typescript
 export async function spawnInContainerWithPty<C extends LifecycleContainmentKind>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerWithPtyOptions = {}): Promise<MxcPtyProcess>;

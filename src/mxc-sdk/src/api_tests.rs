@@ -18,6 +18,14 @@
 //! ```
 //!
 //! ```compile_fail
+//! use mxc_sdk::v1::policy::{
+//!     ClipboardPolicy, Containment, FilesystemPolicy, NetworkAction, NetworkEgressPolicy,
+//!     NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy, NetworkPortPolicy,
+//!     NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig, UiPolicy,
+//! };
+//! ```
+//!
+//! ```compile_fail
 //! use mxc_sdk::__ffi::exec_attached;
 //! ```
 //!

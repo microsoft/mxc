@@ -9,20 +9,30 @@ Callers do not supply JSON or a schema version.
 
 ## Choosing a launch operation
 
-| Output | Create and run a container (`MxcContainer`) | Run in an existing container (`MxcLifecycle`) | Result |
+| Output | Create a new container and run a workload (`MxcContainer`) | Run in an MXC-provisioned container (`MxcLifecycle`) | Result |
 |---|---|---|---|
 | Capture stdout and stderr | `Run` / `RunAsync` | `RunInContainer` / `RunInContainerAsync` | `ExecutionResult` |
 | Live standard pipes | `Spawn` / `SpawnAsync` | `SpawnInContainer` / `SpawnInContainerAsync` | `MxcProcess` |
 | Interactive terminal | `SpawnWithPty` | `SpawnInContainerWithPty` | `MxcPtyProcess` |
 
-Creation takes `ContainerRequest` and operation options. Existing-container
-execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
-and operation options. One-shot PTY support covers IsolationSession, Bubblewrap,
-LXC, and Seatbelt direct execution. Existing-container PTY support remains
-IsolationSession-only. Seatbelt PTY rejects `guiAccess` and legacy
-`launchMethod: "open"`. Terminal handles
-give the caller explicit input, output, resize, and process ownership; there
-is no separate public attached-console or raw-JSON launch API.
+Use `ContainerRequest` when the operation should create a new container for the
+workload. Use `ExecutionRequest` with the `ContainerId` returned by
+`MxcLifecycle.ProvisionContainer` when the workload should run in that
+persistent, MXC-provisioned container.
+
+`Run*` captures output and waits for completion. `Spawn*` returns live standard
+streams. `Spawn*WithPty` returns a terminal process with merged output,
+writable input, and resize support.
+
+## Common parameters
+
+| Parameter | Meaning |
+|---|---|
+| `ContainerRequest request` | Workload command, shared policy, and backend selection for a newly created container. |
+| `ContainerId id` | Opaque identity returned by `ProvisionContainer`; use it only with subsequent lifecycle calls for that container. |
+| `ExecutionRequest request` | Workload command and execution-time settings for an MXC-provisioned container. |
+| `options` | Per-call controls such as telemetry and initial PTY size. Options do not change the request's container policy. |
+| `CancellationToken cancellationToken` | Cancels the managed wait. It does not terminate native execution unless the operation explicitly documents that behavior. |
 
 ## Discovery and validation
 
@@ -191,7 +201,8 @@ public static ValidationResult ValidateStart(ContainerId id, StartOptions? optio
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainer
 
-Run a command in a started container and return live stdio streams.
+Run a command in a started container created by `ProvisionContainer` and
+return live standard streams.
 
 ```csharp
 public static MxcProcess SpawnInContainer(
@@ -216,7 +227,8 @@ public static Task<MxcProcess> SpawnInContainerAsync(
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainerWithPty
 
-Run a command in a started container and attach it to a caller-resized PTY.
+Run a command in a started container created by `ProvisionContainer` and
+attach it to a caller-resized PTY.
 
 ```csharp
 public static MxcPtyProcess SpawnInContainerWithPty(

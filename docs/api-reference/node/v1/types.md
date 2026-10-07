@@ -4,7 +4,10 @@
 
 Public entrypoint: `@microsoft/mxc-sdk/v1`. [Operations](api.md) | [Overview](README.md)
 
-Declarations include public fields, variants, constructors, and members. Inherited SDK members remain defined on their base type; implementation-only helpers and external framework APIs are not expanded.
+Declarations include public fields, variants, constructors, and members.
+Comments clarify field meaning, defaults, ownership, and platform applicability
+where the signature alone is insufficient. Private constructors, native
+drivers, and other implementation-only members are omitted.
 
 ## `@microsoft/mxc-sdk/v1::AvailableBackend`
 
@@ -13,9 +16,13 @@ empty arrays. New native backend, tier, or capability names map to `unknown`.
 
 ```typescript
 export interface AvailableBackend {
+  /** Canonical backend name, or unknown for a newer native value. */
   backend: ContainmentBackend | 'unknown';
+  /** Effective isolation tier; omitted for backends without a tier ladder. */
   tier?: IsolationTier | 'unknown';
+  /** Optional features supported by this backend and tier. */
   capabilities: BackendCapability[];
+  /** Diagnostics for unavailable optional capabilities. */
   warnings: string[];
 }
 ```
@@ -26,12 +33,12 @@ An optional capability reported by native backend discovery.
 
 ```typescript
 export type BackendCapability =
-  | 'captureDenials'
-  | 'filesystemDeniedPaths'
-  | 'filesystemEnumeratePaths'
-  | 'ingressHostLoopbackAllow'
-  | 'proxyEnforcement'
-  | 'identitylessLoopbackProxy'
+  | 'captureDenials' // Windows only.
+  | 'filesystemDeniedPaths' // Windows only.
+  | 'filesystemEnumeratePaths' // Windows only.
+  | 'ingressHostLoopbackAllow' // Windows only.
+  | 'proxyEnforcement' // Linux Bubblewrap only.
+  | 'identitylessLoopbackProxy' // Windows only.
   | 'unknown';
 ```
 
@@ -130,17 +137,27 @@ Complete container request.
 
 ```typescript
 export interface ContainerRequest {
+  /** Command line executed as the container's workload. */
   command: string;
+  /** Cross-backend filesystem restrictions. */
   filesystem?: FilesystemPolicy;
+  /** Cross-backend network policy and runtime network values. */
   network?: NetworkPolicy;
+  /** Cross-backend UI restrictions. */
   ui?: UiPolicy;
+  /** Workload timeout in milliseconds. */
   timeoutMs?: number;
+  /** Backend selection; defaults to the platform-native process backend. */
   containment?: Containment;
+  /** Optional backend-visible container name. */
   containerName?: string;
+  /** Initial workload working directory. */
   workingDirectory?: string;
+  /** Explicit environment entries. */
   environment?: {
     [key: string]: string | undefined;
   };
+  /** Whether backend default environment variables are inherited. */
   inheritDefaultEnvironment?: boolean;
 }
 ```
@@ -305,11 +322,17 @@ Captured output and terminal outcome of a completed workload.
 
 ```typescript
 export interface ExecutionResult {
+  /** Captured standard output. */
   stdout: string;
+  /** Captured standard error. */
   stderr: string;
+  /** Workload exit code. */
   exitCode: number;
+  /** Whether MXC terminated the workload after its configured timeout. */
   timedOut: boolean;
+  /** Policy and operational diagnostics. */
   warnings: string[];
+  /** Structured output from optional features such as denial capture. */
   outputMetadata?: ExecutionMetadata;
 }
 ```
@@ -425,7 +448,8 @@ export class MxcError extends Error {
 
 ## `@microsoft/mxc-sdk/v1::MxcErrorFields`
 
-Every field an MxcError can carry, in the same flat shape as the wire error envelope â€” operation, nativeCode and remediation sit alongside code and message, not nested inside details.
+Every field an `MxcError` can carry. `operation`, `nativeCode`, and
+`remediation` are top-level fields rather than entries in `details`.
 
 ```typescript
 export interface MxcErrorFields {
@@ -445,15 +469,23 @@ A container process whose stdio is backed by native Node streams.
 
 ```typescript
 export class MxcProcess {
+  /** Native process identifier. */
   readonly id: number;
-  constructor(private readonly driver: NativeLifecycleDriver, timeoutMs?: number, private readonly scheduler: LifecycleScheduler = defaultScheduler, private readonly reportBackgroundError: BackgroundErrorReporter = defaultBackgroundErrorReporter);
+  /** Writable standard input, or null when unavailable. */
   get standardInput(): Writable | null;
+  /** Readable standard output, or null when unavailable. */
   get standardOutput(): Readable | null;
+  /** Readable standard error, or null when unavailable. */
   get standardError(): Readable | null;
+  /** Native policy and operational warnings. */
   get warnings(): readonly string[];
+  /** Optional structured feature output, populated after completion. */
   get outputMetadata(): ExecutionMetadata | undefined;
+  /** Wait for process completion. */
   wait(): Promise<WaitResult>;
+  /** Request process termination. */
   kill(): void;
+  /** Release native and stream resources. */
   dispose(): void;
 }
 ```
@@ -465,9 +497,11 @@ A container process attached to an MXC-owned pseudo-terminal.
 
 ```typescript
 export class MxcPtyProcess extends MxcProcess {
-  constructor(driver: NativeLifecycleDriver, private readonly resizePty: ResizePty, timeoutMs?: number, scheduler?: LifecycleScheduler);
+  /** Writable terminal input. */
   get input(): Writable;
+  /** Readable merged terminal output. */
   get output(): Readable;
+  /** Change the terminal dimensions. */
   resize(size: MxcPtySize): void;
 }
 ```
@@ -553,36 +587,36 @@ Platform support information.
 
 ```typescript
 export interface PlatformSupport {
-  isSupported: boolean;
-  reason?: string;
-  availableMethods: ContainmentBackend[];
-  unavailableReasons?: Partial<Record<ContainmentBackend, string>>;
-  isolationTier?: IsolationTier;
-  isolationWarnings?: string[];
-  uiCapabilities?: UiCapabilitySupport;
-  bubblewrapNetwork?: BubblewrapNetworkSupport;
+  isSupported: boolean; // All platforms: at least one SDK backend can launch.
+  reason?: string; // All platforms: why no SDK backend can launch.
+  availableMethods: ContainmentBackend[]; // All platforms.
+  unavailableReasons?: Partial<Record<ContainmentBackend, string>>; // Linux only.
+  isolationTier?: IsolationTier; // Windows only: empty-policy ProcessContainer tier.
+  isolationWarnings?: string[]; // Windows only: tier degradation warnings.
+  uiCapabilities?: UiCapabilitySupport; // Windows only.
+  bubblewrapNetwork?: BubblewrapNetworkSupport; // Linux only.
 }
 ```
 
 
 ## `@microsoft/mxc-sdk/v1::ProbeFacts`
 
-Raw host facts gathered before request tier selection.
+Raw Windows host facts gathered before ProcessContainer tier selection.
 
 ```typescript
 export interface ProbeFacts {
-  baseContainerApiPresent: boolean;
-  nativeCaptureAvailable: boolean;
-  guardedCaptureAvailable: boolean;
-  bfscfgPresent: boolean;
-  bfsCompiledIn: boolean;
-  baseContainerSupportsDenyPaths: boolean;
-  baseContainerSupportsEnumeratePaths: boolean;
-  baseContainerSupportsIngressHostLoopbackAllow: boolean;
-  baseContainerSupportsIdentitylessLoopbackProxy: boolean;
-  isolationSessionAvailable: boolean;
-  hyperlightAvailable: boolean;
-  uiCapabilities: UiCapabilitySupport;
+  baseContainerApiPresent: boolean; // Windows only.
+  nativeCaptureAvailable: boolean; // Windows only.
+  guardedCaptureAvailable: boolean; // Windows only.
+  bfscfgPresent: boolean; // Windows only.
+  bfsCompiledIn: boolean; // Windows only.
+  baseContainerSupportsDenyPaths: boolean; // Windows only.
+  baseContainerSupportsEnumeratePaths: boolean; // Windows only.
+  baseContainerSupportsIngressHostLoopbackAllow: boolean; // Windows only.
+  baseContainerSupportsIdentitylessLoopbackProxy: boolean; // Windows only.
+  isolationSessionAvailable: boolean; // Windows only.
+  hyperlightAvailable: boolean; // Windows only.
+  uiCapabilities: UiCapabilitySupport; // Windows only.
 }
 ```
 
@@ -629,7 +663,7 @@ export interface ProcessContainerConfig {
 
 ## `@microsoft/mxc-sdk/v1::ProcessNetworkConfig`
 
-Runtime network values accepted by existing-container execution.
+Runtime network values accepted when executing in an MXC-provisioned container.
 
 ```typescript
 export interface ProcessNetworkConfig {
@@ -640,16 +674,24 @@ export interface ProcessNetworkConfig {
 
 ## `@microsoft/mxc-sdk/v1::ExecutionRequest`
 
-Process settings for a workload in an existing container.
+Process settings for a workload in a container created by
+`provisionContainer`.
 
 ```typescript
 export interface ExecutionRequest<C extends LifecycleContainmentKind = LifecycleContainmentKind> {
+  /** Command line executed inside the MXC-provisioned container. */
   command: string;
+  /** Initial workload working directory. */
   workingDirectory?: string;
+  /** Explicit environment entries. */
   environment?: Record<string, string>;
+  /** Whether backend default environment variables are inherited. */
   inheritDefaultEnvironment?: boolean;
+  /** Workload timeout in milliseconds. */
   timeoutMs?: number;
+  /** WSLC execution-time network values; other lifecycle backends reject it. */
   network?: C extends 'wslc' ? ProcessNetworkConfig : never;
+  /** Per-invocation telemetry preference; consent and policy still apply. */
   telemetry?: TelemetryConfig;
 }
 ```
@@ -671,6 +713,7 @@ Invocation controls for provisioning a container.
 
 ```typescript
 export interface ProvisionOptions {
+  /** Per-invocation telemetry preference; consent and policy still apply. */
   telemetry?: TelemetryConfig;
 }
 ```
@@ -693,8 +736,11 @@ Container identifier and optional metadata returned after provisioning.
 
 ```typescript
 export interface ProvisionResult<C extends LifecycleContainmentKind> {
+  /** Opaque identity for subsequent lifecycle operations. */
   containerId: ContainerId<C>;
+  /** Backend-specific provision metadata. */
   metadata?: ProvisionMetadata<C>;
+  /** Policy and operational diagnostics. */
   warnings: string[];
 }
 ```
@@ -702,10 +748,11 @@ export interface ProvisionResult<C extends LifecycleContainmentKind> {
 
 ## `@microsoft/mxc-sdk/v1::RunInContainerOptions`
 
-Invocation controls for captured execution in an existing container.
+Invocation controls for captured execution in an MXC-provisioned container.
 
 ```typescript
 export interface RunInContainerOptions {
+  /** Per-invocation telemetry preference; consent and policy still apply. */
   telemetry?: TelemetryConfig;
 }
 ```
@@ -717,6 +764,7 @@ Invocation controls for run.
 
 ```typescript
 export interface RunOptions {
+  /** Per-invocation telemetry preference; consent and policy still apply. */
   telemetry?: TelemetryConfig;
 }
 ```
@@ -728,6 +776,7 @@ Runtime values supplied separately from container policy.
 
 ```typescript
 export interface NetworkRuntimeConfig {
+  /** HTTP/S proxy URL reachable from inside the selected backend. */
   networkProxy?: string;
 }
 ```
@@ -759,10 +808,11 @@ export interface SeatbeltConfig {
 
 ## `@microsoft/mxc-sdk/v1::SpawnInContainerOptions`
 
-Invocation controls for live execution in an existing container.
+Invocation controls for live execution in an MXC-provisioned container.
 
 ```typescript
 export interface SpawnInContainerOptions {
+  /** Per-invocation telemetry preference; consent and policy still apply. */
   telemetry?: TelemetryConfig;
 }
 ```
@@ -770,11 +820,13 @@ export interface SpawnInContainerOptions {
 
 ## `@microsoft/mxc-sdk/v1::SpawnInContainerWithPtyOptions`
 
-Invocation controls for a terminal in an existing container.
+Invocation controls for terminal execution in an MXC-provisioned container.
 
 ```typescript
 export interface SpawnInContainerWithPtyOptions {
+  /** Per-invocation telemetry preference; consent and policy still apply. */
   telemetry?: TelemetryConfig;
+  /** Initial terminal dimensions; defaults to 24 rows by 80 columns. */
   size?: MxcPtySize;
 }
 ```
@@ -786,6 +838,7 @@ Invocation controls for spawn.
 
 ```typescript
 export interface SpawnOptions {
+  /** Per-invocation telemetry preference; consent and policy still apply. */
   telemetry?: TelemetryConfig;
 }
 ```
@@ -797,7 +850,9 @@ Invocation controls for spawning a caller-controlled terminal.
 
 ```typescript
 export interface SpawnWithPtyOptions {
+  /** Per-invocation telemetry preference; consent and policy still apply. */
   telemetry?: TelemetryConfig;
+  /** Initial terminal dimensions; defaults to 24 rows by 80 columns. */
   size?: MxcPtySize;
 }
 ```

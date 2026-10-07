@@ -4,7 +4,10 @@
 
 Public entrypoint: `Microsoft.Mxc.Sdk.V1`. [Operations](api.md) | [Overview](README.md)
 
-Declarations include public fields, variants, constructors, and members. Inherited SDK members remain defined on their base type; implementation-only helpers and external framework APIs are not expanded.
+Declarations include public fields, variants, constructors, and members.
+Comments clarify field meaning, defaults, ownership, and platform applicability
+where the signature alone is insufficient. Implementation-only helpers and
+external framework members are omitted.
 
 ## `Microsoft.Mxc.Sdk.V1.AvailableBackend`
 
@@ -15,11 +18,15 @@ public sealed class AvailableBackend
 {
     public AvailableBackend();
 
+    // Canonical backend name, or Unknown for a newer native value.
     public required ContainmentBackend Backend { get; init; }
+    // Effective isolation tier; null for backends without a tier ladder.
     public IsolationTier? Tier { get; init; }
+    // Optional features supported by this backend and tier.
     public IReadOnlyList<BackendCapability> Capabilities { get; init; } =
         Array.Empty<BackendCapability>();
 
+    // Diagnostics for unavailable optional capabilities.
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }
 ```
@@ -33,12 +40,12 @@ An optional feature supported by a backend on the current host.
 public enum BackendCapability
 {
     Unknown = 0,
-    CaptureDenials = 1,
-    ProxyEnforcement = 2,
-    FilesystemDeniedPaths = 3,
-    IngressHostLoopbackAllow = 4,
-    FilesystemEnumeratePaths = 5,
-    IdentitylessLoopbackProxy = 6,
+    CaptureDenials = 1, // Windows only.
+    ProxyEnforcement = 2, // Linux Bubblewrap only.
+    FilesystemDeniedPaths = 3, // Windows only.
+    IngressHostLoopbackAllow = 4, // Windows only.
+    FilesystemEnumeratePaths = 5, // Windows only.
+    IdentitylessLoopbackProxy = 6, // Windows only.
 }
 ```
 
@@ -156,17 +163,27 @@ public sealed class ContainerRequest
 {
     public ContainerRequest(string command);
 
+    // Command line executed as the container's workload.
     public string Command { get; }
+    // Cross-backend filesystem restrictions.
     public FilesystemPolicy? Filesystem { get; set; }
+    // Cross-backend network policy and runtime network values.
     public NetworkPolicy? Network { get; set; }
+    // Cross-backend UI restrictions.
     public UiPolicy? Ui { get; set; }
+    // Workload timeout in milliseconds.
     public uint? TimeoutMs { get; set; }
 
+    // Backend selection; defaults to the platform-native process backend.
     public Containment Containment { get; set; } = new Containment.Process();
 
+    // Optional backend-visible container name.
     public string? ContainerName { get; set; }
+    // Initial workload working directory.
     public string? WorkingDirectory { get; set; }
+    // Explicit environment entries.
     public Dictionary<string, string>? Environment { get; set; }
+    // Whether backend default environment variables are inherited.
     public bool InheritDefaultEnvironment { get; set; }
 }
 ```
@@ -368,12 +385,18 @@ public sealed class ExecutionResult
 {
     public ExecutionResult();
 
+    // Workload exit code.
     public int ExitCode { get; init; }
+    // Whether MXC terminated the workload after its configured timeout.
     public bool TimedOut { get; init; }
+    // Captured standard output.
     public string Stdout { get; init; } = string.Empty;
+    // Captured standard error.
     public string Stderr { get; init; } = string.Empty;
+    // Structured output from optional features such as denial capture.
     public ExecutionMetadata? OutputMetadata { get; init; }
 
+    // Policy and operational diagnostics.
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }
 ```
@@ -930,8 +953,9 @@ public sealed class PlatformSupport
 {
     public PlatformSupport();
 
-    public bool IsSupported { get; init; }
-    public string? Reason { get; init; }
+    public bool IsSupported { get; init; } // All platforms.
+    public string? Reason { get; init; } // All platforms; set when unsupported.
+    // All platforms: backends the public SDK can launch.
     public IReadOnlyList<ContainmentBackend> AvailableMethods { get; init; } =
         Array.Empty<ContainmentBackend>();
 }
@@ -940,25 +964,25 @@ public sealed class PlatformSupport
 
 ## `Microsoft.Mxc.Sdk.V1.ProbeFacts`
 
-Raw host facts used by request tier selection.
+Raw Windows host facts used by ProcessContainer tier selection.
 
 ```csharp
 public sealed class ProbeFacts
 {
     public ProbeFacts();
 
-    public bool BaseContainerApiPresent { get; init; }
-    public bool NativeCaptureAvailable { get; init; }
-    public bool GuardedCaptureAvailable { get; init; }
-    public bool BfscfgPresent { get; init; }
-    public bool BfsCompiledIn { get; init; }
-    public bool BaseContainerSupportsDenyPaths { get; init; }
-    public bool BaseContainerSupportsEnumeratePaths { get; init; }
-    public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
-    public bool BaseContainerSupportsIdentitylessLoopbackProxy { get; init; }
-    public bool IsolationSessionAvailable { get; init; }
-    public bool HyperlightAvailable { get; init; }
-    public required UiCapabilitySupport UiCapabilities { get; init; }
+    public bool BaseContainerApiPresent { get; init; } // Windows only.
+    public bool NativeCaptureAvailable { get; init; } // Windows only.
+    public bool GuardedCaptureAvailable { get; init; } // Windows only.
+    public bool BfscfgPresent { get; init; } // Windows only.
+    public bool BfsCompiledIn { get; init; } // Windows only.
+    public bool BaseContainerSupportsDenyPaths { get; init; } // Windows only.
+    public bool BaseContainerSupportsEnumeratePaths { get; init; } // Windows only.
+    public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; } // Windows only.
+    public bool BaseContainerSupportsIdentitylessLoopbackProxy { get; init; } // Windows only.
+    public bool IsolationSessionAvailable { get; init; } // Windows only.
+    public bool HyperlightAvailable { get; init; } // Windows only.
+    public required UiCapabilitySupport UiCapabilities { get; init; } // Windows only.
 }
 ```
 
@@ -972,13 +996,13 @@ public sealed class ProbeOutput
 {
     public ProbeOutput();
 
-    public IsolationTier? Tier { get; init; }
-    public bool? NeedsDaclAugmentation { get; init; }
+    public IsolationTier? Tier { get; init; } // Windows only.
+    public bool? NeedsDaclAugmentation { get; init; } // Windows only.
 
-    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>(); // Windows only.
 
-    public required ProbeFacts Probes { get; init; }
-    public string? Error { get; init; }
+    public required ProbeFacts Probes { get; init; } // Windows only.
+    public string? Error { get; init; } // Windows only.
 }
 ```
 
@@ -1062,7 +1086,8 @@ public sealed class ProcessContainerUiPolicy
 
 ## `Microsoft.Mxc.Sdk.V1.ProcessNetworkPolicy`
 
-Runtime network settings available to an existing-container execution.
+Runtime network settings available when executing in an MXC-provisioned
+container.
 
 ```csharp
 public sealed class ProcessNetworkPolicy
@@ -1076,20 +1101,28 @@ public sealed class ProcessNetworkPolicy
 
 ## `Microsoft.Mxc.Sdk.V1.ExecutionRequest`
 
-A workload and its process settings for an existing container.
+A workload and its process settings for a container created by
+`MxcLifecycle.ProvisionContainer`.
 
 ```csharp
 public sealed class ExecutionRequest
 {
+    // Per-invocation telemetry preference; consent and policy still apply.
     public TelemetryConfig? Telemetry { get; set; }
 
     public ExecutionRequest(string command);
 
+    // Command line executed inside the MXC-provisioned container.
     public string Command { get; }
+    // Initial workload working directory.
     public string? WorkingDirectory { get; set; }
+    // Explicit environment entries.
     public Dictionary<string, string>? Environment { get; set; }
+    // Whether backend default environment variables are inherited.
     public bool? InheritDefaultEnvironment { get; set; }
+    // Workload timeout in milliseconds.
     public uint? TimeoutMs { get; set; }
+    // Execution-time network values supported by the provisioned backend.
     public ProcessNetworkPolicy? Network { get; set; }
 }
 ```
@@ -1142,8 +1175,11 @@ public sealed class ProvisionResult
 {
     public ProvisionResult();
 
+    // Opaque identity for subsequent lifecycle operations.
     public ContainerId ContainerId { get; init; }
+    // Backend-specific provision metadata.
     public ProvisionMetadata? Metadata { get; init; }
+    // Policy and operational diagnostics.
     public string[] Warnings { get; set; }
 }
 ```
@@ -1163,13 +1199,14 @@ public sealed class LifecycleResult
 
 ## `Microsoft.Mxc.Sdk.V1.RunInContainerOptions`
 
-Invocation controls for captured execution in an existing container.
+Invocation controls for captured execution in an MXC-provisioned container.
 
 ```csharp
 public sealed class RunInContainerOptions
 {
     public RunInContainerOptions();
 
+    // Per-invocation telemetry preference; consent and policy still apply.
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1184,6 +1221,7 @@ public sealed class RunOptions
 {
     public RunOptions();
 
+    // Per-invocation telemetry preference; consent and policy still apply.
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1220,13 +1258,14 @@ public static class SchemaVersions
 
 ## `Microsoft.Mxc.Sdk.V1.SpawnInContainerOptions`
 
-Invocation controls for spawning a workload in an existing container.
+Invocation controls for spawning a workload in an MXC-provisioned container.
 
 ```csharp
 public sealed class SpawnInContainerOptions
 {
     public SpawnInContainerOptions();
 
+    // Per-invocation telemetry preference; consent and policy still apply.
     public TelemetryConfig? Telemetry { get; set; }
 }
 ```
@@ -1234,14 +1273,16 @@ public sealed class SpawnInContainerOptions
 
 ## `Microsoft.Mxc.Sdk.V1.SpawnInContainerWithPtyOptions`
 
-Invocation controls for a terminal in an existing container.
+Invocation controls for terminal execution in an MXC-provisioned container.
 
 ```csharp
 public sealed class SpawnInContainerWithPtyOptions
 {
     public SpawnInContainerWithPtyOptions();
 
+    // Per-invocation telemetry preference; consent and policy still apply.
     public TelemetryConfig? Telemetry { get; set; }
+    // Initial terminal dimensions; defaults to 24 rows by 80 columns.
     public MxcPtySize? Size { get; set; }
 }
 ```

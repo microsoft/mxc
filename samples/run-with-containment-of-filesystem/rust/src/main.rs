@@ -6,8 +6,7 @@
 use std::error::Error;
 use std::io::{self, Write};
 
-use mxc_sdk::v1::policy::FilesystemPolicy;
-use mxc_sdk::v1::{self, ContainerRequest, Containment, WaitResult};
+use mxc_sdk::v1::{self, ContainerRequest, Containment, FilesystemPolicy, WaitResult};
 
 fn sample_command() -> &'static str {
     if cfg!(target_os = "windows") {

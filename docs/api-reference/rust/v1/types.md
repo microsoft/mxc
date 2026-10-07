@@ -4,7 +4,13 @@
 
 Public entrypoint: `mxc_sdk::v1`. [Operations](api.md) | [Overview](README.md)
 
-Declarations include public fields, variants, constructors, and members. Inherited SDK members remain defined on their base type; implementation-only helpers and external framework APIs are not expanded.
+Declarations include public fields, variants, constructors, and members.
+Comments clarify field meaning, defaults, ownership, and platform applicability
+where the signature alone is insufficient. Implementation-only helpers are
+omitted.
+
+Shared request and policy types have one canonical path under `mxc_sdk::v1`.
+`mxc_sdk::v1::policy` contains helper namespaces, not duplicate type exports.
 
 ## `mxc_sdk::v1::AvailableBackend`
 
@@ -12,9 +18,13 @@ One host-available backend, plus its effective isolation tier (if any).
 
 ```rust
 pub struct AvailableBackend {
+  /// Canonical backend wire name.
   pub backend: String,
+  /// Effective isolation tier; absent for backends without a tier ladder.
   pub tier: Option<String>,
+  /// Optional features supported by this backend and tier.
   pub capabilities: Vec<BackendCapability>,
+  /// Diagnostics for unavailable optional capabilities.
   pub warnings: Vec<String>,
 }
 ```
@@ -26,11 +36,17 @@ Optional feature supported by a containment backend on the current host.
 
 ```rust
 pub enum BackendCapability {
+  /// Windows ProcessContainer denial capture.
   CaptureDenials,
+  /// Windows ProcessContainer denied-path enforcement.
   FilesystemDeniedPaths,
+  /// Windows ProcessContainer enumeration-only path enforcement.
   FilesystemEnumeratePaths,
+  /// Windows ProcessContainer host-loopback ingress support.
   IngressHostLoopbackAllow,
+  /// Linux Bubblewrap proxy-only egress enforcement.
   ProxyEnforcement,
+  /// Windows identity-less loopback proxy support.
   IdentitylessLoopbackProxy,
 }
 ```
@@ -80,7 +96,7 @@ impl CaptureDenialsResult {
 ```
 
 
-## `mxc_sdk::v1::ClipboardPolicy`, `mxc_sdk::v1::policy::ClipboardPolicy`
+## `mxc_sdk::v1::ClipboardPolicy`
 
 Clipboard access level, mirroring the SDK ClipboardPolicy ("none" | "read" | "write" | "all").
 
@@ -123,15 +139,25 @@ A complete single-request request with shared restrictions and backend settings.
 
 ```rust
 pub struct ContainerRequest {
+  /// Command line executed as the container's workload.
   pub command: String,
+  /// Cross-backend filesystem restrictions.
   pub filesystem: Option<FilesystemPolicy>,
+  /// Cross-backend network policy and runtime network values.
   pub network: Option<NetworkPolicy>,
+  /// Cross-backend UI restrictions.
   pub ui: Option<UiPolicy>,
+  /// Workload timeout in milliseconds.
   pub timeout_ms: Option<u32>,
+  /// Backend selection and backend-specific configuration.
   pub containment: Containment,
+  /// Optional backend-visible container name.
   pub container_name: Option<String>,
+  /// Initial workload working directory.
   pub working_directory: Option<String>,
+  /// Explicit environment entries.
   pub environment: Option<Vec<(String, String)>>,
+  /// Whether backend default environment variables are inherited.
   pub inherit_default_environment: Option<bool>,
 }
 
@@ -141,7 +167,7 @@ impl ContainerRequest {
 ```
 
 
-## `mxc_sdk::v1::Containment`, `mxc_sdk::v1::policy::Containment`
+## `mxc_sdk::v1::Containment`
 
 The closed backend choice carried by `ContainerRequest`. Select a variant with
 its typed configuration; the native engine validates backend and policy support.
@@ -234,7 +260,7 @@ impl From<MxcErrorCode> for ErrorCode {
 
 ## `mxc_sdk::v1::ExecutionResult`
 
-The captured result of running a [MxcProcess] to completion via wait_with_output.
+The captured result of running an `MxcProcess` to completion.
 
 ```rust
 pub struct ExecutionResult {
@@ -247,15 +273,19 @@ pub struct ExecutionResult {
 ```
 
 
-## `mxc_sdk::v1::FilesystemPolicy`, `mxc_sdk::v1::policy::FilesystemPolicy`
+## `mxc_sdk::v1::FilesystemPolicy`
 
-Filesystem section of a [ContainerPolicy].
+Filesystem restrictions for a `ContainerRequest` or `ProvisionRequest`.
 
 ```rust
 pub struct FilesystemPolicy {
+  /// Host paths granted read-write access.
   pub readwrite_paths: Vec<String>,
+  /// Host paths granted read-only access.
   pub readonly_paths: Vec<String>,
+  /// Host paths explicitly denied.
   pub denied_paths: Vec<String>,
+  /// Whether transient backend policy state is removed after execution.
   pub clear_policy_on_exit: Option<bool>,
 }
 ```
@@ -359,7 +389,7 @@ impl MxcPtyProcess {
 
 ## `mxc_sdk::v1::MxcPtySize`
 
-Dimensions of an [MxcPtyProcess].
+Dimensions of an `MxcPtyProcess`.
 
 ```rust
 pub struct MxcPtySize {
@@ -379,7 +409,7 @@ impl Default for MxcPtySize {
 ```
 
 
-## `mxc_sdk::v1::NetworkAction`, `mxc_sdk::v1::policy::NetworkAction`
+## `mxc_sdk::v1::NetworkAction`
 
 Allow or deny a network action.
 
@@ -392,7 +422,7 @@ pub enum NetworkAction {
 ```
 
 
-## `mxc_sdk::v1::NetworkEgressPolicy`, `mxc_sdk::v1::policy::NetworkEgressPolicy`
+## `mxc_sdk::v1::NetworkEgressPolicy`
 
 Outbound network policy.
 
@@ -405,7 +435,7 @@ pub struct NetworkEgressPolicy {
 ```
 
 
-## `mxc_sdk::v1::NetworkIngressPolicy`, `mxc_sdk::v1::policy::NetworkIngressPolicy`
+## `mxc_sdk::v1::NetworkIngressPolicy`
 
 Inbound and host-loopback network policy.
 
@@ -417,7 +447,7 @@ pub struct NetworkIngressPolicy {
 ```
 
 
-## `mxc_sdk::v1::NetworkPeerPolicy`, `mxc_sdk::v1::policy::NetworkPeerPolicy`
+## `mxc_sdk::v1::NetworkPeerPolicy`
 
 CIDR network peer.
 
@@ -433,9 +463,9 @@ impl NetworkPeerPolicy {
 ```
 
 
-## `mxc_sdk::v1::NetworkPolicy`, `mxc_sdk::v1::policy::NetworkPolicy`
+## `mxc_sdk::v1::NetworkPolicy`
 
-Network section of a ContainerPolicy.
+Network restrictions and runtime values for a container request.
 
 ```rust
 pub struct NetworkPolicy {
@@ -446,7 +476,7 @@ pub struct NetworkPolicy {
 ```
 
 
-## `mxc_sdk::v1::NetworkPortPolicy`, `mxc_sdk::v1::policy::NetworkPortPolicy`
+## `mxc_sdk::v1::NetworkPortPolicy`
 
 Protocol and destination-port selector.
 
@@ -459,7 +489,7 @@ pub struct NetworkPortPolicy {
 ```
 
 
-## `mxc_sdk::v1::NetworkProtocol`, `mxc_sdk::v1::policy::NetworkProtocol`
+## `mxc_sdk::v1::NetworkProtocol`
 
 Transport protocol selector.
 
@@ -473,7 +503,7 @@ pub enum NetworkProtocol {
 ```
 
 
-## `mxc_sdk::v1::NetworkRulePolicy`, `mxc_sdk::v1::policy::NetworkRulePolicy`
+## `mxc_sdk::v1::NetworkRulePolicy`
 
 Outbound network rule.
 
@@ -485,7 +515,7 @@ pub struct NetworkRulePolicy {
 ```
 
 
-## `mxc_sdk::v1::NetworkRuntimeConfig`, `mxc_sdk::v1::policy::NetworkRuntimeConfig`
+## `mxc_sdk::v1::NetworkRuntimeConfig`
 
 Runtime values supplied separately from container policy.
 
@@ -514,9 +544,13 @@ Platform support information — the Rust analogue of the SDK PlatformSupport ty
 
 ```rust
 pub struct PlatformSupport {
+  /// Whether the SDK can launch any supported backend on this host.
   pub is_supported: bool,
+  /// Why no supported backend can be launched.
   pub reason: Option<String>,
+  /// Canonical names of backends available on this host.
   pub available_methods: Vec<String>,
+  /// Linux-only Bubblewrap proxy-enforcement support.
   pub bubblewrap_network: Option<BubblewrapNetworkSupport>,
 }
 ```
@@ -524,21 +558,33 @@ pub struct PlatformSupport {
 
 ## `mxc_sdk::v1::ProbeFacts`
 
-Raw machine facts gathered prior to running tier selection.
+Raw Windows host facts gathered before ProcessContainer tier selection.
 
 ```rust
 pub struct ProbeFacts {
+  /// Windows only: the Process Security Environment API is present.
   pub base_container_api_present: bool,
+  /// Windows only: native ProcessContainer denial capture is available.
   pub native_capture_available: bool,
+  /// Windows only: guarded WPR denial capture is available.
   pub guarded_capture_available: bool,
+  /// Windows only: bfscfg.exe is installed.
   pub bfscfg_present: bool,
+  /// Windows only: BFS support is compiled into the executor.
   pub bfs_compiled_in: bool,
+  /// Windows only: denied paths are enforceable at the selected tier.
   pub base_container_supports_deny_paths: bool,
+  /// Windows only: enumeration-only paths are enforceable.
   pub base_container_supports_enumerate_paths: bool,
+  /// Windows only: host-loopback ingress can be allowed.
   pub base_container_supports_ingress_host_loopback_allow: bool,
+  /// Windows only: identity-less loopback proxying is available.
   pub base_container_supports_identityless_loopback_proxy: bool,
+  /// Windows only: IsolationSession can be activated.
   pub isolation_session_available: bool,
+  /// Windows only: Hyperlight is available.
   pub hyperlight_available: bool,
+  /// Windows only: enforceable UI restrictions.
   pub ui_capabilities: UiCapabilitySupport,
 }
 ```
@@ -546,14 +592,19 @@ pub struct ProbeFacts {
 
 ## `mxc_sdk::v1::ProbeOutput`
 
-JSON output emitted by wxc-execution --probe.
+Windows ProcessContainer probe result.
 
 ```rust
 pub struct ProbeOutput {
+  /// Selected ProcessContainer tier.
   pub tier: Option<&'static str>,
+  /// Whether the selected tier needs host DACL augmentation.
   pub needs_dacl_augmentation: Option<bool>,
+  /// Tier degradation warnings.
   pub warnings: Vec<String>,
+  /// Raw Windows host facts used for selection.
   pub probes: ProbeFacts,
+  /// Probe failure message.
   pub error: Option<String>,
 }
 ```
@@ -561,7 +612,8 @@ pub struct ProbeOutput {
 
 ## `mxc_sdk::v1::ProcessNetworkPolicy`
 
-Runtime network settings available to an existing-container execution.
+Runtime network settings available when executing in an MXC-provisioned
+container.
 
 ```rust
 pub struct ProcessNetworkPolicy {
@@ -572,16 +624,24 @@ pub struct ProcessNetworkPolicy {
 
 ## `mxc_sdk::v1::ExecutionRequest`
 
-Process settings for a workload in an existing container.
+Process settings for a workload in a container created by
+`v1::container::provision_container`.
 
 ```rust
 pub struct ExecutionRequest {
+  /// Command line executed inside the provisioned container.
   pub command: String,
+  /// Initial workload working directory.
   pub working_directory: Option<String>,
+  /// Explicit environment entries.
   pub environment: Option<Vec<(String, String)>>,
+  /// Whether backend default environment variables are inherited.
   pub inherit_default_environment: Option<bool>,
+  /// Workload timeout in milliseconds.
   pub timeout_ms: Option<u32>,
+  /// Execution-time network values supported by the provisioned backend.
   pub network: Option<ProcessNetworkPolicy>,
+  /// Per-invocation telemetry preference; consent and policy still apply.
   pub telemetry: Option<TelemetryConfig>,
 }
 
@@ -662,8 +722,11 @@ Result of successfully provisioning a container.
 
 ```rust
 pub struct ProvisionResult {
+  /// Opaque identity for subsequent lifecycle operations.
   pub container_id: ContainerId,
+  /// Backend-specific provision metadata.
   pub metadata: Option<ProvisionMetadata>,
+  /// Policy and operational diagnostics.
   pub warnings: Vec<String>,
 }
 ```
@@ -683,10 +746,11 @@ pub enum ProxyEnforcement {
 
 ## `mxc_sdk::v1::RunInContainerOptions`
 
-Invocation controls for captured execution in an existing container.
+Invocation controls for captured execution in an MXC-provisioned container.
 
 ```rust
 pub struct RunInContainerOptions {
+  /// Per-invocation telemetry preference; consent and policy still apply.
   pub telemetry: Option<TelemetryConfig>,
 }
 ```
@@ -698,6 +762,7 @@ Invocation controls for captured container execution.
 
 ```rust
 pub struct RunOptions {
+  /// Per-invocation telemetry preference; consent and policy still apply.
   pub telemetry: Option<TelemetryConfig>,
 }
 ```
@@ -705,10 +770,11 @@ pub struct RunOptions {
 
 ## `mxc_sdk::v1::SpawnInContainerOptions`
 
-Invocation controls for live execution in an existing container.
+Invocation controls for live execution in an MXC-provisioned container.
 
 ```rust
 pub struct SpawnInContainerOptions {
+  /// Per-invocation telemetry preference; consent and policy still apply.
   pub telemetry: Option<TelemetryConfig>,
 }
 ```
@@ -716,11 +782,13 @@ pub struct SpawnInContainerOptions {
 
 ## `mxc_sdk::v1::SpawnInContainerWithPtyOptions`
 
-Invocation controls for a terminal in an existing container.
+Invocation controls for terminal execution in an MXC-provisioned container.
 
 ```rust
 pub struct SpawnInContainerWithPtyOptions {
+  /// Per-invocation telemetry preference; consent and policy still apply.
   pub telemetry: Option<TelemetryConfig>,
+  /// Initial terminal dimensions.
   pub size: MxcPtySize,
 }
 ```
@@ -732,6 +800,7 @@ Invocation controls for spawning a live process.
 
 ```rust
 pub struct SpawnOptions {
+  /// Per-invocation telemetry preference; consent and policy still apply.
   pub telemetry: Option<TelemetryConfig>,
 }
 ```
@@ -743,7 +812,9 @@ Invocation controls for spawning a caller-controlled terminal.
 
 ```rust
 pub struct SpawnWithPtyOptions {
+  /// Per-invocation telemetry preference; consent and policy still apply.
   pub telemetry: Option<TelemetryConfig>,
+  /// Initial terminal dimensions.
   pub size: MxcPtySize,
 }
 ```
@@ -773,7 +844,8 @@ pub struct StopOptions {
 
 ## `mxc_sdk::v1::StreamCloser`
 
-Closes one of a [MxcProcess]'s streams, unblocking a read parked on it without killing the process.
+Closes one of an `MxcProcess`'s streams, unblocking a read without killing the
+process.
 
 ```rust
 pub struct StreamCloser {
@@ -810,9 +882,9 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 ```
 
 
-## `mxc_sdk::v1::UiPolicy`, `mxc_sdk::v1::policy::UiPolicy`
+## `mxc_sdk::v1::UiPolicy`
 
-UI section of a [ContainerPolicy].
+Cross-backend UI restrictions for a container request.
 
 ```rust
 pub struct UiPolicy {
@@ -840,7 +912,7 @@ pub struct ValidationResult {
 
 ## `mxc_sdk::v1::WaitResult`
 
-The outcome of waiting on a [MxcProcess] (see [MxcProcess::wait]).
+The outcome of waiting on an `MxcProcess`.
 
 ```rust
 pub enum WaitResult {
@@ -1003,7 +1075,7 @@ impl Default for SeatbeltConfig {
 
 ## `mxc_sdk::v1::configs::WslcConfig`
 
-WSL Container settings carried by [crate::v1::Containment::Wslc].
+WSL Container settings carried by `v1::Containment::Wslc`.
 
 ```rust
 pub struct WslcConfig {

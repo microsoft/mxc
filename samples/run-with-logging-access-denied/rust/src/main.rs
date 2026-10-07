@@ -7,8 +7,7 @@ use std::error::Error;
 use std::io;
 
 use mxc_sdk::v1::configs::{CaptureDenials, ProcessContainerConfig};
-use mxc_sdk::v1::policy::FilesystemPolicy;
-use mxc_sdk::v1::{self, ContainerRequest, Containment, WaitResult};
+use mxc_sdk::v1::{self, ContainerRequest, Containment, FilesystemPolicy, WaitResult};
 
 fn run() -> Result<i32, Box<dyn Error>> {
     if !cfg!(target_os = "windows") {

@@ -17,10 +17,10 @@ certify backend availability.
 
 | Task | Input | Result |
 |---|---|---|
-| Create and run a container | `ContainerRequest`, operation options | Captured `ExecutionResult` or a live process |
+| Create and run a workload in a new container | `ContainerRequest`, operation options | Captured `ExecutionResult` or a live process |
 | Provision a persistent container | `ProvisionRequest`, `ProvisionOptions` | `ProvisionResult` with `ContainerId` and optional metadata |
 | Start, stop, or deprovision | `ContainerId`, operation options | `LifecycleResult` |
-| Run in an existing container | `ContainerId`, `ExecutionRequest`, operation options | Captured `ExecutionResult` or a live process |
+| Run in an MXC-provisioned container | `ContainerId`, `ExecutionRequest`, operation options | Captured `ExecutionResult` or a live process |
 | Validate a lifecycle operation | The operation's typed inputs | `ValidationResult`, without performing the operation |
 
 Choose captured output, live standard pipes, or an interactive terminal using
@@ -29,6 +29,10 @@ the launch tables for [Rust](rust/v1/api.md#choosing-a-launch-operation),
 [Node](node/v1/api.md#choosing-a-launch-operation). Requests describe the workload
 and policy; operation options control invocation behavior. PTY options include
 the initial size; resize is a method on the returned terminal process.
+
+In this reference, **existing container** means a persistent container created
+through the SDK's provision operation. It does not mean an arbitrary
+OS-managed container discovered outside MXC.
 
 ## Results and policy
 
