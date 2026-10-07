@@ -34,12 +34,14 @@ NVX will ship a Rust crate containing:
 - the Linux kernel and initramfs with the NVX init agent; and
 - manifests, checksums, provenance, licences, and package inventories.
 
-Because the crate distributes `vmlinux`, the NVX team will publish the exact
-corresponding Linux kernel source for every runtime version. The crate will
-include the Linux licence, third-party notices, and a source manifest that
-identifies the kernel version, configuration, patches, source artifact, and
-hashes. The source may be a separate published artifact rather than part of
-every SDK package.
+Because the crate distributes `vmlinux` and an Alpine initramfs, the NVX team
+will publish the exact corresponding Linux and Alpine source artifacts for
+every runtime version. The crate will include `SOURCE-MANIFEST.json`, the
+Alpine package inventory, licences, and third-party notices. The source
+manifest will identify the NVX project source, kernel version and
+configuration, patches, Alpine package sources, published source artifacts,
+and hashes. The source archives may be published separately rather than
+embedded in every SDK package.
 
 ### 2.2 How MXC will consume NVX
 
@@ -55,10 +57,13 @@ MXC will be implementing:
 - offline builds using a pre-fetched crate and dependencies; and
 - packaging for the executor, Node SDK, and .NET SDK.
 
-Before packaging the NVX runtime, MXC will verify that the NVX source manifest
-references an available corresponding-source artifact for the shipped
-`vmlinux`. Packaging will fail when the reference is absent or does not match
-the runtime version.
+Before packaging the NVX runtime, MXC will validate `SOURCE-MANIFEST.json` and
+verify that it references the matching Linux and Alpine source artifacts
+published by the NVX team. MXC will copy the source manifest, Alpine package
+inventory, licences, and notices into the npm and NuGet runtime packages. MXC
+will not generate the source archives. Packaging will fail when required
+metadata, source references, or hashes are missing or do not match the runtime
+version.
 
 ### 2.3 Key NVX files that MXC will use
 
@@ -88,7 +93,7 @@ Developers will not separately install or invoke OpenVMM.
 | Ecosystem | Developer dependency | Packaging behaviour |
 | --- | --- | --- |
 | Rust | `mxc-sdk` with the `microvm` feature | The feature will include the NVX crate and stage its signed runtime assets |
-| Node | `@microsoft/mxc-sdk` and `@microsoft/mxc-nvx-runtime` | The MXC build will package the NVX crate assets beside `mxc_ffi.dll` |
+| Node | `@microsoft/mxc-sdk` and `@microsoft/mxc-nvx-runtime` | The runtime package will contain a matched `mxc_ffi.dll` and co-located NVX crate assets |
 | .NET | `Microsoft.Mxc.Sdk` and `Microsoft.Mxc.Sdk.Nvx.Runtime` | The MXC build will package the RID-specific NVX crate assets beside `mxc_ffi.dll` |
 
 #### Rust
@@ -121,30 +126,36 @@ The developer experience will be the same in all three ecosystems:
 Developers will not provide paths to `openvmm.exe`, `vmlinux`, or
 `initramfs.cpio.gz`, and will not communicate with OpenVMM directly.
 
-For Node and .NET, the published application output will use a co-located
-native layout:
+The Node runtime package will use this layout:
 
 ```text
-<application output>\
-  mxc_ffi.dll
-  nvx\
-    <NVX implementation>.dll
-    openvmm.exe
-    vmlinux
-    initramfs.cpio.gz
-    <image tool>
-    <manifests and checksums>
+@microsoft/mxc-nvx-runtime\
+  bin\win-x64\
+    mxc_ffi.dll
+    nvx\
+      <NVX implementation>.dll
+      openvmm.exe
+      vmlinux
+      initramfs.cpio.gz
+      <image tool>
+      <manifests and checksums>
 ```
 
-The native MXC layer will resolve the `nvx` directory relative to the loaded
-`mxc_ffi.dll`. This avoids searching beside `node.exe` or `dotnet.exe` and
-does not require a new FFI configuration function.
+The Node SDK native-library resolver will check whether
+`@microsoft/mxc-nvx-runtime` is installed. When present, it will load the
+matched `mxc_ffi.dll` from that package, where the NVX runtime is already
+co-located. Without the runtime package, Node will continue to load the normal
+MXC native library and will report `microvm` as unavailable.
 
-The MXC SDK and NVX runtime package versions will be compatible. Before
-launch, MXC will verify the required files, Windows architecture, signatures,
-checksums, and runtime manifest compatibility. A missing or incompatible
-runtime will return `backend_unavailable` with remediation identifying the
-required runtime package or version.
+For .NET, NuGet will copy the RID-specific `mxc_ffi.dll` and `nvx` directory
+into the application output. The native MXC layer will resolve the `nvx`
+directory relative to the loaded `mxc_ffi.dll`.
+
+The MXC SDK, `mxc_ffi.dll`, and NVX runtime package versions must match.
+Before launch, MXC will verify the required files, Windows architecture,
+signatures, checksums, and runtime manifest compatibility. A missing or
+incompatible runtime will return an actionable load or `backend_unavailable`
+error identifying the required runtime package or version.
 
 The co-located checksum manifest will not be trusted by itself. The pinned NVX
 crate will provide the expected runtime-manifest identity, and the compiled
@@ -166,14 +177,15 @@ the integration will not introduce separate NVX-specific execution methods.
 
 | SDK | One-shot configuration | State-aware provision addition | Existing operations that will use it |
 | --- | --- | --- | --- |
-| Rust | `MicrovmConfig { image: String }` and `Containment::Microvm(MicrovmConfig)` | Add `ProvisionRequest::microvm(image: String, memory_mb: Option<u64>)` | `v1::run`, `v1::spawn`, and `v1::container::*` |
-| Node | `{ type: 'microvm', config: { image: string } }` | Add `MicrovmProvisionConfig { image: string; memoryMb?: number; filesystem?; network? }` to `LifecycleConfigRegistry`, and include `'microvm'` in `LifecycleContainmentKind` | `run`, `spawn`, `provisionContainer`, and the existing lifecycle functions |
-| .NET | `Microvm : Containment` with required `Image` | Add `MicrovmProvisionRequest : ProvisionRequest` with required `Image`, optional `MemoryMb`, `Filesystem`, and `Network`; register its JSON discriminator as `microvm` | `MxcContainer.Run`, `MxcContainer.Spawn`, and the existing `MxcLifecycle` methods |
+| Rust | `MicrovmConfig { image: String, memory_mb: Option<u64> }` and `Containment::Microvm(MicrovmConfig)` | Add `ProvisionRequest::microvm(image: String, memory_mb: Option<u64>)` | `v1::run`, `v1::spawn`, and `v1::container::*` |
+| Node | `{ type: 'microvm', config: { image: string; memoryMb?: number } }` | Add `MicrovmProvisionConfig { image: string; memoryMb?: number; filesystem?; network? }` to `LifecycleConfigRegistry`, and include `'microvm'` in `LifecycleContainmentKind` | `run`, `spawn`, `provisionContainer`, and the existing lifecycle functions |
+| .NET | `Microvm : Containment` with required `Image` and optional `MemoryMb` | Add `MicrovmProvisionRequest : ProvisionRequest` with required `Image`, optional `MemoryMb`, `Filesystem`, and `Network`; register its JSON discriminator as `microvm` | `MxcContainer.Run`, `MxcContainer.Spawn`, and the existing `MxcLifecycle` methods |
 
 The wire and SDK changes will be delivered in this order:
 
-1. Add `microvm.image`, state-aware MicroVM provision, engine binding, and
-   runtime tests to the development `1.1.0-alpha` contract.
+1. Add `microvm.image`, `microvm.memoryMb`, state-aware MicroVM provision,
+   engine binding, and runtime tests to the development `1.1.0-alpha`
+   contract.
 2. Keep the wire work development-only while that contract remains mutable.
 3. Publish the fields in stable `1.1.0` when the contract is ready.
 4. Advance `schemas/schema-version.json` `sdkMajorTargets["1"]` from `1.0.0`
@@ -236,6 +248,14 @@ The NVX Rust interface exposes the following operations:
 The integration will keep `containment: "microvm"` and will route it to NVX
 through `mxc_engine`.
 
+`mxc_engine` will also integrate the existing NVX `probe()` operation into
+platform discovery. The NVX probe checks that the host platform, OpenVMM,
+kernel, initramfs, and configured hypervisor are available. MXC will wrap that
+probe with its production-package checks for the matched runtime manifest,
+required files, architecture, signatures, checksums, image tool, and
+guest/runtime compatibility. This discovery path will be read-only and will
+not start a VM.
+
 | Surface | New NVX integration work |
 | --- | --- |
 | Rust SDK | Will enable the NVX backend in the SDK and engine build |
@@ -256,7 +276,8 @@ The integration will target the MXC `1.1.0-alpha` development schema.
   "version": "1.1.0-alpha",
   "containment": "microvm",
   "microvm": {
-    "image": "python:3.12-alpine"
+    "image": "python:3.12-alpine",
+    "memoryMb": 256
   },
   "process": {
     "commandLine": "cat /mnt/c/nvx-work/input/message.txt > /mnt/c/nvx-work/output/result.txt",
@@ -393,6 +414,24 @@ request will supply the process configuration.
 | `deprovision` | Removes the provisioned state |
 | One-shot | MXC will compose provision, start, exec, stop, and deprovision |
 
+MXC will preserve the NVX sandbox ID unchanged. NVX provision returns IDs in
+the following form:
+
+```text
+aci-edge-sandboxes:<32 lowercase hexadecimal characters>
+```
+
+MXC will register the `aci-edge-sandboxes:` prefix in native lifecycle
+dispatch so `start`, `exec`, `stop`, and `deprovision` route back to the
+MicroVM/NVX backend.
+
+| Surface | Required prefix work |
+| --- | --- |
+| Native engine | Map `aci-edge-sandboxes:` to the `microvm` backend in `backend_from_prefix` and state-aware dispatch |
+| Rust SDK | Accept and preserve the opaque ID through `ContainerId` |
+| Node SDK | Brand returned IDs as `ContainerId<'microvm'>` and include the prefix in lifecycle routing and validation maps |
+| .NET SDK | Map the prefix to `ContainmentBackend.Microvm` and preserve it in `ContainerId` |
+
 | Action | Workload effect | VM or state effect |
 | --- | --- | --- |
 | One-shot completion | Returns the workload outcome | MXC stops and deprovisions the VM |
@@ -425,7 +464,7 @@ state does not survive `stop`, while changes to mapped host files do.
 | Separate stdout and stderr | Yes | Combined output is limited to 1 MB |
 | Live stdin | No | Future work if needed. Workload receives EOF |
 | PTY | No | Future work if needed |
-| Guest memory override | Yes | Default is 256 MB |
+| Guest memory override | Yes | One-shot uses `microvm.memoryMb`; state-aware provision uses `microvm.provision.memoryMb`; default is 256 MB |
 | `fallback` | No | Not supported by design, NVX does not select another backend |
 
 | Process behaviour | Developer-visible result |
@@ -464,7 +503,8 @@ conversion and runtime contract is listed in
 ```json
 {
   "microvm": {
-    "image": "python:3.12-alpine"
+    "image": "python:3.12-alpine",
+    "memoryMb": 256
   }
 }
 ```
@@ -478,7 +518,40 @@ The complete request in section 4.1 is an example of this model:
 - The network policy limits the workload to the requested destination and
   port.
 
-Image reference registries will be confirmed by the NVX team later.
+The integration will reuse the existing WSLC cache and registry pattern:
+
+1. Use the image from the local cache when it is already available.
+2. Otherwise, resolve the registry host and check a shared backend-neutral MXC
+   administrative registry policy.
+3. When the registry is permitted, invoke the signed NVX image tool to pull
+   the image and resolve its immutable digest.
+4. Convert and cache the NVX-compatible artifact.
+
+Image references without an explicit registry will resolve against Docker Hub.
+Explicit registry references will be permitted only when the registry is
+allowed by the machine policy.
+
+The policy will be stored under
+`HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Mxc` and will use the existing WSLC
+policy behaviour:
+
+| Policy state | Behaviour |
+| --- | --- |
+| Value absent | Unmanaged; any registry host may be contacted |
+| One or more hosts | Only those registry hosts may be contacted |
+| Present but empty | No registry may be contacted |
+| Present but unreadable | No registry may be contacted |
+
+MXC will own registry authorisation and will validate the registry host before
+invoking the image tool. The signed NVX image tool will own DNS resolution,
+TLS, registry protocol, redirects, download, digest resolution, and
+conversion while enforcing the policy supplied by MXC.
+
+`microvm.image` will accept an OCI image reference rather than an arbitrary
+URL. Redirects to another registry host will require that host to be permitted
+by the same policy. Private-registry credentials will not be part of the
+initial contract and will require a separate approved host
+credential-provider design.
 
 ### 6.2 Schema additions
 
@@ -487,7 +560,7 @@ configuration for both one-shot and state-aware provision requests.
 
 | Contract surface | Schema addition |
 | --- | --- |
-| One-shot | Add `microvm.image` |
+| One-shot | Add `microvm.image` and `microvm.memoryMb` |
 | State-aware provision | Register `containment: "microvm"` and add `microvm.provision.image` and `microvm.provision.memoryMb` |
 | Start, exec, stop, and deprovision | No image fields; these requests use the `sandboxId` created during provision |
 
@@ -499,7 +572,8 @@ One-shot standard-image addition:
 ```json
 {
   "microvm": {
-    "image": "python:3.12-alpine"
+    "image": "python:3.12-alpine",
+    "memoryMb": 256
   }
 }
 ```
@@ -536,7 +610,17 @@ but will not be initially available.
 
 Developers should check platform support before launch using Rust
 `platform_support()`, Node `getPlatformSupport()`, or .NET
-`MxcPlatform.GetPlatformSupport()`.
+`MxcPlatform.GetPlatformSupport()`. These existing APIs will call the native
+MXC discovery path; no separate public NVX probe API will be added.
+
+The discovery result will include `microvm` in `availableMethods` only when the
+NVX probe and MXC package-integrity checks succeed. An unavailable MicroVM
+backend will include a backend-specific reason in the SDK's platform-support
+result, with remediation such as installing the matching runtime package,
+enabling WHP, or repairing corrupt assets.
+
+Execution will repeat the authoritative preflight before launch. A cached or
+stale discovery result will not bypass runtime validation.
 
 Missing WHP, disabled hardware virtualisation, absent runtime files,
 incompatible guest/runtime versions, and unsupported architectures will return
@@ -551,14 +635,15 @@ packaged MXC executor and all three SDKs on Windows x64 with WHP.
 | Area | Required coverage |
 | --- | --- |
 | Integration | `microvm` routes to NVX for one-shot and state-aware execution |
-| Lifecycle | Provision, start, repeated and overlapping exec, caller reconnect, stop, deprovision, invalid transitions, stale IDs, and one-shot failure cleanup |
+| Discovery | Rust, Node, and .NET platform-support APIs include `microvm` only after the native NVX probe and MXC package-integrity checks succeed; each failure mode returns actionable backend-specific remediation without starting a VM |
+| Lifecycle | Provision, exact `aci-edge-sandboxes:` prefix routing, start, repeated and overlapping exec, caller reconnect, stop, deprovision, invalid transitions, malformed/stale IDs, backend prefix isolation, and one-shot failure cleanup |
 | State-aware process lifetime | After the process performing `start` exits, OpenVMM remains running and a later `exec` process reconnects successfully; test from a Windows job that would normally terminate child processes |
 | SDKs and FFI | Rust, Node, and .NET produce the same policy and result behaviour; native ownership and cleanup remain correct |
 | Filesystem | Read-only, read-write, denied paths, files, directories, multiple mappings, and invalid combinations |
 | Network | Defaults, allow/deny precedence, CIDRs, exclusions, TCP/UDP ranges, and rejection of unsupported rules |
 | Process | Command, CWD, environment, timeout, cancellation, output limits, nonzero exits, and descendant cleanup |
 | PTY | Confirm unsupported in the initial implementation; add terminal tests when implemented |
-| Packaging | Rust crate, npm, and NuGet installation; inclusion of the DLL, OpenVMM, image tool, kernel, and initramfs; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that the exact corresponding kernel source is published and referenced |
+| Packaging | Rust crate, npm, and NuGet installation; inclusion of the DLL, OpenVMM, image tool, kernel, initramfs, source manifest, Alpine package inventory, licences, and notices; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that matching Linux and Alpine source artifacts are published and referenced |
 | Signing | Authenticate the runtime manifest, validate the Authenticode chain and Microsoft signer for signed NVX binaries, verify all remaining file checksums, and reject untrusted runtime directories |
 | Host | Real execution on Windows x64 with WHP installed and enabled; ARM remains planned |
 | Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, and generated SDK types |
@@ -602,6 +687,9 @@ so infrastructure failures are not mistaken for policy enforcement.
 | Contract area | Required definition |
 | --- | --- |
 | Input identity | Resolve the OCI reference to an immutable digest and record the registry or source |
+| Registry authorisation | MXC validates the registry against a shared backend-neutral administrative allowlist before invoking the NVX image tool |
+| Redirects | The image tool follows a redirect to another registry host only when that host is also permitted |
+| Credentials | No private-registry credentials in the initial contract; future credentials must come from an approved host provider and remain out of requests, command lines, logs, and telemetry |
 | Conversion timing | Pull and convert before VM start; reuse a compatible cached conversion when available |
 | Converted artifact | Produce a versioned NVX artifact with a manifest identifying the source digest, converter version, runtime compatibility, and checksums |
 | Guest integration | Attach the converted artifact to OpenVMM and make it the workload root while `/init` and the managed agent remain in the initramfs outside the workload root |
@@ -617,7 +705,7 @@ attachment are required deliverables before `microvm.image` is usable.
 
 ### Awaited support
 
-- NVX supported image registries
+- Initial permitted registry set and migration from the existing WSLC-specific policy name
 - NVX signed binaries support
 - NVX crate binary packaging and extraction contract
 - Windows ARM runtime and SDK package availability
