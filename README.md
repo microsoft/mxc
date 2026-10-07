@@ -1,7 +1,5 @@
 # Microsoft eXecution Container (MXC)
 
-> **Audience:** MXC consumers
-
 MXC is a **sandboxed code execution system** for running untrusted code
 (model output, plugins, and tools) on Windows, Linux, and macOS. It provides
 multiple containment backends, from OS-native process sandboxes to full VMs,
