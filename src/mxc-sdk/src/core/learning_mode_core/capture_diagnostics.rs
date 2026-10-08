@@ -19,7 +19,6 @@ pub(crate) const CAPTURE_VERBOSE_LOGGING_VERSION: u32 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum CaptureVerboseLoggingProvider {
-    Other,
     KernelGeneral,
     PrivacyAuditingPermissiveLearningMode,
     LearningModeNetworkDecision,
@@ -75,7 +74,7 @@ pub(crate) enum ConfigurationRecommendation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct NetworkEndpoint {
     pub(crate) protocol: String,
     pub(crate) remote_address: String,
@@ -84,7 +83,7 @@ pub(crate) struct NetworkEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CaptureVerboseLoggingSignature {
     pub(crate) provider: CaptureVerboseLoggingProvider,
     pub(crate) provider_guid: String,
@@ -107,7 +106,7 @@ pub(crate) struct CaptureVerboseLoggingSignature {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CaptureVerboseLoggingAggregate {
     pub(crate) signature: CaptureVerboseLoggingSignature,
     pub(crate) count: u64,
@@ -140,14 +139,25 @@ impl CaptureVerboseLoggingSummary {
             return;
         }
 
+        let actionable = signature.reason.is_actionable();
+        let can_evict = actionable
+            && self
+                .signatures
+                .iter()
+                .any(|group| !group.signature.reason.is_actionable());
+        if (self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS || *retained_bytes >= max_bytes)
+            && !can_evict
+        {
+            self.record_overflow(actionable, 1);
+            return;
+        }
+
         let serialized_len = serialized_signature_len(&signature);
         while self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
             || retained_bytes.saturating_add(serialized_len) > max_bytes
         {
-            if !signature.reason.is_actionable()
-                || !self.evict_one_nonactionable_group(retained_bytes)
-            {
-                self.record_overflow(signature.reason.is_actionable(), 1);
+            if !actionable || !self.evict_one_nonactionable_group(retained_bytes) {
+                self.record_overflow(actionable, 1);
                 return;
             }
         }
@@ -221,7 +231,7 @@ impl CaptureVerboseLoggingSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CaptureVerboseLoggingDocument {
     pub(crate) version: u32,
     pub(crate) signatures: Vec<CaptureVerboseLoggingAggregate>,
@@ -229,7 +239,7 @@ pub(crate) struct CaptureVerboseLoggingDocument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CaptureVerboseLoggingDocumentSummary {
     pub(crate) total_occurrences: u64,
     pub(crate) overflow_occurrences: u64,
@@ -358,13 +368,262 @@ pub(crate) fn write_capture_verbose_logging_document<W: Write>(
 pub(crate) fn parse_supported_verbose_document(
     bytes: &[u8],
 ) -> Result<CaptureVerboseLoggingDocument, serde_json::Error> {
-    let document: CaptureVerboseLoggingDocument = serde_json::from_slice(bytes)?;
-    if matches!(document.version, 3 | 4 | CAPTURE_VERBOSE_LOGGING_VERSION) {
-        Ok(document)
-    } else {
-        Err(<serde_json::Error as serde::de::Error>::custom(
+    let envelope: VerboseDocumentVersion = serde_json::from_slice(bytes)?;
+    match envelope.version {
+        3 => serde_json::from_slice::<VersionedVerboseDocument<Version3Signature>>(bytes)
+            .map(normalize_version3_document),
+        4 => serde_json::from_slice::<VersionedVerboseDocument<Version4Signature>>(bytes)
+            .map(normalize_version4_document),
+        CAPTURE_VERBOSE_LOGGING_VERSION => serde_json::from_slice(bytes),
+        _ => Err(<serde_json::Error as serde::de::Error>::custom(
             "unsupported verbose logging document version",
-        ))
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+struct VerboseDocumentVersion {
+    version: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedVerboseDocument<S> {
+    version: u32,
+    signatures: Vec<VersionedVerboseAggregate<S>>,
+    summary: CaptureVerboseLoggingDocumentSummary,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedVerboseAggregate<S> {
+    signature: S,
+    count: u64,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum Version3Provider {
+    KernelGeneral,
+    PrivacyAuditingPermissiveLearningMode,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum Version4Provider {
+    KernelGeneral,
+    PrivacyAuditingPermissiveLearningMode,
+    LearningModeNetworkDecision,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum Version3Reason {
+    Actionable,
+    UnsupportedEventSchema,
+    EventPayloadMalformed,
+    DecoderLimitReached,
+    UnsupportedPropertyEncoding,
+    MissingObjectType,
+    MissingObjectName,
+    UnsupportedObjectType,
+    UnusableResourcePath,
+    UnresolvedCapability,
+    ComActivation,
+    ComInterfaceCall,
+    NotActionable,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum Version4Reason {
+    Actionable,
+    UnsupportedEventSchema,
+    SchemaUnavailable,
+    EventPayloadMalformed,
+    DecoderLimitReached,
+    UnsupportedPropertyEncoding,
+    MissingObjectType,
+    MissingObjectName,
+    UnsupportedObjectType,
+    UnusableResourcePath,
+    UnresolvedCapability,
+    ComActivation,
+    ComInterfaceCall,
+    NotActionable,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Version3Signature {
+    provider: Version3Provider,
+    provider_guid: String,
+    event_id: u16,
+    reason: Version3Reason,
+    pid: u32,
+    #[serde(default)]
+    access_type: Option<AccessType>,
+    #[serde(default)]
+    resource_type: Option<ResourceType>,
+    properties: Vec<(String, String)>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Version4Signature {
+    provider: Version4Provider,
+    provider_guid: String,
+    event_id: u16,
+    #[serde(default)]
+    event_name: Option<String>,
+    reason: Version4Reason,
+    pid: u32,
+    #[serde(default)]
+    access_type: Option<AccessType>,
+    #[serde(default)]
+    resource_type: Option<ResourceType>,
+    properties: Vec<(String, String)>,
+}
+
+fn normalize_version3_document(
+    document: VersionedVerboseDocument<Version3Signature>,
+) -> CaptureVerboseLoggingDocument {
+    CaptureVerboseLoggingDocument {
+        version: document.version,
+        signatures: document
+            .signatures
+            .into_iter()
+            .map(|aggregate| CaptureVerboseLoggingAggregate {
+                signature: CaptureVerboseLoggingSignature {
+                    provider: match aggregate.signature.provider {
+                        Version3Provider::KernelGeneral => {
+                            CaptureVerboseLoggingProvider::KernelGeneral
+                        }
+                        Version3Provider::PrivacyAuditingPermissiveLearningMode => {
+                            CaptureVerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode
+                        }
+                    },
+                    provider_guid: aggregate.signature.provider_guid,
+                    event_id: aggregate.signature.event_id,
+                    event_name: None,
+                    reason: normalize_version3_reason(aggregate.signature.reason),
+                    pid: aggregate.signature.pid,
+                    access_type: aggregate.signature.access_type,
+                    resource_type: aggregate.signature.resource_type,
+                    network_decision_reason: None,
+                    configuration_recommendation: None,
+                    network_endpoint: None,
+                    properties: aggregate.signature.properties,
+                },
+                count: aggregate.count,
+            })
+            .collect(),
+        summary: document.summary,
+    }
+}
+
+fn normalize_version4_document(
+    document: VersionedVerboseDocument<Version4Signature>,
+) -> CaptureVerboseLoggingDocument {
+    CaptureVerboseLoggingDocument {
+        version: document.version,
+        signatures: document
+            .signatures
+            .into_iter()
+            .map(|aggregate| CaptureVerboseLoggingAggregate {
+                signature: CaptureVerboseLoggingSignature {
+                    provider: match aggregate.signature.provider {
+                        Version4Provider::KernelGeneral => {
+                            CaptureVerboseLoggingProvider::KernelGeneral
+                        }
+                        Version4Provider::PrivacyAuditingPermissiveLearningMode => {
+                            CaptureVerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode
+                        }
+                        Version4Provider::LearningModeNetworkDecision => {
+                            CaptureVerboseLoggingProvider::LearningModeNetworkDecision
+                        }
+                    },
+                    provider_guid: aggregate.signature.provider_guid,
+                    event_id: aggregate.signature.event_id,
+                    event_name: aggregate.signature.event_name,
+                    reason: normalize_version4_reason(aggregate.signature.reason),
+                    pid: aggregate.signature.pid,
+                    access_type: aggregate.signature.access_type,
+                    resource_type: aggregate.signature.resource_type,
+                    network_decision_reason: None,
+                    configuration_recommendation: None,
+                    network_endpoint: None,
+                    properties: aggregate.signature.properties,
+                },
+                count: aggregate.count,
+            })
+            .collect(),
+        summary: document.summary,
+    }
+}
+
+fn normalize_version3_reason(reason: Version3Reason) -> CaptureVerboseLoggingOutcomeReason {
+    match reason {
+        Version3Reason::Actionable => CaptureVerboseLoggingOutcomeReason::Actionable,
+        Version3Reason::UnsupportedEventSchema => {
+            CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema
+        }
+        Version3Reason::EventPayloadMalformed => {
+            CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed
+        }
+        Version3Reason::DecoderLimitReached => {
+            CaptureVerboseLoggingOutcomeReason::DecoderLimitReached
+        }
+        Version3Reason::UnsupportedPropertyEncoding => {
+            CaptureVerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
+        }
+        Version3Reason::MissingObjectType => CaptureVerboseLoggingOutcomeReason::MissingObjectType,
+        Version3Reason::MissingObjectName => CaptureVerboseLoggingOutcomeReason::MissingObjectName,
+        Version3Reason::UnsupportedObjectType => {
+            CaptureVerboseLoggingOutcomeReason::UnsupportedObjectType
+        }
+        Version3Reason::UnusableResourcePath => {
+            CaptureVerboseLoggingOutcomeReason::UnusableResourcePath
+        }
+        Version3Reason::UnresolvedCapability => {
+            CaptureVerboseLoggingOutcomeReason::UnresolvedCapability
+        }
+        Version3Reason::ComActivation => CaptureVerboseLoggingOutcomeReason::ComActivation,
+        Version3Reason::ComInterfaceCall => CaptureVerboseLoggingOutcomeReason::ComInterfaceCall,
+        Version3Reason::NotActionable => CaptureVerboseLoggingOutcomeReason::NotActionable,
+    }
+}
+
+fn normalize_version4_reason(reason: Version4Reason) -> CaptureVerboseLoggingOutcomeReason {
+    match reason {
+        Version4Reason::SchemaUnavailable => CaptureVerboseLoggingOutcomeReason::SchemaUnavailable,
+        Version4Reason::Actionable => CaptureVerboseLoggingOutcomeReason::Actionable,
+        Version4Reason::UnsupportedEventSchema => {
+            CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema
+        }
+        Version4Reason::EventPayloadMalformed => {
+            CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed
+        }
+        Version4Reason::DecoderLimitReached => {
+            CaptureVerboseLoggingOutcomeReason::DecoderLimitReached
+        }
+        Version4Reason::UnsupportedPropertyEncoding => {
+            CaptureVerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
+        }
+        Version4Reason::MissingObjectType => CaptureVerboseLoggingOutcomeReason::MissingObjectType,
+        Version4Reason::MissingObjectName => CaptureVerboseLoggingOutcomeReason::MissingObjectName,
+        Version4Reason::UnsupportedObjectType => {
+            CaptureVerboseLoggingOutcomeReason::UnsupportedObjectType
+        }
+        Version4Reason::UnusableResourcePath => {
+            CaptureVerboseLoggingOutcomeReason::UnusableResourcePath
+        }
+        Version4Reason::UnresolvedCapability => {
+            CaptureVerboseLoggingOutcomeReason::UnresolvedCapability
+        }
+        Version4Reason::ComActivation => CaptureVerboseLoggingOutcomeReason::ComActivation,
+        Version4Reason::ComInterfaceCall => CaptureVerboseLoggingOutcomeReason::ComInterfaceCall,
+        Version4Reason::NotActionable => CaptureVerboseLoggingOutcomeReason::NotActionable,
     }
 }
 
@@ -577,5 +836,156 @@ mod tests {
                 .version,
             CAPTURE_VERBOSE_LOGGING_VERSION
         );
+    }
+
+    #[test]
+    fn parser_accepts_the_exact_version_four_vocabulary() {
+        let document = serde_json::json!({
+            "version": 4,
+            "signatures": [{
+                "signature": {
+                    "provider": "learningModeNetworkDecision",
+                    "providerGuid": "{71237669-21C3-4101-BD2F-FF38945D725A}",
+                    "eventId": 1,
+                    "eventName": "NetworkDecisionV1",
+                    "reason": "schemaUnavailable",
+                    "pid": 0,
+                    "properties": []
+                },
+                "count": 1
+            }],
+            "summary": {
+                "totalOccurrences": 1,
+                "overflowOccurrences": 0,
+                "actionableOverflowOccurrences": 0,
+                "aggregateGroupsTruncated": false,
+                "processedEventsTruncated": false,
+                "actionableLimitReached": false
+            }
+        });
+
+        let parsed = parse_supported_verbose_document(&serde_json::to_vec(&document).unwrap())
+            .expect("version four document should parse");
+
+        assert_eq!(parsed.version, 4);
+        assert_eq!(
+            parsed.signatures[0].signature.provider,
+            CaptureVerboseLoggingProvider::LearningModeNetworkDecision
+        );
+        assert_eq!(
+            parsed.signatures[0].signature.reason,
+            CaptureVerboseLoggingOutcomeReason::SchemaUnavailable
+        );
+        assert_eq!(
+            parsed.signatures[0].signature.event_name.as_deref(),
+            Some("NetworkDecisionV1")
+        );
+    }
+
+    #[test]
+    fn parser_rejects_cross_version_and_unknown_vocabulary() {
+        let summary = serde_json::json!({
+            "totalOccurrences": 1,
+            "overflowOccurrences": 0,
+            "actionableOverflowOccurrences": 0,
+            "aggregateGroupsTruncated": false,
+            "processedEventsTruncated": false,
+            "actionableLimitReached": false
+        });
+        let base_signature = serde_json::json!({
+            "provider": "kernelGeneral",
+            "providerGuid": "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
+            "eventId": 14,
+            "reason": "actionable",
+            "pid": 42,
+            "properties": []
+        });
+        let document = |version, signature: serde_json::Value| {
+            serde_json::json!({
+                "version": version,
+                "signatures": [{"signature": signature, "count": 1}],
+                "summary": summary
+            })
+        };
+
+        let mut version3_event_name = base_signature.clone();
+        version3_event_name["eventName"] = serde_json::json!("AccessCheck");
+        assert!(parse_supported_verbose_document(
+            &serde_json::to_vec(&document(3, version3_event_name)).unwrap()
+        )
+        .is_err());
+
+        let mut version3_provider = base_signature.clone();
+        version3_provider["provider"] = serde_json::json!("learningModeNetworkDecision");
+        assert!(parse_supported_verbose_document(
+            &serde_json::to_vec(&document(3, version3_provider)).unwrap()
+        )
+        .is_err());
+
+        let mut version4_network_field = base_signature.clone();
+        version4_network_field["networkDecisionReason"] = serde_json::json!("directDefaultDeny");
+        assert!(parse_supported_verbose_document(
+            &serde_json::to_vec(&document(4, version4_network_field)).unwrap()
+        )
+        .is_err());
+
+        let mut version4_reason = base_signature.clone();
+        version4_reason["reason"] = serde_json::json!("proxyContainment");
+        assert!(parse_supported_verbose_document(
+            &serde_json::to_vec(&document(4, version4_reason)).unwrap()
+        )
+        .is_err());
+
+        let mut version5_unknown =
+            network_signature(CaptureVerboseLoggingOutcomeReason::Actionable);
+        version5_unknown.properties.clear();
+        let mut version5 = serde_json::to_value(CaptureVerboseLoggingDocument {
+            version: CAPTURE_VERBOSE_LOGGING_VERSION,
+            signatures: vec![CaptureVerboseLoggingAggregate {
+                signature: version5_unknown,
+                count: 1,
+            }],
+            summary: CaptureVerboseLoggingDocumentSummary {
+                total_occurrences: 1,
+                overflow_occurrences: 0,
+                actionable_overflow_occurrences: 0,
+                aggregate_groups_truncated: false,
+                processed_events_truncated: false,
+                actionable_limit_reached: false,
+            },
+        })
+        .unwrap();
+        version5["signatures"][0]["signature"]["futureField"] = serde_json::json!(true);
+        assert!(parse_supported_verbose_document(&serde_json::to_vec(&version5).unwrap()).is_err());
+    }
+
+    #[test]
+    fn saturated_nonactionable_summary_moves_new_groups_directly_to_overflow() {
+        let mut summary = CaptureVerboseLoggingSummary::default();
+        let mut retained_bytes = 0;
+        for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS {
+            let mut signature =
+                network_signature(CaptureVerboseLoggingOutcomeReason::UnknownNetworkReason);
+            signature.event_id = u16::try_from(event_id).unwrap();
+            summary.record_with_byte_budget(
+                signature,
+                &mut retained_bytes,
+                MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+            );
+        }
+        let retained_bytes_before = retained_bytes;
+        let mut overflow =
+            network_signature(CaptureVerboseLoggingOutcomeReason::UnknownNetworkReason);
+        overflow.event_id = u16::MAX;
+
+        summary.record_with_byte_budget(
+            overflow,
+            &mut retained_bytes,
+            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+        );
+
+        assert_eq!(summary.signatures.len(), MAX_VERBOSE_LOGGING_GROUPS);
+        assert_eq!(summary.overflow_occurrences, 1);
+        assert_eq!(retained_bytes, retained_bytes_before);
     }
 }

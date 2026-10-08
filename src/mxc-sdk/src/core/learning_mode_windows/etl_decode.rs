@@ -3950,4 +3950,44 @@ mod tests {
             assert_eq!(group.count, 1);
         }
     }
+
+    #[test]
+    fn network_diagnostics_preserve_observed_event_identity() {
+        let mut unsupported = Accumulator::analyze();
+        unsupported.record_network_outcome(
+            999,
+            None,
+            &crate::learning_mode_windows::network_extractors::NetworkDecisionAnalysis {
+                denial: None,
+                reason: CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema,
+                network_decision_reason: None,
+                configuration_recommendation: None,
+                network_endpoint: None,
+                classification: (None, None),
+                properties: Vec::new(),
+            },
+        );
+        let signature = &unsupported.network_verbose_logging.signatures[0].signature;
+        assert_eq!(signature.event_id, 999);
+        assert!(signature.event_name.is_none());
+
+        let mut malformed = Accumulator::analyze();
+        malformed.record_event_decode_error(
+            crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER,
+            77,
+            0,
+            tdh_decode::DecodeError::event(
+                tdh_decode::EventDecodeKind::PayloadMalformed,
+                "malformed future event".to_string(),
+                Some("FutureNetworkDecision".to_string()),
+            ),
+        );
+        let signature = &malformed.network_verbose_logging.signatures[0].signature;
+        assert_eq!(signature.event_id, 77);
+        assert_eq!(
+            signature.event_name.as_deref(),
+            Some("FutureNetworkDecision")
+        );
+        assert!(signature.properties.is_empty());
+    }
 }

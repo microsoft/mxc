@@ -273,7 +273,9 @@ fn extract_tessera(
             return Ok(network_diagnostic(
                 reason,
                 network_decision_reason,
-                recommendation,
+                (network_decision_reason != NetworkDecisionReason::DirectDefaultDeny)
+                    .then_some(recommendation)
+                    .flatten(),
                 None,
                 ResourceType::Network,
             ));
@@ -386,10 +388,16 @@ fn exact_network_endpoint(
     let remote_address = required_ip_string(parts, "RemoteAddress")?;
     let protocol = optional_u8(parts, field_flags, FIELD_PROTOCOL, "Protocol")?;
     let remote_port = optional_u16(parts, field_flags, FIELD_REMOTE_PORT, "RemotePort")?;
-    let protocol = match protocol {
-        Some(6) => "tcp",
-        Some(17) => "udp",
-        Some(1 | 58) => "icmp",
+    let (protocol, remote_port) = match protocol {
+        Some(6) => match remote_port {
+            Some(1..=u16::MAX) => ("tcp", remote_port),
+            _ => return Ok(None),
+        },
+        Some(17) => match remote_port {
+            Some(1..=u16::MAX) => ("udp", remote_port),
+            _ => return Ok(None),
+        },
+        Some(1 | 58) => ("icmp", None),
         _ => return Ok(None),
     };
     Ok(Some(NetworkEndpoint {
@@ -787,7 +795,7 @@ mod tests {
             })
         );
 
-        let mut unknown_protocol = exact;
+        let mut unknown_protocol = exact.clone();
         replace(&mut unknown_protocol, "Protocol", "132");
         let analysis = analyze_network_decision(&unknown_protocol);
         assert!(analysis.denial.is_some());
@@ -795,6 +803,48 @@ mod tests {
             analysis.network_decision_reason,
             Some(NetworkDecisionReason::DirectDefaultDeny)
         );
+        assert!(analysis.configuration_recommendation.is_none());
+        assert!(analysis.network_endpoint.is_none());
+
+        let mut zero_port = exact.clone();
+        replace(&mut zero_port, "RemotePort", "0");
+        let analysis = analyze_network_decision(&zero_port);
+        assert!(analysis.denial.is_some());
+        assert!(analysis.configuration_recommendation.is_none());
+        assert!(analysis.network_endpoint.is_none());
+
+        let mut missing_port = exact.clone();
+        replace(
+            &mut missing_port,
+            "FieldFlags",
+            (FIELD_PROTOCOL | FIELD_REMOTE_ADDRESS).to_string(),
+        );
+        let analysis = analyze_network_decision(&missing_port);
+        assert!(analysis.denial.is_some());
+        assert!(analysis.configuration_recommendation.is_none());
+        assert!(analysis.network_endpoint.is_none());
+
+        let mut icmp_with_port = exact.clone();
+        replace(&mut icmp_with_port, "Protocol", "1");
+        replace(&mut icmp_with_port, "RemotePort", "8");
+        let analysis = analyze_network_decision(&icmp_with_port);
+        assert_eq!(
+            analysis.configuration_recommendation,
+            Some(ConfigurationRecommendation::AddEgressAllow)
+        );
+        assert_eq!(
+            analysis.network_endpoint,
+            Some(NetworkEndpoint {
+                protocol: "icmp".to_string(),
+                remote_address: "203.0.113.10".to_string(),
+                remote_port: None,
+            })
+        );
+
+        let mut malformed_port = exact;
+        replace(&mut malformed_port, "RemotePort", "not-a-port");
+        let analysis = analyze_network_decision(&malformed_port);
+        assert!(analysis.denial.is_none());
         assert!(analysis.configuration_recommendation.is_none());
         assert!(analysis.network_endpoint.is_none());
     }

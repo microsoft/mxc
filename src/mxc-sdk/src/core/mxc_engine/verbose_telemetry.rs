@@ -371,10 +371,12 @@ mod tests {
         assert_eq!(compact.len() as u64, prepared.document_bytes);
         assert_eq!(sha256_hex(&compact), prepared.document_sha256);
         assert_eq!(reconstructed, project_for_telemetry(doc));
-        assert!(reconstructed
-            .signatures
-            .iter()
-            .all(|aggregate| aggregate.signature.properties.is_empty()));
+        assert!(reconstructed.signatures.iter().all(|aggregate| aggregate
+            .signature
+            .properties
+            .is_empty()
+            && aggregate.signature.event_name.is_none()
+            && aggregate.signature.network_endpoint.is_none()));
         assert!(reconstructed.signatures.iter().all(|aggregate| {
             aggregate.signature.provider_guid
                 == canonical_provider_guid(aggregate.signature.provider)
@@ -437,41 +439,21 @@ mod tests {
             projected.signatures[0].signature.provider_guid,
             canonical_provider_guid(CaptureVerboseLoggingProvider::KernelGeneral)
         );
+        assert!(projected.signatures[0].signature.event_name.is_none());
         assert!(projected.signatures[0].signature.properties.is_empty());
         assert!(projected.signatures[0].signature.network_endpoint.is_none());
     }
 
     #[test]
-    fn telemetry_projection_strips_network_payload_and_canonicalizes_provider() {
-        let mut doc = document(vec![aggregate(1, "private-network-data")]);
-        doc.signatures[0].signature.provider =
-            CaptureVerboseLoggingProvider::LearningModeNetworkDecision;
-        doc.signatures[0].signature.provider_guid = "untrusted-provider".into();
-        doc.signatures[0].signature.event_name = Some("NetworkDecisionV1".into());
-
-        let projected = project_for_telemetry(doc);
-
-        assert_eq!(
-            projected.signatures[0].signature.provider_guid,
-            "{71237669-21C3-4101-BD2F-FF38945D725A}"
-        );
-        assert!(projected.signatures[0].signature.properties.is_empty());
-        assert!(projected.signatures[0].signature.event_name.is_none());
-        let json = serde_json::to_string(&projected).unwrap();
-        assert!(!json.contains("private-network-data"));
-        assert!(!json.contains("untrusted-provider"));
-    }
-
-    #[test]
-    fn telemetry_deduplicates_after_removing_unknown_provider_guids_and_properties() {
+    fn telemetry_projection_regroups_after_removing_sensitive_fields() {
         let mut first = aggregate(999, "first-secret");
-        first.signature.provider_guid = "first-provider".into();
-        first.signature.event_name = Some("first-event".into());
+        first.signature.provider_guid = "first-provider".to_string();
+        first.signature.event_name = Some("first-event".to_string());
         first.count = 3;
         let mut second = first.clone();
-        second.signature.provider_guid = "second-provider".into();
-        second.signature.event_name = Some("second-event".into());
-        second.signature.properties[0].1 = "second-secret".into();
+        second.signature.provider_guid = "second-provider".to_string();
+        second.signature.event_name = Some("second-event".to_string());
+        second.signature.properties[0].1 = "second-secret".to_string();
         second.count = 4;
         let mut input = document(vec![first, second]);
         input.summary.total_occurrences = 7;
@@ -482,10 +464,18 @@ mod tests {
         assert_eq!(projected.signatures[0].count, 7);
         assert_eq!(
             projected.signatures[0].signature.provider_guid,
-            "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}"
+            canonical_provider_guid(CaptureVerboseLoggingProvider::KernelGeneral)
         );
         assert!(projected.signatures[0].signature.event_name.is_none());
         assert!(projected.signatures[0].signature.properties.is_empty());
         assert_eq!(projected.summary.total_occurrences, 7);
+    }
+
+    #[test]
+    fn network_provider_uses_the_canonical_guid() {
+        assert_eq!(
+            canonical_provider_guid(CaptureVerboseLoggingProvider::LearningModeNetworkDecision),
+            "{71237669-21C3-4101-BD2F-FF38945D725A}"
+        );
     }
 }
