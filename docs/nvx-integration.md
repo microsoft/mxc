@@ -7,9 +7,9 @@ tense describes work proposed for the MXC integration.
 
 ## 1. Introduction
 
-[NVX][nvx-readme] is an ultra-light microVM sandbox for running untrusted
-workloads with hardware-enforced isolation. It is built on OpenVMM and runs
-Linux as its guest. It is a cross-platform microVM sandbox for agentic workloads.
+[NVX][nvx-readme] provides ultra-light microVMs for running
+untrusted workloads with hardware-enforced isolation. It is built on OpenVMM,
+runs Linux as its guest, and targets cross-platform agentic workloads.
 
 Customers will use NVX through the MXC APIs and will not need to understand
 OpenVMM, the guest agent, or image conversion.
@@ -28,45 +28,57 @@ Nanvix as the backend for the `microvm` option.
 NVX will ship a Rust crate containing:
 
 - the Rust host API;
-- the signed NVX implementation DLL;
-- the signed OpenVMM executable;
-- the signed image download and conversion tool;
-- the Linux kernel and initramfs with the NVX init agent; and
-- manifests, checksums, provenance, licences, and package inventories.
+- pinned runtime artifact identities, versions, locations, and digests; and
+- build logic that fetches and verifies the matching signed artifacts from
+  NVX-controlled registries or repositories.
 
-Because the crate distributes `vmlinux` and an Alpine initramfs, the NVX team
-will publish the exact corresponding Linux and Alpine source artifacts for
-every runtime version. The crate will include `SOURCE-MANIFEST.json`, the
-Alpine package inventory, licences, and third-party notices. The source
-manifest will identify the NVX project source, kernel version and
-configuration, patches, Alpine package sources, published source artifacts,
-and hashes. The source archives may be published separately rather than
-embedded in every SDK package.
+The fetched runtime artifacts will include the signed NVX implementation DLL,
+signed OpenVMM executable, signed image download and conversion tool, Linux
+kernel, minimal control initramfs with the NVX init agent, manifests,
+checksums, provenance, licences, and package inventories.
+
+NVX already publishes the corresponding source for its Linux kernel and
+Alpine-based control initramfs. The NVX repository contains the owned guest
+and build inputs under `kernel/`, `guest/common/`, and `guest/alpine/`. Its
+release tooling collects the exact patched kernel source and the recipes and
+upstream sources for the minimal initramfs packages, then publishes them as separate
+`source/nvx-linux-source-<kernel-version>.tar.gz` and
+`source/nvx-alpine-source-<release-version>.tar.gz` artifacts.
+
+The existing `SOURCE-MANIFEST.json`, control-initramfs package inventory,
+licences, and third-party notices identify the NVX project source, kernel
+version and configuration, patches, Alpine package sources used by the
+control initramfs, published source artifacts, and hashes. MXC will consume
+and validate this existing source-delivery contract rather than requiring the
+NVX team to create a new one.
 
 ### 2.2 How MXC will consume NVX
 
 MXC will use a pinned NVX crate version. The crate will expose the Rust
-interface and matching signed runtime assets. The build script for each
-consuming executable will invoke a shared MXC build helper to stage those
-assets beside that executable. MXC will use the interface and signed DLL
-implementation from the same crate, so the API and runtime files remain
-versioned together.
+interface and resolve its matching signed runtime artifacts. The build script
+for each consuming executable will invoke a shared MXC build helper, which
+uses the crate's fetch and verification contract before staging those
+artifacts beside the executable. The crate's pinned artifact manifest will
+keep the API and runtime files versioned together.
 
 MXC will be implementing:
 
-- a public Rust build helper that stages the runtime assets from the NVX crate
-  beside the consuming executable;
+- a public Rust build helper that stages the runtime artifacts resolved and
+  verified through the NVX crate beside the consuming executable;
 - checksum and signature verification;
-- offline builds using a pre-fetched crate and dependencies; and
+- offline builds using a pre-fetched runtime artifact directory plus the
+  crate and its dependencies; and
 - packaging for the three SDKs and the internal MXC end-to-end executor bundle.
 
 Before packaging the NVX runtime, MXC will validate `SOURCE-MANIFEST.json` and
-verify that it references the matching Linux and Alpine source artifacts
-published by the NVX team. MXC will copy the source manifest, Alpine package
-inventory, licences, and notices into the npm and NuGet runtime packages. MXC
-will not generate the source archives. Packaging will fail when required
-metadata, source references, or hashes are missing or do not match the runtime
-version.
+verify that it references the matching Linux kernel and minimal control
+initramfs corresponding-source artifacts published by the NVX team. MXC will
+copy the source manifest, control-initramfs package inventory, licences, and
+notices into the npm and NuGet runtime packages. The published
+`nvx-alpine-source-*` archive covers only the Alpine packages included in that
+minimal trusted control environment. MXC will not generate the source
+archives. Packaging will fail when required metadata, source references, or
+hashes are missing or do not match the runtime version.
 
 ### 2.3 Key NVX files that MXC will use
 
@@ -76,17 +88,19 @@ version.
 | `openvmm.exe` | 22 MB | Windows OpenVMM executable |
 | Image download and conversion tool | Not yet published | Will download and convert standard OCI images |
 | `vmlinux` | 24 MB | NVX Linux kernel |
-| `initramfs.cpio.gz` | 7.4 MB | Alpine userspace and NVX guest agent |
+| `initramfs.cpio.gz` | Not yet published | Minimal trusted control userspace and NVX guest agent; customer workload tooling is supplied by the OCI image |
 
 The release also includes the supporting checksum, manifest, provenance,
-licence, and package-inventory files.
-These are the current development-bundle sizes and can change. The final Rust
-crate size will also include the implementation DLL and image tool.
+licence, and package-inventory files. The numeric OpenVMM and kernel sizes are
+from the selected development baseline and can change. The new implementation
+DLL, image tool, and minimal control initramfs sizes have not yet been
+published. These artifacts contribute to the staged runtime and SDK package
+footprint rather than the published Rust crate archive size.
 
 The current NVX binaries are not signed yet. The production Rust crate will
-contain the signed implementation DLL, OpenVMM executable, and image tool.
-MXC will validate their signatures and the published checksums before staging
-or using the files.
+fetch the required signed implementation DLL, OpenVMM executable, image tool,
+and guest artifacts from pinned NVX-controlled locations. MXC will validate
+their signatures and published checksums before staging or using the files.
 
 ### 2.4 Developer packaging and usage
 
@@ -95,7 +109,7 @@ Developers will not separately install or invoke OpenVMM.
 
 | Ecosystem | Developer dependency | Packaging behaviour |
 | --- | --- | --- |
-| Rust | `mxc-sdk` with the `microvm` feature and the NVX staging build helper | The consuming executable's build script will stage the signed NVX crate assets beside that executable |
+| Rust | `mxc-sdk` with the `microvm` feature and the NVX staging build helper | The consuming executable's build script will fetch or use pre-fetched artifacts through the pinned NVX crate contract, verify them, and stage them beside that executable |
 | Node | `@microsoft/mxc-sdk` and `@microsoft/mxc-nvx-runtime` | The base SDK will be the sole owner of `mxc_ffi.dll`; the exact-version runtime package will contain only the NVX assets and its directory will be registered with the native layer |
 | .NET | `Microsoft.Mxc.Sdk` and `Microsoft.Mxc.Sdk.Nvx.Runtime` | The base SDK will be the sole owner of `mxc_ffi.dll`; the exact-version runtime package will add the RID-specific `nvx` assets beside it |
 
@@ -218,9 +232,9 @@ incompatible runtime will return an actionable load or `backend_unavailable`
 error identifying the required runtime package or version.
 
 The co-located checksum manifest will not be trusted by itself. The pinned NVX
-crate will provide the expected runtime-manifest identity, and the compiled
-native integration will authenticate that manifest before using its file
-hashes. MXC will then:
+crate will provide the expected artifact locations, digests, and
+runtime-manifest identity, and the compiled native integration will
+authenticate that manifest before using its file hashes. MXC will then:
 
 1. validate the Authenticode certificate chain and expected Microsoft signer
    for the NVX implementation DLL, `openvmm.exe`, and image tool;
@@ -237,9 +251,9 @@ the integration will not introduce separate NVX-specific execution methods.
 
 | SDK | One-shot configuration | State-aware provision addition | Existing operations that will use it |
 | --- | --- | --- | --- |
-| Rust | `MicrovmConfig { image: String, memory_mb: Option<u64> }` and `Containment::Microvm(MicrovmConfig)` | Add `ProvisionRequest::microvm(image: String, memory_mb: Option<u64>)` | `v1::run`, `v1::spawn`, and `v1::container::*` |
-| Node | `{ type: 'microvm', config: { image: string; memoryMb?: number } }` | Add `MicrovmProvisionConfig { image: string; memoryMb?: number; filesystem?; network? }` to `LifecycleConfigRegistry`, and include `'microvm'` in `LifecycleContainmentKind` | `run`, `spawn`, `provisionContainer`, and the existing lifecycle functions |
-| .NET | `Microvm : Containment` with required `Image` and optional `MemoryMb` | Add `MicrovmProvisionRequest : ProvisionRequest` with required `Image`, optional `MemoryMb`, `Filesystem`, and `Network`; register both MicroVM request shapes and their `microvm` discriminators with the source-generated JSON context | `MxcContainer.Run`, `MxcContainer.Spawn`, and the existing `MxcLifecycle` methods |
+| Rust | `MicrovmConfig { image: String, memory_mb: Option<u64> }` and `Containment::Microvm(MicrovmConfig)` | Reuse `MicrovmConfig` in the state-aware `ProvisionRequest` | `v1::run`, `v1::spawn`, and `v1::container::*` |
+| Node | `{ type: 'microvm', config: { image: string; memoryMb?: number } }` | Reuse the same `{ image, memoryMb? }` MicroVM configuration in `LifecycleConfigRegistry`, and include `'microvm'` in `LifecycleContainmentKind` | `run`, `spawn`, `provisionContainer`, and the existing lifecycle functions |
+| .NET | `Microvm : Containment` with required `Image` and optional `MemoryMb` | Add `MicrovmProvisionRequest : ProvisionRequest` that reuses the same required `Image` and optional `MemoryMb` fields, plus `Filesystem` and `Network`; register both MicroVM request shapes and their `microvm` discriminators with the source-generated JSON context | `MxcContainer.Run`, `MxcContainer.Spawn`, and the existing `MxcLifecycle` methods |
 
 The .NET one-shot `Microvm` containment type and
 `MicrovmProvisionRequest` will each be registered as `[JsonSerializable]`
@@ -254,61 +268,77 @@ The wire and SDK changes will be delivered in this order:
    engine binding, and runtime tests to the development `1.1.0-alpha`
    contract.
 2. Keep the wire work development-only while that contract remains mutable.
-3. Publish the fields in stable `1.1.0` when the contract is ready.
-4. Advance `schemas/schema-version.json` `sdkMajorTargets["1"]` from `1.0.0`
-   to `1.1.0`.
-5. Publish the new Rust, Node, and .NET V1 MicroVM types and update their
-   versioned references.
+3. If NVX is ready when `1.1.0` is frozen, publish the fields in stable
+   `1.1.0`, advance `schemas/schema-version.json` `sdkMajorTargets["1"]` from
+   `1.0.0` to `1.1.0`, and publish the new Rust, Node, and .NET V1 MicroVM
+   types and versioned references. The stable API will not require an
+   experimental option.
+4. If NVX is not ready, stable `1.1.0` will omit the MicroVM fields. Move them
+   into the next mutable contract, such as `1.2.0-alpha`, and do not publish
+   the V1 MicroVM SDK types until a stable contract contains those fields.
 
-Schema publication and runtime authorisation are independent. Even after
-stable `1.1.0` becomes the V1 SDK target, `microvm` may continue to require
-the experimental option until the backend meets its promotion bar.
+Contract publication and host availability remain separate. A published
+MicroVM backend can still return `backend_unavailable` when the host lacks the
+NVX runtime, WHP, or another required capability.
 
 The existing lifecycle operation methods will remain unchanged; only the
 backend-specific request types they accept will expand.
 
 ## 3. Architecture
 
-### 3.1 NVX, OpenVMM, and Alpine Linux
+### 3.1 NVX, OpenVMM, and the guest control environment
 
 MXC will use the NVX Rust interface and its signed DLL implementation. The DLL
-will launch OpenVMM, which will boot the NVX kernel and unpack the Alpine
-initramfs into the VM's in-memory root filesystem.
+will launch OpenVMM, which will boot the NVX kernel and unpack the minimal
+control initramfs into the VM's in-memory control root filesystem.
 
-The initramfs contains two relevant agent components:
+The initramfs contains only the binaries and libraries required to initialise
+and control the microVM, including these two components:
 
 | Guest path | Role |
 | --- | --- |
 | `/init` | Runs first, mounts the guest pseudo-filesystems, reads the kernel command line, prepares networking and host filesystem mappings, and resolves the workload identity |
 | `/sbin/nvx-managed-agent` | Replaces `/init` for the managed lifecycle and remains running as PID 1 while workloads execute |
 
-The managed agent stays in the initramfs root filesystem and is not exposed
-inside the workload's execution context.
+The managed agent remains in the control initramfs and outside the OCI
+workload root filesystem. Workload processes see the converted OCI filesystem
+as `/`; they do not see or execute `/sbin/nvx-managed-agent`, which remains
+PID 1 and handles lifecycle and process-control messages.
 
 ```mermaid
 flowchart LR
     MXC["MXC"] --> API["NVX Rust interface"]
     API --> DLL["Signed NVX implementation DLL"]
     DLL --> OpenVMM["Signed OpenVMM executable"]
-    OpenVMM --> Init["Alpine initramfs: /init"]
-    Init --> Alpine["/sbin/nvx-managed-agent (PID 1)"]
-    Alpine --> Workload["Non-root workload"]
+    OpenVMM --> Init["Control initramfs: /init"]
+    Init --> Agent["/sbin/nvx-managed-agent (PID 1)"]
+    Agent --> Workload["OCI workload environment"]
 ```
 
 The NVX Rust interface exposes the following operations:
 
-| Operation | NVX Rust API |
-| --- | --- |
-| Validate provision | `validate_provision` |
-| Validate execution | `validate_exec` |
-| Check runtime availability | `probe` |
-| Provision VM | `provision` |
-| Start VM | `start` |
-| Execute workload | `exec` |
-| Stop VM | `stop` |
-| Remove provisioned state | `deprovision` |
-| Wait for execution outcome | `Execution::wait` |
-| Cancel execution | `Execution::canceller` |
+| Operation | NVX Rust API | Input structure | Output structure |
+| --- | --- | --- | --- |
+| Validate provision | `validate_provision` | `&ProvisionRequest { filesystem?, network?, microvm.provision.memoryMib? }` | `Result<()>` |
+| Validate execution | `validate_exec` | `&ExecRequest { process { commandLine or argv, cwd?, env?, inheritDefaultEnv?, timeout? }, stdin }` | `Result<()>` |
+| Check runtime availability | `probe` | None | `Result<()>` |
+| Provision VM | `provision` | `&ProvisionRequest` | `Result<ProvisionResult { sandboxId, metadata? }>` |
+| Start VM | `start` | `&SandboxId` | `Result<StartResult { metadata? }>` |
+| Execute workload | `exec` | `&SandboxId`, `&ExecRequest` | `Result<Execution>` with live stdout and stderr pipes, optional stdin pipe, cancellation handle, and wait methods |
+| Stop VM | `stop` | `&SandboxId` | `Result<StopResult { metadata? }>` |
+| Remove provisioned state | `deprovision` | `&SandboxId` | `Result<DeprovisionResult { metadata? }>`; the ID becomes stale |
+| Wait for execution outcome | `Execution::wait` | Owned `Execution` handle | `Result<ExecOutcome>`: `Exited(code)`, `Signaled(signal)`, `TimedOut`, `Cancelled`, or `Failed(reason)` |
+| Wait and collect output | `Execution::wait_with_output` | Owned `Execution` handle | `Result<ExecOutput { outcome, stdout: Vec<u8>, stderr: Vec<u8> }>` |
+| Get cancellation handle | `Execution::canceller` | `&Execution` | `Canceller` |
+| Cancel execution | `Canceller::cancel` | `&Canceller` | `Result<()>` |
+
+`ProvisionRequest` in the selected NVX API does not yet contain an OCI image.
+It also currently nests memory under `microvm.provision`. The MXC wire
+contract will use the shared flat `microvm { image, memoryMb }` structure for
+one-shot and state-aware provision requests; the integration adapter will map
+that structure into the NVX Rust input. The image integration will extend the
+NVX provision input with the resolved OCI image or converted-artifact identity
+described in section 6 and Appendix C.
 
 ### 3.2 MXC integration
 
@@ -381,7 +411,7 @@ The integration will target the MXC `1.1.0-alpha` development schema.
 ### 4.2 Filesystem
 
 MXC will pass the configured host paths to NVX. NVX currently asks OpenVMM for
-one virtio-fs export rooted at the common host directory. The Alpine guest
+one virtio-fs export rooted at the common host directory. The guest control
 agent then bind-mounts each requested path separately as read-only or
 read-write:
 
@@ -389,13 +419,18 @@ read-write:
 flowchart LR
     Policy["MXC filesystem policy"] --> NVX["NVX mapping plan"]
     NVX --> OpenVMM["OpenVMM: one virtio-fs export"]
-    OpenVMM --> Alpine["Alpine: per-path RO/RW bind mounts"]
-    Alpine --> Workload["Workload paths"]
+    OpenVMM --> Agent["Control agent: per-path RO/RW bind mounts"]
+    Agent --> Workload["OCI workload paths"]
 ```
 
 Read-write mappings are
 live: a guest write changes the mapped host file immediately. Denied entries
 are hidden by OpenVMM within the exported host tree.
+
+On Windows, host access remains governed by the Windows identity running
+OpenVMM and the mapped directory's NTFS ACLs. NVX will define and guarantee
+the Windows owner and inherited ACL applied when a guest creates a file; MXC
+will verify that behaviour end to end before release.
 
 All mapped paths must exist, be on the same Windows volume, and share a common
 directory below the volume root. MXC will translate Windows paths into guest
@@ -403,24 +438,33 @@ paths: for example, `C:\nvx-work\input` will be available as
 `/mnt/c/nvx-work/input`. Exporting an entire volume such as `C:\` will be
 rejected.
 
+The initial integration will also reject mappings at or below protected
+Windows host roots, including the Windows directory, Program Files, Program
+Files (x86), and ProgramData. Validation will use canonical paths and Windows
+Known Folder resolution so case differences, short names, junctions, and
+reparse points cannot bypass the rule. Both read-only and read-write mappings
+will fail before OpenVMM starts and identify the protected root.
+
 | MXC Schema field | Works today |
 | --- | --- |
 | `filesystem.readonlyPaths` | Yes |
 | `filesystem.readwritePaths` | Yes |
 | `filesystem.deniedPaths` | Yes |
 
+
 ### 4.3 Network
 
 MXC will pass the directional network policy to NVX. NVX currently converts
-the supported rules into OpenVMM network options. OpenVMM attaches a virtual
-network device to the guest and uses its portable profile as the host-side,
-in-process NAT and filtering data plane.
+the supported rules into OpenVMM network options. OpenVMM presents a virtual
+network adapter to the guest. Its portable networking mode processes the
+adapter's traffic inside the OpenVMM host process, where it performs NAT and
+enforces the configured allow and deny rules.
 
 ```mermaid
 flowchart LR
     Policy["MXC network policy"] --> NVX["NVX rule conversion"]
     NVX --> OpenVMM["OpenVMM virtual NIC + portable profile"]
-    OpenVMM --> Alpine["Alpine virtual network device"]
+    OpenVMM --> Workload["OCI workload virtual network device"]
 ```
 
 
@@ -465,29 +509,27 @@ The following shows only the state-aware difference:
 {
   "phase": "provision",
   "microvm": {
-    "provision": {
-      "memoryMb": 256,
-      "image": "python:3.12-alpine"
-    }
+    "memoryMb": 256,
+    "image": "python:3.12-alpine"
   }
 }
 ```
 
 The `process` section from the one-shot example will be omitted during
-provision. The new `microvm.provision` schema will be a separate MicroVM
-provision type with required `image` and optional `memoryMb`. A later `exec`
+provision. One-shot and state-aware provision will use the same `microvm`
+structure with required `image` and optional `memoryMb`. A later `exec`
 request will supply the process configuration.
 
 | MXC phase | How NVX handles it |
 | --- | --- |
-| `provision` | Resolves the OCI reference to an immutable digest, selects or creates the converted artifact, persists that identity with the configuration, and returns an NVX sandbox ID |
+| `provision` | Resolves the OCI reference to an immutable digest, selects or creates the converted artifact, persists that identity with the configuration, and returns an NVX instance ID |
 | `start` | Launches OpenVMM and waits for the guest agent |
 | `exec` | Runs a workload in the running VM |
 | `stop` | Stops the VM while retaining provisioned state |
 | `deprovision` | Removes the provisioned state |
 | One-shot | MXC will compose provision, start, exec, stop, and deprovision |
 
-MXC will preserve the NVX sandbox ID unchanged. NVX provision returns IDs in
+MXC will preserve the NVX instance ID unchanged. NVX provision returns IDs in
 the following form:
 
 ```text
@@ -529,23 +571,25 @@ state does not survive `stop`, while changes to mapped host files do.
 | Schema field or capability | Works today | Notes |
 | --- | --- | --- |
 | `ui` | No | Not supported by design, reject when supplied |
-| `process.commandLine` | Yes | Runs as a Linux shell command |
+| `process.commandLine` | Yes | Runs through the workload image's execution environment; the control initramfs does not supply workload commands or a fallback shell |
 | `process.cwd` | Yes | Must be an absolute guest path |
 | `process.env` / `inheritDefaultEnv` | Yes |  |
 | `process.timeout` | Yes | Maximum one hour; omitted or `0` means no execution deadline |
 | Separate stdout and stderr | Yes | Combined output is limited to 1 MB |
 | Live stdin | No | Future work if needed. Workload receives EOF |
 | PTY | No | Future work if needed |
-| Guest memory override | Yes | One-shot uses `microvm.memoryMb`; state-aware provision uses `microvm.provision.memoryMb`; default is 256 MB |
+| Guest memory override | Yes | One-shot and state-aware provision use `microvm.memoryMb`; default is 256 MB |
 | `fallback` | No | Not supported by design, NVX does not select another backend |
 
 | Process behaviour | Developer-visible result |
 | --- | --- |
-| Command execution | `process.commandLine` runs through BusyBox `/bin/sh -c` |
-| Environment | Omitted environment uses guest defaults; an explicit list replaces or layers over those defaults; the shell may set `PWD` and `SHLVL` |
+| Command execution | The OCI workload image must provide the shell or executable required by the final execution contract; the control initramfs is not used as the workload command environment |
+| Environment | Omitted environment uses the OCI image defaults; an explicit list replaces or layers over those defaults; the selected shell may set `PWD` and `SHLVL` |
 | Output limit | Combined stdout and stderr are limited to 1 MB; exceeding the limit terminates the workload rather than truncating output |
 | Nonzero exit | Returned as a workload result, not an SDK or FFI failure |
 | Invalid request or unavailable backend | Returned as an MXC error rather than a workload exit code |
+
+**Open question: Should NVX change the output-limit behaviour, for example by truncating output instead of terminating the workload?**
 
 NVX lifecycle errors align with the existing
 [MXC SDK error classifications](reference/rust/v1/types.md). The integration
@@ -590,7 +634,8 @@ The complete request in section 4.1 is an example of this model:
 - The network policy limits the workload to the requested destination and
   port.
 
-The integration will reuse the existing WSLC cache and registry pattern:
+The integration will use an NVX converted-image cache and a shared
+backend-neutral MXC registry policy:
 
 1. Use the image from the local cache when it is already available.
 2. On a cache miss, reject normal execution when the request uses
@@ -605,18 +650,18 @@ The integration will reuse the existing WSLC cache and registry pattern:
 An administrator or deployment pipeline can warm the same cache through a
 separate explicit MXC host-setup operation. That operation will invoke the
 signed NVX image tool, enforce the machine registry policy, and report the
-resolved digest and converted-artifact identity. It will not create a sandbox
-or inherit a sandbox request's workload network policy. After prefetch,
+resolved digest and converted-artifact identity. It will not create a
+NVX instance or inherit a workload request's network policy. After prefetch,
 deny-by-default requests can use the cached artifact without host network
 traffic.
 
-Image references without an explicit registry will resolve against Docker Hub.
-Explicit registry references will be permitted only when the registry is
-allowed by the machine policy.
+`microvm.image` may reference OCI registries such as Docker Hub. The NVX image
+tool will define how short image references are resolved. Before any network
+access, MXC will identify the effective registry host and apply the same
+machine policy to both implicit and explicitly named registries.
 
 The policy will be stored under
-`HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Mxc` and will use the existing WSLC
-policy behaviour:
+`HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Mxc` with the following behaviour:
 
 | Policy state | Behaviour |
 | --- | --- |
@@ -653,7 +698,7 @@ configuration for both one-shot and state-aware provision requests.
 | Contract surface | Schema addition |
 | --- | --- |
 | One-shot | Add `microvm.image` and `microvm.memoryMb` |
-| State-aware provision | Register `containment: "microvm"` and add `microvm.provision.image` and `microvm.provision.memoryMb` |
+| State-aware provision | Register `containment: "microvm"` and reuse `microvm.image` and `microvm.memoryMb` |
 | Start, exec, stop, and deprovision | No image fields; these requests use the `sandboxId` created during provision |
 
 `image` will be required and must contain a non-empty OCI image reference.
@@ -670,17 +715,15 @@ One-shot standard-image addition:
 }
 ```
 
-State-aware provision will use the same fields under `microvm.provision`:
+State-aware provision will use the same `microvm` structure:
 
 ```json
 {
   "phase": "provision",
   "containment": "microvm",
   "microvm": {
-    "provision": {
-      "image": "python:3.12-alpine",
-      "memoryMb": 256
-    }
+    "image": "python:3.12-alpine",
+    "memoryMb": 256
   }
 }
 ```
@@ -748,11 +791,11 @@ executor is not an NVX developer-facing surface.
 | Lifecycle | Provision, exact `aci-edge-sandboxes:` prefix routing, start, repeated and overlapping exec, caller reconnect, stop, deprovision, invalid transitions, malformed/stale IDs, backend prefix isolation, and one-shot failure cleanup |
 | State-aware process lifetime | Configure NVX with `OpenVmmConfig::breakaway_from_job = true` and return actionable `backend_unavailable` when the caller's Windows job disallows breakaway; from a kill-on-close Windows job, verify that OpenVMM remains running after the `start` process exits and that a later `exec` process reconnects successfully |
 | SDKs and FFI | Rust, Node, and .NET produce the same policy and result behaviour; native ownership and cleanup remain correct; Node registers the separately installed MicroVM runtime directory before discovery or execution and rejects conflicting registration; .NET registers both MicroVM request shapes in `MxcJsonContext` and exercises their production serialize/deserialize paths in `Microsoft.Mxc.Sdk.AotSmokeTest` |
-| Filesystem | Read-only, read-write, denied paths, files, directories, multiple mappings, and invalid combinations |
+| Filesystem | Read-only, read-write, denied paths, files, directories, multiple mappings, invalid combinations, access to pre-existing host files, the Windows owner and inherited ACL of guest-created files, protected Windows root rejection, and canonical-path alias and reparse-point bypass attempts |
 | Network | Defaults, allow/deny precedence, CIDRs, exclusions, TCP/UDP ranges, and rejection of unsupported rules |
 | Process | Command, CWD, environment, timeout, cancellation, output limits, nonzero exits, and descendant cleanup |
 | PTY | Confirm unsupported in the initial implementation; add terminal tests when implemented |
-| Packaging | Rust crate, npm, and NuGet installation; single ownership of `mxc_ffi.dll` in npm and NuGet; npm runtime-package resolution and native directory registration; NuGet `buildTransitive` recursive copy into `nvx/**` for both build and publish outputs; rejection of unsupported RID/package combinations; inclusion of the NVX implementation DLL, OpenVMM, image tool, kernel, initramfs, source manifest, Alpine package inventory, licences, and notices; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that matching Linux and Alpine source artifacts are published and referenced |
+| Packaging | Rust crate, npm, and NuGet installation; single ownership of `mxc_ffi.dll` in npm and NuGet; npm runtime-package resolution and native directory registration; NuGet `buildTransitive` recursive copy into `nvx/**` for both build and publish outputs; rejection of unsupported RID/package combinations; inclusion of the NVX implementation DLL, OpenVMM, image tool, kernel, control initramfs, source manifest, control-initramfs package inventory, licences, and notices; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that matching Linux and control-initramfs source artifacts are published and referenced |
 | Signing | Authenticate the runtime manifest, validate the Authenticode chain and Microsoft signer for signed NVX binaries, verify all remaining file checksums, and reject untrusted runtime directories |
 | Host | Real execution on Windows x64 with WHP installed and enabled; ARM remains planned |
 | Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, generated SDK types, cache-miss rejection without host traffic for deny-by-default egress, explicit prefetch followed by offline cache use, permitted execution-time pull, the NVX-owned adversarial conversion-security suite, and MXC rejection of malformed or incompatible converter output |
@@ -772,11 +815,11 @@ so infrastructure failures are not mistaken for policy enforcement.
 | Connection | Mechanism | Purpose |
 | --- | --- | --- |
 | MXC to NVX Rust interface | In-process Rust API calls | Will invoke provision, start, execute, stop, and deprovision |
-| NVX Rust interface to signed implementation DLL | In-process interface call | Will use the implementation shipped in the NVX Rust crate |
+| NVX Rust interface to signed implementation DLL | In-process interface call | Will use the implementation fetched and verified through the pinned NVX crate artifact contract |
 | NVX implementation DLL to `openvmm.exe` | Process launch with CLI arguments | Will supply the kernel, initramfs, hypervisor, filesystem and network configuration, and control-endpoint address |
 | NVX implementation DLL to `openvmm.exe`, during startup only | OpenVMM stdin | Will pass a one-time 32-byte authentication capability; stdin will not be the ongoing command channel |
 | NVX implementation DLL to `openvmm.exe` | Windows named pipe | Will carry ongoing lifecycle and workload control through the NVX framed binary protocol |
-| OpenVMM to Alpine guest agent | Dedicated virtio-console | Will carry readiness, workload commands, stdout and stderr, cancellation, shutdown, and execution outcomes |
+| OpenVMM to guest control agent | Dedicated virtio-console | Will carry readiness, workload commands, stdout and stderr, cancellation, shutdown, and execution outcomes |
 
 
 ## Appendix B: NVX execution outcome mapping
@@ -798,7 +841,7 @@ so infrastructure failures are not mistaken for policy enforcement.
 | Input identity | Resolve the OCI reference to an immutable digest and record the registry or source |
 | Registry authorisation | MXC validates the registry against a shared backend-neutral administrative allowlist before invoking the NVX image tool |
 | Execution-time host fetch | A cache miss under deny-by-default request egress is rejected without registry traffic; automatic pull is available only when the request permits egress |
-| Explicit prefetch | A separate MXC host-setup operation pulls and converts the image under the machine registry policy without creating a sandbox, then stores it in the same runtime cache |
+| Explicit prefetch | A separate MXC host-setup operation pulls and converts the image under the machine registry policy without creating an NVX instance, then stores it in the same runtime cache |
 | Redirects | The image tool follows a redirect to another registry host only when that host is also permitted |
 | Credentials | No private-registry credentials in the initial contract; future credentials must come from an approved host provider and remain out of requests, command lines, logs, and telemetry |
 | Conversion timing | Pull and convert before VM start; reuse a compatible cached conversion when available |
@@ -818,10 +861,10 @@ before `microvm.image` is usable.
 
 ### Awaited support
 
-- Initial permitted registry set and migration from the existing WSLC-specific policy name
+- Initial permitted registry set and final backend-neutral registry policy name
 - NVX-owned OCI converter threat model, containment and bounded-extraction contract, security review, and adversarial test evidence
 - NVX signed binaries support
-- NVX crate binary packaging and extraction contract
+- NVX crate artifact registry, fetching, verification, offline-prefetch, and staging contract
 - Windows ARM runtime and SDK package availability
 - Future PTY support
 
