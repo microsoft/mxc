@@ -17,11 +17,12 @@ use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
@@ -1156,50 +1157,6 @@ fn is_file_mask_target(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve every symlink in `path` (leaf and ancestors) to a real filesystem
-/// path, tolerating trailing components that do not exist yet.
-///
-/// `std::fs::canonicalize` resolves symlinks at every level but requires the
-/// **whole** path to exist. To also cover not-yet-created denied paths under a
-/// symlinked ancestor, this walks the components from the root: every existing
-/// prefix is canonicalized (following symlinks exactly like the kernel), while
-/// `.` and `..` in the not-yet-existent tail are folded lexically. Folding `..`
-/// this way is safe because a component that does not exist cannot be a symlink,
-/// so the result matches the target the kernel's path resolution would reach.
-/// Returns `None` only for an empty path.
-///
-/// A naive backward walk that collected `file_name()` silently dropped `..`
-/// components (Rust returns `None` for a `..` file name) and reconstructed the
-/// wrong target: `/link/missing/../secret` became `/real/missing/secret`
-/// instead of `/real/secret`, so the mask landed on a bystander path and the
-/// real denied target stayed exposed.
-fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => result.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                result.pop();
-            }
-            Component::Normal(name) => {
-                result.push(name);
-                // Canonicalize the prefix so far so symlinks are followed while
-                // it still exists; once a component is missing, canonicalize
-                // fails and the remaining tail is folded lexically above.
-                if let Ok(real) = std::fs::canonicalize(&result) {
-                    result = real;
-                }
-            }
-        }
-    }
-    if result.as_os_str().is_empty() {
-        None
-    } else {
-        Some(result)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1616,6 +1573,20 @@ mod tests {
         assert!(logger.warnings().is_empty(), "no v6 allow, no warning");
     }
 
+    /// A pin built the way production builds one.
+    fn loopback_resolver_pin(dir: &tempfile::TempDir) -> proxy_network::ResolverPin {
+        let path = dir.path().join("resolv.conf");
+        std::fs::write(&path, "nameserver 127.0.0.53\nsearch corp.example\n")
+            .expect("fixture resolver");
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        proxy_network::ResolverPin::from_resolver(
+            &path,
+            &crate::mxc_common::models::ContainerPolicy::default(),
+            &mut logger,
+        )
+        .expect("a loopback stub is pinned")
+    }
+
     /// An allowlist that never names slirp's forwarder leaves the pinned
     /// resolver unreachable, which the sandbox cannot report for itself: the
     /// resolver file looks correct and the query is simply dropped.
@@ -1636,7 +1607,8 @@ mod tests {
         });
         let plan =
             network_rules::EgressPlan::for_request(&req).expect("an allowlist is enforceable");
-        let pin = proxy_network::ResolverPin::for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let pin = loopback_resolver_pin(&dir);
 
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         warn_resolver_blocked_by_egress(&plan, Some(&pin), &mut logger);
@@ -1687,7 +1659,8 @@ mod tests {
         });
         let plan =
             network_rules::EgressPlan::for_request(&req).expect("a udp/53 allow is enforceable");
-        let pin = proxy_network::ResolverPin::for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let pin = loopback_resolver_pin(&dir);
 
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         warn_resolver_blocked_by_egress(&plan, Some(&pin), &mut logger);

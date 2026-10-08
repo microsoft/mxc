@@ -72,6 +72,11 @@ pub mod system_dir;
 #[cfg(unix)]
 pub mod interruptible_reader;
 
+// Linux-only: used by the backends that realise filesystem policy as bind
+// mounts, which must resolve a destination before mounting over it.
+#[cfg(target_os = "linux")]
+pub(crate) mod filesystem_symlink;
+
 /// Crate-wide lock and guards for tests that mutate process environment.
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) mod test_env;

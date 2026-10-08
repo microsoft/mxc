@@ -323,10 +323,17 @@ The replacement applies only when the host's own resolvers are **all** loopback
 addresses and **at least one** is IPv4, so it cannot redirect name resolution
 that already works, and it never applies when slirp has no IPv4 nameserver to
 forward to. The file is mounted over the path the `/etc/resolv.conf` symlink
-chain ends at, because bwrap cannot mount over a symlinked leaf. Anything MXC
-cannot read confidently — a resolver path it cannot follow, or one the
-filesystem policy denies — leaves the sandbox as it was, with a warning naming
-the path.
+chain ends at — resolved through every component, not just the leaf, because
+bwrap cannot create a mount point under an unresolved symlink and aborts the
+sandbox when asked to.
+
+**The pin never costs you a sandbox.** It improves on a resolver the sandbox
+already cannot reach, so every failure gives up the pin rather than the run:
+a resolver path that cannot be followed, one the filesystem policy denies, a
+resolver file that exists but cannot be read, and a failure to write the
+replacement all leave the sandbox exactly as it would have started without
+this feature, each with a warning naming the cause. A host with no
+`/etc/resolv.conf` at all is silent — there is no loopback stub to rescue.
 
 A policy that names `/etc/resolv.conf` (or the path its symlink chain ends at)
 in `readonlyPaths` / `readwritePaths` is supplying its own resolver, and the
