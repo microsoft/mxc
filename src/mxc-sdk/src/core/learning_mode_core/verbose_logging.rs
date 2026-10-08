@@ -25,6 +25,8 @@ pub enum VerboseLoggingProvider {
     KernelGeneral,
     /// Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode.
     PrivacyAuditingPermissiveLearningMode,
+    /// Microsoft-Windows-LearningMode-NetworkDecision.
+    LearningModeNetworkDecision,
 }
 
 /// Closed reason describing how a decoder outcome was handled.
@@ -35,6 +37,8 @@ pub enum VerboseLoggingOutcomeReason {
     Actionable,
     /// The provider is known, but the event ID is not a supported denial schema.
     UnsupportedEventSchema,
+    /// TDH could not resolve the event schema.
+    SchemaUnavailable,
     /// The event payload was malformed or conflicted with its declared TDH schema.
     EventPayloadMalformed,
     /// A decoder safety bound prevented full payload processing.
@@ -77,6 +81,9 @@ pub struct VerboseLoggingSignature {
     pub provider_guid: String,
     /// Provider-scoped ETW schema identifier.
     pub event_id: u16,
+    /// Sanitized schema name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_name: Option<String>,
     /// Closed exclusion category.
     pub reason: VerboseLoggingOutcomeReason,
     /// Process identifier from the event header.
@@ -307,7 +314,7 @@ pub struct VerboseLoggingDocumentSummary {
 
 impl VerboseLoggingDocument {
     /// Current verbose logging document schema version.
-    pub const VERSION: u32 = 3;
+    pub const VERSION: u32 = 4;
 
     /// Builds an on-disk document from decoder aggregate state.
     #[must_use]
@@ -375,6 +382,7 @@ mod tests {
     fn aggregates_and_sorts_sanitized_signatures() {
         let mut summary = VerboseLoggingSummary::default();
         let signature = VerboseLoggingSignature {
+            event_name: None,
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
             event_id: 14,
@@ -411,6 +419,7 @@ mod tests {
         for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS as u16 {
             summary.record(VerboseLoggingSignature {
                 provider: VerboseLoggingProvider::KernelGeneral,
+                event_name: None,
                 provider_guid: "kernel".to_string(),
                 event_id,
                 reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
@@ -422,6 +431,7 @@ mod tests {
         }
         summary.record(VerboseLoggingSignature {
             provider: VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
+            event_name: None,
             provider_guid: "privacy".to_string(),
             event_id: u16::MAX,
             reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
@@ -443,6 +453,7 @@ mod tests {
             summary.record(VerboseLoggingSignature {
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "kernel".to_string(),
+                event_name: None,
                 event_id,
                 reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
                 pid: 1,
@@ -456,6 +467,7 @@ mod tests {
             provider_guid: "kernel".to_string(),
             event_id: u16::MAX,
             reason: VerboseLoggingOutcomeReason::Actionable,
+            event_name: None,
             pid: 1,
             access_type: Some(crate::learning_mode_core::AccessType::Read),
             resource_type: Some(crate::learning_mode_core::ResourceType::File),
@@ -510,6 +522,7 @@ mod tests {
         for pid in 0..MAX_VERBOSE_LOGGING_GROUPS as u32 {
             summary.record_with_byte_budget(
                 VerboseLoggingSignature {
+                    event_name: None,
                     provider: VerboseLoggingProvider::KernelGeneral,
                     provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
                     event_id: 14,
@@ -549,12 +562,41 @@ mod tests {
     }
 
     #[test]
+    fn schema_name_is_optional_and_separate_from_payload() {
+        let old = serde_json::json!({
+            "provider": "learningModeNetworkDecision",
+            "providerGuid": "provider",
+            "eventId": 0,
+            "reason": "schemaUnavailable",
+            "pid": 42,
+            "properties": [["EventName", "payload-name"]]
+        });
+        let mut signature: VerboseLoggingSignature = serde_json::from_value(old).unwrap();
+        assert!(signature.event_name.is_none());
+        assert!(serde_json::to_value(&signature)
+            .unwrap()
+            .get("eventName")
+            .is_none());
+        signature.event_name = Some("schema-name".into());
+        let json = serde_json::to_value(&signature).unwrap();
+        assert_eq!(json["provider"], "learningModeNetworkDecision");
+        assert_eq!(json["reason"], "schemaUnavailable");
+        assert_eq!(json["eventName"], "schema-name");
+        assert_eq!(json["properties"][0][1], "payload-name");
+        assert_eq!(
+            serde_json::from_value::<VerboseLoggingSignature>(json).unwrap(),
+            signature
+        );
+    }
+
+    #[test]
     fn document_uses_actionable_vocabulary() {
         let mut summary = VerboseLoggingSummary::default();
         summary.record(VerboseLoggingSignature {
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "kernel".to_string(),
             event_id: 14,
+            event_name: None,
             reason: VerboseLoggingOutcomeReason::Actionable,
             pid: 1,
             access_type: Some(crate::learning_mode_core::AccessType::Read),
@@ -565,7 +607,7 @@ mod tests {
         summary.mark_actionable_limit_reached();
 
         let value = serde_json::to_value(VerboseLoggingDocument::new(&summary)).unwrap();
-        assert_eq!(value["version"], 3);
+        assert_eq!(value["version"], 4);
         assert_eq!(value["signatures"][0]["signature"]["reason"], "actionable");
         assert_eq!(value["summary"]["actionableOverflowOccurrences"], 2);
         assert_eq!(value["summary"]["actionableLimitReached"], true);

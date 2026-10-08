@@ -2139,7 +2139,7 @@ fn write_analysis_response(
     membership: &JobMembershipSnapshot,
 ) -> Result<()> {
     let analysis = EtlDenialAnalyzer
-        .analyze_for_job_membership(trace_path, membership)
+        .analyze_relogged_for_job_membership(trace_path, membership)
         .context("failed to decode guarded WPR trace for the sandbox process tree")?;
     write_serialized_analysis_response(pipe, &analysis)
 }

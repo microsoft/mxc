@@ -202,7 +202,8 @@ Emitted when a telemetry-enabled ProcessContainer run successfully produces a
 Learning Mode `captureDenials` verbose logging artifact. MXC reads the
 versioned `*.verbose.json` sibling, validates it as a
 `VerboseLoggingDocument`, derives each provider GUID from the document's
-closed provider enum, drops every verbose property name and value, and
+closed provider enum, drops every verbose property name and value and the
+schema name, sums the counts of signatures that become identical, and
 serializes that telemetry-specific projection as compact JSON. The event never
 contains the actionable denials file, raw ETL, commands, sandbox output, or
 general logger text.

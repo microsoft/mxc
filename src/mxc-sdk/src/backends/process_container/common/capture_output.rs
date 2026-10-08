@@ -336,6 +336,7 @@ mod tests {
         let output_path = directory.path().join("denials.json");
         let mut analysis = AnalysisResult::complete(Vec::new());
         analysis.verbose_logging.record(VerboseLoggingSignature {
+            event_name: None,
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
             event_id: 14,

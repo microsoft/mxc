@@ -208,8 +208,9 @@ sandbox policy:
   `summary.totalDenials` equals `denials.length`.
 - Analysis retains at most 10,000 unique denials and processes at most
   1,000,000 ETW events. Reaching the unique-denial bound stops adding policy
-  entries but continues bounded diagnostic accounting; reaching either bound
-  sets `summary.deniedResourcesTruncated` to `true`.
+  entries but continues bounded diagnostic accounting; reaching either bound, or
+  failing to read a non-network event's schema, sets
+  `summary.deniedResourcesTruncated` to `true`.
 - `resource` is the user-visible identifier for the denied resource,
   interpreted by `resourceType`: an absolute `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
@@ -237,7 +238,7 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "signatures": [
     {
       "signature": {
@@ -268,8 +269,8 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 ```
 
 Signatures are keyed by symbolic provider category, provider GUID,
-provider-scoped event ID, outcome reason from a fixed list, PID, and sorted sanitized
-properties. SIDs, capability names, GUIDs, PIDs/process identifiers, and
+provider-scoped event ID, schema name, outcome reason from a fixed list, PID, and
+sorted sanitized properties. SIDs, capability names, GUIDs, PIDs/process identifiers, and
 non-file resource values are retained. Complete file paths are replaced with
 `<REDACTED>`; standalone user/account names remain replaced with
 `<redacted-user>`.
@@ -311,18 +312,25 @@ named-object resources individually identifiable when they share a prefix
 without exceeding the per-property bound. Redaction occurs before the digest is computed, so neither retained context nor
 a digest is derived from a sensitive value.
 
-Unknown event IDs from known Learning Mode providers are classified as
-`unsupportedEventSchema`; the real ETL path retains their provider GUID and
-PID without attempting an unsupported TDH payload decode.
+Only Learning Mode events are decoded: Kernel-General events 14, 27, and 28,
+PermissiveLearningMode events 14, 27, and 4907, and NetworkDecision event 1.
+Other provider and event ID pairs are ignored. `unsupportedEventSchema` means
+the event has no actionable extractor. NetworkDecision records are kept only by
+unscoped analysis, with PID 0 and that reason; the local file keeps their
+sanitized properties, including remote endpoints, while telemetry drops them.
 
 Per-event TDH failures use these predefined diagnostic reasons:
 `eventPayloadMalformed` means the payload is malformed or conflicts with its declared schema,
 `decoderLimitReached` means a nesting/element/work safety bound stopped
 decoding, and `unsupportedPropertyEncoding` means the decoder cannot consume
 that property shape. When TDH exposes it, the schema-declared name is retained
-as the bounded `EventName` signature property. Free-form decoder errors are
-never serialized. Failure to obtain the event schema remains a fatal analysis
-error rather than being represented as a verbose logging signature.
+as the bounded `eventName` signature field. Free-form decoder errors are
+never serialized. `schemaUnavailable` means the event schema could not be
+obtained. Analysis continues but sets `deniedResourcesTruncated` because the
+unreadable event may have been a denial; network decisions are not denials, so
+they do not. Schema failures
+remain fatal for raw decoding and for scoping brokered capability events in
+guarded traces.
 
 To keep diagnostics bounded, verbose logging retains at most 4,096 distinct
 signatures, 24 sorted properties per signature, and 256 characters per property

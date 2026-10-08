@@ -7,7 +7,8 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::learning_mode_core::{
-    verbose_logging_sibling_path, VerboseLoggingDocument, VerboseLoggingProvider,
+    verbose_logging_sibling_path, VerboseLoggingAggregate, VerboseLoggingDocument,
+    VerboseLoggingProvider,
 };
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{ContainmentBackend, ScriptResponse};
@@ -145,11 +146,19 @@ fn prepare_document(path: &Path) -> Result<PreparedVerboseDocument, String> {
 }
 
 fn project_for_telemetry(mut document: VerboseLoggingDocument) -> VerboseLoggingDocument {
-    for aggregate in &mut document.signatures {
+    let mut groups = std::collections::BTreeMap::new();
+    for mut aggregate in document.signatures {
         aggregate.signature.provider_guid =
             canonical_provider_guid(aggregate.signature.provider).to_string();
+        aggregate.signature.event_name = None;
         aggregate.signature.properties.clear();
+        let count = groups.entry(aggregate.signature).or_insert(0u64);
+        *count = count.saturating_add(aggregate.count);
     }
+    document.signatures = groups
+        .into_iter()
+        .map(|(signature, count)| VerboseLoggingAggregate { signature, count })
+        .collect();
     document
 }
 
@@ -158,6 +167,9 @@ fn canonical_provider_guid(provider: VerboseLoggingProvider) -> &'static str {
         VerboseLoggingProvider::KernelGeneral => "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
         VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
             "{811A1DDB-2E69-5F25-ADC0-4B186170E760}"
+        }
+        VerboseLoggingProvider::LearningModeNetworkDecision => {
+            "{71237669-21C3-4101-BD2F-FF38945D725A}"
         }
     }
 }
@@ -222,6 +234,7 @@ mod tests {
     ) -> VerboseLoggingAggregate {
         VerboseLoggingAggregate {
             signature: VerboseLoggingSignature {
+                event_name: None,
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}".to_string(),
                 event_id,
@@ -389,6 +402,7 @@ mod tests {
         let injected = "customer-secret";
         let mut doc = document(vec![aggregate(1, injected)]);
         doc.signatures[0].signature.provider_guid = injected.to_string();
+        doc.signatures[0].signature.event_name = Some(injected.to_string());
         doc.signatures[0].signature.properties = vec![(injected.to_string(), injected.to_string())];
 
         let projected = project_for_telemetry(doc);
@@ -400,5 +414,52 @@ mod tests {
             canonical_provider_guid(VerboseLoggingProvider::KernelGeneral)
         );
         assert!(projected.signatures[0].signature.properties.is_empty());
+    }
+
+    #[test]
+    fn telemetry_projection_strips_network_payload_and_canonicalizes_provider() {
+        let mut doc = document(vec![aggregate(1, "private-network-data")]);
+        doc.signatures[0].signature.provider = VerboseLoggingProvider::LearningModeNetworkDecision;
+        doc.signatures[0].signature.provider_guid = "untrusted-provider".into();
+        doc.signatures[0].signature.event_name = Some("NetworkDecisionV1".into());
+
+        let projected = project_for_telemetry(doc);
+
+        assert_eq!(
+            projected.signatures[0].signature.provider_guid,
+            "{71237669-21C3-4101-BD2F-FF38945D725A}"
+        );
+        assert!(projected.signatures[0].signature.properties.is_empty());
+        assert!(projected.signatures[0].signature.event_name.is_none());
+        let json = serde_json::to_string(&projected).unwrap();
+        assert!(!json.contains("private-network-data"));
+        assert!(!json.contains("untrusted-provider"));
+    }
+
+    #[test]
+    fn telemetry_deduplicates_after_removing_unknown_provider_guids_and_properties() {
+        let mut first = aggregate(999, "first-secret");
+        first.signature.provider_guid = "first-provider".into();
+        first.signature.event_name = Some("first-event".into());
+        first.count = 3;
+        let mut second = first.clone();
+        second.signature.provider_guid = "second-provider".into();
+        second.signature.event_name = Some("second-event".into());
+        second.signature.properties[0].1 = "second-secret".into();
+        second.count = 4;
+        let mut input = document(vec![first, second]);
+        input.summary.total_occurrences = 7;
+
+        let projected = project_for_telemetry(input);
+
+        assert_eq!(projected.signatures.len(), 1);
+        assert_eq!(projected.signatures[0].count, 7);
+        assert_eq!(
+            projected.signatures[0].signature.provider_guid,
+            "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}"
+        );
+        assert!(projected.signatures[0].signature.event_name.is_none());
+        assert!(projected.signatures[0].signature.properties.is_empty());
+        assert_eq!(projected.summary.total_occurrences, 7);
     }
 }

@@ -21,9 +21,7 @@
 //! The learning-mode ETL carries a set of event IDs that map onto the
 //! resource types we surface. This list grows as more denial sources are
 //! decoded; event IDs outside this vocabulary are excluded rather than
-//! extracted, and (for the known providers below) that exclusion is
-//! aggregated into [`crate::learning_mode_core::VerboseLoggingSummary`] rather than
-//! silently dropped. The IDs handled today:
+//! extracted. The IDs handled today:
 //!
 //! - **14 / 4907 — access check** — the primary denial event
 //!   (`ObjectType` / `ObjectName` / `AccessMask`). `ObjectType` selects the
@@ -72,6 +70,10 @@ pub(crate) const PRIVACY_LEARNING_MODE_PROVIDER: GUID = GUID {
     data4: [0xad, 0xc0, 0x4b, 0x18, 0x61, 0x70, 0xe7, 0x60],
 };
 
+pub(crate) const NETWORK_DECISION_PROVIDER: GUID =
+    GUID::from_u128(0x71237669_21c3_4101_bd2f_ff38945d725a);
+pub(crate) const NETWORK_DECISION_EVENT_ID: u16 = 1;
+
 pub(crate) const ACCESS_CHECK_EVENT_ID: u16 = 14;
 pub(crate) const LEARNING_MODE_VIOLATION_EVENT_ID: u16 = 27;
 pub(crate) const CAPABILITY_DENIAL_EVENT_ID: u16 = 28;
@@ -90,6 +92,7 @@ pub struct DecodedEventParts {
     pub provider: GUID,
     /// Originating ETW event ID.
     pub event_id: u16,
+    pub event_name: Option<String>,
     /// `(name, value)` pairs from the decoded payload. String values are
     /// often TDH-quoted; extractors trim the surrounding quotes.
     pub props: Vec<(String, String)>,
@@ -229,13 +232,21 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
                 | LEARNING_MODE_VIOLATION_EVENT_ID
                 | PRIVACY_ACCESS_CHECK_EVENT_ID
         )
+    } else if provider == NETWORK_DECISION_PROVIDER {
+        event_id == NETWORK_DECISION_EVENT_ID
     } else {
         false
     }
 }
 
+pub(crate) fn is_process_scoped_event(provider: GUID, event_id: u16) -> bool {
+    provider != NETWORK_DECISION_PROVIDER && is_learning_mode_event(provider, event_id)
+}
+
 pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) -> Option<u32> {
-    if parts.event_id == CAPABILITY_DENIAL_EVENT_ID {
+    if parts.provider == NETWORK_DECISION_PROVIDER {
+        Some(0)
+    } else if parts.event_id == CAPABILITY_DENIAL_EVENT_ID {
         effective_capability_event_pid(
             find_prop(&parts.props, "ProcessId").map(std::string::String::as_str),
         )
@@ -264,6 +275,8 @@ pub(crate) fn verbose_logging_provider_for_guid(provider: GUID) -> Option<Verbos
         Some(VerboseLoggingProvider::KernelGeneral)
     } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
         Some(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode)
+    } else if provider == NETWORK_DECISION_PROVIDER {
+        Some(VerboseLoggingProvider::LearningModeNetworkDecision)
     } else {
         None
     }
@@ -281,12 +294,15 @@ pub(crate) fn verbose_logging_provider_guid(provider: VerboseLoggingProvider) ->
         VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
             format_guid_braced_uppercase(PRIVACY_LEARNING_MODE_PROVIDER)
         }
+        VerboseLoggingProvider::LearningModeNetworkDecision => {
+            format_guid_braced_uppercase(NETWORK_DECISION_PROVIDER)
+        }
     }
 }
 
 // Keep the serialized spelling independent of formatting changes in the
 // `windows` crate: verbose signatures require braces and uppercase hex.
-fn format_guid_braced_uppercase(guid: GUID) -> String {
+pub(crate) fn format_guid_braced_uppercase(guid: GUID) -> String {
     format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
         guid.data1,
@@ -418,23 +434,49 @@ fn is_identity_property(name: &str) -> bool {
 
 fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&str>) -> bool {
     let normalized = NormalizedPropertyName(name);
-    if normalized.ends_with("path") || normalized.ends_with("filename") {
+    if normalized.ends_with("path")
+        || normalized.ends_with("filename")
+        || normalized.ends_with("filenamestring")
+    {
         return true;
     }
 
-    if !normalized.equals("objectname") && !normalized.equals("resource") {
-        return false;
-    }
-    if object_type.is_some_and(|object_type| com_outcome_reason(object_type).is_some()) {
-        return !is_guid_identifier(value);
-    }
-    if object_type.is_some_and(|object_type| object_type.eq_ignore_ascii_case("File")) {
-        return true;
+    if normalized.equals("objectname") || normalized.equals("resource") {
+        if object_type.is_some_and(|object_type| com_outcome_reason(object_type).is_some()) {
+            return !is_guid_identifier(value);
+        }
+        if object_type.is_some_and(|object_type| object_type.eq_ignore_ascii_case("File")) {
+            return true;
+        }
     }
 
-    crate::learning_mode_windows::path_norm::is_user_visible_absolute(value)
-        || looks_like_dos_device_filesystem_path(value)
-        || looks_like_nt_filesystem_path(value)
+    contains_file_path(value)
+}
+
+fn contains_file_path(value: &str) -> bool {
+    value.match_indices(['\\', ':']).any(|(offset, marker)| {
+        if value[offset..].starts_with(r"\\\\") {
+            return false;
+        }
+        let offset = if marker == ":" {
+            offset.saturating_sub(1)
+        } else {
+            offset
+        };
+        let Some(candidate) = value.get(offset..) else {
+            return false;
+        };
+        if offset > 0
+            && candidate.get(1..4) == Some("://")
+            && (value.as_bytes()[offset - 1].is_ascii_alphanumeric()
+                || matches!(value.as_bytes()[offset - 1], b'+' | b'-' | b'.'))
+        {
+            return false;
+        }
+        crate::learning_mode_windows::path_norm::is_user_visible_absolute(candidate)
+            || looks_like_dos_device_filesystem_path(candidate)
+            || looks_like_nt_filesystem_path(candidate)
+    })
 }
 
 fn looks_like_dos_device_filesystem_path(value: &str) -> bool {
@@ -453,7 +495,9 @@ fn looks_like_dos_device_filesystem_path(value: &str) -> bool {
     let Some(volume) = strip_prefix_ignore_ascii_case(rest, "Volume{") else {
         return false;
     };
-    volume.contains(r"}\")
+    volume
+        .split_once('\\')
+        .is_some_and(|(guid, _)| guid.ends_with('}'))
 }
 
 fn looks_like_drive_absolute_path(value: &str) -> bool {
@@ -555,7 +599,7 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
         .map(|(_, value)| value.trim_matches('"'));
     let mut sanitized = std::collections::BTreeMap::new();
     for (name, raw_value) in props {
-        if is_timestamp_like_property(name) {
+        if is_timestamp_like_property(name) || contains_file_path(name) {
             continue;
         }
         let value = raw_value.trim_matches('"');
@@ -612,6 +656,14 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
             .collect()
     }
     bound_properties(sanitized.into_iter().collect())
+}
+
+pub(crate) fn sanitize_event_name(name: Option<&str>) -> Option<String> {
+    let name = name?;
+    sanitize_properties(&[("EventName".into(), name.into())])
+        .into_iter()
+        .next()
+        .map(|(_, value)| value)
 }
 
 ///
@@ -1063,6 +1115,7 @@ mod tests {
         DecodedEventParts {
             provider,
             event_id,
+            event_name: None,
             props: kv
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -1832,13 +1885,49 @@ mod tests {
             r"\Device\MountPointManager",
             Some("Section")
         ));
-        for identifier in [r"\??\FDC#GENERIC_FLOPPY_DRIVE", r"\\.\PhysicalDrive0"] {
+        for identifier in [
+            r"\??\FDC#GENERIC_FLOPPY_DRIVE",
+            r"\\.\PhysicalDrive0",
+            "https://example.com/resource",
+            "custom+a://example.com/resource",
+            r"\Device\NamedPipe\mxc",
+        ] {
             assert!(!looks_like_file_path_property(
                 "ObjectName",
                 identifier,
                 Some("SymbolicLink")
             ));
         }
+    }
+
+    #[test]
+    fn path_content_scan_handles_candidate_boundaries() {
+        for (value, expected) in [
+            ("", false),
+            (":", false),
+            ("::", false),
+            ("\u{03bb}:/not-a-drive", false),
+            ("\u{03bb}:C:/private.txt", true),
+            ("https://example.com:443/resource", false),
+            ("custom+a://example.com/resource", false),
+            (r"\\server\pipe\mxc", false),
+            (r"\Device\NamedPipe\mxc", false),
+            (r"\BaseNamedObjects\cache", false),
+            (r"C:\", true),
+            ("C:/", true),
+            (r"prefix \\server\share\file.txt", true),
+            (r"prefix \\?\Volume{1234}\file.txt", true),
+        ] {
+            assert_eq!(contains_file_path(value), expected, "{value}");
+        }
+        let prefix = "ordinary text ".repeat(4096);
+        assert!(!contains_file_path(&prefix));
+        assert!(contains_file_path(&format!("{prefix}C:\\private.txt")));
+        assert!(!contains_file_path(&format!(
+            "{}server\\pipe\\mxc",
+            "\\".repeat(32 * 1024)
+        )));
+        assert!(!contains_file_path(&r"\??\Volume{".repeat(4096)));
     }
 
     #[test]
@@ -1924,6 +2013,82 @@ mod tests {
         let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
         assert_eq!(value_for("UserName"), Some(REDACTED_USER));
         assert_eq!(value_for("ObjectName"), Some(REDACTED_PATH));
+    }
+
+    #[test]
+    fn sanitize_properties_omits_sensitive_property_names() {
+        let props = [
+            (r"C:\Users\alice\secret.txt".into(), "42".into()),
+            (r"lookup \\server\share\private.txt".into(), "43".into()),
+            (r"\Device\HarddiskVolume3\private.txt".into(), "44".into()),
+            ("SafeIdentifier".into(), "42".into()),
+        ];
+        assert_eq!(
+            sanitize_properties(&props),
+            [("SafeIdentifier".into(), "42".into())]
+        );
+    }
+
+    #[test]
+    fn event_names_are_sanitized_and_bounded() {
+        assert_eq!(sanitize_event_name(None), None);
+        assert_eq!(
+            sanitize_event_name(Some("AccessCheck")).as_deref(),
+            Some("AccessCheck")
+        );
+        assert_eq!(
+            sanitize_event_name(Some(r"C:\Users\alice\secret.txt")).as_deref(),
+            Some(REDACTED_PATH)
+        );
+        let first = sanitize_event_name(Some(&format!("{}First", "a".repeat(400)))).unwrap();
+        let second = sanitize_event_name(Some(&format!("{}Second", "a".repeat(400)))).unwrap();
+        assert_ne!(first, second);
+        assert!(first.chars().count() <= MAX_SIGNATURE_VALUE_LEN);
+        assert!(second.chars().count() <= MAX_SIGNATURE_VALUE_LEN);
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_embedded_file_paths() {
+        let long_value = format!("{}C:\\Users\\alice\\secret.txt", "prefix ".repeat(100));
+        for (name, value) in [
+            ("CommandLine", r"cmd.exe /c type C:\Users\alice\secret.txt"),
+            (
+                "CommandLine",
+                r#"--input="C:\Program Files\private\data.txt""#,
+            ),
+            ("CommandLine", r"open \\server\share\private.txt"),
+            ("CommandLine", r"open \??\C:\Users\alice\secret.txt"),
+            ("CommandLine", r"open \\?\Volume{1234}\private.txt"),
+            (
+                "CommandLine",
+                r"open \Device\HarddiskVolume3\Users\alice\secret.txt",
+            ),
+            ("CommandLine", "message: C:/Users/alice/secret.txt"),
+            ("CommandLine", "\u{03bb}: C:\\Users\\alice\\secret.txt"),
+            ("CommandLine", long_value.as_str()),
+            (
+                "FutureLocations",
+                r#"["C:\Users\alice\secret.txt", "D:\private.txt"]"#,
+            ),
+            (
+                "FutureLocations",
+                r#"["safe", "\\server\share\private.txt"]"#,
+            ),
+            (
+                "FutureLocations",
+                r#"["safe", "\Device\HarddiskVolume3\private.txt"]"#,
+            ),
+            ("FutureLocations", r#"["C:\\Users\\alice\\secret.txt"]"#),
+            ("FutureLocation", r"C:\Users\private\file.txt"),
+            ("LogFileNameString", "ReloggedFile.ETL"),
+            ("UnrecognizedField", r"\\server\share\private.txt"),
+        ] {
+            assert_eq!(
+                sanitize_properties(&[(name.into(), value.into())]),
+                [(name.into(), REDACTED_PATH.into())],
+                "{value}",
+            );
+        }
     }
 
     #[test]

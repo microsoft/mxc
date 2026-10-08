@@ -85,12 +85,43 @@ impl EventSchemaKey {
 
 #[derive(Default)]
 pub(crate) struct EventSchemaCache {
-    schemas: HashMap<EventSchemaKey, TdhInfoBuffer>,
+    schemas: HashMap<EventSchemaKey, Result<TdhInfoBuffer, DecodeError>>,
+    #[cfg(test)]
+    pub(crate) schema_loads: usize,
+    #[cfg(test)]
+    queued_loads: std::collections::VecDeque<Result<TdhInfoBuffer, DecodeError>>,
 }
 
-#[derive(Debug)]
+impl EventSchemaCache {
+    unsafe fn load(
+        &mut self,
+        event_record: *mut EVENT_RECORD,
+    ) -> Result<TdhInfoBuffer, DecodeError> {
+        #[cfg(test)]
+        {
+            self.schema_loads += 1;
+            if let Some(schema) = self.queued_loads.pop_front() {
+                return schema;
+            }
+        }
+        unsafe { load_event_schema(event_record) }
+    }
+}
+
+#[cfg(test)]
+impl EventSchemaCache {
+    pub(crate) fn insert_test_schema(&mut self, record: &EVENT_RECORD, names: &[&str]) {
+        self.schemas.insert(
+            EventSchemaKey::from_record(record),
+            Ok(tests::uint32_property_buffer(names)),
+        );
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum DecodeError {
     Schema(String),
+    SchemaNotFound,
     Event {
         kind: EventDecodeKind,
         event_name: Option<String>,
@@ -106,21 +137,17 @@ pub(crate) enum EventDecodeKind {
 }
 
 impl DecodeError {
-    pub(crate) fn is_schema_error(&self) -> bool {
-        matches!(self, Self::Schema(_))
-    }
-
     pub(crate) fn event_kind(&self) -> Option<EventDecodeKind> {
         match self {
             Self::Event { kind, .. } => Some(*kind),
-            Self::Schema(_) => None,
+            Self::Schema(_) | Self::SchemaNotFound => None,
         }
     }
 
     pub(crate) fn event_name(&self) -> Option<&str> {
         match self {
             Self::Event { event_name, .. } => event_name.as_deref(),
-            Self::Schema(_) => None,
+            Self::Schema(_) | Self::SchemaNotFound => None,
         }
     }
 
@@ -141,6 +168,7 @@ impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Schema(message) | Self::Event { message, .. } => f.write_str(message),
+            Self::SchemaNotFound => f.write_str("event schema not found"),
         }
     }
 }
@@ -189,9 +217,6 @@ impl TdhInfoBuffer {
 
 /// Decodes an `EVENT_RECORD` into `DecodedEventParts`.
 ///
-/// Returns `None` when TDH can't describe the event (rare — usually
-/// indicates a corrupted or unknown event).
-///
 /// # Safety
 /// `event_record` must point to a valid `EVENT_RECORD` provided by the
 /// ETW callback; the caller must not retain references to its fields
@@ -210,11 +235,12 @@ pub unsafe fn decode_event_parts(
     let pointer_size = pointer_size_from_header_flags(header.Flags);
     let event_name = schema_event_name(buffer.as_bytes(), info);
     let props = decode_properties(buffer.as_bytes(), info, event_record, pointer_size)
-        .map_err(|error| map_property_decode_error(error, event_name))?;
+        .map_err(|error| map_property_decode_error(error, event_name.clone()))?;
 
     Ok(DecodedEventParts {
         provider: header.ProviderId,
         event_id,
+        event_name,
         props,
     })
 }
@@ -247,15 +273,17 @@ unsafe fn event_schema<'a>(
     event_record: *mut EVENT_RECORD,
     event: &EVENT_RECORD,
     schema_cache: &'a mut EventSchemaCache,
-    uncached_schema: &'a mut Option<TdhInfoBuffer>,
+    uncached_schema: &'a mut Option<Result<TdhInfoBuffer, DecodeError>>,
 ) -> Result<&'a TdhInfoBuffer, DecodeError> {
     let key = EventSchemaKey::from_record(event);
     let cacheable = !unsafe { has_trace_logging_schema(event) };
-    if !cacheable {
-        *uncached_schema = Some(unsafe { load_event_schema(event_record) }?);
-    } else if !schema_cache.schemas.contains_key(&key) {
-        let schema = unsafe { load_event_schema(event_record) }?;
-        cache_or_retain_schema(schema_cache, key, schema, uncached_schema);
+    if !cacheable || !schema_cache.schemas.contains_key(&key) {
+        let schema = unsafe { schema_cache.load(event_record) };
+        if cacheable {
+            cache_or_retain_schema(schema_cache, key, schema, uncached_schema);
+        } else {
+            *uncached_schema = Some(schema);
+        }
     }
     schema_buffer(schema_cache, &key, uncached_schema)
 }
@@ -263,10 +291,15 @@ unsafe fn event_schema<'a>(
 fn cache_or_retain_schema(
     schema_cache: &mut EventSchemaCache,
     key: EventSchemaKey,
-    schema: TdhInfoBuffer,
-    uncached_schema: &mut Option<TdhInfoBuffer>,
+    schema: Result<TdhInfoBuffer, DecodeError>,
+    uncached_schema: &mut Option<Result<TdhInfoBuffer, DecodeError>>,
 ) {
-    if schema_cache.schemas.len() < MAX_SCHEMA_CACHE_ENTRIES {
+    let limit = match &schema {
+        Ok(_) => MAX_SCHEMA_CACHE_ENTRIES,
+        Err(DecodeError::SchemaNotFound) => MAX_SCHEMA_CACHE_ENTRIES / 2,
+        Err(_) => 0,
+    };
+    if schema_cache.schemas.len() < limit {
         schema_cache.schemas.insert(key, schema);
     } else {
         *uncached_schema = Some(schema);
@@ -276,15 +309,14 @@ fn cache_or_retain_schema(
 fn schema_buffer<'a>(
     schema_cache: &'a EventSchemaCache,
     key: &EventSchemaKey,
-    uncached_schema: &'a Option<TdhInfoBuffer>,
+    uncached_schema: &'a Option<Result<TdhInfoBuffer, DecodeError>>,
 ) -> Result<&'a TdhInfoBuffer, DecodeError> {
-    if let Some(buffer) = uncached_schema {
-        return Ok(buffer);
-    }
-    schema_cache
-        .schemas
-        .get(key)
-        .ok_or_else(|| DecodeError::Schema("event schema cache lookup failed".to_string()))
+    uncached_schema
+        .as_ref()
+        .or_else(|| schema_cache.schemas.get(key))
+        .ok_or_else(|| DecodeError::Schema("event schema cache lookup failed".to_string()))?
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 fn map_property_decode_error(
@@ -320,10 +352,14 @@ unsafe fn load_event_schema(event_record: *mut EVENT_RECORD) -> Result<TdhInfoBu
     let mut buf_size: u32 = 0;
     // First call: discover required buffer size. ERROR_INSUFFICIENT_BUFFER = 122.
     let status = unsafe { TdhGetEventInformation(event_record, None, None, &mut buf_size) };
-    if status != 122 {
-        return Err(DecodeError::Schema(format!(
-            "TdhGetEventInformation(size) failed with Win32 error {status}"
-        )));
+    match status {
+        122 => {}
+        1168 => return Err(DecodeError::SchemaNotFound),
+        _ => {
+            return Err(DecodeError::Schema(format!(
+                "TdhGetEventInformation(size) failed with Win32 error {status}"
+            )))
+        }
     }
 
     let mut buffer = TdhInfoBuffer::new(buf_size as usize);
@@ -1005,7 +1041,7 @@ mod tests {
             .collect()
     }
 
-    fn uint32_property_buffer(names: &[&str]) -> TdhInfoBuffer {
+    pub(super) fn uint32_property_buffer(names: &[&str]) -> TdhInfoBuffer {
         assert!(!names.is_empty());
         let encoded_names = names
             .iter()
@@ -1060,34 +1096,81 @@ mod tests {
     }
 
     #[test]
-    fn schema_is_retained_uncached_at_cache_capacity() {
+    fn missing_manifest_schema_is_cached_for_full_and_property_decoding() {
         let mut cache = EventSchemaCache::default();
-        for id in 0..MAX_SCHEMA_CACHE_ENTRIES {
-            let mut record: EVENT_RECORD = unsafe { core::mem::zeroed() };
-            record.EventHeader.EventDescriptor.Id = id as u16;
-            let mut uncached = None;
-            cache_or_retain_schema(
-                &mut cache,
-                EventSchemaKey::from_record(&record),
-                TdhInfoBuffer::new(1),
-                &mut uncached,
-            );
-            assert!(uncached.is_none());
+        let mut record = EVENT_RECORD::default();
+        record.EventHeader.ProviderId = GUID::from_u128(1);
+
+        for _ in 0..3 {
+            assert!(matches!(
+                unsafe { decode_event_parts(&mut record, &mut cache) },
+                Err(DecodeError::SchemaNotFound)
+            ));
+            assert!(matches!(
+                unsafe { decode_event_property(&mut record, &mut cache, "ProcessId") },
+                Err(DecodeError::SchemaNotFound)
+            ));
         }
 
-        let mut overflow_record: EVENT_RECORD = unsafe { core::mem::zeroed() };
-        overflow_record.EventHeader.EventDescriptor.Id = MAX_SCHEMA_CACHE_ENTRIES as u16;
-        let overflow_key = EventSchemaKey::from_record(&overflow_record);
-        let mut uncached = None;
-        cache_or_retain_schema(
-            &mut cache,
-            overflow_key,
-            TdhInfoBuffer::new(std::mem::size_of::<TRACE_EVENT_INFO>()),
-            &mut uncached,
-        );
+        assert_eq!(cache.schema_loads, 1);
+        assert_eq!(cache.schemas.len(), 1);
+    }
 
-        assert_eq!(cache.schemas.len(), MAX_SCHEMA_CACHE_ENTRIES);
-        assert!(schema_buffer(&cache, &overflow_key, &uncached).is_ok());
+    #[test]
+    fn transient_schema_failures_are_retried() {
+        let mut cache = EventSchemaCache::default();
+        cache.queued_loads.extend([
+            Err(DecodeError::Schema("transient".into())),
+            Ok(uint32_property_buffer(&["ProcessId"])),
+        ]);
+        let mut record = EVENT_RECORD::default();
+        let payload = 42u32.to_le_bytes();
+        record.UserData = payload.as_ptr().cast_mut().cast();
+        record.UserDataLength = payload.len() as u16;
+
+        assert!(matches!(
+            unsafe { decode_event_property(&mut record, &mut cache, "ProcessId") },
+            Err(DecodeError::Schema(_))
+        ));
+        assert!(
+            unsafe { decode_event_property(&mut record, &mut cache, "ProcessId") }
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(cache.schema_loads, 2);
+    }
+
+    #[test]
+    fn missing_schemas_leave_room_for_successful_schemas() {
+        let mut cache = EventSchemaCache::default();
+        let key = |id: usize| {
+            let mut record = EVENT_RECORD::default();
+            record.EventHeader.EventDescriptor.Id = id as u16;
+            EventSchemaKey::from_record(&record)
+        };
+        let mut cache_result = |id, schema| {
+            let mut uncached = None;
+            cache_or_retain_schema(&mut cache, key(id), schema, &mut uncached);
+            uncached.is_none()
+        };
+        let half = MAX_SCHEMA_CACHE_ENTRIES / 2;
+
+        assert!(!cache_result(
+            0,
+            Err(DecodeError::Schema("transient".into()))
+        ));
+        for id in 0..=half {
+            assert_eq!(
+                cache_result(id, Err(DecodeError::SchemaNotFound)),
+                id < half
+            );
+        }
+        for id in half + 1..=MAX_SCHEMA_CACHE_ENTRIES + 1 {
+            assert_eq!(
+                cache_result(id, Ok(TdhInfoBuffer::new(1))),
+                id <= MAX_SCHEMA_CACHE_ENTRIES
+            );
+        }
     }
 
     #[test]
@@ -1491,15 +1574,41 @@ mod tests {
     }
 
     #[test]
-    fn trace_logging_schema_events_are_not_cacheable_by_descriptor_alone() {
-        let mut item: windows::Win32::System::Diagnostics::Etw::EVENT_HEADER_EXTENDED_DATA_ITEM =
-            unsafe { std::mem::zeroed() };
-        item.ExtType = EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL as u16;
-        let mut record: EVENT_RECORD = unsafe { std::mem::zeroed() };
+    fn trace_logging_schema_failures_are_not_cached() {
+        let mut cache = EventSchemaCache::default();
+        cache.queued_loads.extend([
+            Err(DecodeError::SchemaNotFound),
+            Err(DecodeError::SchemaNotFound),
+            Err(DecodeError::SchemaNotFound),
+        ]);
+        let mut record = EVENT_RECORD::default();
+        record.EventHeader.ProviderId = GUID::from_u128(1);
+        record.EventHeader.EventDescriptor.Channel = 11;
+        assert!(matches!(
+            unsafe { decode_event_parts(&mut record, &mut cache) },
+            Err(DecodeError::SchemaNotFound)
+        ));
+
+        let metadata = [0_u8; 4];
+        let mut item = windows::Win32::System::Diagnostics::Etw::EVENT_HEADER_EXTENDED_DATA_ITEM {
+            ExtType: EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL as u16,
+            DataSize: metadata.len() as u16,
+            DataPtr: metadata.as_ptr() as u64,
+            ..Default::default()
+        };
+        record.EventHeader.Flags = 1;
         record.ExtendedDataCount = 1;
         record.ExtendedData = &mut item;
-
         assert!(unsafe { has_trace_logging_schema(&record) });
+
+        for _ in 0..2 {
+            assert!(matches!(
+                unsafe { decode_event_parts(&mut record, &mut cache) },
+                Err(DecodeError::SchemaNotFound)
+            ));
+        }
+        assert_eq!(cache.schema_loads, 3);
+        assert_eq!(cache.schemas.len(), 1);
     }
 
     #[test]
