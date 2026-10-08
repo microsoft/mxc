@@ -151,10 +151,10 @@ ungranted access is handled while it is recorded:
 > with the guarded WPR capture provider. Unsupported hosts return
 > `backend_unavailable` only when neither path can preserve the full policy.
 >
-> Internal validation confirmed that build `26657.1002` exposes only the
-> incompatible earlier contract and is rejected, while build `26663.1000`
-> exposes the complete V2 contract. These are validation points, not a public
-> Windows release-floor commitment; callers should rely on the runtime probe.
+> Internal validation found no native capture support on build `26657.1002`
+> and the complete option-aware contract on build `26663.1000`. These are
+> validation points, not a public Windows release-floor commitment; callers
+> should rely on the runtime probe.
 >
 > Native PSEC capture cannot represent `processContainer.leastPrivilege`
 > because the process security-environment API does not expose an LPAC token
@@ -288,9 +288,13 @@ intentional authored policy rather than missing grants. They do not appear as
 actionable `DeniedResource` grant candidates. The version-5 artifact retains
 their typed decision reason and the reason-specific review or proxy guidance
 shown above. It never recommends a direct allow for these decisions.
-Malformed events, unknown reasons, identity mismatches, and incomplete
-endpoints are diagnostic-only and receive no success-shaped recommendation.
-Reason `65535` remains `unknownNetworkReason`.
+Malformed events, unknown reasons, identity mismatches, missing or invalid
+remote addresses, and mismatched ICMP protocol/address families are
+diagnostic-only and receive no success-shaped recommendation. A reason-`100`
+event with a valid numeric remote address but an unknown protocol or a missing
+or zero TCP/UDP port remains an actionable observed denial, but omits the
+structured endpoint and `addEgressAllow` recommendation. Reason `65535`
+remains `unknownNetworkReason`.
 
 For reason `100`, the structured endpoint recommendation is emitted only when
 MXC can preserve the observed numeric address and a supported protocol without
@@ -322,8 +326,11 @@ The caller-facing network record is:
 The existing `(resource, accessType)` deduplication contract still applies.
 When repeated events describe the same endpoint, the actionable record retains
 the first observation's `pid` and `filetime`. Per-event source properties such
-as direction, filter ID, local endpoint, package identity, and application ID
-remain available only in the bounded verbose logging signature. Complete
+as the `Direction` and `FilterId` fields, local endpoint, package identity, and
+application ID remain available only in the bounded verbose logging signature.
+`Direction` and `FilterId` are preserved as sanitized numeric strings;
+`Direction` has no public enum or caller-facing semantic mapping, and
+`FilterId` is diagnostic correlation only, never a policy selector. Complete
 application paths are redacted there as `<REDACTED>`; timestamps are omitted
 from the signature so repeated observations can aggregate.
 
