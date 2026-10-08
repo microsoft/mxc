@@ -372,6 +372,42 @@ NVX CLI or executor. The existing generic `wxc-exec` may be built with NVX
 support only as an internal end-to-end harness over the same `mxc_engine`
 implementation.
 
+#### 3.2.1 MXC request and NVX call flow
+
+The SDKs expose typed MXC requests. Node and .NET serialize those requests and
+cross the existing `mxc_ffi` boundary. Rust passes typed requests through
+`mxc-sdk` directly. Both paths reach the MicroVM adapter in `mxc_engine`.
+
+```mermaid
+flowchart LR
+    Rust["Rust SDK"] --> RustSdk["mxc-sdk"]
+    Node["Node SDK"] --> FFI["mxc_ffi"]
+    DotNet[".NET SDK"] --> FFI
+    FFI --> Parser["Exact contract parsing and binding"]
+    Parser --> Engine["mxc_engine MicroVM adapter"]
+    RustSdk --> Engine
+    Engine --> NVX["NVX Rust interface"]
+```
+
+The adapter converts the MXC MicroVM, filesystem, network, and process fields
+into the phase-specific NVX request types. It then calls the NVX Rust surface
+as follows:
+
+| MXC operation | Input reaching the adapter | NVX Rust calls |
+| --- | --- | --- |
+| Platform discovery | Registered runtime directory and packaged runtime metadata | `probe` |
+| One-shot `run` or `spawn` | MicroVM image and memory, filesystem policy, network policy, and process request | `validate_provision` → `provision` → `start` → `validate_exec` → `exec`; the one-shot owner later waits or cancels, then calls `stop` and `deprovision` |
+| State-aware provision | MicroVM image and memory, filesystem policy, and network policy | `validate_provision` → `provision` |
+| State-aware start | NVX instance ID | `start` |
+| State-aware execution | NVX instance ID and process request | `validate_exec` → `exec`; the SDK waits through `Execution::wait` or `Execution::wait_with_output` |
+| Execution cancellation | `Execution` handle | `Execution::canceller` → `Canceller::cancel` |
+| State-aware stop | NVX instance ID | `stop` |
+| State-aware deprovision | NVX instance ID | `deprovision` |
+
+The adapter maps NVX lifecycle results, execution outcomes, and errors back
+to the existing MXC SDK result and error types. Appendix B defines the
+execution-outcome mapping.
+
 ## 4. Filesystem, lifecycle, and network support
 
 The integration will target the MXC `1.1.0-alpha` development schema.
