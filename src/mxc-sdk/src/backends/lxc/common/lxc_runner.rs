@@ -2145,8 +2145,9 @@ mod tests {
     }
 
     #[test]
-    fn a_policy_that_installs_no_chain_leaves_the_capability_alone() {
-        // Dropping it needs CAP_SETPCAP, which an unprivileged caller lacks.
+    fn a_policy_that_installs_no_chain_leaves_the_workload_unconfined() {
+        // Confining takes CAP_SETPCAP to drop a capability, which an
+        // unprivileged caller lacks.
         assert_eq!(
             container_firewall(false, false),
             ContainerFirewall::Absent,
