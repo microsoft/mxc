@@ -18,10 +18,10 @@ behind a unified containment model and typed SDKs.
   - **Network policy**: Proxy support, outbound controls, and backend-dependent
     host filtering
   - **UI policy**: Clipboard, display, and GUI access controls
-- **State-aware lifecycle**: Provision, start, execute, stop, and deprovision
+- **Container lifecycle operations**: Provision, start, execute, stop, and deprovision
   persistent containers
-- **Rust, .NET, and Node SDKs**: Versioned APIs for one-shot and state-aware
-  execution
+- **Rust, .NET, and Node SDKs**: Versioned APIs for create-and-run execution and
+  container lifecycle operations
 - **Diagnostics**: Tools to understand access-denied failures in a container
 
 ## What is MXC?
@@ -156,7 +156,7 @@ used by the Node SDK.
 
 Build prerequisites are:
 
-- [Rust](https://rustup.rs/), pinned to version **1.93** by
+- [Rust](https://rustup.rs/), required version **1.93** as specified by
   `src/rust-toolchain.toml`
 - Node.js 24 or later and npm
 - The platform toolchain and prerequisites described by the selected backend
@@ -187,6 +187,7 @@ build.bat --all             # Release build for current architecture
 
 | Document | Repository location | Purpose |
 |---|---|---|
+| Terminology | [`docs/glossary.md`](docs/glossary.md) | Plain-English definitions of consumer terms |
 | SDK samples | [`samples/`](samples/README.md) | Runnable Rust, .NET, and Node scenarios |
 | SDK API reference | [`docs/api-reference/`](docs/api-reference/README.md) | Supported V1 operations and types |
 | Container lifecycle | [`docs/container-lifecycle.md`](docs/container-lifecycle.md) | Persistent container lifecycle overview |

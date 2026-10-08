@@ -7,7 +7,7 @@ transient container with outbound, inbound, and host-loopback networking
 explicitly denied. The contained `curl` request must fail; a successful request
 causes the sample to fail.
 
-The host's native process-isolation backend must support this deny-all posture.
+The host's native process-isolation backend must support denying all network access.
 Unsupported policy fails before creating the container.
 
 ## Run

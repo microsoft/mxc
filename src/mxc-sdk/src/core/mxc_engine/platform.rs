@@ -39,7 +39,7 @@ pub struct PlatformSupport {
     pub is_supported: bool,
     /// Why the platform is unsupported, when `is_supported` is false.
     pub reason: Option<String>,
-    /// Containment backends available on this host, by wire name
+    /// Containment backends available on this host, using their JSON `containment` values
     /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"processcontainer"`).
     ///
     /// Reports that the backend's tooling is present and usable, not that the
@@ -131,7 +131,7 @@ where
 /// reported when the host has the WSL Container runtime (requires the `wslc`
 /// feature). The broader host-capability set (backends the host can run but the
 /// SDK cannot launch) is reported separately by
-/// [`available_backends`](crate::available_backends).
+/// [`available_backends`](crate::v1::available_backends).
 ///
 /// Every probe here answers "is the tooling usable", not "may this process use
 /// it" — see [`PlatformSupport::available_methods`].

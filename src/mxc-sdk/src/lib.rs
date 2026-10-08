@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `mxc-sdk` â€” an importable library for running MXC containers in-process.
+//! `mxc-sdk`: an importable library for running MXC containers in-process.
+//!
+//! See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md)
+//! for terminology.
 //!
 //! Create a [`v1::ContainerRequest`] with its command and restrictions, then either:
 //!
@@ -64,9 +67,8 @@
 //!
 //! # Diagnosing a failure
 //!
-//! [`Error`] carries a closed [`ErrorCode`] and a message, and â€” when the
-//! failure came from an underlying platform API â€” the call that failed and its
-//! status:
+//! [`Error`] carries an [`ErrorCode`] and a message. When an underlying platform
+//! API fails, it also identifies the call and its status:
 //!
 //! ```no_run
 //! # fn demo(error: mxc_sdk::v1::Error) {
@@ -80,7 +82,7 @@
 //! ```
 //!
 //! [`Error::operation`] and [`Error::native_code`] are absent for a failure
-//! raised before any API call was reached â€” a malformed policy, say â€” and a
+//! raised before any API call was reached (a malformed policy, say) and a
 //! native code only ever appears alongside the operation it belongs to.
 //! `Display` renders both, so logging the error alone does not lose them.
 //!
@@ -119,9 +121,9 @@
 //! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
 //! stream they did not take. WSLC does not expose stdin.
 //!
-//! [`v1::spawn_with_pty`] allocates a caller-controlled PTY for supported one-shot
-//! backends, including IsolationSession, Bubblewrap, LXC, and Seatbelt direct
-//! execution.
+//! [`v1::spawn_with_pty`] allocates a caller-controlled PTY for create-and-run
+//! execution on supported backends, including IsolationSession, Bubblewrap, LXC,
+//! and Seatbelt direct execution.
 //! [`v1::container::spawn_in_container_with_pty`] does the same for a process in
 //! an existing IsolationSession container. Unsupported backends reject the
 //! request before creating a sandbox.
@@ -416,7 +418,7 @@ pub mod __ffi {
     /// Run a lifecycle request (as a JSON string) and return the
     /// response-envelope JSON string.
     ///
-    /// Handles the envelope phases â€” `provision`, `start`, `stop`, `deprovision` â€”
+    /// Handles the envelope phases (`provision`, `start`, `stop`, `deprovision`)
     /// and a dry run of any phase. A non-dry-run execution produces no envelope, so
     /// it is rejected here; use an execution entry point instead:
     /// [`execute_lifecycle_json`] to drive the pipes yourself.
@@ -441,7 +443,7 @@ pub mod __ffi {
 
     /// Execute a lifecycle request (as a JSON string) as a **live streaming**
     /// process, returning a [`MxcProcess`] handle for output streaming, waiting,
-    /// and termination â€” exactly like [`v1::spawn`]. Backends that expose process
+    /// and termination, exactly like [`v1::spawn`]. Backends that expose process
     /// input also make [`MxcProcess::take_stdin`] available.
     ///
     /// The request JSON must specify the `exec` lifecycle phase (with a

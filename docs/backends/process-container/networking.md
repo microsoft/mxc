@@ -2,7 +2,7 @@
 
 > **Audience:** MXC consumers and developers
 
-Supported exact contracts from `0.9.0-alpha` use the shared `network.egress`
+Supported contracts from `0.9.0-alpha` use the shared `network.egress`
 and `network.ingress` policy plus `runtimeConfig.networkProxy` and
 `processContainer.network.allowedProxyPeer` configuration.
 
@@ -285,8 +285,8 @@ durable DNS names or application payloads. Its ingress schema has only
 ## 2. Supported-contract selection and downlevel behavior
 
 Both WFP filter writes and per-container WinHTTP proxy configuration require a
-privileged context. Supported exact contracts select the strongest
-usable process-creation contract through runtime probing.
+privileged context. For requests using supported contracts, MXC probes the
+host and selects the strongest usable process-creation API.
 
 **Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
 probe succeed. PSEC is the only ProcessContainer path that receives directional egress filters, proxy peer identity, or

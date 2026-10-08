@@ -148,7 +148,7 @@ export interface ContainerRequest {
 
 ## `@microsoft/mxc-sdk/v1::Containment`
 
-Closed union and SDK-owned containment choices for container creation requests.
+Union of the SDK-defined containment choices for `ContainerRequest`.
 
 ```typescript
 export type Containment = Containment.Process | Containment.ProcessContainer | Containment.Wslc | Containment.Lxc | Containment.Seatbelt | Containment.IsolationSession | Containment.Bubblewrap;
@@ -237,7 +237,7 @@ export interface DirectionalNetworkConfig {
 
 ## `@microsoft/mxc-sdk/v1::ErrorCode`
 
-Closed set of MXC wire-format error codes.
+The SDK-defined set of MXC native runtime error codes.
 
 ```typescript
 export type ErrorCode = 'malformed_request' | 'unsupported_containment' | 'unsupported_phase' | 'backend_unavailable' | 'malformed_id' | 'stale_id' | 'not_provisioned' | 'not_started' | 'already_started' | 'already_stopped' | 'policy_validation' | 'backend_error';
@@ -343,7 +343,7 @@ export interface FilesystemPolicyResult {
 
 ## `@microsoft/mxc-sdk/v1::IsolationSessionNetworkConfig`
 
-The only network posture IsolationSession can truthfully provide.
+Unrestricted networking, the only network permissions IsolationSession supports.
 
 ```typescript
 export interface IsolationSessionNetworkConfig {
@@ -407,7 +407,7 @@ export interface LxcConfig {
 
 ## `@microsoft/mxc-sdk/v1::MxcError`
 
-Typed error thrown by the MXC SDK in response to a wire-format error envelope.
+Typed error thrown by the MXC SDK in response to a native JSON error object.
 
 ```typescript
 export class MxcError extends Error {
@@ -425,7 +425,7 @@ export class MxcError extends Error {
 
 ## `@microsoft/mxc-sdk/v1::MxcErrorFields`
 
-Every field an MxcError can carry, in the same flat shape as the wire error envelope â€” operation, nativeCode and remediation sit alongside code and message, not nested inside details.
+Every field an `MxcError` can carry, matching the native JSON error object: `operation`, `nativeCode`, and `remediation` sit alongside `code` and `message`, not nested inside `details`.
 
 ```typescript
 export interface MxcErrorFields {
@@ -678,7 +678,7 @@ export interface ProvisionOptions {
 
 ## `@microsoft/mxc-sdk/v1::ProvisionRequest`
 
-Closed backend-specific request for provisioning a container.
+Backend-specific input for provisioning a container, selected by `containment`.
 
 ```typescript
 export type ProvisionRequest<C extends LifecycleContainmentKind = LifecycleContainmentKind> = C extends LifecycleContainmentKind ? ProvisionConfigFor<C> & {
@@ -735,7 +735,7 @@ export interface NetworkRuntimeConfig {
 
 ## `@microsoft/mxc-sdk/v1::SDK_CONTRACT_VERSION`
 
-SDK-owned exact container-request contract used by the V1 high-level API.
+The contract version selected internally by the V1 SDK API.
 
 ```typescript
 const SDK_CONTRACT_VERSION: "1.0.0" = '1.0.0' as const;

@@ -2,6 +2,9 @@
 
 > **Audience:** MXC developers
 
+See the [developer glossary](../glossary.md) for existing implementation names
+such as "state-aware," "one-shot," and "wire contract."
+
 *Detailed design proposal. Compiled 2026-04-28.*
 
 ## Contents
@@ -247,7 +250,7 @@ wire format and have different roles:
 | `containerId` | One-shot wire envelope (per `docs/schema.md`) | Caller-supplied (or auto-generated random hex) | Human-readable label, used as e.g. AppContainer profile name |
 
 For direct `wxc-exec` lifecycle calls, `--container-id` supplies the opaque
-lifecycle routing identifier represented as `sandboxId` in raw JSON. It is
+lifecycle routing identifier represented as `sandboxId` in ["MXC request JSON"](../../schema.md#mxc-request-json). It is
 distinct from the one-shot JSON `containerId` label: the CLI option is required
 for `start`, `exec`, `stop`, and `deprovision`, and is not accepted for
 `provision`. This is a CLI transport name only; the JSON field and native ABI
@@ -367,8 +370,9 @@ consumer API and the backend guides for policy requirements.
 
 ## 7. Wire contract
 
-The raw exact wire contract is a typed, JSON-serialised envelope shared by the
-TypeScript SDK and `mxc_ffi`. Direct executor calls carry lifecycle routing in CLI
+The ["MXC request JSON"](../../schema.md#mxc-request-json) contract defines
+the JSON input to `mxc_ffi`, also produced internally by Node and .NET.
+Typed SDK callers do not author JSON. Direct executor calls carry lifecycle routing in CLI
 arguments while retaining the same phase-specific exact contracts internally. Rust
 normalizes both paths into the same request types (§9.1). The only open content is at
 the leaves of `ErrorEnvelope.details`; every other field, including the error
@@ -454,7 +458,7 @@ State-aware-only fields:
 
 #### `wxc-exec` lifecycle transport
 
-Raw exact SDK and FFI calls retain `phase` and `sandboxId` in JSON. Direct
+"MXC request JSON" retains `phase` and `sandboxId`. Direct
 `wxc-exec` lifecycle calls instead remove those routing fields from the supplied JSON
 and pass them as command-line arguments:
 
@@ -525,8 +529,8 @@ reachable only through raw `1.1.0-alpha` JSON.
 | Innermost value | Backend-specific fields only (no cross-cutting, no `version`) | The SDK extracts these from the consumer's per-(backend, phase) Config |
 
 Compile-time enforcement of valid combinations lives on the SDK's per-(backend, phase)
-Configs (§6.1), not on this illustrative aggregate. Raw-JSON callers writing
-backend sections directly are validated by the exact Rust contract and
+Configs (§6.1), not on this illustrative aggregate. "MXC request JSON" containing
+backend sections is validated by the exact Rust contract and
 `validate_<phase>` hooks at runtime (§10.1). Runtime experimental authorization
 is supplied separately through `SandboxSpawnOptions.experimental` or the
 executor's `--experimental` flag; it is not a request JSON field.
@@ -978,7 +982,7 @@ normalized request has no `source_contract` because no external exact contract
 produced it. Raw callers follow the separate exact path:
 
 ```text
-raw JSON
+"MXC request JSON"
   -> exact registered request root
   -> exact adapter
   -> CommonRequestIR + StateAwareOperation
@@ -1063,8 +1067,8 @@ settings stay in the common request.
 Absent provision configuration remains `None`; an empty provision object remains
 a present config with absent fields; explicit empty strings remain supplied.
 Equivalent absent/empty outer wrappers need not survive. Backend validation and
-defaulting retain ownership of those values. Successful requests retain no raw
-backend JSON or source text. The bundling does not modify `ExecutionRequest`'s shape. Domain models
+defaulting retain ownership of those values. Successful requests retain no
+backend configuration JSON or source text. The bundling does not modify `ExecutionRequest`'s shape. Domain models
 are exposed to the dispatch layer; the wire types are an implementation detail of
 the parser and schema generation.
 
@@ -1454,7 +1458,7 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
 `dispatch_state_aware_typed` returns `TypedDispatchOutcome` without serializing
 backend metadata. The high-level Rust SDK maps that result into
 `ProvisionResult`, `LifecycleResult`, or `ValidationResult` and typed backend
-metadata. The raw JSON lane wraps the same typed dispatch result in
+metadata. The path accepting "MXC request JSON" wraps the same typed dispatch result in
 `DispatchOutcome::Envelope` and serializes it for the wire response. JSON
 response construction is therefore confined to raw/executor entry points
 rather than being an implementation step of typed Rust calls.
@@ -1631,7 +1635,7 @@ unconditionally by the in-guest agent).
   cannot accidentally pass them.
 - **Runtime enforcement at Rust.** The exact phase contract structurally
   rejects fields that are not representable for that phase, including input
-  from raw-JSON callers or a future SDK whose typing has drifted. Those failures
+  from callers providing "MXC request JSON" or a future SDK whose typing has drifted. Those failures
   surface as `malformed_request`. Backend `validate_<phase>` hooks then reject
   unsupported values or combinations among fields the exact contract admits;
   those failures surface as `policy_validation` (§8). Together these checks are

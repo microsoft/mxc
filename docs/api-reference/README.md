@@ -2,10 +2,12 @@
 
 > **Audience:** MXC consumers
 
-These references describe the supported V1 SDK authoring surfaces: operation
+These references describe the supported V1 SDK APIs: operation
 signatures, public types, fields, and containment choices. They complement the
 SDK READMEs and backend guides; they do not replace native policy validation or
 certify backend availability.
+
+See the [consumer glossary](../glossary.md) for terminology.
 
 | SDK | Reference | Public entrypoint |
 |---|---|---|
@@ -36,8 +38,9 @@ Results and live handles expose warnings and optional execution metadata.
 Provision metadata is backend-specific; each language's type reference lists
 the supported fields.
 
-Containment selects the backend. Shared restrictions live on the request;
-backend-specific authoring uses `*Config` types. Omitted environment input
+`ContainerRequest` selects containment and carries shared restrictions;
+backend-specific settings use `*Config` types listed in each language's type
+reference. Omitted environment input
 uses backend defaults, whereas an explicitly empty environment is preserved.
 Filesystem discovery helpers follow the same distinction for their host
 environment input. Native validation decides which policies the backend can

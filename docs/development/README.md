@@ -6,6 +6,9 @@ This section covers MXC architecture, implementation, validation, and planned
 work. Consumer documentation remains under `docs/`; start with the
 [project README](../../README.md).
 
+See the [developer glossary and wording guide](glossary.md) for implementation
+terms, plain-English alternatives, and guidance on naming specific types.
+
 ## Architecture
 
 - [Repository architecture](architecture/repository-architecture.md)

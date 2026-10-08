@@ -143,7 +143,7 @@ impl ContainerRequest {
 
 ## `mxc_sdk::v1::Containment`, `mxc_sdk::v1::policy::Containment`
 
-The closed backend choice carried by `ContainerRequest`. Select a variant with
+The SDK-defined backend choices carried by `ContainerRequest`. Select a variant with
 its typed configuration; the native engine validates backend and policy support.
 
 ```rust
@@ -200,7 +200,7 @@ impl From<MxcError> for Error {
 
 ## `mxc_sdk::v1::ErrorCode`
 
-Closed set of error codes the SDK can return.
+The predefined error codes the SDK can return.
 
 ```rust
 pub enum ErrorCode {

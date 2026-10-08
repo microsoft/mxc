@@ -8,6 +8,8 @@ them in-process through the native engine. The versioned public API is under
 network, and UI restrictions; its typed containment value selects and
 configures the backend.
 
+See the [consumer glossary](../../docs/glossary.md) for terminology.
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or
@@ -133,7 +135,7 @@ operation options and return no execution output.
 | Terminal process outcome | `v1::WaitResult` |
 
 `v1::spawn_with_pty` creates a container with a caller-controlled terminal.
-One-shot PTY support is available for IsolationSession on Windows, Bubblewrap
+Create-and-run PTY support is available for IsolationSession on Windows, Bubblewrap
 and LXC on Linux, and Seatbelt direct execution on macOS. LXC requires root.
 Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
 `wait()` requests canonical-mode terminal EOF for untaken input; raw-mode

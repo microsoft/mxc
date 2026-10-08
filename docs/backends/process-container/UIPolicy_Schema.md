@@ -33,7 +33,7 @@ Default-deny is a strong security posture, but it raises a compatibility questio
 
 **Within a version**, default-deny applies fully — omitted fields are denied, and new fields introduced in a minor revision of the same version are denied for all existing configs.
 
-**Across major versions**, the behavior is different: applications pinned to an older version continue to run under the policy semantics of that version. New fields introduced in a later major version are not applied to configs that declare an older version — preserving the behavior the developer explicitly designed for. This allows the schema to evolve without silently changing the security posture of deployed applications.
+**Across major versions**, the behavior is different: applications using an older schema version continue to run under the policy semantics of that version. New fields introduced in a later major version are not applied to configs that declare an older version — preserving the behavior the developer explicitly designed for. This allows the schema to evolve without silently changing the security posture of deployed applications.
 
 This makes version a compatibility contract: a config that says `"version": 1` will always behave as a v1 config, regardless of what the current schema version is.
 

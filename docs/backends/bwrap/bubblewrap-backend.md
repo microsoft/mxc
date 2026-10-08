@@ -9,12 +9,12 @@ requiring root privileges or a container runtime.
 
 > **Status:** Stable — the default Linux backend.
 
-> **Supported exact contracts (v0.9+):** author `network.egress` /
+> **Supported contracts (v0.9+):** use `network.egress` /
 > `network.ingress` and, for proxy requests, `runtimeConfig.networkProxy`.
 > Versions before `0.9.0-alpha` are rejected; changing only the version of an
 > old config does not migrate its policy. Legacy `defaultPolicy`,
 > `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy`
-> are rejected by supported exact contracts. Typed Rust requests no longer
+> are rejected by supported contracts. Typed Rust requests no longer
 > contain these fields. See [schema migration](../../schema.md).
 > Bubblewrap still rejects enforceable-looking requests it cannot honor
 > (such as `ingress.default: "allow"` or direct egress rules combined with a
@@ -87,7 +87,7 @@ requiring root privileges or a container runtime.
   installed by an unprivileged supervisor that keeps the caller's uid, so on
   a stock host with root-owned `/run` it cannot take that lock. `validate`
   refuses such a host with a message naming the backend rather than letting
-  the supervisor die at the first rule. If pinned to `iptables-legacy`, switch it:
+  the supervisor die at the first rule. If configured to use `iptables-legacy`, switch it:
   ```bash
   sudo update-alternatives --set iptables /usr/sbin/iptables-nft
   sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-nft
@@ -314,7 +314,7 @@ regardless of the rule. MXC emits a warning naming those allowed destinations
 rather than refusing them, since the posture fails closed.
 
 An IPv4-mapped address such as `::ffff:203.0.113.5` is programmed as IPv4:
-Linux puts a genuine IPv4 packet on the wire for one, so an `ip6tables` rule
+Linux sends a genuine IPv4 packet for one, so an `ip6tables` rule
 naming it would never match and a directional deny rule under
 `egress.default: "allow"` would fail open. A mapped CIDR is translated the
 same way — the mapped range is the last 32 bits of `::ffff:0:0/96`, so a
@@ -408,8 +408,8 @@ added in the same change that enables it.
 
 Schema `0.9.0-alpha` uses an explicit `egress` and `ingress` section instead
 of the retired `defaultPolicy` / `allowedHosts` / `blockedHosts` fields. An
-exact v0.9 config carrying a legacy field fails parsing; a config declaring
-an earlier version is refused as an unsupported contract before its network
+`0.9.0-alpha` config carrying a legacy field fails parsing; a config declaring
+an earlier version is refused as an unsupported contract version before its network
 section is read.
 
 ```json
@@ -510,7 +510,7 @@ is opened. A proxy config that states — or defaults to — `deny` therefore ge
 the posture it writes, since the deny still covers every host-loopback path but
 that endpoint. `ingress.hostLoopback` is not consulted there — `EgressPlan::for_proxy`
 builds that chain, not the directional builder that lowers the drop — but the
-observed result matches the contract regardless.
+observed result still matches the requested network policy.
 
 The declaration and these refusals must ship together — declaring the inbound
 features without them would be a fail-open. A unit test asserts exactly that
@@ -530,7 +530,7 @@ is over-declared and fails there. Reverting the host-loopback drop reproduces
 the original bug as a test failure.
 
 `runtimeProxy` is declared. The parser normalizes
-`runtimeConfig.networkProxy` into `policy.network_proxy`, pinned to a loopback
+`runtimeConfig.networkProxy` into `policy.network_proxy`, restricted to a loopback
 endpoint and accepted only alongside `egress.default: "deny"` with no direct
 rules. That is the proxy-only posture this backend enforces. The end-to-end
 test runs the supported proxy configuration with ingress denial both omitted
@@ -690,7 +690,7 @@ an exit is detected; see [Limitations](#limitations).
 A proxy request is the proxy-only posture, so `egress.default` must be `deny`
 with no `allow` / `deny` rules; the chain opens the proxy endpoint alone.
 
-Exact contracts before v0.9 are retired. Legacy `network.proxy` and host-list
+Contract versions before `0.9.0-alpha` are retired. Legacy `network.proxy` and host-list
 configurations cannot be expressed by declaring v0.9; use
 `runtimeConfig.networkProxy` with a ruleless, deny-default directional egress
 policy as shown above. The external proxy enforces any host filtering itself.
@@ -803,7 +803,7 @@ blocks, not DNS names. Do not put a hostname in a `cidr` field: Bubblewrap
 cannot enforce an IP rule against the workload's changing DNS answers and
 rejects the request. If policy must inspect requested hostnames, use
 `runtimeConfig.networkProxy` with a separately configured external proxy.
-The exact v0.9 contract provides no MXC-managed host-list policy for that proxy.
+Contract `0.9.0-alpha` provides no MXC-managed host-list policy for that proxy.
 
 ## Comparison with LXC
 
@@ -852,8 +852,8 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
   IPv6 destinations remain unreachable until slirp supports IPv6 here.
   `runtimeConfig.networkProxy` restricts direct egress to the configured
   loopback proxy endpoint; hostname policy belongs to that external proxy.
-- **No state-aware lifecycle** — Bubblewrap implements `ScriptRunner` only
-  (one-shot), not `StatefulSandboxBackend`
+- **No container lifecycle operations**: Bubblewrap's `ScriptRunner`
+  supports create-and-run execution, not `StatefulSandboxBackend` lifecycle calls.
 - **Provider-loss detection is exit-based** — in the private-namespace modes a
   `slirp4netns` that exits mid-run fails the run; one that is alive but wedged
   is not detected, and reaches the workload as an unreachable network

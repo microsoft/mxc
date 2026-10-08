@@ -93,7 +93,7 @@ operation. See the
 |---------|-------------|
 | Run-to-completion | Starts a workload, waits, and returns its outcome and output |
 | Streaming | Returns a live process handle with streams, wait, and kill operations |
-| State-aware lifecycle | Uses separate provision, start, exec, stop, and deprovision calls |
+| State-aware lifecycle | Manual lifecycle operations: provision, start, exec, stop, and deprovision |
 
 The common traits are defined in `mxc_sdk::mxc_common`;
 `mxc_sdk::mxc_engine` dispatches each surface to the selected backend.

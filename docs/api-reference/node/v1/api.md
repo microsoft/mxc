@@ -17,12 +17,12 @@ Callers do not supply JSON or a schema version.
 
 Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
-and operation options. PTY operations are asynchronous. One-shot PTY support
+and operation options. PTY operations are asynchronous. Create-and-run PTY support
 covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
 Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
 rejects `guiAccess` and legacy `launchMethod: "open"`.
 Terminal handles give the caller explicit input, output, resize, and process
-ownership; there is no separate attached-console or raw-JSON launch API.
+ownership; there is no separate attached-console launch API or API accepting ["MXC request JSON"](../../../schema.md#mxc-request-json).
 
 ## Discovery and validation
 
@@ -98,7 +98,7 @@ export function getUserProfilePolicy(environment?: { [key: string]: string | und
 
 ## `@microsoft/mxc-sdk/v1::mxcErrorFromCode`
 
-Constructs an MxcError from a wire-format error code.
+Constructs an `MxcError` from a native runtime error code.
 
 ```typescript
 export function mxcErrorFromCode(code: string, message: string, details?: Record<string, unknown>): MxcError;
@@ -116,7 +116,7 @@ export function probe(request?: ContainerRequest): ProbeOutput;
 
 ## `@microsoft/mxc-sdk/v1::provisionContainer`
 
-Provision a container from a closed backend-specific request.
+Provision a container from the backend-specific `ProvisionRequest` type.
 
 ```typescript
 export async function provisionContainer<C extends LifecycleContainmentKind>(request: ProvisionRequest<C> & {

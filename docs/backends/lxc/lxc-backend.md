@@ -4,7 +4,7 @@
 
 The LXC backend provides Linux container isolation using [LXC (Linux Containers)](https://linuxcontainers.org/lxc/).
 
-For every registered contract from `0.9.0-alpha` onward, networking is
+For every supported contract from `0.9.0-alpha` onward, networking is
 directional-only: use `network.egress` and `network.ingress`. LXC rejects
 `runtimeConfig.networkProxy`, so a supported LXC request has no proxy surface
 at all — see [Proxy](#proxy) below.
@@ -167,7 +167,7 @@ The field must name a loopback endpoint, and an LXC container has its own
 network namespace, so `127.0.0.1` there is the container rather than the host.
 MXC ships no component that relays a host loopback proxy into that namespace.
 
-The legacy `network.proxy` fields also have no supported exact contract.
+The legacy `network.proxy` fields are also absent from every supported contract.
 Choose a backend that supports a loopback proxy if the workload needs one;
 relabeling a retired LXC proxy request as v0.9 cannot make its policy enforceable.
 
@@ -252,7 +252,7 @@ LXC reads a run's network section only when the container starts. Omit
 
 **Teardown is owed on every terminal path,** including a drop without `wait`:
 the network chains come down, and the container is released. A reused container
-also has any stale proxy hosts-file pin from an earlier run cleared before its
+also has any stale proxy address mapping in its hosts file cleared before its
 new workload launches. MXC checks for marked lines inside the running
 container using `lxc-attach` and removes them if present. A failed check
 refuses to run the workload.
@@ -358,10 +358,10 @@ The zone query should answer the zone you assigned.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
   host that provides one.
 - **No proxied egress.** See [Proxy](#proxy).
-- **No state-aware lifecycle.** LXC implements `ScriptRunner` (one-shot) and
+- **No container lifecycle operations.** LXC implements `ScriptRunner` (create-and-run execution) and
   `SandboxBackend` (streaming over pipes or a caller-controlled PTY), not
   `StatefulSandboxBackend`. A
-  state-aware request is rejected.
+  request for a container lifecycle operation is rejected.
 - **Inherited stdio is unavailable.** Use ordinary pipe streaming or
   `spawn_with_pty`; the in-process API never takes over the host application's
   own terminal. See [Streaming](#streaming).
