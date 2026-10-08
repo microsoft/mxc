@@ -179,7 +179,16 @@ Common consequences of this default:
   compat symlink, and WSL's `/mnt/wsl/resolv.conf` is bound directly.
   Neither exposes host `/var` or `/mnt` contents. Hosts that point
   `/etc/resolv.conf` at some other custom location still need that target
-  listed in `readonlyPaths`.
+  listed in `readonlyPaths`. Bubblewrap retains a mount-configuration hint
+  for SDK callers, which `lxc-exec` also prints to stderr, when a direct,
+  absolute resolver symlink target has no overlapping known mount
+  destination. The check reads the link but does not resolve or stat its
+  target or policy paths; a missing file or symlink alias can make the hint
+  inapplicable. Check the link and consider listing its containing directory
+  in `readonlyPaths`. Relative targets, uncertain mounts, and synthetic
+  destinations such as `/tmp` and `/var/run` suppress the hint. Silence
+  does not prove DNS is available; the hint never changes mounts or the
+  run's outcome.
 
 Files in `/etc` that contain secrets (`/etc/shadow`, `/etc/sudoers`,
 `/etc/ssh/ssh_host_*_key`) are mode `0400` / `0640` `root` and remain
