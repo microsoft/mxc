@@ -232,7 +232,7 @@ mod tests {
     use crate::learning_mode_core::capture_diagnostics::{
         write_capture_verbose_logging_document, CaptureVerboseLoggingAggregate,
         CaptureVerboseLoggingDocumentSummary, CaptureVerboseLoggingOutcomeReason,
-        CaptureVerboseLoggingSignature, CAPTURE_VERBOSE_LOGGING_VERSION,
+        CaptureVerboseLoggingSignature, NetworkEndpoint, CAPTURE_VERBOSE_LOGGING_VERSION,
     };
     use crate::mxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
 
@@ -423,6 +423,11 @@ mod tests {
         doc.signatures[0].signature.provider_guid = injected.to_string();
         doc.signatures[0].signature.event_name = Some(injected.to_string());
         doc.signatures[0].signature.properties = vec![(injected.to_string(), injected.to_string())];
+        doc.signatures[0].signature.network_endpoint = Some(NetworkEndpoint {
+            protocol: "tcp".to_string(),
+            remote_address: injected.to_string(),
+            remote_port: Some(443),
+        });
 
         let projected = project_for_telemetry(doc);
         let serialized = serde_json::to_string(&projected).unwrap();
@@ -433,6 +438,7 @@ mod tests {
             canonical_provider_guid(CaptureVerboseLoggingProvider::KernelGeneral)
         );
         assert!(projected.signatures[0].signature.properties.is_empty());
+        assert!(projected.signatures[0].signature.network_endpoint.is_none());
     }
 
     #[test]
