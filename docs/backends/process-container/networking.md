@@ -41,6 +41,12 @@ narrows the outbound public and private destinations reachable through the grant
 | `allow` | `allow` | Both capabilities | Internet outbound and bidirectional private-network traffic are allowed. |
 
 This matrix covers the direction defaults without explicit internet egress rules or proxy mode.
+It describes the ordinary non-capture capability posture. Native PSEC
+`captureDenials` temporarily adds `internetClient` only when the caller
+explicitly supplies a direct `network.egress` section, allowing Tessera's WFP
+policy to observe and record the attempt while the authored egress table
+continues to enforce it. Absent or ingress-only network policy, non-capture
+runs, and proxy mode retain the matrix posture.
 
 ### Model 1: direct egress, WFP-filtered (least restrictive)
 

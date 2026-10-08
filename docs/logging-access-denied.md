@@ -49,7 +49,7 @@ surface delivers it explicitly:
 | Surface | How the warning is delivered |
 |---------|------------------------------|
 | Rust | `Sandbox::warnings()` / `Output::warnings` |
-| C# | `RunResult.Warnings` |
+| C# | `ExecutionResult.Warnings` / `MxcProcess.Warnings` |
 | C ABI (`mxc_ffi`) | `MxcRunResult::warnings_json_utf8` (JSON array of strings) |
 | `wxc-exec` | printed to stderr after the run — the CLI owns its terminal |
 
@@ -246,6 +246,14 @@ When option-aware native capture is selected, MXC requests both `ACCESS` and
 `NETWORK` sources. A failed combined start fails the trace rather than retrying
 with partial access-only collection. Legacy native capture remains access-only.
 MXC does not coordinate with WFP directly.
+
+Native PSEC capture has one capture-specific capability exception. When the
+caller explicitly supplies a direct `network.egress` section and enables
+`captureDenials`, MXC adds `internetClient` so the outbound attempt reaches
+Tessera's WFP policy and can be recorded there. The authored egress table still
+makes the allow-or-deny decision. This exception is not applied when
+`network.egress` is absent, when the request supplies ingress only, when
+capture is disabled, or when proxy mode is selected.
 
 MXC currently recognizes two normalized source domains:
 
@@ -495,10 +503,10 @@ so CLI callers can locate the deliverable without scanning the filesystem:
 ```
 
 The pointer echoes the policy file's `summary`; that file is the authoritative
-record of denials. In-process Rust callers receive the same summary information through
-`Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
-C# SDK exposes it through `RunResult.OutputMetadata` and
-`MxcSandboxProcess.OutputMetadata`.
+record of denials. In-process Rust callers receive the same summary information
+through `Output::output_metadata` or `Sandbox::output_metadata()` after
+waiting. The C# SDK exposes it through `ExecutionResult.OutputMetadata` and
+`MxcProcess.OutputMetadata`.
 
 By default, the intermediate ETW `.etl` trace is an internal, runner-managed
 file in a protected per-run temporary directory that MXC deletes after
