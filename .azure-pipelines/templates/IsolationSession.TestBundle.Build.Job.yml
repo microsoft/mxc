@@ -332,6 +332,21 @@ jobs:
           Copy-Item "$sdkRoot/LICENSE.md" "$sdkStaged/LICENSE.md"
       }
       Copy-Item -Recurse "$sdkRoot/node_modules" "$sdkStaged/node_modules"
+
+      # node-pty ships third-party PDBs beside its prebuilt binaries. BinSkim
+      # reads their S_COMPILE3 records and reports BA2007 for upstream compiler
+      # switches, as it does for co-located Rust CRT PDBs. The symbols are not
+      # required to execute this test-only bundle, so keep the runtime binaries
+      # intact and omit only node-pty's PDBs.
+      $nodePtyPdbs = @(
+          Get-ChildItem -Path $sdkInteg -Filter '*.pdb' -Recurse -File |
+              Where-Object { $_.FullName -match '[\\/]node-pty[\\/]' }
+      )
+      foreach ($pdb in $nodePtyPdbs) {
+          Remove-Item -LiteralPath $pdb.FullName -Force -ErrorAction Stop
+      }
+      Write-Host "  -> removed $($nodePtyPdbs.Count) node-pty PDB(s) from the test bundle"
+
       Write-Host "  -> sdk-integration/ (Node E2E suite)"
 
       # Manifest
