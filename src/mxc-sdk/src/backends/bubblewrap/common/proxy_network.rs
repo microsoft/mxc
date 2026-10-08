@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
+use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
 use nix::errno::Errno;
@@ -107,6 +108,19 @@ pub(crate) const SLIRP_HOST_GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 const SLIRP_NETWORK: &str = "10.0.2.0/24";
 /// Path the hosts-file pin is mounted over inside the sandbox.
 const SANDBOX_HOSTS_PATH: &str = "/etc/hosts";
+/// Resolver file the sandbox reads, and the start of the resolver pin's
+/// symlink walk.
+const SANDBOX_RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
+/// slirp's built-in DNS forwarder.
+///
+/// libslirp rewrites a query addressed here to the first IPv4 nameserver in the
+/// *host's* `/etc/resolv.conf` and sends it from the host's network namespace,
+/// which is what puts a host loopback resolver back in reach of the sandbox.
+const SLIRP_DNS_FORWARDER: &str = "10.0.2.3";
+/// The forwarder as an address, for the egress check that has to decide whether
+/// the chain admits it. Kept in step with [`SLIRP_DNS_FORWARDER`] by
+/// [`tests::forwarder_constants_agree`].
+pub(crate) const SLIRP_DNS_FORWARDER_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
 /// Egress chain installed inside the sandbox's own network namespace.
 const EGRESS_CHAIN: &str = "MXC_EGRESS";
 /// Chain carrying the inbound posture, hooked into `INPUT`.
@@ -697,6 +711,9 @@ pub(crate) struct ProxyNetworkNamespace {
     userns: Option<File>,
     /// Hosts file mounted over `/etc/hosts`, when the endpoint is a hostname.
     hosts: Option<PathBuf>,
+    /// Generated resolver file and the sandbox path it is mounted over, when
+    /// the host's own nameservers are unreachable from a private namespace.
+    resolver: Option<(PathBuf, String)>,
     /// Read end of the descriptor the supervisor and slirp hold open, taken by
     /// the monitor that watches for the network provider dying mid-run.
     liveness_reader: Option<OwnedFd>,
@@ -715,7 +732,8 @@ impl ProxyNetworkNamespace {
     /// supervisor signals readiness; anything it does not accept is dropped.
     /// `ingress` is the matching inbound posture. `pin` is the hosts-file entry
     /// the sandbox needs to agree with the plan, which only a hostname proxy
-    /// endpoint produces.
+    /// endpoint produces. `resolver` redirects the sandbox's nameserver to
+    /// slirp's forwarder, which only a loopback-resolver host produces.
     ///
     /// Callers reach this only after `BwrapRunner::validate` has already run
     /// [`probe_dependencies`], so the probe is not repeated here.
@@ -723,6 +741,7 @@ impl ProxyNetworkNamespace {
         plan: &EgressPlan,
         ingress: &IngressPlan,
         pin: Option<&ProxyHostPin>,
+        resolver: Option<&ResolverPin>,
         logger: &mut Logger,
         script_timeout_ms: u32,
     ) -> Result<Self, String> {
@@ -843,6 +862,8 @@ impl ProxyNetworkNamespace {
             None => None,
         };
 
+        let resolver = stage_resolver(resolver, state_dir.path(), logger);
+
         Ok(Self {
             state_dir,
             supervisor,
@@ -850,6 +871,7 @@ impl ProxyNetworkNamespace {
             pid_writer: Some(pid_writer),
             userns: Some(userns),
             hosts,
+            resolver,
             liveness_reader: Some(liveness_reader),
             transactions,
             script_timeout_ms,
@@ -881,6 +903,18 @@ impl ProxyNetworkNamespace {
                     "Bubblewrap: the proxy host pin overrides an earlier mount of \
                      /etc/hosts; the sandbox sees the pinned file",
                 );
+            }
+        }
+
+        if let Some((source, destination)) = &self.resolver {
+            let source = source
+                .to_str()
+                .ok_or_else(|| "Bubblewrap: resolver pin path is not valid UTF-8".to_string())?;
+            if insert_pin_bind(args, source, destination)? {
+                logger.log_line(&format!(
+                    "Bubblewrap: the resolver pin overrides an earlier mount of {destination}; \
+                     the sandbox sees the pinned file"
+                ));
             }
         }
 
@@ -1375,6 +1409,214 @@ fn strip_host_from_hosts(contents: &str, hostname: &str) -> String {
     out
 }
 
+/// A generated resolver file and the sandbox path it is mounted over.
+///
+/// The sandbox always runs in a private network namespace, so a host that
+/// resolves through a loopback stub -- `systemd-resolved` at `127.0.0.53`,
+/// `dnsmasq` at `127.0.0.1` -- hands it a nameserver address that belongs to
+/// its own empty loopback. Binding the host's resolver directories makes the
+/// file *readable*; it does not make the address *reachable*.
+#[derive(Debug)]
+pub(crate) struct ResolverPin {
+    destination: PathBuf,
+    contents: String,
+}
+
+impl ResolverPin {
+    /// The pin this host needs, or `None` when its resolvers already work
+    /// inside a private namespace.
+    pub(crate) fn for_host(policy: &ContainerPolicy, logger: &mut Logger) -> Option<Self> {
+        Self::from_resolver(Path::new(SANDBOX_RESOLV_CONF_PATH), policy, logger)
+    }
+
+    /// The pin a sandbox reading `resolver_path` needs.
+    ///
+    /// Returning `None` leaves the sandbox exactly as it is today, so every
+    /// case this cannot read confidently declines rather than guessing.
+    ///
+    /// Takes the path rather than reading the host's so the decision can be
+    /// exercised against a fixture.
+    pub(crate) fn from_resolver(
+        resolver_path: &Path,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Option<Self> {
+        let shown = resolver_path.display();
+        let host_contents = match fs::read_to_string(resolver_path) {
+            Ok(contents) => contents,
+            // No resolver file is not a loopback stub to rescue, and is normal
+            // on a host that configures DNS some other way.
+            Err(error) if error.kind() == ErrorKind::NotFound => return None,
+            Err(error) => {
+                logger.warning_line(&format!(
+                    "WARNING: Bubblewrap: {shown} could not be read ({error}), so the sandbox \
+                     keeps whatever resolver it inherits and names may not resolve inside it."
+                ));
+                return None;
+            }
+        };
+        if !resolvers_are_loopback_only(&host_contents) {
+            return None;
+        }
+
+        let destination = match resolver_target_of(resolver_path) {
+            Ok(destination) => destination,
+            Err(reason) => {
+                logger.warning_line(&format!(
+                    "WARNING: Bubblewrap: the host resolves through a loopback nameserver, which \
+                     the sandbox's private network namespace cannot reach, and {reason}. Names \
+                     will not resolve inside the sandbox; point {shown} at a routable nameserver."
+                ));
+                return None;
+            }
+        };
+
+        let destination_text = destination.to_str()?.to_string();
+        if path_is_denied(policy, &destination_text) {
+            logger.warning_line(&format!(
+                "WARNING: Bubblewrap: the host resolves through a loopback nameserver, but the \
+                 filesystem policy denies {destination_text}, so the sandbox keeps the host's \
+                 unreachable resolver. Names will not resolve inside the sandbox; remove that \
+                 path from deniedPaths to let the sandbox use slirp's forwarder."
+            ));
+            return None;
+        }
+
+        // Naming the resolver itself is the caller supplying their own, which
+        // the pin would otherwise mount over.
+        if policy_names_path(policy, &resolver_path.to_string_lossy())
+            || policy_names_path(policy, &destination_text)
+        {
+            logger.log_line(
+                "Bubblewrap: the filesystem policy mounts its own resolver, so the sandbox keeps \
+                 it rather than slirp's forwarder",
+            );
+            return None;
+        }
+
+        Some(Self {
+            destination,
+            contents: render_pinned_resolv_conf(&host_contents),
+        })
+    }
+
+    /// Write the generated file into `directory` and report the mount it needs.
+    fn stage(&self, directory: &Path) -> Result<(PathBuf, String), String> {
+        let source = directory.join("resolv.conf");
+        fs::write(&source, &self.contents)
+            .map_err(|error| format!("Bubblewrap: failed to write the resolver pin: {error}"))?;
+        let destination = self
+            .destination
+            .to_str()
+            .ok_or_else(|| "Bubblewrap: resolver pin path is not valid UTF-8".to_string())?;
+        Ok((source, destination.to_string()))
+    }
+}
+
+/// Write the pin into `directory` and report the mount it needs, or `None`
+/// when there is nothing to pin or staging failed.
+///
+/// A staging failure gives up the pin rather than the run. The pin is an
+/// improvement on a resolver the sandbox already cannot reach, so refusing to
+/// start would deny the caller a sandbox that would otherwise have run with
+/// exactly the DNS it has today.
+fn stage_resolver(
+    resolver: Option<&ResolverPin>,
+    directory: &Path,
+    logger: &mut Logger,
+) -> Option<(PathBuf, String)> {
+    let resolver = resolver?;
+    match resolver.stage(directory) {
+        Ok(staged) => {
+            logger.log_line(&format!(
+                "Bubblewrap: the host resolves through a loopback nameserver, so the sandbox \
+                 reads {} with nameserver {SLIRP_DNS_FORWARDER}",
+                staged.1
+            ));
+            Some(staged)
+        }
+        Err(error) => {
+            logger.warning_line(&format!(
+                "WARNING: {error}. The sandbox keeps the host's loopback nameserver, which its \
+                 private network namespace cannot reach, so names will not resolve inside it."
+            ));
+            None
+        }
+    }
+}
+
+/// Whether every nameserver the host declares is a loopback address, with at
+/// least one of them IPv4.
+///
+/// Both halves gate the pin. All-loopback means name resolution is already
+/// broken inside the namespace, so replacing it cannot regress a host that
+/// works. The IPv4 requirement is libslirp's: it forwards a query to the first
+/// IPv4 nameserver in the host's file and drops the packet when there is none.
+fn resolvers_are_loopback_only(contents: &str) -> bool {
+    let mut saw_ipv4_loopback = false;
+    for value in nameserver_values(contents) {
+        // A link-local v6 nameserver may carry a zone suffix, which is not part
+        // of the address.
+        let literal = value.split('%').next().unwrap_or(value);
+        match literal.parse::<IpAddr>() {
+            Ok(address) if address.is_loopback() => saw_ipv4_loopback |= address.is_ipv4(),
+            _ => return false,
+        }
+    }
+    saw_ipv4_loopback
+}
+
+/// The sandbox's resolver file, pointed at slirp's forwarder.
+///
+/// Every other directive is carried over: `search` and `options` decide how a
+/// bare name is expanded and retried, and dropping them would change which
+/// names resolve rather than merely where they resolve.
+fn render_pinned_resolv_conf(contents: &str) -> String {
+    let mut out = format!("nameserver {SLIRP_DNS_FORWARDER}\n");
+    for line in contents.lines().filter(|line| !is_nameserver_line(line)) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn nameserver_values(contents: &str) -> impl Iterator<Item = &str> {
+    contents
+        .lines()
+        .filter(|line| is_nameserver_line(line))
+        .filter_map(|line| line.split_whitespace().nth(1))
+}
+
+fn is_nameserver_line(line: &str) -> bool {
+    // A resolver directive is only read when its keyword starts the line.
+    !line.starts_with(char::is_whitespace) && line.split_whitespace().next() == Some("nameserver")
+}
+
+/// Where the pin has to be mounted for the sandbox to read it.
+///
+/// bwrap refuses to mount over a path whose leaf is a symlink, and cannot
+/// create a mount point beneath a symlinked ancestor that sits inside a
+/// read-only bind, so the destination is resolved the same way a `deniedPaths`
+/// entry is: every component, not only the leaf. Resolving less than that also
+/// made the policy checks compare a spelling the mount would never use.
+fn resolver_target_of(start: &Path) -> Result<PathBuf, String> {
+    let resolved = resolve_through_symlinks(start)
+        .ok_or_else(|| format!("{} is not a resolvable path", start.display()))?;
+
+    // A chain that loops or dangles leaves canonicalization unfinished, so the
+    // walk hands back path text that is still a link. Binding there aborts the
+    // sandbox, which is worse than the broken DNS being fixed.
+    let metadata = fs::symlink_metadata(&resolved)
+        .map_err(|error| format!("{} could not be read ({error})", resolved.display()))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "{} does not resolve to a regular file",
+            resolved.display()
+        ));
+    }
+    Ok(resolved)
+}
+
 /// Reject a hostname endpoint whose pin would defeat a denied `/etc/hosts`.
 ///
 /// The pin is spliced after every filesystem-policy mount so it survives them
@@ -1412,28 +1654,33 @@ pub(crate) fn check_hosts_pin_against_policy(
 /// path, so the deepest entry covering the file is the one that takes effect:
 /// an ancestor denial counts, and a more specific grant beneath it wins back.
 fn hosts_file_is_denied(policy: &ContainerPolicy) -> bool {
+    path_is_denied(policy, SANDBOX_HOSTS_PATH)
+}
+
+/// Whether the filesystem policy masks `target`.
+fn path_is_denied(policy: &ContainerPolicy, target: &str) -> bool {
     resolve_mount_order(policy)
         .iter()
-        .rfind(|mount| covers_hosts_file(&mount.path))
+        .rfind(|mount| covers_path(&mount.path, target))
         .is_some_and(|mount| mount.intent == FsIntent::Denied)
 }
 
-/// Whether `path` is the sandbox hosts file or a directory holding it.
-fn covers_hosts_file(path: &str) -> bool {
+/// Whether `path` is `target` or a directory holding it.
+fn covers_path(path: &str, target: &str) -> bool {
     let path = path.trim_end_matches('/');
-    path == SANDBOX_HOSTS_PATH
-        || SANDBOX_HOSTS_PATH
+    path == target
+        || target
             .strip_prefix(path)
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-/// Splice the pinned-hosts bind in just before the command separator.
-///
-/// bwrap applies mounts in argument order and the last mount at a path wins,
-/// so the bind must come after every baseline and user-policy mount for the
-/// pin to survive -- including one that would otherwise expose the host's own
-/// `/etc/hosts`. Returns `true` when an earlier mount already targeted
-/// `/etc/hosts`, so the caller can report that the pin overrides it.
+/// Whether the filesystem policy names `target` itself rather than an ancestor.
+fn policy_names_path(policy: &ContainerPolicy, target: &str) -> bool {
+    resolve_mount_order(policy)
+        .iter()
+        .any(|mount| mount.path.trim_end_matches('/') == target)
+}
+
 /// Index of the separator that ends bwrap's options and begins the command.
 ///
 /// Scanning for the first `--` would find a caller-controlled value instead:
@@ -1449,20 +1696,33 @@ fn command_separator(args: &[String]) -> Result<usize, String> {
         .ok_or_else(|| "Bubblewrap: argument list has no command separator".to_string())
 }
 
-fn insert_hosts_bind(args: &mut Vec<String>, hosts_path: &str) -> Result<bool, String> {
+/// Splice a pin's bind in just before the command separator.
+///
+/// bwrap applies mounts in argument order and the last mount at a path wins,
+/// so the bind must come after every baseline and user-policy mount for the
+/// pin to survive -- including one that would otherwise expose the host's own
+/// file. Returns `true` when an earlier mount already targeted `destination`,
+/// so the caller can report that the pin overrides it.
+fn insert_pin_bind(
+    args: &mut Vec<String>,
+    source: &str,
+    destination: &str,
+) -> Result<bool, String> {
     let separator = command_separator(args)?;
-    let overrides = args[..separator]
-        .iter()
-        .any(|arg| arg == SANDBOX_HOSTS_PATH);
+    let overrides = args[..separator].iter().any(|arg| arg == destination);
     args.splice(
         separator..separator,
         [
             "--ro-bind".to_string(),
-            hosts_path.to_string(),
-            SANDBOX_HOSTS_PATH.to_string(),
+            source.to_string(),
+            destination.to_string(),
         ],
     );
     Ok(overrides)
+}
+
+fn insert_hosts_bind(args: &mut Vec<String>, hosts_path: &str) -> Result<bool, String> {
+    insert_pin_bind(args, hosts_path, SANDBOX_HOSTS_PATH)
 }
 
 /// What pulled this request into a private network namespace.
@@ -2588,6 +2848,520 @@ mod tests {
         // the bind to the workload as arguments and leave it unpinned.
         let mut args = vec!["--ro-bind-try".to_string(), "/etc".to_string()];
         assert!(insert_hosts_bind(&mut args, "/tmp/pin/hosts").is_err());
+    }
+
+    /// The stub resolver the issue reports: readable inside the sandbox,
+    /// unreachable from it.
+    const SYSTEMD_RESOLVED_STUB: &str = "nameserver 127.0.0.53\noptions edns0 trust-ad\n\
+                                         search corp.example\n";
+
+    /// The resolver file is written from the string and the egress check reads
+    /// the address. A drift between them would pin one forwarder and test the
+    /// chain against another, so the warning would fire on a chain that works.
+    #[test]
+    fn forwarder_constants_agree() {
+        assert_eq!(SLIRP_DNS_FORWARDER_IP.to_string(), SLIRP_DNS_FORWARDER);
+    }
+
+    #[test]
+    fn a_loopback_stub_resolver_is_pinned() {
+        assert!(resolvers_are_loopback_only(SYSTEMD_RESOLVED_STUB));
+        assert!(resolvers_are_loopback_only("nameserver 127.0.0.1\n"));
+    }
+
+    /// Pinning a host whose nameserver is routable would redirect name
+    /// resolution that already works.
+    #[test]
+    fn a_routable_resolver_is_left_alone() {
+        assert!(!resolvers_are_loopback_only("nameserver 8.8.8.8\n"));
+        assert!(!resolvers_are_loopback_only(
+            "nameserver 127.0.0.53\nnameserver 8.8.8.8\n"
+        ));
+    }
+
+    /// slirp forwards to the first IPv4 nameserver in the host's file and drops
+    /// the query when there is none, so a v6-only resolver list cannot be
+    /// rescued by pointing at the forwarder.
+    #[test]
+    fn a_resolver_list_without_an_ipv4_entry_is_left_alone() {
+        assert!(!resolvers_are_loopback_only("nameserver ::1\n"));
+        assert!(!resolvers_are_loopback_only("search corp.example\n"));
+        assert!(!resolvers_are_loopback_only(""));
+    }
+
+    /// An address this cannot parse might be routable, and pinning over it
+    /// would take away name resolution that works.
+    #[test]
+    fn an_unreadable_nameserver_is_left_alone() {
+        assert!(!resolvers_are_loopback_only("nameserver localhost\n"));
+        assert!(!resolvers_are_loopback_only("nameserver 127.0.0.999\n"));
+        assert!(!resolvers_are_loopback_only("nameserver\n"));
+    }
+
+    /// glibc reads a directive only when its keyword starts the line, so an
+    /// indented one names no resolver the host actually uses and the file still
+    /// counts as loopback-only.
+    #[test]
+    fn an_indented_directive_is_not_a_nameserver() {
+        assert!(!is_nameserver_line("  nameserver 8.8.8.8"));
+        assert!(resolvers_are_loopback_only(
+            "nameserver 127.0.0.53\n  nameserver 8.8.8.8\n"
+        ));
+        assert_eq!(
+            render_pinned_resolv_conf("nameserver 127.0.0.53\n  nameserver 8.8.8.8\n"),
+            "nameserver 10.0.2.3\n  nameserver 8.8.8.8\n"
+        );
+    }
+
+    /// glibc takes the address after the keyword and ignores the rest of the
+    /// line.
+    #[test]
+    fn a_nameserver_line_ignores_trailing_fields() {
+        assert!(resolvers_are_loopback_only(
+            "nameserver 127.0.0.53 # stub\n"
+        ));
+    }
+
+    /// `search` and `options` decide how a bare name is expanded and retried,
+    /// so dropping them would change which names resolve.
+    #[test]
+    fn the_pinned_resolver_keeps_every_other_directive() {
+        let pinned = render_pinned_resolv_conf(SYSTEMD_RESOLVED_STUB);
+
+        assert_eq!(
+            pinned,
+            "nameserver 10.0.2.3\noptions edns0 trust-ad\nsearch corp.example\n"
+        );
+    }
+
+    /// Leaving one behind would let the resolver fall back to an address the
+    /// namespace cannot reach.
+    #[test]
+    fn the_pinned_resolver_replaces_every_nameserver() {
+        let pinned =
+            render_pinned_resolv_conf("nameserver 127.0.0.53\nnameserver 127.0.0.54\n# comment\n");
+
+        assert_eq!(pinned, "nameserver 10.0.2.3\n# comment\n");
+        assert_eq!(nameserver_values(&pinned).collect::<Vec<_>>(), ["10.0.2.3"]);
+    }
+
+    /// A host whose `/etc/resolv.conf` is `contents`, as a real file the
+    /// decision can be run against.
+    fn host_with_resolver(dir: &tempfile::TempDir, contents: &str) -> PathBuf {
+        let root = std::fs::canonicalize(dir.path()).expect("tempdir canonicalizes");
+        let path = root.join("resolv.conf");
+        fs::write(&path, contents).expect("fixture resolver");
+        path
+    }
+
+    fn buffer_logger() -> Logger {
+        Logger::new(crate::mxc_common::logger::Mode::Buffer)
+    }
+
+    /// The whole decision, not just its helpers: a loopback stub is pinned to
+    /// slirp's forwarder and mounted over the file the chain ends at.
+    #[test]
+    fn the_decision_pins_a_loopback_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
+        let mut logger = buffer_logger();
+
+        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
+            .expect("a loopback stub is pinned");
+
+        assert_eq!(pin.destination, resolver);
+        assert!(pin.contents.contains("nameserver 10.0.2.3"));
+        assert!(pin.contents.contains("search corp.example"));
+        assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
+    }
+
+    /// A host that already resolves is left alone, silently.
+    #[test]
+    fn the_decision_declines_a_routable_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = host_with_resolver(&dir, "nameserver 8.8.8.8\n");
+        let mut logger = buffer_logger();
+
+        assert!(
+            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
+                .is_none()
+        );
+        assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
+    }
+
+    /// A host with no resolver file has no stub to rescue, which is not a
+    /// degradation worth reporting.
+    #[test]
+    fn the_decision_is_silent_when_there_is_no_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("absent.conf");
+        let mut logger = buffer_logger();
+
+        assert!(
+            ResolverPin::from_resolver(&absent, &ContainerPolicy::default(), &mut logger).is_none()
+        );
+        assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
+    }
+
+    /// The pin is spliced after every policy mount, so honouring it would hand
+    /// back the file the policy masked.
+    #[test]
+    fn the_decision_declines_a_denied_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
+        let policy = ContainerPolicy {
+            denied_paths: vec![resolver.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let mut logger = buffer_logger();
+
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &mut logger).is_none());
+        let out = logger.warnings().join("\n");
+        assert!(out.contains("deniedPaths"), "must name the remedy: {out}");
+    }
+
+    #[test]
+    fn the_decision_declines_a_caller_supplied_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
+        let policy = ContainerPolicy {
+            readonly_paths: vec![resolver.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let mut logger = buffer_logger();
+
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &mut logger).is_none());
+        assert!(
+            logger.warnings().is_empty(),
+            "the caller got what they asked for: {:?}",
+            logger.warnings()
+        );
+    }
+
+    /// A chain with no regular file at the end gives up the pin, not the run,
+    /// and says why.
+    #[test]
+    fn the_decision_declines_an_unresolvable_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let first = root.join("first.conf");
+        let second = root.join("second.conf");
+        std::os::unix::fs::symlink(&second, &first).unwrap();
+        std::os::unix::fs::symlink(&first, &second).unwrap();
+        let mut logger = buffer_logger();
+
+        assert!(
+            ResolverPin::from_resolver(&first, &ContainerPolicy::default(), &mut logger).is_none()
+        );
+        let out = logger.warnings().join("\n");
+        assert!(out.contains("could not be read"), "got: {out}");
+    }
+
+    /// The destination is the canonical file, so a policy denying it through an
+    /// ancestor is honoured even when the host's symlink spells the path
+    /// differently. An ancestor denial is used deliberately: a policy naming
+    /// the destination exactly would also trip the caller-supplied-resolver
+    /// check, and the test would pass without the deny comparison being right.
+    #[test]
+    fn the_decision_compares_policy_against_the_canonical_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::write(root.join("real/stub.conf"), SYSTEMD_RESOLVED_STUB).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+
+        let policy = ContainerPolicy {
+            denied_paths: vec![root.join("real").to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        let mut logger = buffer_logger();
+
+        assert!(
+            ResolverPin::from_resolver(&root.join("link/stub.conf"), &policy, &mut logger)
+                .is_none(),
+            "a denial of the canonical directory must stop the pin reached by an alias"
+        );
+        let out = logger.warnings().join("\n");
+        assert!(out.contains("deniedPaths"), "must name the remedy: {out}");
+    }
+
+    /// The pin improves on a resolver the sandbox already cannot reach, so a
+    /// staging failure must cost the pin and not the run — the caller would
+    /// otherwise lose a sandbox that was going to start.
+    #[test]
+    fn a_staging_failure_gives_up_the_pin_rather_than_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
+        let mut logger = buffer_logger();
+        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
+            .expect("a loopback stub is pinned");
+
+        let staged = stage_resolver(
+            Some(&pin),
+            Path::new("/mxc-absent-staging-dir"),
+            &mut logger,
+        );
+
+        assert!(
+            staged.is_none(),
+            "a failed stage leaves the sandbox unpinned"
+        );
+        let out = logger.warnings().join("\n");
+        assert!(
+            out.contains("loopback nameserver"),
+            "the degradation must be reported: {out}"
+        );
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the warning must travel as a retained warning, not as buffer output"
+        );
+    }
+
+    #[test]
+    fn staging_reports_the_pin_it_mounted() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
+        let mut logger = buffer_logger();
+        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
+            .expect("a loopback stub is pinned");
+
+        let staging = tempfile::tempdir().unwrap();
+        let (source, destination) = stage_resolver(Some(&pin), staging.path(), &mut logger)
+            .expect("staging into a real dir");
+
+        assert_eq!(fs::read_to_string(&source).unwrap(), pin.contents);
+        assert_eq!(destination, resolver.to_string_lossy());
+        assert!(
+            logger.warnings().is_empty(),
+            "a successful pin is not a degradation: {:?}",
+            logger.warnings()
+        );
+    }
+
+    /// A host whose resolver already works is never pinned, and that is not a
+    /// degradation worth reporting.
+    #[test]
+    fn staging_nothing_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut logger = buffer_logger();
+
+        assert!(stage_resolver(None, dir.path(), &mut logger).is_none());
+        assert!(logger.warnings().is_empty());
+        assert!(logger.get_buffer().is_empty());
+    }
+
+    /// bwrap refuses to mount over a symlinked leaf, so the pin has to land on
+    /// the file the chain ends at.
+    #[test]
+    fn the_resolver_target_follows_the_link_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir_all(root.join("run/systemd/resolve")).unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        let stub = root.join("run/systemd/resolve/stub-resolv.conf");
+        fs::write(&stub, SYSTEMD_RESOLVED_STUB).unwrap();
+        std::os::unix::fs::symlink(&stub, root.join("etc/resolv.conf")).unwrap();
+
+        assert_eq!(resolver_target_of(&root.join("etc/resolv.conf")), Ok(stub));
+    }
+
+    /// Debian's resolvconf writes a relative link, which has to be resolved
+    /// against the directory holding it rather than the process's cwd.
+    #[test]
+    fn the_resolver_target_resolves_a_relative_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir_all(root.join("run/resolvconf")).unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        let real = root.join("run/resolvconf/resolv.conf");
+        fs::write(&real, SYSTEMD_RESOLVED_STUB).unwrap();
+        std::os::unix::fs::symlink(
+            "../run/resolvconf/resolv.conf",
+            root.join("etc/resolv.conf"),
+        )
+        .unwrap();
+
+        assert_eq!(resolver_target_of(&root.join("etc/resolv.conf")), Ok(real));
+    }
+
+    /// A destination still holding a symlinked ancestor is one bwrap cannot
+    /// create a mount point at when that ancestor's parent is bound read-only,
+    /// which aborts the sandbox rather than merely leaving DNS broken.
+    #[test]
+    fn the_resolver_target_resolves_a_symlinked_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir_all(root.join("run/res/v1")).unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        let real = root.join("run/res/v1/stub.conf");
+        fs::write(&real, SYSTEMD_RESOLVED_STUB).unwrap();
+        std::os::unix::fs::symlink(root.join("run/res/v1"), root.join("run/res/current")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("run/res/current/stub.conf"),
+            root.join("etc/resolv.conf"),
+        )
+        .unwrap();
+
+        assert_eq!(resolver_target_of(&root.join("etc/resolv.conf")), Ok(real));
+    }
+
+    /// `..` has to be applied to the directory the link really sits in, not to
+    /// path text that still names a symlink, or the pin covers a file the
+    /// resolver never reads.
+    #[test]
+    fn the_resolver_target_folds_dotdot_under_a_symlinked_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir_all(root.join("run/resolvconf")).unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        let real = root.join("run/other.conf");
+        fs::write(&real, SYSTEMD_RESOLVED_STUB).unwrap();
+        // /etc/link -> /run/resolvconf, then the leaf climbs out of it.
+        std::os::unix::fs::symlink(root.join("run/resolvconf"), root.join("etc/link")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("etc/link/../other.conf"),
+            root.join("etc/resolv.conf"),
+        )
+        .unwrap();
+
+        assert_eq!(resolver_target_of(&root.join("etc/resolv.conf")), Ok(real));
+    }
+
+    /// A plain file is its own target, and a missing one has nothing to pin
+    /// over.
+    #[test]
+    fn the_resolver_target_handles_a_regular_file_and_a_broken_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let regular = root.join("resolv.conf");
+        fs::write(&regular, SYSTEMD_RESOLVED_STUB).unwrap();
+        assert_eq!(resolver_target_of(&regular), Ok(regular.clone()));
+
+        let dangling = root.join("dangling");
+        std::os::unix::fs::symlink(root.join("absent"), &dangling).unwrap();
+        assert!(resolver_target_of(&dangling).is_err());
+    }
+
+    /// A link loop leaves canonicalization unfinished, so the walk hands back a
+    /// path that is still a link; binding there would abort the sandbox.
+    #[test]
+    fn the_resolver_target_gives_up_on_a_link_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        std::os::unix::fs::symlink(&second, &first).unwrap();
+        std::os::unix::fs::symlink(&first, &second).unwrap();
+
+        let error = resolver_target_of(&first).expect_err("a loop has no target");
+        assert!(error.contains("regular file"), "got: {error}");
+    }
+
+    /// A directory would be mounted over as if it were the resolver file.
+    #[test]
+    fn the_resolver_target_refuses_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(root.join("adir")).unwrap();
+
+        assert!(resolver_target_of(&root.join("adir")).is_err());
+    }
+
+    /// The pin is spliced after every policy mount, so a `deniedPaths` entry
+    /// covering the resolver would be handed back a readable file instead.
+    #[test]
+    fn a_denied_resolver_path_is_detected() {
+        let denied = ContainerPolicy {
+            denied_paths: vec!["/run/systemd/resolve".into()],
+            ..Default::default()
+        };
+        assert!(path_is_denied(
+            &denied,
+            "/run/systemd/resolve/stub-resolv.conf"
+        ));
+        assert!(!path_is_denied(&denied, "/etc/resolv.conf"));
+
+        let regranted = ContainerPolicy {
+            denied_paths: vec!["/run/systemd/resolve".into()],
+            readonly_paths: vec!["/run/systemd/resolve/stub-resolv.conf".into()],
+            ..Default::default()
+        };
+        assert!(!path_is_denied(
+            &regranted,
+            "/run/systemd/resolve/stub-resolv.conf"
+        ));
+    }
+
+    /// A caller who mounts their own resolver has chosen one, and the pin is
+    /// spliced after every policy mount, so it would replace their choice.
+    #[test]
+    fn a_caller_supplied_resolver_is_recognized() {
+        let supplied = ContainerPolicy {
+            readonly_paths: vec!["/etc/resolv.conf".into()],
+            ..Default::default()
+        };
+        assert!(policy_names_path(&supplied, "/etc/resolv.conf"));
+
+        // An ancestor grant is not a choice about the resolver itself.
+        let whole_etc = ContainerPolicy {
+            readonly_paths: vec!["/etc".into()],
+            ..Default::default()
+        };
+        assert!(!policy_names_path(&whole_etc, "/etc/resolv.conf"));
+    }
+
+    /// The pin only works if it outranks the baseline mount of the directory
+    /// holding the resolver.
+    #[test]
+    fn the_resolver_bind_lands_after_the_policy_mounts() {
+        let mut args = vec![
+            "--ro-bind-try".to_string(),
+            "/run/systemd/resolve".to_string(),
+            "/run/systemd/resolve".to_string(),
+        ];
+        args.extend(command_tail());
+
+        let overrides = insert_pin_bind(
+            &mut args,
+            "/tmp/pin/resolv.conf",
+            "/run/systemd/resolve/stub-resolv.conf",
+        )
+        .unwrap();
+
+        assert!(!overrides, "a parent directory mount is not the same path");
+        let pin = args
+            .windows(3)
+            .position(|window| {
+                window
+                    == [
+                        "--ro-bind",
+                        "/tmp/pin/resolv.conf",
+                        "/run/systemd/resolve/stub-resolv.conf",
+                    ]
+            })
+            .expect("pin bind should be present");
+        assert!(pin > 0, "pin must follow the baseline mount");
+        assert_eq!(
+            args[args.len() - COMMAND_TAIL.len() - 1..],
+            ["--", "sh", "-c", "echo hello"]
+        );
+    }
+
+    /// Reported so an operator who mounted their own resolver knows the pin
+    /// shadowed it.
+    #[test]
+    fn the_resolver_bind_reports_overriding_an_earlier_mount() {
+        let mut args = vec![
+            "--ro-bind".to_string(),
+            "/custom/resolv.conf".to_string(),
+            "/etc/resolv.conf".to_string(),
+        ];
+        args.extend(command_tail());
+
+        assert!(
+            insert_pin_bind(&mut args, "/tmp/pin/resolv.conf", "/etc/resolv.conf").unwrap(),
+            "an earlier mount of the same path is an override"
+        );
     }
 
     /// The command bwrap is asked to run, as `build_args` appends it.
@@ -4938,6 +5712,7 @@ exec sleep 30
             pid_writer: None,
             userns: None,
             hosts: None,
+            resolver: None,
             liveness_reader: None,
             transactions: 0,
             script_timeout_ms: 0,

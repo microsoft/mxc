@@ -17,11 +17,12 @@ use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
@@ -41,6 +42,8 @@ use crate::bwrap_common::{
     provider_monitor::ProviderMonitor,
     proxy_network,
 };
+
+const DNS_PORT: u16 = 53;
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -350,6 +353,32 @@ fn warn_unreachable_v6_targets(plan: &network_rules::EgressPlan, logger: &mut Lo
     ));
 }
 
+/// Warn that the resolver pin cannot work under the installed chain.
+///
+/// The pin points the sandbox at slirp's forwarder, but the forwarder is a
+/// destination like any other: a chain that does not admit it drops the query
+/// and names still fail to resolve. The chain is the caller's policy, so this
+/// warns rather than opening the port on their behalf.
+fn warn_resolver_blocked_by_egress(
+    plan: &network_rules::EgressPlan,
+    resolver: Option<&proxy_network::ResolverPin>,
+    logger: &mut Logger,
+) {
+    if resolver.is_none() || plan.admits_udp(proxy_network::SLIRP_DNS_FORWARDER_IP, DNS_PORT) {
+        return;
+    }
+    logger.warning_line(&format!(
+        "WARNING: Bubblewrap pointed the sandbox at slirp's DNS forwarder {} because the host \
+         resolves through a loopback nameserver, but network.egress does not admit UDP port {} \
+         to it, so queries are dropped and names will not resolve. Add an allow rule for \
+         '{}/32' on udp port {} if the workload needs to resolve names.",
+        proxy_network::SLIRP_DNS_FORWARDER_IP,
+        DNS_PORT,
+        proxy_network::SLIRP_DNS_FORWARDER_IP,
+        DNS_PORT
+    ));
+}
+
 impl BubblewrapScriptRunner {
     /// Set up networking and spawn `bwrap`, returning a [`BwrapChild`] wrapped
     /// by the [`SandboxProcess`] handle. With [`StdioMode::Pipes`] the child's
@@ -398,10 +427,15 @@ impl BubblewrapScriptRunner {
             // the egress rule must open.
             Some(resolved) => {
                 let egress = resolved.egress();
+
+                // A proxied chain opens no port 53, so the workload resolves
+                // through the proxy rather than a nameserver of its own.
+                let resolver = None;
                 match proxy_network::ProxyNetworkNamespace::start(
                     &egress.plan(),
                     &network_rules::IngressPlan::for_policy(&request.policy),
                     egress.pin(),
+                    resolver,
                     logger,
                     request.script_timeout,
                 ) {
@@ -422,10 +456,13 @@ impl BubblewrapScriptRunner {
                         Err(error) => return Err(ScriptResponse::error(&error)),
                     },
                 };
+                let resolver = proxy_network::ResolverPin::for_host(&request.policy, logger);
+                warn_resolver_blocked_by_egress(&plan, resolver.as_ref(), logger);
                 match proxy_network::ProxyNetworkNamespace::start(
                     &plan,
                     &network_rules::IngressPlan::for_policy(&request.policy),
                     None,
+                    resolver.as_ref(),
                     logger,
                     request.script_timeout,
                 ) {
@@ -1120,50 +1157,6 @@ fn is_file_mask_target(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve every symlink in `path` (leaf and ancestors) to a real filesystem
-/// path, tolerating trailing components that do not exist yet.
-///
-/// `std::fs::canonicalize` resolves symlinks at every level but requires the
-/// **whole** path to exist. To also cover not-yet-created denied paths under a
-/// symlinked ancestor, this walks the components from the root: every existing
-/// prefix is canonicalized (following symlinks exactly like the kernel), while
-/// `.` and `..` in the not-yet-existent tail are folded lexically. Folding `..`
-/// this way is safe because a component that does not exist cannot be a symlink,
-/// so the result matches the target the kernel's path resolution would reach.
-/// Returns `None` only for an empty path.
-///
-/// A naive backward walk that collected `file_name()` silently dropped `..`
-/// components (Rust returns `None` for a `..` file name) and reconstructed the
-/// wrong target: `/link/missing/../secret` became `/real/missing/secret`
-/// instead of `/real/secret`, so the mask landed on a bystander path and the
-/// real denied target stayed exposed.
-fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => result.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                result.pop();
-            }
-            Component::Normal(name) => {
-                result.push(name);
-                // Canonicalize the prefix so far so symlinks are followed while
-                // it still exists; once a component is missing, canonicalize
-                // fails and the remaining tail is folded lexically above.
-                if let Ok(real) = std::fs::canonicalize(&result) {
-                    result = real;
-                }
-            }
-        }
-    }
-    if result.as_os_str().is_empty() {
-        None
-    } else {
-        Some(result)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1578,6 +1571,104 @@ mod tests {
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         warn_unreachable_v6_targets(&plan, &mut logger);
         assert!(logger.warnings().is_empty(), "no v6 allow, no warning");
+    }
+
+    /// A pin built the way production builds one.
+    fn loopback_resolver_pin(dir: &tempfile::TempDir) -> proxy_network::ResolverPin {
+        let path = dir.path().join("resolv.conf");
+        std::fs::write(&path, "nameserver 127.0.0.53\nsearch corp.example\n")
+            .expect("fixture resolver");
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        proxy_network::ResolverPin::from_resolver(
+            &path,
+            &crate::mxc_common::models::ContainerPolicy::default(),
+            &mut logger,
+        )
+        .expect("a loopback stub is pinned")
+    }
+
+    /// An allowlist that never names slirp's forwarder leaves the pinned
+    /// resolver unreachable, which the sandbox cannot report for itself: the
+    /// resolver file looks correct and the query is simply dropped.
+    #[test]
+    fn a_pinned_resolver_the_chain_drops_is_warned_about() {
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkPeer, NetworkRule};
+
+        let mut req = base_request();
+        req.policy.network_egress = Some(NetworkEgressPolicy {
+            allow: vec![NetworkRule {
+                to: vec![NetworkPeer {
+                    cidr: "140.82.112.0/20".parse().expect("test CIDR"),
+                    except: vec![],
+                }],
+                ports: vec![],
+            }],
+            ..Default::default()
+        });
+        let plan =
+            network_rules::EgressPlan::for_request(&req).expect("an allowlist is enforceable");
+        let dir = tempfile::tempdir().unwrap();
+        let pin = loopback_resolver_pin(&dir);
+
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        warn_resolver_blocked_by_egress(&plan, Some(&pin), &mut logger);
+        let out = logger.warnings().join("\n");
+        assert!(out.contains("10.0.2.3"), "must name the forwarder: {out}");
+        assert!(
+            out.contains("udp") && out.contains("53"),
+            "must name the rule the caller needs: {out}"
+        );
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the warning must travel as a retained warning, not as buffer output"
+        );
+
+        // A host whose resolver already works is never pinned, so there is
+        // nothing to warn about however closed the chain is.
+        let mut unpinned = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        warn_resolver_blocked_by_egress(&plan, None, &mut unpinned);
+        assert!(
+            unpinned.warnings().is_empty(),
+            "no pin, no warning: {:?}",
+            unpinned.warnings()
+        );
+    }
+
+    /// Warning at a caller who already opened the forwarder would send them to
+    /// change a rule that is already correct.
+    #[test]
+    fn a_pinned_resolver_the_chain_admits_is_not_warned_about() {
+        use crate::mxc_common::models::{
+            NetworkEgressPolicy, NetworkPeer, NetworkPort, NetworkProtocol, NetworkRule,
+        };
+
+        let mut req = base_request();
+        req.policy.network_egress = Some(NetworkEgressPolicy {
+            allow: vec![NetworkRule {
+                to: vec![NetworkPeer {
+                    cidr: "10.0.2.3/32".parse().expect("test CIDR"),
+                    except: vec![],
+                }],
+                ports: vec![NetworkPort {
+                    protocol: NetworkProtocol::Udp,
+                    port: Some(53),
+                    end_port: None,
+                }],
+            }],
+            ..Default::default()
+        });
+        let plan =
+            network_rules::EgressPlan::for_request(&req).expect("a udp/53 allow is enforceable");
+        let dir = tempfile::tempdir().unwrap();
+        let pin = loopback_resolver_pin(&dir);
+
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        warn_resolver_blocked_by_egress(&plan, Some(&pin), &mut logger);
+        assert!(
+            logger.warnings().is_empty(),
+            "the chain admits DNS, so there is nothing to report: {:?}",
+            logger.warnings()
+        );
     }
 
     /// Proxy-only mode rewrites the endpoint to slirp's gateway and opens
