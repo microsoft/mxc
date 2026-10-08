@@ -95,8 +95,8 @@ Port mappings require bridged networking. A request that leaves `network` out,
 or sets it to the all-`deny` isolated posture, is rejected at provision: the
 container has no networking for a forward to reach.
 
-The field requires development contract `1.1.0-alpha`. WSLc "MXC request JSON"
-requests using `0.9.0-alpha` must explicitly select `1.1.0-alpha` to use it.
+The field requires development contract `1.1.0-alpha`. Requests declaring
+`0.9.0-alpha` cannot include it and must select `1.1.0-alpha` explicitly.
 The daemon shares one session (VM) but creates a separate container for each
 provision, so a mapping applies only to the container that declared it, unlike
 the session-wide `cpuCount` / `memoryMb` / `gpu` / `storagePath` knobs that
@@ -276,8 +276,8 @@ are not part of daemon error mapping. Once dispatch reaches the backend,
 | WSLc feature absent / host cannot run WSLc | `backend_unavailable` |
 
 The daemon classifies each failure from the `failure_phase` its step helper
-reported, so a phase failure reaches the SDK with the same code create-and-run
-execution returns for the same host condition. A caller branches on the code
+reported, so a phase failure reaches the SDK with the same code that
+create-and-run execution returns for the same host condition. A caller branches on the code
 without matching the message.
 
 `ErrKind` is additive: a kind a client does not recognize decodes to

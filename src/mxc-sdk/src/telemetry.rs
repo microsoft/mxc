@@ -225,8 +225,8 @@ pub enum ConsentActionResult {
 impl ConsentActionResult {
     /// Stable string used in telemetry consent results.
     ///
-    /// The `result` field returned by telemetry-consent FFI operations and the
-    /// other SDKs uses these camelCase spellings.
+    /// Telemetry-consent FFI operations and the other SDKs use these camelCase
+    /// spellings in the `result` field.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Granted => "granted",
