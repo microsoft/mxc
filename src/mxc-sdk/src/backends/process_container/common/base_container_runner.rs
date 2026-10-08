@@ -14,7 +14,9 @@ use std::ptr;
 use std::sync::Arc;
 
 use crate::learning_mode_core::{capture_diagnostics::CaptureAnalysis, AnalyzeError};
-use crate::learning_mode_windows::{EtlDenialAnalyzer, LearningModeApi, LearningModeError};
+use crate::learning_mode_windows::{
+    EtlDenialAnalyzer, LearningModeApi, LearningModeError, LearningModeTraceSources,
+};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
     HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -216,6 +218,10 @@ impl CaptureSessionOps for CaptureSession {
 }
 
 trait CaptureSessionFactory: Send + Sync {
+    fn trace_sources(
+        &self,
+    ) -> Result<LearningModeTraceSources, crate::learning_mode_windows::LearningModeError>;
+
     fn begin(
         &self,
         sandbox_specification: &[u8],
@@ -226,6 +232,12 @@ trait CaptureSessionFactory: Send + Sync {
 struct RealCaptureSessionFactory;
 
 impl CaptureSessionFactory for RealCaptureSessionFactory {
+    fn trace_sources(
+        &self,
+    ) -> Result<LearningModeTraceSources, crate::learning_mode_windows::LearningModeError> {
+        LearningModeApi::load().map(|api| api.trace_sources())
+    }
+
     fn begin(
         &self,
         sandbox_specification: &[u8],
@@ -296,6 +308,7 @@ impl BaseContainerRunner {
             request,
             version,
             version >= SecurityEnvironmentVersion::V1_1,
+            request.policy.capture_denials.is_some(),
         )
     }
 
@@ -558,10 +571,23 @@ impl BaseContainerRunner {
 
         let supports_network_ingress = psec_version >= SecurityEnvironmentVersion::V1_1
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress);
+        let capture_network_decisions = match capture_denials.as_ref() {
+            Some(_) => self
+                .capture_factory
+                .trace_sources()
+                .map_err(|error| {
+                    ScriptResponse::error(&format!(
+                        "captureDenials: failed to inspect learning-mode trace sources: {error}"
+                    ))
+                })?
+                .includes_network(),
+            None => false,
+        };
         let process_security_environment_spec = build_psec_v1_security_environment_spec(
             request,
             psec_version,
             supports_network_ingress,
+            capture_network_decisions,
         );
         let _ = writeln!(
             logger,
@@ -2254,6 +2280,7 @@ mod tests {
     }
 
     struct FakeCaptureFactory {
+        trace_sources: LearningModeTraceSources,
         begin_error: Option<(&'static str, i32)>,
         finish_error: Option<(&'static str, i32)>,
         begin_calls: AtomicUsize,
@@ -2261,6 +2288,13 @@ mod tests {
     }
 
     impl CaptureSessionFactory for FakeCaptureFactory {
+        fn trace_sources(
+            &self,
+        ) -> Result<LearningModeTraceSources, crate::learning_mode_windows::LearningModeError>
+        {
+            Ok(self.trace_sources)
+        }
+
         fn begin(
             &self,
             _sandbox_specification: &[u8],
@@ -2282,6 +2316,7 @@ mod tests {
 
     fn fake_capture_factory() -> Arc<FakeCaptureFactory> {
         Arc::new(FakeCaptureFactory {
+            trace_sources: LearningModeTraceSources::AccessAndNetwork,
             begin_error: None,
             finish_error: None,
             begin_calls: AtomicUsize::new(0),
@@ -2672,6 +2707,7 @@ mod tests {
     #[test]
     fn capture_factory_injects_begin_failure() {
         let factory = Arc::new(FakeCaptureFactory {
+            trace_sources: LearningModeTraceSources::AccessAndNetwork,
             begin_error: Some((
                 "StartLearningModeTrace",
                 windows::Win32::Foundation::E_FAIL.0,
@@ -2698,6 +2734,7 @@ mod tests {
     #[test]
     fn capture_factory_injects_finish_failure_once() {
         let factory = Arc::new(FakeCaptureFactory {
+            trace_sources: LearningModeTraceSources::AccessAndNetwork,
             begin_error: None,
             finish_error: Some((
                 "StopLearningModeTrace",
@@ -2954,6 +2991,30 @@ mod tests {
 
         assert_eq!(spec.capabilities(), Some("internetClient"));
         assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+    }
+
+    #[test]
+    fn capture_capability_requires_a_network_aware_trace() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+
+        for (capture_network_decisions, expected_capabilities) in
+            [(false, None), (true, Some("internetClient"))]
+        {
+            let bytes = build_psec_v1_security_environment_spec(
+                &request,
+                SecurityEnvironmentVersion::V1_0,
+                false,
+                capture_network_decisions,
+            );
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+            assert_eq!(spec.capabilities(), expected_capabilities);
+        }
     }
 
     #[test]
@@ -3329,7 +3390,7 @@ mod tests {
         let version =
             BaseContainerRunner::choose_min_required_psec_version_for_request(&request, true);
         assert_eq!(version, SecurityEnvironmentVersion::V1_0);
-        let bytes = build_psec_v1_security_environment_spec(&request, version, false);
+        let bytes = build_psec_v1_security_environment_spec(&request, version, false, false);
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
         let network = spec.network_policy().unwrap();
         assert_eq!(spec.version().minor(), 0);
@@ -3369,6 +3430,7 @@ mod tests {
             &ExecutionRequest::default(),
             SecurityEnvironmentVersion { major: 2, minor: 0 },
             false,
+            false,
         );
     }
 
@@ -3378,6 +3440,7 @@ mod tests {
         let bytes = build_psec_v1_security_environment_spec(
             &request,
             SecurityEnvironmentVersion::V1_1,
+            false,
             false,
         );
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
@@ -3398,6 +3461,7 @@ mod tests {
         let bytes = build_psec_v1_security_environment_spec(
             &request,
             SecurityEnvironmentVersion::V1_0,
+            false,
             false,
         );
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();

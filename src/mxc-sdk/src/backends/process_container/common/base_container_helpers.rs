@@ -31,13 +31,14 @@ pub(super) fn build_psec_v1_security_environment_spec(
     request: &ExecutionRequest,
     version: SecurityEnvironmentVersion,
     supports_network_ingress: bool,
+    capture_network_decisions: bool,
 ) -> Vec<u8> {
     assert_eq!(
         version.major, 1,
         "build_psec_v1_security_environment_spec only supports PSEC major version 1"
     );
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let mut capabilities = effective_capabilities(request);
+    let mut capabilities = effective_capabilities(request, capture_network_decisions);
     if request.policy.network_proxy.is_enabled()
         && unrestricted_host_loopback_allowed(&request.policy)
     {
@@ -73,7 +74,10 @@ pub(super) fn build_psec_v1_security_environment_spec(
     builder.finished_data().to_vec()
 }
 
-fn effective_capabilities(request: &ExecutionRequest) -> Vec<String> {
+fn effective_capabilities(
+    request: &ExecutionRequest,
+    capture_network_decisions: bool,
+) -> Vec<String> {
     let policy = &request.policy;
     let mut capabilities: Vec<_> = policy
         .capabilities
@@ -83,6 +87,7 @@ fn effective_capabilities(request: &ExecutionRequest) -> Vec<String> {
         .collect();
     add_default_network_capabilities(policy, &mut capabilities);
     if policy.capture_denials.is_some()
+        && capture_network_decisions
         && policy.network_egress.is_some()
         && !policy.network_proxy.is_enabled()
     {

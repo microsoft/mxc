@@ -53,8 +53,12 @@ fn runtime_proxy_request(proxy: &TcpListener) -> ExecutionRequest {
 fn runtime_proxy_uses_peer_and_capability_without_native_ingress() {
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let request = runtime_proxy_request(&proxy);
-    let bytes =
-        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_1, true);
+    let bytes = build_psec_v1_security_environment_spec(
+        &request,
+        SecurityEnvironmentVersion::V1_1,
+        true,
+        false,
+    );
     let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
     let network = spec.network_policy().expect("network policy");
     let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
@@ -87,8 +91,12 @@ fn runtime_proxy_creates_native_security_environment() {
     }
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let request = runtime_proxy_request(&proxy);
-    let bytes =
-        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_1, true);
+    let bytes = build_psec_v1_security_environment_spec(
+        &request,
+        SecurityEnvironmentVersion::V1_1,
+        true,
+        false,
+    );
     let environment =
         create(&bytes, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE).unwrap_or_else(|error| {
             panic!("valid runtime proxy policy failed to create PSEC: {error}")
@@ -107,8 +115,12 @@ fn identity_scoped_proxy_does_not_grant_host_loopback() {
         .unwrap()
         .host_loopback = NetworkAction::Deny;
     request.policy.allowed_proxy_peer = Some("Contoso.Proxy_12345".to_string());
-    let bytes =
-        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_0, false);
+    let bytes = build_psec_v1_security_environment_spec(
+        &request,
+        SecurityEnvironmentVersion::V1_0,
+        false,
+        false,
+    );
     let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
     let network = spec.network_policy().unwrap();
 
