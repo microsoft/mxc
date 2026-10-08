@@ -124,6 +124,7 @@ pub(crate) struct CaptureVerboseLoggingSummary {
 }
 
 impl CaptureVerboseLoggingSummary {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn record_with_byte_budget(
         &mut self,
         signature: CaptureVerboseLoggingSignature,
@@ -181,6 +182,7 @@ impl CaptureVerboseLoggingSummary {
         *retained_bytes = retained_bytes.saturating_add(serialized_len);
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn record_actionable_after_saturation(
         &mut self,
         signature: CaptureVerboseLoggingSignature,
@@ -198,6 +200,7 @@ impl CaptureVerboseLoggingSummary {
         }
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn record_overflow(&mut self, actionable: bool, count: u64) {
         self.total_occurrences = self.total_occurrences.saturating_add(count);
         self.overflow_occurrences = self.overflow_occurrences.saturating_add(count);
@@ -208,6 +211,7 @@ impl CaptureVerboseLoggingSummary {
         self.aggregate_groups_truncated = true;
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn evict_one_nonactionable_group(&mut self, retained_bytes: &mut usize) -> bool {
         let Some(index) = self
             .signatures
@@ -316,6 +320,7 @@ pub(crate) struct CaptureAnalysis {
 }
 
 impl CaptureAnalysis {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn into_legacy(mut self) -> AnalysisResult {
         for aggregate in self.network_verbose_logging.signatures {
             if let Some(signature) = Self::capture_signature_to_legacy(&aggregate.signature) {
@@ -363,6 +368,7 @@ impl CaptureAnalysis {
         }
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn capture_signature_to_legacy(
         signature: &CaptureVerboseLoggingSignature,
     ) -> Option<VerboseLoggingSignature> {
@@ -431,6 +437,7 @@ impl CaptureAnalysis {
         })
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn merge_legacy_aggregate(
         summary: &mut VerboseLoggingSummary,
         signature: VerboseLoggingSignature,

@@ -221,6 +221,7 @@ impl VerboseLoggingSummary {
 
     /// Records an actionable outcome after the caller has established that
     /// retention is saturated and every retained group is actionable.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn record_actionable_after_saturation(
         &mut self,
         signature: VerboseLoggingSignature,
