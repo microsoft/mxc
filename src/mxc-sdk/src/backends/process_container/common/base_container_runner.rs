@@ -2114,11 +2114,13 @@ mod tests {
         AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
     };
     use crate::mxc_common::models::{
-        BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr,
-        NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort, NetworkProtocol,
-        NetworkRule, ProxyAddress, ProxyConfig, UiPolicy,
+        BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, ContainmentBackend, NetworkAction,
+        NetworkCidr, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort,
+        NetworkProtocol, NetworkRule, ProxyAddress, ProxyConfig, UiPolicy,
     };
+    use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
     use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
+    use crate::mxc_common::wire;
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
     use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2951,6 +2953,76 @@ mod tests {
             .expect("PSEC must carry the Tessera egress policy");
 
         assert_eq!(spec.capabilities(), Some("internetClient"));
+        assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+    }
+
+    #[test]
+    fn capture_capability_requires_an_explicit_direct_egress_section() {
+        for (network, expected_capabilities) in [
+            (None, None),
+            (
+                Some(wire::Network {
+                    egress: None,
+                    ingress: Some(wire::NetworkIngress {
+                        default: Some(wire::NetworkAction::Deny),
+                        host_loopback: Some(wire::NetworkAction::Deny),
+                    }),
+                }),
+                None,
+            ),
+            (
+                Some(wire::Network {
+                    egress: Some(wire::NetworkEgress {
+                        default: Some(wire::NetworkAction::Deny),
+                        allow: None,
+                        deny: None,
+                    }),
+                    ingress: None,
+                }),
+                Some("internetClient"),
+            ),
+        ] {
+            let mut request = ExecutionRequest::default();
+            request.policy.capture_denials = Some(Default::default());
+            parse_network_policy(
+                &mut request.policy,
+                NetworkSections {
+                    network,
+                    runtime: None,
+                    process_container: None,
+                },
+                &ContainmentBackend::ProcessContainer,
+            )
+            .unwrap();
+
+            let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+            let egress = spec
+                .network_policy()
+                .and_then(|policy| policy.egress())
+                .expect("PSEC must retain deny-default egress");
+
+            assert_eq!(spec.capabilities(), expected_capabilities);
+            assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+        }
+    }
+
+    #[test]
+    fn directional_default_deny_without_capture_does_not_add_internet_capability() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .expect("PSEC must retain deny-default egress");
+
+        assert!(spec.capabilities().is_none());
         assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
     }
 
