@@ -251,32 +251,42 @@ MXC currently recognizes two normalized source domains:
 
 - App Isolation missing-capability decisions map capability IDs `0`, `1`, and
   `2` to `internetClient`, `internetClientServer`, and
-  `privateNetworkClientServer`.
+  `privateNetworkClientServer`. These decisions remain actionable capability
+  denials and carry the `addCapability` configuration recommendation in the
+  version-5 verbose artifact.
 - Tessera direct-network default-deny decisions map a complete remote endpoint
   to a `network` resource such as `tcp://203.0.113.10:443` or
-  `udp://[2001:db8::1]:53`.
+  `udp://[2001:db8::1]:53`. These decisions remain actionable network denials.
 
 `NetworkDecisionV1` retains its original 24-property event ID/version `1`
 schema. Tessera attribution is carried only in the existing `Reason` field:
 
-| Reason | Meaning |
-|---:|---|
-| `100` | Direct default deny |
-| `101` | Authored explicit deny |
-| `102` | Exclusion from an allow rule |
-| `103` | Proxy-containment baseline |
+| Source/reason | Meaning | Version-5 recommendation |
+|---|---|---|
+| App Isolation `1` | Missing capability | `addCapability`: add the exact capability named by the actionable record. |
+| Tessera `100` | Direct default deny | `addEgressAllow`: author an exact egress allow only when the numeric endpoint and protocol are representable. |
+| Tessera `101` | Authored explicit deny | `reviewEgressDeny`: remove or narrow the matching deny if that authored restriction is unintended. Adding an allow does not override a deny. |
+| Tessera `102` | Exclusion from an allow rule | `reviewAllowExclusion`: review or narrow the matching `to[].except` entry rather than broadening the existing allow. |
+| Tessera `103` | Proxy-containment baseline | `useConfiguredProxy`: route the workload through `runtimeConfig.networkProxy` rather than enabling direct egress. |
 
 The internal WFP provider-data format used to produce the reason is not part of
 the ETW contract. MXC does not parse provider data or require additional policy
 model, rule-kind, or rule-ordinal fields.
 
 Tessera explicit denies, allow exclusions, and proxy-containment decisions are
-intentional authored policy rather than missing grants. They are retained in
-the verbose logging artifact but are not emitted as policy recommendations;
-recommending a direct allow for proxy containment could bypass the proxy.
+intentional authored policy rather than missing grants. They do not appear as
+actionable `DeniedResource` grant candidates. The version-5 artifact retains
+their typed decision reason and the reason-specific review or proxy guidance
+shown above. It never recommends a direct allow for these decisions.
 Malformed events, unknown reasons, identity mismatches, and incomplete
-endpoints are also verbose-only.
+endpoints are diagnostic-only and receive no success-shaped recommendation.
 Reason `65535` remains `unknownNetworkReason`.
+
+For reason `100`, the structured endpoint recommendation is emitted only when
+MXC can preserve the observed numeric address and a supported protocol without
+widening it to `any`. IPv4 addresses map to `/32`, IPv6 addresses map to
+`/128`, TCP and UDP retain the observed port when present, and ICMP omits
+ports. Unknown protocol encodings do not produce `addEgressAllow`.
 
 Actionable network records use the existing `DeniedResource` shape. The
 normalized protocol, remote address, and optional remote port are encoded in
@@ -310,6 +320,15 @@ capture. The guarded-WPR fallback filters ETW by exact workload process
 generations, while the normalized network event's ETW header identifies the
 broker process, so guarded-WPR analysis intentionally excludes it.
 
+The public Rust `DenialAnalyzer` contract remains source-compatible with MXC
+1.x. It returns actionable WFP capability and reason-`100` network records
+through the existing `DeniedResource` fields, but its existing exhaustive
+provider and reason enums cannot truthfully represent the new WFP diagnostic
+groups. The compatibility projection therefore does not fabricate a legacy
+provider or reason: it omits those groups from the public verbose signature
+array and includes their occurrence counts in the existing overflow counters.
+MXC's native product capture path retains the complete groups in version 5.
+
 ### Verbose logging event signatures
 
 Every successful decode also writes a deterministic sibling file:
@@ -319,27 +338,35 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "signatures": [
     {
       "signature": {
-        "provider": "kernelGeneral",
-        "providerGuid": "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
-        "eventId": 14,
+        "provider": "learningModeNetworkDecision",
+        "providerGuid": "{71237669-21C3-4101-BD2F-FF38945D725A}",
+        "eventId": 1,
+        "eventName": "NetworkDecisionV1",
         "reason": "actionable",
-        "pid": 4321,
-        "accessType": "read",
-        "resourceType": "file",
+        "pid": 0,
+        "accessType": "unknown",
+        "resourceType": "network",
+        "networkDecisionReason": "directDefaultDeny",
+        "configurationRecommendation": "addEgressAllow",
+        "networkEndpoint": {
+          "protocol": "tcp",
+          "remoteAddress": "203.0.113.10",
+          "remotePort": 443
+        },
         "properties": [
-          ["PackageSid", "S-1-15-3-1"],
-          ["resource", "<REDACTED>"]
+          ["ApplicationId", "<REDACTED>"],
+          ["FilterId", "12345"]
         ]
       },
-      "count": 37
+      "count": 3
     }
   ],
   "summary": {
-    "totalOccurrences": 37,
+    "totalOccurrences": 3,
     "overflowOccurrences": 0,
     "actionableOverflowOccurrences": 0,
     "aggregateGroupsTruncated": false,
@@ -349,9 +376,17 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 }
 ```
 
-Version `3` adds the managed network-decision provider and its closed outcome
-reasons. Consumers must reject unsupported document versions rather than
-interpreting an unknown provider or reason with an older vocabulary.
+Version `3` is the legacy contract preceding scoped verbose diagnostics.
+Version `4` adds the schema `eventName` field, the `other` provider category,
+and `schemaUnavailable` outcome used by scoped verbose diagnostics. Version
+`5` adds MXC's internal WFP provider, WFP-specific outcome reasons, typed
+network decision reason, reason-specific configuration recommendation, and
+exact endpoint components. Option-aware native
+`captureDenials` writes version 5 even when a particular trace contains no WFP
+occurrences. Legacy and guarded capture paths may still produce their
+corresponding legacy document version. MXC readers that consume captured
+artifacts accept versions 3, 4, and 5 and reject every other version rather
+than interpreting an unknown provider or reason with an older vocabulary.
 
 Signatures are keyed by symbolic provider category, provider GUID,
 provider-scoped event ID, schema name, outcome reason from a fixed list, PID, and
@@ -369,8 +404,15 @@ under the same signature and increment its count. `accessType` and
 `resourceType` are included when denial extraction determined them; diagnostic
 outcomes without those classifications omit the fields.
 
-Candidates excluded from the actionable output retain a diagnostic
-reason from a fixed list and their sanitized event properties:
+Version-5 WFP signatures may also include `networkDecisionReason`,
+`configurationRecommendation`, and `networkEndpoint`. The decision reason can
+remain present when endpoint decoding is incomplete, but an exact endpoint and
+automatic allow recommendation are omitted when the decoder cannot represent
+the policy change without broadening it. `FilterId` is diagnostic correlation
+only and is never presented as a policy selector.
+
+Candidates excluded from the actionable output retain a diagnostic reason
+from a fixed list and their sanitized event properties:
 
 - `notActionable` includes registry writes, registry checks whose access mask
   cannot be classified as a read, and recognized Section, SymbolicLink, and
