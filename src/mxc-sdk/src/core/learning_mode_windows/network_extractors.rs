@@ -4,8 +4,11 @@
 //! Extractors for the OS-managed Learning Mode WFP decision event.
 
 use crate::learning_mode_core::{
-    AccessType, ResourceType, VerboseLoggingOutcomeReason as VerboseLoggingExclusionReason,
-    VerboseLoggingProvider,
+    capture_diagnostics::{
+        CaptureVerboseLoggingOutcomeReason, ConfigurationRecommendation, NetworkDecisionReason,
+        NetworkEndpoint,
+    },
+    AccessType, ResourceType,
 };
 use std::net::IpAddr;
 use windows::core::GUID;
@@ -44,11 +47,73 @@ const TESSERA_PROVIDER: &str = "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}";
 const TESSERA_SUBLAYER: &str = "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}";
 const APP_ISOLATION_SUBLAYER: &str = "{FFE221C3-92A8-4564-A59F-DAFB70756020}";
 
-pub(crate) fn extract_network_denial(
+const NETWORK_DECISION_V1_FIELDS: [&str; 24] = [
+    "SchemaVersion",
+    "SourceDomain",
+    "Mode",
+    "NormalDecision",
+    "EffectiveDecision",
+    "Reason",
+    "FieldFlags",
+    "OriginalTimestamp",
+    "UserSid",
+    "PackageSid",
+    "ApplicationId",
+    "WfpEventType",
+    "FilterId",
+    "ProviderGuid",
+    "SublayerGuid",
+    "LayerId",
+    "Direction",
+    "IsLoopback",
+    "Protocol",
+    "LocalAddress",
+    "LocalPort",
+    "RemoteAddress",
+    "RemotePort",
+    "CapabilityId",
+];
+
+pub(crate) struct NetworkDecisionAnalysis {
+    pub(crate) denial: Option<RawDenial>,
+    pub(crate) reason: CaptureVerboseLoggingOutcomeReason,
+    pub(crate) network_decision_reason: Option<NetworkDecisionReason>,
+    pub(crate) configuration_recommendation: Option<ConfigurationRecommendation>,
+    pub(crate) network_endpoint: Option<NetworkEndpoint>,
+    pub(crate) classification: (Option<AccessType>, Option<ResourceType>),
+    pub(crate) properties: Vec<(String, String)>,
+}
+
+pub(crate) fn analyze_network_decision(parts: &DecodedEventParts) -> NetworkDecisionAnalysis {
+    let properties = sanitize_properties(&parts.props);
+    match analyze_network_decision_inner(parts) {
+        Ok(mut analysis) => {
+            analysis.properties = properties;
+            analysis
+        }
+        Err(reason) => NetworkDecisionAnalysis {
+            denial: None,
+            reason,
+            network_decision_reason: None,
+            configuration_recommendation: None,
+            network_endpoint: None,
+            classification: verbose_logging_classification(parts),
+            properties,
+        },
+    }
+}
+
+fn analyze_network_decision_inner(
     parts: &DecodedEventParts,
-) -> Result<RawDenial, VerboseLoggingExclusionReason> {
+) -> Result<NetworkDecisionAnalysis, CaptureVerboseLoggingOutcomeReason> {
     if parts.provider != NETWORK_DECISION_PROVIDER || parts.event_id != NETWORK_DECISION_EVENT_ID {
-        return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
+        return Err(CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema);
+    }
+    if !NETWORK_DECISION_V1_FIELDS
+        .iter()
+        .all(|name| property(parts, name).is_some())
+    {
+        return Err(CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema);
     }
 
     let schema_version = required_u16(parts, "SchemaVersion")?;
@@ -68,7 +133,7 @@ pub(crate) fn extract_network_denial(
         || filetime == 0
         || filter_id == 0
     {
-        return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
+        return Err(CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema);
     }
 
     match source_domain {
@@ -76,7 +141,7 @@ pub(crate) fn extract_network_denial(
             extract_app_isolation(parts, reason, field_flags, filetime, filter_id)
         }
         SOURCE_TESSERA => extract_tessera(parts, reason, field_flags, filetime, filter_id),
-        _ => Err(VerboseLoggingExclusionReason::UnknownNetworkReason),
+        _ => Err(CaptureVerboseLoggingOutcomeReason::UnknownNetworkReason),
     }
 }
 
@@ -100,32 +165,67 @@ fn extract_app_isolation(
     field_flags: u32,
     filetime: u64,
     _filter_id: u64,
-) -> Result<RawDenial, VerboseLoggingExclusionReason> {
+) -> Result<NetworkDecisionAnalysis, CaptureVerboseLoggingOutcomeReason> {
     if !property_eq(parts, "SublayerGuid", APP_ISOLATION_SUBLAYER) {
-        return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
+        return Err(CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema);
     }
     if reason != REASON_APP_ISOLATION_MISSING_CAPABILITY {
-        return Err(VerboseLoggingExclusionReason::UnknownNetworkReason);
+        return Err(CaptureVerboseLoggingOutcomeReason::UnknownNetworkReason);
     }
     if field_flags & FIELD_CAPABILITY_ID == 0 {
-        return Err(VerboseLoggingExclusionReason::UnresolvedCapability);
+        return Ok(network_diagnostic(
+            CaptureVerboseLoggingOutcomeReason::UnresolvedCapability,
+            NetworkDecisionReason::AppIsolationMissingCapability,
+            None,
+            None,
+            ResourceType::Capability,
+        ));
     }
-    let capability = match required_u32(parts, "CapabilityId")? {
+    let capability_id = match required_u32(parts, "CapabilityId") {
+        Ok(capability_id) => capability_id,
+        Err(reason) => {
+            return Ok(network_diagnostic(
+                reason,
+                NetworkDecisionReason::AppIsolationMissingCapability,
+                None,
+                None,
+                ResourceType::Capability,
+            ));
+        }
+    };
+    let capability = match capability_id {
         0 => "internetClient",
         1 => "internetClientServer",
         2 => "privateNetworkClientServer",
-        _ => return Err(VerboseLoggingExclusionReason::UnresolvedCapability),
+        _ => {
+            return Ok(network_diagnostic(
+                CaptureVerboseLoggingOutcomeReason::UnresolvedCapability,
+                NetworkDecisionReason::AppIsolationMissingCapability,
+                None,
+                None,
+                ResourceType::Capability,
+            ));
+        }
     };
 
-    Ok(RawDenial {
+    let denial = RawDenial {
         pid: 0,
         resource_type: ResourceType::Capability,
         object_name: capability.to_string(),
         access_type: AccessType::Unknown,
         filetime,
         event_id: parts.event_id,
-        provider: VerboseLoggingProvider::LearningModeNetworkDecision,
-        verbose_logging_properties: sanitize_properties(&parts.props),
+        provider: None,
+        verbose_logging_properties: Vec::new(),
+    };
+    Ok(NetworkDecisionAnalysis {
+        denial: Some(denial),
+        reason: CaptureVerboseLoggingOutcomeReason::Actionable,
+        network_decision_reason: Some(NetworkDecisionReason::AppIsolationMissingCapability),
+        configuration_recommendation: Some(ConfigurationRecommendation::AddCapability),
+        network_endpoint: None,
+        classification: (Some(AccessType::Unknown), Some(ResourceType::Capability)),
+        properties: Vec::new(),
     })
 }
 
@@ -135,51 +235,168 @@ fn extract_tessera(
     field_flags: u32,
     filetime: u64,
     _filter_id: u64,
-) -> Result<RawDenial, VerboseLoggingExclusionReason> {
+) -> Result<NetworkDecisionAnalysis, CaptureVerboseLoggingOutcomeReason> {
     if !property_eq(parts, "ProviderGuid", TESSERA_PROVIDER)
         || !property_eq(parts, "SublayerGuid", TESSERA_SUBLAYER)
         || field_flags & FIELD_CAPABILITY_ID != 0
     {
-        return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
+        return Err(CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema);
     }
 
-    match reason {
-        REASON_TESSERA_EXPLICIT_DENY | REASON_TESSERA_ALLOW_EXCLUSION => {
-            return Err(VerboseLoggingExclusionReason::IntentionalNetworkPolicyDeny)
+    let (network_decision_reason, outcome_reason, recommendation) = match reason {
+        REASON_TESSERA_DIRECT_DEFAULT_DENY => (
+            NetworkDecisionReason::DirectDefaultDeny,
+            CaptureVerboseLoggingOutcomeReason::Actionable,
+            Some(ConfigurationRecommendation::AddEgressAllow),
+        ),
+        REASON_TESSERA_EXPLICIT_DENY => (
+            NetworkDecisionReason::AuthoredExplicitDeny,
+            CaptureVerboseLoggingOutcomeReason::IntentionalNetworkPolicyDeny,
+            Some(ConfigurationRecommendation::ReviewEgressDeny),
+        ),
+        REASON_TESSERA_ALLOW_EXCLUSION => (
+            NetworkDecisionReason::AllowExclusion,
+            CaptureVerboseLoggingOutcomeReason::IntentionalNetworkPolicyDeny,
+            Some(ConfigurationRecommendation::ReviewAllowExclusion),
+        ),
+        REASON_TESSERA_PROXY_CONTAINMENT => (
+            NetworkDecisionReason::ProxyContainment,
+            CaptureVerboseLoggingOutcomeReason::ProxyContainment,
+            Some(ConfigurationRecommendation::UseConfiguredProxy),
+        ),
+        _ => return Err(CaptureVerboseLoggingOutcomeReason::UnknownNetworkReason),
+    };
+
+    let endpoint = match exact_network_endpoint(parts, field_flags) {
+        Ok(endpoint) => endpoint,
+        Err(reason) => {
+            return Ok(network_diagnostic(
+                reason,
+                network_decision_reason,
+                recommendation,
+                None,
+                ResourceType::Network,
+            ));
         }
-        REASON_TESSERA_PROXY_CONTAINMENT => {
-            return Err(VerboseLoggingExclusionReason::ProxyContainment)
-        }
-        REASON_TESSERA_DIRECT_DEFAULT_DENY => {}
-        _ => return Err(VerboseLoggingExclusionReason::UnknownNetworkReason),
+    };
+    if reason != REASON_TESSERA_DIRECT_DEFAULT_DENY {
+        return Ok(NetworkDecisionAnalysis {
+            denial: None,
+            reason: outcome_reason,
+            network_decision_reason: Some(network_decision_reason),
+            configuration_recommendation: recommendation,
+            network_endpoint: endpoint,
+            classification: (Some(AccessType::Unknown), Some(ResourceType::Network)),
+            properties: Vec::new(),
+        });
     }
 
     if field_flags & FIELD_REMOTE_ADDRESS == 0 {
-        return Err(VerboseLoggingExclusionReason::IncompleteNetworkEndpoint);
+        return Ok(network_diagnostic(
+            CaptureVerboseLoggingOutcomeReason::IncompleteNetworkEndpoint,
+            network_decision_reason,
+            None,
+            None,
+            ResourceType::Network,
+        ));
     }
+    let remote_address = match required_ip_string(parts, "RemoteAddress") {
+        Ok(remote_address) => remote_address,
+        Err(reason) => {
+            return Ok(network_diagnostic(
+                reason,
+                network_decision_reason,
+                None,
+                None,
+                ResourceType::Network,
+            ));
+        }
+    };
 
-    let remote_address = required_ip_string(parts, "RemoteAddress")?;
+    let denial = (|| {
+        let protocol = optional_u8(parts, field_flags, FIELD_PROTOCOL, "Protocol")?;
+        let _local_address =
+            optional_ip_string(parts, field_flags, FIELD_LOCAL_ADDRESS, "LocalAddress")?;
+        let _local_port = optional_u16(parts, field_flags, FIELD_LOCAL_PORT, "LocalPort")?;
+        let remote_port = optional_u16(parts, field_flags, FIELD_REMOTE_PORT, "RemotePort")?;
+        let _application_id =
+            optional_string(parts, field_flags, FIELD_APPLICATION_ID, "ApplicationId")?;
+        let _direction = required_u32(parts, "Direction")?;
+        let resource = format_network_resource(protocol, &remote_address, remote_port);
 
-    let protocol = optional_u8(parts, field_flags, FIELD_PROTOCOL, "Protocol")?;
-    let _local_address =
-        optional_ip_string(parts, field_flags, FIELD_LOCAL_ADDRESS, "LocalAddress")?;
-    let _local_port = optional_u16(parts, field_flags, FIELD_LOCAL_PORT, "LocalPort")?;
-    let remote_port = optional_u16(parts, field_flags, FIELD_REMOTE_PORT, "RemotePort")?;
-    let _application_id =
-        optional_string(parts, field_flags, FIELD_APPLICATION_ID, "ApplicationId")?;
-    let _direction = required_u32(parts, "Direction")?;
-    let resource = format_network_resource(protocol, &remote_address, remote_port);
-
-    Ok(RawDenial {
-        pid: 0,
-        resource_type: ResourceType::Network,
-        object_name: resource,
-        access_type: AccessType::Unknown,
-        filetime,
-        event_id: parts.event_id,
-        provider: VerboseLoggingProvider::LearningModeNetworkDecision,
-        verbose_logging_properties: sanitize_properties(&parts.props),
+        Ok::<_, CaptureVerboseLoggingOutcomeReason>(RawDenial {
+            pid: 0,
+            resource_type: ResourceType::Network,
+            object_name: resource,
+            access_type: AccessType::Unknown,
+            filetime,
+            event_id: parts.event_id,
+            provider: None,
+            verbose_logging_properties: Vec::new(),
+        })
+    })();
+    let denial = match denial {
+        Ok(denial) => denial,
+        Err(reason) => {
+            return Ok(network_diagnostic(
+                reason,
+                network_decision_reason,
+                None,
+                endpoint,
+                ResourceType::Network,
+            ));
+        }
+    };
+    Ok(NetworkDecisionAnalysis {
+        denial: Some(denial),
+        reason: outcome_reason,
+        network_decision_reason: Some(network_decision_reason),
+        configuration_recommendation: recommendation.filter(|_| endpoint.is_some()),
+        network_endpoint: endpoint,
+        classification: (Some(AccessType::Unknown), Some(ResourceType::Network)),
+        properties: Vec::new(),
     })
+}
+
+fn network_diagnostic(
+    reason: CaptureVerboseLoggingOutcomeReason,
+    network_decision_reason: NetworkDecisionReason,
+    configuration_recommendation: Option<ConfigurationRecommendation>,
+    network_endpoint: Option<NetworkEndpoint>,
+    resource_type: ResourceType,
+) -> NetworkDecisionAnalysis {
+    NetworkDecisionAnalysis {
+        denial: None,
+        reason,
+        network_decision_reason: Some(network_decision_reason),
+        configuration_recommendation,
+        network_endpoint,
+        classification: (Some(AccessType::Unknown), Some(resource_type)),
+        properties: Vec::new(),
+    }
+}
+
+fn exact_network_endpoint(
+    parts: &DecodedEventParts,
+    field_flags: u32,
+) -> Result<Option<NetworkEndpoint>, CaptureVerboseLoggingOutcomeReason> {
+    if field_flags & FIELD_REMOTE_ADDRESS == 0 {
+        return Ok(None);
+    }
+    let remote_address = required_ip_string(parts, "RemoteAddress")?;
+    let protocol = optional_u8(parts, field_flags, FIELD_PROTOCOL, "Protocol")?;
+    let remote_port = optional_u16(parts, field_flags, FIELD_REMOTE_PORT, "RemotePort")?;
+    let protocol = match protocol {
+        Some(6) => "tcp",
+        Some(17) => "udp",
+        Some(1 | 58) => "icmp",
+        _ => return Ok(None),
+    };
+    Ok(Some(NetworkEndpoint {
+        protocol: protocol.to_string(),
+        remote_address,
+        remote_port,
+    }))
 }
 
 fn format_network_resource(protocol: Option<u8>, address: &str, port: Option<u16>) -> String {
@@ -217,56 +434,56 @@ fn property_eq(parts: &DecodedEventParts, name: &str, expected: &str) -> bool {
 fn required_string(
     parts: &DecodedEventParts,
     name: &'static str,
-) -> Result<String, VerboseLoggingExclusionReason> {
+) -> Result<String, CaptureVerboseLoggingOutcomeReason> {
     property(parts, name)
         .map(ToOwned::to_owned)
-        .ok_or(VerboseLoggingExclusionReason::EventPayloadMalformed)
+        .ok_or(CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed)
 }
 
 fn required_ip_string(
     parts: &DecodedEventParts,
     name: &'static str,
-) -> Result<String, VerboseLoggingExclusionReason> {
+) -> Result<String, CaptureVerboseLoggingOutcomeReason> {
     required_string(parts, name)?
         .parse::<IpAddr>()
         .map(|address| address.to_string())
-        .map_err(|_| VerboseLoggingExclusionReason::IncompleteNetworkEndpoint)
+        .map_err(|_| CaptureVerboseLoggingOutcomeReason::IncompleteNetworkEndpoint)
 }
 
 fn required_u8(
     parts: &DecodedEventParts,
     name: &'static str,
-) -> Result<u8, VerboseLoggingExclusionReason> {
+) -> Result<u8, CaptureVerboseLoggingOutcomeReason> {
     property(parts, name)
         .and_then(parse_u8)
-        .ok_or(VerboseLoggingExclusionReason::EventPayloadMalformed)
+        .ok_or(CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed)
 }
 
 fn required_u16(
     parts: &DecodedEventParts,
     name: &'static str,
-) -> Result<u16, VerboseLoggingExclusionReason> {
+) -> Result<u16, CaptureVerboseLoggingOutcomeReason> {
     property(parts, name)
         .and_then(parse_u16)
-        .ok_or(VerboseLoggingExclusionReason::EventPayloadMalformed)
+        .ok_or(CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed)
 }
 
 fn required_u32(
     parts: &DecodedEventParts,
     name: &'static str,
-) -> Result<u32, VerboseLoggingExclusionReason> {
+) -> Result<u32, CaptureVerboseLoggingOutcomeReason> {
     property(parts, name)
         .and_then(parse_u32)
-        .ok_or(VerboseLoggingExclusionReason::EventPayloadMalformed)
+        .ok_or(CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed)
 }
 
 fn required_u64(
     parts: &DecodedEventParts,
     name: &'static str,
-) -> Result<u64, VerboseLoggingExclusionReason> {
+) -> Result<u64, CaptureVerboseLoggingOutcomeReason> {
     property(parts, name)
         .and_then(parse_u64)
-        .ok_or(VerboseLoggingExclusionReason::EventPayloadMalformed)
+        .ok_or(CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed)
 }
 
 fn optional_string(
@@ -274,7 +491,7 @@ fn optional_string(
     flags: u32,
     flag: u32,
     name: &'static str,
-) -> Result<Option<String>, VerboseLoggingExclusionReason> {
+) -> Result<Option<String>, CaptureVerboseLoggingOutcomeReason> {
     if flags & flag == 0 {
         return Ok(None);
     }
@@ -286,7 +503,7 @@ fn optional_ip_string(
     flags: u32,
     flag: u32,
     name: &'static str,
-) -> Result<Option<String>, VerboseLoggingExclusionReason> {
+) -> Result<Option<String>, CaptureVerboseLoggingOutcomeReason> {
     if flags & flag == 0 {
         return Ok(None);
     }
@@ -298,7 +515,7 @@ fn optional_u8(
     flags: u32,
     flag: u32,
     name: &'static str,
-) -> Result<Option<u8>, VerboseLoggingExclusionReason> {
+) -> Result<Option<u8>, CaptureVerboseLoggingOutcomeReason> {
     if flags & flag == 0 {
         return Ok(None);
     }
@@ -310,7 +527,7 @@ fn optional_u16(
     flags: u32,
     flag: u32,
     name: &'static str,
-) -> Result<Option<u16>, VerboseLoggingExclusionReason> {
+) -> Result<Option<u16>, CaptureVerboseLoggingOutcomeReason> {
     if flags & flag == 0 {
         return Ok(None);
     }
@@ -343,6 +560,15 @@ fn parse_u64(value: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type VerboseLoggingExclusionReason = CaptureVerboseLoggingOutcomeReason;
+
+    fn extract_network_denial(
+        parts: &DecodedEventParts,
+    ) -> Result<RawDenial, CaptureVerboseLoggingOutcomeReason> {
+        let analysis = analyze_network_decision(parts);
+        analysis.denial.ok_or(analysis.reason)
+    }
 
     fn event(source: u8, reason: u16, fields: &[(&str, &str)]) -> DecodedEventParts {
         let mut props = vec![
@@ -502,23 +728,75 @@ mod tests {
 
     #[test]
     fn intentional_and_proxy_denials_are_verbose_only() {
-        for (reason, expected) in [
+        for (reason, expected, policy_reason, recommendation) in [
             (
                 REASON_TESSERA_EXPLICIT_DENY,
                 VerboseLoggingExclusionReason::IntentionalNetworkPolicyDeny,
+                NetworkDecisionReason::AuthoredExplicitDeny,
+                ConfigurationRecommendation::ReviewEgressDeny,
             ),
             (
                 REASON_TESSERA_ALLOW_EXCLUSION,
                 VerboseLoggingExclusionReason::IntentionalNetworkPolicyDeny,
+                NetworkDecisionReason::AllowExclusion,
+                ConfigurationRecommendation::ReviewAllowExclusion,
             ),
             (
                 REASON_TESSERA_PROXY_CONTAINMENT,
                 VerboseLoggingExclusionReason::ProxyContainment,
+                NetworkDecisionReason::ProxyContainment,
+                ConfigurationRecommendation::UseConfiguredProxy,
             ),
         ] {
             let parts = event(SOURCE_TESSERA, reason, &[]);
             assert_eq!(extract_network_denial(&parts).unwrap_err(), expected);
+            let analysis = analyze_network_decision(&parts);
+            assert_eq!(analysis.network_decision_reason, Some(policy_reason));
+            assert_eq!(analysis.configuration_recommendation, Some(recommendation));
         }
+    }
+
+    #[test]
+    fn direct_default_deny_exposes_only_exact_allow_recommendations() {
+        let flags = FIELD_PROTOCOL | FIELD_REMOTE_ADDRESS | FIELD_REMOTE_PORT;
+        let mut exact = event(
+            SOURCE_TESSERA,
+            REASON_TESSERA_DIRECT_DEFAULT_DENY,
+            &[
+                ("Protocol", "6"),
+                ("RemoteAddress", "203.0.113.10"),
+                ("RemotePort", "443"),
+            ],
+        );
+        replace(&mut exact, "FieldFlags", flags.to_string());
+        let analysis = analyze_network_decision(&exact);
+        assert_eq!(
+            analysis.network_decision_reason,
+            Some(NetworkDecisionReason::DirectDefaultDeny)
+        );
+        assert_eq!(
+            analysis.configuration_recommendation,
+            Some(ConfigurationRecommendation::AddEgressAllow)
+        );
+        assert_eq!(
+            analysis.network_endpoint,
+            Some(NetworkEndpoint {
+                protocol: "tcp".to_string(),
+                remote_address: "203.0.113.10".to_string(),
+                remote_port: Some(443),
+            })
+        );
+
+        let mut unknown_protocol = exact;
+        replace(&mut unknown_protocol, "Protocol", "132");
+        let analysis = analyze_network_decision(&unknown_protocol);
+        assert!(analysis.denial.is_some());
+        assert_eq!(
+            analysis.network_decision_reason,
+            Some(NetworkDecisionReason::DirectDefaultDeny)
+        );
+        assert!(analysis.configuration_recommendation.is_none());
+        assert!(analysis.network_endpoint.is_none());
     }
 
     #[test]
@@ -649,6 +927,25 @@ mod tests {
                 "CapabilityId",
             ]
         );
+    }
+
+    #[test]
+    fn every_original_v1_property_name_is_required() {
+        for missing in NETWORK_DECISION_V1_FIELDS {
+            let mut parts = event(
+                SOURCE_TESSERA,
+                REASON_TESSERA_DIRECT_DEFAULT_DENY,
+                &[("RemoteAddress", "203.0.113.10")],
+            );
+            replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
+            parts.props.retain(|(name, _)| name != missing);
+
+            assert_eq!(
+                analyze_network_decision(&parts).reason,
+                CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema,
+                "missing base property {missing} must fail closed"
+            );
+        }
     }
 
     #[test]

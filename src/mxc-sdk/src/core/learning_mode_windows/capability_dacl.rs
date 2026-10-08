@@ -270,7 +270,7 @@ pub(crate) fn extract_denials(
             access_type: AccessType::Unknown,
             filetime,
             event_id: parts.event_id,
-            provider,
+            provider: Some(provider),
             verbose_logging_properties:
                 crate::learning_mode_windows::extractors::sanitize_properties(&parts.props),
         })

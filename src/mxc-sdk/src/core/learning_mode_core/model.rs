@@ -123,15 +123,18 @@ pub struct DeniedResource {
     /// Access type the workload was attempting (see [`AccessType`]).
     pub access_type: AccessType,
 
-    /// Process ID inside the sandbox that triggered the denial.
+    /// Process ID inside the sandbox that triggered the denial. Network
+    /// decisions use `0` when the normalized broker event does not contain a
+    /// reliable workload process ID.
     pub pid: u32,
 
-    /// Kernel timestamp of the denial. On Windows this is `FILETIME`
-    /// (100-nanosecond intervals since 1601-01-01 UTC), copied from
-    /// `EVENT_RECORD.EventHeader.TimeStamp`. Other backends normalise
-    /// their native clocks onto the same epoch so consumers can treat
-    /// the field uniformly. The JSON wire format uses a decimal string so
-    /// JavaScript consumers do not lose precision.
+    /// Timestamp of the denial. On Windows this is `FILETIME` (100-nanosecond
+    /// intervals since 1601-01-01 UTC). Most events use
+    /// `EVENT_RECORD.EventHeader.TimeStamp`; normalized network decisions use
+    /// the payload's original WFP timestamp because the broker emits the ETW
+    /// record later. Other backends normalise their native clocks onto the same
+    /// epoch so consumers can treat the field uniformly. The JSON wire format
+    /// uses a decimal string so JavaScript consumers do not lose precision.
     #[serde(with = "decimal_u64")]
     pub filetime: u64,
 }

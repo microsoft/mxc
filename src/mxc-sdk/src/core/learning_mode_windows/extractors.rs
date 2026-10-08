@@ -119,7 +119,7 @@ pub struct RawDenial {
     pub event_id: u16,
     /// Symbolic category of the originating provider, for verbose logging
     /// aggregation. Never a raw provider GUID.
-    pub provider: VerboseLoggingProvider,
+    pub provider: Option<VerboseLoggingProvider>,
     /// Bounded sensitive-value-redacted properties retained for verbose logging signatures.
     pub verbose_logging_properties: Vec<(String, String)>,
 }
@@ -146,10 +146,6 @@ pub fn extract_denial(
     if !is_learning_mode_event(parts.provider, parts.event_id) {
         return Err(VerboseLoggingOutcomeReason::UnsupportedEventSchema);
     }
-    if parts.provider == super::network_extractors::NETWORK_DECISION_PROVIDER {
-        return super::network_extractors::extract_network_denial(parts);
-    }
-
     match parts.event_id {
         ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID => {
             build_denial_from_access_check(parts, pid, filetime, provider)
@@ -285,8 +281,6 @@ pub(crate) fn verbose_logging_provider_for_guid(provider: GUID) -> Option<Verbos
         Some(VerboseLoggingProvider::KernelGeneral)
     } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
         Some(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode)
-    } else if provider == NETWORK_DECISION_PROVIDER {
-        Some(VerboseLoggingProvider::LearningModeNetworkDecision)
     } else {
         None
     }
@@ -303,9 +297,6 @@ pub(crate) fn verbose_logging_provider_guid(provider: VerboseLoggingProvider) ->
         }
         VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
             format_guid_braced_uppercase(PRIVACY_LEARNING_MODE_PROVIDER)
-        }
-        VerboseLoggingProvider::LearningModeNetworkDecision => {
-            format_guid_braced_uppercase(NETWORK_DECISION_PROVIDER)
         }
     }
 }
@@ -791,7 +782,7 @@ pub fn build_denial_from_access_check(
         access_type,
         filetime,
         event_id: parts.event_id,
-        provider,
+        provider: Some(provider),
         verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
@@ -881,7 +872,7 @@ pub fn build_denial_from_learning_mode(
         access_type: AccessType::Unknown,
         filetime,
         event_id: parts.event_id,
-        provider,
+        provider: Some(provider),
         verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
@@ -948,7 +939,7 @@ pub fn build_denial_from_capability(
         access_type: AccessType::Unknown,
         filetime,
         event_id: parts.event_id,
-        provider,
+        provider: Some(provider),
         verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
@@ -1680,7 +1671,7 @@ mod tests {
         // pid comes from the payload ProcessId (0x1acc), not the header.
         assert_eq!(ev.pid, 0x1acc);
         assert_eq!(ev.object_name, "internetClient");
-        assert_eq!(ev.provider, VerboseLoggingProvider::KernelGeneral);
+        assert_eq!(ev.provider, Some(VerboseLoggingProvider::KernelGeneral));
     }
 
     #[test]

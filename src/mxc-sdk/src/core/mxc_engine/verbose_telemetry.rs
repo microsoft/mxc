@@ -7,8 +7,11 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::learning_mode_core::{
-    verbose_logging_sibling_path, VerboseLoggingAggregate, VerboseLoggingDocument,
-    VerboseLoggingProvider,
+    capture_diagnostics::{
+        parse_supported_verbose_document, CaptureVerboseLoggingDocument,
+        CaptureVerboseLoggingProvider,
+    },
+    verbose_logging_sibling_path,
 };
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{ContainmentBackend, ScriptResponse};
@@ -118,11 +121,8 @@ fn prepare_document(path: &Path) -> Result<PreparedVerboseDocument, String> {
         return Err("verbose artifact exceeds the telemetry input bound".to_string());
     }
 
-    let document: VerboseLoggingDocument = serde_json::from_slice(&bytes)
-        .map_err(|_| "verbose artifact is not valid typed JSON".to_string())?;
-    if document.version != VerboseLoggingDocument::VERSION {
-        return Err("verbose artifact uses an unsupported document version".to_string());
-    }
+    let document = parse_supported_verbose_document(&bytes)
+        .map_err(|_| "verbose artifact is not valid supported typed JSON".to_string())?;
     let document = project_for_telemetry(document);
 
     let compact = serde_json::to_vec(&document)
@@ -145,36 +145,44 @@ fn prepare_document(path: &Path) -> Result<PreparedVerboseDocument, String> {
     })
 }
 
-fn project_for_telemetry(mut document: VerboseLoggingDocument) -> VerboseLoggingDocument {
+fn project_for_telemetry(
+    mut document: CaptureVerboseLoggingDocument,
+) -> CaptureVerboseLoggingDocument {
     let mut groups = std::collections::BTreeMap::new();
     for mut aggregate in document.signatures {
         aggregate.signature.provider_guid =
             canonical_provider_guid(aggregate.signature.provider).to_string();
         aggregate.signature.event_name = None;
         aggregate.signature.properties.clear();
+        aggregate.signature.network_endpoint = None;
         let count = groups.entry(aggregate.signature).or_insert(0u64);
         *count = count.saturating_add(aggregate.count);
     }
     document.signatures = groups
         .into_iter()
-        .map(|(signature, count)| VerboseLoggingAggregate { signature, count })
+        .map(|(signature, count)| {
+            crate::learning_mode_core::capture_diagnostics::CaptureVerboseLoggingAggregate {
+                signature,
+                count,
+            }
+        })
         .collect();
     document
 }
 
-fn canonical_provider_guid(provider: VerboseLoggingProvider) -> &'static str {
+fn canonical_provider_guid(provider: CaptureVerboseLoggingProvider) -> &'static str {
     match provider {
-        VerboseLoggingProvider::KernelGeneral => "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
-        VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
+        CaptureVerboseLoggingProvider::KernelGeneral => "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
+        CaptureVerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
             "{811A1DDB-2E69-5F25-ADC0-4B186170E760}"
         }
-        VerboseLoggingProvider::LearningModeNetworkDecision => {
+        CaptureVerboseLoggingProvider::LearningModeNetworkDecision => {
             "{71237669-21C3-4101-BD2F-FF38945D725A}"
         }
     }
 }
 
-fn chunk_signatures(document: &VerboseLoggingDocument) -> Result<Vec<String>, String> {
+fn chunk_signatures(document: &CaptureVerboseLoggingDocument) -> Result<Vec<String>, String> {
     let mut chunks = Vec::new();
     let mut current = String::from("[");
     let mut current_count = 0usize;
@@ -221,46 +229,50 @@ fn random_document_id() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::learning_mode_core::{
-        VerboseLoggingAggregate, VerboseLoggingDocumentSummary, VerboseLoggingOutcomeReason,
-        VerboseLoggingProvider, VerboseLoggingSignature,
+    use crate::learning_mode_core::capture_diagnostics::{
+        write_capture_verbose_logging_document, CaptureVerboseLoggingAggregate,
+        CaptureVerboseLoggingDocumentSummary, CaptureVerboseLoggingOutcomeReason,
+        CaptureVerboseLoggingSignature, CAPTURE_VERBOSE_LOGGING_VERSION,
     };
     use crate::mxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
 
     fn aggregate_with_reason(
         event_id: u16,
         value: &str,
-        reason: VerboseLoggingOutcomeReason,
-    ) -> VerboseLoggingAggregate {
-        VerboseLoggingAggregate {
-            signature: VerboseLoggingSignature {
-                event_name: None,
-                provider: VerboseLoggingProvider::KernelGeneral,
+        reason: CaptureVerboseLoggingOutcomeReason,
+    ) -> CaptureVerboseLoggingAggregate {
+        CaptureVerboseLoggingAggregate {
+            signature: CaptureVerboseLoggingSignature {
+                provider: CaptureVerboseLoggingProvider::KernelGeneral,
                 provider_guid: "{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}".to_string(),
                 event_id,
+                event_name: None,
                 reason,
                 pid: 42,
                 access_type: None,
                 resource_type: None,
+                network_decision_reason: None,
+                configuration_recommendation: None,
+                network_endpoint: None,
                 properties: vec![("Value".to_string(), value.to_string())],
             },
             count: 1,
         }
     }
 
-    fn aggregate(event_id: u16, value: &str) -> VerboseLoggingAggregate {
+    fn aggregate(event_id: u16, value: &str) -> CaptureVerboseLoggingAggregate {
         aggregate_with_reason(
             event_id,
             value,
-            VerboseLoggingOutcomeReason::UnsupportedEventSchema,
+            CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema,
         )
     }
 
-    fn document(signatures: Vec<VerboseLoggingAggregate>) -> VerboseLoggingDocument {
-        VerboseLoggingDocument {
-            version: VerboseLoggingDocument::VERSION,
+    fn document(signatures: Vec<CaptureVerboseLoggingAggregate>) -> CaptureVerboseLoggingDocument {
+        CaptureVerboseLoggingDocument {
+            version: CAPTURE_VERBOSE_LOGGING_VERSION,
             signatures,
-            summary: VerboseLoggingDocumentSummary {
+            summary: CaptureVerboseLoggingDocumentSummary {
                 total_occurrences: 1,
                 overflow_occurrences: 0,
                 actionable_overflow_occurrences: 0,
@@ -277,7 +289,9 @@ mod tests {
         let chunks = chunk_signatures(&doc).unwrap();
         let rebuilt = chunks
             .iter()
-            .flat_map(|chunk| serde_json::from_str::<Vec<VerboseLoggingAggregate>>(chunk).unwrap())
+            .flat_map(|chunk| {
+                serde_json::from_str::<Vec<CaptureVerboseLoggingAggregate>>(chunk).unwrap()
+            })
             .collect::<Vec<_>>();
         assert_eq!(rebuilt, doc.signatures);
     }
@@ -294,7 +308,7 @@ mod tests {
         let chunks = chunk_signatures(&doc).unwrap();
         assert_eq!(chunks.len(), 2);
         for chunk in chunks {
-            let parsed: Vec<VerboseLoggingAggregate> = serde_json::from_str(&chunk).unwrap();
+            let parsed: Vec<CaptureVerboseLoggingAggregate> = serde_json::from_str(&chunk).unwrap();
             assert_eq!(parsed.len(), 1);
         }
     }
@@ -308,7 +322,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&doc).unwrap()).unwrap();
         assert!(prepare_document(&path)
             .unwrap_err()
-            .contains("unsupported document version"));
+            .contains("valid supported typed JSON"));
     }
 
     #[test]
@@ -321,7 +335,7 @@ mod tests {
             aggregate(2, "customer-secret-two"),
         ]);
         let mut pretty = Vec::new();
-        crate::learning_mode_core::write_verbose_logging_document(&mut pretty, &doc).unwrap();
+        write_capture_verbose_logging_document(&mut pretty, &doc).unwrap();
         std::fs::write(&verbose_path, pretty).unwrap();
 
         let response = ScriptResponse {
@@ -342,10 +356,12 @@ mod tests {
         let signatures = prepared
             .chunks
             .iter()
-            .flat_map(|chunk| serde_json::from_str::<Vec<VerboseLoggingAggregate>>(chunk).unwrap())
+            .flat_map(|chunk| {
+                serde_json::from_str::<Vec<CaptureVerboseLoggingAggregate>>(chunk).unwrap()
+            })
             .collect();
         let summary = serde_json::from_str(&prepared.summary).unwrap();
-        let reconstructed = VerboseLoggingDocument {
+        let reconstructed = CaptureVerboseLoggingDocument {
             version: prepared.version,
             signatures,
             summary,
@@ -370,7 +386,7 @@ mod tests {
         let mut document = document(vec![aggregate_with_reason(
             14,
             "{A47979D2-C419-11D9-A5B4-001185AD2B89}",
-            VerboseLoggingOutcomeReason::ComActivation,
+            CaptureVerboseLoggingOutcomeReason::ComActivation,
         )]);
         document.signatures[0].signature.resource_type =
             Some(crate::learning_mode_core::ResourceType::Other);
@@ -378,7 +394,10 @@ mod tests {
         document = project_for_telemetry(document);
 
         let signature = &document.signatures[0].signature;
-        assert_eq!(signature.reason, VerboseLoggingOutcomeReason::ComActivation);
+        assert_eq!(
+            signature.reason,
+            CaptureVerboseLoggingOutcomeReason::ComActivation
+        );
         assert_eq!(
             signature.resource_type,
             Some(crate::learning_mode_core::ResourceType::Other)
@@ -393,7 +412,7 @@ mod tests {
         let path = directory.path().join("denials.verbose.json");
         std::fs::write(&path, br#"{"secret":"do-not-send"}"#).unwrap();
         let error = prepare_document(&path).unwrap_err();
-        assert_eq!(error, "verbose artifact is not valid typed JSON");
+        assert_eq!(error, "verbose artifact is not valid supported typed JSON");
         assert!(!error.contains("do-not-send"));
     }
 
@@ -411,7 +430,7 @@ mod tests {
         assert!(!serialized.contains(injected));
         assert_eq!(
             projected.signatures[0].signature.provider_guid,
-            canonical_provider_guid(VerboseLoggingProvider::KernelGeneral)
+            canonical_provider_guid(CaptureVerboseLoggingProvider::KernelGeneral)
         );
         assert!(projected.signatures[0].signature.properties.is_empty());
     }
@@ -419,7 +438,8 @@ mod tests {
     #[test]
     fn telemetry_projection_strips_network_payload_and_canonicalizes_provider() {
         let mut doc = document(vec![aggregate(1, "private-network-data")]);
-        doc.signatures[0].signature.provider = VerboseLoggingProvider::LearningModeNetworkDecision;
+        doc.signatures[0].signature.provider =
+            CaptureVerboseLoggingProvider::LearningModeNetworkDecision;
         doc.signatures[0].signature.provider_guid = "untrusted-provider".into();
         doc.signatures[0].signature.event_name = Some("NetworkDecisionV1".into());
 

@@ -20,20 +20,16 @@ pub const MAX_VERBOSE_LOGGING_SIGNATURE_BYTES: usize = 16 * 1024 * 1024;
 /// Stable category for a known Learning Mode ETW provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum VerboseLoggingProvider {
     /// Microsoft-Windows-Kernel-General.
     KernelGeneral,
     /// Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode.
     PrivacyAuditingPermissiveLearningMode,
-    /// Microsoft-Windows-LearningMode-NetworkDecision.
-    LearningModeNetworkDecision,
 }
 
 /// Closed reason describing how a decoder outcome was handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum VerboseLoggingOutcomeReason {
     /// The event produced a valid actionable denial.
     Actionable,
@@ -63,14 +59,16 @@ pub enum VerboseLoggingOutcomeReason {
     ComInterfaceCall,
     /// The event was valid but did not describe an actionable denial.
     NotActionable,
-    /// The source reported an intentional explicit deny or allow-rule exclusion.
-    IntentionalNetworkPolicyDeny,
-    /// The source reported a direct connection blocked by proxy containment.
-    ProxyContainment,
-    /// The network event carried an unknown or unsupported stable reason.
-    UnknownNetworkReason,
-    /// The network event omitted endpoint data required for policy guidance.
-    IncompleteNetworkEndpoint,
+}
+
+/// Validates a supported MXC verbose logging document without exposing its
+/// version-specific internal Rust representation.
+///
+/// This accepts the legacy public document and newer product-only document
+/// versions used by MXC capture paths.
+#[doc(hidden)]
+pub fn validate_verbose_logging_document(bytes: &[u8]) -> Result<(), serde_json::Error> {
+    super::capture_diagnostics::parse_supported_verbose_document(bytes).map(|_| ())
 }
 
 impl VerboseLoggingOutcomeReason {
@@ -565,8 +563,8 @@ mod tests {
         let retained = summary.signatures[0].signature.clone();
         summary.record_actionable_after_saturation(retained);
         summary.record_actionable_after_saturation(VerboseLoggingSignature {
-            provider: VerboseLoggingProvider::LearningModeNetworkDecision,
-            provider_guid: "network".to_string(),
+            provider: VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
+            provider_guid: "privacy".to_string(),
             event_id: u16::MAX,
             reason: VerboseLoggingOutcomeReason::Actionable,
             pid: 0,

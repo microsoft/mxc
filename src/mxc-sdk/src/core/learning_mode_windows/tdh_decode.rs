@@ -1161,7 +1161,9 @@ mod tests {
             props,
         };
 
-        let denial = network_extractors::extract_network_denial(&parts).expect("network denial");
+        let denial = network_extractors::analyze_network_decision(&parts)
+            .denial
+            .expect("network denial");
 
         assert_eq!(denial.object_name, "tcp://203.0.113.10:443");
     }
