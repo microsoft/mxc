@@ -276,8 +276,8 @@ are not part of daemon error mapping. Once dispatch reaches the backend,
 | WSLc feature absent / host cannot run WSLc | `backend_unavailable` |
 
 The daemon classifies each failure from the `failure_phase` its step helper
-reported, so a phase failure reaches the SDK with the same code create-and-run
-execution returns for the same host condition. A caller branches on the code
+reported, so a phase failure reaches the SDK with the same code that
+create-and-run execution returns for the same host condition. A caller branches on the code
 without matching the message.
 
 `ErrKind` is additive: a kind a client does not recognize decodes to
