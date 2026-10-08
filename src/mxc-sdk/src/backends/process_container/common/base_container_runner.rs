@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 
-use crate::learning_mode_core::DenialAnalyzer;
+use crate::learning_mode_core::{capture_diagnostics::CaptureAnalysis, AnalyzeError};
 use crate::learning_mode_windows::{EtlDenialAnalyzer, LearningModeApi, LearningModeError};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
@@ -59,7 +59,7 @@ use crate::process_container_common::base_container_helpers::{
 };
 use crate::process_container_common::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
-    remove_internal_capture_file, unique_denials_output_paths, write_denials_document,
+    remove_internal_capture_file, unique_denials_output_paths, write_capture_denials_document,
     write_stderr_line_best_effort,
 };
 use crate::process_container_common::job_object::UiJobObject;
@@ -78,6 +78,16 @@ use crate::process_container_common::secenv::{
 use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
+
+trait CaptureDenialAnalyzer {
+    fn analyze_capture(&self, source_path: &Path) -> Result<CaptureAnalysis, AnalyzeError>;
+}
+
+impl CaptureDenialAnalyzer for EtlDenialAnalyzer {
+    fn analyze_capture(&self, source_path: &Path) -> Result<CaptureAnalysis, AnalyzeError> {
+        EtlDenialAnalyzer::analyze_capture(self, source_path)
+    }
+}
 
 /// Build the environment block handed to the contained child.
 ///
@@ -1635,21 +1645,21 @@ impl BaseContainerSandboxProcess {
 
     /// Decodes a sealed capture into the JSON denials document at `output_path`.
     fn decode_and_write_denials(
-        analyzer: &dyn DenialAnalyzer,
+        analyzer: &dyn CaptureDenialAnalyzer,
         etl_path: &std::path::Path,
         output_path: &std::path::Path,
         exit_code: i32,
     ) -> std::io::Result<CaptureDenialsOutput> {
-        let analysis = analyzer.analyze(etl_path).map_err(|error| {
+        let analysis = analyzer.analyze_capture(etl_path).map_err(|error| {
             std::io::Error::other(format!(
                 "captureDenials failed to decode denials ETL: {error}"
             ))
         })?;
-        write_denials_document(analysis, exit_code, output_path)
+        write_capture_denials_document(analysis, exit_code, output_path)
     }
 
     fn decode_write_and_finalize(
-        analyzer: &dyn DenialAnalyzer,
+        analyzer: &dyn CaptureDenialAnalyzer,
         etl_path: &Path,
         etl_directory: Option<&Path>,
         output_path: &Path,
@@ -2100,7 +2110,8 @@ fn managed_capture_output_path_in(
 mod tests {
     use super::*;
     use crate::learning_mode_core::{
-        AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
+        capture_diagnostics::CaptureVerboseLoggingSummary, AccessType, AnalysisResult,
+        AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
     };
     use crate::mxc_common::models::{
         BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr,
@@ -2280,10 +2291,15 @@ mod tests {
         result: Result<AnalysisResult, &'static str>,
     }
 
-    impl DenialAnalyzer for FakeAnalyzer {
-        fn analyze(&self, _source_path: &Path) -> Result<AnalysisResult, AnalyzeError> {
+    impl CaptureDenialAnalyzer for FakeAnalyzer {
+        fn analyze_capture(&self, _source_path: &Path) -> Result<CaptureAnalysis, AnalyzeError> {
             match &self.result {
-                Ok(result) => Ok(result.clone()),
+                Ok(result) => Ok(CaptureAnalysis {
+                    denials: result.denials.clone(),
+                    denied_resources_truncated: result.denied_resources_truncated,
+                    verbose_logging: result.verbose_logging.clone(),
+                    network_verbose_logging: CaptureVerboseLoggingSummary::default(),
+                }),
                 Err(message) => Err(AnalyzeError::Decode((*message).to_string())),
             }
         }
@@ -2387,8 +2403,16 @@ mod tests {
         assert_eq!(metadata.exit_code, 7);
         assert_eq!(metadata.total_denials, 1);
         let document: DenialsDocument =
-            serde_json::from_slice(&std::fs::read(output_path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
         assert_eq!(document.denials.len(), 1);
+        let verbose_path =
+            crate::learning_mode_core::verbose_logging_sibling_path(&output_path).unwrap();
+        let verbose: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(verbose_path).unwrap()).unwrap();
+        assert_eq!(
+            verbose["version"],
+            crate::learning_mode_core::capture_diagnostics::CAPTURE_VERBOSE_LOGGING_VERSION
+        );
     }
 
     #[test]

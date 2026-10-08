@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::learning_mode_core::{
+    capture_diagnostics::{write_capture_verbose_logging_document, CaptureAnalysis},
     verbose_logging_sibling_path, write_document, write_paired_output_files,
     write_verbose_logging_document, AnalysisResult, DenialSummary, DenialsDocument,
     DenialsOutputPointer, ExistingOutputPolicy, VerboseLoggingDocument,
@@ -77,6 +78,41 @@ pub fn write_denials_document(
         ExistingOutputPolicy::CreateNew,
         |writer| write_document(writer, &document),
         |writer| write_verbose_logging_document(writer, &verbose_logging_document),
+    )?;
+
+    let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
+    Ok(CaptureDenialsOutput {
+        kind: pointer.kind,
+        output_path: pointer.output_path,
+        exit_code: pointer.exit_code,
+        total_denials: pointer.total_denials,
+        denied_resources_truncated: pointer.denied_resources_truncated,
+        etl_path: None,
+    })
+}
+
+/// Writes native capture analysis with the complete internal v5 diagnostics.
+pub(crate) fn write_capture_denials_document(
+    analysis: CaptureAnalysis,
+    exit_code: i32,
+    output_path: &Path,
+) -> std::io::Result<CaptureDenialsOutput> {
+    let verbose_logging_path = verbose_logging_output_path(output_path)?;
+    let verbose_logging_document = analysis.verbose_document();
+    let summary = DenialSummary::new(
+        exit_code,
+        analysis.denials.len(),
+        analysis.denied_resources_truncated,
+    );
+    let document = DenialsDocument::new(analysis.denials, summary);
+
+    write_paired_output_files(
+        "captureDenials",
+        output_path,
+        &verbose_logging_path,
+        ExistingOutputPolicy::CreateNew,
+        |writer| write_document(writer, &document),
+        |writer| write_capture_verbose_logging_document(writer, &verbose_logging_document),
     )?;
 
     let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
@@ -281,6 +317,11 @@ pub fn write_stderr_line_best_effort(message: std::fmt::Arguments<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::learning_mode_core::capture_diagnostics::{
+        CaptureVerboseLoggingOutcomeReason, CaptureVerboseLoggingProvider,
+        CaptureVerboseLoggingSignature, CaptureVerboseLoggingSummary, ConfigurationRecommendation,
+        NetworkDecisionReason, NetworkEndpoint, CAPTURE_VERBOSE_LOGGING_VERSION,
+    };
     use crate::learning_mode_core::{
         AccessType, DeniedResource, ResourceType, VerboseLoggingOutcomeReason,
         VerboseLoggingProvider, VerboseLoggingSignature,
@@ -328,6 +369,68 @@ mod tests {
         assert_eq!(metadata.total_denials, 0);
         assert!(output_path.exists());
         assert!(verbose_logging_output_path(&output_path).unwrap().exists());
+    }
+
+    #[test]
+    fn native_capture_writes_version_five_reason_specific_guidance() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        let mut network_verbose_logging = CaptureVerboseLoggingSummary::default();
+        let mut retained_bytes = 0;
+        network_verbose_logging.record_with_byte_budget(
+            CaptureVerboseLoggingSignature {
+                provider: CaptureVerboseLoggingProvider::LearningModeNetworkDecision,
+                provider_guid: "{71237669-21C3-4101-BD2F-FF38945D725A}".to_string(),
+                event_id: 1,
+                event_name: Some("NetworkDecisionV1".to_string()),
+                reason: CaptureVerboseLoggingOutcomeReason::Actionable,
+                pid: 0,
+                access_type: Some(AccessType::Unknown),
+                resource_type: Some(ResourceType::Network),
+                network_decision_reason: Some(NetworkDecisionReason::DirectDefaultDeny),
+                configuration_recommendation: Some(ConfigurationRecommendation::AddEgressAllow),
+                network_endpoint: Some(NetworkEndpoint {
+                    protocol: "tcp".to_string(),
+                    remote_address: "203.0.113.10".to_string(),
+                    remote_port: Some(443),
+                }),
+                properties: Vec::new(),
+            },
+            &mut retained_bytes,
+            crate::learning_mode_core::MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+        );
+        let analysis = CaptureAnalysis {
+            denials: vec![DeniedResource {
+                resource: "tcp://203.0.113.10:443".to_string(),
+                resource_type: ResourceType::Network,
+                access_type: AccessType::Unknown,
+                pid: 0,
+                filetime: 99,
+            }],
+            denied_resources_truncated: false,
+            verbose_logging: Default::default(),
+            network_verbose_logging,
+        };
+
+        write_capture_denials_document(analysis, 0, &output_path).unwrap();
+
+        let verbose: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(verbose_logging_output_path(&output_path).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(verbose["version"], CAPTURE_VERBOSE_LOGGING_VERSION);
+        assert_eq!(
+            verbose["signatures"][0]["signature"]["networkDecisionReason"],
+            "directDefaultDeny"
+        );
+        assert_eq!(
+            verbose["signatures"][0]["signature"]["configurationRecommendation"],
+            "addEgressAllow"
+        );
+        assert_eq!(
+            verbose["signatures"][0]["signature"]["networkEndpoint"]["remoteAddress"],
+            "203.0.113.10"
+        );
     }
 
     #[test]
