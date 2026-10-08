@@ -6,7 +6,7 @@ Terms used in the [SDK reference](api-reference/README.md) and [configuration gu
 
 | Term | Meaning in MXC | Example |
 |---|---|---|
-| Container | Isolated environment in which  command. | Process isolation, Linux container, user session, or VM. |
+| Container | Isolated environment in which a command or program runs. | Process isolation, Linux container, user session, or VM. |
 | Backend | MXC implementation of a container technology. | Bubblewrap on Linux. |
 | Workload | Command or program running inside the container. | `node -e "console.log('hello')"` |
 | Policy / config | Access rules enforced by the container. | `FilesystemPolicy`: readable, writable, and denied paths. |
