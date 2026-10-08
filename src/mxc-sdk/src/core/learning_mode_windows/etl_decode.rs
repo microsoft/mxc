@@ -35,7 +35,7 @@ use crate::learning_mode_core::{
     },
     AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource, ProcessLifetime,
     VerboseLoggingOutcomeReason, VerboseLoggingProvider, VerboseLoggingSignature,
-    VerboseLoggingSummary, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+    VerboseLoggingSummary, MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
 use windows::core::PWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
@@ -431,6 +431,8 @@ impl<'visitor> Accumulator<'visitor> {
         );
         if reason.is_actionable()
             && self.verbose_logging.overflow_occurrences > overflow_before
+            && (self.verbose_logging.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
+                || self.verbose_logging_signature_bytes >= MAX_VERBOSE_LOGGING_SIGNATURE_BYTES)
             && self
                 .verbose_logging
                 .signatures
@@ -476,6 +478,9 @@ impl<'visitor> Accumulator<'visitor> {
         );
         if analysis.reason.is_actionable()
             && self.network_verbose_logging.overflow_occurrences > overflow_before
+            && (self.network_verbose_logging.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
+                || self.network_verbose_logging_signature_bytes
+                    >= MAX_VERBOSE_LOGGING_SIGNATURE_BYTES)
             && self
                 .network_verbose_logging
                 .signatures
@@ -3707,6 +3712,65 @@ mod tests {
         assert!(accumulator.verbose_logging_signature_bytes <= MAX_VERBOSE_LOGGING_SIGNATURE_BYTES);
     }
 
+    #[test]
+    fn oversized_actionable_signature_does_not_saturate_remaining_byte_budget() {
+        let remaining_bytes = 512;
+        let mut accumulator = Accumulator::analyze();
+        accumulator.verbose_logging_signature_bytes =
+            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES - remaining_bytes;
+        accumulator.record_exclusion(
+            VerboseLoggingProvider::KernelGeneral,
+            14,
+            VerboseLoggingOutcomeReason::Actionable,
+            1,
+            vec![("Large".to_string(), "x".repeat(remaining_bytes))],
+        );
+
+        assert_eq!(accumulator.verbose_logging.overflow_occurrences, 1);
+        assert!(!accumulator.verbose_logging_actionable_only_saturated);
+
+        accumulator.record_exclusion(
+            VerboseLoggingProvider::KernelGeneral,
+            15,
+            VerboseLoggingOutcomeReason::Actionable,
+            1,
+            Vec::new(),
+        );
+
+        assert_eq!(accumulator.verbose_logging.signatures.len(), 1);
+        assert_eq!(accumulator.verbose_logging.overflow_occurrences, 1);
+    }
+
+    #[test]
+    fn oversized_network_signature_does_not_saturate_remaining_byte_budget() {
+        let remaining_bytes = 512;
+        let mut accumulator = Accumulator::analyze();
+        accumulator.network_verbose_logging_signature_bytes =
+            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES - remaining_bytes;
+        let analysis = crate::learning_mode_windows::network_extractors::NetworkDecisionAnalysis {
+            denial: None,
+            reason: CaptureVerboseLoggingOutcomeReason::Actionable,
+            network_decision_reason: None,
+            configuration_recommendation: None,
+            network_endpoint: None,
+            classification: (None, None),
+            properties: vec![("Large".to_string(), "x".repeat(remaining_bytes))],
+        };
+        accumulator.record_network_outcome(1, Some("NetworkDecisionV1".to_string()), &analysis);
+
+        assert_eq!(accumulator.network_verbose_logging.overflow_occurrences, 1);
+        assert!(!accumulator.network_verbose_logging_actionable_only_saturated);
+
+        let analysis = crate::learning_mode_windows::network_extractors::NetworkDecisionAnalysis {
+            properties: Vec::new(),
+            ..analysis
+        };
+        accumulator.record_network_outcome(2, None, &analysis);
+
+        assert_eq!(accumulator.network_verbose_logging.signatures.len(), 1);
+        assert_eq!(accumulator.network_verbose_logging.overflow_occurrences, 1);
+    }
+    #[test]
     #[test]
     fn unknown_resource_signature_redacts_the_entire_file_path() {
         let events = vec![kernel_event(

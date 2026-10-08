@@ -421,6 +421,10 @@ fn format_network_resource(protocol: Option<u8>, address: &str, port: Option<u16
     } else {
         address.to_string()
     };
+    let port = match protocol {
+        Some(1 | 58) => None,
+        _ => port,
+    };
     port.map_or_else(
         || format!("{scheme}://{host}"),
         |port| format!("{scheme}://{host}:{port}"),
@@ -732,6 +736,36 @@ mod tests {
             extract_network_denial(&parts).unwrap().object_name,
             "udp://[2001:db8::1]:53"
         );
+    }
+
+    #[test]
+    fn tessera_icmp_resources_ignore_irrelevant_ports() {
+        for (protocol, expected) in [(1, "icmp://203.0.113.10"), (58, "icmpv6://[2001:db8::1]")] {
+            let address = if protocol == 1 {
+                "203.0.113.10"
+            } else {
+                "2001:db8::1"
+            };
+            let flags = FIELD_PROTOCOL | FIELD_REMOTE_ADDRESS | FIELD_REMOTE_PORT;
+            let mut parts = event(
+                SOURCE_TESSERA,
+                REASON_TESSERA_DIRECT_DEFAULT_DENY,
+                &[
+                    ("Protocol", &protocol.to_string()),
+                    ("RemoteAddress", address),
+                    ("RemotePort", "8"),
+                ],
+            );
+            replace(&mut parts, "FieldFlags", flags.to_string());
+
+            let analysis = analyze_network_decision(&parts);
+            assert_eq!(analysis.denial.unwrap().object_name, expected);
+            assert_eq!(
+                analysis.network_endpoint.unwrap().remote_port,
+                None,
+                "ICMP recommendations must not carry ports"
+            );
+        }
     }
 
     #[test]
