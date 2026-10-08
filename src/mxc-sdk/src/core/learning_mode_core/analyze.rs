@@ -306,7 +306,6 @@ mod tests {
         let signature = |pid| VerboseLoggingAggregate {
             signature: VerboseLoggingSignature {
                 provider: VerboseLoggingProvider::KernelGeneral,
-                event_name: None,
                 provider_guid: "provider".to_string(),
                 event_id: 14,
                 reason: VerboseLoggingOutcomeReason::Actionable,
@@ -352,7 +351,6 @@ mod tests {
                 signatures: vec![VerboseLoggingAggregate {
                     signature: VerboseLoggingSignature {
                         provider: VerboseLoggingProvider::KernelGeneral,
-                        event_name: None,
                         provider_guid: "provider".to_string(),
                         event_id: 14,
                         reason: VerboseLoggingOutcomeReason::Actionable,
@@ -397,7 +395,6 @@ mod tests {
                     signature: VerboseLoggingSignature {
                         provider: VerboseLoggingProvider::KernelGeneral,
                         provider_guid: "provider".to_string(),
-                        event_name: None,
                         event_id: 14,
                         reason: VerboseLoggingOutcomeReason::Actionable,
                         pid: 1,
@@ -432,7 +429,6 @@ mod tests {
             .map(|pid| VerboseLoggingAggregate {
                 signature: VerboseLoggingSignature {
                     provider: VerboseLoggingProvider::KernelGeneral,
-                    event_name: None,
                     provider_guid: "provider".to_string(),
                     event_id: 14,
                     reason: VerboseLoggingOutcomeReason::MissingObjectName,

@@ -56,6 +56,16 @@ const INVALID_PROCESSTRACE_HANDLE: u64 = u64::MAX;
 const MAX_UNIQUE_DENIALS: usize = 10_000;
 const MAX_PROCESSED_EVENTS: usize = 1_000_000;
 
+pub(crate) fn is_process_scoped_relog_candidate(
+    provider: windows::core::GUID,
+    event_id: u16,
+) -> bool {
+    is_process_scoped_event(provider, event_id)
+        || (crate::learning_mode_windows::extractors::verbose_logging_provider_for_guid(provider)
+            .is_some()
+            && !is_learning_mode_event(provider, event_id))
+}
+
 /// One decoded ETW event, retaining the header context the extractors need.
 #[cfg(test)]
 struct CollectedEvent {
@@ -251,6 +261,14 @@ impl<'visitor> Accumulator<'visitor> {
         }
     }
 
+    fn selects(&self, provider: windows::core::GUID, event_id: u16) -> bool {
+        if self.process_lifetimes.is_some() {
+            is_process_scoped_relog_candidate(provider, event_id)
+        } else {
+            is_learning_mode_event(provider, event_id)
+        }
+    }
+
     fn add_raw_denial(&mut self, raw: RawDenial) {
         self.add_raw_denial_impl(raw, true);
     }
@@ -341,7 +359,6 @@ impl<'visitor> Accumulator<'visitor> {
         raw: &RawDenial,
         resource: &str,
         reason: VerboseLoggingOutcomeReason,
-        event_name: Option<&str>,
     ) {
         let mut properties = raw
             .verbose_logging_properties
@@ -390,6 +407,17 @@ impl<'visitor> Accumulator<'visitor> {
             (Some(raw.access_type), Some(raw.resource_type)),
             properties,
         );
+    }
+
+    fn record_exclusion(
+        &mut self,
+        provider: VerboseLoggingProvider,
+        event_id: u16,
+        reason: VerboseLoggingOutcomeReason,
+        pid: u32,
+        properties: Vec<(String, String)>,
+    ) {
+        self.record_outcome(provider, event_id, reason, pid, (None, None), properties);
     }
 
     fn record_outcome(
@@ -450,7 +478,7 @@ impl<'visitor> Accumulator<'visitor> {
         analysis: &crate::learning_mode_windows::network_extractors::NetworkDecisionAnalysis,
     ) {
         let (access_type, resource_type) = analysis.classification;
-        let signature = CaptureVerboseLoggingSignature {
+        self.record_capture_signature(CaptureVerboseLoggingSignature {
             provider: CaptureVerboseLoggingProvider::LearningModeNetworkDecision,
             provider_guid: "{71237669-21C3-4101-BD2F-FF38945D725A}".to_string(),
             event_id,
@@ -463,9 +491,12 @@ impl<'visitor> Accumulator<'visitor> {
             configuration_recommendation: analysis.configuration_recommendation,
             network_endpoint: analysis.network_endpoint.clone(),
             properties: analysis.properties.clone(),
-        };
-        if self.network_verbose_logging_actionable_only_saturated && analysis.reason.is_actionable()
-        {
+        });
+    }
+
+    fn record_capture_signature(&mut self, signature: CaptureVerboseLoggingSignature) {
+        let actionable = signature.reason.is_actionable();
+        if self.network_verbose_logging_actionable_only_saturated && actionable {
             self.network_verbose_logging
                 .record_actionable_after_saturation(signature);
             return;
@@ -476,7 +507,7 @@ impl<'visitor> Accumulator<'visitor> {
             &mut self.network_verbose_logging_signature_bytes,
             MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
         );
-        if analysis.reason.is_actionable()
+        if actionable
             && self.network_verbose_logging.overflow_occurrences > overflow_before
             && (self.network_verbose_logging.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
                 || self.network_verbose_logging_signature_bytes
@@ -531,13 +562,21 @@ impl<'visitor> Accumulator<'visitor> {
         pid: u32,
         error: tdh_decode::DecodeError,
     ) {
-        let fatal = matches!(self.mode, CollectionMode::Raw) || error.is_schema_error();
+        let fatal = matches!(self.mode, CollectionMode::Raw);
         if fatal {
             if self.decode_error.is_none() {
                 self.decode_error =
                     Some(format!("provider {:?} event {event_id}: {error}", provider));
             }
             return;
+        }
+        let pid = if is_process_scoped_event(provider, event_id) {
+            pid
+        } else {
+            0
+        };
+        if error.event_kind().is_none() && is_process_scoped_event(provider, event_id) {
+            self.truncated = true;
         }
         if provider == crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER {
             let reason = match error.event_kind() {
@@ -550,7 +589,7 @@ impl<'visitor> Accumulator<'visitor> {
                 Some(tdh_decode::EventDecodeKind::UnsupportedPropertyEncoding) => {
                     CaptureVerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
                 }
-                None => return,
+                None => CaptureVerboseLoggingOutcomeReason::SchemaUnavailable,
             };
             let event_name = error
                 .event_name()
@@ -581,21 +620,16 @@ impl<'visitor> Accumulator<'visitor> {
         {
             let reason = match error.event_kind() {
                 Some(tdh_decode::EventDecodeKind::PayloadMalformed) => {
-                    VerboseLoggingOutcomeReason::EventPayloadMalformed
+                    CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed
                 }
                 Some(tdh_decode::EventDecodeKind::DecoderLimitReached) => {
-                    VerboseLoggingOutcomeReason::DecoderLimitReached
+                    CaptureVerboseLoggingOutcomeReason::DecoderLimitReached
                 }
                 Some(tdh_decode::EventDecodeKind::UnsupportedPropertyEncoding) => {
-                    VerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
+                    CaptureVerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
                 }
-                None => return,
+                None => CaptureVerboseLoggingOutcomeReason::SchemaUnavailable,
             };
-            let properties = error
-                .event_name()
-                .map(|name| vec![("EventName".to_string(), name.to_string())])
-                .map(crate::learning_mode_windows::extractors::bound_properties)
-                .unwrap_or_default();
             let classification = match event_id {
                 crate::learning_mode_windows::extractors::LEARNING_MODE_VIOLATION_EVENT_ID => (
                     Some(crate::learning_mode_core::AccessType::Unknown),
@@ -616,7 +650,34 @@ impl<'visitor> Accumulator<'visitor> {
                 }
                 _ => (None, None),
             };
-            self.record_outcome(category, event_id, reason, pid, classification, properties);
+            let provider = match category {
+                VerboseLoggingProvider::KernelGeneral => {
+                    CaptureVerboseLoggingProvider::KernelGeneral
+                }
+                VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
+                    CaptureVerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode
+                }
+            };
+            let (access_type, resource_type) = classification;
+            self.record_capture_signature(CaptureVerboseLoggingSignature {
+                provider,
+                provider_guid:
+                    crate::learning_mode_windows::extractors::verbose_logging_provider_guid(
+                        category,
+                    ),
+                event_id,
+                event_name: crate::learning_mode_windows::extractors::sanitize_event_name(
+                    error.event_name(),
+                ),
+                reason,
+                pid,
+                access_type,
+                resource_type,
+                network_decision_reason: None,
+                configuration_recommendation: None,
+                network_endpoint: None,
+                properties: Vec::new(),
+            });
         }
     }
 
@@ -847,7 +908,7 @@ pub(crate) fn select_learning_mode_events_for_relogging(
 fn dedup_to_resources<I: IntoIterator<Item = RawDenial>>(raws: I) -> AnalysisResult {
     let mut accumulator = Accumulator::analyze();
     for raw in raws {
-        accumulator.add_raw_denial(raw, None);
+        accumulator.add_raw_denial(raw);
     }
     accumulator
         .into_analysis()
@@ -1047,6 +1108,15 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
             return;
         };
+        if is_network && acc.process_lifetimes.is_some() {
+            return;
+        }
+        if !is_network
+            && event_id != crate::learning_mode_windows::extractors::CAPABILITY_DENIAL_EVENT_ID
+            && !acc.event_in_scope(header.ProcessId, filetime)
+        {
+            return;
+        }
         analyze_filetime = Some(filetime);
         if !is_learning_mode_event(provider, event_id) {
             if !acc.event_in_scope(header.ProcessId, filetime) || !acc.begin_event() {
@@ -1242,7 +1312,10 @@ fn handle_decoded_event(
             parts.event_id,
             (parts.event_id
                 == crate::learning_mode_windows::network_extractors::NETWORK_DECISION_EVENT_ID)
-                .then(|| "NetworkDecisionV1".to_string()),
+                .then_some("NetworkDecisionV1")
+                .and_then(|name| {
+                    crate::learning_mode_windows::extractors::sanitize_event_name(Some(name))
+                }),
             &analysis,
         );
         if let Some(raw) = denial {
@@ -1256,6 +1329,18 @@ fn handle_decoded_event(
     else {
         return;
     };
+    if !is_learning_mode_event(parts.provider, parts.event_id) {
+        if acc.event_in_scope(header_pid, filetime) && acc.begin_event() {
+            acc.record_exclusion(
+                category,
+                parts.event_id,
+                VerboseLoggingOutcomeReason::UnsupportedEventSchema,
+                header_pid,
+                Vec::new(),
+            );
+        }
+        return;
+    }
     let Some(pid) =
         crate::learning_mode_windows::extractors::effective_event_pid(parts, header_pid)
     else {
@@ -1354,12 +1439,12 @@ mod tests {
                 ("RemoteAddress", "203.0.113.10"),
             ],
         );
-        let native = resources_from_events(std::slice::from_ref(&event));
+        let native = capture_resources_from_events(std::slice::from_ref(&event));
         assert!(native.denials.is_empty());
-        let signature = &native.verbose_logging.signatures[0].signature;
+        let signature = &native.network_verbose_logging.signatures[0].signature;
         assert_eq!(
             signature.provider,
-            VerboseLoggingProvider::LearningModeNetworkDecision
+            CaptureVerboseLoggingProvider::LearningModeNetworkDecision
         );
         assert_eq!(
             signature.provider_guid,
@@ -1368,11 +1453,11 @@ mod tests {
         assert_eq!(signature.pid, 0);
         assert_eq!(
             signature.reason,
-            VerboseLoggingOutcomeReason::UnsupportedEventSchema
+            CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema
         );
-        assert_eq!(property(signature, "Reason"), "100");
-        assert_eq!(property(signature, "ApplicationId"), "<REDACTED>");
-        assert_eq!(property(signature, "RemoteAddress"), "203.0.113.10");
+        assert_eq!(capture_property(signature, "Reason"), "100");
+        assert_eq!(capture_property(signature, "ApplicationId"), "<REDACTED>");
+        assert_eq!(capture_property(signature, "RemoteAddress"), "203.0.113.10");
 
         let lifetimes = [ProcessLifetime {
             pid: SCOPED_PID,
@@ -1404,11 +1489,16 @@ mod tests {
             unsafe { process_event_record(&mut record, &mut accumulator) };
             assert_eq!(accumulator.schema_cache.schema_loads, 0);
             assert_eq!(
-                accumulator.verbose_logging.total_occurrences,
+                accumulator.network_verbose_logging.total_occurrences,
                 u64::from(native)
             );
             if native {
-                assert_eq!(accumulator.verbose_logging.signatures[0].signature.pid, 0);
+                assert_eq!(
+                    accumulator.network_verbose_logging.signatures[0]
+                        .signature
+                        .pid,
+                    0
+                );
             }
             assert!(accumulator.relog_selected_event_indices.is_empty());
             assert!(!accumulator.truncated);
@@ -1428,7 +1518,7 @@ mod tests {
                 Some("NetworkDecisionV1".into()),
             ),
         );
-        let group = &accumulator.verbose_logging.signatures[0];
+        let group = &accumulator.network_verbose_logging.signatures[0];
         assert_eq!(group.signature.pid, 0);
         assert_eq!(
             group.signature.event_name.as_deref(),
@@ -1436,7 +1526,7 @@ mod tests {
         );
         assert_eq!(
             group.signature.reason,
-            VerboseLoggingOutcomeReason::EventPayloadMalformed
+            CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed
         );
     }
 
@@ -1451,9 +1541,9 @@ mod tests {
             (privacy, 14, true),
             (privacy, 27, true),
             (privacy, 4907, true),
-            (kernel, 4907, false),
-            (privacy, 28, false),
-            (kernel, 999, false),
+            (kernel, 4907, true),
+            (privacy, 28, true),
+            (kernel, 999, true),
             (windows::core::GUID::from_u128(1), 14, false),
             (
                 windows::core::GUID::from_u128(0x3d6fa8d0_fe05_11d0_9dda_00c04fd7ba7c),
@@ -1596,7 +1686,7 @@ mod tests {
         let analysis = accumulator.into_analysis().unwrap();
         let groups = &analysis.verbose_logging.signatures;
         assert_eq!(analysis.verbose_logging.total_occurrences, 8);
-        assert_eq!(groups.len(), 4);
+        assert_eq!(groups.len(), 3);
         assert!(groups.iter().all(|group| group.count == 2));
         let decoded = groups
             .iter()
@@ -1608,20 +1698,18 @@ mod tests {
         assert!(decoded
             .iter()
             .all(|group| property(&group.signature, "ObjectType") == "42"));
-        for reason in [
-            VerboseLoggingOutcomeReason::EventPayloadMalformed,
-            VerboseLoggingOutcomeReason::SchemaUnavailable,
-        ] {
-            let group = groups
-                .iter()
-                .find(|group| group.signature.reason == reason)
-                .unwrap();
-            assert!(group.signature.properties.is_empty());
-            assert_eq!(
-                group.signature.provider,
-                VerboseLoggingProvider::KernelGeneral
-            );
-        }
+        let group = groups
+            .iter()
+            .find(|group| {
+                group.signature.reason == VerboseLoggingOutcomeReason::EventPayloadMalformed
+            })
+            .unwrap();
+        assert!(group.signature.properties.is_empty());
+        assert_eq!(
+            group.signature.provider,
+            VerboseLoggingProvider::KernelGeneral
+        );
+        assert_eq!(analysis.verbose_logging.overflow_occurrences, 2);
         assert!(analysis.denials.is_empty());
     }
 
@@ -1808,8 +1896,8 @@ mod tests {
             150,
         );
 
-        assert_eq!(accumulator.relog_event_count, 3);
-        assert_eq!(accumulator.relog_selected_event_indices, [0]);
+        assert_eq!(accumulator.relog_event_count, 4);
+        assert_eq!(accumulator.relog_selected_event_indices, [0, 2]);
         assert!(accumulator.decode_error.is_none());
     }
 
@@ -2123,26 +2211,21 @@ mod tests {
             crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
             14,
             1,
-            tdh_decode::DecodeError::Schema("manifest unavailable".to_string()),
+            tdh_decode::DecodeError::SchemaNotFound,
         );
 
-        let analysis = accumulator.into_analysis().unwrap();
-        let group = &analysis.verbose_logging.signatures[0];
+        let analysis = accumulator.into_capture_analysis().unwrap();
+        let group = &analysis.network_verbose_logging.signatures[0];
         assert_eq!(
             group.signature.reason,
-            VerboseLoggingOutcomeReason::SchemaUnavailable
+            CaptureVerboseLoggingOutcomeReason::SchemaUnavailable
         );
         assert!(group.signature.properties.is_empty());
         assert_eq!(group.count, 1);
-        let mut bytes = Vec::new();
-        crate::learning_mode_core::write_verbose_logging_document(
-            &mut bytes,
-            &crate::learning_mode_core::VerboseLoggingDocument::new(&analysis.verbose_logging),
-        )
-        .unwrap();
-        assert!(!String::from_utf8(bytes)
-            .unwrap()
-            .contains("manifest unavailable"));
+        assert_eq!(
+            group.signature.provider,
+            CaptureVerboseLoggingProvider::KernelGeneral
+        );
     }
 
     #[test]
@@ -2162,8 +2245,8 @@ mod tests {
                 true,
                 false,
             ),
-            (kernel, 999, false, false),
-            (privacy, 28, false, false),
+            (kernel, 999, true, false),
+            (privacy, 28, true, false),
             (windows::core::GUID::from_u128(1), 14, false, false),
         ] {
             let mut accumulator = Accumulator::analyze();
@@ -2171,7 +2254,7 @@ mod tests {
                 provider,
                 event_id,
                 42,
-                tdh_decode::DecodeError::Schema("manifest unavailable".into()),
+                tdh_decode::DecodeError::SchemaNotFound,
             );
             let event = kernel_event(
                 14,
@@ -2196,10 +2279,8 @@ mod tests {
                 1 + u64::from(retained)
             );
             assert_eq!(
-                analysis.verbose_logging.signatures.iter().any(|group| {
-                    group.signature.reason == VerboseLoggingOutcomeReason::SchemaUnavailable
-                }),
-                retained
+                analysis.verbose_logging.overflow_occurrences,
+                u64::from(retained)
             );
             let mut bytes = Vec::new();
             let summary = crate::learning_mode_core::DenialSummary::new(
@@ -2387,14 +2468,11 @@ mod tests {
             .map(|index| (format!(r"c:\data\{index}.txt"), AccessType::Read))
             .collect();
 
-        accumulator.add_raw_denial(
-            raw(
-                r"C:\data\overflow.txt",
-                AccessType::Read,
-                ResourceType::File,
-            ),
-            None,
-        );
+        accumulator.add_raw_denial(raw(
+            r"C:\data\overflow.txt",
+            AccessType::Read,
+            ResourceType::File,
+        ));
 
         assert!(
             !accumulator.stop_requested,
@@ -2415,18 +2493,12 @@ mod tests {
         // Processing continues past the cap: a further overflow candidate is
         // still aggregated (not silently discarded), and a duplicate of an
         // already-actionable denial retains the same actionable classification.
-        accumulator.add_raw_denial(
-            raw(
-                r"C:\data\overflow-2.txt",
-                AccessType::Read,
-                ResourceType::File,
-            ),
-            None,
-        );
-        accumulator.add_raw_denial(
-            raw(r"C:\data\0.txt", AccessType::Read, ResourceType::File),
-            None,
-        );
+        accumulator.add_raw_denial(raw(
+            r"C:\data\overflow-2.txt",
+            AccessType::Read,
+            ResourceType::File,
+        ));
+        accumulator.add_raw_denial(raw(r"C:\data\0.txt", AccessType::Read, ResourceType::File));
 
         assert!(!accumulator.stop_requested);
         assert_eq!(
@@ -3199,7 +3271,7 @@ mod tests {
 
         assert_eq!(analysis.denials.len(), 1);
         assert_eq!(analysis.denials[0].resource, r"C:\owned.txt");
-        assert_eq!(analysis.verbose_logging.signatures.len(), 1);
+        assert_eq!(analysis.verbose_logging.signatures.len(), 2);
         assert!(analysis
             .verbose_logging
             .signatures
@@ -3288,7 +3360,10 @@ mod tests {
             reason_for(28),
             Some(VerboseLoggingOutcomeReason::NotActionable)
         );
-        assert_eq!(reason_for(9999), None);
+        assert_eq!(
+            reason_for(9999),
+            Some(VerboseLoggingOutcomeReason::UnsupportedEventSchema)
+        );
     }
 
     #[test]
@@ -3510,7 +3585,10 @@ mod tests {
         let out = resources_from_events(&events);
         assert!(out.denials.is_empty());
 
-        assert!(out.verbose_logging.is_empty());
+        assert_eq!(out.verbose_logging.signatures.len(), 2);
+        assert!(out.verbose_logging.signatures.iter().all(|group| {
+            group.signature.reason == VerboseLoggingOutcomeReason::UnsupportedEventSchema
+        }));
     }
 
     #[test]
@@ -3569,10 +3647,6 @@ mod tests {
             VerboseLoggingProvider::KernelGeneral
         );
         assert_eq!(actionable_group.signature.event_id, 14);
-        assert_eq!(
-            actionable_group.signature.event_name.as_deref(),
-            Some("AccessCheck")
-        );
         assert_eq!(
             actionable_group.count, 3,
             "all three occurrences are retained"
@@ -3658,7 +3732,6 @@ mod tests {
         assert_eq!(signature.reason, VerboseLoggingOutcomeReason::Actionable);
         assert_eq!(signature.access_type, Some(AccessType::Unknown));
         assert_eq!(signature.resource_type, Some(ResourceType::Capability));
-        assert_eq!(signature.event_name.as_deref(), Some("CapabilityCheck"));
     }
 
     fn find_signature(
@@ -3672,10 +3745,33 @@ mod tests {
             .unwrap_or_else(|| panic!("expected a verbose logging signature for event {event_id}"))
     }
 
+    fn find_capture_signature(
+        summary: &CaptureVerboseLoggingSummary,
+        event_id: u16,
+    ) -> &crate::learning_mode_core::capture_diagnostics::CaptureVerboseLoggingAggregate {
+        summary
+            .signatures
+            .iter()
+            .find(|group| group.signature.event_id == event_id)
+            .unwrap_or_else(|| {
+                panic!("expected a capture verbose logging signature for event {event_id}")
+            })
+    }
+
     fn property<'a>(
         signature: &'a crate::learning_mode_core::VerboseLoggingSignature,
         name: &str,
     ) -> &'a str {
+        signature
+            .properties
+            .iter()
+            .find(|(key, _)| key == name)
+            .unwrap_or_else(|| panic!("expected property {name:?} in signature {signature:?}"))
+            .1
+            .as_str()
+    }
+
+    fn capture_property<'a>(signature: &'a CaptureVerboseLoggingSignature, name: &str) -> &'a str {
         signature
             .properties
             .iter()
@@ -3699,7 +3795,7 @@ mod tests {
         for pid in 0..crate::learning_mode_core::MAX_VERBOSE_LOGGING_GROUPS as u32 {
             accumulator.record_outcome(
                 VerboseLoggingProvider::KernelGeneral,
-                (14, None),
+                14,
                 VerboseLoggingOutcomeReason::Actionable,
                 pid,
                 (None, None),
@@ -3770,7 +3866,6 @@ mod tests {
         assert_eq!(accumulator.network_verbose_logging.signatures.len(), 1);
         assert_eq!(accumulator.network_verbose_logging.overflow_occurrences, 1);
     }
-    #[test]
     #[test]
     fn unknown_resource_signature_redacts_the_entire_file_path() {
         let events = vec![kernel_event(
@@ -3915,13 +4010,13 @@ mod tests {
             ),
         );
         let out = accumulator
-            .into_analysis()
+            .into_capture_analysis()
             .expect("per-event decode failures are non-fatal in Analyze mode");
 
-        let malformed = find_signature(&out.verbose_logging, 14);
+        let malformed = find_capture_signature(&out.network_verbose_logging, 14);
         assert_eq!(
             malformed.signature.reason,
-            VerboseLoggingOutcomeReason::EventPayloadMalformed
+            CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed
         );
         assert_eq!(malformed.signature.pid, 9);
         assert_eq!(
@@ -3929,22 +4024,31 @@ mod tests {
             Some("AccessCheck")
         );
         assert_eq!(
-            find_signature(&out.verbose_logging, 27).signature.reason,
-            VerboseLoggingOutcomeReason::DecoderLimitReached
+            find_capture_signature(&out.network_verbose_logging, 27)
+                .signature
+                .reason,
+            CaptureVerboseLoggingOutcomeReason::DecoderLimitReached
         );
         assert_eq!(
-            find_signature(&out.verbose_logging, 28).signature.reason,
-            VerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
+            find_capture_signature(&out.network_verbose_logging, 28)
+                .signature
+                .reason,
+            CaptureVerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
         );
         assert_eq!(
-            find_signature(&out.verbose_logging, 28)
+            find_capture_signature(&out.network_verbose_logging, 28)
                 .signature
                 .resource_type,
             Some(ResourceType::Capability)
         );
-        assert!(out.verbose_logging.signatures.iter().all(|aggregate| {
-            aggregate.signature.properties.is_empty() && aggregate.signature.event_name.is_some()
-        }));
+        assert!(out
+            .network_verbose_logging
+            .signatures
+            .iter()
+            .all(|aggregate| {
+                aggregate.signature.properties.is_empty()
+                    && aggregate.signature.event_name.is_some()
+            }));
     }
 
     #[test]
@@ -4007,8 +4111,8 @@ mod tests {
                     Some(r"C:\Users\private\schema".into()),
                 ),
             );
-            let analysis = accumulator.into_analysis().unwrap();
-            let group = &analysis.verbose_logging.signatures[0];
+            let analysis = accumulator.into_capture_analysis().unwrap();
+            let group = &analysis.network_verbose_logging.signatures[0];
             assert_eq!(group.signature.event_name.as_deref(), Some("<REDACTED>"));
             assert!(group.signature.properties.is_empty());
             assert_eq!(group.count, 1);

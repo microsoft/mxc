@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AccessType, AnalysisResult, ResourceType, VerboseLoggingAggregate, VerboseLoggingOutcomeReason,
-    VerboseLoggingProvider, VerboseLoggingSummary, MAX_VERBOSE_LOGGING_GROUPS,
-    MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+    VerboseLoggingProvider, VerboseLoggingSignature, VerboseLoggingSummary,
+    MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
 
 /// Verbose document version owned by the WFP diagnostic extension.
@@ -153,6 +153,10 @@ impl CaptureVerboseLoggingSummary {
         }
 
         let serialized_len = serialized_signature_len(&signature);
+        if serialized_len > max_bytes {
+            self.record_overflow(actionable, 1);
+            return;
+        }
         while self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
             || retained_bytes.saturating_add(serialized_len) > max_bytes
         {
@@ -192,15 +196,6 @@ impl CaptureVerboseLoggingSummary {
             }
             Err(_) => self.record_overflow(true, 1),
         }
-    }
-
-    pub(crate) fn actionable_occurrences(&self) -> u64 {
-        self.signatures
-            .iter()
-            .filter(|aggregate| aggregate.signature.reason.is_actionable())
-            .fold(self.actionable_overflow_occurrences, |total, aggregate| {
-                total.saturating_add(aggregate.count)
-            })
     }
 
     fn record_overflow(&mut self, actionable: bool, count: u64) {
@@ -322,30 +317,146 @@ pub(crate) struct CaptureAnalysis {
 
 impl CaptureAnalysis {
     pub(crate) fn into_legacy(mut self) -> AnalysisResult {
-        let omitted = self.network_verbose_logging.total_occurrences;
-        if omitted > 0 {
-            self.verbose_logging.total_occurrences = self
-                .verbose_logging
-                .total_occurrences
-                .saturating_add(omitted);
-            self.verbose_logging.overflow_occurrences = self
-                .verbose_logging
-                .overflow_occurrences
-                .saturating_add(omitted);
-            self.verbose_logging.actionable_overflow_occurrences = self
-                .verbose_logging
-                .actionable_overflow_occurrences
-                .saturating_add(self.network_verbose_logging.actionable_occurrences());
-            self.verbose_logging.aggregate_groups_truncated = true;
-            self.verbose_logging.processed_events_truncated |=
-                self.network_verbose_logging.processed_events_truncated;
-            self.verbose_logging.actionable_limit_reached |=
-                self.network_verbose_logging.actionable_limit_reached;
+        for aggregate in self.network_verbose_logging.signatures {
+            if let Some(signature) = Self::capture_signature_to_legacy(&aggregate.signature) {
+                Self::merge_legacy_aggregate(&mut self.verbose_logging, signature, aggregate.count);
+            } else {
+                self.verbose_logging.total_occurrences = self
+                    .verbose_logging
+                    .total_occurrences
+                    .saturating_add(aggregate.count);
+                self.verbose_logging.overflow_occurrences = self
+                    .verbose_logging
+                    .overflow_occurrences
+                    .saturating_add(aggregate.count);
+                if aggregate.signature.reason.is_actionable() {
+                    self.verbose_logging.actionable_overflow_occurrences = self
+                        .verbose_logging
+                        .actionable_overflow_occurrences
+                        .saturating_add(aggregate.count);
+                }
+                self.verbose_logging.aggregate_groups_truncated = true;
+            }
         }
+        self.verbose_logging.total_occurrences = self
+            .verbose_logging
+            .total_occurrences
+            .saturating_add(self.network_verbose_logging.overflow_occurrences);
+        self.verbose_logging.overflow_occurrences = self
+            .verbose_logging
+            .overflow_occurrences
+            .saturating_add(self.network_verbose_logging.overflow_occurrences);
+        self.verbose_logging.actionable_overflow_occurrences = self
+            .verbose_logging
+            .actionable_overflow_occurrences
+            .saturating_add(self.network_verbose_logging.actionable_overflow_occurrences);
+        self.verbose_logging.aggregate_groups_truncated |=
+            self.network_verbose_logging.aggregate_groups_truncated;
+        self.verbose_logging.processed_events_truncated |=
+            self.network_verbose_logging.processed_events_truncated;
+        self.verbose_logging.actionable_limit_reached |=
+            self.network_verbose_logging.actionable_limit_reached;
         AnalysisResult {
             denials: self.denials,
             denied_resources_truncated: self.denied_resources_truncated,
             verbose_logging: self.verbose_logging,
+        }
+    }
+
+    fn capture_signature_to_legacy(
+        signature: &CaptureVerboseLoggingSignature,
+    ) -> Option<VerboseLoggingSignature> {
+        let provider = match signature.provider {
+            CaptureVerboseLoggingProvider::KernelGeneral => VerboseLoggingProvider::KernelGeneral,
+            CaptureVerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
+                VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode
+            }
+            CaptureVerboseLoggingProvider::LearningModeNetworkDecision => return None,
+        };
+        let reason = match signature.reason {
+            CaptureVerboseLoggingOutcomeReason::Actionable => {
+                VerboseLoggingOutcomeReason::Actionable
+            }
+            CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema => {
+                VerboseLoggingOutcomeReason::UnsupportedEventSchema
+            }
+            CaptureVerboseLoggingOutcomeReason::SchemaUnavailable
+            | CaptureVerboseLoggingOutcomeReason::IntentionalNetworkPolicyDeny
+            | CaptureVerboseLoggingOutcomeReason::ProxyContainment
+            | CaptureVerboseLoggingOutcomeReason::UnknownNetworkReason
+            | CaptureVerboseLoggingOutcomeReason::IncompleteNetworkEndpoint => return None,
+            CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed => {
+                VerboseLoggingOutcomeReason::EventPayloadMalformed
+            }
+            CaptureVerboseLoggingOutcomeReason::DecoderLimitReached => {
+                VerboseLoggingOutcomeReason::DecoderLimitReached
+            }
+            CaptureVerboseLoggingOutcomeReason::UnsupportedPropertyEncoding => {
+                VerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
+            }
+            CaptureVerboseLoggingOutcomeReason::MissingObjectType => {
+                VerboseLoggingOutcomeReason::MissingObjectType
+            }
+            CaptureVerboseLoggingOutcomeReason::MissingObjectName => {
+                VerboseLoggingOutcomeReason::MissingObjectName
+            }
+            CaptureVerboseLoggingOutcomeReason::UnsupportedObjectType => {
+                VerboseLoggingOutcomeReason::UnsupportedObjectType
+            }
+            CaptureVerboseLoggingOutcomeReason::UnusableResourcePath => {
+                VerboseLoggingOutcomeReason::UnusableResourcePath
+            }
+            CaptureVerboseLoggingOutcomeReason::UnresolvedCapability => {
+                VerboseLoggingOutcomeReason::UnresolvedCapability
+            }
+            CaptureVerboseLoggingOutcomeReason::ComActivation => {
+                VerboseLoggingOutcomeReason::ComActivation
+            }
+            CaptureVerboseLoggingOutcomeReason::ComInterfaceCall => {
+                VerboseLoggingOutcomeReason::ComInterfaceCall
+            }
+            CaptureVerboseLoggingOutcomeReason::NotActionable => {
+                VerboseLoggingOutcomeReason::NotActionable
+            }
+        };
+        Some(VerboseLoggingSignature {
+            provider,
+            provider_guid: signature.provider_guid.clone(),
+            event_id: signature.event_id,
+            reason,
+            pid: signature.pid,
+            access_type: signature.access_type,
+            resource_type: signature.resource_type,
+            properties: signature.properties.clone(),
+        })
+    }
+
+    fn merge_legacy_aggregate(
+        summary: &mut VerboseLoggingSummary,
+        signature: VerboseLoggingSignature,
+        count: u64,
+    ) {
+        let total_before = summary.total_occurrences;
+        let overflow_before = summary.overflow_occurrences;
+        summary.record(signature.clone());
+        let additional = count.saturating_sub(1);
+        if summary.overflow_occurrences > overflow_before {
+            summary.total_occurrences = summary.total_occurrences.saturating_add(additional);
+            summary.overflow_occurrences = summary.overflow_occurrences.saturating_add(additional);
+            if signature.reason.is_actionable() {
+                summary.actionable_overflow_occurrences = summary
+                    .actionable_overflow_occurrences
+                    .saturating_add(additional);
+            }
+        } else if let Ok(index) = summary
+            .signatures
+            .binary_search_by(|group| group.signature.cmp(&signature))
+        {
+            summary.total_occurrences = summary.total_occurrences.saturating_add(additional);
+            summary.signatures[index].count =
+                summary.signatures[index].count.saturating_add(additional);
+        } else {
+            debug_assert_eq!(summary.total_occurrences, total_before);
         }
     }
 
@@ -767,6 +878,25 @@ mod tests {
         assert_eq!(legacy.verbose_logging.overflow_occurrences, 1);
         assert_eq!(legacy.verbose_logging.actionable_overflow_occurrences, 1);
         assert!(legacy.verbose_logging.aggregate_groups_truncated);
+    }
+
+    #[test]
+    fn individually_oversized_actionable_signature_does_not_evict_diagnostic() {
+        let mut summary = CaptureVerboseLoggingSummary::default();
+        let mut bytes = 0;
+        let mut diagnostic =
+            network_signature(CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema);
+        diagnostic.event_id = 999;
+        summary.record_with_byte_budget(diagnostic, &mut bytes, 512);
+
+        let mut oversized = network_signature(CaptureVerboseLoggingOutcomeReason::Actionable);
+        oversized.properties = vec![("Large".to_string(), "x".repeat(1_024))];
+        summary.record_with_byte_budget(oversized, &mut bytes, 512);
+
+        assert_eq!(summary.signatures.len(), 1);
+        assert_eq!(summary.signatures[0].signature.event_id, 999);
+        assert_eq!(summary.overflow_occurrences, 1);
+        assert_eq!(summary.actionable_overflow_occurrences, 1);
     }
 
     #[test]

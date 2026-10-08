@@ -18,8 +18,8 @@ use windows::Win32::System::Diagnostics::Etw::{
     CLSID_TraceRelogger, ITraceEvent, ITraceEventCallback, ITraceEventCallback_Impl, ITraceRelogger,
 };
 
+use crate::learning_mode_windows::etl_decode::is_process_scoped_relog_candidate;
 use crate::learning_mode_windows::etl_decode::select_learning_mode_events_for_relogging;
-use crate::learning_mode_windows::extractors::is_process_scoped_event;
 use crate::learning_mode_windows::process_lifetime::{
     attested_process_lifetimes, JobMembershipSnapshot,
 };
@@ -158,7 +158,7 @@ impl ITraceEventCallback_Impl for ProcessScopedTraceFilter_Impl {
             ));
         };
         let header = &record.EventHeader;
-        if !is_process_scoped_event(header.ProviderId, header.EventDescriptor.Id) {
+        if !is_process_scoped_relog_candidate(header.ProviderId, header.EventDescriptor.Id) {
             return Ok(());
         }
         let is_supported_capability_event = header.EventDescriptor.Id
@@ -588,9 +588,9 @@ mod tests {
         }];
 
         let selection = select_learning_mode_events_for_relogging(&source, &lifetimes).unwrap();
-        assert_eq!(selection.total_event_count, 1);
-        assert_eq!(selection.selected_event_indices, [0]);
-        assert_eq!(selection.selected_event_pids, [pid]);
+        assert_eq!(selection.total_event_count, 3);
+        assert_eq!(selection.selected_event_indices, [0, 1, 2]);
+        assert_eq!(selection.selected_event_pids, [pid, pid, pid]);
 
         let native = crate::learning_mode_windows::EtlDenialAnalyzer
             .analyze_for_process_lifetimes(&source, &lifetimes)
@@ -621,10 +621,11 @@ mod tests {
             }
         }
         for (observed, reconciled) in [
-            (vec![pid], true),
+            (vec![pid, pid, pid], true),
             (vec![], false),
+            (vec![pid], false),
             (vec![pid, pid], false),
-            (vec![pid + 1], false),
+            (vec![pid + 1, pid + 1, pid + 1], false),
         ] {
             assert_eq!(
                 relog_trace_with(

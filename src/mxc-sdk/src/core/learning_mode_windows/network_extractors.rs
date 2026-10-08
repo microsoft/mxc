@@ -619,6 +619,7 @@ mod tests {
         DecodedEventParts {
             provider: NETWORK_DECISION_PROVIDER,
             event_id: NETWORK_DECISION_EVENT_ID,
+            event_name: None,
             props,
         }
     }

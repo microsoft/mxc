@@ -1158,6 +1158,7 @@ mod tests {
         let parts = DecodedEventParts {
             provider: record.EventHeader.ProviderId,
             event_id: record.EventHeader.EventDescriptor.Id,
+            event_name: None,
             props,
         };
 
