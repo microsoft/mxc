@@ -32,25 +32,25 @@ NVX will ship a Rust crate containing:
 - build logic that fetches and verifies the matching signed artifacts from
   NVX-controlled registries or repositories.
 
-The fetched runtime artifacts will include the signed NVX implementation DLL,
-signed OpenVMM executable, signed image download and conversion tool, Linux
-kernel, minimal control initramfs with the NVX init agent, manifests,
+The fetched host artifacts will include the signed NVX implementation DLL,
+OpenVMM executable, and image download and conversion tool. The artifact set
+will also include the Linux kernel, minimal control initramfs, manifests,
 checksums, provenance, licences, and package inventories.
 
 NVX already publishes the corresponding source for its Linux kernel and
 Alpine-based control initramfs. The NVX repository contains the owned guest
 and build inputs under `kernel/`, `guest/common/`, and `guest/alpine/`. Its
-release tooling collects the exact patched kernel source and the recipes and
-upstream sources for the minimal initramfs packages, then publishes them as separate
-`source/nvx-linux-source-<kernel-version>.tar.gz` and
-`source/nvx-alpine-source-<release-version>.tar.gz` artifacts.
+release tooling collects the exact patched kernel source. It also collects the
+recipes and upstream sources for the minimal initramfs packages. The release
+publishes them as separate `source/nvx-linux-source-<kernel-version>.tar.gz`
+and `source/nvx-alpine-source-<release-version>.tar.gz` artifacts.
 
-The existing `SOURCE-MANIFEST.json`, control-initramfs package inventory,
-licences, and third-party notices identify the NVX project source, kernel
-version and configuration, patches, Alpine package sources used by the
-control initramfs, published source artifacts, and hashes. MXC will consume
-and validate this existing source-delivery contract rather than requiring the
-NVX team to create a new one.
+NVX records its source details in `SOURCE-MANIFEST.json` and the
+control-initramfs package inventory. These files identify the project source,
+kernel build, patches, initramfs package sources, published source artifacts,
+and hashes. The release also includes the required licences and third-party
+notices. MXC will validate and consume this existing contract rather than
+require a new one.
 
 ### 2.2 How MXC will consume NVX
 
@@ -66,8 +66,6 @@ MXC will be implementing:
 - a public Rust build helper that stages the runtime artifacts resolved and
   verified through the NVX crate beside the consuming executable;
 - checksum and signature verification;
-- offline builds using a pre-fetched runtime artifact directory plus the
-  crate and its dependencies; and
 - packaging for the three SDKs and the internal MXC end-to-end executor bundle.
 
 Before packaging the NVX runtime, MXC will validate `SOURCE-MANIFEST.json` and
@@ -109,11 +107,11 @@ Developers will not separately install or invoke OpenVMM.
 
 | Ecosystem | Developer dependency | Packaging behaviour |
 | --- | --- | --- |
-| Rust | `mxc-sdk` with the `microvm` feature and the NVX staging build helper | The consuming executable's build script will fetch or use pre-fetched artifacts through the pinned NVX crate contract, verify them, and stage them beside that executable |
+| Rust | `mxc-sdk` with the `microvm` feature and the NVX staging build helper | The consuming executable's build script will fetch artifacts through the pinned NVX crate contract, verify them, and stage them beside that executable |
 | Node | `@microsoft/mxc-sdk` and `@microsoft/mxc-nvx-runtime` | The base SDK will be the sole owner of `mxc_ffi.dll`; the exact-version runtime package will contain only the NVX assets and its directory will be registered with the native layer |
 | .NET | `Microsoft.Mxc.Sdk` and `Microsoft.Mxc.Sdk.Nvx.Runtime` | The base SDK will be the sole owner of `mxc_ffi.dll`; the exact-version runtime package will add the RID-specific `nvx` assets beside it |
 
-#### Rust
+#### 2.4.1 Rust
 
 ```toml
 [dependencies]
@@ -131,32 +129,11 @@ fn main() {
 }
 ```
 
-#### Node
+#### 2.4.2 npm
 
 ```bash
 npm install @microsoft/mxc-sdk @microsoft/mxc-nvx-runtime
 ```
-
-#### .NET
-
-```xml
-<PackageReference Include="Microsoft.Mxc.Sdk" Version="..." />
-<PackageReference Include="Microsoft.Mxc.Sdk.Nvx.Runtime" Version="..." />
-```
-
-The developer experience will be the same in all three ecosystems:
-
-1. Developers will add the MXC SDK and its NVX runtime dependency. Rust
-   applications will also invoke the staging helper from their build script.
-2. They will select `microvm` in the MXC request.
-3. The SDK will locate the packaged NVX runtime for the current platform.
-   Node will register the separately installed runtime package directory with
-   the native layer.
-4. MXC will validate the signatures and checksums, then launch OpenVMM through
-   the NVX Rust integration.
-
-Developers will not provide paths to `openvmm.exe`, `vmlinux`, or
-`initramfs.cpio.gz`, and will not communicate with OpenVMM directly.
 
 The Node packages will use this layout:
 
@@ -195,6 +172,13 @@ package version, architecture, authenticated manifest, signatures, and
 checksums. Without the runtime package, Node will not register a MicroVM
 runtime directory and will report `microvm` as unavailable.
 
+#### 2.4.3 NuGet
+
+```xml
+<PackageReference Include="Microsoft.Mxc.Sdk" Version="..." />
+<PackageReference Include="Microsoft.Mxc.Sdk.Nvx.Runtime" Version="..." />
+```
+
 For .NET, `Microsoft.Mxc.Sdk` will be the only package that owns
 `mxc_ffi.dll`. Its Windows native library will include the MicroVM integration
 but will report `microvm` as unavailable when the NVX assets are absent.
@@ -204,10 +188,12 @@ directory and will declare an exact-version dependency on
 
 NuGet's default RID-native asset handling flattens files beneath
 `runtimes/{rid}/native`, so the runtime package will not place the NVX tree
-there. It will package the assets under `runtimes/{rid}/nvx/**` and include a
-`buildTransitive/Microsoft.Mxc.Sdk.Nvx.Runtime.targets` file. That target will
-recursively copy the selected RID's complete `nvx` tree, preserving
-`%(RecursiveDir)`, into both normal build and publish outputs:
+there. The `Microsoft.Mxc.Sdk.Nvx.Runtime` NuGet package will store the assets
+under `runtimes/{rid}/nvx/**`. It will also include
+`buildTransitive/Microsoft.Mxc.Sdk.Nvx.Runtime.targets`, which NuGet
+automatically imports into projects that reference the runtime package. That
+MSBuild target will recursively copy the selected RID's complete `nvx` tree,
+preserving `%(RecursiveDir)`, into both normal build and publish outputs:
 
 ```text
 <application output>\
@@ -224,6 +210,29 @@ recursively copy the selected RID's complete `nvx` tree, preserving
 The native MXC layer will resolve the `nvx` directory relative to the loaded
 `mxc_ffi.dll`. The copy target will reject unsupported RID and architecture
 combinations rather than producing a partial runtime.
+
+The .NET one-shot `Microvm` containment type and
+`MicrovmProvisionRequest` will each be registered as `[JsonSerializable]`
+roots in `MxcJsonContext`. Their serialization and deserialization will use
+the existing `MxcJson` helpers without reflection fallback.
+`Microsoft.Mxc.Sdk.AotSmokeTest` will serialize and deserialize representative
+one-shot and state-aware MicroVM requests through that production JSON path.
+
+#### 2.4.4 Common packaging and validation
+
+The developer experience will be the same in all three ecosystems:
+
+1. Developers will add the MXC SDK and its NVX runtime dependency. Rust
+   applications will also invoke the staging helper from their build script.
+2. They will select `microvm` in the MXC request.
+3. The SDK will locate the packaged NVX runtime for the current platform.
+   Node will register the separately installed runtime package directory with
+   the native layer.
+4. MXC will validate the signatures and checksums, then launch OpenVMM through
+   the NVX Rust integration.
+
+Developers will not provide paths to `openvmm.exe`, `vmlinux`, or
+`initramfs.cpio.gz`, and will not communicate with OpenVMM directly.
 
 The MXC SDK, `mxc_ffi.dll`, and NVX runtime package versions must match.
 Before launch, MXC will verify the required files, Windows architecture,
@@ -244,6 +253,8 @@ authenticate that manifest before using its file hashes. MXC will then:
    manifest mismatch, checksum mismatch, or runtime directory that is writable
    by an untrusted user.
 
+#### 2.4.5 SDK API exposure
+
 The integration will add a new typed MicroVM configuration to each SDK. This
 configuration describes which backend and OCI image to use. Developers will
 pass that configuration to the existing run, spawn, and lifecycle operations;
@@ -254,13 +265,6 @@ the integration will not introduce separate NVX-specific execution methods.
 | Rust | `MicrovmConfig { image: String, memory_mb: Option<u64> }` and `Containment::Microvm(MicrovmConfig)` | Reuse `MicrovmConfig` in the state-aware `ProvisionRequest` | `v1::run`, `v1::spawn`, and `v1::container::*` |
 | Node | `{ type: 'microvm', config: { image: string; memoryMb?: number } }` | Reuse the same `{ image, memoryMb? }` MicroVM configuration in `LifecycleConfigRegistry`, and include `'microvm'` in `LifecycleContainmentKind` | `run`, `spawn`, `provisionContainer`, and the existing lifecycle functions |
 | .NET | `Microvm : Containment` with required `Image` and optional `MemoryMb` | Add `MicrovmProvisionRequest : ProvisionRequest` that reuses the same required `Image` and optional `MemoryMb` fields, plus `Filesystem` and `Network`; register both MicroVM request shapes and their `microvm` discriminators with the source-generated JSON context | `MxcContainer.Run`, `MxcContainer.Spawn`, and the existing `MxcLifecycle` methods |
-
-The .NET one-shot `Microvm` containment type and
-`MicrovmProvisionRequest` will each be registered as `[JsonSerializable]`
-roots in `MxcJsonContext`. Their serialization and deserialization will use
-the existing `MxcJson` helpers without reflection fallback.
-`Microsoft.Mxc.Sdk.AotSmokeTest` will serialize and deserialize representative
-one-shot and state-aware MicroVM requests through that production JSON path.
 
 The wire and SDK changes will be delivered in this order:
 
@@ -361,8 +365,8 @@ not start a VM.
 
 Node and .NET will continue to use the existing `mxc_ffi` boundary. NVX will
 be linked on the Rust side; no separate NVX FFI library will be required.
-The NVX developer contract covers the Rust, Node V1, and .NET SDKs. The Node
-V1 run, spawn, PTY, and state-aware paths call `mxc_ffi` in-process. NVX will
+The NVX developer contract covers the Rust, Node, and .NET SDKs. The Node run,
+spawn, PTY, and state-aware paths call `mxc_ffi` in-process. NVX will
 not add support commitments for legacy Node executor paths or introduce a new
 NVX CLI or executor. The existing generic `wxc-exec` may be built with NVX
 support only as an internal end-to-end harness over the same `mxc_engine`
@@ -427,10 +431,20 @@ Read-write mappings are
 live: a guest write changes the mapped host file immediately. Denied entries
 are hidden by OpenVMM within the exported host tree.
 
-On Windows, host access remains governed by the Windows identity running
-OpenVMM and the mapped directory's NTFS ACLs. NVX will define and guarantee
-the Windows owner and inherited ACL applied when a guest creates a file; MXC
-will verify that behaviour end to end before release.
+Filesystem access is enforced at two layers:
+
+| Access control | Enforcer |
+| --- | --- |
+| Which host paths are exposed or hidden | NVX and OpenVMM |
+| Whether an exposed path is read-only or read-write | The NVX guest control agent and OpenVMM |
+| Whether the OpenVMM process may access a host file | Windows and NTFS, using OpenVMM's Windows process identity |
+
+If a path is not mapped, or is explicitly denied, NVX and OpenVMM prevent the
+workload from reaching it even when the OpenVMM process could access it. If a
+mapped path is denied to the OpenVMM process by its NTFS ACL, Windows still
+rejects the operation. MXC validates the requested mappings and launches
+OpenVMM under the intended Windows identity, but it does not perform each file
+access check itself.
 
 All mapped paths must exist, be on the same Windows volume, and share a common
 directory below the volume root. MXC will translate Windows paths into guest
@@ -450,6 +464,14 @@ will fail before OpenVMM starts and identify the protected root.
 | `filesystem.readonlyPaths` | Yes |
 | `filesystem.readwritePaths` | Yes |
 | `filesystem.deniedPaths` | Yes |
+
+| Current NVX filesystem limit | Behaviour |
+| --- | --- |
+| Denied paths | At most 128 hidden paths |
+| Hidden relative path syntax | Whitespace, `:`, `\`, and links are rejected |
+| Nested Windows mappings | A read-only file inside a read-write directory is rejected |
+| Mapping count and length | All bind-mount arguments must fit in the 1024-byte kernel-command-line budget, allowing roughly a dozen typical mappings |
+| If any limit above is exceeded | NVX rejects the request before OpenVMM starts; no workload runs |
 
 
 ### 4.3 Network
@@ -610,10 +632,10 @@ filesystem format consumed by NVX.
 
 OCI-image-backed execution is a prerequisite for the MXC integration. The
 selected NVX Rust API does not currently accept an image or attach a converted
-workload filesystem. The NVX team will provide the signed conversion tool and
-extend the runtime contract so the converted image can be attached and used as
-the workload root while the init agent remains in the initramfs. The required
-conversion and runtime contract is listed in
+workload filesystem. The NVX team will provide the signed conversion tool. It
+will also extend the runtime contract so the converted image can be attached
+as the workload root. The init agent will remain in the control initramfs. The
+required conversion and runtime contract is listed in
 [Appendix C](#appendix-c-oci-image-conversion-contract).
 
 ```json
@@ -780,25 +802,27 @@ identify the associated log path.
 ## 8. Requirements and end-to-end tests
 
 The NVX backend will be complete when the following areas pass through all
-three SDKs on Windows x64 with WHP. MXC may additionally run the same cases
-through the generic packaged executor as an internal end-to-end harness; that
-executor is not an NVX developer-facing surface.
+three SDKs on Windows x64 with WHP. MXC may additionally run applicable cases
+through the generic packaged executor as an internal end-to-end harness. The
+relayed executor path is excluded from state-aware timeout expectations
+because it cannot represent a distinct timed-out result. The executor is not
+an NVX developer-facing surface.
 
 | Area | Required coverage |
 | --- | --- |
-| Integration | `microvm` routes to NVX for one-shot and state-aware execution through Rust, Node V1, and .NET; the generic executor is used only as an internal harness |
+| Integration | `microvm` routes to NVX for one-shot and state-aware execution through Rust, Node, and .NET; the generic executor is used only as an internal harness |
 | Discovery | Add the native `unavailableReasons` payload and its Rust, Node, and .NET projections; include `microvm` only after the native NVX probe and MXC package-integrity checks succeed; verify each failure mode returns actionable backend-specific remediation without starting a VM |
 | Lifecycle | Provision, exact `aci-edge-sandboxes:` prefix routing, start, repeated and overlapping exec, caller reconnect, stop, deprovision, invalid transitions, malformed/stale IDs, backend prefix isolation, and one-shot failure cleanup |
 | State-aware process lifetime | Configure NVX with `OpenVmmConfig::breakaway_from_job = true` and return actionable `backend_unavailable` when the caller's Windows job disallows breakaway; from a kill-on-close Windows job, verify that OpenVMM remains running after the `start` process exits and that a later `exec` process reconnects successfully |
 | SDKs and FFI | Rust, Node, and .NET produce the same policy and result behaviour; native ownership and cleanup remain correct; Node registers the separately installed MicroVM runtime directory before discovery or execution and rejects conflicting registration; .NET registers both MicroVM request shapes in `MxcJsonContext` and exercises their production serialize/deserialize paths in `Microsoft.Mxc.Sdk.AotSmokeTest` |
-| Filesystem | Read-only, read-write, denied paths, files, directories, multiple mappings, invalid combinations, access to pre-existing host files, the Windows owner and inherited ACL of guest-created files, protected Windows root rejection, and canonical-path alias and reparse-point bypass attempts |
+| Filesystem | Read-only, read-write, denied paths, files, directories, multiple mappings, invalid combinations, access to pre-existing host files, the Windows owner and inherited ACL of guest-created files, protected Windows root rejection, canonical-path alias and reparse-point bypass attempts, 128/129 denied-path boundaries, valid and invalid hidden-path syntax, read-only files nested under read-write directories, and mapping sets immediately below and above the kernel-command-line budget |
 | Network | Defaults, allow/deny precedence, CIDRs, exclusions, TCP/UDP ranges, and rejection of unsupported rules |
-| Process | Command, CWD, environment, timeout, cancellation, output limits, nonzero exits, and descendant cleanup |
+| Process | Command, CWD, environment, cancellation, output limits, nonzero exits, and descendant cleanup through all supported paths; timeout results through the three in-process SDK paths, excluding the generic executor's relayed state-aware path |
 | PTY | Confirm unsupported in the initial implementation; add terminal tests when implemented |
 | Packaging | Rust crate, npm, and NuGet installation; single ownership of `mxc_ffi.dll` in npm and NuGet; npm runtime-package resolution and native directory registration; NuGet `buildTransitive` recursive copy into `nvx/**` for both build and publish outputs; rejection of unsupported RID/package combinations; inclusion of the NVX implementation DLL, OpenVMM, image tool, kernel, control initramfs, source manifest, control-initramfs package inventory, licences, and notices; OCI image conversion; automatic runtime discovery; missing/corrupt artifacts; and verification that matching Linux and control-initramfs source artifacts are published and referenced |
 | Signing | Authenticate the runtime manifest, validate the Authenticode chain and Microsoft signer for signed NVX binaries, verify all remaining file checksums, and reject untrusted runtime directories |
 | Host | Real execution on Windows x64 with WHP installed and enabled; ARM remains planned |
-| Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, generated SDK types, cache-miss rejection without host traffic for deny-by-default egress, explicit prefetch followed by offline cache use, permitted execution-time pull, the NVX-owned adversarial conversion-security suite, and MXC rejection of malformed or incompatible converter output |
+| Image support | Verify standard-image registry conversion, required-image validation, one-shot and state-aware schema branches, generated SDK types, cache-miss rejection without host traffic for deny-by-default egress, explicit prefetch followed by cache-only use, permitted execution-time pull, the NVX-owned adversarial conversion-security suite, and MXC rejection of malformed or incompatible converter output |
 
 Negative filesystem and network tests must include a working positive control
 so infrastructure failures are not mistaken for policy enforcement.
@@ -828,7 +852,8 @@ so infrastructure failures are not mistaken for policy enforcement.
 | --- | --- |
 | `Exited(code)` | Will return the workload exit code |
 | `Signaled(signal)` | Will return `128 + signal` through the existing integer exit result |
-| `TimedOut` | Will return the existing MXC timed-out result |
+| `TimedOut` through an in-process Piped SDK path | Will return the existing MXC timed-out result |
+| `TimedOut` through the internal executor's Relayed path | A distinct timeout is not supported by the relay and is excluded from timeout harness expectations; returning `TimedOut` currently produces `backend_error` as a relay contract violation |
 | `Cancelled` | Will return exit code `137` |
 | `Failed(WorkingDirectory)` | Will return `backend_error` with the working-directory failure |
 | Other `Failed(...)` outcomes | Will return `backend_error` with the NVX failure reason |
@@ -864,7 +889,7 @@ before `microvm.image` is usable.
 - Initial permitted registry set and final backend-neutral registry policy name
 - NVX-owned OCI converter threat model, containment and bounded-extraction contract, security review, and adversarial test evidence
 - NVX signed binaries support
-- NVX crate artifact registry, fetching, verification, offline-prefetch, and staging contract
+- NVX crate artifact registry, fetching, verification, and staging contract
 - Windows ARM runtime and SDK package availability
 - Future PTY support
 
