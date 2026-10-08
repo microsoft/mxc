@@ -95,8 +95,8 @@ Port mappings require bridged networking. A request that leaves `network` out,
 or sets it to the all-`deny` isolated posture, is rejected at provision: the
 container has no networking for a forward to reach.
 
-The field requires development contract `1.1.0-alpha`. WSLc "MXC request JSON"
-requests using `0.9.0-alpha` must explicitly select `1.1.0-alpha` to use it.
+The field requires development contract `1.1.0-alpha`. Requests declaring
+`0.9.0-alpha` cannot include it and must select `1.1.0-alpha` explicitly.
 The daemon shares one session (VM) but creates a separate container for each
 provision, so a mapping applies only to the container that declared it, unlike
 the session-wide `cpuCount` / `memoryMb` / `gpu` / `storagePath` knobs that
