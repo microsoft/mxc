@@ -15,7 +15,7 @@ Terms used in the [SDK reference](api-reference/README.md) and [configuration gu
 | Persistent / transient container | Retained between calls / cleaned up after a run. | Neither promises survival across host reboots. |
 | Provision / deprovision | Allocate / release container resources. | `provisionContainer` / `deprovisionContainer`. |
 | Container identity / opaque ID | Provisioned container's `ContainerId`; pass unchanged, never parse or construct it. | Provision returns it; later operations take it. |
-| **MXC request JSON** | JSON schema contract for containment rules and operations. | `schemas/stable/mxc-config.schema.1.0.0.json`. |
+| **MXC request JSON** | Versioned JSON request format for containment rules and operations. | [Stable `1.0.0` schema](../schemas/stable/mxc-config.schema.1.0.0.json). |
 | **\[I\/O model\]** Captured | Full output emitted after program execution. | Node V1 `run`. |
 | **\[I\/O model\]** Streaming output | Output collected after completion / readable during execution. | Node V1 `spawn`. |
 | **\[I\/O model\]** PTY (pseudoterminal) | Interactive terminal with input, combined output, and resizing. | Node V1 `spawnWithPty`. |
