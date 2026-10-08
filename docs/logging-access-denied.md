@@ -247,13 +247,15 @@ When option-aware native capture is selected, MXC requests both `ACCESS` and
 with partial access-only collection. Legacy native capture remains access-only.
 MXC does not coordinate with WFP directly.
 
-Native PSEC capture has one capture-specific capability exception. When the
-caller explicitly supplies a direct `network.egress` section and enables
-`captureDenials`, MXC adds `internetClient` so the outbound attempt reaches
-Tessera's WFP policy and can be recorded there. The authored egress table still
-makes the allow-or-deny decision. This exception is not applied when
-`network.egress` is absent, when the request supplies ingress only, when
-capture is disabled, or when proxy mode is selected.
+Option-aware native PSEC capture has one capture-specific capability exception.
+When the caller explicitly supplies a direct `network.egress` section and
+enables `captureDenials`, MXC adds `internetClient` so the outbound attempt
+reaches Tessera's WFP policy and can be recorded there. The authored egress
+table still makes the allow-or-deny decision. Legacy access-only native capture
+does not add the capability because it cannot collect the resulting network
+decision. The exception is also not applied when `network.egress` is absent,
+when the request supplies ingress only, when capture is disabled, or when proxy
+mode is selected.
 
 MXC currently recognizes two normalized source domains:
 

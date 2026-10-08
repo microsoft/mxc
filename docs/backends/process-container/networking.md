@@ -42,10 +42,11 @@ narrows the outbound public and private destinations reachable through the grant
 
 This matrix covers the direction defaults without explicit internet egress rules or proxy mode.
 It describes the ordinary non-capture capability posture. Native PSEC
-`captureDenials` temporarily adds `internetClient` only when the caller
-explicitly supplies a direct `network.egress` section, allowing Tessera's WFP
-policy to observe and record the attempt while the authored egress table
-continues to enforce it. Absent or ingress-only network policy, non-capture
+`captureDenials` temporarily adds `internetClient` only when the option-aware
+trace collects network decisions and the caller explicitly supplies a direct
+`network.egress` section, allowing Tessera's WFP policy to observe and record
+the attempt while the authored egress table continues to enforce it. Legacy
+access-only capture, absent or ingress-only network policy, non-capture
 runs, and proxy mode retain the matrix posture.
 
 ### Model 1: direct egress, WFP-filtered (least restrictive)
