@@ -284,6 +284,50 @@ fn start_directory(request: &ExecutionRequest) -> Option<String> {
         .map(crate::mxc_common::models::sandbox_absolute_path)
 }
 
+/// Find an explicit cwd with no overlapping known mount destination.
+/// This is a lexical hint, not proof of visibility inside Bubblewrap.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn cwd_without_matching_mount(request: &ExecutionRequest) -> Option<String> {
+    let dir = start_directory(request)?;
+    if dir == "/"
+        || !request.working_directory.starts_with('/')
+        || request
+            .working_directory
+            .split('/')
+            .any(|part| part == "." || part == "..")
+    {
+        return None;
+    }
+
+    let mounts = BASELINE_RO_BIND_PATHS
+        .iter()
+        .copied()
+        .chain(["/dev", "/proc", "/tmp", "/var/run"])
+        .chain(
+            request
+                .policy
+                .readwrite_paths
+                .iter()
+                .chain(&request.policy.readonly_paths)
+                .chain(&request.policy.denied_paths)
+                .map(String::as_str),
+        );
+    for mount in mounts {
+        if !mount.starts_with('/') || mount.split('/').any(|part| part == "." || part == "..") {
+            return None;
+        }
+        if path_is_within(&dir, mount) || path_is_within(mount, &dir) {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn path_is_within(path: &str, parent: &str) -> bool {
+    std::path::Path::new(path).starts_with(parent)
+}
+
 /// The default environment: `PATH`, `TERM`, and — when one resolves — `HOME`.
 ///
 /// `HOME` names the directory the child actually runs in, so it is a path the
@@ -572,6 +616,85 @@ mod tests {
     }
 
     #[test]
+    fn cwd_hint_requires_a_nonoverlapping_absolute_path() {
+        let mut request = base_request();
+        assert_eq!(
+            cwd_without_matching_mount(&request).as_deref(),
+            Some("/home/user")
+        );
+        request.working_directory = "/".into();
+        assert_eq!(cwd_without_matching_mount(&request), None);
+        request.working_directory = "".into();
+        assert_eq!(cwd_without_matching_mount(&request), None);
+        request.working_directory = "home/user".into();
+        assert_eq!(cwd_without_matching_mount(&request), None);
+        request.working_directory = "/home/../home/user".into();
+        assert_eq!(cwd_without_matching_mount(&request), None);
+    }
+
+    #[test]
+    fn cwd_overlap_is_inconclusive_in_either_direction() {
+        let mut request = base_request();
+        for cwd in ["/etc", "/etc/project", "/usr", "/tmp/work", "/var"] {
+            request.working_directory = cwd.into();
+            assert_eq!(cwd_without_matching_mount(&request), None, "{cwd}");
+        }
+        for mount in [
+            "/home",
+            "/home/user",
+            "/home/user/",
+            "/home//user/",
+            "/home/user/data",
+            "/home//user/data/",
+        ] {
+            request.working_directory = "/home/user".into();
+            request.policy.readonly_paths = vec![mount.into()];
+            assert_eq!(cwd_without_matching_mount(&request), None, "{mount}");
+        }
+        for mount in ["/home/user2", "/home/user2/"] {
+            request.policy.readonly_paths = vec![mount.into()];
+            assert_eq!(
+                cwd_without_matching_mount(&request).as_deref(),
+                Some("/home/user"),
+                "{mount}"
+            );
+        }
+        request.policy.readonly_paths = vec!["/alias/../home/user".into()];
+        assert_eq!(cwd_without_matching_mount(&request), None);
+        request.policy.readonly_paths = vec!["/".into()];
+        assert_eq!(cwd_without_matching_mount(&request), None);
+        request.policy.readonly_paths.clear();
+        request.policy.denied_paths = vec!["/home/user/hidden".into()];
+        assert_eq!(cwd_without_matching_mount(&request), None);
+    }
+
+    #[test]
+    fn cwd_proof_uses_the_mounted_baseline_and_virtual_roots() {
+        let request = base_request();
+        let args = build_args(&request, None);
+        for mount in BASELINE_RO_BIND_PATHS {
+            assert!(
+                args.windows(3)
+                    .any(|a| { a == ["--ro-bind-try", *mount, *mount] }),
+                "{mount}"
+            );
+        }
+        for (flag, path) in [
+            ("--dev", "/dev"),
+            ("--proc", "/proc"),
+            ("--tmpfs", "/tmp"),
+            ("--symlink", "/var/run"),
+        ] {
+            assert!(
+                args.windows(2).any(|a| a[0] == flag && a[1] == path)
+                    || (flag == "--symlink"
+                        && args.windows(3).any(|a| a == ["--symlink", "/run", path])),
+                "{flag} {path}"
+            );
+        }
+    }
+
+    #[test]
     fn ambiguous_resolver_paths_and_shadowed_link_do_not_warn() {
         let mut policy = ContainerPolicy::default();
         for target in ["relative/resolv.conf", "/opt/../secret/resolv.conf", "/"] {
@@ -592,6 +715,33 @@ mod tests {
             &policy,
             "/opt/private/resolv.conf"
         ));
+    }
+
+    #[test]
+    fn cwd_diagnostic_recognizes_every_emitted_mount_destination() {
+        let mut request = base_request();
+        let args = build_args(&request, None);
+        for triple in args.windows(3) {
+            if matches!(
+                triple[0].as_str(),
+                "--ro-bind-try" | "--ro-bind" | "--bind" | "--symlink"
+            ) {
+                request.working_directory = triple[2].clone();
+                assert!(
+                    cwd_without_matching_mount(&request).is_none(),
+                    "unrecognized mount destination: {triple:?}"
+                );
+            }
+        }
+        for pair in args.windows(2) {
+            if matches!(pair[0].as_str(), "--dev" | "--proc" | "--tmpfs") {
+                request.working_directory = pair[1].clone();
+                assert!(
+                    cwd_without_matching_mount(&request).is_none(),
+                    "unrecognized virtual mount destination: {pair:?}"
+                );
+            }
+        }
     }
 
     /// `process.env` resolution, which schema 0.9 gave a default block.

@@ -146,6 +146,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             return Err(ScriptResponse::error(&msg));
         }
         warn_resolver_mount_hint(request, logger);
+        warn_cwd_mount_hint(request, logger);
         let child = self.spawn_bwrap(request, &plan.files, egress_plan, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
@@ -374,6 +375,18 @@ fn warn_resolver_mount_hint_with(
          mount destination overlaps that path. DNS may fail if the link does not \
          resolve inside the sandbox; check the link and consider listing its \
          containing directory in filesystem.readonlyPaths."
+    ));
+}
+
+fn warn_cwd_mount_hint(request: &ExecutionRequest, logger: &mut Logger) {
+    let Some(dir) = bwrap_command::cwd_without_matching_mount(request) else {
+        return;
+    };
+    logger.warning_line(&format!(
+        "WARNING: Bubblewrap: process.cwd {dir:?} has no apparent covering mount \
+         destination. It may be unavailable inside the sandbox; check \
+         filesystem.readonlyPaths or filesystem.readwritePaths for a containing \
+         directory. Bubblewrap will decide whether --chdir succeeds."
     ));
 }
 
@@ -1292,6 +1305,29 @@ mod tests {
             assert_eq!(hint_logger.warnings().len(), expected_hints, "{name}");
             std::fs::remove_file(&link).unwrap();
         }
+    }
+
+    #[test]
+    fn cwd_mount_hint_is_retained_for_unmatched_paths() {
+        use crate::mxc_common::logger::Mode;
+
+        let mut request = base_request();
+        request.working_directory = "/home/user".into();
+        let mut logger = Logger::new(Mode::Buffer);
+        warn_cwd_mount_hint(&request, &mut logger);
+        assert_eq!(logger.warnings().len(), 1);
+        assert!(logger.warnings()[0].contains("no apparent covering mount"));
+        assert!(logger.warnings()[0].contains("filesystem.readonlyPaths"));
+        assert!(logger.get_buffer().is_empty());
+
+        request.policy.readonly_paths = vec!["/other".into()];
+        let mut unrelated_logger = Logger::new(Mode::Buffer);
+        warn_cwd_mount_hint(&request, &mut unrelated_logger);
+        assert_eq!(unrelated_logger.warnings().len(), 1);
+        request.policy.readonly_paths = vec!["/home/user/data".into()];
+        let mut covered_logger = Logger::new(Mode::Buffer);
+        warn_cwd_mount_hint(&request, &mut covered_logger);
+        assert!(covered_logger.warnings().is_empty());
     }
 
     /// A request carrying `alice:hunter2@` in its proxy URL, built the way a

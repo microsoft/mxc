@@ -172,6 +172,15 @@ Common consequences of this default:
   `readonlyPaths` if the script depends on it.
 - `working_directory` must live under the baseline or a policy path — a
   `cwd` of `~/project` without a matching `readonlyPaths` entry will fail.
+  At launch, Bubblewrap retains a mount-configuration hint for SDK callers,
+  which `lxc-exec` also prints to stderr, when an explicit absolute cwd has
+  no apparent overlap with known mount destinations. This compares path
+  spellings without inspecting the host cwd or policy paths, so symlinks or
+  runtime mount behavior can make the hint inapplicable. Check
+  `readonlyPaths` or `readwritePaths` for a containing directory. Ambiguous
+  paths (including `..` and paths near policy mounts) are left to Bubblewrap;
+  silence does not prove a cwd is accessible. The hint does not change
+  execution or replace Bubblewrap's error.
 - DNS works on systemd-resolved, NetworkManager, and resolvconf hosts
   because the corresponding `/run/...` directories are bound. The common
   symlink targets *outside* `/run` are covered too: `/var/run/...`-routed
