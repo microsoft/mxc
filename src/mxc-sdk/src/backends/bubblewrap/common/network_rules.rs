@@ -141,6 +141,35 @@ impl RuleAddress {
             text: format!("{address}/{prefix}"),
         }
     }
+
+    /// Whether this destination covers `address`.
+    ///
+    /// The text is either a bare literal or a CIDR block, because a proxy
+    /// endpoint is rendered without a prefix while a lowered peer keeps one.
+    /// An unparseable block reports no match, which can only make a diagnostic
+    /// quieter than the chain it describes -- never more permissive.
+    fn contains_v4(&self, address: Ipv4Addr) -> bool {
+        if self.family != RuleFamily::V4 {
+            return false;
+        }
+        let (base, prefix) = match self.text.split_once('/') {
+            Some((base, prefix)) => match prefix.parse::<u8>() {
+                Ok(prefix) if prefix <= 32 => (base, prefix),
+                _ => return false,
+            },
+            None => (self.text.as_str(), 32),
+        };
+        let Ok(base) = base.parse::<Ipv4Addr>() else {
+            return false;
+        };
+        // `u32::MAX << 32` is undefined, so the /0 case is masked explicitly.
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - u32::from(prefix))
+        };
+        (base.to_bits() & mask) == (address.to_bits() & mask)
+    }
 }
 
 /// An IPv4-mapped CIDR as its IPv4 equivalent, when it has one.
@@ -620,6 +649,27 @@ impl EgressRule {
             self.verdict.target()
         )
     }
+
+    /// Whether this rule matches a UDP datagram to `destination:port`.
+    ///
+    /// An absent protocol or port range matches everything, which is how
+    /// `iptables` reads a rule carrying no `-p` or `--dport`.
+    fn matches_udp(&self, destination: Ipv4Addr, port: u16) -> bool {
+        if self.address.family != RuleFamily::V4 {
+            return false;
+        }
+        if !matches!(self.port.protocol, None | Some("udp")) {
+            return false;
+        }
+        if self
+            .port
+            .range
+            .is_some_and(|(start, end)| port < start || port > end)
+        {
+            return false;
+        }
+        self.address.contains_v4(destination)
+    }
 }
 
 /// The complete filtering posture for one sandbox.
@@ -800,6 +850,21 @@ impl EgressPlan {
             }
         }
         targets
+    }
+
+    /// Whether the installed chain lets a UDP datagram reach `destination:port`.
+    ///
+    /// The chain is evaluated first-match, so this walks the rules in the order
+    /// they are installed and takes the verdict of the first that matches,
+    /// falling back to the family's terminal verdict. The loopback exemption is
+    /// not consulted: it matches on outbound interface, which no destination
+    /// address decides.
+    pub(crate) fn admits_udp(&self, destination: Ipv4Addr, port: u16) -> bool {
+        self.rules
+            .iter()
+            .find(|rule| rule.matches_udp(destination, port))
+            .map_or(self.v4_terminal, |rule| rule.verdict)
+            == RuleVerdict::Accept
     }
 }
 
@@ -1928,6 +1993,139 @@ mod tests {
             EgressPlan::for_request(&request(NetworkAction::Deny, &["::ffff:203.0.113.5"], &[]))
                 .expect("a mapped address is enforceable");
         assert!(mapped.allowed_v6_targets().is_empty());
+    }
+
+    /// The forwarder address the resolver pin writes, which these ask the chain
+    /// about.
+    const FORWARDER: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 3);
+
+    /// A ruleless allow default opens the forwarder along with everything else.
+    #[test]
+    fn an_open_egress_default_admits_the_dns_forwarder() {
+        let plan = EgressPlan::for_request(&request(NetworkAction::Allow, &[], &[]))
+            .expect("an open default is enforceable");
+
+        assert!(plan.admits_udp(FORWARDER, 53));
+    }
+
+    /// The case the warning exists for: an allowlist that never names the
+    /// forwarder drops the query at the chain's terminal verdict.
+    #[test]
+    fn a_deny_default_without_a_dns_rule_blocks_the_forwarder() {
+        let plan =
+            EgressPlan::for_request(&request(NetworkAction::Deny, &["140.82.112.0/20"], &[]))
+                .expect("an allowlist is enforceable");
+
+        assert!(!plan.admits_udp(FORWARDER, 53));
+    }
+
+    /// The remedy the warning names has to actually silence it.
+    #[test]
+    fn an_explicit_dns_rule_admits_the_forwarder() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("10.0.2.3/32", &[])],
+                vec![port(NetworkProtocol::Udp, Some(53), None)],
+            )],
+            Vec::new(),
+        );
+        let plan = EgressPlan::for_request(&req).expect("a udp/53 allow is enforceable");
+
+        assert!(plan.admits_udp(FORWARDER, 53));
+        // The rule names one port, so it must not read as opening others.
+        assert!(!plan.admits_udp(FORWARDER, 443));
+    }
+
+    /// A rule the forwarder merely falls inside counts, so an operator who
+    /// opened a wider range is not told to add one they already have.
+    #[test]
+    fn a_containing_block_admits_the_forwarder() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("10.0.2.0/24", &[])],
+                vec![port(NetworkProtocol::Any, None, None)],
+            )],
+            Vec::new(),
+        );
+        let plan = EgressPlan::for_request(&req).expect("a block with no port is enforceable");
+
+        assert!(plan.admits_udp(FORWARDER, 53));
+    }
+
+    /// A rule that names only TCP leaves DNS dropped, so matching on the
+    /// address alone would miss the case the warning is for.
+    #[test]
+    fn a_tcp_only_rule_does_not_admit_the_forwarder() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("10.0.2.3/32", &[])],
+                vec![port(NetworkProtocol::Tcp, Some(53), None)],
+            )],
+            Vec::new(),
+        );
+        let plan = EgressPlan::for_request(&req).expect("a tcp/53 allow is enforceable");
+
+        assert!(!plan.admits_udp(FORWARDER, 53));
+    }
+
+    /// Denies precede allows in the chain, so a deny covering the forwarder
+    /// wins even under an open default.
+    #[test]
+    fn a_deny_rule_closes_the_forwarder_under_an_open_default() {
+        let plan = EgressPlan::for_request(&request(NetworkAction::Allow, &[], &["10.0.2.0/24"]))
+            .expect("a deny rule under an open default is enforceable");
+
+        assert!(!plan.admits_udp(FORWARDER, 53));
+    }
+
+    /// An exclusion carves the forwarder out of a block that otherwise covers
+    /// it, which only address containment can see.
+    #[test]
+    fn an_exclusion_removes_the_forwarder_from_a_covering_block() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("10.0.0.0/8", &["10.0.2.3/32"])],
+                vec![port(NetworkProtocol::Any, None, None)],
+            )],
+            Vec::new(),
+        );
+        let plan = EgressPlan::for_request(&req).expect("an exclusion is enforceable");
+
+        assert!(!plan.admits_udp(FORWARDER, 53));
+        // The rest of the block is still open, so the exclusion is what closed it.
+        assert!(plan.admits_udp(Ipv4Addr::new(10, 0, 2, 4), 53));
+    }
+
+    /// A port range is inclusive at both ends.
+    #[test]
+    fn a_port_range_admits_its_whole_span() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("10.0.2.3/32", &[])],
+                vec![port(NetworkProtocol::Udp, Some(50), Some(60))],
+            )],
+            Vec::new(),
+        );
+        let plan = EgressPlan::for_request(&req).expect("a port range is enforceable");
+
+        assert!(plan.admits_udp(FORWARDER, 50));
+        assert!(plan.admits_udp(FORWARDER, 60));
+        assert!(!plan.admits_udp(FORWARDER, 61));
+    }
+
+    /// The proxy posture opens one TCP endpoint, so it never admits DNS. The
+    /// resolver pin is not applied there, and this is what keeps the two
+    /// statements consistent.
+    #[test]
+    fn the_proxy_plan_does_not_admit_the_forwarder() {
+        let plan = EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128);
+
+        assert!(!plan.admits_udp(FORWARDER, 53));
     }
 
     #[test]
