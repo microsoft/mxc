@@ -385,7 +385,7 @@ fn exact_network_endpoint(
     if field_flags & FIELD_REMOTE_ADDRESS == 0 {
         return Ok(None);
     }
-    let remote_address = required_ip_string(parts, "RemoteAddress")?;
+    let remote_address = required_ip(parts, "RemoteAddress")?;
     let protocol = optional_u8(parts, field_flags, FIELD_PROTOCOL, "Protocol")?;
     let remote_port = optional_u16(parts, field_flags, FIELD_REMOTE_PORT, "RemotePort")?;
     let (protocol, remote_port) = match protocol {
@@ -397,12 +397,14 @@ fn exact_network_endpoint(
             Some(1..=u16::MAX) => ("udp", remote_port),
             _ => return Ok(None),
         },
-        Some(1 | 58) => ("icmp", None),
+        Some(1) if remote_address.is_ipv4() => ("icmp", None),
+        Some(58) if remote_address.is_ipv6() => ("icmp", None),
+        Some(1 | 58) => return Err(CaptureVerboseLoggingOutcomeReason::IncompleteNetworkEndpoint),
         _ => return Ok(None),
     };
     Ok(Some(NetworkEndpoint {
         protocol: protocol.to_string(),
-        remote_address,
+        remote_address: remote_address.to_string(),
         remote_port,
     }))
 }
@@ -456,9 +458,15 @@ fn required_ip_string(
     parts: &DecodedEventParts,
     name: &'static str,
 ) -> Result<String, CaptureVerboseLoggingOutcomeReason> {
+    required_ip(parts, name).map(|address| address.to_string())
+}
+
+fn required_ip(
+    parts: &DecodedEventParts,
+    name: &'static str,
+) -> Result<IpAddr, CaptureVerboseLoggingOutcomeReason> {
     required_string(parts, name)?
         .parse::<IpAddr>()
-        .map(|address| address.to_string())
         .map_err(|_| CaptureVerboseLoggingOutcomeReason::IncompleteNetworkEndpoint)
 }
 
@@ -766,6 +774,32 @@ mod tests {
                 None,
                 "ICMP recommendations must not carry ports"
             );
+        }
+    }
+
+    #[test]
+    fn tessera_icmp_recommendations_require_matching_address_family() {
+        for (protocol, address) in [(1, "2001:db8::1"), (58, "203.0.113.10")] {
+            let flags = FIELD_PROTOCOL | FIELD_REMOTE_ADDRESS | FIELD_REMOTE_PORT;
+            let mut parts = event(
+                SOURCE_TESSERA,
+                REASON_TESSERA_DIRECT_DEFAULT_DENY,
+                &[
+                    ("Protocol", &protocol.to_string()),
+                    ("RemoteAddress", address),
+                    ("RemotePort", "8"),
+                ],
+            );
+            replace(&mut parts, "FieldFlags", flags.to_string());
+
+            let analysis = analyze_network_decision(&parts);
+            assert!(analysis.denial.is_none());
+            assert_eq!(
+                analysis.reason,
+                CaptureVerboseLoggingOutcomeReason::IncompleteNetworkEndpoint
+            );
+            assert!(analysis.configuration_recommendation.is_none());
+            assert!(analysis.network_endpoint.is_none());
         }
     }
 
