@@ -293,8 +293,10 @@ Reason `65535` remains `unknownNetworkReason`.
 For reason `100`, the structured endpoint recommendation is emitted only when
 MXC can preserve the observed numeric address and a supported protocol without
 widening it to `any`. IPv4 addresses map to `/32`, IPv6 addresses map to
-`/128`, TCP and UDP retain the observed port when present, and ICMP omits
-ports. Unknown protocol encodings do not produce `addEgressAllow`.
+`/128`, TCP and UDP require and retain a nonzero observed port, and ICMP
+normalizes to a portless rule even if the event carries an inapplicable port
+value. Missing or zero TCP/UDP ports and unknown protocol encodings do not
+produce `addEgressAllow`.
 
 Actionable network records use the existing `DeniedResource` shape. The
 normalized protocol, remote address, and optional remote port are encoded in
@@ -385,16 +387,18 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 ```
 
 Version `3` is the legacy contract preceding scoped verbose diagnostics.
-Version `4` adds the schema `eventName` field, the `other` provider category,
+Version `4` adds the schema `eventName` field, the network-decision provider,
 and `schemaUnavailable` outcome used by scoped verbose diagnostics. Version
-`5` adds MXC's internal WFP provider, WFP-specific outcome reasons, typed
-network decision reason, reason-specific configuration recommendation, and
-exact endpoint components. Option-aware native
+`5` adds MXC's internal WFP-specific outcome reasons, typed network decision
+reason, reason-specific configuration recommendation, and exact endpoint
+components. Option-aware native
 `captureDenials` writes version 5 even when a particular trace contains no WFP
 occurrences. Legacy and guarded capture paths may still produce their
 corresponding legacy document version. MXC readers that consume captured
-artifacts accept versions 3, 4, and 5 and reject every other version rather
-than interpreting an unknown provider or reason with an older vocabulary.
+artifacts dispatch versions 3, 4, and 5 to separate closed contracts. They
+reject unknown fields, newer providers/reasons under an older version label,
+and every unsupported version rather than interpreting newer vocabulary with
+an older schema.
 
 Signatures are keyed by symbolic provider category, provider GUID,
 provider-scoped event ID, schema name, outcome reason from a fixed list, PID, and
@@ -485,9 +489,11 @@ When stable telemetry is enabled and authorized, MXC may validate, compact, and
 send this redacted verbose document through `Microsoft.MXC/MXC.VerboseDenials`. Each
 event contains a valid JSON array of complete signatures and document
 reconstruction metadata. Before emission, MXC derives provider GUIDs from the
-predefined provider enum and drops every verbose property name and value. MXC does
-not send the actionable denials file, workload-derived properties, or raw ETL
-through telemetry. See [MXC telemetry](development/architecture/telemetry.md).
+fixed provider enum; removes schema `eventName`, every verbose property name
+and value, and structured network endpoints; then regroups signatures that
+become identical. MXC does not send the actionable denials file,
+workload-derived properties, or raw ETL through telemetry. See
+[MXC telemetry](development/architecture/telemetry.md).
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique
