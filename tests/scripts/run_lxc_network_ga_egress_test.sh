@@ -283,6 +283,13 @@ for dns_addr in "$PEER_DNS_IP" "$PEER_DNS_SIBLING_IP"; do
     fi
 done
 
+# The ICMP cases below read an unanswered echo as a firewall verdict, so a peer
+# that ignores echo has to fail here as harness breakage instead.
+if command -v ping >/dev/null 2>&1; then
+    ping -c 1 -W 5 "$PEER_IP" >/dev/null 2>&1 \
+        || fail "the egress peer does not answer ICMP echo at $PEER_IP."
+fi
+
 # Drift guard: the peer fixtures must target this peer, or the run would probe a
 # stale address and prove nothing.
 PEER_TARGETING_CONFIGS=(
