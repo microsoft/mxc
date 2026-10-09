@@ -6,7 +6,7 @@ Node.js / TypeScript SDK for MXC (Microsoft eXecution Containers). The
 versioned public request, execution, and lifecycle APIs are exported from
 `@microsoft/mxc-sdk/v1`, including platform discovery, errors, and telemetry consent.
 The package root exports no public APIs. These APIs use the SDK-selected contract
-version; callers do not select it. See the [consumer glossary](../../docs/glossary.md)
+version; callers do not select it. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md)
 for terminology.
 
 ```bash

@@ -8,7 +8,7 @@ them in-process through the native engine. The versioned public API is under
 network, and UI restrictions; its typed containment value selects and
 configures the backend.
 
-See the [consumer glossary](../../docs/glossary.md) for terminology.
+See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
 ## Run to completion and spawn
 
@@ -146,7 +146,7 @@ For host discovery, use
 `mxc_sdk::v1::platform_support` and `mxc_sdk::v1::available_backends`. Errors are
 returned as `mxc_sdk::v1::Error` with an `ErrorCode`.
 Telemetry and policy helpers are also under `v1`. The
-[launch-choice table](../../docs/api-reference/rust/v1/api.md#choosing-a-launch-operation)
+[launch-choice table](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/api.md#choosing-a-launch-operation)
 compares captured, piped, and terminal execution.
 
 ## Build features and backend support

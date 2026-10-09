@@ -6,7 +6,7 @@
 container requests through the in-process native `mxc_ffi` library. The
 versioned public API is in `Microsoft.Mxc.Sdk.V1`. All request and policy types
 in this API use the SDK-selected contract version; callers do not select
-that version. See the [consumer glossary](../../docs/glossary.md) for terminology.
+that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
 ## Run to completion
 
