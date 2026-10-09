@@ -38,6 +38,39 @@ pub fn embed_version_info(file_description: &str, original_filename: &str) {
     }
 }
 
+/// Copy the complete NVX runtime directory beside the executable being built.
+pub fn stage_nvx_runtime(source: &Path) {
+    let out_dir = std::env::var_os("OUT_DIR").expect("OUT_DIR not set");
+    let target_dir = Path::new(&out_dir)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("could not determine Cargo profile directory")
+        .join("nvx");
+
+    if target_dir.exists() {
+        std::fs::remove_dir_all(&target_dir).expect("failed to remove stale NVX runtime directory");
+    }
+    copy_directory(source, &target_dir).expect("failed to stage the NVX runtime directory");
+    println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rerun-if-env-changed=DEP_ACI_EDGE_SANDBOXES_ARTIFACTS_DIR");
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_directory(&source_path, &destination_path)?;
+        } else {
+            std::fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn embed_version_info_windows(file_description: &str, original_filename: &str) {
     const PRODUCT_NAME: &str = "Microsoft Execution Containers";

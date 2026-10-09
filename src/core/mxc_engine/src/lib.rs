@@ -78,6 +78,25 @@ use wxc_common::sandbox_process::{
 use wxc_common::state_aware_request::MxcRequest;
 use wxc_common::telemetry;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapturedOutcome {
+    Exited(i32),
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedExecutionResult {
+    pub outcome: CapturedOutcome,
+    pub warnings: Vec<String>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+pub enum OneShotExecution {
+    Captured(CapturedExecutionResult),
+    Streaming(Box<dyn SandboxProcess>),
+}
+
 /// Spawn a streaming [`SandboxProcess`] handle for a normalized
 /// [`ExecutionRequest`].
 ///
@@ -121,6 +140,30 @@ pub fn spawn_one_shot_json(
     spawn_execution_request_with_logger(&request, logger)
 }
 
+#[doc(hidden)]
+pub fn execute_one_shot_json(
+    request_json: &str,
+    experimental: bool,
+) -> Result<OneShotExecution, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+
+    if request.containment == ContainmentBackend::MicroVm {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        {
+            return run_captured_execution_request(&request, logger)
+                .map(OneShotExecution::Captured);
+        }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+        {
+            return spawn_execution_request_with_logger(&request, logger)
+                .map(OneShotExecution::Streaming);
+        }
+    }
+
+    spawn_execution_request_with_logger(&request, logger).map(OneShotExecution::Streaming)
+}
+
 fn parse_one_shot_json(
     request_json: &str,
     experimental: bool,
@@ -142,6 +185,76 @@ fn parse_one_shot_json(
     };
     request.experimental_enabled = experimental;
     Ok(request)
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+fn run_captured_execution_request(
+    request: &ExecutionRequest,
+    mut logger: Logger,
+) -> Result<CapturedExecutionResult, Error> {
+    crate::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
+
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
+    let started = std::time::Instant::now();
+    let mut runner = nvx_runner::NvxRunner::new();
+    let result = match runner.run_captured(request, &mut logger) {
+        Ok(result) => result,
+        Err(error) => {
+            telemetry::emit_sdk_early_exit_with_kind(
+                telemetry_registration.transfer(),
+                &request.containment,
+                requested_sandbox_kind,
+                telemetry::classify_mxc_error(&error),
+            );
+            return Err(Error::from(error));
+        }
+    };
+
+    let response = ScriptResponse {
+        exit_code: match result.outcome {
+            nvx_runner::CapturedOutcome::Exited(code) => code,
+            nvx_runner::CapturedOutcome::TimedOut => -1,
+        },
+        failure_phase: match result.outcome {
+            nvx_runner::CapturedOutcome::Exited(_) => FailurePhase::None,
+            nvx_runner::CapturedOutcome::TimedOut => FailurePhase::Timeout,
+        },
+        ..Default::default()
+    };
+    telemetry::emit_sdk_completion_with_kind(
+        telemetry_registration.transfer(),
+        &request.containment,
+        requested_sandbox_kind,
+        &response,
+        started.elapsed(),
+    );
+
+    let warnings = logger
+        .take_warnings()
+        .into_iter()
+        .chain(result.warnings)
+        .collect();
+    Ok(CapturedExecutionResult {
+        outcome: match result.outcome {
+            nvx_runner::CapturedOutcome::Exited(code) => CapturedOutcome::Exited(code),
+            nvx_runner::CapturedOutcome::TimedOut => CapturedOutcome::TimedOut,
+        },
+        warnings,
+        stdout: result.stdout,
+        stderr: result.stderr,
+    })
 }
 
 fn spawn_execution_request_with_logger(

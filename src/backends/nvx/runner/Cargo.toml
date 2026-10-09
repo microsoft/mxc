@@ -1,0 +1,15 @@
+[package]
+name = "nvx_runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MXC run-to-completion adapter for the NVX Rust API."
+
+[dependencies]
+wxc_common.workspace = true
+aci_edge_sandboxes.workspace = true
+
+[features]
+default = ["openvmm"]
+openvmm = ["aci_edge_sandboxes/openvmm"]
+bundled = ["openvmm", "aci_edge_sandboxes/bundled"]

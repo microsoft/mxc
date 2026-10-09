@@ -5,7 +5,7 @@ setlocal enabledelayedexpansion
 set "BUILD_CONFIG=release"
 set "BUILD_ARCH="
 set "BUILD_ALL=0"
-set "WITH_NANVIX=0"
+set "WITH_NVX=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
 set "WITH_HYPERLIGHT=0"
@@ -18,7 +18,7 @@ if /i "%~1"=="--release" ( set "BUILD_CONFIG=release"  & shift & goto :parse_arg
 if /i "%~1"=="--x64"     ( set "BUILD_ARCH=x86_64-pc-windows-msvc"   & shift & goto :parse_args )
 if /i "%~1"=="--arm64"   ( set "BUILD_ARCH=aarch64-pc-windows-msvc"  & shift & goto :parse_args )
 if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_args )
-if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_args )
+if /i "%~1"=="--with-microvm" ( set "WITH_NVX=1"       & shift & goto :parse_args )
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
 if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
@@ -44,7 +44,15 @@ if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
 :: workspace feature flags above, so it uses its own profile/target-only flags.
 set "PLM_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "PLM_FLAGS=--release --target"
-if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
+if "%WITH_NVX%"=="1" if "%BUILD_ALL%"=="1" (
+    echo ERROR: --with-microvm currently supports Windows x64 only.
+    exit /b 1
+)
+if "%WITH_NVX%"=="1" if /i not "%BUILD_ARCH%"=="x86_64-pc-windows-msvc" (
+    echo ERROR: --with-microvm currently supports Windows x64 only.
+    exit /b 1
+)
+if "%WITH_NVX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
@@ -131,25 +139,14 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\mxc_ffi.dll
         )
-        if "%WITH_NANVIX%"=="1" (
-            for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
-                if exist "!BIN_DIR!\%%B" (
-                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
-                    echo   Copied !SDK_ARCH!\%%B
-                )
+        if "%WITH_NVX%"=="1" (
+            if not exist "!BIN_DIR!\nvx" (
+                echo ERROR: NVX-enabled build is missing !BIN_DIR!\nvx
+                exit /b 1
             )
-            if exist "!BIN_DIR!\bin\kernel.elf" (
-                if not exist "sdk\node\bin\!SDK_ARCH!\bin" mkdir "sdk\node\bin\!SDK_ARCH!\bin"
-                copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\node\bin\!SDK_ARCH!\bin\" >nul
-                echo   Copied !SDK_ARCH!\bin\kernel.elf
-            )
-            for %%S in (kernel.vmem kernel.whp.cbor) do (
-                if exist "!BIN_DIR!\snapshots\%%S" (
-                    if not exist "sdk\node\bin\!SDK_ARCH!\snapshots" mkdir "sdk\node\bin\!SDK_ARCH!\snapshots"
-                    copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\node\bin\!SDK_ARCH!\snapshots\" >nul
-                    echo   Copied !SDK_ARCH!\snapshots\%%S
-                )
-            )
+            if exist "sdk\node\bin\!SDK_ARCH!\nvx" rmdir /S /Q "sdk\node\bin\!SDK_ARCH!\nvx"
+            xcopy /E /I /Y "!BIN_DIR!\nvx" "sdk\node\bin\!SDK_ARCH!\nvx" >nul
+            echo   Copied !SDK_ARCH!\nvx runtime
         )
         if "!COPY_WSLC_RUNTIME!"=="1" (
             if "%WITH_WSLC%"=="1" (
@@ -309,7 +306,7 @@ echo   --release   Build release configuration
 echo   --x64       Build for x64 only
 echo   --arm64     Build for ARM64 only
 echo   --all             Build both Windows architectures and create the .NET NuGet package
-echo   --with-microvm    Download and include NanVix micro-VM binaries
+echo   --with-microvm    Download and include the pinned NVX runtime
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)
 echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)

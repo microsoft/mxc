@@ -9,7 +9,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 
 - **Cross-platform**: Windows, Linux, and macOS support with platform-appropriate containment backends
 - **JSON-based Configuration**: Define execution parameters and security policies via a versioned JSON schema
-- **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
+- **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NVX on Windows x64 and NanVix on Linux), Hyperlight, IsolationSession, and WSLC
 - **Policy-driven Sandboxing**:
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
     - **Network Policy**: Proxy support (cooperative on Linux/macOS), allow/block outbound, and backend-dependent host filtering
@@ -70,7 +70,7 @@ layout, crate responsibilities, dependency direction, and execution surfaces.
 build.bat                  # Release build for current architecture
 build.bat --debug          # Debug build
 build.bat --all            # Release build for both x64 and ARM64
-build.bat --with-microvm   # Include NanVix micro-VM binaries
+build.bat --with-microvm   # Include the pinned NVX runtime (Windows x64)
 ```
 
 #### Linux

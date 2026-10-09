@@ -352,7 +352,12 @@ pub mod __ffi {
     /// Run a raw exact-version JSON container request to completion and capture
     /// its output. The JSON and `experimental` rules match [`spawn_container_json`].
     pub fn run_json(request_json: &str, experimental: bool) -> Result<ExecutionResult, Error> {
-        wait_with_output(spawn_container_json(request_json, experimental)?)
+        match mxc_engine::execute_one_shot_json(request_json, experimental)? {
+            mxc_engine::OneShotExecution::Captured(result) => Ok(captured_execution_result(result)),
+            mxc_engine::OneShotExecution::Streaming(process) => {
+                wait_with_output(MxcProcess::new(process))
+            }
+        }
     }
 
     /// Run a lifecycle request (as a JSON string) and return the
@@ -435,6 +440,19 @@ pub mod __ffi {
                 ExecOutcome::TimedOut => WaitResult::TimedOut,
             }
         })
+    }
+}
+
+fn captured_execution_result(result: mxc_engine::CapturedExecutionResult) -> ExecutionResult {
+    ExecutionResult {
+        outcome: match result.outcome {
+            mxc_engine::CapturedOutcome::Exited(code) => sandbox::WaitResult::Exited(code),
+            mxc_engine::CapturedOutcome::TimedOut => sandbox::WaitResult::TimedOut,
+        },
+        warnings: result.warnings,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        output_metadata: None,
     }
 }
 
