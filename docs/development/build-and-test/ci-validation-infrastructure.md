@@ -306,7 +306,7 @@ Every one of the three scripts also takes the workload-interpreter inventory
 ### Workload interpreters
 
 Some suites do not just exercise MXC's primitives — they run *real programs*
-inside the sandbox and assert on what those programs produce. Each preparation
+inside the container and assert on what those programs produce. Each preparation
 script inventories those programs on the host up front, so a missing one is
 reported once, as a preparation result, rather than repeatedly as a confusing
 mid-suite failure.

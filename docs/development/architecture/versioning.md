@@ -103,7 +103,7 @@ A future breaking schema line adds a side-by-side V2 namespace rather than
 replacing V1.
 
 Version-independent APIs stay at the package root: errors and error codes,
-running-sandbox handles and output/wait types, platform/backend discovery,
+running-container handles and output/wait types, platform/backend discovery,
 telemetry consent, schema-version constants, raw exact-JSON APIs that take
 caller-declared versions, and executor-backed raw config APIs.
 
@@ -198,12 +198,12 @@ commands and independent drift/history gates.
 Exact development requests adapt directly to a `StateAwareOperation` and
 cross-cutting `ExecutionRequest`. The operation determines its phase:
 provision retains a backend tag and optional runtime configuration, while
-start, exec, stop, and deprovision carry their required sandbox ID.
+start, exec, stop, and deprovision carry their required container ID.
 `ParsedStateAwareRequest` exposes read-only accessors, not independently
 writable phase, containment, or payload fields. Successful production requests
 retain neither raw backend JSON nor source text.
 
-The engine resolves provision by containment and later phases by the sandbox
+The engine resolves provision by containment and later phases by the container
 ID prefix. After the existing experimental and build-availability gates, its
 checked binding helpers produce `BoundStateAwareRequest<B>` for both relayed
 lifecycle dispatch and streaming exec. An incompatible operation/backend pair
@@ -222,7 +222,7 @@ normalization. Source-aware errors remain at exact structural deserialization.
 Exact fixtures cover structural acceptance and rejection, including
 `appId: null`. Recording backends cover binding, configuration delivery,
 validation order, dry-run behavior, and both exec topologies without requiring
-live sandboxes.
+live containers.
 
 Version-specific adapters convert registered JSON contract types into the
 private `CommonRequestIR` intermediate representation. Shared normalization in
@@ -756,7 +756,7 @@ standard exact-contract diagnostic.
 
 1. **Security of the experimental flag:** Should `--experimental` require
    additional privilege or be restricted to debug builds? A malicious caller could
-   pass `--experimental` to enable a feature that weakens the sandbox boundary.
+   pass `--experimental` to enable a feature that weakens the containment boundary.
 
 2. **Conflicting experimental features:** If two experimental features have
    conflicting requirements (e.g., one denies a namespace, another relaxes it),

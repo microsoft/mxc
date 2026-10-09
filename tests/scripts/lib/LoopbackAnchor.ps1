@@ -10,7 +10,7 @@
 # posture rather than the runner's outbound internet access.
 
 # Binds an ephemeral loopback port and serves a fixed body from a background
-# runspace, so the caller can stay blocked on a sandbox exec while the
+# runspace, so the caller can stay blocked on a container exec while the
 # contained process connects back. Returns $null if the port cannot be bound.
 function Start-LoopbackAnchor {
     # Bind port 0 and read back what the OS assigned, rather than reserving a
@@ -63,7 +63,7 @@ function Stop-LoopbackAnchor {
     & $Anchor.Stop
 }
 
-# Command line that fetches the anchor from inside a sandbox.
+# Command line that fetches the anchor from inside an IsolationSession container.
 #
 # Deliberately a bare curl rather than a `&& echo REACHED || echo BLOCKED`
 # token pair: the one-shot runner invokes wxc-exec with --debug, which echoes

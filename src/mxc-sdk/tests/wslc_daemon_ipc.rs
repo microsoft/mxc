@@ -83,7 +83,7 @@ impl Drop for DaemonProcess {
     }
 }
 
-/// Provision and start a sandbox over the pipe, returning its id.
+/// Provision and start a container over the pipe, returning its id.
 fn provisioned_and_started(client: &DaemonClient) -> String {
     use mxc_sdk::wslc_common::daemon_protocol::{ProvisionConfig, StartConfig};
 
@@ -139,7 +139,7 @@ fn deprovision_all(client: &DaemonClient, sandbox_ids: Vec<String>) {
     }
 }
 
-/// Two clients running against their own sandboxes share the daemon: both are
+/// Two clients running against their own containers share the daemon: both are
 /// admitted, each sees only its own output, and the runs overlap in the guest.
 #[test]
 #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
@@ -190,7 +190,7 @@ fn two_clients_exec_concurrently_over_the_pipe() {
         "each client must receive only its own stream"
     );
 
-    // Both sandboxes share one utility VM, so their clocks agree.
+    // Both containers share one utility VM, so their clocks agree.
     let (alpha_start, alpha_end) = stamped_interval(&results[0].1);
     let (beta_start, beta_end) = stamped_interval(&results[1].1);
     let overlap = alpha_end.min(beta_end) - alpha_start.max(beta_start);

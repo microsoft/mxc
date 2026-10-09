@@ -15,7 +15,7 @@ The `"ui"` section of the MXC container configuration controls how a contained p
 - **Job Object UI Restrictions**
 - **Process Mitigation: Win32k System Call Disable** (`PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY`)
 
-Developers declare *what the process is allowed to do* — the OS-side sandbox layer translates that into the correct kernel flags and mitigations.
+Developers declare *what the process is allowed to do* — the OS-side containment layer translates that into the correct kernel flags and mitigations.
 
 ### Design Principles
 
@@ -223,7 +223,7 @@ All fields default to the most restrictive value. **`"ui": {}` = total lockdown.
 
 ## Examples
 
-### Example 1: Sandboxed App — GUI enabled, everything else locked down
+### Example 1: Contained App — GUI enabled, everything else locked down
 
 The process can create and manage its own windows but is fully isolated from other applications and the system.
 

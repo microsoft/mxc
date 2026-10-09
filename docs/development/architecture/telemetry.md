@@ -121,7 +121,7 @@ targets for this work.
   MXC identities, numeric status fields, and schema field paths only.
   `MXC.Verbose` is separately limited to the sanitized, typed inventory below.
 - Events do not contain command lines, environment values, complete file paths,
-  UPNs, tokens, sandbox output, raw ETL, actionable denial documents, general
+  UPNs, tokens, container output, raw ETL, actionable denial documents, general
   logger text, or free-form error text.
 - `MXC.PolicyHash` uses the same effective container identity as the runner
   (`CLI` when no container ID was supplied), then applies the standard identity
@@ -163,9 +163,9 @@ result (with `mxc.exit_code` = 1 and `mxc.outcome` = `failure`).
 The state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 `deprovision`) is also instrumented: each dispatched phase emits one
 `MXC.Execution` tagged with `mxc.phase`. Non-`exec` phases and `exec` dry-runs
-report success with `mxc.exit_code` = 0; a completed `exec` reports the sandbox
+report success with `mxc.exit_code` = 0; a completed `exec` reports the contained
 process exit code; a dispatch error reports `failure` plus an `MXC.Error`. As in
-the one-shot path, a clean non-zero sandbox exit is not treated as an MXC error.
+the one-shot path, a clean non-zero contained process exit is not treated as an MXC error.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -205,7 +205,7 @@ versioned `*.verbose.json` sibling, validates it as a
 closed provider enum, drops every verbose property name and value and the
 schema name, sums the counts of signatures that become identical, and
 serializes that telemetry-specific projection as compact JSON. The event never
-contains the actionable denials file, raw ETL, commands, sandbox output, or
+contains the actionable denials file, raw ETL, commands, container output, or
 general logger text.
 
 One verbose document may require multiple ETW events. Every `mxc.content`
@@ -242,7 +242,7 @@ MXC's optional diagnostic events contain:
 
 - MXC version and channel
 - Whether the build has debug assertions enabled (`IsDebugging`)
-- Caller-requested sandbox kind and the concrete backend selected on the host
+- Caller-requested containment kind and the concrete backend selected on the host
 - Run outcome, exit code, duration, bounded failure category, and lifecycle
   phase
 - `UTCReplace_AppSessionGuid`, which asks the telemetry pipeline to supply a
@@ -255,7 +255,7 @@ MXC's optional diagnostic events contain:
   names and values are dropped.
 
 MXC does not emit commands, credentials, complete file paths, usernames,
-workload-derived properties, sandbox output, raw ETL, actionable denial
+workload-derived properties, container output, raw ETL, actionable denial
 documents, general logger text, or free-form error text.
 
 ### Privacy review status
@@ -272,7 +272,7 @@ contract are documented in
 The state-aware lifecycle runs each phase (`provision` → `start` → `exec` →
 `stop` → `deprovision`) as a **separate `wxc-exec` process**. The
 `UTCReplace_AppSessionGuid` common field is therefore per-process and cannot join
-events from different phases of the same sandbox. The stable join key is the
+events from different phases of the same container. The stable join key is the
 **Microsoft Correlation Vector (MS-CV)**, emitted under TraceLogging's reserved
 `__TlgCV__` field.
 
@@ -403,7 +403,7 @@ disclosure. Its title, body, action labels, and privacy link are documented in
 and must be rendered verbatim by every EXE and SDK presenter.
 
 The optional ETW events contain MXC version/channel, debug-build state,
-caller-requested sandbox kind, selected backend, bounded outcomes and failure
+caller-requested containment kind, selected backend, bounded outcomes and failure
 categories, numeric status values, lifecycle phase, policy fingerprints, and
 opaque/redacted identities. They do not contain commands, file paths,
 credentials, customer content, or free-form error text.
@@ -505,11 +505,11 @@ collected by a fleet log agent.
 * **No config values, no filesystem paths, no command lines.** Config field
   *paths* (`process.commandLine`) are permitted — they are bounded and already
   public in the schema. Field *values* are not.
-* **No raw user identities.** Identity-bearing sandbox records use a constant
+* **No raw user identities.** Identity-bearing container records use a constant
   redaction marker instead of a user identifier. A truncated SHA-256 is not used:
   a low-entropy identity could be recovered by dictionary attack. The cost is
-  that these sandboxes have no MXC-side join key in the local log.
-* **No caller-supplied identifiers verbatim.** A sandbox identity derived from
+  that these containers have no MXC-side join key in the local log.
+* **No caller-supplied identifiers verbatim.** A container identity derived from
   configuration (the AppContainer profile name is the caller's `containerId`)
   is retained only when it matches one of the closed set of shapes MXC itself
   mints — the literal default `CLI`, `sandbox-<16 hex>`, or the state-aware
@@ -524,7 +524,7 @@ collected by a fleet log agent.
 
 Fields are record-specific. Process-boundary records include `backend`,
 `identity`, `tier` (for `process_container`), and `pid`. Early records emitted
-before a sandbox exists carry only the fields shown in the table below; in
+before a container exists carry only the fields shown in the table below; in
 particular, `mxc.PolicyHash` has `backend`, `policy_hash`, and
 `config_schema_version`, `mxc.EnforcementDegraded` has `backend`, `identity`,
 and `tier`, and `mxc.ConfigRejected` has `correlation_id` and `backend` plus its
@@ -532,7 +532,7 @@ rejection fields.
 
 `correlation_id` is a per-invocation opaque hex token, minted once per process
 and stable for its lifetime. It exists because a rejection is refused *before* a
-sandbox identity is assigned, so it is the only key that groups several
+container identity is assigned, so it is the only key that groups several
 rejection records from the same invocation. A successful launch emits no
 `mxc.ConfigRejected` at all.
 
@@ -542,7 +542,7 @@ rejection records from the same invocation. A successful launch emits no
 | `mxc.SandboxIdentity` | After a successful state-aware phase | `backend`, `identity`, `phase` |
 | `mxc.EnforcementDegraded` | ProcessContainer dispatch resolved below the preferred tier | `backend`, `identity`, `tier`, `needs_dacl_augmentation`, `effective_enforcement_level`, `degradation_reasons`, `degradation_reason_count` |
 | `mxc.NetworkPolicyApplied` | AppContainer: after network setup, before process launch. BaseContainer: success after launch. Both tiers: failure when network setup fails | `backend`, `identity`, `tier` (no `pid` field), plus `enforcement_mode`, `default_policy`, `proxy_port`, `firewall_rules_created`, `firewall_applied`, `status` |
-| `mxc.ProcessExited` | Sandboxed process exited on its own | `exit_code` |
+| `mxc.ProcessExited` | Contained process exited on its own | `exit_code` |
 | `mxc.ProcessTimedOut` | `scriptTimeout` breached | `timeout_ms` |
 | `mxc.ProcessKillFailed` | A kill/terminate call failed (**failure only**) | `kill_method`, `error_code` |
 | `mxc.SandboxTornDown` | Per-run resources released, once per handle | ProcessContainer: `backend`, `identity`, `tier`, `pid`, `status`, `firewall_rules_removed`, `firewall_removal_ok`, `bfs_removed`, `proxy_stopped`, `preserve_policy`, `container_released`, `skip_reason`. IsolationSession: `backend`, `identity`, `phase`, `status`, `session_stopped`, `agent_user_deprovisioned`, `client_unregistered` |
@@ -564,18 +564,18 @@ BaseContainer network record.
 
 Tier selection can *degrade* (proceed with weaker enforcement) or *fail*
 (refuse to run). Telling those apart is the whole point of the distinction
-below — a reader who cannot separate "a sandbox ran with reduced isolation"
+below — a reader who cannot separate "a container ran with reduced isolation"
 from "a benign race aborted the launch" cannot use this log for security
 decisions.
 
 **`FallbackError` (MXC-owned, `fallback_detector.rs`) is always
 security-relevant and always fail-closed.** It aborts tier selection; no
-sandbox runs. It exists precisely so MXC never silently broadens access when
+container runs. It exists precisely so MXC never silently broadens access when
 it cannot honour the requested policy:
 
 | Variant | Meaning | Why it is security-relevant |
 |---|---|---|
-| `DaclFallbackDisabled` | The selected tier would have to mutate host DACLs, but the caller set `fallback.allowDaclMutation = false`. | The caller explicitly forbade host mutation. Running anyway would modify the host outside the sandbox contract. |
+| `DaclFallbackDisabled` | The selected tier would have to mutate host DACLs, but the caller set `fallback.allowDaclMutation = false`. | The caller explicitly forbade host mutation. Running anyway would modify the host outside the containment contract. |
 | `WriteDacUnavailable` | `WRITE_DAC` is unavailable on a path needing ACE augmentation (or the path would not open). | The `deniedPaths` policy cannot be enforced. Proceeding would run with the deny silently absent. |
 | `SystemRootUnresolved` | `%SystemRoot%` could not be resolved. | MXC refuses to guess `C:\Windows`: an attacker who can scrub the environment could otherwise force a silent Tier 2 → Tier 3 downgrade. |
 
@@ -724,7 +724,7 @@ that it was skipped.
 | Process outcome (M-ETW-1) | ✅ | ✅ | ✅ | ✅ (shared `create_process`) |
 | Enforcement degradation (M-ETW-2) | ✅ (shared dispatcher; records the tier actually selected) | ✅ | n/a — no tier/fallback ladder exists for this backend | n/a |
 | Policy hash (M-ETW-3) | ✅ | ✅ | ✅ | ✅ |
-| Network policy (M-ETW-4) | ✅ (`enforcement_mode: capabilities` — policy travels in the sandbox spec and the OS enforces it, so `firewall_rules_created` is honestly `0`) | ✅ (`enforcement_mode: capabilities` for supported directional requests; egress default is reported as `allow` or `block`) | n/a — MXC rejects network and proxy policy for this backend before provisioning | n/a |
+| Network policy (M-ETW-4) | ✅ (`enforcement_mode: capabilities` — policy travels in the container spec and the OS enforces it, so `firewall_rules_created` is honestly `0`) | ✅ (`enforcement_mode: capabilities` for supported directional requests; egress default is reported as `allow` or `block`) | n/a — MXC rejects network and proxy policy for this backend before provisioning | n/a |
 | Sandbox teardown (M-ETW-5) | ✅ | ✅ | ✅ | ✅ (`stop` and `deprovision` phases) |
 | IsolationSession telemetry (M-ETW-6) | n/a | n/a | ✅ Applicable lifecycle events use `Microsoft.MXC`; no separate OS provider is assumed | ✅ Same provider path |
 | Configuration rejection (M-ETW-7) | ✅ | ✅ | ✅ | ✅ (`phase` names the rejecting phase) |
@@ -749,7 +749,7 @@ matrix. See [Platform scope](#platform-scope).
 
 | Requirement | Existing OS coverage | MXC local coverage | Join/correlation notes |
 |---|---|---|---|
-| Process outcome (M-ETW-1) | Existing OS process-lifecycle records cover normal exit. The OS does not provide a verified timeout or kill-failure record for this requirement. | `mxc.ProcessTimedOut` and `mxc.ProcessKillFailed` cover the MXC boundary for both one-shot and state-aware paths. | Join the OS lifecycle identity to the MXC sandbox identity where available; use the process ID for process records. |
+| Process outcome (M-ETW-1) | Existing OS process-lifecycle records cover normal exit. The OS does not provide a verified timeout or kill-failure record for this requirement. | `mxc.ProcessTimedOut` and `mxc.ProcessKillFailed` cover the MXC boundary for both one-shot and state-aware paths. | Join the OS lifecycle identity to the MXC container identity where available; use the process ID for process records. |
 | Enforcement degradation (M-ETW-2) | Not applicable to this backend: `isolation_session` has no MXC process-container tier/fallback model. | `mxc.EnforcementDegraded` covers process-container tier selection and includes `effective_enforcement_level`. | No isolation-session tier join is expected. |
 | Policy hash (M-ETW-3) | No policy hash field is emitted by the isolation-session OS provider. | `mxc.PolicyHash` records the effective MXC policy locally, excluding secrets and command content. | Correlate by the invocation/lifecycle context; the hash is an MXC record, not an OS field. |
 | Network policy (M-ETW-4) | Not applicable to `isolation_session`: MXC rejects its network and proxy policy before OS provisioning. | `mxc.NetworkPolicyApplied` covers process-container network setup on every tier, including the OS-enforced BaseContainer (`capabilities`) case. | This row changes only if the separate M1 network-proxy requirement is implemented. |

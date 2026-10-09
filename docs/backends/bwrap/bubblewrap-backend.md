@@ -4,7 +4,7 @@
 
 The Bubblewrap backend provides **unprivileged Linux sandboxing** using
 [Bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`). It uses
-Linux user namespaces to create isolated sandbox environments without
+Linux user namespaces to create isolated container environments without
 requiring root privileges or a container runtime.
 
 > **Status:** Stable — the default Linux backend.
@@ -36,7 +36,7 @@ requiring root privileges or a container runtime.
   apk add bubblewrap
   ```
   The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
-  read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
+  read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the container
   environment is built with `--clearenv` (bwrap 0.5.0+), so **bwrap 0.5.0 or
   newer** is required. Platform detection probes `bwrap --version` and reports
   the backend as unavailable — with the detected version — when the host is
@@ -63,11 +63,11 @@ requiring root privileges or a container runtime.
   needs none of these additional network tools.
 
   > `ip6tables` is required to *deny* IPv6, not to carry it. slirp4netns is
-  > launched without `--enable-ipv6`, so the sandbox namespace has no IPv6
+  > launched without `--enable-ipv6`, so the container namespace has no IPv6
   > connectivity at all and the v6 rules exist to keep the unmatched family
   > closed. An IPv6 destination is unreachable even when a rule allows it
   > (see #955). On a kernel without IPv6 (built without `CONFIG_IPV6`, or
-  > booted with `ipv6.disable=1`) the sandbox cannot open an IPv6 socket, so
+  > booted with `ipv6.disable=1`) the container cannot open an IPv6 socket, so
   > the runner returns a warning that it is skipping the v6 rules and installs
   > only the IPv4 chains. The `ip6tables` tools are still probed there,
   > because they ship in the same package as `iptables`.
@@ -98,7 +98,7 @@ requiring root privileges or a container runtime.
   back to sharing the host network namespace or to running without egress
   rules. The host must also provide the util-linux `unshare` command with
   `--map-current-user` and `--keep-caps`. No root is needed: `iptables` runs
-  against the sandbox's own network namespace, where the supervisor holds
+  against the container's own network namespace, where the supervisor holds
   `CAP_NET_ADMIN`.
 - User namespaces must be enabled:
   ```bash
@@ -134,26 +134,26 @@ Bubblewrap creates a namespace-isolated process by:
 
 1. Unsharing user, PID, IPC, and UTS namespaces (`--unshare-*`)
 2. Bind-mounting a **minimal deny-by-default baseline** read-only into the
-   sandbox (`/bin`, `/sbin`, `/lib*`, `/usr/bin`, `/usr/sbin`, `/usr/lib*`,
+   container (`/bin`, `/sbin`, `/lib*`, `/usr/bin`, `/usr/sbin`, `/usr/lib*`,
    `/usr/libexec`, `/usr/share`, `/etc`, plus DNS stub-resolver dirs
    under `/run`). Everything else on the host — including the caller's
    `$HOME`, `/root`, `/opt`, `/var`, `/sys`, and `/run/user/<uid>` — is
-   invisible inside the sandbox.
+   invisible inside the container.
 3. Layering filesystem policy overrides (read-write, read-only, denied paths)
 4. Setting up minimal `/dev`, `/proc`, and `/tmp`
 5. Clearing the environment and applying only requested variables
 6. Executing the command via `sh -c`
 
-The sandboxed process runs as a child of `bwrap` and dies automatically when
+The contained process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
 
 ### Deny-by-default filesystem
 
 The baseline mirrors the macOS Seatbelt backend's `(deny default)` posture:
-the sandbox can read the dynamic linker, libc, system tools, and system
+the container can read the dynamic linker, libc, system tools, and system
 configuration — and **nothing else** — until the caller opts in via
 `readonlyPaths` / `readwritePaths`. To make a host directory visible inside
-the sandbox, list it explicitly:
+the container, list it explicitly:
 
 ```json
 {
@@ -167,7 +167,7 @@ the sandbox, list it explicitly:
 Common consequences of this default:
 
 - `$HOME` (e.g. `~/.aws/credentials`, `~/.ssh/id_*`, browser cookies) is
-  not readable from the sandbox.
+  not readable from the container.
 - `/opt` and `/usr/local` tooling is not on PATH; list either path under
   `readonlyPaths` if the script depends on it.
 - `working_directory` must live under the baseline or a policy path — a
@@ -211,7 +211,7 @@ backend-specific config block is needed.
 
 ### Process environment
 
-The host environment is never inherited — the sandbox is built with
+The host environment is never inherited — the container is built with
 `--clearenv`, so host secrets can't leak into untrusted code.
 
 **From schema 0.9** the child gets a default block of `PATH`
@@ -261,9 +261,9 @@ cannot be stat'd (missing/unreadable) fall back to `--tmpfs`.
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point
 when **any** component of that path — the leaf itself *or* an ancestor directory
-— is a pre-existing host symlink whose parent is bound into the sandbox (the
+— is a pre-existing host symlink whose parent is bound into the container (the
 mount then resolves through the host symlink and fails with `ENOENT`, aborting
-the sandbox). So both `/a/link` (symlinked leaf) and `/a/link/secret` (symlinked
+the container). So both `/a/link` (symlinked leaf) and `/a/link/secret` (symlinked
 ancestor) would abort. A `deniedPaths` entry is therefore rewritten to its real
 filesystem path before mounting — canonicalizing the deepest existing ancestor
 (following symlinks at every level) and re-appending any not-yet-created trailing
@@ -294,9 +294,9 @@ All supported exact requests use directional `network.egress` and
 The JSON objects below are network fragments to place in a v0.9+ request.
 
 **Full block** (ruleless `egress.default: "deny"`, no runtime proxy) uses
-`--unshare-net` for complete network namespace isolation. The sandbox gets a
+`--unshare-net` for complete network namespace isolation. The container gets a
 private network stack with only its own loopback (bwrap brings `lo` up), so
-nothing outside the sandbox is reachable and nothing outside can reach in.
+nothing outside the container is reachable and nothing outside can reach in.
 This needs no root or `slirp4netns`.
 
 ```json
@@ -308,15 +308,15 @@ This needs no root or `slirp4netns`.
 }
 ```
 
-**Address filtering** (`egress.allow` / `egress.deny`) puts the sandbox in a
+**Address filtering** (`egress.allow` / `egress.deny`) puts the container in a
 private, slirp-backed network namespace and programs its rules there from a
 supervisor holding `CAP_NET_ADMIN` inside an unprivileged user namespace.
-**No root required**; the sandbox drops `CAP_NET_ADMIN` before the workload
+**No root required**; the container drops `CAP_NET_ADMIN` before the workload
 starts, so it cannot undo the rules.
 
 Rule addresses must be **IP literals or CIDR blocks**; a DNS name is rejected
 at validation time rather than resolved on the caller's behalf. The backend
-does not resolve, because the sandbox resolves names itself and a lookup that
+does not resolve, because the container resolves names itself and a lookup that
 disagreed with the one behind the rules would hand the workload an address the
 chain never authorized.
 
@@ -324,7 +324,7 @@ chain never authorized.
 separate concerns and only the second is missing. Filtering works: an IPv6 rule
 programs `ip6tables`, and the terminal verdict of the unmatched family follows
 `egress.default`, so an IPv4-only allow rule under `deny` does not leave IPv6 open.
-What the sandbox lacks is IPv6 *connectivity* — slirp4netns is launched without
+What the container lacks is IPv6 *connectivity* — slirp4netns is launched without
 `--enable-ipv6`, so the namespace has no IPv6 route at all (see #955). The
 consequence is one-sided: an IPv6 **block** is already satisfied, while an IPv6
 **allow** grants nothing in practice, because the destination stays unreachable
@@ -375,10 +375,10 @@ The retired `allowLocalNetwork` field has no v0.9 spelling. Use
 `network.ingress.default` to express unsolicited inbound policy and
 `network.ingress.hostLoopback` for the bidirectional host-loopback path.
 Bubblewrap currently honors only `deny` for either control. An `allow` value
-is rejected before sandbox creation: slirp has no host-to-sandbox port
+is rejected before container creation: slirp has no host-to-container port
 forwarding, so no inbound-accepting posture could be delivered.
 
-The sandbox's own loopback remains usable by its processes for `bind()` and
+The container's own loopback remains usable by its processes for `bind()` and
 `listen()`; that does not open an inbound path from the host. Under slirp,
 host-loopback denial also blocks container-to-host traffic at `10.0.2.2`,
 ahead of any outbound allow rule. The only exception is the configured
@@ -397,7 +397,7 @@ hooked into `INPUT`, for both families:
 ```
 
 Be honest about what this buys. It is **not** new protection: nothing outside
-the sandbox can reach in already, because the runner configures no port
+the container can reach in already, because the runner configures no port
 forwarding into the namespace, so there is no path for an inbound packet to
 arrive on. The chain is defense in depth against a future change that adds
 one, and a defense-in-depth implementation of `ingress.default`. The terminal
@@ -406,14 +406,14 @@ one, and a defense-in-depth implementation of `ingress.default`. The terminal
 must not open inbound as a side effect.
 
 The `ESTABLISHED,RELATED` accept is not optional. A terminal `INPUT` drop
-applies to reply packets too, so without it the sandbox would lose all
+applies to reply packets too, so without it the container would lose all
 networking rather than gain an inbound restriction.
 
 That connection-state match requires `nf_conntrack` on the host. Unprivileged
 Bubblewrap cannot `modprobe`, so if the module is not already loaded the
 `iptables-restore` transaction fails, iptables rolls the whole table back, and
 the supervisor aborts before releasing the workload. The failure is loud and
-fail-closed by construction, not a silently unenforced sandbox. No separate
+fail-closed by construction, not a silently unenforced container. No separate
 probe is performed: the transaction is a stricter check than probing the
 userspace extension would be, because it exercises the match in the actual
 namespace.
@@ -448,7 +448,7 @@ section is read.
 ```
 
 Egress lowers into the namespace-local iptables chains described above. The
-supervisor holds `CAP_NET_ADMIN`, the sandbox drops it, and no root is required.
+supervisor holds `CAP_NET_ADMIN`, the container drops it, and no root is required.
 Addresses are IP literals or CIDRs only. An `except` list on a rule is lowered
 by CIDR subtraction into the remaining covering blocks, so
 `allow 0.0.0.0/0 except 1.1.1.0/24` becomes a set of accepts that provably
@@ -456,7 +456,7 @@ omit the carve-out rather than an accept followed by a hoped-for later deny.
 
 **Protocol support.** `ports[].protocol` accepts `tcp`, `udp`, `icmp`, and
 `any`. What Bubblewrap actually enforces is bounded by its *transport*, not by
-its rule engine: every mode that installs egress rules puts the sandbox behind
+its rule engine: every mode that installs egress rules puts the container behind
 `slirp4netns`, a userspace network stack that carries **TCP, UDP, and ICMP echo
 only**. No other IP protocol — SCTP, DCCP, GRE — has a path out of the
 namespace, whether or not a rule names it.
@@ -517,7 +517,7 @@ container-to-host traffic under slirp at gateway `10.0.2.2`. That drop is
 lowered *ahead* of every caller rule: a broad allow, including `0.0.0.0/0`,
 would otherwise win. An omitted `ingress` section enforces the same deny,
 since deny is the schema's default rather than an absence of policy. This
-gateway drop is IPv4 only — slirp gives the sandbox no IPv6 route to the host.
+gateway drop is IPv4 only — slirp gives the container no IPv6 route to the host.
 
 Proxy mode is the defined exception. The proxy is reached at the gateway
 `10.0.2.2:<port>`, which *is* host loopback, so its chain opens that single TCP
@@ -617,7 +617,7 @@ shared-host-network behavior.
 2. The runner creates a same-UID user-namespace supervisor, starts Bubblewrap
    with `--unshare-net`, and keeps the workload behind a startup barrier.
 3. The supervisor attaches `slirp4netns` to Bubblewrap's private network
-   namespace. Host-loopback proxy endpoints are presented to the sandbox
+   namespace. Host-loopback proxy endpoints are presented to the container
    through slirp's `10.0.2.2` host gateway. Once slirp is up, the supervisor
    programs a default-DROP `MXC_EGRESS` chain into that namespace via
    `nsenter`, permitting only loopback and the proxy endpoint (IPv6 gets a
@@ -635,16 +635,16 @@ shared-host-network behavior.
    and a partial apply leaves the policy unhooked rather than half-enforced.
    The workload is released only after every transaction is
    applied, so it can never run with egress open. A failure to program any
-   rule aborts the supervisor rather than starting an unenforced sandbox.
+   rule aborts the supervisor rather than starting a container without enforcement.
 
    Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
-   creating its own, so the sandbox lives in the namespace that owns the
+   creating its own, so the container lives in the namespace that owns the
    rule-bearing network namespace. This relies on Bubblewrap dropping
-   capabilities in the sandboxed process — the runner passes no `--cap-add` —
+   capabilities in the contained process — the runner passes no `--cap-add` —
    which is what prevents the workload from holding the `CAP_NET_ADMIN` needed
    to flush the chain.
 4. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
-   `FTP_PROXY`, and their lowercase variants inside the sandbox via
+   `FTP_PROXY`, and their lowercase variants inside the container via
    `bwrap --setenv` (caller-supplied values for these keys, including
    `NO_PROXY` / `no_proxy`, are stripped before injection). The runner
    deliberately does **not** set `NO_PROXY`, because exempt destinations would
@@ -657,8 +657,8 @@ shared-host-network behavior.
 
 ### Losing the network provider mid-run
 
-`slirp4netns` carries the sandbox's only route, so a slirp that dies under a
-running workload leaves the sandbox running against a dead network: every
+`slirp4netns` carries the container's only route, so a slirp that dies under a
+running workload leaves the container running against a dead network: every
 connection fails with a generic transport error, and the run is attributed to
 whatever the workload reported. Two checks close that, and both apply to
 firewall-enforcement mode as well, since it stands up the same supervisor and
@@ -668,14 +668,14 @@ the same slirp.
 slirp *came up*, not that it is still up — so it can already be stale by the
 time the startup gate opens. The supervisor is re-checked immediately before
 the gate is released. Any exit fails the run, including a successful one:
-slirp's exit code says nothing about whether the sandbox still has a route.
+slirp's exit code says nothing about whether the container still has a route.
 
 **For the lifetime of the workload.** The supervisor inherits the write end of
 a pipe nothing ever writes to, and slirp inherits it in turn; the runner keeps
 only the read end. That descriptor reaches EOF when *both* have exited, which
 is what separates a dead network from an orphaned slirp still carrying traffic
 after its supervisor was killed. A monitor thread in the executor watches the
-descriptor, terminates the sandbox when it closes, and fails the run naming the
+descriptor, terminates the container when it closes, and fails the run naming the
 supervisor's exit status and a bounded tail of its stderr:
 
 ```text
@@ -769,28 +769,28 @@ so a Node caller keeps the first answer it received.
 
 ### Caveats
 
-- **Host loopback is not sandbox loopback**: inside the private namespace
-  `127.0.0.1` means *the sandbox itself*, not the host. The configured proxy
+- **Host loopback is not container loopback**: inside the private namespace
+  `127.0.0.1` means *the container itself*, not the host. The configured proxy
   remains reachable at slirp's gateway address `10.0.2.2`; the runner
-  rewrites its loopback endpoint so the sandbox can find it. Other
+  rewrites its loopback endpoint so the container can find it. Other
   host-local services do **not** come along: slirp itself runs without
   `--disable-host-loopback`, so the gateway can in principle carry traffic to
   any host-loopback port, but the egress chain admits only the single
   `10.0.2.2:<proxy-port>` destination and drops the rest. The host-loopback
   surface is therefore the proxy endpoint alone.
-- **The supervisor's user namespace is visible to the sandbox**: in proxy
+- **The supervisor's user namespace is visible to the container**: in proxy
   mode `bwrap` joins the supervisor's user namespace via `--userns` rather
   than creating its own, and the namespace descriptor stays open in the
   workload — `bwrap` keeps it across its own `fork`/`exec` and offers no flag
   to close it. Re-entering the namespace with `setns` requires
-  `CAP_SYS_ADMIN`, which the sandbox cannot hold: `bwrap` empties the
+  `CAP_SYS_ADMIN`, which the container cannot hold: `bwrap` empties the
   capability bounding set before `exec`, so the workload runs with
   `CapBnd`/`CapEff`/`CapPrm` all zero. The end-to-end test suite asserts
   those are zero, because that assumption is what makes the exposed
   descriptor inert.
 - **Cooperative routing, enforced egress (v0.9+)**: the runner injects
   `HTTP_PROXY` / `HTTPS_PROXY` so cooperating clients route through the proxy,
-  and additionally programs a default-DROP egress chain inside the sandbox's
+  and additionally programs a default-DROP egress chain inside the container's
   private network namespace. Clients that ignore the env vars (raw sockets,
   custom HTTP clients) can no longer reach the network directly: only loopback
   and the proxy endpoint are permitted. DNS is deliberately **not** opened —
@@ -835,7 +835,7 @@ The exact v0.9 contract provides no MXC-managed host-list policy for that proxy.
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
-- Quick sandboxing without root access
+- Quick containment without root access
 - Environments where LXC is not available
 - Fast iteration (no container create/destroy overhead)
 
@@ -859,14 +859,14 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
 ## Limitations
 
 - **Linux only** — Bubblewrap requires Linux kernel namespaces
-- **Deny-by-default filesystem** — the sandbox sees a minimal allowlist
+- **Deny-by-default filesystem** — the container sees a minimal allowlist
   of host paths (system binaries, libs, `/etc`, DNS stub-resolver dirs)
   and nothing else. `$HOME`, `/opt`, `/var`, `/sys`, `/run/user/<uid>`,
   and `/usr/local` are invisible unless explicitly listed in
   `readonlyPaths` / `readwritePaths`. There is no separate rootfs — the
   visible paths are bind-mounted from the host.
 - **Network filtering** — `network.egress` allows or denies numeric addresses
-  and CIDRs without root (rules live in the sandbox's own namespace). Allowed
+  and CIDRs without root (rules live in the container's own namespace). Allowed
   IPv6 destinations remain unreachable until slirp supports IPv6 here.
   `runtimeConfig.networkProxy` restricts direct egress to the configured
   loopback proxy endpoint; hostname policy belongs to that external proxy.

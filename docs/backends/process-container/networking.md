@@ -242,7 +242,7 @@ for unpackaged profile creation.
 
 - **Capabilities:** none; no host or peer loopback exemptions.
 - **Enforcement:** no proxy; external outbound and inbound are dropped.
-  Intra-sandbox loopback is not part of the shared external-network policy.
+  Intra-container loopback is not part of the shared external-network policy.
 
 When no runtime proxy or backend proxy peer is configured, deny-all is the default and model 3 is also the result of
 providing no network policy at all: the explicit form, an omitted network block, and an empty `"network": {}` are

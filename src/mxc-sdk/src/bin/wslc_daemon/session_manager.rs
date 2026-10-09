@@ -529,7 +529,7 @@ impl SessionHandle {
 
     /// Admit and run a command in a started container. Awaits the worker's
     /// **admission** decision first: on rejection (unknown / not-started /
-    /// already-busy sandbox) this returns the typed error *before* the caller
+    /// already-busy container) this returns the typed error *before* the caller
     /// writes any admission to the client. On admission it returns an
     /// [`ExecStream`] — the completion receiver (the run's exit code) plus the
     /// live-output receiver, which the caller drains into `Stdout`/`Stderr`
@@ -667,7 +667,7 @@ struct ContainerEntry {
     retired: bool,
     container: WslcContainerGuard,
 
-    /// Keeps a quarantined sandbox counted against exec capacity, because a run
+    /// Keeps a quarantined container counted against exec capacity, because a run
     /// whose termination was never confirmed may still hold a live process.
     exec_slot: Option<ExecSlotGuard>,
 }
@@ -684,14 +684,14 @@ struct PendingProvision {
 /// A command addressed to one container, either about to run or parked behind
 /// an exec that is still using that container's handle.
 pub(crate) enum ContainerWork {
-    /// Validate the sandbox (exists + started) and, if admitted, hand the run to
+    /// Validate the container (exists + started) and, if admitted, hand the run to
     /// a thread of its own. The two replies make admission **atomic** with the
     /// claim on the container: the worker validates, claims the container's
     /// in-flight slot, answers `admit` and starts the run thread without
     /// yielding. A later lifecycle command naming that container parks behind
     /// the claim and a later `Exec` is refused with `Busy`, so none can
     /// interleave with the run. `admit` carries the pre-run decision (so an
-    /// unknown, not-started or already-busy sandbox is a pre-admission typed
+    /// unknown, not-started or already-busy container is a pre-admission typed
     /// error, never a post-admission stream `Error`); `done` carries the run's
     /// exit code once [`WorkerCommand::ExecFinished`] lands.
     Exec(ExecRequest),
@@ -2619,7 +2619,7 @@ mod tests {
         assert_eq!(
             limiter.available_permits(),
             0,
-            "a quarantined sandbox whose process may still be running must keep its slot"
+            "a quarantined container whose process may still be running must keep its slot"
         );
     }
 
@@ -2650,7 +2650,7 @@ mod tests {
         assert_eq!(
             limiter.available_permits(),
             1,
-            "deprovisioning the quarantined sandbox must return its slot"
+            "deprovisioning the quarantined container must return its slot"
         );
     }
 
@@ -2991,7 +2991,7 @@ mod tests {
         ));
     }
 
-    /// Provision and start a sandbox on the live host, returning its id.
+    /// Provision and start a container on the live host, returning its id.
     async fn provisioned_and_started(handle: &SessionHandle) -> String {
         let id = handle
             .provision(ProvisionConfig {
@@ -3278,7 +3278,7 @@ mod tests {
         handle.shutdown().await.unwrap();
     }
 
-    /// Two sandboxes must run at the same time rather than one after the other.
+    /// Two containers must run at the same time rather than one after the other.
     #[tokio::test]
     #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
     async fn execs_on_two_sandboxes_overlap() {
@@ -3295,7 +3295,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Both sandboxes share one utility VM, so their clocks agree.
+        // Both containers share one utility VM, so their clocks agree.
         let (first_start, first_end) = stamped_interval(&mut first).await;
         let (second_start, second_end) = stamped_interval(&mut second).await;
         assert_eq!(first.done.await.unwrap().unwrap(), ExecTerminal::Exited(0));

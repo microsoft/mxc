@@ -245,7 +245,7 @@ kill. `StdioMode::Inherit` remains unsupported.
 **`kill()` stops the container,** not just the workload: the workload runs under
 container init, where nothing aimed at the host `lxc-attach` process reaches it.
 
-**One live sandbox per container name, per process.** A second sandbox naming a
+**One live container per container name, per process.** A second container naming a
 `containerId` this process already holds is refused rather than queued, because
 LXC reads a run's network section only when the container starts. Omit
 `containerId` for a generated name. The claim is released when the handle drops.

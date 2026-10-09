@@ -67,8 +67,8 @@ experimental opt-in.
   the existing 3-tier shutdown (close stdin → `SendCtrlClose` → `Terminate`)
   reaps the agent. See [Cancellation](#cancellation) below.
 - **Concurrent state-aware sessions.** v1 targets a single state-aware
-  sandbox per consumer. This is a scoping choice, not an OS limitation — see
-  [Concurrent state-aware sandboxes](#concurrent-state-aware-sandboxes).
+  container per consumer. This is a scoping choice, not an OS limitation — see
+  [Concurrent state-aware containers](#concurrent-state-aware-containers).
 
 ## Per-phase config and metadata shapes
 
@@ -118,7 +118,7 @@ legacy fields, mixing postures, or adding rules or proxy settings is a structura
 |---|---|---|
 | `agentUserName` | string | The OS-assigned agent account name returned by provisioning, also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
 | `agentUserSid` | string | The security identifier (SID) of the agent user, returned by provisioning. Diagnostic only. |
-| `ephemeralWorkspacePath` | string | A directory shared between the calling user and this isolated agent user, through which the caller can stage files into the session. Each isolated user can access only its own workspace; the caller can access every concurrent sandbox's workspace. Created at provision and deleted when the sandbox is deprovisioned. It does **not** change the workload's working directory. |
+| `ephemeralWorkspacePath` | string | A directory shared between the calling user and this isolated agent user, through which the caller can stage files into the session. Each isolated user can access only its own workspace; the caller can access every concurrent container's workspace. Created at provision and deleted when the container is deprovisioned. It does **not** change the workload's working directory. |
 
 `appId` is deliberately **not** echoed in the metadata — the caller supplied
 the value, so echoing it would be redundant surface.
@@ -170,14 +170,14 @@ transparent.
 **Determinism.** The payload is serialised from a struct rather than a map, so
 key order is fixed and the same content always yields the same id string.
 
-**Upgrading with live sandboxes.** **Both** the running session and the agent
+**Upgrading with live containers.** **Both** the running session and the agent
 user account survive a binary upgrade: nothing in MXC tears either down when the
 executable is replaced, and outliving the process is the premise of the whole
 state-aware lifecycle — `exec` runs in a different process from `start` and
 addresses the same live session. A session ends at an explicit `stop`, or when
 `deprovision` removes the agent user (which terminates any session still running
 under it). An id the running build cannot decode is refused as `malformed_id` on
-every phase that takes one, and a sandbox left behind that way cannot be
+every phase that takes one, and a container left behind that way cannot be
 addressed through MXC afterwards — so stop and deprovision **before** replacing
 the executable.
 
@@ -327,7 +327,7 @@ Notes on the rows that are not a simple accept/reject:
   its runtime configuration directly to checked engine binding; the dispatcher
   does not navigate or reparse experimental JSON.
 - **`containerId`** is not part of the exact state-aware roots. Lifecycle
-  requests address the sandbox by its returned `sandboxId` after provision.
+  requests address the container by its returned `sandboxId` after provision.
 - **`process` on non-exec state-aware phases** is structurally rejected. Supply
   process settings only on exec; other phases do not run a workload.
 - **`process.env`**: every process starts from the agent user's default
@@ -397,7 +397,7 @@ remove `phase` and `sandboxId` from the JSON payload and pass them as
 
 | Phase | Repeated call | Notes |
 |---|---|---|
-| provision | non-idempotent | Each provision mints a fresh agent user. Two provision calls produce two distinct sandboxes. Acceptable: callers manage `sandboxId` state themselves. |
+| provision | non-idempotent | Each provision mints a fresh agent user. Two provision calls produce two distinct containers. Acceptable: callers manage `sandboxId` state themselves. |
 | start | OS-side dependent | Starting an already-started session surfaces an HRESULT from the OS session-start call; mapped to `backend_error` (no specific MXC code). Callers should not call start twice; if they do, the second call's failure does not corrupt the first session. |
 | exec | per-call | Each exec creates a fresh agent process via `RunProcessWithOptionsAsync`. No deduplication — repeated `commandLine` runs the command repeatedly. |
 | stop | OS-side dependent | Stopping an already-stopped session surfaces an HRESULT from `StopSessionAsync`; mapped to `backend_error`. The agent user remains — only the running session is gone. |
@@ -405,13 +405,13 @@ remove `phase` and `sandboxId` from the JSON payload and pass them as
 
 ## Concurrency
 
-### Multiple sandboxes
+### Multiple containers
 
 Distinct `sandboxId`s map to distinct OS agent users (each provisioning call
 mints a fresh account). There is no shared registration between them, so
 concurrent provisions are independent and all succeed.
 
-### Multiple exec calls against the same sandbox
+### Multiple exec calls against the same container
 
 The runner's `exec` impl blocks under **`Relayed`**: it reuses the
 one-shot `create_process` path, and that call runs until the agent process
@@ -421,11 +421,11 @@ waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
 service serialises (or rejects, depending on session state) at its own layer.
 
-### Deprovision and concurrent sandboxes
+### Deprovision and concurrent containers
 
 `deprovision` removes only its own agent user (`deprovision_agent_user`).
-Because each sandbox is a distinct OS agent user with no shared registration,
-deprovisioning one sandbox does not affect any other concurrent sandbox —
+Because each container is a distinct OS agent user with no shared registration,
+deprovisioning one container does not affect any other concurrent container —
 they remain independently addressable until each is deprovisioned in turn.
 
 ## Error mapping
@@ -491,7 +491,7 @@ semantic error channel, and **only** for non-provision operations.
   "agent user not provisioned". The same value arriving as a transport failure has no
   such provenance — it could be any "not found" from activation or RPC — so promoting it
   would emit a false `stale_id`, whose remediation is "re-provision; treat the id as
-  dead", and destroy a healthy sandbox.
+  dead", and destroy a healthy container.
 - *Non-provision only:* provision mints the agent user. There is no `sandboxId` yet, so
   reporting a stale one would be incoherent.
 
@@ -579,10 +579,10 @@ terminator and an earlier refusal no longer applies.
 
 ## Known issues
 
-### Concurrent state-aware sandboxes
+### Concurrent state-aware containers
 
-v1 targets a single state-aware sandbox per consumer (see the
-[Out of scope](#out-of-scope-for-v1) note). Each sandbox is an independent OS
+v1 targets a single state-aware container per consumer (see the
+[Out of scope](#out-of-scope-for-v1) note). Each container is an independent OS
 agent user with no shared registration, so this is a v1 scoping choice, not an
 OS limitation.
 

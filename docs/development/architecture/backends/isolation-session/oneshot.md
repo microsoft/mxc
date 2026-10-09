@@ -4,7 +4,7 @@
 
 ## Problem
 
-MXC supports several sandboxing backends, but none of them runs the workload as a 
+MXC supports several containment backends, but none of them runs the workload as a
 freshly-provisioned, per-execution Windows user account inside a dedicated OS-managed
 session. Use cases that need this — per the broader claw-on-MXC scenario — call for:
 
@@ -251,7 +251,7 @@ the rationale for each disposition, and the error mapping live in
 | `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
 | `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
-| `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
+| `containerId` | accepted, no effect (a label; the backend addresses containers by the OS-assigned agent user name) |
 | `isolationSession` / one-shot `appId` | rejected as `malformed_request` — IsolationSession one-shot configuration uses only the stable top-level policy |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
@@ -268,7 +268,7 @@ isolation session is a separate OS session, so the contained code keeps its UI
 capabilities but cannot reach the host's. That makes every posture untrue here —
 `disable` either denies capabilities the session grants or promises a GUI the
 user can never see; `clipboard` describes a relationship to a clipboard the
-sandbox cannot touch. Only `injection: false` is honest (`SendInput` returns
+container cannot touch. Only `injection: false` is honest (`SendInput` returns
 `ERROR_ACCESS_DENIED`), and it cannot be supplied alone because the other fields
 materialize to defaults that are false. With nothing truthful to accept, there is
 no acknowledgment-style gate as there is for `network`. An omitted `ui` is

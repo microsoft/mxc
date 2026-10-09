@@ -18,8 +18,8 @@
 
 Read these in order:
 
-1. [Configuration schema](../../schema.md): supported policy fields and their
-   default behavior.
+1. [Containment policy spec](../../containment-configuration/1.0.0/policy.md): the stable exact
+request shape and supported policy fields.
 2. [Versioning Design](../architecture/versioning.md): how policy/schema/SDK
 versions relate and when to bump.
 

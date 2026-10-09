@@ -147,14 +147,14 @@ ingress on just to run a build. These rules are path-scoped, so they never
 widen IP networking.
 
 > ⚠️ **`connect()` is a capability `file-write*` alone didn't grant.** A broad
-> `readwritePaths` root lets the sandbox talk to any pre-existing listener
+> `readwritePaths` root lets the contained process talk to any pre-existing listener
 > underneath it — and a Docker, `ssh-agent`, or `gpg-agent` socket is a control
 > plane. Keep the read-write root narrow, and put sensitive sockets in
 > `deniedPaths`.
 
 ### Always-on baseline
 
-Every sandbox gets these regardless of policy, so the dynamic linker, shells,
+Every workload gets these regardless of policy, so the dynamic linker, shells,
 and standard tools work:
 
 | Access | Paths |
@@ -163,8 +163,9 @@ and standard tools work:
 | Read **+ write** | `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom` |
 | Read-data only | `/` itself — the loader can't resolve path lookups without it |
 
-Every sandbox also gets an unfiltered `(allow file-read-metadata)`, because the
-kernel reads metadata on each ancestor directory while resolving a path.
+Each generated Seatbelt profile also includes an unfiltered
+`(allow file-read-metadata)`, because the kernel reads metadata on each
+ancestor directory while resolving a path.
 `deniedPaths` names that operation explicitly so it still outranks the grant.
 
 The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
@@ -192,9 +193,8 @@ Anything it hasn't declared is rejected up front.
 
 ### Fields (supported schema 0.9+)
 
-This is the cross-backend directional shape accepted by the registered exact
-contracts. Schema 0.8 is no longer accepted; see the
-[supported network fields](../../schema.md#directional-networking-supported-contracts).
+This is the cross-backend directional shape described by the
+[supported containment policy](../../containment-configuration/1.0.0/policy.md).
 
 > **Omitting `network` entirely denies all IP networking.** Every field below
 > defaults to `deny`, so a config with no `network` block behaves exactly like
@@ -206,14 +206,14 @@ contracts. Schema 0.8 is no longer accepted; see the
 | `egress.default` | `"deny"` → no *general* outbound rule; baseline `(deny default)` blocks IP sockets, except for the host-loopback path (`ingress.hostLoopback`) and a `runtimeConfig.networkProxy` endpoint, which are carved out of it. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. Only the first of those three is egress. |
 | `egress.allow` / `egress.deny` | **Rejected** if non-empty — no CIDR/port/protocol primitive exists |
 | `ingress.default` | `"allow"` → `(allow network-inbound (local ip))`. This single rule is what permits **both `bind()` and `listen()`**; `network-bind` alone grants `bind()` but not `listen()`. |
-| `ingress.hostLoopback` | Controls sandbox → host loopback. May be `"deny"` under `ingress.default: "allow"`; `"allow"` under `ingress.default: "deny"` is rejected. **Defaults to `"deny"`.** |
+| `ingress.hostLoopback` | Controls workload → host loopback. May be `"deny"` under `ingress.default: "allow"`; `"allow"` under `ingress.default: "deny"` is rejected. **Defaults to `"deny"`.** |
 | `runtimeConfig.networkProxy` | Loopback `http`/`https` URL with an explicit port |
 
 ### The `hostLoopback` trap
 
 > ⚠️ **`ingress.hostLoopback` defaults to `"deny"`.**
 
-This config looks like "let the sandbox use the network":
+This config looks like "let the workload use the network":
 
 ```json
 { "network": { "egress": { "default": "allow" } } }
@@ -227,7 +227,7 @@ generated profile is:
 (deny network-outbound (remote ip "localhost:*"))   ;; last match wins
 ```
 
-**Your sandbox can reach the whole internet but not your own machine** — no
+**Your workload can reach the whole internet but not your own machine** — no
 `localhost:3000` dev server, no local model endpoint. It passes validation
 silently, because `ingress.default` defaulted to `deny` too and the two agree.
 
@@ -255,7 +255,7 @@ Two more things to know about `hostLoopback`:
 
 `hostLoopback` is bidirectional, but Seatbelt can only enforce the outbound
 half. There's no way to scope an inbound grant by peer: `(local ip)` filters on
-the sandbox's *own* bind address, and a `remote ip` inbound filter is a no-op
+the workload's *own* bind address, and a `remote ip` inbound filter is a no-op
 because the peer isn't known at bind time.
 
 **`hostLoopback: "allow"` under `ingress.default: "deny"` is rejected**, because
@@ -266,7 +266,7 @@ the only rule that could carry the promised inbound grant is the blanket
 its container→host half *is* expressible — by the `(deny default)` baseline
 under a denied egress default, and by the explicit `localhost:*` deny under an
 allowed one. Its host→container half is not, so a host process can still reach
-the sandbox's listeners. That residual grant is strictly narrower than the
+the workload's listeners. That residual grant is strictly narrower than the
 alternative it replaces: reaching a listener through `hostLoopback: "allow"`
 gives up the container→host direction as well.
 
@@ -275,7 +275,7 @@ gives up the container→host direction as well.
 > profile syntax error, `host must be * or localhost`, exactly as for `remote`.
 > So a workload that binds `0.0.0.0` rather than `127.0.0.1` is reachable from
 > **the LAN**, not only from this host. `--bind 127.0.0.1` is a convention the
-> workload follows, not one the sandbox can enforce. Prefer a backend with a
+> workload follows, not one the containment mechanism can enforce. Prefer a backend with a
 > private network namespace when that is not acceptable.
 
 If you only need *outbound* loopback, `egress.default: "deny"` plus a loopback
@@ -287,7 +287,7 @@ This distinction matters, and it's easy to get backwards.
 
 | Question | Enforced? |
 |---|---|
-| Can the sandbox reach anything *other than* the proxy? | **No — kernel-enforced**, provided `ingress.hostLoopback` stays `"deny"` (see the caveat below). |
+| Can the workload reach anything *other than* the proxy? | **No — kernel-enforced**, provided `ingress.hostLoopback` stays `"deny"` (see the caveat below). |
 | Will a client actually *speak to* the proxy? | Not enforced — cooperative. |
 | Is traffic transparently redirected into the proxy? | No. |
 | Can the proxy contain *inbound* traffic? | No — a proxy confines egress only. Inbound is governed solely by `ingress.default`, and Seatbelt cannot scope that grant by peer or by address. |
@@ -301,7 +301,7 @@ recommended `hostLoopback: "deny"` the profile ends up as:
 (allow network-outbound (remote ip "localhost:<proxy-port>"))
 ```
 
-That single port is the sandbox's entire outbound universe. The kernel enforces
+That single port is the workload's entire outbound universe. The kernel enforces
 it. A client that opens raw sockets and ignores `HTTP_PROXY` **cannot** reach
 the internet or any other host-local service — it simply fails to connect.
 
@@ -309,12 +309,12 @@ the internet or any other host-local service — it simply fails to connect.
 > host*, not just the proxy port, and the confinement claim above no longer
 > holds. Keep `hostLoopback: "deny"` whenever the proxy is meant to be the only
 > way out. This won't prevent the proxy's TCP responses from reaching the
-> sandbox.
+> workload.
 >
 > `ingress.default` is a separate decision: it grants inbound only and never
 > widens outbound, so `{"default": "allow", "hostLoopback": "deny"}` keeps
 > proxy-only egress while permitting a listener. The tradeoff is inbound — that
-> grant cannot be scoped by peer or address, so the sandbox's listeners are
+> grant cannot be scoped by peer or address, so the workload's listeners are
 > reachable from this host and, if the workload binds `0.0.0.0`, from the LAN.
 
 **Proxy usage is cooperative.** MXC injects `HTTP_PROXY` / `HTTPS_PROXY` /
@@ -326,7 +326,7 @@ way Windows can.
 
 **What the profile does not control is where the proxy then connects.** A
 caller-managed proxy applies its own destination policy; MXC does not supply
-one. Configure hostname allow/block lists on that proxy, not in the sandbox
+one. Configure hostname allow/block lists on that proxy, not in the containment
 request. `egress.allow` / `egress.deny` describe direct traffic and cannot be
 combined with `runtimeConfig.networkProxy`.
 
@@ -349,7 +349,7 @@ Set under a top-level `"seatbelt"` key.
 
 | Option | Type | Default | What it does |
 |---|---|---|---|
-| `nestedPty` | bool | `true` | Lets the inner process allocate its own ptys. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
+| `nestedPty` | bool | `true` | Lets the inner process allocate its own ptys. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for tighter containment. |
 | `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
@@ -414,7 +414,7 @@ The child gets a default block of `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
 `PWD` sits outside the table: it is always exported, set to the resolved
 working directory. It is applied *after* everything above. It exists so the
 child's `getcwd()` takes its fast `$PWD` path
-instead of walking parent directories the sandbox may not let it read, which
+instead of walking parent directories the containment policy may not let it read, which
 would otherwise leak a "getcwd: … Operation not permitted" line onto stderr.
 
 The table is the environment MXC hands the child. macOS `/bin/sh` assigns its
@@ -443,9 +443,9 @@ Tools installed outside the default `PATH` need both an env entry **and** a
 `PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin` and each `process.env` entry
 adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
 
-> ⚠️ **`$HOME` and `TERM` are unset inside the sandbox unless you set them.**
+> ⚠️ **`$HOME` and `TERM` are unset in the workload unless you set them.**
 > Policy paths still accept `~` (expanded against the *host's* `$HOME` when the
-> config is parsed), but a script running inside the sandbox cannot use `~` —
+> config is parsed), but a script running under containment cannot use `~` —
 > the shell expands it against an unset `HOME`. `getpwuid()` doesn't help
 > either, since directory services aren't reachable. Pass `"HOME=…"` in
 > `process.env` if your command needs it.
@@ -549,7 +549,7 @@ Follow the `PATH` instructions it prints (`/opt/homebrew/bin` on Apple silicon).
 | Node.js | `brew install node` | building/testing the TypeScript SDK |
 
 > On Apple silicon Homebrew lives at `/opt/homebrew`, so example configs that
-> run Python include `"readonlyPaths": ["/opt/homebrew"]` to let the sandbox
+> run Python include `"readonlyPaths": ["/opt/homebrew"]` to let the workload
 > reach the interpreter and its libraries.
 
 **4. Verify**

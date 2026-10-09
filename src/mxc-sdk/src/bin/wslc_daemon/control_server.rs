@@ -573,14 +573,14 @@ where
 /// Exec: validate-then-admit, then stream the run's stdout/stderr live as
 /// [`StreamFrame`]s, followed by a terminal frame.
 ///
-/// The sandbox is validated (exists + started) *before* the `Ok` admission is
+/// The container is validated (exists + started) *before* the `Ok` admission is
 /// written, and — critically — admission is **atomic** with the claim the
 /// worker takes on the container (see [`SessionHandle::exec`]): the worker
 /// validates, claims the container and hands the run to a thread of its own
 /// without yielding. A later `Stop`/`Deprovision` naming that container parks
 /// behind the claim and a later `Exec` is refused with `Busy`, so neither can
 /// invalidate the checked state. An unknown, not-started or already-busy
-/// sandbox therefore comes back as a pre-admission typed
+/// container therefore comes back as a pre-admission typed
 /// [`DaemonResponse::Err`] rather than a post-admission stream `Error` frame.
 ///
 /// The exec permit is shared with the run, so capacity frees only once the run

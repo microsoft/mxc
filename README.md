@@ -1,6 +1,6 @@
 # Microsoft eXecution Container (MXC)
 
-MXC is a **sandboxed code execution system** for running untrusted code
+MXC is a **containment-based code execution system** for running untrusted code
 (model output, plugins, and tools) on Windows, Linux, and macOS. It provides
 multiple containment backends, from OS-native process sandboxes to full VMs,
 behind a unified containment model and typed SDKs.
@@ -13,7 +13,7 @@ behind a unified containment model and typed SDKs.
   security policies
 - **Multiple containment backends**: ProcessContainer, Windows Sandbox, LXC,
   Bubblewrap, Seatbelt, MicroVM (Nanvix), Hyperlight, IsolationSession, and WSLC
-- **Policy-driven sandboxing**:
+- **Policy-driven containment**:
   - **Filesystem policy**: Read-only, read-write, and denied path lists
   - **Network policy**: Proxy support, outbound controls, and backend-dependent
     host filtering
@@ -189,6 +189,7 @@ build.bat --all             # Release build for current architecture
 |---|---|---|
 | SDK samples | [`samples/`](samples/README.md) | Runnable Rust, .NET, and Node scenarios |
 | SDK API reference | [`docs/api-reference/`](docs/api-reference/README.md) | Supported V1 operations and types |
+| Containment policy | [`docs/containment-configuration/`](docs/containment-configuration/README.md) | Supported policy contracts by schema version |
 | Container lifecycle | [`docs/container-lifecycle.md`](docs/container-lifecycle.md) | Persistent container lifecycle overview |
 | Logging access denied | [`docs/logging-access-denied.md`](docs/logging-access-denied.md) | Diagnose blocked accesses and author policy |
 | Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Consent and administrative controls |

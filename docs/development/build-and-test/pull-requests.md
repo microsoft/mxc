@@ -19,7 +19,7 @@ From `sdk/node`, run `npm run typecheck` before pushing SDK changes. It builds
 the SDK and unit tests, packs the SDK, installs it into an isolated temporary
 integration project, and compiles every integration test. To repeat only the
 packed-package check after building the SDK, run `npm run typecheck:integration`.
-Neither command runs sandbox workloads.
+Neither command runs contained workloads.
 
 The integration jobs install a packed SDK rather than building `sdk/node/dist`
 in the checkout. Test-only private type imports must resolve from the installed
