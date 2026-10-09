@@ -92,9 +92,10 @@ fn workload_cannot_reconfigure_or_bypass_the_network() {
         );
     }
 
-    // 2 is SECCOMP_MODE_FILTER.  The kernel writes this line too.  A filter
-    // cannot be lifted once it is attached, and this one fails
-    // socket(AF_PACKET, ...) with EPERM.
+    // 2 is SECCOMP_MODE_FILTER.  The kernel writes this line too, and a filter
+    // cannot be lifted once it is attached.  This asserts only that one is
+    // attached; that it refuses AF_PACKET with EPERM is proven by the
+    // lxc_bindings unit test the_filter_refuses_a_packet_socket_with_eperm.
     assert_eq!(
         status_number(&status, "Seccomp:"),
         2,
