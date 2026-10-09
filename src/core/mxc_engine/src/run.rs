@@ -292,16 +292,16 @@ fn resolve_runner_inner_windows(
             "VM backend not yet implemented",
         )),
         ContainmentBackend::MicroVm => {
-            #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
+            #[cfg(feature = "microvm")]
             {
                 Ok(ResolvedRunner::without_guard(Box::new(
-                    nvx_runner::NvxRunner::new(),
+                    nanvix_runner::NanVixScriptRunner::new(),
                 )))
             }
-            #[cfg(not(all(feature = "microvm", target_arch = "x86_64")))]
+            #[cfg(not(feature = "microvm"))]
             {
                 Err(MxcError::unsupported_containment(
-                    "NVX MicroVM requires Windows x64 and --features microvm",
+                    "MicroVM backend not compiled in (build with --features microvm)",
                 ))
             }
         }

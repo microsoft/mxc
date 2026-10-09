@@ -3415,13 +3415,14 @@ dependencies = [
 name = "wxc"
 version = "0.9.0"
 dependencies = [
- "aci_edge_sandboxes",
  "anyhow",
  "clap",
  "hyperlight_common",
  "learning_mode_core",
  "mxc_build_common",
  "mxc_engine",
+ "nanvix_binaries",
+ "nanvix_build_common",
  "plm",
  "process_container_common",
  "serde_json",

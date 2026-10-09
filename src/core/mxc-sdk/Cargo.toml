@@ -40,10 +40,6 @@ required-features = ["isolation_session"]
 name = "sta_probe"
 required-features = ["isolation_session"]
 
-[[example]]
-name = "nvx_run_json"
-required-features = ["microvm"]
-
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 libc = { workspace = true }
 

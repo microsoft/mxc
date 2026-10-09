@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wxc — embeds Windows VersionInfo and stages optional runtimes.
+//! Build script for wxc — embeds Windows VersionInfo and copies NanVix binaries.
 
 fn main() {
     mxc_build_common::embed_version_info("MXC sandbox executor", "wxc-exec.exe");
@@ -10,7 +10,7 @@ fn main() {
     check_test_prerequisites();
 
     #[cfg(all(windows, feature = "microvm"))]
-    copy_nvx_runtime();
+    copy_nanvix_binaries();
 
     // Delay-load winhvplatform.dll so WHP-less hosts don't crash before main().
     // CARGO_CFG_TARGET_* (not #[cfg]) because build.rs cfg gates are host, not target.
@@ -80,15 +80,19 @@ fn check_test_prerequisites() {
 }
 
 #[cfg(all(windows, feature = "microvm"))]
-fn copy_nvx_runtime() {
+fn copy_nanvix_binaries() {
     use std::path::Path;
 
-    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    assert_eq!(
-        target_arch, "x86_64",
-        "NVX MicroVM currently supports Windows x64 only"
-    );
-    let artifacts = std::env::var("DEP_ACI_EDGE_SANDBOXES_ARTIFACTS_DIR")
-        .expect("NVX bundled artifacts metadata is missing");
-    mxc_build_common::stage_nvx_runtime(Path::new(&artifacts));
+    let nanvix_bin_dir = match std::env::var("DEP_NANVIX_BINARIES_BIN_DIR") {
+        Ok(dir) => dir,
+        Err(_) => {
+            eprintln!("wxc build.rs: DEP_NANVIX_BINARIES_BIN_DIR not set, skipping copy");
+            return;
+        }
+    };
+
+    // Stage the artifacts next to the executable and emit rerun triggers. All
+    // of the staging logic (target-dir derivation, snapshot trust, copy/purge,
+    // rerun emission) lives in the build-only `nanvix_build_common` crate.
+    nanvix_build_common::stage_artifacts_next_to_exe(Path::new(&nanvix_bin_dir));
 }
