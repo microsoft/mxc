@@ -164,7 +164,6 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     }
 }
 
-
 /// Removing CA_NET_RAW prevents a process from using RAW and PACKET sockets.  However, ICMP is also denied.
 /// LXC needs to allow ICMP and prevent programs from using sockets to
 /// bypass the network guards.  The solution is to give the kernel a custom filter to refuse
@@ -186,7 +185,6 @@ fn refuse_packet_sockets() -> std::io::Result<()> {
     const JUMP_IF_EQUAL: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
     const JUMP_IF_AT_LEAST: u16 = (libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K) as u16;
     const RETURN: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
-
 
     // https://github.com/torvalds/linux/blob/master/include/uapi/linux/seccomp.h
     // Keys of the information needed during the filter.
@@ -215,7 +213,6 @@ fn refuse_packet_sockets() -> std::io::Result<()> {
     const USES_X32_ABI_FLAG: u32 = 0x4000_0000;
 
     const SOCKET_SYSCALL: u32 = libc::SYS_socket as u32;
-
 
     // Make the filter
     #[rustfmt::skip]

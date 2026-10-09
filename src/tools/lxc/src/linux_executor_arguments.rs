@@ -156,28 +156,26 @@ impl LinuxExecutorArguments {
 
             //KVM is checked before anything is pulled.
             #[cfg(target_os = "linux")]
-            {
-                if !mxc_sdk::hyperlight_common::is_kvm_available() {
-                    return Err(
-                        "Error: --setup-hyperlight requires KVM: /dev/kvm must be readable and \
+            if !mxc_sdk::hyperlight_common::is_kvm_available() {
+                return Err(
+                    "Error: --setup-hyperlight requires KVM: /dev/kvm must be readable and \
                      writable by this user."
-                            .to_string(),
-                    );
-                }
-
-                // Setup is an interactive install: the pull and the warm-up
-                // report progress as they go.
-                let runtimes = mxc_sdk::hyperlight_common::parse_runtimes(
-                    &self.setup_hyperlight.clone().unwrap(),
-                )?;
-
-                let mut logger = mxc_sdk::mxc_common::logger::Logger::new(
-                    mxc_sdk::mxc_common::logger::Mode::Console,
+                        .to_string(),
                 );
-                match mxc_sdk::hyperlight_common::setup(self.force, &runtimes, &mut logger) {
-                    Ok(home) => Ok(format!("hyperlight setup: image home ready at {home:?}")),
-                    Err(msg) => Err(format!("hyperlight setup failed: {msg}")),
-                }
+            }
+
+            // Setup is an interactive install: the pull and the warm-up
+            // report progress as they go.
+            let runtimes = mxc_sdk::hyperlight_common::parse_runtimes(
+                &self.setup_hyperlight.clone().unwrap(),
+            )?;
+
+            let mut logger = mxc_sdk::mxc_common::logger::Logger::new(
+                mxc_sdk::mxc_common::logger::Mode::Console,
+            );
+            match mxc_sdk::hyperlight_common::setup(self.force, &runtimes, &mut logger) {
+                Ok(home) => Ok(format!("hyperlight setup: image home ready at {home:?}")),
+                Err(msg) => Err(format!("hyperlight setup failed: {msg}")),
             }
         }
     }
