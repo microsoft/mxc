@@ -16,16 +16,6 @@ use mxc_sdk::mxc_common::telemetry;
 use mxc_sdk::lxc_common::signal_cleanup;
 
 fn main() {
-    // Install before spawning any other threads so the signal mask propagates.
-    // Failure here is fatal: install() either succeeds with the watchdog
-    // running, or restores the original signal mask and returns Err.  We refuse
-    // to continue without it because containers leaked on SIGTERM/INT are
-    // exactly the failure mode this code exists to prevent.
-    if let Err(e) = signal_cleanup::install() {
-        eprintln!("Error: failed to install signal cleanup handler: {e}");
-        process::exit(1);
-    }
-
     let arguments = linux_executor_arguments::LinuxExecutorArguments::parse();
 
     // Get the logger
@@ -99,6 +89,12 @@ fn main() {
     }
 
     log_request(&request, &mut logger);
+
+    // Setup watchdog for unexpected shutdowns
+    if let Err(e) = signal_cleanup::install() {
+        eprintln!("Error: failed to install signal cleanup handler: {e}");
+        process::exit(1);
+    }
 
     let run_start = Instant::now();
 
