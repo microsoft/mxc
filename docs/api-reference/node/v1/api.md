@@ -22,7 +22,15 @@ covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
 Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
 rejects `guiAccess` and legacy `launchMethod: "open"`.
 Terminal handles give the caller explicit input, output, resize, and process
-ownership; there is no separate attached-console or raw-JSON launch API.
+ownership; there is no separate attached-console API. The
+[V1.Dev exact-JSON API](dev.md) accepts caller-authored requests separately
+from this typed surface.
+Captured existing-container execution closes its output streams on timeout
+and returns the text collected so far with `timedOut: true`.
+Output read failures reject capture without waiting for the workload to exit.
+For executor-backed ProcessContainer PTY, `timeoutMs` reaches `wxc-exec`,
+but its exit channel does not distinguish a timeout from an ordinary exit:
+`wait().timedOut` is `false` when the executor exits in either case.
 
 ## Discovery and validation
 

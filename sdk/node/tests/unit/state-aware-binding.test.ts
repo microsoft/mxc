@@ -47,12 +47,14 @@ const REQUEST: BindingStateAwareRequest = {
 };
 
 describe('state-aware native binding ownership', () => {
-  it('forwards flags and frees the populated result exactly once', async () => {
+  it('forwards flags and rejects a missing response while freeing the result', async () => {
     const native = new FakeStateAwareNative();
 
-    assert.strictEqual(
-      await runBindingStateAwareRequestWithNative(REQUEST, native),
-      '{}',
+    await assert.rejects(
+      () => runBindingStateAwareRequestWithNative(REQUEST, native),
+      (error: unknown) => error instanceof MxcError
+        && error.code === 'backend_error'
+        && error.message.includes('missing JSON'),
     );
     assert.deepStrictEqual(native.calls, [{
       request: REQUEST.requestJson,

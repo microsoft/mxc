@@ -8,6 +8,13 @@ versioned public request, execution, and lifecycle APIs are exported from
 The package root exports no public APIs. These APIs use the SDK-owned V1 contract; callers
 do not select the wire version.
 
+`@microsoft/mxc-sdk/v1/dev` provides
+[exact-JSON APIs](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md).
+The dev operations accept complete caller-authored, exact-version JSON and
+authorize experimental backends separately. They return Promises; lifecycle
+and validation return the native response JSON string. ProcessContainer PTY
+passes the original JSON through `wxc-exec` without stable typed mapping.
+
 ```bash
 npm install @microsoft/mxc-sdk
 ```
@@ -106,6 +113,9 @@ Terminal stderr is merged into `output`. Closing `input` requests terminal EOF
 when supported; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
 Unsupported combinations are rejected before sandbox creation.
+ProcessContainer PTY passes `timeoutMs` to `wxc-exec`, but the executor
+channel reports only an exit code: `terminal.wait().timedOut` is `false`
+even if that timeout ended the workload.
 
 ## Lifecycle API
 
@@ -151,6 +161,8 @@ try {
 
 `spawnInContainer` returns a `Promise<MxcProcess>` with live standard pipes;
 `runInContainer` returns a `Promise<ExecutionResult>` with captured output.
+On timeout, it returns partial captured text without waiting for a
+descendant-held output stream to close.
 `spawnInContainerWithPty(containerId, request, options?)` starts an
 IsolationSession exec with a caller-driven terminal and returns a
 `Promise<MxcPtyProcess>`. Set `options.size` for initial dimensions; it defaults

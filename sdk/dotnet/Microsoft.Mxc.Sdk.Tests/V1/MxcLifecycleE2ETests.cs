@@ -195,6 +195,31 @@ public class MxcLifecycleE2ETests
         }
     }
 
+    [Fact]
+    public async Task Exec_CapturedTimeoutClosesDescendantHeldOutput()
+    {
+        IsolationSessionHost.Require();
+
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            var request = new ExecutionRequest(
+                $"{Cmd} /c echo MXC_TIMEOUT_PARTIAL & start /b {Cmd} /c ping -n 60 127.0.0.1 >nul & ping -n 60 127.0.0.1 >nul")
+            {
+                TimeoutMs = 750,
+            };
+            var capture = MxcLifecycle.RunInContainerAsync(
+                started.Id, request, cancellationToken: TestContext.Current.CancellationToken);
+            var finished = await Task.WhenAny(
+                capture, Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+            Assert.Same(capture, finished);
+
+            var result = await capture;
+            Assert.True(result.TimedOut);
+            Assert.Contains("MXC_TIMEOUT_PARTIAL", result.Stdout);
+        }
+    }
+
     /// <summary>
     /// Stop and deprovision must be reachable through this binding, and a
     /// deprovisioned id must not still be usable.

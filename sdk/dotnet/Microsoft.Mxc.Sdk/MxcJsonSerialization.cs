@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Mxc.Sdk.V1;
+using Microsoft.Mxc.Sdk.V1.Dev;
 
 namespace Microsoft.Mxc.Sdk;
 
@@ -45,6 +46,8 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(RunOptions))]
 [JsonSerializable(typeof(SpawnOptions))]
 [JsonSerializable(typeof(SpawnWithPtyOptions))]
+[JsonSerializable(typeof(JsonOptions))]
+[JsonSerializable(typeof(PtyJsonOptions))]
 [JsonSerializable(typeof(ProvisionOptions))]
 [JsonSerializable(typeof(StartOptions))]
 [JsonSerializable(typeof(StopOptions))]

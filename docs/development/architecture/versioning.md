@@ -68,6 +68,11 @@ take a caller-supplied schema version. Each v1 SDK targets the published exact
 
 Raw configuration APIs require the caller to declare a registered `version`
 to select an immutable published or mutable development contract.
+Rust `mxc_sdk::v1::dev`, .NET `Microsoft.Mxc.Sdk.V1.Dev`, and Node
+`@microsoft/mxc-sdk/v1/dev` accept complete caller-authored one-shot or
+state-aware JSON strings using the native exact-version parsing path.
+Experimental backend authorization is supplied separately in invocation
+options, not inferred from the document's version.
 
 ```typescript
 // sdk/node/src/types.ts

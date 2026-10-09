@@ -4,6 +4,7 @@
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Microsoft.Mxc.Sdk.V1.Policy;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests.V1;
@@ -25,13 +26,23 @@ public sealed class V1ApiSurfaceTests
     public void PublicSurfaceUsesContainerRequestWithoutAggregatePolicyTypes()
     {
         var exportedTypes = typeof(ContainerRequest).Assembly.GetExportedTypes();
+        var devTypes = new[]
+        {
+            typeof(Dev.JsonOptions),
+            typeof(Dev.PtyJsonOptions),
+            typeof(Dev.MxcContainer),
+            typeof(Dev.MxcLifecycle),
+        };
         Assert.All(
             exportedTypes,
             type => Assert.Equal(
                 type == typeof(Filesystem) || type == typeof(FilesystemPolicyResult)
                     ? "Microsoft.Mxc.Sdk.V1.Policy"
+                    : devTypes.Contains(type)
+                        ? "Microsoft.Mxc.Sdk.V1.Dev"
                     : "Microsoft.Mxc.Sdk.V1",
                 type.Namespace));
+        Assert.All(devTypes, type => Assert.Contains(type, exportedTypes));
 
         Assert.Contains(typeof(ContainerRequest), exportedTypes);
         Assert.Contains(typeof(MxcContainer), exportedTypes);

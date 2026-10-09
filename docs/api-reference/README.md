@@ -13,6 +13,16 @@ certify backend availability.
 | .NET | [V1](dotnet/v1/README.md) | `Microsoft.Mxc.Sdk.V1` |
 | Node | [V1](node/v1/README.md) | `@microsoft/mxc-sdk/v1` |
 
+V1.Dev exact-JSON entry points are listed in [Rust](rust/v1/dev.md),
+[.NET](dotnet/v1/dev.md), and [Node](node/v1/dev.md). Each accepts a complete
+caller-authored exact-version document. Use V1.Dev when the typed V1 API
+cannot express the request, such as a supported historical contract or
+fields in the mutable development contract. Prefer typed V1 for published
+functionality; development-contract fields and experimental backends are
+for development and testing, not production dependencies. The selected
+contract must be registered in the MXC build, and experimental backend
+authorization is an independent invocation option.
+
 ## Choosing an operation
 
 | Task | Input | Result |

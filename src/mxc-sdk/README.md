@@ -8,6 +8,14 @@ them in-process through the native engine. The versioned public API is under
 network, and UI restrictions; its typed containment value selects and
 configures the backend.
 
+`mxc_sdk::v1::dev` provides
+[exact-JSON API signatures](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md).
+V1.Dev runs caller-authored exact-version requests in-process. It provides
+one-shot and existing-container capture, pipe and PTY spawns, lifecycle
+operations, and dry-run validation. Lifecycle calls return the complete
+native response JSON; capture and live process handles reuse the V1 result
+types. Backend support remains mode-dependent.
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or

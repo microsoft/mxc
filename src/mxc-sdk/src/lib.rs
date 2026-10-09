@@ -200,6 +200,7 @@ pub use core_modules::plm;
 pub use core_modules::process_security_environment_spec;
 
 mod configs;
+mod dev;
 mod options;
 mod policy;
 mod sandbox;
@@ -223,6 +224,11 @@ use sandbox::{ExecutionResult, MxcProcess};
 /// schema version.
 ///
 pub mod v1 {
+    /// Caller-authored exact-JSON execution and lifecycle operations.
+    pub mod dev {
+        pub use crate::dev::*;
+    }
+
     pub use crate::mxc_engine::{
         available_backends, platform_support, AvailableBackend, BackendCapability,
         BubblewrapNetworkSupport, Error, ErrorCode, PlatformSupport, ProxyEnforcement,
