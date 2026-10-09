@@ -45,6 +45,11 @@ pub(super) mod op {
     pub(crate) const OPTIONS_REDIRECT_STDERR: &str =
         "IsoSessionProcessOptions.SetRedirectStandardError";
     pub(crate) const OPTIONS_ENVIRONMENT: &str = "IsoSessionProcessOptions.Environment";
+
+    /// The staged shim's runtime-verification export, called before any session
+    /// work to confirm the IsolationSession framework is installed.
+    #[cfg(feature = "isolation_session_lifted")]
+    pub(crate) const VERIFY_FRAMEWORK: &str = "IsoSessionApp.VerifyIsoSessionFramework";
 }
 
 /// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`. Every non-provision lifecycle op
@@ -60,6 +65,12 @@ const CLASS_E_CLASSNOTAVAILABLE_HRESULT: u32 = 0x80040111;
 
 /// `REGDB_E_CLASSNOTREG` — the runtime class is not registered at all.
 const REGDB_E_CLASSNOTREG_HRESULT: u32 = 0x80040154;
+
+/// `E_NOINTERFACE` — the activator produced an object that does not implement
+/// the requested interface. In lifted mode this is the signature of a
+/// WinMD/runtime version-pin mismatch. Inbox activation does not have enough
+/// information to make that diagnosis. See [`activation_error`].
+const E_NOINTERFACE_HRESULT: u32 = 0x80004002;
 
 /// Renders an HRESULT for the wire `nativeCode` field.
 fn format_native_code(code: u32) -> String {
@@ -307,6 +318,22 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
             "the in-proc IsolationSession runtime API is not available on this OS build. Ensure \
          the OS feature gate is enabled and the platform supports isolation sessions."
                 .to_string()
+        } else if code == E_NOINTERFACE_HRESULT {
+            #[cfg(feature = "isolation_session_lifted")]
+            {
+                "the co-located IsoSessionApp.dll activated but returned an object that does not \
+                 implement the expected IsolationSession interface. This is the classic WinMD/MSI \
+                 version-pin mismatch: the Preview WinMD the current MXC native module was built \
+                 against and the \
+                 MSI-installed IsolationSession runtime were produced from different OS versions, \
+                 so their interface IIDs differ. Rebuild the MSI and the \
+                 Microsoft.AI.IsolationSession.SDK NuGet from the same OS commit."
+                    .to_string()
+            }
+            #[cfg(not(feature = "isolation_session_lifted"))]
+            {
+                format!("IsolationSession runtime API activation failed: {detail}")
+            }
         } else {
             format!("IsolationSession runtime API activation failed: {detail}")
         };
@@ -330,6 +357,56 @@ pub(super) fn identity_refusal(err: windows_core::Error) -> IsolationSessionErro
                       duplicate at SecurityImpersonation level."
             .to_string(),
     })
+}
+
+/// The adjacent lifted activation payload is missing, so the version-pinned
+/// MSI-installed IsolationSession runtime cannot be bound.
+///
+/// Raised for the `None` arm of
+/// [`super::regfree::activate_from_adjacent_shim`]. MXC deliberately does
+/// **not** fall back to the inbox `System32` runtime here — silently binding a
+/// different, unversioned binary set is exactly the failure mode this design
+/// exists to prevent — so the missing payload surfaces as a hard,
+/// actionable error instead.
+#[cfg(feature = "isolation_session_lifted")]
+pub(super) fn lifted_payload_missing(operation: &str) -> IsolationSessionError {
+    IsolationSessionError::ServiceUnavailable(IsoApiFailure::new(
+        operation,
+        Some(REGDB_E_CLASSNOTREG_HRESULT),
+        Some(
+            "IsolationSession lifted activation was not taken: IsoSessionApp.dll and \
+             IsoSession.manifest are not co-located with this module or executable, or the \
+             shim reported the runtime class as not registered, so the version-pinned \
+             MSI-installed IsolationSession runtime could not be bound. MXC will \
+             not silently fall back to the inbox System32 runtime."
+                .to_string(),
+        ),
+        Some(
+            "Rebuild against the Microsoft.AI.IsolationSession.SDK NuGet so \
+             IsoSessionApp.dll and its stamped IsoSession.manifest are staged beside the host, \
+             and install the matching runtime MSI (`winget install Microsoft.AI.IsolationSession`)."
+                .to_string(),
+        ),
+    ))
+}
+
+/// The staged shim reports that the IsolationSession framework runtime is not
+/// installed (or could not confirm it is), so no session work may proceed.
+///
+/// The refusal's concise problem statement becomes the failure `message` (so it
+/// surfaces in the one-shot `ScriptResponse` string and as the state-aware
+/// `MxcError` message), and the shim's ready-to-display fix text, when present,
+/// becomes the `remediation`.
+#[cfg(feature = "isolation_session_lifted")]
+pub(super) fn framework_unavailable(
+    refusal: super::regfree::FrameworkRefusal,
+) -> IsolationSessionError {
+    IsolationSessionError::ServiceUnavailable(IsoApiFailure::new(
+        op::VERIFY_FRAMEWORK,
+        None,
+        Some(refusal.message),
+        refusal.remediation,
+    ))
 }
 
 /// Whether an `ERROR_NOT_FOUND` from this operation means "the sandbox is
@@ -804,6 +881,50 @@ mod tests {
         assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
         assert_eq!(mapped.native_code(), Some("0x80004005"));
         assert!(mapped.message.contains("catastrophic failure"));
+    }
+
+    /// `E_NOINTERFACE` from lifted activation is the WinMD/MSI version-pin mismatch
+    /// signature: the mapping must name that cause rather than echo the bare
+    /// COM detail, so the message points at rebuilding both from one commit.
+    #[cfg(feature = "isolation_session_lifted")]
+    #[test]
+    fn e_nointerface_activation_names_version_pin_mismatch() {
+        let mapped = map_lifecycle_error(activation_error(E_NOINTERFACE_HRESULT, "ignored"));
+        assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(mapped.native_code(), Some("0x80004002"));
+        assert!(mapped.message.contains("version-pin mismatch"));
+        assert!(mapped.message.contains("same OS commit"));
+    }
+
+    #[cfg(not(feature = "isolation_session_lifted"))]
+    #[test]
+    fn inbox_e_nointerface_activation_preserves_platform_detail() {
+        let mapped = map_lifecycle_error(activation_error(
+            E_NOINTERFACE_HRESULT,
+            "platform activation detail",
+        ));
+        assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(mapped.native_code(), Some("0x80004002"));
+        assert!(mapped.message.contains("platform activation detail"));
+        assert!(!mapped.message.contains("version-pin mismatch"));
+    }
+
+    /// The hard error raised when the lifted payload is absent must carry the
+    /// class-not-registered code, an operation, a message that refuses the
+    /// inbox fallback, and an actionable remediation.
+    #[cfg(feature = "isolation_session_lifted")]
+    #[test]
+    fn lifted_payload_missing_is_a_hard_actionable_error() {
+        let mapped = map_lifecycle_error(lifted_payload_missing(op::ACTIVATE));
+        assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(mapped.operation(), Some("IsoSessionOps.ActivateInstance"));
+        assert_eq!(mapped.native_code(), Some("0x80040154"));
+        assert!(mapped.message.contains("not silently fall back"));
+        assert!(mapped
+            .remediation
+            .as_deref()
+            .is_some_and(|r| r.contains("IsolationSession.SDK NuGet")
+                && r.contains("winget install Microsoft.AI.IsolationSession")));
     }
 
     #[test]

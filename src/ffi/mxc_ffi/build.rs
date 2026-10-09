@@ -26,8 +26,53 @@ fn main() {
     println!("cargo:rerun-if-changed=src/state_aware.rs");
     println!("cargo:rerun-if-changed=build.rs");
 
+    #[cfg(feature = "isolation_session")]
+    reconcile_isolation_session_runtime();
+
     #[cfg(feature = "dotnetsdk")]
     generate_csharp_bindings();
+}
+
+#[cfg(feature = "isolation_session")]
+fn reconcile_isolation_session_runtime() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let target_dir = out_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .expect("could not determine target directory from OUT_DIR");
+
+    // Feature configurations share the final profile directory but have
+    // separate build-script fingerprints. A missing tracked path keeps this
+    // reconciliation active whenever Cargo switches fingerprints.
+    println!(
+        "cargo:rerun-if-changed={}",
+        target_dir.join(".isosession-payload-state").display()
+    );
+
+    #[cfg(feature = "isolation_session_lifted")]
+    mxc_build_common::isolation_session_sdk::stage_runtime()
+        .unwrap_or_else(|error| panic!("IsolationSession SDK staging failed: {error}"));
+
+    #[cfg(not(feature = "isolation_session_lifted"))]
+    {
+        for file_name in [
+            "IsoSessionApp.dll",
+            "IsoSession.manifest",
+            "IsoSessionApp.runtimeversion",
+        ] {
+            let path = target_dir.join(file_name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("remove stale lifted payload {}: {error}", path.display()),
+            }
+        }
+    }
 }
 
 #[cfg(feature = "dotnetsdk")]

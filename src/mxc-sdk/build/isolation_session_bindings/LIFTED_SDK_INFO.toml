@@ -1,0 +1,18 @@
+# Provenance for the lifted IsolationSession SDK package.
+#
+# Bindings are regenerated at build time from the Preview WinMD in the pinned
+# SDK package. Run Update-IsoSessionSdk.ps1 rather than editing this file.
+
+[tool]
+windows_bindgen_version = "0.62.1"
+target_windows_crate = "0.62"
+generated_date = "2026-10-06"
+
+[source]
+nupkg = "Microsoft.AI.IsolationSession.SDK.0.202610.5.nupkg"
+nupkg_sha256 = "b387c9d11808bf8864d3d7e4d6924f79bdcd6e7c4c54c4e2e49ab0e3525b3d2e"
+winmd = "metadata/windows.ai.isolationsession.preview.winmd"
+winmd_sha256 = "C6115B52525B06316BE77BEEB4FC4624C5CBB1CEC02E5493D86C46D90FABD6A9"
+namespace = "Windows.AI.IsolationSession.Preview"
+runtime_version = "2026_10"
+build_guid = "e5ad0558-b9a6-a19a-f50e-cc2ebcaccf65"

@@ -33,6 +33,8 @@ use super::error::{
     activation_error, check_result, format_iso_error, lifecycle_err, op, transport_err,
     IsolationSessionError, StalePromotion,
 };
+#[cfg(feature = "isolation_session_lifted")]
+use super::error::{framework_unavailable, lifted_payload_missing};
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
@@ -81,15 +83,35 @@ unsafe impl Send for MtaReference {}
 unsafe impl Sync for MtaReference {}
 
 /// Activates the in-proc IsolationSession runtime factory and returns the
-/// instance.
+/// instance. Activation goes through the `DllGetActivationFactory` export of
+/// the co-located `IsoSessionApp.dll` shim (see [`super::regfree`]), binding
+/// the version-pinned MSI-installed runtime.
+///
+/// There is **no inbox fallback**: if the lifted payload is not staged beside
+/// this module or executable, this returns a hard [`lifted_payload_missing`]
+/// error rather than silently binding the inbox `System32` runtime.
+#[cfg(feature = "isolation_session_lifted")]
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
-    match IsoSessionOps::new() {
-        Ok(ops) => Ok(ops),
+    // Refuse before touching the runtime if the framework is not verified.
+    super::regfree::verify_framework().map_err(framework_unavailable)?;
+
+    match super::regfree::activate_from_adjacent_shim::<IsoSessionOps>() {
+        Some(Ok(ops)) => Ok(ops),
         // The HRESULT→error mapping lives in `activation_error` so it stays
         // testable without depending on whether this host can activate the
         // API at all.
-        Err(e) => Err(activation_error(e.code().0 as u32, &e.message())),
+        Some(Err(e)) => Err(activation_error(e.code().0 as u32, &e.message())),
+        // The lifted payload is absent: refuse to silently bind the inbox
+        // runtime, and surface an actionable hard error instead.
+        None => Err(lifted_payload_missing(op::ACTIVATE)),
     }
+}
+
+/// Inbox mode: activates the system-registered OS API through normal WinRT
+/// activation.
+#[cfg(not(feature = "isolation_session_lifted"))]
+fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
+    IsoSessionOps::new().map_err(|e| activation_error(e.code().0 as u32, &e.message()))
 }
 
 /// `GetFeatureLevel` fails on a host that does not recognize the feature
@@ -1527,18 +1549,35 @@ mod tests {
             Err(IsolationSessionError::ServiceUnavailable(failure)) => {
                 // Service is NOT available. Verify the error is clean and
                 // descriptive (not a panic or cryptic COM error), and that
-                // it names the activation operation it failed on.
+                // it names the operation it failed on. Lifted builds verify
+                // the adjacent framework before activation; inbox builds go
+                // directly to activation.
                 assert!(
                     failure.message.contains("not available")
-                        || failure.message.contains("activation failed"),
+                        || failure.message.contains("activation failed")
+                        || failure.message.contains("lifted activation was not taken")
+                        || failure
+                            .message
+                            .contains("does not support runtime verification")
+                        || failure
+                            .message
+                            .contains("framework verification entry point could not be loaded"),
                     "Expected descriptive error message, got: {}",
                     failure.message
                 );
-                assert_eq!(failure.operation, op::ACTIVATE);
-                assert!(
-                    failure.code.is_some(),
-                    "activation failure carries no HRESULT"
-                );
+
+                match failure.operation.as_str() {
+                    #[cfg(feature = "isolation_session_lifted")]
+                    op::VERIFY_FRAMEWORK => assert!(
+                        failure.code.is_none(),
+                        "framework refusal unexpectedly carried an HRESULT"
+                    ),
+                    op::ACTIVATE => assert!(
+                        failure.code.is_some(),
+                        "activation failure carries no HRESULT"
+                    ),
+                    operation => panic!("unexpected availability operation: {operation}"),
+                }
             }
             Err(other) => {
                 panic!("expected ServiceUnavailable variant, got: {:?}", other);

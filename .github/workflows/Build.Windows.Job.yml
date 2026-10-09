@@ -2,6 +2,12 @@ name: Windows Build
 
 on:
   workflow_call:
+    inputs:
+      run_isolation_session_lifted:
+        description: Run x64 Cargo validation against the published lifted IsolationSession SDK package.
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -120,3 +126,147 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
           if-no-files-found: error
           retention-days: 1
+
+  isolation-session-lifted:
+    name: x64 isolation_session_lifted
+    if: inputs.run_isolation_session_lifted
+    runs-on: windows-2025
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          target: x86_64-pc-windows-msvc
+          override: false
+          rustflags: ''
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target
+          key: x86_64-pc-windows-msvc-isolation-session-lifted-v1
+          cache-on-failure: false
+
+      - name: Test lifted SDK and compile FFI tests
+        run: |
+          cargo test --locked --release --target x86_64-pc-windows-msvc `
+            -p mxc-sdk --features isolation_session_lifted
+          cargo test --locked --release --target x86_64-pc-windows-msvc `
+            -p mxc_ffi --features isolation_session_lifted --no-run
+
+      - name: Build lifted CLI
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+             -p wxc --no-default-features --features isolation_session_lifted
+
+      - name: Build and test lifted .NET SDK
+        working-directory: sdk/dotnet
+        shell: pwsh
+        run: |
+          dotnet build Microsoft.Mxc.Sdk.slnx -p:MxcIsolationSessionLifted=true
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build exited $LASTEXITCODE" }
+
+          $testExe = 'Microsoft.Mxc.Sdk.Tests\bin\Debug\net8.0\Microsoft.Mxc.Sdk.Tests.exe'
+          if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
+            throw "The xUnit v3 test executable was not built: $testExe"
+          }
+
+          $log = Join-Path $env:RUNNER_TEMP 'dotnet-test-isolation-session-lifted.log'
+          & $testExe -automated sync -noColor 2>&1 |
+            Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "The lifted managed tests exited $code" }
+          $summary = Get-Content -LiteralPath $log |
+            Where-Object { $_ -match '"\$type":"test-assembly-finished"' } |
+            Select-Object -Last 1 |
+            ConvertFrom-Json
+          if ($null -eq $summary -or $summary.TestsTotal -eq 0) {
+            throw 'The lifted run passed no tests, so it did not establish managed coverage.'
+          }
+          if ($summary.TestsFailed -ne 0 -or $summary.TestsNotRun -ne 0) {
+            throw "The lifted managed run was incomplete: $($summary | ConvertTo-Json -Compress)"
+          }
+
+          $pinLog = Join-Path $env:RUNNER_TEMP 'dotnet-test-isolation-session-lifted-pin.log'
+          & $testExe -automated sync -noColor `
+            -method '*IsolationSessionBuildSwitch*' 2>&1 |
+            Tee-Object -FilePath $pinLog
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "The lifted build-switch pin exited $code" }
+          $pinSummary = Get-Content -LiteralPath $pinLog |
+            Where-Object { $_ -match '"\$type":"test-assembly-finished"' } |
+            Select-Object -Last 1 |
+            ConvertFrom-Json
+          if (
+            $null -eq $pinSummary -or
+            $pinSummary.TestsTotal -ne 1 -or
+            $pinSummary.TestsFailed -ne 0 -or
+            $pinSummary.TestsSkipped -ne 0 -or
+            $pinSummary.TestsNotRun -ne 0
+          ) {
+            throw 'The IsolationSession build-switch test did not run and pass in lifted mode.'
+          }
+
+      - name: Pack lifted .NET SDK
+        working-directory: sdk/dotnet
+        shell: pwsh
+        run: |
+          dotnet pack Microsoft.Mxc.Sdk/Microsoft.Mxc.Sdk.csproj `
+            --configuration Release `
+            -p:MxcIsolationSessionLifted=true `
+            -p:MxcPackSingleRid=true `
+            -p:MxcPackageRid=win-x64
+          if ($LASTEXITCODE -ne 0) { throw "dotnet pack exited $LASTEXITCODE" }
+
+          $packages = @(Get-ChildItem Microsoft.Mxc.Sdk\bin\Release\*.nupkg)
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one packed SDK, found $($packages.Count)."
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($packages[0].FullName)
+          try {
+            $entries = @($archive.Entries | ForEach-Object FullName)
+            foreach ($entry in @(
+              'runtimes/win-x64/native/IsoSessionApp.dll',
+              'runtimes/win-x64/native/IsoSession.manifest'
+            )) {
+              if ($entry -notin $entries) {
+                throw "Packed SDK is missing lifted runtime entry: $entry"
+              }
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+      - name: Verify adjacent activation payload
+        shell: pwsh
+        run: |
+          $releaseDir = 'target\x86_64-pc-windows-msvc\release'
+          $requiredFiles = @(
+            'wxc-exec.exe',
+            'IsoSessionApp.dll',
+            'IsoSession.manifest'
+          )
+
+          foreach ($file in $requiredFiles) {
+            $path = Join-Path $releaseDir $file
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Lifted build did not stage required file: $path"
+            }
+          }

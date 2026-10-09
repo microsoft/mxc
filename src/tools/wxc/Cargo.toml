@@ -26,6 +26,8 @@ winresource.workspace = true
 [build-dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [features]
 default = []
@@ -34,5 +36,6 @@ microvm = ["mxc-sdk/microvm"]
 wslc = ["mxc-sdk/wslc"]
 hyperlight = ["mxc-sdk/hyperlight"]
 isolation_session = ["mxc-sdk/isolation_session"]
+isolation_session_lifted = ["isolation_session", "mxc-sdk/isolation_session_lifted"]
 force-tier-testing = ["mxc-sdk/force-tier-testing"]
 tier2_bfs = ["mxc-sdk/tier2_bfs"]

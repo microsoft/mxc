@@ -11,6 +11,7 @@
     <!-- The native detail struct is marshalled with raw pointers. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <DefineConstants Condition="'$(MxcWithWslc)' == 'true'">$(DefineConstants);MXC_WITH_WSLC</DefineConstants>
+    <MxcWithIsolationSession Condition="'$(MxcIsolationSessionLifted)' == 'true'">true</MxcWithIsolationSession>
     <DefineConstants Condition="'$(MxcWithIsolationSession)' == 'true'">$(DefineConstants);MXC_WITH_ISOLATION_SESSION</DefineConstants>
     <MxcSrcDir>$(MSBuildProjectDirectory)/../../../src</MxcSrcDir>
     <MxcTestCargoTargetDir>$(MxcSrcDir)/target/dotnet-test-support</MxcTestCargoTargetDir>
@@ -18,7 +19,8 @@
          including when the managed tests themselves run in Release. -->
     <MxcTestCargoProfileDir>debug</MxcTestCargoProfileDir>
     <MxcTestCargoFeatures>dotnetsdk test-support</MxcTestCargoFeatures>
-    <MxcTestCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) isolation_session</MxcTestCargoFeatures>
+    <MxcTestCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and '$(MxcIsolationSessionLifted)' != 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) isolation_session</MxcTestCargoFeatures>
+    <MxcTestCargoFeatures Condition="'$(MxcIsolationSessionLifted)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) isolation_session_lifted</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) wslc</MxcTestCargoFeatures>
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">mxc_ffi.dll</MxcTestNativeFileName>
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libmxc_ffi.dylib</MxcTestNativeFileName>
