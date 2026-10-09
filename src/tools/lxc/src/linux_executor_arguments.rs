@@ -38,12 +38,6 @@ pub struct LinuxExecutorArguments {
     #[arg(long)]
     experimental: bool,
 
-    /// Allow testing-only features that must never run in production, currently
-    /// `network.proxy.builtinTestServer` (a bundled, deliberately-permissive
-    /// test HTTP proxy). Distinct from --experimental.
-    #[arg(long = "allow-testing-features")]
-    allow_testing_features: bool,
-
     /// Report host backend availability as JSON and exit
     #[arg(long = "available-backends")]
     available_backends: bool,
@@ -123,7 +117,6 @@ impl LinuxExecutorArguments {
         };
 
         request.experimental_enabled = self.experimental;
-        request.testing_features_enabled = self.allow_testing_features;
         request.dry_run = self.dry_run;
 
         request

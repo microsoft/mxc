@@ -135,14 +135,11 @@ pub enum ContainerFirewall {
     Absent,
 }
 
-/// Take away the two ways a workload can get around the chains MXC installed.
-/// `CAP_NET_ADMIN` rewrites them and is dropped. Packets built on an
-/// `AF_PACKET` socket go to the interface below the hook the chains hang on,
-/// and a seccomp filter refuses that socket.
-///
-/// `CAP_NET_RAW` stays. An `AF_INET` raw socket still goes through `OUTPUT`,
-/// where the chains already filter it, and an explicit `protocol: "icmp"`
-/// allow needs one.
+/// Two networking capabilites LXC cares about is CAP_NET_ADMIN and CAP_NET_RAW.
+/// CAP_NET_ADMIN allows a process to change the networking rules
+/// CAP_NET_RAW allows a process to use RAW and PACKET sockets and those allow a process to bypass
+///    a network chain.
+/// Remove both capabilites here. (Technically CAP_NET_RAW isn not removed.  More details inside)
 #[cfg(target_os = "linux")]
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -155,102 +152,93 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     // syscalls, the filter lives on the stack, and this closure allocates
     // nothing and captures nothing.
     unsafe {
+        // Take away CAP_NET_ADMIN.
         command.pre_exec(|| {
             if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
+
+            // Refuse AF_PACKET communication.
             refuse_packet_sockets()
         });
     }
 }
 
-/// Make `socket(AF_PACKET, ...)` fail with `EPERM` for this process and
-/// everything it goes on to exec. A seccomp filter cannot be lifted once it is
-/// installed, which is what holds the refusal against a workload trying to get
-/// out of it.
-///
-/// Needs `CAP_SYS_ADMIN`, which the runner already holds. Asking the kernel to
-/// take the filter without it would mean setting `no_new_privs`, and that would
-/// also strip the file capabilities a distribution's `ping` is shipped with.
+
+/// Removing CA_NET_RAW prevents a process from using RAW and PACKET sockets.  However, ICMP is also denied.
+/// LXC needs to allow ICMP and prevent programs from using sockets to
+/// bypass the network guards.  The solution is to give the kernel a custom filter to refuse
+/// any socket that carries AF_PACKET.  LXC utalizes SecComp.
+/// see https://docs.kernel.org/userspace-api/seccomp_filter.html and
+/// https://man7.org/linux/man-pages/man2/seccomp.2.html
 #[cfg(target_os = "linux")]
 fn refuse_packet_sockets() -> std::io::Result<()> {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    compile_error!(
-        "refusing AF_PACKET needs this target's audit architecture and socket syscall number"
-    );
+    compile_error!("LXC only understands SecComp system calls for x86_x64 and arm64.");
 
-    // Classic BPF opcodes, from linux/bpf_common.h: BPF_LD|BPF_W|BPF_ABS,
-    // BPF_JMP|BPF_JEQ|BPF_K, BPF_JMP|BPF_JGE|BPF_K, and BPF_RET|BPF_K.
-    const LOAD_WORD: u16 = 0x20;
-    const JUMP_IF_EQUAL: u16 = 0x15;
-    const JUMP_IF_AT_LEAST: u16 = 0x35;
-    const RETURN: u16 = 0x06;
+    // https://docs.kernel.org/networking/filter.html for more information on filtering sockets
+    // Filtering sockets requires assembling a small filter program with assembly like syntax.
+    // The below code is to consolidate some commands into easy to understand words.
 
-    // Byte offsets into the `seccomp_data` the kernel presents, from
-    // linux/seccomp.h. `args` holds six 64-bit values; on a little-endian
-    // machine the low half of the first one sits at the lower address, and a
-    // socket domain is an `int` that fits there.
+    // https://github.com/torvalds/linux/blob/master/include/uapi/linux/bpf_common.h
+    // Common BPF words
+    const LOAD_WORD: u16 = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+    const JUMP_IF_EQUAL: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+    const JUMP_IF_AT_LEAST: u16 = (libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K) as u16;
+    const RETURN: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
+
+
+    // https://github.com/torvalds/linux/blob/master/include/uapi/linux/seccomp.h
+    // Keys of the information needed during the filter.
     const SYSCALL_NUMBER: u32 = 0;
     const ARCHITECTURE: u32 = 4;
     const FIRST_ARGUMENT: u32 = 16;
 
-    // x86-64 sets this bit in the syscall number to mean the x32 ABI, which
-    // numbers its calls differently. Neither supported architecture reaches
-    // this value any other way.
-    const FOREIGN_NUMBERING: u32 = 0x4000_0000;
-
     const REFUSE_WITH_EPERM: u32 = libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32);
 
-    // `seccomp` takes no flags here. Naming the argument keeps a bare zero out
-    // of a variadic call, where nothing would say what it meant.
     const NO_FLAGS: libc::c_ulong = 0;
 
-    // AUDIT_ARCH_* from linux/audit.h: the machine number in linux/elf-em.h
-    // with the 64-bit and little-endian flags set. The syscall numbers are from
-    // arch/x86/entry/syscalls/syscall_64.tbl and
-    // include/uapi/asm-generic/unistd.h.
-    #[cfg(target_arch = "x86_64")]
-    const NATIVE_ARCHITECTURE: u32 = 0xC000_003E;
-    #[cfg(target_arch = "x86_64")]
-    const SOCKET_SYSCALL: u32 = 41;
-    #[cfg(target_arch = "aarch64")]
-    const NATIVE_ARCHITECTURE: u32 = 0xC000_00B7;
-    #[cfg(target_arch = "aarch64")]
-    const SOCKET_SYSCALL: u32 = 198;
+    // numbers come from
+    // https://github.com/torvalds/linux/blob/master/include/uapi/linux/audit.h
+    // To test the ABI the filter needs to know the endiness and arch.
+    const _64BIT_ABI_LITTLE_ENDINESS: u32 = 0x8000_0000 | 0x4000_0000;
 
-    // The kernel runs these in order and stops at the first `RETURN` it
-    // reaches. Read the architecture, and kill anything not built for the one
-    // this filter was compiled against, whose syscall numbers would not line up
-    // with the comparison below. Read the syscall number, and let everything
-    // that is not `socket` through. Read the first argument, which is the
-    // socket domain, and refuse `AF_PACKET`. Each jump counts forward from the
-    // instruction after it, taking `jt` when the comparison holds and `jf` when
-    // it does not.
-    //
-    // Laid out one instruction per line, which is the only way the jumps can be
-    // counted by eye.
+    // Also from https://github.com/torvalds/linux/blob/master/include/uapi/linux/audit.h
+    #[cfg(target_arch = "x86_64")]
+    const NATIVE_ARCHITECTURE: u32 = _64BIT_ABI_LITTLE_ENDINESS | libc::EM_X86_64 as u32;
+    #[cfg(target_arch = "aarch64")]
+    const NATIVE_ARCHITECTURE: u32 = _64BIT_ABI_LITTLE_ENDINESS | libc::EM_AARCH64 as u32;
+
+    // Filter only works for x64 and arm64 ABI's.
+    // Used to filter out a 32 bit process under the "Filters" section.
+    // check https://man7.org/linux/man-pages/man2/seccomp.2.html
+    const USES_X32_ABI_FLAG: u32 = 0x4000_0000;
+
+    const SOCKET_SYSCALL: u32 = libc::SYS_socket as u32;
+
+
+    // Make the filter
     #[rustfmt::skip]
     let mut program = [
         libc::sock_filter { code: LOAD_WORD,        jt: 0, jf: 0, k: ARCHITECTURE },
-        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 0, jf: 7, k: NATIVE_ARCHITECTURE },
+        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 0, jf: 7, k: NATIVE_ARCHITECTURE }, // test ABI
         libc::sock_filter { code: LOAD_WORD,        jt: 0, jf: 0, k: SYSCALL_NUMBER },
-        libc::sock_filter { code: JUMP_IF_AT_LEAST, jt: 5, jf: 0, k: FOREIGN_NUMBERING },
-        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 0, jf: 2, k: SOCKET_SYSCALL },
+        libc::sock_filter { code: JUMP_IF_AT_LEAST, jt: 5, jf: 0, k: USES_X32_ABI_FLAG }, // Test 32 bit
+        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 0, jf: 2, k: SOCKET_SYSCALL }, // Only process a socket syscall
         libc::sock_filter { code: LOAD_WORD,        jt: 0, jf: 0, k: FIRST_ARGUMENT },
-        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 1, jf: 0, k: libc::AF_PACKET as u32 },
+        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 1, jf: 0, k: libc::AF_PACKET as u32 }, // return error if using AF_PACKET
         libc::sock_filter { code: RETURN,           jt: 0, jf: 0, k: libc::SECCOMP_RET_ALLOW },
         libc::sock_filter { code: RETURN,           jt: 0, jf: 0, k: REFUSE_WITH_EPERM },
         libc::sock_filter { code: RETURN,           jt: 0, jf: 0, k: libc::SECCOMP_RET_KILL_PROCESS },
     ];
 
+    // Make the struct
     let header = libc::sock_fprog {
         len: program.len() as libc::c_ushort,
         filter: program.as_mut_ptr(),
     };
 
-    // SAFETY: `libc` has no wrapper for this syscall. The kernel copies the
-    // program during the call and writes nothing back through the pointer, and
-    // both the program and the header outlive the call.
+    // Make the sys call
     let taken = unsafe {
         libc::syscall(
             libc::SYS_seccomp,
