@@ -105,7 +105,7 @@ and resizing support. Initial dimensions default to 24 rows by 80 columns.
 Terminal stderr is merged into `output`. Closing `input` requests terminal EOF
 when supported; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
-Unsupported combinations are rejected before sandbox creation.
+Unsupported combinations are rejected before container creation.
 
 ## Lifecycle API
 

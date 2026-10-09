@@ -106,7 +106,7 @@ resizing support. Initial dimensions default to 24 rows by 80 columns.
 PTY stderr is merged into `Output`. Closing `Input` requests terminal EOF in
 canonical mode; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
-Unsupported combinations are rejected before sandbox creation.
+Unsupported combinations are rejected before container creation.
 
 ## Lifecycle API
 
@@ -216,7 +216,7 @@ Backend/platform discovery, errors, telemetry, and helpers are also in
 | Terminal process outcome | `WaitResult` |
 
 All types above are in `Microsoft.Mxc.Sdk.V1`. See the
-[networking guide](https://github.com/microsoft/mxc/blob/main/docs/schema.md#directional-networking-supported-contracts);
+[networking guide](https://github.com/microsoft/mxc/blob/main/docs/schema.md#directional-networking-supported-contracts)
 for policy behavior and the
 [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md)
 for complete signatures and types.
@@ -233,7 +233,7 @@ IsolationSession provision metadata is present, `AgentUserName`, `AgentUserSid`,
 and `EphemeralWorkspacePath` are required non-null strings.
 
 `MxcPlatform.GetPlatformSupport()` reports whether the SDK can launch a
-sandbox on the current host. `MxcPlatform.GetAvailableBackends()` reports
+container on the current host. `MxcPlatform.GetAvailableBackends()` reports
 host backend capabilities; availability is advisory and launch-time
 validation still applies.
 

@@ -8,6 +8,9 @@ MXC uses a JSON configuration file. The current stable schema is at
 For development, the exact schema at
 [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
+See [containment policy by schema version](containment-configuration/README.md) for the
+supported `0.9.0-alpha`, stable `1.0.0`, and development `1.1.0-alpha`
+contracts and their differences.
 
 Editors that support JSON Schema will provide autocomplete and validation when
 you add a `"$schema"` reference to your config file. Use the stable schema for
@@ -259,17 +262,17 @@ that can be executed independently.
 `process.cwd` is optional. When it is set, it is passed to the backend
 verbatim — an unusable value fails the launch rather than being silently
 replaced. When it is **omitted**, backends do not simply inherit the launcher's
-working directory: under a deny-by-default sandbox that directory is usually
+working directory: under deny-by-default containment that directory is usually
 unreadable, and the result ranges from a confusing silent relocation (Windows
 restarts the child at the drive root) to `getcwd()` errors on the child's
-stderr. Each backend therefore substitutes a directory the sandbox can actually
+stderr. Each backend therefore substitutes a directory the container can actually
 use:
 
 | Backend | Default when `process.cwd` is omitted |
 |---------|----------------------------------------|
 | Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
-| Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
+| Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the container root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
 | MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
 
@@ -337,7 +340,7 @@ containment tier selected at runtime:
 - **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
   the run and removed on exit. This path is gated by `allowDaclMutation`, requires
   `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
-  Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
+  Because the ACEs are keyed on the container's derived AppContainer SID, two concurrent
   runs sharing the same `containerId` can revoke each other's ACEs — use distinct
   `containerId` values for parallel runs.
 
@@ -382,7 +385,7 @@ whether it applies, rejects, or ignores the section. **IsolationSession and WSLc
 refuse any supplied `ui` at every phase on both surfaces**, and each accepts an
 omitted one without applying any UI restriction — so the section's default-deny
 reading does not hold on either. The reasons differ: no `ui` posture is truthful
-for a session-isolated sandbox (see
+for a session-isolated container (see
 [IsolationSession state-aware Rust architecture](development/architecture/backends/isolation-session/state-aware-rust.md)),
 while WSLc has no mechanism to enforce UI restrictions on a container (see
 [`backends/wslc/wslc-state-aware.md`](backends/wslc/wslc-state-aware.md)).
@@ -419,7 +422,7 @@ force a particular backend.
 | Value | Description |
 |-------|-------------|
 | `"processcontainer"` | (Default) Windows process-level isolation. Resolves to AppContainer (legacy) or BaseContainer (newer OS sandbox API) at run time depending on host capabilities and the `--experimental` flag. |
-| `"windows_sandbox"` | Windows Sandbox VM isolation. Dual-mode: a transient **one-shot** runner that launches a fresh disposable VM per execution, and a **state-aware** lifecycle backed by a long-lived per-sandbox daemon. |
+| `"windows_sandbox"` | Windows Sandbox VM isolation. Dual-mode: a transient **one-shot** runner that launches a fresh disposable VM per execution, and a **state-aware** lifecycle backed by a long-lived per-container daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
@@ -438,7 +441,7 @@ The exact development schema documents a multi-phase envelope shape for the
 state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 `deprovision`). Where the one-shot config above is a self-contained
 `ExecutionRequest` to run once, a state-aware envelope identifies which
-phase is being driven against an existing provisioned sandbox.
+phase is being driven against an existing provisioned container.
 
 State-aware envelopes use an exact backend-specific contract:
 

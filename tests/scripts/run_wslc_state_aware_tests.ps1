@@ -1679,7 +1679,7 @@ try {
 # ---------------- Lifecycle J: exec concurrency ----------------
 
 # Placed ahead of H because H drives the daemon to exit. Each scenario needs two
-# phases in flight at once -- overlapping runs on separate sandboxes, a refused
+# phases in flight at once -- overlapping runs on separate containers, a refused
 # same-container second exec, and a lifecycle command issued mid-run -- so all
 # three use Start-StateAware rather than the sequential Invoke-StateAware.
 $script:ccSandboxA = $null
@@ -1689,33 +1689,33 @@ $ccBDeprovisionedOk = $false
 try {
     $ccAReady = $false
     $ccBReady = $false
-    $ccAProvOk = Run-StateAwareTest "J: provision sandbox A" {
+    $ccAProvOk = Run-StateAwareTest "J: provision container A" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
         $envObj = Assert-ResultEnvelope $r "concurrency A provision"
         if ($envObj) { $script:ccSandboxA = [string]$envObj.result.sandboxId }
     }
-    $ccBProvOk = Run-StateAwareTest "J: provision sandbox B" {
+    $ccBProvOk = Run-StateAwareTest "J: provision container B" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
         $envObj = Assert-ResultEnvelope $r "concurrency B provision"
         if ($envObj) { $script:ccSandboxB = [string]$envObj.result.sandboxId }
     }
     if ($ccAProvOk) {
-        $ccAReady = Run-StateAwareTest "J: start sandbox A" {
+        $ccAReady = Run-StateAwareTest "J: start container A" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:ccSandboxA
             $null = Assert-ResultEnvelope $r "concurrency A start"
         }
     }
     if ($ccBProvOk) {
-        $ccBReady = Run-StateAwareTest "J: start sandbox B" {
+        $ccBReady = Run-StateAwareTest "J: start container B" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:ccSandboxB
             $null = Assert-ResultEnvelope $r "concurrency B start"
         }
     }
 
-    # J1: both sandboxes share one utility VM, so their clocks agree and the two
+    # J1: both containers share one utility VM, so their clocks agree and the two
     # runs can be compared directly. Serialized runs cannot overlap at all.
     if ($ccAReady -and $ccBReady) {
-        Run-StateAwareTest "J: execs on two sandboxes overlap in wall clock" {
+        Run-StateAwareTest "J: execs on two containers overlap in wall clock" {
             $stamped = "sh -c 'date +%s; sleep 6; date +%s'"
             $sleepA = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = $stamped; timeout = 60000 } }
             $sleepB = @{ phase = 'exec'; sandboxId = $script:ccSandboxB; process = @{ commandLine = $stamped; timeout = 60000 } }
@@ -1742,7 +1742,7 @@ try {
     # J2: the refusal is a pre-admission error, so it reaches the client as an
     # envelope on stderr rather than a terminal stream frame.
     if ($ccAReady) {
-        Run-StateAwareTest "J: second exec on the same sandbox is refused as busy" {
+        Run-StateAwareTest "J: second exec on the same container is refused as busy" {
             $blocker = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = "sh -c 'echo blocker-ready; sleep 6; echo blocker-done'"; timeout = 30000 } }
             $second = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = 'echo should-not-run'; timeout = 30000 } }
 
@@ -1787,11 +1787,11 @@ try {
         } | Out-Null
     }
 
-    # J4: a long exec on A must not delay a full lifecycle on another sandbox,
-    # so C's own run has to fall inside A's. Both sandboxes share one utility VM,
+    # J4: a long exec on A must not delay a full lifecycle on another container,
+    # so C's own run has to fall inside A's. Both containers share one utility VM,
     # so their in-container stamps are on the same clock.
     if ($ccAReady) {
-        Run-StateAwareTest "J: a long exec on A does not block lifecycle work on another sandbox" {
+        Run-StateAwareTest "J: a long exec on A does not block lifecycle work on another container" {
             $blocker = @{ phase = 'exec'; sandboxId = $script:ccSandboxA; process = @{ commandLine = "sh -c 'echo blocker-ready; date +%s; sleep 25; date +%s; echo blocker-done'"; timeout = 60000 } }
             $blockerHandle = Start-StateAwareLines -Request $blocker
             $ready = Wait-StateAwareMarker -Handle $blockerHandle -Marker 'blocker-ready'

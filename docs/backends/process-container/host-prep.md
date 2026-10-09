@@ -4,14 +4,14 @@
 
 `wxc-host-prep.exe` is a Windows-only, privileged-by-manifest binary
 that owns the one-time host setup steps MXC requires before
-AppContainer- and other sandboxed workloads can run reliably. It is
+AppContainer- and other contained workloads can run reliably. It is
 shipped alongside `wxc-exec.exe` inside the SDK bin payload.
 
 The binary has `requireAdministrator` baked into its embedded
 application manifest in release builds. The Windows loader prompts
 for UAC at process start (or, when launched under SYSTEM — e.g. from
 a scheduled task — satisfies the requirement trivially). The
-sandbox launcher `wxc-exec.exe` never elevates itself; all
+container launcher `wxc-exec.exe` never elevates itself; all
 privilege-requiring setup work lives in `wxc-host-prep.exe` instead.
 
 > **Migrated from `wxc-exec --prepare-system-drive`.** Earlier

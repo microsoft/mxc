@@ -7,8 +7,8 @@ A unified diagnostic view across every layer of the MXC stack:
 | Layer | Source | What you see |
 |-------|--------|--------------|
 | **SDK** | `mxc-sdk` (TypeScript) | SDK version, policy construction |
-| **Runtime** | `wxc-exec.exe` (Rust) | Input config, parsed request, sandbox spec, process lifecycle, timing |
-| **OS** | MXC OS-side ETW provider | Kernel-side sandbox creation and validation events |
+| **Runtime** | `wxc-exec.exe` (Rust) | Input config, parsed request, container spec, process lifecycle, timing |
+| **OS** | MXC OS-side ETW provider | Kernel-side container creation and validation events |
 | **Internals** | Kernel-General ETW (learning mode) | Access checks that would have been denied, logged instead of blocked |
 
 All layers stream into a single `mxc-diagnostic-console.exe` window in real time.
@@ -60,7 +60,7 @@ it:
 - `mxc-diagnostic-console.exe` prints an error and **exits with code 1**.
 - `wxc-exec.exe` prints `[MXC Diagnostics] Refusing an unauthenticated
   diagnostic pipe` to stderr and continues running **without** pipe output. The
-  sandboxed workload still runs normally; only the diagnostics are lost.
+  contained workload still runs normally; only the diagnostics are lost.
 
 If the console starts but never shows any events, an unset or malformed token on
 the `wxc-exec` side is the first thing to check — the two processes must agree on
@@ -238,13 +238,13 @@ From an elevated PowerShell window:
 > **Do not delete the marker first.** Removing it neither stops WPR nor proves
 > that the recording is safe to discard. It only removes MXC's durable warning
 > that host trace state could not be verified. This recovery procedure changes
-> only host-side WPR bookkeeping; it does not change sandbox policy or
+> only host-side WPR bookkeeping; it does not change containment policy or
 > enforcement.
 
 ## What Gets Logged
 
 - Input JSON config and parsed `ExecutionRequest` (env values redacted, script truncated)
-- Sandbox spec details (size, UI flags, capabilities, filesystem/network policy)
+- Container spec details (size, UI flags, capabilities, filesystem/network policy)
 - Process lifecycle (command line, identity, child PID, exit code, elapsed time)
 - Section markers for key execution stages
 - **Structured audit records** — one JSON object per line, prefixed `{"event":"mxc.`
@@ -253,10 +253,10 @@ From an elevated PowerShell window:
 
 Alongside the human-readable prose above, both sinks carry machine-readable
 audit records: process exit / timeout / kill outcome, enforcement-tier
-degradation, policy hash, network policy applied, sandbox teardown, config
-rejection, and the sandbox identity join key.
+degradation, policy hash, network policy applied, container teardown, config
+rejection, and the container identity join key.
 
-Records are joined by `identity` once a sandbox exists. A config rejection is
+Records are joined by `identity` once a container exists. A config rejection is
 refused *before* an identity is assigned, so `mxc.ConfigRejected` instead carries
 a `correlation_id` — an opaque hex token minted once per `wxc-exec` invocation
 and stable for that invocation, which groups several rejection records from the

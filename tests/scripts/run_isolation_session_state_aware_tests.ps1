@@ -1328,14 +1328,14 @@ try {
     }
 
     # Test 11b: stale_id breadth. Every non-provision phase resolves the agent
-    # user from the sandbox id, so a deprovisioned id must read as stale on all
+    # user from the container id, so a deprovisioned id must read as stale on all
     # of them -- not just the `stop` asserted above. `operation` is checked for
     # shape rather than an exact value here: which API call first reports
     # ERROR_NOT_FOUND depends on the OS-side capability set, and test 11 already
     # pins one exact constant. `deprovision` is covered separately below.
     if ($deprovisionedOk) {
         foreach ($phase in @('start', 'exec')) {
-            Run-StateAwareTest "stale_id ($phase on previously-deprovisioned sandbox)" {
+            Run-StateAwareTest "stale_id ($phase on previously-deprovisioned container)" {
                 $req = @{
                     phase     = $phase
                     sandboxId = $script:sandboxId
@@ -1344,7 +1344,7 @@ try {
                     $req.process = @{ commandLine = 'cmd /c echo stale_should_not_run'; timeout = 30000 }
                 }
                 $r = Invoke-StateAware -Request $req
-                Assert-True ($r.ExitCode -ne 0) "exit code is non-zero ($phase on a stale sandbox failed as expected)"
+                Assert-True ($r.ExitCode -ne 0) "exit code is non-zero ($phase on a stale container failed as expected)"
                 $envObj = Parse-Envelope -Stdout $r.Stdout
                 if ($null -eq $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
                 Assert-True ($null -ne $envObj) "the failure is a parseable envelope"
@@ -1357,18 +1357,18 @@ try {
                 Assert-True ($nativeCode -eq '0x80070490') `
                     "error.nativeCode is '0x80070490' (got '$nativeCode')"
                 Assert-True (-not ($r.Stdout -match 'stale_should_not_run')) `
-                    "no workload ran against the stale sandbox"
+                    "no workload ran against the stale container"
             } | Out-Null
         }
     }
 
-    # Test 11c: `deprovision` against a deprovisioned sandbox. Documented to
+    # Test 11c: `deprovision` against a deprovisioned container. Documented to
     # report stale_id like the phases above, but RemoveUser reports success for
     # an agent user that is already gone, so the runner never sees an
     # ERROR_NOT_FOUND to promote. Recorded without failing the suite while
     # #1429 is open.
     if ($deprovisionedOk) {
-        Run-StateAwareTest "stale_id (deprovision on previously-deprovisioned sandbox)" {
+        Run-StateAwareTest "stale_id (deprovision on previously-deprovisioned container)" {
             $r = Invoke-StateAware -Request @{ phase = 'deprovision'; sandboxId = $script:sandboxId }
             $envObj = Parse-Envelope -Stdout $r.Stdout
             if ($null -eq $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
@@ -1828,11 +1828,11 @@ try {
 #   - the mandated all-allow network posture really carries traffic,
 #   - exec output reaches the caller while the command is still running,
 #   - `process.timeout` ends a long command and leaves the session usable,
-#   - a caller killed mid-exec does not take the sandbox with it,
-#   - repeating a lifecycle call never corrupts the sandbox,
+#   - a caller killed mid-exec does not take the container with it,
+#   - repeating a lifecycle call never corrupts the container,
 #   - the agent account named in the provision metadata is created and removed.
 
-# Provision a sandbox and capture the full provision metadata.
+# Provision a container and capture the full provision metadata.
 function Provision-LifecycleGSandbox {
     $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json'
     $envObj = Parse-Envelope -Stdout $r.Stdout
@@ -1940,7 +1940,7 @@ try {
 
         # G4: process.timeout. Only the one-shot path had a timeout test; the
         # state-aware exec deadline was unexercised, as was the question of
-        # whether a timed-out exec consumes the sandbox.
+        # whether a timed-out exec consumes the container.
         Run-StateAwareTest "Lifecycle G: exec honours process.timeout and leaves the session usable" {
             $req = @{
                 phase     = 'exec'
@@ -1964,13 +1964,13 @@ try {
             Assert-True ($elapsed -lt 45) "the deadline ended the run early (took $([int]$elapsed)s)"
 
             $after = Exec-InSession -SandboxId $script:gSandbox.SandboxId -CommandLine 'cmd /c echo after_timeout_marker'
-            Assert-True ($after.ExitCode -eq 0) "a later exec against the same sandbox exits 0"
-            Assert-True ($after.Stdout -match 'after_timeout_marker') "the sandbox survives a timed-out exec"
+            Assert-True ($after.ExitCode -eq 0) "a later exec against the same container exits 0"
+            Assert-True ($after.Stdout -match 'after_timeout_marker') "the container survives a timed-out exec"
         } | Out-Null
 
-        # G5: recovery. The sandbox outlives the process that created it, so a
+        # G5: recovery. The container outlives the process that created it, so a
         # caller dying mid-exec must not strand or tear down the session.
-        Run-StateAwareTest "Lifecycle G: a caller killed mid-exec leaves the sandbox usable" {
+        Run-StateAwareTest "Lifecycle G: a caller killed mid-exec leaves the container usable" {
             $req = @{
                 phase     = 'exec'
                 sandboxId = $script:gSandbox.SandboxId
@@ -1989,14 +1989,14 @@ try {
             Assert-True (-not ($r.Stdout -match 'crash_probe_finished')) "the killed exec did not run to completion"
 
             $after = Exec-InSession -SandboxId $script:gSandbox.SandboxId -CommandLine 'cmd /c echo recovered_marker'
-            Assert-True ($after.ExitCode -eq 0) "a later exec against the same sandbox exits 0"
-            Assert-True ($after.Stdout -match 'recovered_marker') "the sandbox is still usable after its caller died"
+            Assert-True ($after.ExitCode -eq 0) "a later exec against the same container exits 0"
+            Assert-True ($after.Stdout -match 'recovered_marker') "the container is still usable after its caller died"
         } | Out-Null
 
         # G6: repeated start. MXC forwards start/stop straight to the OS service
         # and does not normalise the repeat outcome, so the assertable contract
         # is that repeating the call is *safe*: it answers in a well-formed way
-        # and the sandbox still works afterwards. A hang, a crash, unparseable
+        # and the container still works afterwards. A hang, a crash, unparseable
         # output, or a bricked session all fail this.
         Run-StateAwareTest "Lifecycle G: repeating start is safe" {
             $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:gSandbox.SandboxId
@@ -2009,8 +2009,8 @@ try {
                 Write-Host "  repeat start refused with '$(if ($envObj) { $envObj.error.code } else { '<none>' })'" -ForegroundColor DarkGray
             }
             $after = Exec-InSession -SandboxId $script:gSandbox.SandboxId -CommandLine 'cmd /c echo after_repeat_start_marker'
-            Assert-True ($after.ExitCode -eq 0) "the sandbox still execs after a repeated start"
-            Assert-True ($after.Stdout -match 'after_repeat_start_marker') "the repeated start did not corrupt the sandbox"
+            Assert-True ($after.ExitCode -eq 0) "the container still execs after a repeated start"
+            Assert-True ($after.Stdout -match 'after_repeat_start_marker') "the repeated start did not corrupt the container"
         } | Out-Null
     }
 
@@ -2021,7 +2021,7 @@ try {
         }
 
         # G7: repeated stop. Same contract as the repeated start: whatever the
-        # OS reports, the sandbox must remain deprovisionable (asserted by G8
+        # OS reports, the container must remain deprovisionable (asserted by G8
         # running immediately after this).
         if ($gStoppedOk) {
             Run-StateAwareTest "Lifecycle G: repeating stop is safe" {
@@ -2033,7 +2033,7 @@ try {
                     if ($null -eq $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
                     Assert-True ((Envelope-Arm $envObj) -eq 'error') "a refused repeat stop is a well-formed error envelope"
                     $code = if ($envObj) { [string]$envObj.error.code } else { '<none>' }
-                    Assert-True ($code -ne 'stale_id') "a stopped-but-provisioned sandbox is not reported as stale (got '$code')"
+                    Assert-True ($code -ne 'stale_id') "a stopped-but-provisioned container is not reported as stale (got '$code')"
                 }
             } | Out-Null
         }
@@ -2055,7 +2055,7 @@ try {
         }
         if ($gDeprovPassed) {
             $gDeprov = $true
-            Run-StateAwareTest "Lifecycle G: repeating deprovision reports a stale sandbox" {
+            Run-StateAwareTest "Lifecycle G: repeating deprovision reports a stale container" {
                 $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:gSandbox.SandboxId
                 $envObj = Parse-Envelope -Stdout $r.Stdout
                 if ($null -eq $envObj) { $envObj = Parse-StderrEnvelope -Stderr $r.Stderr }
@@ -2069,7 +2069,7 @@ try {
     Stop-LoopbackAnchor -Anchor $script:gAnchor
     if ($null -ne $script:gSandbox -and -not $gDeprov) {
         Write-Host ""
-        Write-Host "[cleanup] best-effort deprovision of Lifecycle G sandbox ($($script:gSandbox.SandboxId))" -ForegroundColor DarkGray
+        Write-Host "[cleanup] best-effort deprovision of Lifecycle G container ($($script:gSandbox.SandboxId))" -ForegroundColor DarkGray
         try {
             $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:gSandbox.SandboxId
         } catch { }

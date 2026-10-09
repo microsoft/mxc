@@ -6,7 +6,7 @@
 
 [Bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) is a lightweight, unprivileged
 sandboxing tool for Linux. It uses Linux kernel namespaces (user, mount, PID, network, IPC, UTS)
-to create sandboxed environments *without* requiring root privileges or a container runtime like
+to create isolated container environments *without* requiring root privileges or a container runtime like
 LXC. It's the same technology backing Flatpak sandboxing.
 
 Key advantages over LXC for MXC:
@@ -275,10 +275,10 @@ same iptables-based approach used by the LXC backend.
    specified, use `--unshare-net` for zero-overhead full isolation (no iptables needed).
 
 2. When `allowedHosts` or `blockedHosts` are specified, **do not** use `--unshare-net`
-   (the sandbox shares the host network namespace). Instead:
+   (the container shares the host network namespace). Instead:
    - Discover the bwrap child PID
-   - Create a per-sandbox iptables chain via `NetworkIptablesManager`
-   - Apply allow/block rules scoped to the sandbox process using `--pid-owner` match
+   - Create a per-container iptables chain via `NetworkIptablesManager`
+   - Apply allow/block rules scoped to the contained process using `--pid-owner` match
      or cgroup-based scoping
    - Clean up rules after execution
 

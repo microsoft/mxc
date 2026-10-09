@@ -2,7 +2,7 @@
 
 > **Audience:** MXC consumers
 
-MXC sandboxes are **deny-by-default**: when a workload touches a file, registry
+MXC containers are **deny-by-default**: when a workload touches a file, registry
 key, or other resource the policy does not grant, the access is blocked and the
 OS returns the usual "Access is denied" error. For non-trivial workloads this is
 operationally fragile — the author must enumerate every path the workload will
@@ -117,7 +117,7 @@ stays enforced:
    ```
 
 2. **App / user-configurable (`captureDenials` block / `learningModeLogging`).**
-   An app wants to let its users "configure" their own sandbox. Each user
+   An app wants to let its users "configure" their own container. Each user
    workflow differs, so the app records what was blocked, presents it through its
    own UX, and re-generates the config with the new paths/capabilities.
    Deny-by-default stays enforced — the workload behaves exactly as it would in
@@ -174,9 +174,9 @@ ungranted access is handled while it is recorded:
 
 ### Output file the caller consumes
 
-After the sandboxed workload exits, MXC decodes the captured denials and writes
+After the contained workload exits, MXC decodes the captured denials and writes
 the policy JSON deliverable a host application reads to regenerate its
-sandbox policy:
+containment policy:
 
 ```json
 {
@@ -384,7 +384,7 @@ succeeds.
 
 WPR's source ETL is host-wide, so the elevated guarded-WPR helper never
 transfers that file across the privilege boundary for `captureDenials` or
-`--audit`. After the sandbox process tree terminates, the helper uses the
+`--audit`. After the contained process tree terminates, the helper uses the
 retained, job-attested process handles and their exact PID/creation/exit
 `FILETIME` ranges to relog a second ETL. The
 retained ETL contains only supported Learning Mode events whose event header

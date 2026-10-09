@@ -15,8 +15,8 @@ see [Windows OS-version policy support](../../backends/process-container/os-vers
 
 ## Prerequisites
 
-1. Read the [supported configuration schema](../../schema.md) for policy and
-   request fields.
+1. Read the [stable containment policy spec](../../containment-configuration/1.0.0/policy.md)
+   for the current exact request and policy fields.
 2. Read [authoring-a-new-feature.md](authoring-a-new-feature.md), especially
    Step 1 (feature spec) and Step 2 (OS changes).
 3. Submit a feature spec so reviewers understand the end-to-end flow.
