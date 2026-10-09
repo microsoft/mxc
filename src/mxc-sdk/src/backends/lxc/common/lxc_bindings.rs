@@ -135,6 +135,11 @@ pub enum ContainerFirewall {
     Absent,
 }
 
+/// Two networking capabilities LXC cares about are CAP_NET_ADMIN and CAP_NET_RAW.
+/// CAP_NET_ADMIN allows a process to change the networking rules
+/// CAP_NET_RAW allows a process to use RAW and PACKET sockets and those allow a process to bypass
+///    a network chain.
+/// Remove both capabilities here. (Technically CAP_NET_RAW is not removed.  More details inside)
 #[cfg(target_os = "linux")]
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -143,16 +148,108 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     const CAP_NET_ADMIN: libc::c_ulong = 12;
 
     // SAFETY: `pre_exec` runs between fork and exec, where only
-    // async-signal-safe work is permitted. `prctl` is a bare syscall and this
-    // closure allocates nothing and captures nothing.
+    // async-signal-safe work is permitted. `prctl` and `seccomp` are bare
+    // syscalls, the filter lives on the stack, and this closure allocates
+    // nothing and captures nothing.
     unsafe {
+        // Take away CAP_NET_ADMIN.
         command.pre_exec(|| {
             if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            Ok(())
+
+            // Refuse AF_PACKET communication.
+            refuse_packet_sockets()
         });
     }
+}
+
+/// Removing CAP_NET_RAW prevents a process from using RAW and PACKET sockets.  However, ICMP is also denied.
+/// LXC needs to allow ICMP and prevent programs from using sockets to
+/// bypass the network guards.  The solution is to give the kernel a custom filter to refuse
+/// any socket that carries AF_PACKET.  LXC utilizes seccomp.
+/// see https://docs.kernel.org/userspace-api/seccomp_filter.html and
+/// https://man7.org/linux/man-pages/man2/seccomp.2.html
+#[cfg(target_os = "linux")]
+fn refuse_packet_sockets() -> std::io::Result<()> {
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    compile_error!("LXC only understands seccomp system calls for x86_64 and arm64.");
+
+    // https://docs.kernel.org/networking/filter.html for more information on filtering sockets
+    // Filtering sockets requires assembling a small filter program with assembly like syntax.
+    // The below code is to consolidate some commands into easy to understand words.
+
+    // https://github.com/torvalds/linux/blob/master/include/uapi/linux/bpf_common.h
+    // Common BPF words
+    const LOAD_WORD: u16 = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+    const JUMP_IF_EQUAL: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+    const JUMP_IF_AT_LEAST: u16 = (libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K) as u16;
+    const RETURN: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
+
+    // https://github.com/torvalds/linux/blob/master/include/uapi/linux/seccomp.h
+    // Keys of the information needed during the filter.
+    const SYSCALL_NUMBER: u32 = 0;
+    const ARCHITECTURE: u32 = 4;
+    const FIRST_ARGUMENT: u32 = 16;
+
+    const REFUSE_WITH_EPERM: u32 = libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32);
+
+    const NO_FLAGS: libc::c_ulong = 0;
+
+    // numbers come from
+    // https://github.com/torvalds/linux/blob/master/include/uapi/linux/audit.h
+    // To test the ABI the filter needs to know the endianness and arch.
+    const _64BIT_ABI_LITTLE_ENDIANNESS: u32 = 0x8000_0000 | 0x4000_0000;
+
+    // Also from https://github.com/torvalds/linux/blob/master/include/uapi/linux/audit.h
+    #[cfg(target_arch = "x86_64")]
+    const NATIVE_ARCHITECTURE: u32 = _64BIT_ABI_LITTLE_ENDIANNESS | libc::EM_X86_64 as u32;
+    #[cfg(target_arch = "aarch64")]
+    const NATIVE_ARCHITECTURE: u32 = _64BIT_ABI_LITTLE_ENDIANNESS | libc::EM_AARCH64 as u32;
+
+    // Filter only works for x64 and arm64 ABI's.
+    // Used to filter out a 32 bit process under the "Filters" section.
+    // check https://man7.org/linux/man-pages/man2/seccomp.2.html
+    const USES_X32_ABI_FLAG: u32 = 0x4000_0000;
+
+    const SOCKET_SYSCALL: u32 = libc::SYS_socket as u32;
+
+    // Make the filter
+    #[rustfmt::skip]
+    let mut program = [
+        libc::sock_filter { code: LOAD_WORD,        jt: 0, jf: 0, k: ARCHITECTURE },
+        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 0, jf: 7, k: NATIVE_ARCHITECTURE }, // test ABI
+        libc::sock_filter { code: LOAD_WORD,        jt: 0, jf: 0, k: SYSCALL_NUMBER },
+        libc::sock_filter { code: JUMP_IF_AT_LEAST, jt: 5, jf: 0, k: USES_X32_ABI_FLAG }, // Test 32 bit
+        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 0, jf: 2, k: SOCKET_SYSCALL }, // Only process a socket syscall
+        libc::sock_filter { code: LOAD_WORD,        jt: 0, jf: 0, k: FIRST_ARGUMENT },
+        libc::sock_filter { code: JUMP_IF_EQUAL,    jt: 1, jf: 0, k: libc::AF_PACKET as u32 }, // return error if using AF_PACKET
+        libc::sock_filter { code: RETURN,           jt: 0, jf: 0, k: libc::SECCOMP_RET_ALLOW },
+        libc::sock_filter { code: RETURN,           jt: 0, jf: 0, k: REFUSE_WITH_EPERM },
+        libc::sock_filter { code: RETURN,           jt: 0, jf: 0, k: libc::SECCOMP_RET_KILL_PROCESS },
+    ];
+
+    // Make the struct
+    let header = libc::sock_fprog {
+        len: program.len() as libc::c_ushort,
+        filter: program.as_mut_ptr(),
+    };
+
+    // Make the sys call
+    let taken = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER as libc::c_ulong,
+            NO_FLAGS,
+            &header as *const libc::sock_fprog,
+        )
+    };
+
+    if taken != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 /// A `/etc/hosts` helper emits one `mxc:` diagnostic line, so this is far above
@@ -1450,9 +1547,9 @@ mod tests {
         );
     }
 
-    // The attach paths drop this capability only when chains are installed: the
-    // drop is privileged, so applying it to every run costs an unprivileged
-    // caller the whole execution.
+    // The attach paths confine the workload only when chains are installed:
+    // dropping a capability is privileged, so applying it to every run costs an
+    // unprivileged caller the whole execution.
     #[cfg(target_os = "linux")]
     #[test]
     fn confining_a_command_takes_a_privilege_an_unprivileged_caller_lacks() {
@@ -1477,6 +1574,99 @@ mod tests {
         assert!(
             unconfined.status().is_ok(),
             "a run with no chains to protect must spawn without any privilege"
+        );
+    }
+
+    /// The probe child opened `AF_PACKET`.
+    #[cfg(target_os = "linux")]
+    const AF_PACKET_ALLOWED: i32 = 10;
+
+    /// The probe child was refused with EPERM, which is what the filter returns.
+    #[cfg(target_os = "linux")]
+    const AF_PACKET_REFUSED_EPERM: i32 = 11;
+
+    /// The probe child was refused, but for some other reason.
+    #[cfg(target_os = "linux")]
+    const AF_PACKET_REFUSED_OTHER: i32 = 12;
+
+    /// Fork a child that optionally installs the packet-socket filter, opens
+    /// `socket(AF_PACKET, SOCK_RAW, 0)`, and reports which answer the kernel
+    /// gave.  The child leaves through `_exit` and never reaches `exec`, so the
+    /// attempt runs in the same post-fork context that confines a real
+    /// workload.  Reporting through the exit code keeps a refusal distinct from
+    /// a child that never ran: a missing or unspawnable program cannot forge
+    /// one of these three numbers.
+    #[cfg(target_os = "linux")]
+    fn probe_packet_socket(install_filter: bool) -> i32 {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = std::process::Command::new("/bin/true");
+
+        // SAFETY: `pre_exec` runs between fork and exec, where only
+        // async-signal-safe work is permitted.  This closure makes bare
+        // syscalls, allocates nothing, and leaves through `_exit`, which skips
+        // the atexit handlers the parent still owns.
+        unsafe {
+            command.pre_exec(move || {
+                // Seccomp wants this or CAP_SYS_ADMIN.  Production is root and
+                // gets it from the capability; setting it here lets the probe
+                // report the filter's own verdict at any privilege level.
+                libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+
+                if install_filter {
+                    refuse_packet_sockets()?;
+                }
+
+                let descriptor = libc::socket(libc::AF_PACKET, libc::SOCK_RAW, 0);
+                if descriptor >= 0 {
+                    libc::close(descriptor);
+                    libc::_exit(AF_PACKET_ALLOWED);
+                }
+
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                    libc::_exit(AF_PACKET_REFUSED_EPERM)
+                } else {
+                    libc::_exit(AF_PACKET_REFUSED_OTHER)
+                }
+            });
+        }
+
+        command
+            .status()
+            .expect("the probe child must fork")
+            .code()
+            .expect("the probe child reports through its exit code, never a signal")
+    }
+
+    // `Seccomp: 2` in `/proc/self/status` says a filter is attached, not that it
+    // refuses anything: a filter permitting every syscall reports the same
+    // number.  This opens the one socket the filter exists to stop and reads
+    // the kernel's answer.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_filter_refuses_a_packet_socket_with_eperm() {
+        assert_eq!(
+            probe_packet_socket(true),
+            AF_PACKET_REFUSED_EPERM,
+            "a workload under the filter must not reach AF_PACKET, which writes \
+             frames below the chains confining it"
+        );
+    }
+
+    // The control for the test above.  On its own an EPERM settles nothing,
+    // because a caller lacking CAP_NET_RAW is refused identically and an empty
+    // filter would pass just as well.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_packet_socket_is_otherwise_open_to_a_caller_holding_cap_net_raw() {
+        // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
+        let running_as_root = unsafe { libc::geteuid() } == 0;
+
+        assert_eq!(
+            probe_packet_socket(false) == AF_PACKET_ALLOWED,
+            running_as_root,
+            "an unfiltered caller holding CAP_NET_RAW has to reach AF_PACKET, or \
+             the refusal above is the privilege talking rather than the filter"
         );
     }
 

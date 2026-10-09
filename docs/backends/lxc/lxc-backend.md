@@ -333,12 +333,11 @@ The zone query should answer the zone you assigned.
   container init keeps `CAP_NET_ADMIN` there, so a process running as root inside
   the container can flush or delete them. The command MXC runs is attached with
   `CAP_NET_ADMIN` dropped from its bounding set whenever chains are installed, so
-  it cannot. Default-deny closes external reachability for a container that does
+  it cannot. That same attach installs a seccomp filter refusing
+  `socket(AF_PACKET, ...)` with `EPERM`. Without it a workload holding
+  `CAP_NET_RAW` could put frames on the wire beneath the chains, which filter at
+  the IP layer. Default-deny closes external reachability for a container that does
   not deliberately tear it down, including services the workload itself starts.
-- **Raw sockets bypass egress filtering.** `CAP_NET_RAW` is retained so that an
-  explicit `protocol: "icmp"` allow works. It also permits `AF_PACKET` sockets,
-  which write link-layer frames straight to the interface without traversing the
-  filter chain.
 - **Policy is not in force while the container starts.** The chains are installed
   after the container has started and its address has settled, so container init
   and anything it starts run unfiltered in both directions for that interval. The

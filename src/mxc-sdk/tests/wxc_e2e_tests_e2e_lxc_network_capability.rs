@@ -9,6 +9,7 @@ use serde_json::json;
 use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value};
 
 const CAP_NET_ADMIN: u64 = 1 << 12;
+const CAP_NET_RAW: u64 = 1 << 13;
 
 /// Whether the LXC capability prerequisites are present.
 fn ready() -> bool {
@@ -25,13 +26,24 @@ fn capability_mask(status: &str, field: &str) -> u64 {
         .unwrap_or_else(|| panic!("the container reported no readable {field} line\n{status}"))
 }
 
+/// Read one decimal field out of the container's `/proc/self/status`.
+fn status_number(status: &str, field: &str) -> u64 {
+    status
+        .lines()
+        .find(|line| line.starts_with(field))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("the container reported no readable {field} line\n{status}"))
+}
+
 #[test]
-fn workload_cannot_reconfigure_the_network() {
+fn workload_cannot_reconfigure_or_bypass_the_network() {
     if !ready() {
         return;
     }
 
-    // The drop only happens when chains exist, so this policy asks for a firewall.
+    // The confinement only happens when chains exist.  This policy asks for a
+    // firewall to bring it on.
     let config = json!({
         "version": "0.9.0-alpha",
         "containerId": "lxc-network-capability",
@@ -72,5 +84,21 @@ fn workload_cannot_reconfigure_the_network() {
             0,
             "{field} still carries CAP_NET_ADMIN; the workload can rewrite the firewall confining it\n{status}"
         );
+
+        assert_ne!(
+            capability_mask(&status, field) & CAP_NET_RAW,
+            0,
+            "{field} lost CAP_NET_RAW; an explicit `protocol: \"icmp\"` allow needs a raw socket\n{status}"
+        );
     }
+
+    // 2 is SECCOMP_MODE_FILTER.  The kernel writes this line too, and a filter
+    // cannot be lifted once it is attached.  This asserts only that one is
+    // attached; that it refuses AF_PACKET with EPERM is proven by the
+    // lxc_bindings unit test the_filter_refuses_a_packet_socket_with_eperm.
+    assert_eq!(
+        status_number(&status, "Seccomp:"),
+        2,
+        "the workload runs with no seccomp filter; AF_PACKET reaches the interface below the chains\n{status}"
+    );
 }
