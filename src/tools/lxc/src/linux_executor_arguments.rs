@@ -99,7 +99,10 @@ impl LinuxExecutorArguments {
         } else if let Some(ref path) = self.config_path {
             (path.clone(), false)
         } else {
-            (String::new(), false)
+            eprintln!(
+                "Error: No config provided. Use a positional path, --config, or --config-base64"
+            );
+            process::exit(1);
         };
 
         let mut logger = Logger::new(if self.debug {
@@ -166,9 +169,9 @@ impl LinuxExecutorArguments {
 
             // Setup is an interactive install: the pull and the warm-up
             // report progress as they go.
-            let runtimes = mxc_sdk::hyperlight_common::parse_runtimes(
-                &self.setup_hyperlight.clone().unwrap(),
-            )?;
+            let runtimes =
+                mxc_sdk::hyperlight_common::parse_runtimes(&self.setup_hyperlight.clone().unwrap())
+                    .map_err(|message| format!("Error: {message}"))?;
 
             let mut logger = mxc_sdk::mxc_common::logger::Logger::new(
                 mxc_sdk::mxc_common::logger::Mode::Console,
