@@ -85,6 +85,7 @@ jobs:
         working-directory: src
         run: |
           cargo test -p wxc_e2e_tests --target x86_64-pc-windows-msvc test_microvm_ -- --nocapture
+          cargo test -p mxc-sdk --features microvm --target x86_64-pc-windows-msvc --test nvx_e2e -- --ignored --nocapture
 
       - name: Upload logs on failure
         if: failure() || cancelled()

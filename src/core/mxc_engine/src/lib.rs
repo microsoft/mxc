@@ -92,11 +92,6 @@ pub struct CapturedExecutionResult {
     pub stderr: Vec<u8>,
 }
 
-pub enum OneShotExecution {
-    Captured(CapturedExecutionResult),
-    Streaming(Box<dyn SandboxProcess>),
-}
-
 /// Spawn a streaming [`SandboxProcess`] handle for a normalized
 /// [`ExecutionRequest`].
 ///
@@ -141,27 +136,30 @@ pub fn spawn_one_shot_json(
 }
 
 #[doc(hidden)]
-pub fn execute_one_shot_json(
+pub fn run_nvx_one_shot_json(
     request_json: &str,
     experimental: bool,
-) -> Result<OneShotExecution, Error> {
+) -> Result<CapturedExecutionResult, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
 
-    if request.containment == ContainmentBackend::MicroVm {
-        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
-        {
-            return run_captured_execution_request(&request, logger)
-                .map(OneShotExecution::Captured);
-        }
-        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
-        {
-            return spawn_execution_request_with_logger(&request, logger)
-                .map(OneShotExecution::Streaming);
-        }
+    if request.containment != ContainmentBackend::MicroVm {
+        return Err(Error::from(MxcError::unsupported_containment(
+            "the NVX test entry point requires containment 'microvm'",
+        )));
     }
 
-    spawn_execution_request_with_logger(&request, logger).map(OneShotExecution::Streaming)
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+    {
+        run_captured_execution_request(&request, logger)
+    }
+    #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+    {
+        let _ = logger;
+        Err(Error::from(MxcError::backend_unavailable(
+            "NVX requires Windows x64 and the mxc_engine microvm feature",
+        )))
+    }
 }
 
 fn parse_one_shot_json(
@@ -207,6 +205,21 @@ fn run_captured_execution_request(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
+    crate::run::log_policy_hash(request, &mut logger);
+    if let Err(response) = wxc_common::validator::validate_common(request) {
+        let error = if request.script_code.is_empty() {
+            MxcError::malformed_request(response.error_message)
+        } else {
+            MxcError::policy_validation(response.error_message)
+        };
+        telemetry::emit_sdk_early_exit_with_kind(
+            telemetry_registration.transfer(),
+            &request.containment,
+            requested_sandbox_kind,
+            telemetry::classify_mxc_error(&error),
+        );
+        return Err(Error::from(error));
+    }
     let started = std::time::Instant::now();
     let mut runner = nvx_runner::NvxRunner::new();
     let result = match runner.run_captured(request, &mut logger) {

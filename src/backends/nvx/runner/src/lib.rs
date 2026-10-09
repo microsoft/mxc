@@ -56,8 +56,13 @@ impl NvxRunner {
             execution.wait_with_output().map_err(map_nvx_error)
         })();
 
+        let stop_error = client.stop(&sandbox_id).err().map(map_nvx_error);
+        let stop_error = match stop_error {
+            Some(error) if primary.is_err() && error.code == MxcErrorCode::AlreadyStopped => None,
+            other => other,
+        };
         let cleanup_errors: Vec<MxcError> = [
-            client.stop(&sandbox_id).err().map(map_nvx_error),
+            stop_error,
             client.deprovision(&sandbox_id).err().map(map_nvx_error),
         ]
         .into_iter()
@@ -90,7 +95,9 @@ impl NvxRunner {
         let outcome = match output.outcome {
             ExecOutcome::Exited(code) => CapturedOutcome::Exited(code),
             ExecOutcome::TimedOut => CapturedOutcome::TimedOut,
-            ExecOutcome::Signaled(signal) => CapturedOutcome::Exited(-signal),
+            ExecOutcome::Signaled(signal) => {
+                CapturedOutcome::Exited(128_i32.saturating_add(signal))
+            }
             other => {
                 return Err(MxcError::backend_error(format!(
                     "NVX workload did not complete normally: {other}"

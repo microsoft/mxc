@@ -23,7 +23,7 @@ fn run_nonce(label: &str) {
         }
     });
 
-    let result = mxc_sdk::__ffi::run_json(&request.to_string(), true)
+    let result = mxc_sdk::__ffi::run_nvx_json(&request.to_string(), true)
         .expect("exact alpha MicroVM request should run through NVX");
     assert_eq!(result.outcome, WaitResult::Exited(0));
     assert!(

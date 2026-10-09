@@ -352,12 +352,15 @@ pub mod __ffi {
     /// Run a raw exact-version JSON container request to completion and capture
     /// its output. The JSON and `experimental` rules match [`spawn_container_json`].
     pub fn run_json(request_json: &str, experimental: bool) -> Result<ExecutionResult, Error> {
-        match mxc_engine::execute_one_shot_json(request_json, experimental)? {
-            mxc_engine::OneShotExecution::Captured(result) => Ok(captured_execution_result(result)),
-            mxc_engine::OneShotExecution::Streaming(process) => {
-                wait_with_output(MxcProcess::new(process))
-            }
-        }
+        wait_with_output(spawn_container_json(request_json, experimental)?)
+    }
+
+    /// Run an exact-version MicroVM request through the experimental NVX
+    /// integration. This temporary entry point does not change the normal
+    /// `microvm` backend selected by [`run_json`].
+    #[doc(hidden)]
+    pub fn run_nvx_json(request_json: &str, experimental: bool) -> Result<ExecutionResult, Error> {
+        mxc_engine::run_nvx_one_shot_json(request_json, experimental).map(captured_execution_result)
     }
 
     /// Run a lifecycle request (as a JSON string) and return the
