@@ -369,9 +369,6 @@ assert_blocked "a destination denied by its own rule was reachable because an ea
 run_case "shadow-control case: the same first rule with no second deny" "$EXCEPT_SHADOW_CONTROL_CONFIG"
 assert_allowed "an address excluded from a deny was unreachable under egress.default allow. The exclusion is not narrowing its own rule, so the shadow case above proves only that everything was blocked."
 
-# This case runs before the icmp-denied case below and fail() exits at once. A
-# container that cannot send ICMP at all stops the run here instead of letting
-# the denied case report a pass it did not earn.
 run_case "icmp case: egress.default deny, peer allowed on protocol icmp" "$ICMP_ALLOWED_CONFIG"
 assert_allowed "an ICMP echo to a peer allowed on protocol icmp was unreachable. Either the icmp selector never reached the chain, or the container cannot open a raw socket at all, which would make the icmp-denied case below pass without filtering anything."
 

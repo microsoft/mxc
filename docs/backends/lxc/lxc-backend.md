@@ -335,15 +335,6 @@ The zone query should answer the zone you assigned.
   `CAP_NET_ADMIN` dropped from its bounding set whenever chains are installed, so
   it cannot. Default-deny closes external reachability for a container that does
   not deliberately tear it down, including services the workload itself starts.
-- **Only the command MXC attaches is held under the chains.** `CAP_NET_RAW`
-  stays, because an explicit `protocol: "icmp"` allow needs a raw socket. It
-  also permits `AF_PACKET` sockets, which write link-layer frames straight to
-  the interface without traversing the filter chain, and the attached command
-  carries a seccomp filter that fails `socket(AF_PACKET, ...)` with `EPERM`
-  whenever chains are installed. Container init and anything it starts are not
-  attached and are not filtered. A syscall entering under numbering the filter
-  was not built for, such as a 32-bit compat entry, kills the process rather
-  than passing unchecked.
 - **Policy is not in force while the container starts.** The chains are installed
   after the container has started and its address has settled, so container init
   and anything it starts run unfiltered in both directions for that interval. The
