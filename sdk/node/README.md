@@ -264,6 +264,23 @@ Filesystem discovery helpers and their result/options types are grouped under
 `ToolsPolicyOptions`; set `containerType: 'processcontainer'` to exclude
 directories with ALL APPLICATION PACKAGES access on Windows. ACL inspection
 is bounded to five seconds per directory; failures retain the directory and
-emit a diagnostic warning. `getUserProfilePolicy` uses the supplied environment,
-and `getTemporaryFilesPolicy` returns existing temporary storage without creating
-directories.
+emit a diagnostic warning. When `pwsh.exe` is on `PATH`, discovery adds the
+PSReadLine history directory to `readwritePaths` and leaves the system-drive
+root out of `readonlyPaths`. Set `allowPowerShellDriveRootRead: true` to
+restore that root for callers who accept the compatibility grant. On
+BaseContainer, a drive-root `readonlyPaths` entry permits recursive reads of
+the whole drive, including unrelated user files. `getUserProfilePolicy` uses
+the supplied environment, and `getTemporaryFilesPolicy` returns existing
+temporary storage without creating directories.
+
+PowerShell startup may still need to stat the system-drive root. Use explicit
+host preparation or tier-supported configuration for that check.
+[`wxc-host-prep prepare-system-drive`](https://github.com/microsoft/mxc/blob/main/docs/backends/process-container/host-prep.md)
+adds persistent, non-inheriting metadata ACEs on the drive root for the
+AppContainer package SIDs: `FILE_READ_ATTRIBUTES`, `FILE_READ_EA`,
+`READ_CONTROL`, and `SYNCHRONIZE`. The ACEs apply only to the root itself.
+They include no directory-enumeration right, no file-content read, and no
+write. Where the isolation tier supports a narrower query grant, set
+`enumeratePaths` on ProcessContainer containment configuration.
+`FilesystemPolicyResult` stays limited to `readonlyPaths` and `readwritePaths`,
+so this helper cannot carry `enumeratePaths` for every tier.
