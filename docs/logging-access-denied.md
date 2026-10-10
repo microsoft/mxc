@@ -323,6 +323,41 @@ The caller-facing network record is:
 }
 ```
 
+For an actionable reason-`100` record, translate the numeric endpoint without
+broadening it. For example, the record above and its `addEgressAllow`
+recommendation map to this direct-egress policy:
+
+```jsonc
+{
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            { "cidr": "203.0.113.10/32" }
+          ],
+          "ports": [
+            { "protocol": "tcp", "port": 443 }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}
+```
+
+Use `/128` for an observed IPv6 address. Preserve `udp` and its observed port
+the same way. An ICMP endpoint produces a portless rule. Apply this
+transformation only when `configurationRecommendation` is `addEgressAllow`;
+`reviewEgressDeny`, `reviewAllowExclusion`, and `useConfiguredProxy` require
+the reason-specific policy changes in the table above, not an additional allow
+rule.
+
 The existing `(resource, accessType)` deduplication contract still applies.
 When repeated events describe the same endpoint, the actionable record retains
 the first observation's `pid` and `filetime`. Per-event source properties such
