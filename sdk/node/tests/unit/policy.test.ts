@@ -33,6 +33,10 @@ describe('filesystem helper environment and options', () => {
 
     it('does not substitute the host environment for an empty map', () => {
         assert.deepStrictEqual(getAvailableToolsPolicy({}), { readonlyPaths: [], readwritePaths: [] });
+        assert.deepStrictEqual(
+            getAvailableToolsPolicy({}, { allowPowerShellDriveRootRead: true }),
+            { readonlyPaths: [], readwritePaths: [] },
+        );
         assert.deepStrictEqual(getUserProfilePolicy({}), { readonlyPaths: [], readwritePaths: [] });
     });
 
@@ -68,13 +72,53 @@ describe('filesystem helper environment and options', () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-tools & paths-'));
         try {
             execFileSync('icacls.exe', [root, '/grant', '*S-1-15-2-1:(OI)(CI)(RX)'], { windowsHide: true });
+            fs.writeFileSync(path.join(root, 'pwsh.exe'), '');
             const environment = { path: root };
+            const driveRoot = path.resolve('C:\\');
             assert.deepStrictEqual(getAvailableToolsPolicy(environment).readonlyPaths, [root]);
             assert.deepStrictEqual(
                 getAvailableToolsPolicy(environment, { containerType: 'processcontainer' }).readonlyPaths, [],
             );
+            // containerType filters ACLs and does not opt in to the drive-root read.
+            assert.deepStrictEqual(
+                getAvailableToolsPolicy(environment, {
+                    containerType: 'processcontainer',
+                    allowPowerShellDriveRootRead: false,
+                }).readonlyPaths,
+                [],
+            );
+            assert.deepStrictEqual(
+                getAvailableToolsPolicy(environment, {
+                    containerType: 'processcontainer',
+                    allowPowerShellDriveRootRead: true,
+                }).readonlyPaths,
+                [driveRoot],
+            );
         } finally {
             fs.rmSync(root, { recursive: true });
+        }
+    });
+
+    it('preserves a drive root explicitly supplied on PATH', { skip: process.platform !== 'win32' }, () => {
+        const pwshDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-test-'));
+        try {
+            fs.writeFileSync(path.join(pwshDir, 'pwsh.exe'), '');
+            const driveRoot = path.resolve((process.env['SystemDrive'] || 'C:') + '\\');
+            assert.strictEqual(fs.statSync(driveRoot).isDirectory(), true);
+            const environment = { PATH: `${driveRoot};${pwshDir}`, USERPROFILE: 'C:\\Users\\TestUser' };
+            const history = path.resolve(path.join(
+                'C:\\Users\\TestUser', 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine',
+            ));
+            const result = getAvailableToolsPolicy(environment);
+            const toolDir = path.resolve(pwshDir);
+            assert.deepStrictEqual(result.readonlyPaths, [driveRoot, toolDir]);
+            assert.deepStrictEqual(result.readwritePaths, [history]);
+            assert.deepStrictEqual(
+                getAvailableToolsPolicy({ PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' }).readonlyPaths,
+                [toolDir],
+            );
+        } finally {
+            fs.rmSync(pwshDir, { recursive: true, force: true });
         }
     });
 });
@@ -100,6 +144,12 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         return tmpDir;
     };
 
+    const psReadLine = (profile: string): string => path.resolve(path.join(
+        profile, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine',
+    ));
+
+    const driveRoot = (drive: string): string => path.resolve(drive + '\\');
+
     afterEach(() => {
         if (originalPlatform) {
             Object.defineProperty(process, 'platform', originalPlatform);
@@ -111,69 +161,83 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         }
     });
 
-    it('should add system root to readonlyPaths when pwsh.exe is on PATH', { skip: isLinux }, () => {
+    it('should keep the tool directory and PSReadLine history without a drive root', { skip: isLinux }, () => {
         mockWindows();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
-        const result = getAvailableToolsPolicy(env);
-        assert.ok(
-            result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root (e.g. C:\\) should be in readonlyPaths when pwsh.exe is on PATH',
-        );
+        const toolDir = path.resolve(pwshDir);
+        const history = psReadLine('C:\\Users\\TestUser');
+        const optionSets = [undefined, {}, { allowPowerShellDriveRootRead: false }] as const;
+        for (const options of optionSets) {
+            const result = getAvailableToolsPolicy(env, options);
+            assert.deepStrictEqual(result.readonlyPaths, [toolDir]);
+            assert.deepStrictEqual(result.readwritePaths, [history]);
+        }
     });
 
-    it('should add PSReadLine dir to readwritePaths when pwsh.exe is on PATH', { skip: isLinux }, () => {
+    it('should restore the drive root only when allowPowerShellDriveRootRead is true', { skip: isLinux }, () => {
         mockWindows();
         const pwshDir = createFakePwshDir();
-        const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
-        const result = getAvailableToolsPolicy(env);
-        const expected = path.join(
-            'C:\\Users\\TestUser', 'AppData', 'Roaming', 'Microsoft', 'Windows', 'PowerShell', 'PSReadLine',
+        const toolDir = path.resolve(pwshDir);
+        const history = psReadLine('C:\\Users\\TestUser');
+
+        const nonDefaultDrive = getAvailableToolsPolicy(
+            { PATH: pwshDir, SystemDrive: 'D:', USERPROFILE: 'C:\\Users\\TestUser' },
+            { allowPowerShellDriveRootRead: true },
         );
-        assert.ok(
-            result.readwritePaths.some(p => p.toLowerCase() === expected.toLowerCase()),
-            'PSReadLine directory should be in readwritePaths',
+        assert.deepStrictEqual(nonDefaultDrive.readonlyPaths, [toolDir, driveRoot('D:')]);
+        assert.deepStrictEqual(nonDefaultDrive.readwritePaths, [history]);
+
+        for (const systemDrive of [undefined, '']) {
+            const environment: { [key: string]: string | undefined } = {
+                PATH: pwshDir,
+                USERPROFILE: 'C:\\Users\\TestUser',
+            };
+            if (systemDrive !== undefined) {
+                environment['SystemDrive'] = systemDrive;
+            }
+            const fallback = getAvailableToolsPolicy(environment, { allowPowerShellDriveRootRead: true });
+            assert.deepStrictEqual(fallback.readonlyPaths, [toolDir, driveRoot('C:')]);
+            assert.deepStrictEqual(fallback.readwritePaths, [history]);
+        }
+
+        const caseInsensitive = getAvailableToolsPolicy(
+            { path: pwshDir, systemdrive: 'E:', userprofile: 'C:\\Users\\Other' },
+            { allowPowerShellDriveRootRead: true },
         );
+        assert.deepStrictEqual(caseInsensitive.readonlyPaths, [toolDir, driveRoot('E:')]);
+        assert.deepStrictEqual(caseInsensitive.readwritePaths, [psReadLine('C:\\Users\\Other')]);
     });
 
-    it('should not add PowerShell paths when pwsh.exe is not on PATH', { skip: isLinux }, () => {
+    it('should not add a drive root without pwsh.exe even when opted in', { skip: isLinux }, () => {
         mockWindows();
-        const env = { PATH: 'C:\\Windows\\System32', USERPROFILE: 'C:\\Users\\TestUser' };
-        const result = getAvailableToolsPolicy(env);
-        assert.ok(
-            !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root should not be in readonlyPaths when pwsh.exe is not on PATH',
-        );
-        assert.strictEqual(result.readwritePaths.length, 0,
-            'readwritePaths should be empty when pwsh.exe is not on PATH',
-        );
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-test-'));
+        const env = { PATH: tmpDir, USERPROFILE: 'C:\\Users\\TestUser', SystemDrive: 'D:' };
+        const result = getAvailableToolsPolicy(env, { allowPowerShellDriveRootRead: true });
+        assert.deepStrictEqual(result.readonlyPaths, [path.resolve(tmpDir)]);
+        assert.deepStrictEqual(result.readwritePaths, []);
     });
 
-    it('should return empty policy on non-Windows even when pwsh.exe is on PATH', { skip: isLinux }, () => {
+    it('should return no PowerShell grant on non-Windows even when opted in', { skip: isLinux }, () => {
         mockLinux();
         const pwshDir = createFakePwshDir();
-        const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
-        const result = getAvailableToolsPolicy(env);
-        assert.ok(
-            !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root (e.g. C:\\) should not be in readonlyPaths on Linux',
-        );
-        assert.strictEqual(result.readwritePaths.length, 0,
-            'readwritePaths should be empty on Linux',
-        );
+        const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser', SystemDrive: 'D:' };
+        const result = getAvailableToolsPolicy(env, { allowPowerShellDriveRootRead: true });
+        assert.ok(!result.readonlyPaths.includes(driveRoot('D:')));
+        assert.ok(!result.readonlyPaths.includes(driveRoot('C:')));
+        assert.deepStrictEqual(result.readwritePaths, []);
     });
 
-    it('should not add PSReadLine path when USERPROFILE is not set', { skip: isLinux }, () => {
+    it('should not add PSReadLine history when USERPROFILE is not set', { skip: isLinux }, () => {
         mockWindows();
         const pwshDir = createFakePwshDir();
-        const env = { PATH: pwshDir };
-        const result = getAvailableToolsPolicy(env);
-        assert.ok(
-            result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root should still be in readonlyPaths',
-        );
-        assert.strictEqual(result.readwritePaths.length, 0,
-            'readwritePaths should be empty without USERPROFILE',
-        );
+        const env = { PATH: pwshDir, SystemDrive: 'D:' };
+        const toolDir = path.resolve(pwshDir);
+        const withoutRoot = getAvailableToolsPolicy(env, { allowPowerShellDriveRootRead: false });
+        assert.deepStrictEqual(withoutRoot.readonlyPaths, [toolDir]);
+        assert.deepStrictEqual(withoutRoot.readwritePaths, []);
+        const withRoot = getAvailableToolsPolicy(env, { allowPowerShellDriveRootRead: true });
+        assert.deepStrictEqual(withRoot.readonlyPaths, [toolDir, driveRoot('D:')]);
+        assert.deepStrictEqual(withRoot.readwritePaths, []);
     });
 });

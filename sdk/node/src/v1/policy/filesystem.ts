@@ -36,6 +36,16 @@ export interface ToolsPolicyOptions {
      * because AppContainer processes can already see them implicitly.
      */
     containerType?: 'processcontainer';
+
+    /**
+     * When `true`, and `pwsh.exe` is found on PATH, add the system-drive root
+     * (`SystemDrive`, falling back to `C:`) to `readonlyPaths`.
+     *
+     * Defaults to `false`. Opting in permits recursive whole-drive reads on
+     * BaseContainer. PowerShell startup that only needs to stat the drive root
+     * should use host preparation or tier-supported configuration instead.
+     */
+    allowPowerShellDriveRootRead?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,19 +215,25 @@ function deduplicatePaths(paths: string[]): string[] {
  * the supplied PATH directories for a `pwsh.exe` binary.
  *
  * When PowerShell is found, return a policy fragment with:
- * - `C:\` in `readonlyPaths` — pwsh.exe enumerates the drive root on startup.
  * - The PSReadLine history directory in `readwritePaths` so the PSReadLine
  *   module can persist command history.
+ * - The system-drive root in `readonlyPaths` only when
+ *   `allowPowerShellDriveRootRead` is true. The root comes from `SystemDrive`,
+ *   falling back to `C:`. That opt-in permits recursive whole-drive reads on
+ *   BaseContainer. The default omits the root; PowerShell startup may need
+ *   explicit host preparation or tier-supported configuration instead.
  *
  * On non-Windows platforms or when pwsh.exe is not found on PATH, returns an
- * empty policy.
+ * empty policy. The opt-in does not add a drive root in either case.
  *
  * @param pathDirs - The list of PATH directories already collected by the caller.
  * @param environment - Environment variable map.
+ * @param allowPowerShellDriveRootRead - Whether to add the synthetic system-drive root.
  */
 function getPowerShellPolicy(
     pathDirs: string[],
     environment: { [key: string]: string | undefined },
+    allowPowerShellDriveRootRead: boolean,
 ): FilesystemPolicyResult {
     if (os.platform() !== 'win32') {
         return { readonlyPaths: [], readwritePaths: [] };
@@ -235,9 +251,11 @@ function getPowerShellPolicy(
         return { readonlyPaths: [], readwritePaths: [] };
     }
 
-    const systemDrive = environmentValue(environment, 'SystemDrive') || 'C:';
-    const systemRoot = systemDrive + "\\";
-    const readonlyPaths: string[] = [systemRoot];
+    const readonlyPaths: string[] = [];
+    if (allowPowerShellDriveRootRead) {
+        const systemDrive = environmentValue(environment, 'SystemDrive') || 'C:';
+        readonlyPaths.push(systemDrive + "\\");
+    }
     const readwritePaths: string[] = [];
 
     const userProfile = environmentValue(environment, 'USERPROFILE');
@@ -268,10 +286,13 @@ function getPowerShellPolicy(
  *    already grant access to `ALL_APPLICATION_PACKAGES` are removed because
  *    AppContainer processes can see them without explicit brokering.
  *
- * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the drive root
- * (`C:\`) is added to `readonlyPaths` and the PSReadLine history directory
- * is added to `readwritePaths` so that interactive PowerShell sessions work
- * correctly inside the container.
+ * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the PSReadLine
+ * history directory is added to `readwritePaths`. The system-drive root is
+ * added to `readonlyPaths` only when `options.allowPowerShellDriveRootRead`
+ * is true (the default is `false`). That opt-in permits recursive whole-drive
+ * reads on BaseContainer. PowerShell startup that stats the drive root may
+ * need explicit host preparation or tier-supported configuration; the opt-in
+ * is the compatibility path for callers who accept the broad read.
  *
  * ACL inspection failures retain the directory and emit a diagnostic warning.
  *
@@ -316,8 +337,13 @@ export function getAvailableToolsPolicy(
         return true;
     });
 
-    // Merge PowerShell-specific paths when pwsh.exe is available
-    const pwshPolicy = getPowerShellPolicy(pathDirs, environment);
+    // Merge PowerShell-specific paths when pwsh.exe is available.
+    // The drive-root read is opt-in; tool directories and PSReadLine are not.
+    const pwshPolicy = getPowerShellPolicy(
+        pathDirs,
+        environment,
+        options?.allowPowerShellDriveRootRead === true,
+    );
 
     return {
         readonlyPaths: deduplicatePaths([...filtered, ...pwshPolicy.readonlyPaths]),
