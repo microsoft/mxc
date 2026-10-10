@@ -200,13 +200,16 @@ Emitted on execution errors.
 
 Emitted when a telemetry-enabled ProcessContainer run successfully produces a
 Learning Mode `captureDenials` verbose logging artifact. MXC reads the
-versioned `*.verbose.json` sibling, validates it as a
-`VerboseLoggingDocument`, derives each provider GUID from the document's
-closed provider enum, drops every verbose property name and value and the
-schema name, sums the counts of signatures that become identical, and
-serializes that telemetry-specific projection as compact JSON. The event never
-contains the actionable denials file, raw ETL, commands, sandbox output, or
-general logger text.
+versioned `*.verbose.json` sibling and dispatches document versions 3, 4, and 5
+to their separate closed schemas. It rejects cross-version or unknown
+vocabulary, derives each provider GUID from the version's closed provider
+vocabulary, removes schema `eventName`, every verbose property name and value,
+and structured network endpoints, then regroups signatures that become
+identical and sums their counts before compact serialization. Version 5
+retains the WFP provider and its closed typed reason and
+configuration-recommendation fields. Unsupported document versions are
+rejected. The event never contains the actionable denials file, raw ETL,
+commands, sandbox output, or general logger text.
 
 One verbose document may require multiple ETW events. Every `mxc.content`
 value is an independently parseable compact JSON array of complete verbose

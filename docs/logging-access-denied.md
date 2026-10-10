@@ -49,7 +49,7 @@ surface delivers it explicitly:
 | Surface | How the warning is delivered |
 |---------|------------------------------|
 | Rust | `Sandbox::warnings()` / `Output::warnings` |
-| C# | `RunResult.Warnings` |
+| C# | `ExecutionResult.Warnings` / `MxcProcess.Warnings` |
 | C ABI (`mxc_ffi`) | `MxcRunResult::warnings_json_utf8` (JSON array of strings) |
 | `wxc-exec` | printed to stderr after the run — the CLI owns its terminal |
 
@@ -103,10 +103,10 @@ stays enforced:
    `captureDenials.mode: "allow"` for permissive application-driven capture.
    It is a compatibility wrapper over `captureDenials.mode: "allow"` with ETL
    retention forced on, and injects `permissiveLearningMode`. The selected
-   ProcessContainer capture backend owns the trace lifecycle: complete PSEC/V2
-   hosts use native capture without PLM or UAC, while legacy or incompatible
-   tiers use the session-scoped guarded-WPR fallback and elevate only its
-   fixed-operation guardian. The CLI consumes the returned JSON and ETL paths,
+   ProcessContainer capture backend owns the trace lifecycle: compatible PSEC
+   hosts use native capture without PLM or UAC, while incompatible tiers use
+   the session-scoped guarded-WPR fallback and elevate only its fixed-operation
+   guardian. The CLI consumes the returned JSON and ETL paths,
    relocates the policy output, its verbose logging sibling, and the trace to
    `denials.json`, `denials.verbose.json`, and `trace.etl`, and generates the
    source snapshot and `Adjusted_*.json` from the policy denials without decoding
@@ -136,21 +136,25 @@ Windows-only `captureDenials` config switch drives collecting those events and
 surfacing the resulting denials to the caller. Its `mode` selects how each
 ungranted access is handled while it is recorded:
 
-> **Host selection.** MXC prefers native capture on a feature-enabled Windows
-> build exposing the complete official V2 API set:
-> `StartLearningModeTrace`, `StopLearningModeTrace`,
+> **Host selection.** MXC uses native capture when Windows exposes the PSEC
+> lifecycle plus a compatible Learning Mode lifecycle. It prefers
+> `StartLearningModeTraceWithOptions`, which requests `ACCESS | NETWORK`, and
+> falls back to access-only `StartLearningModeTrace` when the option-aware
+> export is absent. Both paths require `StopLearningModeTrace`,
 > `CloseLearningModeTrace`, `CreateProcessSecurityEnvironment`,
 > `QueryProcessSecurityEnvironmentSupport`, and
-> `CloseProcessSecurityEnvironment`. When that set is unavailable or cannot
-> fully honor the requested policy, MXC retains the highest compatible legacy
+> `CloseProcessSecurityEnvironment`. If the option-aware export exists but its
+> call fails, MXC reports the failure rather than silently downgrading. When
+> native capture is unavailable or cannot fully honor the requested policy,
+> MXC retains the highest compatible legacy
 > AppContainer containment tier (AppContainer+BFS or AppContainer+DACL) and pairs it
 > with the guarded WPR capture provider. Unsupported hosts return
 > `backend_unavailable` only when neither path can preserve the full policy.
 >
-> Internal validation confirmed that build `26657.1002` exposes only the
-> incompatible earlier contract and is rejected, while build `26663.1000`
-> exposes the complete V2 contract. These are validation points, not a public
-> Windows release-floor commitment; callers should rely on the runtime probe.
+> Internal validation found no native capture support on build `26657.1002`
+> and the complete option-aware contract on build `26663.1000`. These are
+> validation points, not a public Windows release-floor commitment; callers
+> should rely on the runtime probe.
 >
 > Native PSEC capture cannot represent `processContainer.leastPrivilege`
 > because the process security-environment API does not expose an LPAC token
@@ -229,6 +233,156 @@ sandbox policy:
 - `filetime` is a decimal string containing the Windows `FILETIME` value, so
   JavaScript consumers retain all 64 bits without numeric precision loss.
 
+### Network denial sources
+
+Feature-enabled Windows builds can add WFP decisions to the managed Learning
+Mode ETL through the manifested
+`Microsoft-Windows-LearningMode-NetworkDecision` provider
+(`{71237669-21C3-4101-BD2F-FF38945D725A}`). MXC accepts event ID `1`,
+`NetworkDecisionV1`, with schema version `1`. The OS Learning Mode broker owns
+the WFP subscription, runtime-filter lookup, subject scoping, event
+normalization, queue draining, and ETW flush before the trace is sealed.
+When option-aware native capture is selected, MXC requests both `ACCESS` and
+`NETWORK` sources. A failed combined start fails the trace rather than retrying
+with partial access-only collection. Legacy native capture remains access-only.
+MXC does not coordinate with WFP directly.
+
+Option-aware native PSEC capture has one capture-specific capability exception.
+When the caller explicitly supplies a direct `network.egress` section and
+enables `captureDenials`, MXC adds `internetClient` so the outbound attempt
+reaches Tessera's WFP policy and can be recorded there. The authored egress
+table still makes the allow-or-deny decision. Legacy access-only native capture
+does not add the capability because it cannot collect the resulting network
+decision. The exception is also not applied when `network.egress` is absent,
+when the request supplies ingress only, when capture is disabled, or when proxy
+mode is selected.
+
+MXC currently recognizes two normalized source domains:
+
+- App Isolation missing-capability decisions map capability IDs `0`, `1`, and
+  `2` to `internetClient`, `internetClientServer`, and
+  `privateNetworkClientServer`. These decisions remain actionable capability
+  denials and carry the `addCapability` configuration recommendation in the
+  version-5 verbose artifact.
+- Tessera direct-network default-deny decisions map a complete remote endpoint
+  to a `network` resource such as `tcp://203.0.113.10:443` or
+  `udp://[2001:db8::1]:53`. These decisions remain actionable network denials.
+
+`NetworkDecisionV1` retains its original 24-property event ID/version `1`
+schema. Tessera attribution is carried only in the existing `Reason` field:
+
+| Source/reason | Meaning | Version-5 recommendation |
+|---|---|---|
+| App Isolation `1` | Missing capability | `addCapability`: add the exact capability named by the actionable record. |
+| Tessera `100` | Direct default deny | `addEgressAllow`: author an exact egress allow only when the numeric endpoint and protocol are representable. |
+| Tessera `101` | Authored explicit deny | `reviewEgressDeny`: remove or narrow the matching deny if that authored restriction is unintended. Adding an allow does not override a deny. |
+| Tessera `102` | Exclusion from an allow rule | `reviewAllowExclusion`: review or narrow the matching `to[].except` entry rather than broadening the existing allow. |
+| Tessera `103` | Proxy-containment baseline | `useConfiguredProxy`: route the workload through `runtimeConfig.networkProxy` rather than enabling direct egress. |
+
+The internal WFP provider-data format used to produce the reason is not part of
+the ETW contract. MXC does not parse provider data or require additional policy
+model, rule-kind, or rule-ordinal fields.
+
+Tessera explicit denies, allow exclusions, and proxy-containment decisions are
+intentional authored policy rather than missing grants. They do not appear as
+actionable `DeniedResource` grant candidates. The version-5 artifact retains
+their typed decision reason and the reason-specific review or proxy guidance
+shown above. It never recommends a direct allow for these decisions.
+Malformed events, unknown reasons, identity mismatches, missing or invalid
+remote addresses, and mismatched ICMP protocol/address families are
+diagnostic-only and receive no success-shaped recommendation. A reason-`100`
+event with a valid numeric remote address but an unknown protocol or a missing
+or zero TCP/UDP port remains an actionable observed denial, but omits the
+structured endpoint and `addEgressAllow` recommendation. Reason `65535`
+remains `unknownNetworkReason`.
+
+For reason `100`, the structured endpoint recommendation is emitted only when
+MXC can preserve the observed numeric address and a supported protocol without
+widening it to `any`. IPv4 addresses map to `/32`, IPv6 addresses map to
+`/128`, TCP and UDP require and retain a nonzero observed port, and ICMP
+normalizes to a portless rule even if the event carries an inapplicable port
+value. Missing or zero TCP/UDP ports and unknown protocol encodings do not
+produce `addEgressAllow`.
+
+Actionable network records use the existing `DeniedResource` shape. The
+normalized protocol, remote address, and optional remote port are encoded in
+`resource`; no network-specific field is added to the public Rust type or JSON
+record. The WFP event does not provide a reliable workload PID, so these
+records use `pid: 0`. `filetime` is the original WFP event timestamp carried
+in the normalized payload, not the later ETW emission time.
+
+The caller-facing network record is:
+
+```json
+{
+  "resource": "tcp://203.0.113.10:443",
+  "resourceType": "network",
+  "accessType": "unknown",
+  "pid": 0,
+  "filetime": "132847890123512345"
+}
+```
+
+For an actionable reason-`100` record, translate the numeric endpoint without
+broadening it. For example, the record above and its `addEgressAllow`
+recommendation map to this direct-egress policy:
+
+```jsonc
+{
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            { "cidr": "203.0.113.10/32" }
+          ],
+          "ports": [
+            { "protocol": "tcp", "port": 443 }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}
+```
+
+Use `/128` for an observed IPv6 address. Preserve `udp` and its observed port
+the same way. An ICMP endpoint produces a portless rule. Apply this
+transformation only when `configurationRecommendation` is `addEgressAllow`;
+`reviewEgressDeny`, `reviewAllowExclusion`, and `useConfiguredProxy` require
+the reason-specific policy changes in the table above, not an additional allow
+rule.
+
+The existing `(resource, accessType)` deduplication contract still applies.
+When repeated events describe the same endpoint, the actionable record retains
+the first observation's `pid` and `filetime`. Per-event source properties such
+as the `Direction` and `FilterId` fields, local endpoint, package identity, and
+application ID remain available only in the bounded verbose logging signature.
+`Direction` and `FilterId` are preserved as sanitized numeric strings;
+`Direction` has no public enum or caller-facing semantic mapping, and
+`FilterId` is diagnostic correlation only, never a policy selector. Complete
+application paths are redacted there as `<REDACTED>`; timestamps are omitted
+from the signature so repeated observations can aggregate.
+
+This source is available only through option-aware native managed broker
+capture. The guarded-WPR fallback filters ETW by exact workload process
+generations, while the normalized network event's ETW header identifies the
+broker process, so guarded-WPR analysis intentionally excludes it.
+
+The public Rust `DenialAnalyzer` contract remains source-compatible with MXC
+1.x. It returns actionable WFP capability and reason-`100` network records
+through the existing `DeniedResource` fields, but its existing exhaustive
+provider and reason enums cannot truthfully represent the new WFP diagnostic
+groups. The compatibility projection therefore does not fabricate a legacy
+provider or reason: it omits those groups from the public verbose signature
+array and includes their occurrence counts in the existing overflow counters.
+MXC's native product capture path retains the complete groups in version 5.
+
 ### Verbose logging event signatures
 
 Every successful decode also writes a deterministic sibling file:
@@ -238,27 +392,35 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "signatures": [
     {
       "signature": {
-        "provider": "kernelGeneral",
-        "providerGuid": "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
-        "eventId": 14,
+        "provider": "learningModeNetworkDecision",
+        "providerGuid": "{71237669-21C3-4101-BD2F-FF38945D725A}",
+        "eventId": 1,
+        "eventName": "NetworkDecisionV1",
         "reason": "actionable",
-        "pid": 4321,
-        "accessType": "read",
-        "resourceType": "file",
+        "pid": 0,
+        "accessType": "unknown",
+        "resourceType": "network",
+        "networkDecisionReason": "directDefaultDeny",
+        "configurationRecommendation": "addEgressAllow",
+        "networkEndpoint": {
+          "protocol": "tcp",
+          "remoteAddress": "203.0.113.10",
+          "remotePort": 443
+        },
         "properties": [
-          ["PackageSid", "S-1-15-3-1"],
-          ["resource", "<REDACTED>"]
+          ["ApplicationId", "<REDACTED>"],
+          ["FilterId", "12345"]
         ]
       },
-      "count": 37
+      "count": 3
     }
   ],
   "summary": {
-    "totalOccurrences": 37,
+    "totalOccurrences": 3,
     "overflowOccurrences": 0,
     "actionableOverflowOccurrences": 0,
     "aggregateGroupsTruncated": false,
@@ -267,6 +429,20 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
   }
 }
 ```
+
+Version `3` is the legacy contract preceding scoped verbose diagnostics.
+Version `4` adds the schema `eventName` field, the network-decision provider,
+and `schemaUnavailable` outcome used by scoped verbose diagnostics. Version
+`5` adds MXC's internal WFP-specific outcome reasons, typed network decision
+reason, reason-specific configuration recommendation, and exact endpoint
+components. Option-aware native
+`captureDenials` writes version 5 even when a particular trace contains no WFP
+occurrences. Legacy and guarded capture paths may still produce their
+corresponding legacy document version. MXC readers that consume captured
+artifacts dispatch versions 3, 4, and 5 to separate closed contracts. They
+reject unknown fields, newer providers/reasons under an older version label,
+and every unsupported version rather than interpreting newer vocabulary with
+an older schema.
 
 Signatures are keyed by symbolic provider category, provider GUID,
 provider-scoped event ID, schema name, outcome reason from a fixed list, PID, and
@@ -284,8 +460,15 @@ under the same signature and increment its count. `accessType` and
 `resourceType` are included when denial extraction determined them; diagnostic
 outcomes without those classifications omit the fields.
 
-Candidates excluded from the actionable output retain a diagnostic
-reason from a fixed list and their sanitized event properties:
+Version-5 WFP signatures may also include `networkDecisionReason`,
+`configurationRecommendation`, and `networkEndpoint`. The decision reason can
+remain present when endpoint decoding is incomplete, but an exact endpoint and
+automatic allow recommendation are omitted when the decoder cannot represent
+the policy change without broadening it. `FilterId` is diagnostic correlation
+only and is never presented as a policy selector.
+
+Candidates excluded from the actionable output retain a diagnostic reason
+from a fixed list and their sanitized event properties:
 
 - `notActionable` includes registry writes, registry checks whose access mask
   cannot be classified as a read, and recognized Section, SymbolicLink, and
@@ -350,9 +533,11 @@ When stable telemetry is enabled and authorized, MXC may validate, compact, and
 send this redacted verbose document through `Microsoft.MXC/MXC.VerboseDenials`. Each
 event contains a valid JSON array of complete signatures and document
 reconstruction metadata. Before emission, MXC derives provider GUIDs from the
-predefined provider enum and drops every verbose property name and value. MXC does
-not send the actionable denials file, workload-derived properties, or raw ETL
-through telemetry. See [MXC telemetry](development/architecture/telemetry.md).
+fixed provider enum; removes schema `eventName`, every verbose property name
+and value, and structured network endpoints; then regroups signatures that
+become identical. MXC does not send the actionable denials file,
+workload-derived properties, or raw ETL through telemetry. See
+[MXC telemetry](development/architecture/telemetry.md).
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique
@@ -368,15 +553,15 @@ so CLI callers can locate the deliverable without scanning the filesystem:
 ```
 
 The pointer echoes the policy file's `summary`; that file is the authoritative
-record of denials. In-process Rust callers receive the same summary information through
-`Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
-C# SDK exposes `ExecutionMetadata` through `ExecutionResult.OutputMetadata` and
+record of denials. In-process Rust callers receive the same summary information
+through `Output::output_metadata` or `Sandbox::output_metadata()` after
+waiting. The C# SDK exposes it through `ExecutionResult.OutputMetadata` and
 `MxcProcess.OutputMetadata`.
 
 By default, the intermediate ETW `.etl` trace is an internal, runner-managed
 file in a protected per-run temporary directory that MXC deletes after
 analysis. Set `captureDenials.retainEtl` to `true` to preserve the sealed trace
-for diagnostics after a terminal wait. Both native PSEC/V2 capture and the
+for diagnostics after a terminal wait. Both native PSEC capture and the
 guarded-WPR fallback honor retention. Native retention begins under
 `%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and moves to a protected
 per-run directory under `capture-denials\retained` only after sealing
