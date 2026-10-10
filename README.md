@@ -194,6 +194,8 @@ build.bat --all             # Release build for current architecture
 | Logging access denied | [`docs/logging-access-denied.md`](docs/logging-access-denied.md) | Diagnose blocked accesses and author policy |
 | Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Consent and administrative controls |
 | Backend guides | [`docs/backends/`](docs/backends/) | Platform and backend prerequisites and behavior |
+| Policy Store API (proposal) | [`docs/mxc-policy-store-api.md`](docs/mxc-policy-store-api.md) | Types, behavior, and caller examples under API review |
+| Policy Store design (proposal) | [`docs/mxc-policy-store.md`](docs/mxc-policy-store.md) | Catalog authoring, validation, and implementation design |
 
 Repository contributors should start with the
 [MXC development documentation](docs/development/README.md).
