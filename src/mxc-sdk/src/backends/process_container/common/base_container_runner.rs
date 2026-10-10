@@ -13,8 +13,10 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 
-use crate::learning_mode_core::DenialAnalyzer;
-use crate::learning_mode_windows::{EtlDenialAnalyzer, LearningModeApi, LearningModeError};
+use crate::learning_mode_core::{capture_diagnostics::CaptureAnalysis, AnalyzeError};
+use crate::learning_mode_windows::{
+    EtlDenialAnalyzer, LearningModeApi, LearningModeError, LearningModeTraceSources,
+};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
     HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -59,7 +61,7 @@ use crate::process_container_common::base_container_helpers::{
 };
 use crate::process_container_common::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
-    remove_internal_capture_file, unique_denials_output_paths, write_denials_document,
+    remove_internal_capture_file, unique_denials_output_paths, write_capture_denials_document,
     write_stderr_line_best_effort,
 };
 use crate::process_container_common::job_object::UiJobObject;
@@ -78,6 +80,16 @@ use crate::process_container_common::secenv::{
 use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
+
+trait CaptureDenialAnalyzer {
+    fn analyze_capture(&self, source_path: &Path) -> Result<CaptureAnalysis, AnalyzeError>;
+}
+
+impl CaptureDenialAnalyzer for EtlDenialAnalyzer {
+    fn analyze_capture(&self, source_path: &Path) -> Result<CaptureAnalysis, AnalyzeError> {
+        EtlDenialAnalyzer::analyze_capture(self, source_path)
+    }
+}
 
 /// Build the environment block handed to the contained child.
 ///
@@ -206,6 +218,10 @@ impl CaptureSessionOps for CaptureSession {
 }
 
 trait CaptureSessionFactory: Send + Sync {
+    fn trace_sources(
+        &self,
+    ) -> Result<LearningModeTraceSources, crate::learning_mode_windows::LearningModeError>;
+
     fn begin(
         &self,
         sandbox_specification: &[u8],
@@ -216,6 +232,12 @@ trait CaptureSessionFactory: Send + Sync {
 struct RealCaptureSessionFactory;
 
 impl CaptureSessionFactory for RealCaptureSessionFactory {
+    fn trace_sources(
+        &self,
+    ) -> Result<LearningModeTraceSources, crate::learning_mode_windows::LearningModeError> {
+        LearningModeApi::load().map(|api| api.trace_sources())
+    }
+
     fn begin(
         &self,
         sandbox_specification: &[u8],
@@ -286,6 +308,7 @@ impl BaseContainerRunner {
             request,
             version,
             version >= SecurityEnvironmentVersion::V1_1,
+            request.policy.capture_denials.is_some(),
         )
     }
 
@@ -548,10 +571,23 @@ impl BaseContainerRunner {
 
         let supports_network_ingress = psec_version >= SecurityEnvironmentVersion::V1_1
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress);
+        let capture_network_decisions = match capture_denials.as_ref() {
+            Some(_) => self
+                .capture_factory
+                .trace_sources()
+                .map_err(|error| {
+                    ScriptResponse::error(&format!(
+                        "captureDenials: failed to inspect learning-mode trace sources: {error}"
+                    ))
+                })?
+                .includes_network(),
+            None => false,
+        };
         let process_security_environment_spec = build_psec_v1_security_environment_spec(
             request,
             psec_version,
             supports_network_ingress,
+            capture_network_decisions,
         );
         let _ = writeln!(
             logger,
@@ -1635,21 +1671,21 @@ impl BaseContainerSandboxProcess {
 
     /// Decodes a sealed capture into the JSON denials document at `output_path`.
     fn decode_and_write_denials(
-        analyzer: &dyn DenialAnalyzer,
+        analyzer: &dyn CaptureDenialAnalyzer,
         etl_path: &std::path::Path,
         output_path: &std::path::Path,
         exit_code: i32,
     ) -> std::io::Result<CaptureDenialsOutput> {
-        let analysis = analyzer.analyze(etl_path).map_err(|error| {
+        let analysis = analyzer.analyze_capture(etl_path).map_err(|error| {
             std::io::Error::other(format!(
                 "captureDenials failed to decode denials ETL: {error}"
             ))
         })?;
-        write_denials_document(analysis, exit_code, output_path)
+        write_capture_denials_document(analysis, exit_code, output_path)
     }
 
     fn decode_write_and_finalize(
-        analyzer: &dyn DenialAnalyzer,
+        analyzer: &dyn CaptureDenialAnalyzer,
         etl_path: &Path,
         etl_directory: Option<&Path>,
         output_path: &Path,
@@ -2100,14 +2136,17 @@ fn managed_capture_output_path_in(
 mod tests {
     use super::*;
     use crate::learning_mode_core::{
-        AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
+        capture_diagnostics::CaptureVerboseLoggingSummary, AccessType, AnalysisResult,
+        AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
     };
     use crate::mxc_common::models::{
-        BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr,
-        NetworkEgressPolicy, NetworkPeer, NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress,
-        ProxyConfig, UiPolicy,
+        BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, ContainmentBackend, NetworkAction,
+        NetworkCidr, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort,
+        NetworkProtocol, NetworkRule, ProxyAddress, ProxyConfig, UiPolicy,
     };
+    use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
     use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
+    use crate::mxc_common::wire;
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
     use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2241,6 +2280,7 @@ mod tests {
     }
 
     struct FakeCaptureFactory {
+        trace_sources: LearningModeTraceSources,
         begin_error: Option<(&'static str, i32)>,
         finish_error: Option<(&'static str, i32)>,
         begin_calls: AtomicUsize,
@@ -2248,6 +2288,13 @@ mod tests {
     }
 
     impl CaptureSessionFactory for FakeCaptureFactory {
+        fn trace_sources(
+            &self,
+        ) -> Result<LearningModeTraceSources, crate::learning_mode_windows::LearningModeError>
+        {
+            Ok(self.trace_sources)
+        }
+
         fn begin(
             &self,
             _sandbox_specification: &[u8],
@@ -2269,6 +2316,7 @@ mod tests {
 
     fn fake_capture_factory() -> Arc<FakeCaptureFactory> {
         Arc::new(FakeCaptureFactory {
+            trace_sources: LearningModeTraceSources::AccessAndNetwork,
             begin_error: None,
             finish_error: None,
             begin_calls: AtomicUsize::new(0),
@@ -2280,10 +2328,15 @@ mod tests {
         result: Result<AnalysisResult, &'static str>,
     }
 
-    impl DenialAnalyzer for FakeAnalyzer {
-        fn analyze(&self, _source_path: &Path) -> Result<AnalysisResult, AnalyzeError> {
+    impl CaptureDenialAnalyzer for FakeAnalyzer {
+        fn analyze_capture(&self, _source_path: &Path) -> Result<CaptureAnalysis, AnalyzeError> {
             match &self.result {
-                Ok(result) => Ok(result.clone()),
+                Ok(result) => Ok(CaptureAnalysis {
+                    denials: result.denials.clone(),
+                    denied_resources_truncated: result.denied_resources_truncated,
+                    verbose_logging: result.verbose_logging.clone(),
+                    network_verbose_logging: CaptureVerboseLoggingSummary::default(),
+                }),
                 Err(message) => Err(AnalyzeError::Decode((*message).to_string())),
             }
         }
@@ -2387,8 +2440,16 @@ mod tests {
         assert_eq!(metadata.exit_code, 7);
         assert_eq!(metadata.total_denials, 1);
         let document: DenialsDocument =
-            serde_json::from_slice(&std::fs::read(output_path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
         assert_eq!(document.denials.len(), 1);
+        let verbose_path =
+            crate::learning_mode_core::verbose_logging_sibling_path(&output_path).unwrap();
+        let verbose: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(verbose_path).unwrap()).unwrap();
+        assert_eq!(
+            verbose["version"],
+            crate::learning_mode_core::capture_diagnostics::CAPTURE_VERBOSE_LOGGING_VERSION
+        );
     }
 
     #[test]
@@ -2646,6 +2707,7 @@ mod tests {
     #[test]
     fn capture_factory_injects_begin_failure() {
         let factory = Arc::new(FakeCaptureFactory {
+            trace_sources: LearningModeTraceSources::AccessAndNetwork,
             begin_error: Some((
                 "StartLearningModeTrace",
                 windows::Win32::Foundation::E_FAIL.0,
@@ -2672,6 +2734,7 @@ mod tests {
     #[test]
     fn capture_factory_injects_finish_failure_once() {
         let factory = Arc::new(FakeCaptureFactory {
+            trace_sources: LearningModeTraceSources::AccessAndNetwork,
             begin_error: None,
             finish_error: Some((
                 "StopLearningModeTrace",
@@ -2908,6 +2971,153 @@ mod tests {
             spec.fs_enumerate().unwrap().iter().collect::<Vec<_>>(),
             vec!["C:\\tools"]
         );
+    }
+
+    #[test]
+    fn capture_denials_directional_default_deny_reaches_tessera_network_policy() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .expect("PSEC must carry the Tessera egress policy");
+
+        assert_eq!(spec.capabilities(), Some("internetClient"));
+        assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+    }
+
+    #[test]
+    fn capture_capability_requires_a_network_aware_trace() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+
+        for (capture_network_decisions, expected_capabilities) in
+            [(false, None), (true, Some("internetClient"))]
+        {
+            let bytes = build_psec_v1_security_environment_spec(
+                &request,
+                SecurityEnvironmentVersion::V1_0,
+                false,
+                capture_network_decisions,
+            );
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+            assert_eq!(spec.capabilities(), expected_capabilities);
+        }
+    }
+
+    #[test]
+    fn capture_capability_requires_an_explicit_direct_egress_section() {
+        for (network, expected_capabilities) in [
+            (None, None),
+            (
+                Some(wire::Network {
+                    egress: None,
+                    ingress: Some(wire::NetworkIngress {
+                        default: Some(wire::NetworkAction::Deny),
+                        host_loopback: Some(wire::NetworkAction::Deny),
+                    }),
+                }),
+                None,
+            ),
+            (
+                Some(wire::Network {
+                    egress: Some(wire::NetworkEgress {
+                        default: Some(wire::NetworkAction::Deny),
+                        allow: None,
+                        deny: None,
+                    }),
+                    ingress: None,
+                }),
+                Some("internetClient"),
+            ),
+        ] {
+            let mut request = ExecutionRequest::default();
+            request.policy.capture_denials = Some(Default::default());
+            parse_network_policy(
+                &mut request.policy,
+                NetworkSections {
+                    network,
+                    runtime: None,
+                    process_container: None,
+                },
+                &ContainmentBackend::ProcessContainer,
+            )
+            .unwrap();
+
+            let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+            let egress = spec
+                .network_policy()
+                .and_then(|policy| policy.egress())
+                .expect("PSEC must retain deny-default egress");
+
+            assert_eq!(spec.capabilities(), expected_capabilities);
+            assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+        }
+    }
+
+    #[test]
+    fn directional_default_deny_without_capture_does_not_add_internet_capability() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .expect("PSEC must retain deny-default egress");
+
+        assert!(spec.capabilities().is_none());
+        assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+    }
+
+    #[test]
+    fn capture_denials_proxy_preserves_proxy_capability_posture() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.runtime_network_proxy_specified = true;
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+        };
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        request.policy.network_ingress = Some(NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+        assert_eq!(
+            spec.capabilities(),
+            Some("privateNetworkClientServer,networkLoopback")
+        );
+        assert!(spec
+            .capabilities()
+            .is_none_or(|capabilities| !capabilities.contains("internetClient")));
+        assert!(spec
+            .network_policy()
+            .and_then(|network| network.proxy())
+            .is_some());
     }
 
     #[test]
@@ -3180,7 +3390,7 @@ mod tests {
         let version =
             BaseContainerRunner::choose_min_required_psec_version_for_request(&request, true);
         assert_eq!(version, SecurityEnvironmentVersion::V1_0);
-        let bytes = build_psec_v1_security_environment_spec(&request, version, false);
+        let bytes = build_psec_v1_security_environment_spec(&request, version, false, false);
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
         let network = spec.network_policy().unwrap();
         assert_eq!(spec.version().minor(), 0);
@@ -3220,6 +3430,7 @@ mod tests {
             &ExecutionRequest::default(),
             SecurityEnvironmentVersion { major: 2, minor: 0 },
             false,
+            false,
         );
     }
 
@@ -3229,6 +3440,7 @@ mod tests {
         let bytes = build_psec_v1_security_environment_spec(
             &request,
             SecurityEnvironmentVersion::V1_1,
+            false,
             false,
         );
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
@@ -3249,6 +3461,7 @@ mod tests {
         let bytes = build_psec_v1_security_environment_spec(
             &request,
             SecurityEnvironmentVersion::V1_0,
+            false,
             false,
         );
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();

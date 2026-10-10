@@ -66,12 +66,7 @@ fn convert_wire_proxy_at(url_str: &str, path: &str) -> Result<ProxyConfig, WxcEr
     })
 }
 
-fn convert_egress(egress: Option<wire::NetworkEgress>) -> Result<NetworkEgressPolicy, WxcError> {
-    let egress = egress.unwrap_or(wire::NetworkEgress {
-        default: None,
-        allow: None,
-        deny: None,
-    });
+fn convert_egress(egress: wire::NetworkEgress) -> Result<NetworkEgressPolicy, WxcError> {
     Ok(NetworkEgressPolicy {
         default: egress.default.map(convert_action).unwrap_or_default(),
         allow: convert_rules(egress.allow.unwrap_or_default(), "network.egress.allow")?,
@@ -119,14 +114,13 @@ pub(crate) fn parse_network_policy(
             // metadata is intentionally excluded because it may be supplied at exec.
             policy.network_mode_specified = has_directional_policy_fields(&network);
 
-            let egress = convert_egress(network.egress)?;
-            policy.network_egress = Some(egress);
+            policy.network_egress = network.egress.map(convert_egress).transpose()?;
 
             let ingress = convert_ingress(network.ingress);
             policy.network_ingress = Some(ingress);
         }
         None => {
-            policy.network_egress = Some(NetworkEgressPolicy::default());
+            policy.network_egress = None;
             policy.network_ingress = Some(NetworkIngressPolicy::default());
         }
     }
