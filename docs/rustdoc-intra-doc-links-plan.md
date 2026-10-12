@@ -1,23 +1,29 @@
 # Rustdoc intra-doc link cleanup
 
-## Starting point
+Status: open. Windows warning inventory checked against `origin/main`
+`c6f301d53` (October 9, 2026) on October 12, 2026.
 
-At `origin/main` `81936d318`, the command
-`cargo doc --workspace --all-features --no-deps` completed on Windows with
-61 warnings. With
-`RUSTDOCFLAGS="-D warnings"`, it failed on a link in
-`src/testing/wxc_e2e_tests/src/lib.rs`. The unmerged
-`user/gudge/fix-intra-doc-links` branch (`50398b5e6`) fixes that example and
-provides a useful checklist, but it is 197 commits behind this main snapshot.
-Several source paths have moved, notably from `appcontainer` to
-`process_container`; do not rebase or cherry-pick the old patch wholesale.
+## Current baseline
+
+From `src/`, `cargo doc --workspace --all-features --no-deps` completed on
+Windows with 51 warnings: 47 in the `mxc-sdk` library documentation, one in
+`wxc-exec`, one in `wxc-windows-sandbox-daemon`, and two in `wxc-host-prep`.
+They include unresolved links and public documentation that links to private
+items. No Linux or macOS documentation build was run for this inventory.
+
+The earlier inventory at `81936d318` found 61 warnings and a failing link
+in `src/testing/wxc_e2e_tests/src/lib.rs`; neither count nor path describes
+the current tree. The unmerged `user/gudge/fix-intra-doc-links` branch
+(`50398b5e6`) is 242 commits behind this main snapshot. Its old layout
+predates consolidation under `src/mxc-sdk/src/` and the move from
+`appcontainer` to `process_container`. Use it as a checklist, not a patch
+to rebase or cherry-pick wholesale.
 
 ## Plan
 
-1. Start a fresh branch from current `origin/main`. Inventory rustdoc warnings
-   on Windows and in applicable Linux/macOS target builds, including warnings
-   introduced since the old branch.
-2. Port only the still-needed fixes to their current files. Keep links to
+1. Start from current `origin/main` and update the warning inventory,
+   including Linux/macOS target documentation builds where available.
+2. Fix only warnings still present in current files. Keep links to
    reachable public items; use inline code for private, unavailable, or
    unresolvable external items. Do not widen API visibility or suppress
    warnings to satisfy rustdoc.

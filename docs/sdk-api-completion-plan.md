@@ -7,15 +7,14 @@ experimental option on typed V1), #1400 (Node ProcessContainer PTY), #1403
 (1.0.0 package versions), and #1399 (scenario-based samples) have landed.
 Recheck the baseline before implementation begins.
 
-The merged APIs and `docs/reference/*/v1/` on `origin/main` are the source
-of truth for public names, types, and placement after #1385 and #1398. The
-earlier [`ffi-json-ingress-plan.md`](ffi-json-ingress-plan.md) supplies the
-exact-JSON ingress rationale and raw-mode requirements, but its superseded
-API/type vocabulary, raw package-root placement, and pre-publication release
-gate do not override main or the V1.Dev decisions below. The older
-[`version-aware-stack-plan.md`](version-aware-stack-plan.md) is historical
-where the ingress plan supersedes it. Neither older plan is on main at the
-baseline commit.
+The merged APIs and `docs/api-reference/*/v1/` on `origin/main` are the source
+of truth for public names, types, and placement after #1385 and #1398.
+[`MXC Versioning Design`](development/architecture/versioning.md) describes
+the exact-contract boundary and SDK major targets. Exact-JSON FFI ingress and
+private binding-request cleanup have merged (#1349-#1353); the public raw
+execution and lifecycle APIs remain to be implemented. This plan records
+their V1.Dev names, placement, and requirements rather than the superseded
+typed-FFI or package-root raw API proposals.
 
 ## 1. Current state
 
@@ -31,8 +30,8 @@ baseline commit.
 This is an **API/source inventory**, not a claim that all modes have passed
 host-dependent runtime or packaged-consumer verification. The merged API
 references explicitly state that .NET and Node have no public raw-JSON launch
-API (`docs/reference/dotnet/v1/api.md` and
-`docs/reference/node/v1/api.md` on main). The source boundaries include
+API (`docs/api-reference/dotnet/v1/api.md` and
+`docs/api-reference/node/v1/api.md` on main). The source boundaries include
 `src/mxc-sdk/src/lib.rs` (`v1` versus `__ffi`),
 `sdk/node/src/index.ts` and `sdk/node/src/v1/`, and
 `sdk/dotnet/Microsoft.Mxc.Sdk/V1/`. Rust, Node, and .NET package manifests
