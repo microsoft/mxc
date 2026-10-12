@@ -13,10 +13,11 @@ use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::ScriptResponse;
 use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
-use crate::wslc_common::container_steps::{cstr_bytes, sdk_error};
+use crate::wslc_common::container_steps::{cstr_bytes, sdk_error, validate_store_access};
 use crate::wslc_common::error::WslcError;
 use crate::wslc_common::registry_policy;
 use crate::wslc_common::sdk_init;
+use crate::wslc_common::store_slots;
 use crate::wslc_common::wslc_bindings::*;
 
 /// How long a single pull may run before it is abandoned.
@@ -943,8 +944,14 @@ fn with_implicit_tag(name: &str) -> String {
     }
 }
 
-/// Warm a storage path's image cache with `image_name` and release the session,
-/// backing `wxc-exec.exe --setup-wslc`.
+/// Warm the create-and-run store's image cache with `image_name`, and the first
+/// `daemon_slots` state-aware store slots with it too, backing
+/// `wxc-exec.exe --setup-wslc`.
+///
+/// The state-aware daemon leases its store from a separate pool, so warming the
+/// create-and-run store does not warm the daemon's. A slot that has never been
+/// leased holds no images at all, and an uncached image under the default
+/// deny-egress posture is refused before the VM is reached.
 ///
 /// # Safety
 /// Must be called once per process before any other WSLC SDK functions
@@ -952,6 +959,7 @@ fn with_implicit_tag(name: &str) -> String {
 pub unsafe fn setup_pull_image(
     image_name: &str,
     storage_path: Option<&str>,
+    daemon_slots: usize,
     logger: &mut Logger,
 ) -> Result<(), String> {
     let sdk = match sdk_init::init_and_load_sdk(logger) {
@@ -959,6 +967,50 @@ pub unsafe fn setup_pull_image(
         Err(resp) => return Err(resp.error_message),
     };
 
+    warm_store(
+        sdk,
+        image_name,
+        storage_path,
+        StoreKind::CreateAndRun,
+        logger,
+    )?;
+
+    for slot in store_slots::slot_paths(daemon_slots) {
+        std::fs::create_dir_all(&slot)
+            .map_err(|e| format!("could not create the WSLc store slot at {slot:?}: {e}"))?;
+        warm_store(
+            sdk,
+            image_name,
+            Some(&slot.to_string_lossy()),
+            StoreKind::DaemonSlot,
+            logger,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Which store a warm pass is filling.
+enum StoreKind {
+    /// The store create-and-run execution reads, caller-named or defaulted.
+    CreateAndRun,
+
+    /// A slot from the state-aware pool, which one live session holds at a time.
+    DaemonSlot,
+}
+
+/// Pull `image_name` into one store and release the session.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and COM must be initialised on this
+/// thread.
+unsafe fn warm_store(
+    sdk: &'static WslcSdk,
+    image_name: &str,
+    storage_path: Option<&str>,
+    kind: StoreKind,
+    logger: &mut Logger,
+) -> Result<(), String> {
     let storage_path_str = storage_path.map(|s| s.to_string()).unwrap_or_else(|| {
         std::env::temp_dir()
             .join("mxc-wslc-sessions")
@@ -996,6 +1048,14 @@ pub unsafe fn setup_pull_image(
         sdk.terminate_session_fn(),
         sdk.release_session_fn(),
     );
+
+    // A slot admits one live session, and a conflict is invisible until the
+    // store is touched, so a held slot would otherwise surface partway through
+    // the pull.
+    if matches!(kind, StoreKind::DaemonSlot) {
+        validate_store_access(sdk, session, &storage_path_str)
+            .map_err(|resp| resp.error_message)?;
+    }
 
     let _ = writeln!(logger, "[WSLC setup] Target store: {}", storage_path_str);
     let budget = pull_budget();

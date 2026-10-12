@@ -77,7 +77,8 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
 
 # Preflight: warm the WSLC image cache so per-test timings stay clear of one-off
 # download cost. The runner pulls on a miss by itself, so -SkipSetup is a
-# supported way to exercise that path instead.
+# supported way to exercise that path instead. These are create-and-run tests,
+# so the lifecycle store slots are left alone.
 if (-not $SkipSetup) {
     $SetupScript = Join-Path $RepoRoot "scripts\setup-wslc.ps1"
     if (Test-Path $SetupScript) {
@@ -92,7 +93,7 @@ if (-not $SkipSetup) {
             "ghcr.io/linuxserver/baseimage-alpine:3.21",
             "quay.io/fedora/fedora-minimal:latest"
         )
-        & $SetupScript -WxcExecPath $WxcExec -Image $images -Force
+        & $SetupScript -WxcExecPath $WxcExec -Image $images -DaemonSlots 0 -Force
         if ($LASTEXITCODE -ne 0) {
             Write-Host "WARN: setup-wslc.ps1 reported failures; continuing with tests anyway." -ForegroundColor Yellow
         }

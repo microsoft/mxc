@@ -124,11 +124,15 @@ if (-not $ConfigDir) {
 
 # ---------------- Image pre-pull preflight ----------------
 
+# The daemon leases its store from the slot pool, not from
+# %TEMP%\mxc-wslc-sessions, and the fixtures below provision with the isolated
+# posture, which refuses a registry pull. Slot 0 is the one a daemon holding a
+# single session leases, so that is the store these images have to be in.
 if (-not $SkipSetup) {
     $SetupScript = Join-Path $RepoRoot "scripts\setup-wslc.ps1"
     if (Test-Path $SetupScript) {
         Write-Host "Pre-pulling WSLc images (pass -SkipSetup to skip)..." -ForegroundColor Cyan
-        & $SetupScript -WxcExecPath $WxcExec -Image @("alpine:latest", "python:3.12-alpine") -Force
+        & $SetupScript -WxcExecPath $WxcExec -Image @("alpine:latest", "python:3.12-alpine") -DaemonSlots 1 -Force
         if ($LASTEXITCODE -ne 0) {
             Write-Host "WARN: setup-wslc.ps1 reported failures; continuing anyway." -ForegroundColor Yellow
         }

@@ -56,6 +56,10 @@ use crate::wslc_common::wslc_bindings::*;
 // Shared error helper
 // ---------------------------------------------------------------------------
 
+/// `ERROR_SHARING_VIOLATION`, which the SDK reports when a call reaches a store
+/// whose VHDX another live session already has mounted.
+const E_SHARING_VIOLATION: HRESULT = 0x8007_0020_u32 as HRESULT;
+
 /// Build a `ScriptResponse` error from an HRESULT failure with an optional
 /// SDK-provided message. Thin wrapper over [`WslcError::Sdk`], which owns the
 /// message formatting and the `LaunchFailed` phase attribution.
@@ -729,13 +733,99 @@ pub unsafe fn create_daemon_session(
         let msg = err_msg.to_string_lossy();
         return Err(sdk_error("WslcCreateSession failed", hr, &msg));
     }
-    let _ = writeln!(logger, "[WSLC][daemon] Session created");
 
-    Ok(WslcSessionGuard::from_raw(
+    let guard = WslcSessionGuard::from_raw(
         session,
         sdk.terminate_session_fn(),
         sdk.release_session_fn(),
-    ))
+    );
+    validate_store_access(sdk, guard.as_raw(), storage_path)?;
+
+    let _ = writeln!(
+        logger,
+        "[WSLC][daemon] Session created on store {storage_path}"
+    );
+
+    Ok(guard)
+}
+
+/// Confirm a session just created can reach the store it was given.
+///
+/// A store's VHDX admits one live session, and the SDK does not report a
+/// conflict at create time: `WslcCreateSession` against a held store returns a
+/// healthy-looking handle, and the violation appears on first use as
+/// `HRESULT 0x80070020`. Probing here turns that into a create failure, so a
+/// caller never mints a sandbox id against a session that would die at an
+/// arbitrary later phase.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+pub unsafe fn validate_store_access(
+    sdk: &WslcSdk,
+    session: WslcSession,
+    storage_path: &str,
+) -> Result<(), ScriptResponse> {
+    list_image_names(sdk, session).map(|_| ()).map_err(|hr| {
+        if hr == E_SHARING_VIOLATION {
+            sdk_error(
+                "WSLc store unavailable",
+                hr,
+                &format!(
+                    "the image store at {storage_path} is already held by another live session. \
+                     A running wxc-wslc-daemon.exe releases it after its idle timeout; a \
+                     create-and-run execution releases it when the run ends"
+                ),
+            )
+        } else {
+            sdk_error(
+                "WslcListSessionImages failed",
+                hr,
+                &format!("could not read the image store at {storage_path}"),
+            )
+        }
+    })
+}
+
+/// Names of the images a session's store holds.
+///
+/// This is the cheapest call that proves a session handle is usable rather than
+/// merely non-null, since it has to reach the store's VHDX to answer.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+pub unsafe fn list_session_image_names(
+    sdk: &WslcSdk,
+    session: WslcSession,
+) -> Result<Vec<String>, ScriptResponse> {
+    list_image_names(sdk, session).map_err(|hr| sdk_error("WslcListSessionImages failed", hr, ""))
+}
+
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+unsafe fn list_image_names(sdk: &WslcSdk, session: WslcSession) -> Result<Vec<String>, HRESULT> {
+    let mut images: *mut WslcImageInfo = ptr::null_mut();
+    let mut count: u32 = 0;
+    let hr = sdk.WslcListSessionImages(session, &mut images, &mut count);
+    if hr != S_OK {
+        return Err(hr);
+    }
+    if images.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let mut names = Vec::with_capacity(count as usize);
+    for info in std::slice::from_raw_parts(images, count as usize) {
+        // `info.name` is a fixed-size, possibly-unterminated C buffer; read up
+        // to the first NUL, or the whole buffer if there is none.
+        let bytes = std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        if let Ok(name) = std::str::from_utf8(&bytes[..end]) {
+            names.push(name.to_string());
+        }
+    }
+    windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
+
+    Ok(names)
 }
 
 /// Create a daemon-owned container with `keepalive` as its init process, so it

@@ -72,6 +72,7 @@ struct Cli {
             "setup_wslc",
             "image",
             "storage_path",
+            "wslc_daemon_slots",
             "probe",
             "force_reclaim"
         ]
@@ -135,6 +136,14 @@ struct Cli {
     #[arg(long = "storage-path", requires = "setup_wslc")]
     storage_path: Option<String>,
 
+    /// Also warm the first N container-lifecycle store slots, which the
+    /// state-aware daemon leases from and `--storage-path` does not reach.
+    /// Defaults to 0 so warming a create-and-run cache costs one pull per
+    /// image; each slot warmed adds a pull and a multi-GiB store.
+    /// Requires `--setup-wslc`.
+    #[arg(long = "wslc-daemon-slots", value_name = "N", requires = "setup_wslc")]
+    wslc_daemon_slots: Option<usize>,
+
     /// Run the fallback detector and emit JSON, without spawning a sandbox.
     #[arg(long)]
     probe: bool,
@@ -157,6 +166,7 @@ struct Cli {
             "setup_wslc",
             "image",
             "storage_path",
+            "wslc_daemon_slots",
             "probe",
             "force_reclaim",
             "operation",
@@ -1215,6 +1225,7 @@ fn main() {
                 mxc_sdk::wslc_common::image::setup_pull_image(
                     image,
                     cli.storage_path.as_deref(),
+                    cli.wslc_daemon_slots.unwrap_or(0),
                     &mut logger,
                 )
             };
