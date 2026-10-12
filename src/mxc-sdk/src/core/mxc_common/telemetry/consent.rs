@@ -764,7 +764,10 @@ mod platform {
         // The persistent file is only the rendezvous point. LockFileEx waits
         // for the current owner instead of making correctness depend on a
         // fixed retry budget under scheduler or filesystem contention.
+        // SAFETY: `OVERLAPPED` supports all-zero initialization, which selects byte offset 0.
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        // SAFETY: `file` owns a valid synchronous handle for the duration of the call,
+        // and `overlapped` is a valid mutable pointer. Closing `file` releases the lock.
         unsafe {
             LockFileEx(
                 HANDLE(file.as_raw_handle()),
