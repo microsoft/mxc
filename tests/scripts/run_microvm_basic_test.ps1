@@ -33,6 +33,10 @@ if (-not (Test-Path $WxcExec)) {
 }
 
 Write-Host "Running MicroVM basic smoke test..." -ForegroundColor Cyan
+if (-not $env:MXC_NVX_BUNDLE_DIR) {
+    Write-Host "ERROR: MXC_NVX_BUNDLE_DIR must name the extracted signed NVX bundle." -ForegroundColor Red
+    exit 1
+}
 & $WxcExec --debug --experimental $TestConfig
 $exitCode = $LASTEXITCODE
 

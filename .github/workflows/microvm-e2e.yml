@@ -35,12 +35,44 @@ jobs:
         with:
           workspaces: src
 
+      - name: Download and verify signed NVX agent bundle
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $release = Join-Path $env:RUNNER_TEMP "nvx-agent-release"
+          New-Item -ItemType Directory -Force $release | Out-Null
+          gh release download v0.1.0-dev.4a30cb560277 `
+            --repo microsoft/nvx `
+            --pattern aci-edge-sandboxes.zip `
+            --dir $release
+          $archive = Join-Path $release "aci-edge-sandboxes.zip"
+          $expectedArchive = "b22c39abafe889dd20f62a7e49bc3aa7dbf09b0f0f779b98c82df0ac52d5dc80"
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expectedArchive) {
+            throw "NVX release ZIP digest mismatch"
+          }
+          $bundle = Join-Path $release "bundle"
+          Expand-Archive -LiteralPath $archive -DestinationPath $bundle
+          $entries = @(Get-Content (Join-Path $bundle "SHA256SUMS"))
+          if ($entries.Count -ne 17) {
+            throw "Expected 17 signed-bundle entries, got $($entries.Count)"
+          }
+          foreach ($entry in $entries) {
+            $parts = $entry -split '\s+\*?', 2
+            $file = Join-Path $bundle $parts[1]
+            if ($parts.Count -ne 2 -or (Get-FileHash $file -Algorithm SHA256).Hash -ne $parts[0]) {
+              throw "NVX bundle file digest mismatch: $file"
+            }
+          }
+          "MXC_NVX_BUNDLE_DIR=$bundle" | Out-File $env:GITHUB_ENV -Append
+          "MXC_NVX_STATE_ROOT=$(Join-Path $release 'state')" | Out-File $env:GITHUB_ENV -Append
+
       - name: Build with MicroVM support
         working-directory: src
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: cargo build --features microvm --target x86_64-pc-windows-msvc
+        run: cargo build -p wxc --features microvm --target x86_64-pc-windows-msvc
 
       - name: Exclude build output from Windows Defender
         shell: pwsh
@@ -49,26 +81,21 @@ jobs:
           Add-MpPreference -ExclusionPath $binDir
           Write-Host "Added Defender exclusion for $binDir"
 
-      - name: Verify MicroVM binaries
+      - name: Verify MicroVM inputs
         shell: pwsh
         run: |
           $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
           $required = @(
-            "wxc-exec.exe",
-            "nanvixd.exe",
-            "nanvix_rootfs.img",
-            "python3.initrd",
-            "bin\kernel.elf",
-            "snapshots\kernel.vmem",
-            "snapshots\kernel.whp.cbor"
+            (Join-Path $binDir "wxc-exec.exe"),
+            (Join-Path $env:MXC_NVX_BUNDLE_DIR "SOURCE-MANIFEST.json"),
+            (Join-Path $env:MXC_NVX_BUNDLE_DIR "bin\aci_edge_agent.dll")
           )
-          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
+          $missing = $required | Where-Object { -not (Test-Path $_ -PathType Leaf) }
           if ($missing) {
             Write-Host "::error::Missing binaries: $($missing -join ', ')"
             exit 1
           }
-          $leaves = $required | ForEach-Object { Split-Path $_ -Leaf }
-          Get-ChildItem $binDir -Include $leaves -Recurse | Format-Table FullName, Length
+          Get-Item $required | Format-Table FullName, Length
 
       - name: Diagnose hypervisor environment
         shell: pwsh
@@ -84,7 +111,8 @@ jobs:
         shell: pwsh
         working-directory: src
         run: |
-          cargo test -p mxc-sdk --test wxc_e2e_tests_e2e_windows --target x86_64-pc-windows-msvc test_microvm_ -- --nocapture
+          cargo test -p mxc-sdk --features microvm --test wxc_e2e_tests_e2e_windows --target x86_64-pc-windows-msvc test_microvm_ -- --nocapture
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc -- --ignored --nocapture
 
       - name: Upload logs on failure
         if: failure() || cancelled()

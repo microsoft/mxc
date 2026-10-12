@@ -21,6 +21,11 @@ pub mod lxc {
     pub mod common;
 }
 
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+pub mod nvx {
+    pub mod runner;
+}
+
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub mod nanvix {
     #[cfg(feature = "microvm")]

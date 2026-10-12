@@ -181,6 +181,25 @@ pub fn has_nanvix_binaries() -> bool {
     present
 }
 
+/// Return whether the manually extracted signed NVX agent bundle is available.
+pub fn has_nvx_bundle() -> bool {
+    let Some(bundle) = std::env::var_os("MXC_NVX_BUNDLE_DIR") else {
+        println!("SKIPPED: MXC_NVX_BUNDLE_DIR is not set");
+        return false;
+    };
+    let bundle = PathBuf::from(bundle);
+    let present = bundle.is_dir()
+        && bundle.join("SOURCE-MANIFEST.json").is_file()
+        && bundle.join("bin").join("aci_edge_agent.dll").is_file();
+    if !present {
+        println!(
+            "SKIPPED: MXC_NVX_BUNDLE_DIR does not contain the signed NVX agent bundle: {}",
+            bundle.display()
+        );
+    }
+    present
+}
+
 /// Return whether `lxc-exec` is available for direct E2E execution.
 pub fn has_lxc_exe() -> bool {
     match find_binary("lxc-exec") {

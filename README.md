@@ -12,7 +12,8 @@ behind a unified containment model and typed SDKs.
 - **JSON-based configuration**: Versioned container-creation requests and
   security policies
 - **Multiple containment backends**: ProcessContainer, Windows Sandbox, LXC,
-  Bubblewrap, Seatbelt, MicroVM (Nanvix), Hyperlight, IsolationSession, and WSLC
+  Bubblewrap, Seatbelt, MicroVM (NVX on Windows x64; Nanvix on Linux), Hyperlight,
+  IsolationSession, and WSLC
 - **Policy-driven sandboxing**:
   - **Filesystem policy**: Read-only, read-write, and denied path lists
   - **Network policy**: Proxy support, outbound controls, and backend-dependent
@@ -56,6 +57,12 @@ Linux, and macOS.
 | macOS ARM64 / x64 | `seatbelt` | - | - |
 
 \* These backends are **experimental**.
+
+The Windows x64 `microvm` backend is a development NVX integration. Set
+`MXC_NVX_BUNDLE_DIR` to a manually verified and extracted signed NVX agent
+bundle before running it. NVX stores image and sandbox state under
+`%LOCALAPPDATA%\Microsoft\MXC\NVX` by default; set `MXC_NVX_STATE_ROOT` to
+override that private state directory.
 
 ## How do I use MXC?
 

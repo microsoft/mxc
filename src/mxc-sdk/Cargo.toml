@@ -32,7 +32,7 @@ wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
 link-wslcsdk = ["dep:zip"]
 isolation_session = ["dep:windows-collections", "dep:windows-future"]
 test-support = []
-microvm = []
+microvm = ["dep:aci_edge_sandboxes"]
 hyperlight = [
     "dep:hyperlight-unikraft",
     "dep:ureq",
@@ -102,6 +102,9 @@ windows-collections = { version = "0.3", optional = true }
 windows-core.workspace = true
 windows-future = { version = "0.3", optional = true }
 winreg.workspace = true
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+aci_edge_sandboxes = { git = "https://github.com/microsoft/nvx", rev = "4a30cb560277e06f1e090d416e354b7182f56b71", default-features = false, features = ["agent"], optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"

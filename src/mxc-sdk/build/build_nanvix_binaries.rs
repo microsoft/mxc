@@ -68,10 +68,17 @@ pub(crate) fn run() -> Option<(PathBuf, bool)> {
         return None;
     }
 
-    // Check the TARGET platform (not host). NanVix binaries are only needed when
-    // the output binary will run on Windows or Linux with KVM.
+    // Check the TARGET platform (not host). Windows MicroVM builds use NVX and
+    // receive their signed agent bundle at runtime through MXC_NVX_BUNDLE_DIR.
+    // NanVix artifacts remain a Linux-only build input.
     let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target != "windows" && target != "linux" {
+    if target == "windows" {
+        let out_dir = std::env::var("OUT_DIR").unwrap();
+        println!("cargo:rustc-env=NANVIX_BIN_DIR={}", out_dir);
+        println!("cargo:rerun-if-changed=build.rs");
+        return None;
+    }
+    if target != "linux" {
         let out_dir = std::env::var("OUT_DIR").unwrap();
         println!("cargo:rustc-env=NANVIX_BIN_DIR={}", out_dir);
         println!("cargo:rerun-if-changed=build.rs");
@@ -128,7 +135,7 @@ pub(crate) fn run() -> Option<(PathBuf, bool)> {
             crate::nanvix_build_common::emit_rerun_for_copied_artifacts(&bin_dir);
         }
     } else {
-        // Windows: original logic
+        // Windows: retained for the Nanvix implementation until it is removed.
         let all_binaries: Vec<&str> = versions
             .nanvix_python
             .binaries
@@ -161,15 +168,6 @@ pub(crate) fn run() -> Option<(PathBuf, bool)> {
             crate::nanvix_build_common::emit_rerun_for_copied_artifacts(&bin_dir);
         }
 
-        // Generate host-local WHP snapshots at build time so even the first
-        // runtime execution uses warm start. The runtime fallback in
-        // nanvix_runner.rs handles the case where snapshots are missing.
-        //
-        // Skip on non-x86_64 hosts: `nanvixd.exe` is an x86_64 Windows binary
-        // and launching it on (e.g.) ARM64 Windows fails with
-        // STATUS_INVALID_IMAGE_FORMAT (0xc000007b). Snapshot pre-generation is
-        // a warm-start cache only — the runtime fallback covers cold boot on
-        // hosts where this build step is skipped.
         let host = std::env::var("HOST").unwrap_or_default();
         let host_is_x86_64 = host.starts_with("x86_64-");
         if !host_is_x86_64 {
@@ -187,11 +185,6 @@ pub(crate) fn run() -> Option<(PathBuf, bool)> {
             if snapshots_present {
                 eprintln!("nanvix_binaries: host-local snapshots already present");
             } else if use_prefetched_binaries {
-                // In offline mode the NANVIX_BIN directory is treated as an
-                // immutable, pre-fetched input — it may be a read-only or
-                // shared cache. Do not run nanvixd.exe to generate snapshots
-                // into it. The runtime fallback in nanvix_runner.rs cold-boots
-                // when snapshots are absent.
                 eprintln!(
                     "nanvix_binaries: offline — snapshots absent in NANVIX_BIN; \
                      skipping generation (runtime will cold-boot on first use)."
