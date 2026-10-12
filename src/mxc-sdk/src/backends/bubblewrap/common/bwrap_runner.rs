@@ -354,28 +354,33 @@ fn warn_unreachable_v6_targets(plan: &network_rules::EgressPlan, logger: &mut Lo
 }
 
 /// Warn that the resolver pin cannot work under the installed chain.
-///
-/// The pin points the sandbox at slirp's forwarder, but the forwarder is a
-/// destination like any other: a chain that does not admit it drops the query
-/// and names still fail to resolve. The chain is the caller's policy, so this
-/// warns rather than opening the port on their behalf.
 fn warn_resolver_blocked_by_egress(
     plan: &network_rules::EgressPlan,
-    resolver: Option<&proxy_network::ResolverPin>,
+    pinned: bool,
     logger: &mut Logger,
 ) {
-    if resolver.is_none() || plan.admits_udp(proxy_network::SLIRP_DNS_FORWARDER_IP, DNS_PORT) {
+    if !pinned {
         return;
     }
+    let forwarder = proxy_network::SLIRP_DNS_FORWARDER_IP;
+    let udp = plan.admits("udp", forwarder, DNS_PORT);
+    let tcp = plan.admits("tcp", forwarder, DNS_PORT);
+    if udp && tcp {
+        return;
+    }
+
+    let blocked = match (udp, tcp) {
+        (false, false) => "UDP or TCP",
+        (true, false) => "TCP",
+        _ => "UDP",
+    };
     logger.warning_line(&format!(
-        "WARNING: Bubblewrap pointed the sandbox at slirp's DNS forwarder {} because the host \
-         resolves through a loopback nameserver, but network.egress does not admit UDP port {} \
-         to it, so queries are dropped and names will not resolve. Add an allow rule for \
-         '{}/32' on udp port {} if the workload needs to resolve names.",
-        proxy_network::SLIRP_DNS_FORWARDER_IP,
-        DNS_PORT,
-        proxy_network::SLIRP_DNS_FORWARDER_IP,
-        DNS_PORT
+        "WARNING: Bubblewrap pointed the sandbox at slirp's DNS forwarder {forwarder} because \
+         the host resolves through a loopback nameserver, but network.egress does not admit \
+         {blocked} port {DNS_PORT} to it, so queries are dropped and names will not resolve. \
+         Add an allow rule for '{forwarder}/32' on port {DNS_PORT} with protocol 'any' if the \
+         workload needs to resolve names; a resolver falls back to TCP for answers that do not \
+         fit a datagram."
     ));
 }
 
@@ -457,7 +462,6 @@ impl BubblewrapScriptRunner {
                     },
                 };
                 let resolver = proxy_network::ResolverPin::for_host(&request.policy, logger);
-                warn_resolver_blocked_by_egress(&plan, resolver.as_ref(), logger);
                 match proxy_network::ProxyNetworkNamespace::start(
                     &plan,
                     &network_rules::IngressPlan::for_policy(&request.policy),
@@ -466,7 +470,10 @@ impl BubblewrapScriptRunner {
                     logger,
                     request.script_timeout,
                 ) {
-                    Ok(network) => Some(network),
+                    Ok(network) => {
+                        warn_resolver_blocked_by_egress(&plan, network.resolver_pinned(), logger);
+                        Some(network)
+                    }
                     Err(error) => return Err(ScriptResponse::error(&error)),
                 }
             }
@@ -1573,18 +1580,35 @@ mod tests {
         assert!(logger.warnings().is_empty(), "no v6 allow, no warning");
     }
 
-    /// A pin built the way production builds one.
-    fn loopback_resolver_pin(dir: &tempfile::TempDir) -> proxy_network::ResolverPin {
-        let path = dir.path().join("resolv.conf");
-        std::fs::write(&path, "nameserver 127.0.0.53\nsearch corp.example\n")
-            .expect("fixture resolver");
-        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        proxy_network::ResolverPin::from_resolver(
-            &path,
-            &crate::mxc_common::models::ContainerPolicy::default(),
-            &mut logger,
-        )
-        .expect("a loopback stub is pinned")
+    /// A plan whose only allow rule opens `cidr` on `ports`.
+    fn plan_allowing(
+        cidr: &str,
+        ports: Vec<crate::mxc_common::models::NetworkPort>,
+    ) -> network_rules::EgressPlan {
+        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkPeer, NetworkRule};
+
+        let mut req = base_request();
+        req.policy.network_egress = Some(NetworkEgressPolicy {
+            allow: vec![NetworkRule {
+                to: vec![NetworkPeer {
+                    cidr: cidr.parse().expect("test CIDR"),
+                    except: vec![],
+                }],
+                ports,
+            }],
+            ..Default::default()
+        });
+        network_rules::EgressPlan::for_request(&req).expect("the allowlist is enforceable")
+    }
+
+    fn dns_port(
+        protocol: crate::mxc_common::models::NetworkProtocol,
+    ) -> Vec<crate::mxc_common::models::NetworkPort> {
+        vec![crate::mxc_common::models::NetworkPort {
+            protocol,
+            port: Some(53),
+            end_port: None,
+        }]
     }
 
     /// An allowlist that never names slirp's forwarder leaves the pinned
@@ -1592,30 +1616,14 @@ mod tests {
     /// resolver file looks correct and the query is simply dropped.
     #[test]
     fn a_pinned_resolver_the_chain_drops_is_warned_about() {
-        use crate::mxc_common::models::{NetworkEgressPolicy, NetworkPeer, NetworkRule};
-
-        let mut req = base_request();
-        req.policy.network_egress = Some(NetworkEgressPolicy {
-            allow: vec![NetworkRule {
-                to: vec![NetworkPeer {
-                    cidr: "140.82.112.0/20".parse().expect("test CIDR"),
-                    except: vec![],
-                }],
-                ports: vec![],
-            }],
-            ..Default::default()
-        });
-        let plan =
-            network_rules::EgressPlan::for_request(&req).expect("an allowlist is enforceable");
-        let dir = tempfile::tempdir().unwrap();
-        let pin = loopback_resolver_pin(&dir);
+        let plan = plan_allowing("140.82.112.0/20", vec![]);
 
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        warn_resolver_blocked_by_egress(&plan, Some(&pin), &mut logger);
+        warn_resolver_blocked_by_egress(&plan, true, &mut logger);
         let out = logger.warnings().join("\n");
         assert!(out.contains("10.0.2.3"), "must name the forwarder: {out}");
         assert!(
-            out.contains("udp") && out.contains("53"),
+            out.contains("53") && out.contains("any"),
             "must name the rule the caller needs: {out}"
         );
         assert!(
@@ -1626,7 +1634,7 @@ mod tests {
         // A host whose resolver already works is never pinned, so there is
         // nothing to warn about however closed the chain is.
         let mut unpinned = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        warn_resolver_blocked_by_egress(&plan, None, &mut unpinned);
+        warn_resolver_blocked_by_egress(&plan, false, &mut unpinned);
         assert!(
             unpinned.warnings().is_empty(),
             "no pin, no warning: {:?}",
@@ -1634,39 +1642,37 @@ mod tests {
         );
     }
 
+    /// A resolver falls back to TCP for an answer that does not fit a datagram,
+    /// and `options use-vc` -- which the pin carries over -- makes it use TCP
+    /// for everything, so a UDP-only rule still loses names.
+    #[test]
+    fn a_udp_only_rule_is_warned_about_for_tcp() {
+        use crate::mxc_common::models::NetworkProtocol;
+
+        let plan = plan_allowing("10.0.2.3/32", dns_port(NetworkProtocol::Udp));
+
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        warn_resolver_blocked_by_egress(&plan, true, &mut logger);
+        let out = logger.warnings().join("\n");
+        assert!(
+            out.contains("TCP"),
+            "a UDP-only rule must still report TCP as blocked: {out}"
+        );
+    }
+
     /// Warning at a caller who already opened the forwarder would send them to
     /// change a rule that is already correct.
     #[test]
     fn a_pinned_resolver_the_chain_admits_is_not_warned_about() {
-        use crate::mxc_common::models::{
-            NetworkEgressPolicy, NetworkPeer, NetworkPort, NetworkProtocol, NetworkRule,
-        };
+        use crate::mxc_common::models::NetworkProtocol;
 
-        let mut req = base_request();
-        req.policy.network_egress = Some(NetworkEgressPolicy {
-            allow: vec![NetworkRule {
-                to: vec![NetworkPeer {
-                    cidr: "10.0.2.3/32".parse().expect("test CIDR"),
-                    except: vec![],
-                }],
-                ports: vec![NetworkPort {
-                    protocol: NetworkProtocol::Udp,
-                    port: Some(53),
-                    end_port: None,
-                }],
-            }],
-            ..Default::default()
-        });
-        let plan =
-            network_rules::EgressPlan::for_request(&req).expect("a udp/53 allow is enforceable");
-        let dir = tempfile::tempdir().unwrap();
-        let pin = loopback_resolver_pin(&dir);
+        let plan = plan_allowing("10.0.2.3/32", dns_port(NetworkProtocol::Any));
 
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        warn_resolver_blocked_by_egress(&plan, Some(&pin), &mut logger);
+        warn_resolver_blocked_by_egress(&plan, true, &mut logger);
         assert!(
             logger.warnings().is_empty(),
-            "the chain admits DNS, so there is nothing to report: {:?}",
+            "the chain admits DNS on both protocols, so there is nothing to report: {:?}",
             logger.warnings()
         );
     }

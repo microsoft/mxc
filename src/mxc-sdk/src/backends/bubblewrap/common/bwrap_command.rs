@@ -100,6 +100,11 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/mnt/wsl/resolv.conf",
 ];
 
+/// The compatibility symlink the sandbox gets in place of a real `/var/run`,
+/// and the directory it points at.
+pub(crate) const COMPAT_RUN_LINK: &str = "/var/run";
+pub(crate) const COMPAT_RUN_TARGET: &str = "/run";
+
 /// The networking behavior Bubblewrap applies for one execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResolvedNetworkMode {
@@ -360,7 +365,11 @@ pub(crate) fn build_args_classified_with_mode(
     // intermediate path would dangle inside the sandbox and DNS would
     // silently fail. The symlink rescues the whole `/var/run/...` family and
     // pulls no host `/var` contents in (bwrap synthesises an empty `/var`).
-    args.extend(["--symlink".into(), "/run".into(), "/var/run".into()]);
+    args.extend([
+        "--symlink".into(),
+        COMPAT_RUN_TARGET.into(),
+        COMPAT_RUN_LINK.into(),
+    ]);
 
     // Standard virtual filesystems (applied before policy mounts so policy
     // paths under /dev, /proc, or /tmp survive).

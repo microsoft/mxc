@@ -317,7 +317,10 @@ Under **address filtering**, MXC therefore replaces the sandbox's resolver with
 slirp's built-in forwarder, `10.0.2.3`. libslirp rewrites a query sent there to
 the first IPv4 nameserver in the *host's* `/etc/resolv.conf` and sends it from
 the host's network namespace, which is what puts the host's stub back in reach.
-`search`, `options`, and every other directive are carried over unchanged.
+`search`, `domain`, `sortlist`, and `options` are carried over unchanged, since
+they decide which names resolve. Comments and unrecognized lines are not: the
+replacement can land on a path the filesystem policy never granted, so only the
+resolver's own behavior crosses that boundary.
 
 The replacement applies only when the host's own resolvers are **all** loopback
 addresses and **at least one** is IPv4, so it cannot redirect name resolution
@@ -337,8 +340,10 @@ this feature, each with a warning naming the cause. A host with no
 
 A policy that names `/etc/resolv.conf` (or the path its symlink chain ends at)
 in `readonlyPaths` / `readwritePaths` is supplying its own resolver, and the
-sandbox keeps that one. Listing an ancestor such as `/etc` is not treated as a
-choice about the resolver.
+sandbox keeps that one — with a warning, because a resolver naming only
+loopback nameservers is unreachable from the sandbox whoever mounted it.
+Listing an ancestor such as `/etc` is not treated as a choice about the
+resolver.
 
 Two cases are deliberately untouched:
 
@@ -350,8 +355,11 @@ Two cases are deliberately untouched:
 Under `egress.default: "deny"` *with* rules, the chain's terminal verdict still
 governs: a query to `10.0.2.3` is dropped unless a rule permits it. MXC warns
 at launch when it pins the resolver and the chain admits nothing to
-`10.0.2.3:53`, naming the rule to add — allow `10.0.2.3/32` on `udp` port 53.
-The rule is not added automatically: the chain is the caller's policy.
+`10.0.2.3:53`, naming the rule to add — allow `10.0.2.3/32` on port 53 with
+protocol `any`. Both protocols are needed: a resolver falls back to TCP for an
+answer that does not fit a datagram, and `options use-vc` makes it use TCP for
+everything. The rule is not added automatically: the chain is the caller's
+policy.
 
 > ⚠️ slirp's forwarder reaches the host's resolver by design, and the chain's
 > `-d 10.0.2.2/32 -j DROP` rule — which closes the sandbox's path to host
