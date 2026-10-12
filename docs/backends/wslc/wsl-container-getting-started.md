@@ -175,8 +175,8 @@ for the full administrator reference, including deployment and verification.
 A single pull is bounded at 540 seconds; `MXC_WSLC_PULL_TIMEOUT_SECS`
 overrides it.
 
-A state-aware pull is additionally held 60 seconds under the deadline its
-client is waiting on, so that a slow registry surfaces as a failed provision
+An image pull during `provision` must also finish at least 60 seconds before
+the client's daemon-call deadline, so that a slow registry causes a failed provision
 rather than a timeout that abandons a container. Raising the budget past
 540 seconds on that path therefore needs
 `MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS` (default 600) raised with it.
@@ -330,7 +330,7 @@ TCP only — the WSLC SDK runtime returns `E_NOTIMPL` for UDP, so a `"udp"`
 protocol is rejected. Two entries claiming the same `windowsPort` are also
 rejected.
 
-The state-aware lifecycle takes the same list under
+The separate `provision` operation takes the same list under
 `wslc.provision.portMappings`, which requires schema `1.1.0-alpha`:
 
 ```json
@@ -348,9 +348,9 @@ The state-aware lifecycle takes the same list under
 }
 ```
 
-The state-aware daemon creates one container per sandbox, so a forward belongs
+The lifecycle daemon creates one container per sandbox, so a forward belongs
 to the sandbox that declared it. The session-wide `cpuCount` / `memoryMb` /
-`gpu` / `storagePath` settings stay one-shot-only, because that daemon shares a
+`gpu` / `storagePath` settings remain available only for create-and-run execution, because that daemon shares a
 single WSL session across every sandbox.
 
 ### Image sources
@@ -399,8 +399,8 @@ no separate `--setup-wslc` step is required.
 
 > **No per-host filtering primitive exists.** The container lacks
 > `CAP_NET_ADMIN`; MXC refuses unsupported rules rather than running them
-> unenforced. The removed legacy `allowOutbound` authoring and wire host-list
-> vocabulary is not accepted by any supported exact contract.
+> unenforced. The removed legacy `allowOutbound` setting and JSON host-list
+> fields are not accepted by any supported contract.
 
 ### Network proxy (cooperative, unprivileged)
 
@@ -447,9 +447,9 @@ proxy must have an address routable from the container:
 ```
 
 The removed `network.proxy` object and its `localhost`/`builtinTestServer`
-forms are rejected by exact v0.9. One-shot proxy use requires the unrestricted
+forms are rejected by schema `0.9.0-alpha`. Create-and-run proxy use requires the unrestricted
 bridged posture shown above; a proxy cannot make isolated networking reach an
-external listener. State-aware exec instead supplies only `runtimeConfig` and
+external listener. Execution in an existing container (`exec`) instead supplies only `runtimeConfig` and
 inherits its provisioned network posture.
 
 ### Per-host filtering is not supported
@@ -480,7 +480,7 @@ dispatch. In supported contracts, `network.enforcementMode`,
 and fail structural parsing; there is no legacy `"capabilities"` selector.
 Use the directional all-allow or all-deny posture above. Inbound reachability
 requires explicit host-to-container forwards through `wslc.portMappings`
-(one-shot) or `wslc.provision.portMappings` (state-aware);
+(create-and-run execution) or `wslc.provision.portMappings` (container lifecycle operations);
 `ingress.default: "allow"` alone does not create them.
 
 **Caveats**
@@ -504,14 +504,14 @@ the container.
 
 ### Working directory (`process.cwd`)
 
-One-shot runs take `process.cwd` as a local Windows drive path and map it the
+Create-and-run execution takes `process.cwd` as a local Windows drive path and maps it the
 same way: `C:\workspace` starts the process in `/mnt/c/workspace`. Grant the
 directory in `filesystem` so it is mounted. A value that cannot be mapped —
 a relative, drive-relative (`C:work`), UNC, or in-container path such as
 `/workspace` — is **rejected** before the container is created. An omitted or
 blank `cwd` leaves the container's default working directory in place.
 
-State-aware `exec` takes the opposite form: an absolute in-container path such
+Execution in an existing container (`exec`) takes the opposite form: an absolute in-container path such
 as `/work`.
 
 ### Environment
@@ -582,16 +582,16 @@ you can write through unenforced. Omit the section entirely.
 `WSLC_CONTAINER_FLAG_AUTO_REMOVE`, and teardown stops and deletes the container.
 
 `lifecycle.destroyOnExit: false` is **rejected**. It asks for the container to
-outlive the run, which a one-shot invocation cannot deliver: the container is
+outlive the run, which create-and-run execution cannot deliver on this backend: the container is
 scoped to a session this process owns, terminating that session at the end of
 the run reaps the container regardless of the AutoRemove flag, and the WSLC SDK
-has no cross-process re-attach. Use the state-aware lifecycle if you need a
+has no cross-process re-attach. Use manual lifecycle operations if you need a
 container to persist — its daemon holds the session open across phase processes.
 
 `lifecycle.preservePolicy: true` is **rejected** — WSLC has no
 policy-persistence primitive, so there is nothing for the flag to select.
 
-Note the state-aware surface differs: it rejects the whole `lifecycle` section
+Container lifecycle JSON requests differ: they reject the whole `lifecycle` section
 at parse time, because a multi-invocation sandbox's lifetime is driven by the
 explicit `provision` / `deprovision` phases rather than by per-run flags.
 
@@ -632,11 +632,11 @@ images — cannot be used.
 | HRESULT `0x80040327` (`WSL_E_OS_NOT_SUPPORTED`) from any WSLC call | The SDK reached WSL's service-connect guard on a host that is neither Windows 11 nor has the WSL support interface | Upgrade Windows. `0x80040321` (`WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`) is the sibling code when the legacy `lxss` component is absent too |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
-| `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/mxc-sdk/build/build_wslc_common.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
+| `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (specified by `WSLC_SDK_VERSION` in `src/mxc-sdk/build/build_wslc_common.rs`) | Update MXC to a build that includes a newer SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
 | `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress |
 | `WSLC image '<name>' cannot be pulled: '<host>' is not in the administrative registry allowlist` | Machine policy restricts which registries may be used | Use a permitted registry, set `imageTarPath`, or ask an administrator to widen `WslcAllowedImageRegistries` |
 | `WSLC image '<name>' did not finish pulling within <n>s and was stopped` | The pull exceeded its budget and was aborted | Retry, raise `MXC_WSLC_PULL_TIMEOUT_SECS`, or warm the cache from a faster network |
-| `WSLC image '<name>' did not finish pulling within <n>s. The transfer was abandoned` | The registry stopped responding, so the pull was given up on rather than ended | Retry, or warm the cache from a faster network. On a state-aware run raise `MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS` alongside `MXC_WSLC_PULL_TIMEOUT_SECS`, since the budget is held under it |
+| `WSLC image '<name>' did not finish pulling within <n>s. The transfer was abandoned` | The registry stopped responding, so the pull was given up on rather than ended | Retry, or warm the cache from a faster network. For a separate `provision` operation, raise `MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS` alongside `MXC_WSLC_PULL_TIMEOUT_SECS`, since the pull must finish before the daemon-call deadline |
 | `WSLC image '<name>' could not be pulled` with `repository does not exist or may require 'docker login'` | The reference is wrong, or the registry needs credentials MXC cannot supply | Fix the image name and tag. For a private registry, use `imageTarPath` or import the image out of band |
 | `WSLC image '<name>' could not be pulled` with `no such host` or a connection error | This host cannot reach the registry | Restore network access, or warm the cache from a connected machine with `--setup-wslc` and match `storagePath`. `imageTarPath` removes the dependency entirely |
 | `WSLC image '<name>' could not be pulled` with `HRESULT 0x8004060D` | Administrative policy on the host blocks the registry | Use a permitted registry, or supply the image with `imageTarPath` |

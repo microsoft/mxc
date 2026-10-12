@@ -81,7 +81,7 @@ three things:
 
 | Entry | Purpose |
 |---|---|
-| `initrd.cpio` | The guest rootfs, pulled from `ghcr.io/hyperlight-dev/hyperlight-unikraft/<runtime>` at the release the crate is pinned to |
+| `initrd.cpio` | The guest rootfs, pulled from `ghcr.io/hyperlight-dev/hyperlight-unikraft/<runtime>` at the release specified by the crate |
 | `snapshot/` | The guest, booted once and captured with the runtime warm; every run restores it |
 | `VERSION` | The rootfs release the directory holds |
 

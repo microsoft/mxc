@@ -6,8 +6,8 @@
 
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 
-/// Closed set of error codes the SDK can return. Mirrors the wire-format codes
-/// (serialised as snake_case strings) one-for-one.
+/// Error codes returned by the SDK, corresponding one-for-one to the
+/// snake_case codes reported by MXC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     MalformedRequest,
@@ -25,7 +25,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    /// The wire-format (snake_case) string for this code.
+    /// The snake_case value used in JSON errors, such as `"backend_error"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MalformedRequest => "malformed_request",
@@ -69,21 +69,18 @@ impl From<MxcErrorCode> for ErrorCode {
     }
 }
 
-/// An error returned by the SDK's fallible operations
-/// ([`spawn_execution_request`](crate::spawn_execution_request)).
+/// An error returned by SDK operations such as [`spawn`](crate::v1::spawn).
 ///
-/// The detail fields sit flat on the error, the same way the wire format, the
-/// C ABI and the C# SDK carry them — one failure reads the same whichever of
-/// the four surfaces a caller is holding.
+/// Details such as `operation` and `native_code` are top-level fields, not
+/// nested in another object. The Node and .NET SDKs and errors returned through
+/// `mxc_ffi` expose the same fields.
 ///
-/// Marked `#[non_exhaustive]`, as both the wire envelope and the internal error
-/// this facades already are: read the fields, and build one with
-/// [`Error::new`] rather than by literal, so a later field costs a downstream
-/// crate nothing.
+/// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
+/// literal so future versions can add fields without breaking construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Error {
-    /// The closed error code.
+    /// The SDK error code.
     pub code: ErrorCode,
     /// A human-readable message.
     pub message: String,

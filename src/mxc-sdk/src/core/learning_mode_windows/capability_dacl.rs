@@ -270,7 +270,7 @@ pub(crate) fn extract_denials(
             access_type: AccessType::Unknown,
             filetime,
             event_id: parts.event_id,
-            provider,
+            provider: Some(provider),
             verbose_logging_properties:
                 crate::learning_mode_windows::extractors::sanitize_properties(&parts.props),
         })
@@ -676,6 +676,7 @@ mod tests {
     fn parts(name: &str, value: String) -> DecodedEventParts {
         DecodedEventParts {
             provider: PRIVACY_LEARNING_MODE_PROVIDER,
+            event_name: None,
             event_id: ACCESS_CHECK_EVENT_ID,
             props: vec![
                 ("ObjectType".to_string(), "\"\"".to_string()),
@@ -854,6 +855,7 @@ mod tests {
     #[test]
     fn ignores_non_permissive_provider() {
         let event = DecodedEventParts {
+            event_name: None,
             provider: GUID::zeroed(),
             event_id: ACCESS_CHECK_EVENT_ID,
             props: Vec::new(),

@@ -49,7 +49,7 @@ pub enum ConsentState {
 }
 
 impl ConsentState {
-    /// The stable wire string for this state, identical across every SDK.
+    /// The stable serialized value for this state, identical across SDKs.
     pub fn as_str(&self) -> &'static str {
         Self::to_inner(*self).as_str()
     }
@@ -160,7 +160,7 @@ pub enum ConsentStatusReason {
 }
 
 impl ConsentStatusReason {
-    /// Stable wire string used by the maintenance and binding contracts.
+    /// Stable string used in telemetry consent status responses.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::NoRecord => "no-record",
@@ -223,10 +223,10 @@ pub enum ConsentActionResult {
 }
 
 impl ConsentActionResult {
-    /// Stable wire string used by the maintenance and binding contracts.
+    /// Stable string used in telemetry consent results.
     ///
-    /// The FFI JSON `result` field and language bindings use these exact
-    /// camelCase spellings.
+    /// Telemetry-consent FFI operations and the other SDKs use these camelCase
+    /// spellings in the `result` field.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Granted => "granted",
@@ -313,7 +313,7 @@ pub enum PolicyState {
 }
 
 impl PolicyState {
-    /// The stable wire string for this state, identical across every SDK.
+    /// The stable serialized value for this state, identical across SDKs.
     pub fn as_str(&self) -> &'static str {
         Self::to_inner(*self).as_str()
     }

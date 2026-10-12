@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! The SDK's sandbox handle â€” a crate-owned facade over the internal
+//! The SDK's sandbox handle: a crate-owned facade over the internal
 //! `mxc_common` streaming handle, so the public API never exposes the
 //! foundation crate's traits.
 
@@ -221,8 +221,8 @@ pub enum WaitResult {
     ///
     /// How far "gone" reaches depends on the backend. A process-spawning
     /// backend kills the whole tree. A backend whose only primitive is the
-    /// foreground process â€” the state-aware `exec` path over IsolationSession â€”
-    /// confirms that process, and a descendant the workload backgrounded is
+    /// foreground process, such as IsolationSession execution in an existing
+    /// container, confirms that process, and a descendant the workload backgrounded is
     /// reclaimed when the container is stopped and deprovisioned rather than here.
     ///
     /// That lifecycle route is reachable through
@@ -254,7 +254,7 @@ pub struct ExecutionResult {
 /// and [`spawn_in_container`](crate::v1::container::spawn_in_container).
 ///
 /// Stream the child's stdio with the `take_*` accessors, wait for it, or kill
-/// it. No pty is allocated â€” the streams are ordinary pipes. Any stdout/stderr
+/// it. No pty is allocated; the streams are ordinary pipes. Any stdout/stderr
 /// the caller does not `take_*` is drained and discarded by [`wait`](Self::wait).
 pub struct MxcProcess {
     inner: Box<dyn SandboxProcess>,

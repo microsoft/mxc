@@ -8,13 +8,13 @@ The Windows Sandbox backend provides VM-level isolation using
 [Windows Sandbox](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview).
 It is experimental and requires `--experimental`.
 
-The backend has two execution surfaces:
+The backend has two execution modes:
 
-- **One-shot:** each invocation launches a fresh disposable VM, runs one
+- **Create-and-run execution:** each invocation launches a fresh disposable VM, runs one
   command, and tears the VM down before returning. Teardown is best-effort, not
   kernel-guaranteed — a launcher hard-kill can leave a wedged orphan; see the
   reference doc's "Hard-kill orphans and `--force-reclaim`" section.
-- **State-aware:** `provision`, `start`, repeated `exec`, `stop`, and
+- **Container lifecycle operations:** `provision`, `start`, repeated `exec`, `stop`, and
   `deprovision` calls share one VM through a detached host daemon.
 
 ## Architecture
@@ -25,8 +25,8 @@ wxc-exec.exe
   `-- mxc_engine
         |
         `-- windows_sandbox_lifecycle::WindowsSandboxRunner
-              |-- one-shot ScriptRunner
-              `-- state-aware StatefulSandboxBackend
+              |-- create-and-run ScriptRunner
+              `-- lifecycle StatefulSandboxBackend
                     |
                     `-- wxc-windows-sandbox-daemon.exe
                           (owns the VM between phase processes)
@@ -45,17 +45,17 @@ WindowsSandbox.exe
 
 | Component | Location | Purpose |
 |---|---|---|
-| Execution engine module | `src/mxc-sdk/src/core/mxc_engine/` | Selects one-shot and state-aware backends |
+| Execution engine module | `src/mxc-sdk/src/core/mxc_engine/` | Selects backends for create-and-run execution and container lifecycle operations |
 | Lifecycle module | `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/` | Policy, launch, bridge, records, ownership, and teardown |
-| Host daemon | `src/mxc-sdk/src/bin/windows_sandbox_daemon/` | State-aware VM and guest-connection owner |
+| Host daemon | `src/mxc-sdk/src/bin/windows_sandbox_daemon/` | Owns the VM and guest connection between lifecycle calls |
 | Shared protocol module | `src/mxc-sdk/src/backends/windows_sandbox/common/` | Nonce authentication and control framing |
 | Guest agent | `src/mxc-sdk/src/bin/windows_sandbox_guest/` | Runs commands and bridges stdio inside the VM |
 
-## One-Shot Execution
+## Create-and-Run Execution
 
 1. Validate policy and reject an existing Tokio runtime before side effects.
 2. Acquire the per-session mutex for the host's single Windows Sandbox VM.
-3. Reconcile any stale one-shot marker and provably-owned orphan.
+3. Reconcile any stale create-and-run marker and provably-owned orphan.
 4. Create secured per-run state, a launch nonce, bootstrap script, and `.wsb`
    configuration.
 5. Launch `WindowsSandbox.exe` and record PID-plus-creation-time ownership proof.
@@ -64,13 +64,13 @@ WindowsSandbox.exe
 7. Execute one command and capture the exit status and output.
 8. Tear down the owned VM and remove the marker after confirmed exit.
 
-Every invocation follows the complete lifecycle; one-shot execution never
+Every invocation follows the complete lifecycle; create-and-run execution never
 reuses a warm VM.
 
-## State-Aware Lifecycle
+## Container Lifecycle Operations
 
-The state-aware surface keeps the VM alive across separate `wxc-exec
---operation` processes. Raw SDK/FFI requests carry `phase` and, after
+The lifecycle API keeps the VM alive across separate `wxc-exec
+--operation` processes. ["MXC request JSON"](../../schema.md#mxc-request-json) carries `phase` and, after
 provision, `sandboxId` in JSON. Direct executor calls omit those routing fields
 from JSON and pass them as `--operation` and `--container-id`. The backend is
 inferred from the `wsb:` sandbox ID after provision.
@@ -88,17 +88,17 @@ sandbox ID, readiness, and VM ownership proof under
 `%TEMP%\wxc-wsb\state-aware`. It receives its authentication nonce over stdin,
 not the command line.
 
-The host supports only one Windows Sandbox VM per logon session. One-shot and
-state-aware owners share the same host-slot mutex. Orphan reclaim requires
+The host supports only one Windows Sandbox VM per logon session. Create-and-run and
+lifecycle VM owners share the same host-slot mutex. Orphan reclaim requires
 recorded PID-plus-creation-time proof intersecting the live process set;
 unproven VMs are treated as foreign and left untouched.
 
-There is no idle watchdog. A started state-aware sandbox remains active until
+There is no idle watchdog. A container started through lifecycle operations remains active until
 `stop` or `deprovision`.
 
 ## Configuration
 
-### One-shot
+### Create-and-run execution
 
 ```json
 {
@@ -111,9 +111,9 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 }
 ```
 
-### State-aware provision
+### Provision
 
-The raw SDK/FFI provision request is:
+The provision "MXC request JSON" is:
 
 ```json
 {
@@ -133,18 +133,18 @@ For a direct executor call, remove `phase` from that JSON and invoke:
 wxc-exec.exe config.json --operation provision
 ```
 
-Subsequent raw SDK/FFI phases carry the returned `sandboxId` in JSON. Direct
+Subsequent lifecycle calls carry the returned `sandboxId` in "MXC request JSON". Direct
 executor calls remove `phase` and `sandboxId` from JSON and pass
 `--operation <phase> --container-id <id>`.
 
 The legacy `windowsSandbox.idleTimeoutMs`, `idleTimeout`, and
 `daemonPipeName` fields remain parseable for schema compatibility but do not
-affect either execution surface. One-shot emits a targeted warning only for
+affect either execution mode. Create-and-run execution emits a targeted warning only for
 non-default values.
 
 ## Policy Support
 
-### One-shot
+### Create-and-run execution
 
 | Policy | Behaviour |
 |---|---|
@@ -153,17 +153,17 @@ non-default values.
 | `filesystem.deniedPaths` | Accepted outside shares; rejected when overlapping a mapped share |
 | Omitted network policy | Guest firewall blocks external networking |
 | `network.egress` or `network.ingress` supplied (even empty or deny-only) | Rejected; omit both sections to use guest isolation |
-| Retired `defaultPolicy` and host lists | Rejected by the exact contract |
+| Retired `defaultPolicy` and host lists | Rejected by the version-specific JSON request type |
 | Network proxy | Rejected |
 
 Mapped paths must be absolute existing directories. Files, nested mapped roots,
 and conflicting read-only/read-write entries are rejected.
 
-### State-aware
+### Container lifecycle operations
 
 Filesystem policy is accepted only during `provision` and is immutable
 afterward. Later phases reject filesystem policy. Network and UI policy are not
-accepted by state-aware phases; the guest still enforces its unconditional
+accepted by container lifecycle operations; the guest still enforces its unconditional
 network lockdown.
 
 ## Security Model
@@ -174,11 +174,11 @@ network lockdown.
 - **Role-based pairing:** sockets are paired by declared role, not TCP accept
   order.
 - **Network isolation:** only the established host connection is permitted.
-- **Secured records:** nonce, rendezvous, marker, and state-aware directories
+- **Secured records:** nonce, rendezvous, marker, and lifecycle record directories
   use owner-only ACLs and reject roots owned by another user.
 - **Ownership-scoped teardown:** PID-plus-creation-time proof prevents PID reuse
   or a foreign VM from being treated as owned.
-- **Single-flight state-aware exec:** the daemon admits only one execution at a
+- **One lifecycle execution at a time:** the daemon admits only one execution at a
   time and restores the guest slot before reporting terminal completion.
 
 Same-user processes remain within the backend's trust boundary.
@@ -196,13 +196,13 @@ required.
 
 ## Known Limitations
 
-1. One-shot execution pays the full VM cold-boot cost on every invocation.
+1. Create-and-run execution pays the full VM boot cost on every invocation.
 2. Only one Windows Sandbox VM can be active per logon session.
-3. One-shot stdin is buffered and capped at 64 MiB.
+3. Create-and-run stdin is buffered and capped at 64 MiB.
 4. Filesystem sharing supports directories only.
 5. Network access is block-only; allow-lists, block-lists, proxies, and
    unrestricted outbound access are unsupported.
-6. State-aware lifecycle has no idle timeout.
+6. Container lifecycle operations have no idle timeout.
 
 ## Testing
 

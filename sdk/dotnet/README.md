@@ -5,8 +5,8 @@
 `Microsoft.Mxc.Sdk` provides .NET APIs for authoring and executing MXC
 container requests through the in-process native `mxc_ffi` library. The
 versioned public API is in `Microsoft.Mxc.Sdk.V1`. All request and policy types
-in this API use the owned V1 contract rather than exposing a wire-version
-selector.
+in this API use the SDK-selected contract version; callers do not select
+that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
 ## Run to completion
 
@@ -49,13 +49,13 @@ Console.WriteLine($"exit={result.ExitCode}");
 `Spawn` / `SpawnAsync` return a live `MxcProcess` with separate stdin, stdout,
 and stderr streams, plus wait, termination, and disposal operations. Shared filesystem,
 network, and UI restrictions are authored directly on `ContainerRequest`,
-alongside the selected backend configuration. The SDK owns the exact wire
-contract; requests do not accept a caller-selected schema version.
+alongside the selected backend configuration. The SDK selects the contract
+version; `ContainerRequest` does not accept a caller-selected schema version.
 
 `UiPolicy.Disable` defaults to `true`; clipboard and input-injection
 permissions are authored separately.
 
-`ContainerRequest.Containment` is a closed `Containment` choice. Select an
+`ContainerRequest.Containment` accepts the SDK-defined `Containment` choices. Select an
 SDK-owned nested choice such as `Containment.Process` (the default),
 `Containment.ProcessContainer`, or `Containment.Wslc`. Backend semantics are
 validated by the native engine.
@@ -113,7 +113,7 @@ Unsupported combinations are rejected before sandbox creation.
 `ProvisionResult.Metadata` is an optional `ProvisionMetadata` value. For
 IsolationSession, pattern-match `IsolationSessionProvisionMetadata` to read the
 agent account and workspace details. WSLC returns no provision metadata. Native
-metadata is mapped to this closed typed surface; callers do not parse raw JSON.
+metadata is converted to these SDK-defined types; callers do not parse native result JSON.
 
 `MxcLifecycle` provides typed provision, start, exec, stop, and deprovision
 operations. The provision result contains an opaque `ContainerId`; pass it to

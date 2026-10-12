@@ -528,7 +528,16 @@ mod tests {
 
     #[test]
     fn truncated_actionable_denials_snapshot_but_skip_adjusted_config() {
-        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, true));
+        let document = DenialsDocument::new(
+            vec![DeniedResource {
+                resource: "internetClient".to_string(),
+                resource_type: ResourceType::Capability,
+                access_type: AccessType::Unknown,
+                pid: 42,
+                filetime: 1,
+            }],
+            DenialSummary::new(0, 1, true),
+        );
 
         let (_directory, log_dir, adjusted) = postprocess_fixture(&document);
 

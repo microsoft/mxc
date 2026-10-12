@@ -16,7 +16,7 @@ The host opens four TCP connections on boot:
 | Stdout | Child standard output |
 | Stderr | Child standard error |
 
-State-aware execution reconnects the three data channels after each
+Execution through container lifecycle operations reconnects the three data channels after each
 `StreamsReady`; the control channel remains attached to the daemon.
 
 ### Authentication and channel roles
@@ -50,7 +50,7 @@ Control messages then use a four-byte little-endian length followed by JSON.
 | `StreamsReady` | Guest to host | Data channels may reconnect |
 | `Ping` / `Pong` | Either | Liveness |
 
-## State-Aware Daemon IPC
+## Lifecycle Daemon Inter-Process Communication
 
 The daemon listens on an OS-assigned localhost port recorded in `daemon.json`.
 A phase process sends:
@@ -73,8 +73,8 @@ The daemon restores or marks-unusable the guest slot and releases its mutex
 before writing the terminal exit frame. This makes terminal completion the point
 at which a new execution may be admitted.
 
-The daemon record (`daemon.json`) also carries the IPC wire-protocol version the
-daemon speaks, and the version is negotiated on the wire, not merely advertised.
+The daemon record (`daemon.json`) also carries the version of its inter-process
+communication protocol, and the client and daemon check that version during communication.
 The client sends its version as the trailing token of the `EXEC` line
 (`EXEC <nonce> <proto>`), and the daemon refuses a mismatch with
 `ERR protocol …` **before** any frame exchange. Because the check is enforced by
@@ -89,7 +89,7 @@ command so an orphaned VM can always be reclaimed.
 
 ## Host State
 
-### One-shot
+### Create-and-run execution
 
 ```text
 %TEMP%\wxc-wsb\oneshot\<run-id>\
@@ -102,7 +102,7 @@ command so an orphaned VM can always be reclaimed.
     rendezvous.txt
 ```
 
-### State-aware
+### Container lifecycle operations
 
 ```text
 %TEMP%\wxc-wsb\state-aware\
@@ -139,11 +139,11 @@ the bridge, and runs `C:\Sandbox-Rendezvous\bootstrap.cmd`.
 
 No host runtime, including Python, is implicitly discovered or mapped.
 
-## One-Shot Launch
+## Create-and-Run Launch
 
 1. Reject an ambient Tokio runtime before side effects.
 2. Validate policy and acquire the host VM mutex.
-3. Reconcile stale one-shot markers and live VM processes.
+3. Reconcile stale create-and-run markers and live VM processes.
 4. Create secured run state and write the initial launcher marker.
 5. Generate the nonce, bootstrap script, and `.wsb` file.
 6. Launch `WindowsSandbox.exe`.
@@ -152,7 +152,7 @@ No host runtime, including Python, is implicitly discovered or mapped.
 9. Send one execution request and relay stdio.
 10. Tear down the owned VM and clear the marker after confirmed exit.
 
-## State-Aware Lifecycle
+## Container Lifecycle Operations
 
 ### Provision
 
@@ -177,7 +177,7 @@ The daemon:
 
 Start polls the record until readiness or timeout. A stale daemon or VM is
 reclaimed only when recorded process identities intersect the live set. If the
-host's single VM slot is already held by another VM owner (a concurrent one-shot
+host's single VM slot is already held by another VM owner (a concurrent create-and-run
 run or another live daemon), the daemon exits with a distinct busy code and
 start surfaces `backend_unavailable` rather than an opaque error.
 
@@ -226,20 +226,20 @@ Mapped roots must be absolute existing directories. The backend rejects:
 A denied path outside all shares is already inaccessible because Windows
 Sandbox shares nothing by default.
 
-State-aware filesystem policy is accepted only at provision and is immutable
+Filesystem policy for container lifecycle operations is accepted only at provision and is immutable
 afterward.
 
 ### Network and UI
 
-One-shot supports only default network policy `block`; `allow`, host filters,
+Create-and-run execution supports only default network policy `block`; `allow`, host filters,
 and proxies are rejected.
 
-State-aware phases reject network and UI policy. The guest firewall still
+Container lifecycle operations reject network and UI policy. The guest firewall still
 enforces unconditional network lockdown.
 
 ## Teardown and Recovery
 
-One-shot and state-aware modes share `Local\wxc-wsb-vm`, serialising ownership
+Create-and-run execution and container lifecycle operations share `Local\wxc-wsb-vm`, serialising ownership
 of the host's single Windows Sandbox VM.
 
 Cleanup rules:
@@ -279,17 +279,17 @@ These fields remain parseable but do not control either live execution path:
 - `windowsSandbox.idleTimeout`
 - `windowsSandbox.daemonPipeName`
 
-State-aware lifecycle has no idle watchdog.
+Container lifecycle operations have no idle watchdog.
 
 ## Debugging
 
-Inspect one-shot state under:
+Inspect create-and-run records under:
 
 ```powershell
 $root = Join-Path $env:TEMP "wxc-wsb\oneshot"
 ```
 
-Inspect state-aware records under:
+Inspect lifecycle records under:
 
 ```powershell
 $root = Join-Path $env:TEMP "wxc-wsb\state-aware"
@@ -311,17 +311,17 @@ PID-plus-creation-time ownership proof.
 
 | File | Purpose |
 |---|---|
-| `src/mxc-sdk/src/core/mxc_engine/run.rs` | One-shot backend selection |
-| `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | State-aware backend selection |
-| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/one_shot.rs` | One-shot orchestration |
-| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/state_aware.rs` | State-aware phase implementation |
+| `src/mxc-sdk/src/core/mxc_engine/run.rs` | Backend selection for create-and-run execution |
+| `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | Backend selection for container lifecycle operations |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/one_shot.rs` | Create-and-run orchestration |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/state_aware.rs` | Lifecycle operation implementation |
 | `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/control_plane.rs` | Records, state decisions, IPC constants, and locks |
-| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/teardown.rs` | One-shot markers and cleanup |
+| `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/teardown.rs` | Create-and-run markers and cleanup |
 | `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/bridge.rs` | Guest bridge and stream relay |
 | `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/ipc_exec.rs` | Daemon exec frame codec |
 | `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/vm.rs` | VM generation, launch, proof, and teardown |
 | `src/mxc-sdk/src/backends/windows_sandbox/lifecycle/policy.rs` | Policy mapping and validation |
-| `src/mxc-sdk/src/bin/windows_sandbox_daemon/main.rs` | State-aware daemon ownership and launch |
+| `src/mxc-sdk/src/bin/windows_sandbox_daemon/main.rs` | Lifecycle daemon ownership and launch |
 | `src/mxc-sdk/src/bin/windows_sandbox_daemon/control_server.rs` | Daemon IPC and single-flight execution |
 | `src/mxc-sdk/src/backends/windows_sandbox/common/auth.rs` | Nonce and role authentication |
 | `src/mxc-sdk/src/backends/windows_sandbox/common/sandbox_protocol.rs` | Guest control framing |

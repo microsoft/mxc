@@ -2,6 +2,9 @@
 
 > **Audience:** MXC developers
 
+See the [developer glossary](../glossary.md) for terms such as "exact contract,"
+"wire format," and "request root."
+
 ## Architecture at a glance
 
 Versioning determines **which configuration contract is accepted**, not which
@@ -12,16 +15,16 @@ separate:
 | --- | --- |
 | Which fields and values exist? | The exact Rust contract types and registration in `mxc_contract`. Published contracts are immutable; the development contract can evolve. |
 | Which exact contract does a typed SDK emit? | `sdkMajorTargets` in `schemas/schema-version.json`, checked against the exact Rust registry. Callers select a major-version SDK API, not an exact JSON version. |
-| Which exact contract does raw JSON use? | The caller's declared, registered `version`. A version range or development opt-in cannot authorize another spelling. |
+| Which contract does ["MXC request JSON"](../../schema.md#mxc-request-json) use? | The caller's declared, registered `version`. A version range or development opt-in cannot authorize another spelling. |
 | Which backend and policy can run? | `mxc_engine` resolves the backend and checks authorization; host capabilities and backend validation determine what can actually be enforced. |
 
-Typed authoring and raw JSON converge before backend execution:
+Typed SDK inputs and "MXC request JSON" converge before backend execution:
 
 ```mermaid
 flowchart LR
     typed["Typed SDK policy or lifecycle request"]
     target["SDK-owned published exact target"]
-    raw["Raw JSON with caller-declared version"]
+    raw["'MXC request JSON' with caller-declared version"]
     contract["Registered exact Rust contract"]
     adapter["Version-specific adapter"]
     normalized["Shared normalization<br/>ExecutionRequest and typed lifecycle operation"]
@@ -180,7 +183,7 @@ state-aware roots, including recursively closed experimental structures. The
 registered Rust types remain the authority for declared `1.1.0-alpha`
 requests; the schema is their derived editor and validation artifact.
 
-Raw JSON is parsed with the exact registered contract named by its `version`
+"MXC request JSON" is parsed with the registered contract named by its `version`
 field. High-level Rust, .NET, and Node v1 builders do not accept a caller-supplied
 schema version: they construct requests for exact `1.0.0` and reject fields or
 backends outside that contract. Repository config validation selects the schema

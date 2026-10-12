@@ -43,7 +43,7 @@ pub enum BackendCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableBackend {
-    /// Canonical [`ContainmentBackend::wire_name`] value.
+    /// Backend identifier, such as `"seatbelt"` or `"processcontainer"`.
     pub backend: String,
     /// Highest-isolation tier the host supports for this backend (a canonical
     /// `IsolationTier::as_str()` name); `None`, and omitted from JSON, for

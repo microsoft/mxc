@@ -118,6 +118,12 @@ Update documentation in the same change when behavior changes:
 
 Do not duplicate detailed backend behavior here. Keep the canonical explanation in the subsystem documentation.
 
+### Terminology
+
+- In consumer docs and public Rustdoc, replace "state-aware" with "container lifecycle operations" ("manual lifecycle operations" for caller responsibility), "one-shot" with "create-and-run execution", and "exact contract" with "contract".
+- Use plain English and explicit type, namespace, field, and format names (e.g. "MXC request JSON"). Avoid "wire type", unqualified "raw JSON", "native request", "closed exclusion", "closes over policy", "operation-neutral", and "pinned logging".
+- Preserve code identifiers. Follow the [developer wording guide](../docs/development/glossary.md); define retained jargon in the [consumer glossary](../docs/glossary.md) or developer glossary.
+
 ## SDK API consistency
 
 - Publish every SDK operation, type, probe, discovery API, telemetry API, and helper only through a supported versioned (V*) namespace/module/entrypoint.

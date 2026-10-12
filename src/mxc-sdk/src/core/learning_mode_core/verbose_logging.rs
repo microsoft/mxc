@@ -35,7 +35,7 @@ pub enum VerboseLoggingOutcomeReason {
     Actionable,
     /// The provider is known, but the event ID is not a supported denial schema.
     UnsupportedEventSchema,
-    /// The event payload conflicted with its declared TDH schema.
+    /// The event payload was malformed or conflicted with its declared TDH schema.
     EventPayloadMalformed,
     /// A decoder safety bound prevented full payload processing.
     DecoderLimitReached,
@@ -51,8 +51,22 @@ pub enum VerboseLoggingOutcomeReason {
     UnusableResourcePath,
     /// A capability event did not contain a usable capability denial.
     UnresolvedCapability,
+    /// Classic COM class activation.
+    ComActivation,
+    /// Classic COM interface call.
+    ComInterfaceCall,
     /// The event was valid but did not describe an actionable denial.
     NotActionable,
+}
+
+/// Validates a supported MXC verbose logging document without exposing its
+/// version-specific internal Rust representation.
+///
+/// This accepts the legacy public document and newer product-only document
+/// versions used by MXC capture paths.
+#[doc(hidden)]
+pub fn validate_verbose_logging_document(bytes: &[u8]) -> Result<(), serde_json::Error> {
+    super::capture_diagnostics::parse_supported_verbose_document(bytes).map(|_| ())
 }
 
 impl VerboseLoggingOutcomeReason {
@@ -175,6 +189,10 @@ impl VerboseLoggingSummary {
         }
 
         let serialized_len = Self::serialized_signature_len(&signature);
+        if serialized_len > max_bytes {
+            self.record_overflow(signature.reason.is_actionable());
+            return;
+        }
         while self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
             || retained_bytes.saturating_add(serialized_len) > max_bytes
         {
@@ -199,6 +217,26 @@ impl VerboseLoggingSummary {
         );
         self.total_occurrences = self.total_occurrences.saturating_add(1);
         *retained_bytes = retained_bytes.saturating_add(serialized_len);
+    }
+
+    /// Records an actionable outcome after the caller has established that
+    /// retention is saturated and every retained group is actionable.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn record_actionable_after_saturation(
+        &mut self,
+        signature: VerboseLoggingSignature,
+    ) {
+        debug_assert!(signature.reason.is_actionable());
+        match self
+            .signatures
+            .binary_search_by(|group| group.signature.cmp(&signature))
+        {
+            Ok(index) => {
+                self.total_occurrences = self.total_occurrences.saturating_add(1);
+                self.signatures[index].count = self.signatures[index].count.saturating_add(1);
+            }
+            Err(_) => self.record_overflow(true),
+        }
     }
 
     /// Counts an outcome whose new signature could not be retained at a bound.
@@ -303,7 +341,7 @@ pub struct VerboseLoggingDocumentSummary {
 
 impl VerboseLoggingDocument {
     /// Current verbose logging document schema version.
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 4;
 
     /// Builds an on-disk document from decoder aggregate state.
     #[must_use]
@@ -467,6 +505,76 @@ mod tests {
     }
 
     #[test]
+    fn com_signature_overflow_is_not_counted_as_actionable() {
+        let mut summary = VerboseLoggingSummary::default();
+        let mut signature: VerboseLoggingSignature = serde_json::from_value(serde_json::json!({
+            "provider": "kernelGeneral",
+            "providerGuid": "kernel",
+            "eventId": 0,
+            "reason": "unsupportedEventSchema",
+            "pid": 1,
+            "properties": []
+        }))
+        .unwrap();
+        for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS as u16 {
+            signature.event_id = event_id;
+            summary.record(signature.clone());
+        }
+
+        signature.event_id = u16::MAX;
+        signature.reason = VerboseLoggingOutcomeReason::ComActivation;
+        signature.resource_type = Some(crate::learning_mode_core::ResourceType::Other);
+        summary.record(signature);
+
+        assert_eq!(summary.overflow_occurrences, 1);
+        assert_eq!(summary.actionable_overflow_occurrences, 0);
+        assert!(!summary
+            .signatures
+            .iter()
+            .any(|group| { group.signature.reason == VerboseLoggingOutcomeReason::ComActivation }));
+    }
+
+    #[test]
+    fn saturated_actionable_groups_still_count_retained_repeats() {
+        let mut summary = VerboseLoggingSummary::default();
+        let retained_bytes = MAX_VERBOSE_LOGGING_SIGNATURE_BYTES;
+        for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS as u16 {
+            summary.signatures.push(VerboseLoggingAggregate {
+                signature: VerboseLoggingSignature {
+                    provider: VerboseLoggingProvider::KernelGeneral,
+                    provider_guid: "kernel".to_string(),
+                    event_id,
+                    reason: VerboseLoggingOutcomeReason::Actionable,
+                    pid: 1,
+                    access_type: Some(crate::learning_mode_core::AccessType::Read),
+                    resource_type: Some(crate::learning_mode_core::ResourceType::File),
+                    properties: Vec::new(),
+                },
+                count: 1,
+            });
+        }
+        summary.total_occurrences = MAX_VERBOSE_LOGGING_GROUPS as u64;
+
+        let retained = summary.signatures[0].signature.clone();
+        summary.record_actionable_after_saturation(retained);
+        summary.record_actionable_after_saturation(VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
+            provider_guid: "privacy".to_string(),
+            event_id: u16::MAX,
+            reason: VerboseLoggingOutcomeReason::Actionable,
+            pid: 0,
+            access_type: Some(crate::learning_mode_core::AccessType::Unknown),
+            resource_type: Some(crate::learning_mode_core::ResourceType::Network),
+            properties: vec![("RemoteAddress".to_string(), "203.0.113.10".to_string())],
+        });
+
+        assert_eq!(summary.signatures[0].count, 2);
+        assert_eq!(summary.overflow_occurrences, 1);
+        assert_eq!(summary.actionable_overflow_occurrences, 1);
+        assert_eq!(retained_bytes, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES);
+    }
+
+    #[test]
     fn byte_budget_leaves_guarded_analysis_protocol_headroom() {
         let mut summary = VerboseLoggingSummary::default();
         let mut retained_bytes = 0;
@@ -503,6 +611,45 @@ mod tests {
     }
 
     #[test]
+    fn individually_oversized_actionable_signature_does_not_evict_diagnostic() {
+        let mut summary = VerboseLoggingSummary::default();
+        let mut retained_bytes = 0;
+        let signature = |event_id, reason, value: String| VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::KernelGeneral,
+            provider_guid: "kernel".to_string(),
+            event_id,
+            reason,
+            pid: 1,
+            access_type: None,
+            resource_type: None,
+            properties: vec![("Value".to_string(), value)],
+        };
+        summary.record_with_byte_budget(
+            signature(
+                14,
+                VerboseLoggingOutcomeReason::UnsupportedEventSchema,
+                "diagnostic".to_string(),
+            ),
+            &mut retained_bytes,
+            512,
+        );
+        summary.record_with_byte_budget(
+            signature(
+                15,
+                VerboseLoggingOutcomeReason::Actionable,
+                "x".repeat(1_024),
+            ),
+            &mut retained_bytes,
+            512,
+        );
+
+        assert_eq!(summary.signatures.len(), 1);
+        assert_eq!(summary.signatures[0].signature.event_id, 14);
+        assert_eq!(summary.overflow_occurrences, 1);
+        assert_eq!(summary.actionable_overflow_occurrences, 1);
+    }
+
+    #[test]
     fn document_round_trips() {
         let mut summary = VerboseLoggingSummary::default();
         summary.mark_actionable_limit_reached();
@@ -531,10 +678,24 @@ mod tests {
         summary.mark_actionable_limit_reached();
 
         let value = serde_json::to_value(VerboseLoggingDocument::new(&summary)).unwrap();
-        assert_eq!(value["version"], 2);
+        assert_eq!(value["version"], 4);
         assert_eq!(value["signatures"][0]["signature"]["reason"], "actionable");
         assert_eq!(value["summary"]["actionableOverflowOccurrences"], 2);
         assert_eq!(value["summary"]["actionableLimitReached"], true);
+    }
+
+    #[test]
+    fn document_serializes_distinct_nonactionable_com_reasons() {
+        for (reason, expected) in [
+            (VerboseLoggingOutcomeReason::ComActivation, "comActivation"),
+            (
+                VerboseLoggingOutcomeReason::ComInterfaceCall,
+                "comInterfaceCall",
+            ),
+        ] {
+            assert!(!reason.is_actionable());
+            assert_eq!(serde_json::to_value(reason).unwrap(), expected);
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ compare while each implementation remains idiomatic for its language.
 ## Conventions
 
 - Each sample demonstrates one primary concept through the public versioned V1 API.
-- Requests use typed SDK models rather than JSON or generated wire types.
+- Requests use typed SDK models rather than ["MXC request JSON"](../docs/schema.md#mxc-request-json) or generated JSON serialization types.
 - Commands are harmless, bounded, and selected for the current operating system.
 - Workload failures, timeouts, SDK errors, warnings, and cleanup failures remain visible.
 - Projects reference the SDK in this repository so the samples track the current source.

@@ -192,7 +192,7 @@ Anything it hasn't declared is rejected up front.
 
 ### Fields (supported schema 0.9+)
 
-This is the cross-backend directional shape accepted by the registered exact
+This is the cross-backend directional format accepted by the supported
 contracts. Schema 0.8 is no longer accepted; see the
 [supported network fields](../../schema.md#directional-networking-supported-contracts).
 
@@ -638,7 +638,7 @@ deliberate: the alternative is a rule that matches nothing, which for
 |---|---|
 | `guiAccess: true` with `ui.disable: true`, or with no `ui` section | The GUI rules are only emitted when UI is enabled, so the request would otherwise be dropped without a word |
 | `guiAccess: true` with piped stdio or a caller-controlled PTY | GUI mode needs inherited stdio and an externally owned terminal |
-| `launchMethod` in a supported contract | The field is retired and rejected at exact parsing |
+| `launchMethod` in a supported contract | The field is retired and rejected during JSON parsing |
 
 ## Limitations
 

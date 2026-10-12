@@ -79,6 +79,7 @@ run_test() {
 }
 
 run_test "Basic Bubblewrap" "$SCRIPT_DIR/run_bwrap_basic_test.sh"
+run_test "Bubblewrap cwd advisory" "$SCRIPT_DIR/run_bwrap_cwd_advisory_test.sh"
 run_test "Bubblewrap Environment" "$SCRIPT_DIR/run_bwrap_environment_test.sh"
 run_test "Bubblewrap Filesystem" "$SCRIPT_DIR/run_bwrap_filesystem_test.sh"
 run_test "Bubblewrap Read-Only Denial" "$SCRIPT_DIR/run_bwrap_readonly_denial_test.sh"

@@ -1,20 +1,20 @@
-# WSLc State-Aware Lifecycle
+# WSLc Container Lifecycle Operations
 
 > **Audience:** MXC consumers and developers
 
-This document describes the **state-aware lifecycle** for the WSL Container (WSLc) backend:
-the multi-invocation `provision → start → exec → stop → deprovision` surface that keeps a
-container **warm** across separate `wxc-exec` phase processes, amortizing WSLc's high cold-start
-cost.
+This document describes **container lifecycle operations** for the WSL Container (WSLc) backend:
+`provision → start → exec → stop → deprovision` calls that keep a
+container running across separate `wxc-exec` phase processes, avoiding repeated
+WSLc startup costs. See the [consumer glossary](../../glossary.md) for terminology.
 
 It complements:
 
 - [WSLC SDK bindings runbook](../../development/build-and-test/wslc-sdk-bindings.md) — regenerating the SDK bindings.
-- [Container lifecycle architecture](../../development/architecture/container-lifecycle.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
+- [Container lifecycle architecture](../../development/architecture/container-lifecycle.md) — the shared lifecycle JSON format, the Rust `StatefulSandboxBackend` trait, and backend routing.
 
-The raw WSLc state-aware surface is available in published exact schemas
+WSLc lifecycle ["MXC request JSON"](../../schema.md#mxc-request-json) is supported by published contracts
 beginning with `0.9.0-alpha`. The Rust, .NET, and Node high-level v1 lifecycle
-APIs are V1 contract-mapped and emit stable exact `1.0.0`; callers do not
+APIs use stable contract `1.0.0`; callers do not
 supply a schema version. Neither path requires a runtime experimental opt-in.
 Native builds still require the `wslc` feature (`build.bat --with-wslc`).
 
@@ -23,7 +23,7 @@ Native builds still require the `wslc` feature (`build.bat --with-wslc`).
 The WSLc SDK (`wslcsdk.dll`, 2.9.9) has **no cross-process session re-attach**: every operation
 (`WslcCreateContainer`, `WslcStartContainer`, `WslcCreateContainerProcess`, image pull, stop /
 delete) requires a live in-process `WslcSession` / `WslcContainer` handle, and there is no
-`WslcOpenSession`. State-aware runs each phase as a **separate**
+`WslcOpenSession`. Each lifecycle phase runs as a **separate**
 `wxc-exec` invocation, so handles minted during `provision` cannot be reused by a later `exec`
 or `deprovision` in a different process.
 
@@ -40,34 +40,37 @@ the live SDK handles. Each phase process is a thin client that contacts the daem
 pipe; the daemon performs the actual SDK calls and streams stdio back. This mirrors the Windows
 Sandbox daemon pattern.
 
-The daemon runs all SDK calls on a **single apartment-affine worker thread** (the WSLc SDK handles
-are not thread-agnostic). Today `exec` blocks that worker for the duration of the run, so commands
-against different sandboxes are serialized — correct, just not concurrent. See
+The daemon owns the live SDK handles on a **single apartment-affine worker thread**, which services
+every lifecycle command. Any thread that has joined the MTA may use those handles, so an image
+pull and an `exec` each run on an MTA thread of their own and post their outcome back to the
+worker, leaving it free to serve other sandboxes for the duration of a run. A second `exec` on a
+container with a run in flight is refused as `busy`; a lifecycle command naming that container
+waits for the run, because deleting the container would free a handle the run is using. See
 [Known limitations](#known-limitations).
 
 ## Components
 
 | Component | Location | Role |
 |-----------|----------|------|
-| State-aware backend | `src/mxc-sdk/src/backends/wslc/common/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
-| Policy honor matrix | `src/mxc-sdk/src/backends/wslc/common/policy.rs` | Per-phase validation of which policy fields are honored vs rejected. |
+| Lifecycle backend | `src/mxc-sdk/src/backends/wslc/common/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and shared policy fields into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
+| Policy support checks | `src/mxc-sdk/src/backends/wslc/common/policy.rs` | Per-phase validation of which policy fields are enforced or rejected. |
 | Daemon client | `src/mxc-sdk/src/backends/wslc/common/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
 | Daemon | `src/mxc-sdk/src/bin/wslc_daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
-| Engine arm | `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | Dispatches the WSLc state-aware backend (Windows + `wslc` feature). |
+| Engine routing | `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | Selects the WSLc lifecycle backend (Windows + `wslc` feature). |
 | Prefix registration | `src/mxc-sdk/src/tools/mxc_common/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
 
-Exact adapters construct `mxc_common::models::WslcProvisionConfig` directly from
-`wslc.provision`. Engine-side checked binding preserves an absent
+Version-specific adapters construct `mxc_common::models::WslcProvisionConfig` directly from
+`wslc.provision`. Conversion to the backend's typed configuration preserves an absent
 config, a present empty config, and supplied
 `image`/`imageTarPath`/`portMappings` values without reparsing JSON. An omitted
-image remains `None` until the backend chooses its default. The exact contract
-type is converted once by its adapter; the backend's provision associated type
-is the runtime-owned model, not a wire deserialization DTO.
+image remains `None` until the backend chooses its default. Each version's JSON
+request type is converted once by its adapter; the backend uses the runtime
+`WslcProvisionConfig` model rather than deserializing JSON again.
 
 ### Port mappings
 
 `wslc.provision.portMappings` forwards host ports into the sandbox's container,
-using the same entry shape as the one-shot `wslc.portMappings` list:
+using the same entry shape as the create-and-run `wslc.portMappings` list:
 
 ```json
 {
@@ -92,17 +95,17 @@ Port mappings require bridged networking. A request that leaves `network` out,
 or sets it to the all-`deny` isolated posture, is rejected at provision: the
 container has no networking for a forward to reach.
 
-The field requires development contract `1.1.0-alpha`. State-aware WSLC
-requests default to `0.9.0-alpha`, so the version has to be set explicitly.
+The field requires development contract `1.1.0-alpha`. Requests declaring
+`0.9.0-alpha` cannot include it and must select `1.1.0-alpha` explicitly.
 The daemon shares one session (VM) but creates a separate container for each
 provision, so a mapping applies only to the container that declared it, unlike
 the session-wide `cpuCount` / `memoryMb` / `gpu` / `storagePath` knobs that
-remain one-shot-only.
+remain available only for create-and-run execution.
 
-The one-shot `wslc.portMappings` list and `wslc.provision.portMappings` share
+The create-and-run `wslc.portMappings` list and `wslc.provision.portMappings` share
 one duplicate check, so two entries claiming the same `windowsPort` are
 rejected identically. Zero ports and non-TCP protocols are rejected when the
-exact contract deserializes.
+version-specific JSON request is deserialized.
 
 The forward listens on `127.0.0.1` only, so a mapped port reaches the container
 from the host itself and not from other machines. WSLC installs it when the
@@ -112,7 +115,7 @@ process already holds on loopback fails the `start` phase, not `provision`.
 ## Sandbox IDs
 
 `provision` mints an id of the form `wslc:<32 lowercase hex>` (`wslc:` + a UUID simple form).
-Raw SDK/FFI requests carry this id in `sandboxId` for every post-provision phase
+"MXC request JSON" carries this id in `sandboxId` for every post-provision phase
 (`start` / `exec` / `stop` / `deprovision`). Direct `wxc-exec` calls omit it from JSON and pass it
 as `--container-id`; the dispatcher derives the backend from the `wslc:` prefix (later operations do
 **not** repeat `containment`).
@@ -129,10 +132,10 @@ as `--container-id`; the dispatcher derives the backend from the `wslc:` prefix 
 
 ### exec output semantics
 
-`provision` / `start` / `stop` / `deprovision` return a JSON `{result | error}` envelope on stdout.
+`provision` / `start` / `stop` / `deprovision` return a JSON object containing `result` or `error` on stdout.
 For `wxc-exec` CLI execution, a **successful** `exec` relays the script's raw stdout/stderr live
 from daemon frames and exits with the script's own exit code — it does **not** wrap the result in
-an envelope. A CLI dispatch **failure** writes its `{error}` envelope to stderr, because the
+a JSON result object. A CLI dispatch **failure** writes its `{error}` JSON object to stderr, because the
 script's output may already own stdout by the time the failure is known. In-process SDK execution
 uses the supported streaming APIs, which return separate stdout/stderr pipes; no stdin pipe is
 returned. Rust and .NET SDKs do not expose attached exec as a public operation. A timeout on the
@@ -141,12 +144,39 @@ the streaming path reports it through its wait result.
 
 ### exec admission, cancellation, and failure containment
 
-The daemon runs one exec at a time because all WSLc SDK operations are confined
-to one apartment-affine worker. A concurrent exec is rejected with
-`backend_error` rather than queued behind an unknown-duration workload. Up to
-eight additional control connections can be serviced while an exec owns the
-stream slot; connections beyond the daemon's bounded client capacity are
-refused.
+The daemon admits up to eight exec streams at once, one per container. A second
+exec naming a container that already has one in flight is refused with `busy`
+before any admission reaches the client; the outward SDK error is
+`backend_error`. The bound of eight comes from memory: a streaming exec's output
+lives only in its bounded live-output queue, so the persistent per-user daemon
+stays near 128 MB of live output even against clients that never drain. An
+exec's slot is held until the run has reported back and its client has been
+written to, so a client that disconnects mid-run keeps counting against that
+bound while its process is still going, and one that drains slowly keeps
+counting while its output is still queued. A run whose termination could not be
+confirmed leaves its sandbox quarantined and keeps the slot until that sandbox
+is deprovisioned, because the process may still be alive.
+
+Three conditions surface as `busy`, and all reach an SDK caller as
+`backend_error`:
+
+| Condition | Message | Retry |
+| --- | --- | --- |
+| The daemon's eight exec slots are all occupied | `WSLc daemon exec capacity is exhausted` | Succeeds once any exec finishes |
+| The named container already has an exec in flight | `sandbox <id> already has an exec in flight` | Succeeds once that container's run finishes |
+| Every client slot is occupied and the request is not a cancellation | `WSLc daemon client capacity is exhausted` | Succeeds once any client disconnects |
+
+Up to eight additional control connections can be serviced while every exec slot
+is occupied. Beyond that, a connection is admitted only to cancel: cancellation
+is the one request that never waits on the worker, and the only way to end a run
+with no timeout, so it keeps capacity of its own that lifecycle work cannot
+consume. A connection on that lane must send its request within two seconds and
+in under 1 KB, so one that connects and stalls cannot hold a cancellation slot
+for the general deadline.
+
+`start` / `stop` / `deprovision` naming a container with an exec in flight
+**wait** for that run, because deleting the container would free a handle the
+run is still using.
 
 Each exec carries an internal ID and per-run token. A duplicate live ID is
 rejected, and cancellation must match both values so a delayed cancellation
@@ -171,12 +201,12 @@ daemon attempts immediate deletion. If deletion fails, the quarantined entry is
 retained so `deprovision` can retry cleanup; it is not removed from tracking
 while a potentially running workload remains.
 
-## Policy honor matrix
+## Supported and rejected policy fields
 
 WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs
 `Bridged`); there is no per-host filtering or independent ingress/host-loopback
 restriction primitive. Proxy configuration supplies environment variables, not
-a firewall. Exact v0.9 supports two coherent postures:
+a firewall. Schema `0.9.0-alpha` supports two combinations:
 
 | Posture | `egress.default` | `ingress.default` | `ingress.hostLoopback` |
 | --- | --- | --- | --- |
@@ -202,14 +232,14 @@ acknowledges that WSLC cannot independently restrict those directions.
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
 | `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 
-For a raw `0.9.0-alpha` request, that exact request root is selected before
-backend dispatch. High-level v1 SDK calls select exact `1.0.0` internally.
-Fields absent from that phase's closed root fail structurally with
+For "MXC request JSON" declaring `0.9.0-alpha`, that version's request type is selected before
+backend execution. High-level v1 SDK calls select contract `1.0.0` internally.
+Fields not declared for that phase are rejected during parsing with
 `malformed_request`: provision excludes `ui`, start / stop / deprovision admit
 no filesystem, network, UI, or process policy, and exec excludes filesystem and
 UI. These failures do not reach WSLc's presence checks.
 
-Fields the exact root does admit still receive backend semantic validation.
+Fields allowed by that phase's JSON request type still receive backend validation.
 Every resulting `policy_validation` above aborts the phase before anything is
 created: the dispatcher runs each `validate_*` hook ahead of the phase body,
 and `connect_daemon()` lives inside `provision()`, so a refused provision never
@@ -231,11 +261,11 @@ directional requirements do not change those published contracts.
 
 ## Error mapping
 
-Exact-contract `malformed_request` failures occur before daemon connection and
+JSON parsing failures reported as `malformed_request` occur before daemon connection and
 are not part of daemon error mapping. Once dispatch reaches the backend,
-`state_aware.rs::map_daemon_error` maps daemon errors to the cross-backend wire error codes:
+`state_aware.rs::map_daemon_error` maps daemon errors to the shared SDK error codes:
 
-| Source | Wire error code |
+| Source | SDK error code |
 |--------|-----------------|
 | daemon `ErrKind::NotProvisioned` (incl. stale / deprovisioned id) | `not_provisioned` |
 | daemon `ErrKind::NotStarted` | `not_started` |
@@ -246,8 +276,8 @@ are not part of daemon error mapping. Once dispatch reaches the backend,
 | WSLc feature absent / host cannot run WSLc | `backend_unavailable` |
 
 The daemon classifies each failure from the `failure_phase` its step helper
-reported, so a phase failure reaches the SDK with the same code the one-shot
-surface returns for the same host condition. A caller branches on the code
+reported, so a phase failure reaches the SDK with the same code that
+create-and-run execution returns for the same host condition. A caller branches on the code
 without matching the message.
 
 `ErrKind` is additive: a kind a client does not recognize decodes to
@@ -267,7 +297,7 @@ caller sets these before the first `provision`:
 | `MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS` | `300` | Idle duration after which the daemon tears down the session. |
 | `MXC_WSLC_DAEMON_IDLE_POLL_SECS` | `15` | How often the idle watchdog checks for inactivity. |
 
-The state-aware E2E harness (`tests/scripts/run_wslc_state_aware_tests.ps1`) uses short overrides so
+The lifecycle end-to-end test script (`tests/scripts/run_wslc_state_aware_tests.ps1`) uses short overrides so
 it can observe idle-teardown within seconds.
 
 ## Testing
@@ -276,12 +306,17 @@ it can observe idle-teardown within seconds.
 host that can reach a registry or already has the image cached, and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
 core lifecycle, warm-reuse (a marker written by one `exec` is read back by a separate `exec`
 process — only possible if the container stayed warm), filesystem volumes, bridged networking +
-proxy, validation rejections, and idle teardown. Fixtures live in
+proxy, validation rejections, exec concurrency, and idle teardown. Fixtures live in
 `tests/configs/wslc_state_aware_*.json`.
+
+The concurrency section launches a phase without waiting for it (`Start-StateAware` /
+`Wait-StateAware`), which is what lets it observe two sandboxes running at once, a refused
+same-container second exec, and a lifecycle command issued while a run is in flight. Every other
+section drives one phase process at a time.
 
 ### Running the fixtures (ordering + id substitution)
 
-The `wslc_state_aware_*.json` fixtures are **stateful** — unlike the one-shot configs, they cannot be
+The `wslc_state_aware_*.json` test inputs describe **container lifecycle operations**: unlike create-and-run configs, they cannot be
 run individually or in an arbitrary order:
 
 - **Order is mandatory.** A sandbox must go through `provision → start → exec… → stop → deprovision`.
@@ -290,8 +325,8 @@ run individually or in an arbitrary order:
   `deprovision` → `not_provisioned`).
 - **The id must be threaded through.** `provision` returns the real `wslc:<32-hex>` id on stdout
   (`result.sandboxId`). The post-provision fixtures (`_start`, `_stop`, `_deprovision`, and every
-  `_exec_*`) ship with a literal **`{{SANDBOX_ID}}` placeholder**. These fixtures use the raw exact
-  SDK/FFI envelope shape; the harness replaces the placeholder before converting the request to
+  `_exec_*`) ship with a literal **`{{SANDBOX_ID}}` placeholder**. These test inputs use
+  "MXC request JSON"; the harness replaces the placeholder before converting the request to
   direct executor CLI form.
 
 `run_wslc_state_aware_tests.ps1` handles both concerns automatically (it drives the phases in order
@@ -301,15 +336,18 @@ fixtures **through the harness**, not by pointing `wxc-exec --config` at them di
 
 ## Known limitations
 
-- **Serialized exec (deferred).** Because the daemon's single worker thread blocks on
-  `WaitForSingleObject` for the whole `exec`, no other sandbox can provision or exec while one
-  command runs, and a per-container single-flight `Busy` guard is not yet meaningful. The intended
-  fix splits `exec` into an on-worker `ExecStart` (extract the thread-agnostic Win32 exit-event
-  handle) + an off-thread wait + an on-worker `ExecReap`, with a per-container `in_flight` slot. This
-  is tracked as follow-up work.
+- **Ordering is per-container, not global.** A lifecycle command naming a container with a run in
+  flight waits for that run; commands for other sandboxes proceed independently. A caller cannot
+  infer that work on one sandbox completed because work on another did.
+
+- **`busy` collapses to `backend_error` (deferred).** A refused exec reaches an SDK caller as a
+  generic `backend_error` with no indication that retrying would succeed. A retryable error code
+  needs a new `MxcErrorCode` variant, whose predefined values match the SDK `ErrorCode` union
+  one-for-one, so it spans Rust, Node, .NET, the versioned references, and schema regeneration.
+  This is tracked as follow-up work.
 
 - **No typed SDK can set port mappings yet.** The Rust, Node, and .NET v1 SDKs
-  all pin the published stable contract `1.0.0`, which does not declare the
-  field, and released schemas are immutable. Raw `1.1.0-alpha` JSON through the
+  all use published stable contract `1.0.0`, which does not declare the
+  field, and released schemas are immutable. "MXC request JSON" using contract `1.1.0-alpha` through the
   FFI or `wxc-exec` is the only way to reach it today. Promoting `1.1.0-alpha`
   to a stable release is what lets the three SDKs expose it together.

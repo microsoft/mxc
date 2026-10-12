@@ -118,11 +118,8 @@ pub enum OutStream {
     Stderr,
 }
 
-/// Optional live-output sink invoked from the SDK's stdout/stderr callbacks in
-/// addition to the capped capture buffers. The daemon supplies one to stream a
-/// container's output to the client as bytes arrive; paths that only need the
-/// final captured blob (one-shot, detached init) leave it unset. It receives
-/// the full callback bytes, independent of the capped buffers' truncation.
+/// Optional live-output sink that replaces the capped capture buffers, so a
+/// caller that sets one gets empty captured stdout/stderr.
 ///
 /// **Two distinct live-output architectures — why they don't share plumbing.**
 /// The one-shot runner streams via `OutputMode::Stream` (in `wsl_container_runner`)
@@ -137,7 +134,7 @@ pub enum OutStream {
 /// block** — the same SDK thread also delivers the process-exit callback, so the
 /// daemon path uses a non-blocking `try_send` that drops on overflow rather than
 /// stalling teardown. Keep the two paths separate for those reasons; share only
-/// the leaf primitives ([`OutStream`], the capped capture buffers).
+/// the leaf primitives ([`OutStream`], [`IoContext`]).
 pub type OutputSink = Box<dyn Fn(OutStream, &[u8]) + Send + Sync>;
 
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are
@@ -147,10 +144,11 @@ pub struct IoContext {
     pub(crate) stdout: Arc<Mutex<Vec<u8>>>,
     pub(crate) stderr: Arc<Mutex<Vec<u8>>>,
     pub(crate) exited: Arc<(Mutex<bool>, Condvar)>,
-    /// Live sink for streaming output alongside the capped buffers; `None` when
-    /// only the final captured blob is needed. Its owning `Arc<IoContext>` is
-    /// released on the same schedule as the capture buffers, so on the
-    /// deliberate kill-path leak the sink (and its sender) is leaked too.
+    /// Live sink for streaming output; `None` when the caller wants the final
+    /// captured blob instead. A streaming caller reads its bytes from the sink
+    /// as they arrive, so the capture buffers stay empty. Its owning
+    /// `Arc<IoContext>` is released on the same schedule as those buffers, so
+    /// on the deliberate kill-path leak the sink (and its sender) is leaked too.
     sink: Option<OutputSink>,
 }
 
@@ -201,24 +199,20 @@ unsafe extern "C" fn io_callback(
     let ctx = &*(context as *const IoContext);
     let bytes = std::slice::from_raw_parts(data, data_size as usize);
     match io_handle {
-        WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDOUT => {
-            {
+        WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDOUT => match ctx.sink.as_ref() {
+            Some(sink) => sink(OutStream::Stdout, bytes),
+            None => {
                 let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
                 append_capped(&mut buf, bytes);
             }
-            if let Some(sink) = ctx.sink.as_ref() {
-                sink(OutStream::Stdout, bytes);
-            }
-        }
-        WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDERR => {
-            {
+        },
+        WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDERR => match ctx.sink.as_ref() {
+            Some(sink) => sink(OutStream::Stderr, bytes),
+            None => {
                 let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
                 append_capped(&mut buf, bytes);
             }
-            if let Some(sink) = ctx.sink.as_ref() {
-                sink(OutStream::Stderr, bytes);
-            }
-        }
+        },
         _ => {}
     }
 }
@@ -1348,6 +1342,45 @@ mod tests {
         assert_eq!(
             classify_completion(ExitWait::NoEvent, false, -1),
             ProcessCompletion::TerminationUnconfirmed
+        );
+    }
+
+    /// A streaming caller reads its bytes from the sink, so a second capped
+    /// copy would double the daemon's per-exec output memory.
+    #[test]
+    fn a_streaming_callback_captures_nothing() {
+        let streamed = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&streamed);
+        let io_ctx = Arc::new(IoContext {
+            stdout: Arc::new(Mutex::new(Vec::new())),
+            stderr: Arc::new(Mutex::new(Vec::new())),
+            exited: Arc::new((Mutex::new(false), Condvar::new())),
+            sink: Some(Box::new(move |kind, bytes| {
+                seen.lock().unwrap().push((kind, bytes.to_vec()));
+            })),
+        });
+
+        let payload = b"streamed-not-captured";
+        let raw = Arc::into_raw(Arc::clone(&io_ctx));
+        // SAFETY: `raw` is a live `Arc<IoContext>` pointer and `payload` is
+        // valid for its full length, matching what the SDK passes.
+        unsafe {
+            io_callback(
+                WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDOUT,
+                payload.as_ptr(),
+                payload.len() as u32,
+                raw as *mut c_void,
+            );
+            drop(Arc::from_raw(raw));
+        }
+
+        assert_eq!(
+            streamed.lock().unwrap().as_slice(),
+            &[(OutStream::Stdout, payload.to_vec())]
+        );
+        assert!(
+            io_ctx.stdout.lock().unwrap().is_empty(),
+            "a streamed chunk must not also be captured"
         );
     }
 

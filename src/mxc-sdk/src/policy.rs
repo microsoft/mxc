@@ -598,8 +598,8 @@ pub enum Containment {
     /// IsolationSession backend: a Windows isolated user session.
     ///
     /// Requires the `isolation_session` build feature but no runtime
-    /// experimental opt-in. Served with piped stdio; the multi-call lifecycle
-    /// is reachable through the state-aware entry points.
+    /// experimental opt-in. Uses piped stdio. Manual lifecycle operations are
+    /// available through [`crate::v1::container`].
     IsolationSession,
 }
 
@@ -645,7 +645,7 @@ pub(crate) struct ContainerPolicy {
     pub timeout_ms: Option<u32>,
 }
 
-/// A complete one-shot request with shared restrictions and backend settings.
+/// Request for creating a container and running a workload.
 #[derive(Debug, Clone)]
 pub struct ContainerRequest {
     /// Command line to execute.
@@ -672,7 +672,7 @@ pub struct ContainerRequest {
 }
 
 impl ContainerRequest {
-    /// Create a one-shot request for `command`.
+    /// Create a [`ContainerRequest`] for `command`.
     pub fn new(command: impl Into<String>) -> Self {
         Self {
             command: command.into(),

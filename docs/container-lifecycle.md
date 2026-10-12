@@ -2,15 +2,16 @@
 
 > **Audience:** MXC consumers
 
-Companion to the [full lifecycle and wire contract](development/architecture/container-lifecycle.md).
+Companion to the [lifecycle architecture and native JSON format](development/architecture/container-lifecycle.md).
+See the [consumer glossary](glossary.md) for terminology.
 
 MXC separates container creation from persistent lifecycle operations.
-Creation runs a `ContainerRequest`; persistent execution provisions a
-container, starts it, runs `ExecutionRequest` workloads, then stops and
-deprovisions it. The public SDK surface is versioned independently of the
-native wire contract.
+Creation runs a `ContainerRequest`. With manual lifecycle operations, the caller
+provisions a container, starts it, runs `ExecutionRequest` workloads, then stops
+and deprovisions it. The public SDK API is versioned independently of the
+native JSON request and response format.
 
-## Public SDK surface
+## Public SDK API
 
 All public types, operations, probes, backend/platform discovery, telemetry,
 and helpers live under `mxc_sdk::v1`, `Microsoft.Mxc.Sdk.V1`, or
@@ -28,7 +29,7 @@ and helpers live under `mxc_sdk::v1`, `Microsoft.Mxc.Sdk.V1`, or
 | Stop | `container::stop_container` | `MxcLifecycle.StopContainer` | `stopContainer` |
 | Deprovision | `container::deprovision_container` | `MxcLifecycle.DeprovisionContainer` | `deprovisionContainer` |
 
-- Creation takes a request followed by its operation-specific options.
+- Creation takes `ContainerRequest` followed by its operation-specific options.
 - Provision takes `ProvisionRequest` followed by `ProvisionOptions`.
 - Start, stop, and deprovision take `ContainerId` followed by their own options.
 - Existing-container execution takes `ContainerId`, `ExecutionRequest`, and
@@ -37,7 +38,7 @@ and helpers live under `mxc_sdk::v1`, `Microsoft.Mxc.Sdk.V1`, or
 
 Common process settings are command, working directory, environment,
 inherit-default-environment, and timeout. SDKs use properties or setters
-according to their language conventions. Containment choices are closed:
+according to their language conventions. Supported containment choices are defined by
 Rust enum variants, SDK-owned .NET subclasses, and Node discriminated unions.
 Creation defaults to generic `Process` intent.
 
@@ -80,7 +81,7 @@ author typed SDK requests.
 
 ## References
 
-- [Full lifecycle and wire contract](development/architecture/container-lifecycle.md)
+- [Lifecycle architecture and native JSON format](development/architecture/container-lifecycle.md)
 - [Rust SDK](../src/mxc-sdk/README.md)
 - [.NET SDK](../sdk/dotnet/README.md)
 - [Node SDK](../sdk/node/README.md)

@@ -33,6 +33,7 @@
 #![deny(missing_docs)]
 
 pub mod analyze;
+pub(crate) mod capture_diagnostics;
 pub mod emit;
 pub mod model;
 pub mod paired_output;

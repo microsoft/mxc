@@ -18,10 +18,8 @@ use windows::Win32::System::Diagnostics::Etw::{
     CLSID_TraceRelogger, ITraceEvent, ITraceEventCallback, ITraceEventCallback_Impl, ITraceRelogger,
 };
 
+use crate::learning_mode_windows::etl_decode::is_process_scoped_relog_candidate;
 use crate::learning_mode_windows::etl_decode::select_learning_mode_events_for_relogging;
-use crate::learning_mode_windows::extractors::{
-    is_learning_mode_event, verbose_logging_provider_for_guid,
-};
 use crate::learning_mode_windows::process_lifetime::{
     attested_process_lifetimes, JobMembershipSnapshot,
 };
@@ -160,12 +158,11 @@ impl ITraceEventCallback_Impl for ProcessScopedTraceFilter_Impl {
             ));
         };
         let header = &record.EventHeader;
-        if verbose_logging_provider_for_guid(header.ProviderId).is_none() {
+        if !is_process_scoped_relog_candidate(header.ProviderId, header.EventDescriptor.Id) {
             return Ok(());
         }
         let is_supported_capability_event = header.EventDescriptor.Id
-            == crate::learning_mode_windows::extractors::CAPABILITY_DENIAL_EVENT_ID
-            && is_learning_mode_event(header.ProviderId, header.EventDescriptor.Id);
+            == crate::learning_mode_windows::extractors::CAPABILITY_DENIAL_EVENT_ID;
         let effective_pid = if is_supported_capability_event {
             let payload_pid = self
                 .schema_cache
@@ -370,6 +367,278 @@ fn windows_error(operation: &str, error: windows::core::Error) -> AnalyzeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record_private_trace(
+        path: &Path,
+        provider: &tracelogging::Provider,
+        guid: windows::core::GUID,
+        emit: impl FnOnce() -> Vec<u32>,
+    ) {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Diagnostics::Etw::{
+            ControlTraceW, EnableTraceEx2, StartTraceW, CONTROLTRACE_HANDLE,
+            EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_PRIVATE_IN_PROC, EVENT_TRACE_PRIVATE_LOGGER_MODE,
+            EVENT_TRACE_PROPERTIES, WNODE_FLAG_TRACED_GUID,
+        };
+        static PRIVATE_TRACE: Mutex<()> = Mutex::new(());
+        let _guard = PRIVATE_TRACE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let name = format!("mxc-verbose-test-{}", std::process::id())
+            .encode_utf16()
+            .chain([0])
+            .collect::<Vec<_>>();
+        let path = path
+            .as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>();
+        let mut storage = vec![0u64; 512];
+        let properties = storage.as_mut_ptr().cast::<EVENT_TRACE_PROPERTIES>();
+        let mut session = CONTROLTRACE_HANDLE::default();
+        unsafe {
+            (*properties).Wnode.BufferSize = (storage.len() * 8) as u32;
+            (*properties).Wnode.Guid = guid;
+            (*properties).Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+            (*properties).Wnode.ClientContext = 1;
+            (*properties).BufferSize = 64;
+            (*properties).LogFileMode =
+                EVENT_TRACE_PRIVATE_LOGGER_MODE | EVENT_TRACE_PRIVATE_IN_PROC;
+            (*properties).LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
+            (*properties).LogFileNameOffset =
+                (*properties).LoggerNameOffset + (name.len() * 2) as u32;
+            assert!((*properties).LogFileNameOffset as usize + path.len() * 2 <= storage.len() * 8);
+            std::ptr::copy_nonoverlapping(
+                path.as_ptr(),
+                storage
+                    .as_mut_ptr()
+                    .cast::<u8>()
+                    .add((*properties).LogFileNameOffset as usize)
+                    .cast::<u16>(),
+                path.len(),
+            );
+            assert_eq!(provider.register(), 0);
+            let started = StartTraceW(&mut session, PCWSTR(name.as_ptr()), properties);
+            if started.0 != 0 {
+                provider.unregister();
+                panic!("private StartTraceW failed: {}", started.0);
+            }
+            let enabled = EnableTraceEx2(session, &guid, 1, 5, u64::MAX, 0, 0, None);
+            let emitted = emit();
+            let stopped = ControlTraceW(
+                session,
+                PCWSTR(name.as_ptr()),
+                properties,
+                EVENT_TRACE_CONTROL_STOP,
+            );
+            let unregistered = provider.unregister();
+            for status in [enabled.0, stopped.0, unregistered]
+                .into_iter()
+                .chain(emitted)
+            {
+                assert_eq!(status, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn private_trace_relogging_excludes_unrelated_events_but_raw_decoding_preserves_them() {
+        tracelogging::define_provider!(
+            TEST_PROVIDER,
+            "MxcTest.Redaction",
+            id("a93bc25e-f2de-485a-90e7-a2d8970b22a9")
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.etl");
+        let destination = directory.path().join("scoped.etl");
+        let provider = windows::core::GUID::from_u128(0xa93bc25e_f2de_485a_90e7_a2d8970b22a9);
+        let mut locations = 2u16.to_le_bytes().to_vec();
+        for value in [r"C:\Users\alice\secret.txt", r"D:\private.txt"] {
+            locations.extend(value.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+        }
+        record_private_trace(&source, &TEST_PROVIDER, provider, || {
+            let emit = || {
+                [
+                    tracelogging::write_event!(
+                        TEST_PROVIDER,
+                        "CompositeProperties",
+                        cstr8("CommandLine", r"cmd.exe /c type C:\Users\alice\secret.txt"),
+                        raw_field_slice("FutureLocations", CStr16, &locations),
+                        u32("SafeIdentifier", &42),
+                        u32("C:\\Users\\alice\\secret.txt", &42),
+                        cstr8("EventName", "payload-name"),
+                    ),
+                    tracelogging::write_event!(
+                        TEST_PROVIDER,
+                        "OtherCompositeProperties",
+                        cstr8("CommandLine", r"cmd.exe /c type C:\Users\alice\secret.txt"),
+                        raw_field_slice("FutureLocations", CStr16, &locations),
+                        u32("SafeIdentifier", &42),
+                        u32("C:\\Users\\alice\\secret.txt", &42),
+                        cstr8("EventName", "payload-name"),
+                    ),
+                ]
+            };
+            emit().into_iter().chain(emit()).collect()
+        });
+        if let Some(path) = std::env::var_os("MXC_TEST_ETL_OUTPUT") {
+            std::fs::copy(&source, path).expect("failed to retain the test ETL for CLI replay");
+        }
+        let lifetimes = [ProcessLifetime {
+            pid: std::process::id(),
+            start_filetime: 0,
+            end_filetime: u64::MAX,
+        }];
+        let native = crate::learning_mode_windows::EtlDenialAnalyzer
+            .analyze_for_process_lifetimes(&source, &lifetimes)
+            .unwrap();
+        filter_trace_for_process_lifetimes(&source, &destination, &lifetimes).unwrap();
+        let guarded = crate::learning_mode_windows::EtlDenialAnalyzer
+            .analyze_relogged_for_process_lifetimes(&destination, &lifetimes)
+            .unwrap();
+        let mut decoded = Vec::new();
+        crate::learning_mode_windows::visit_raw_events(&source, &mut |parts| {
+            if parts.provider == provider {
+                decoded.push(parts.clone());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(decoded.len(), 4);
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|parts| parts.event_name.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("CompositeProperties"),
+                Some("OtherCompositeProperties"),
+                Some("CompositeProperties"),
+                Some("OtherCompositeProperties")
+            ]
+        );
+        for parts in decoded {
+            let properties =
+                crate::learning_mode_windows::extractors::sanitize_properties(&parts.props);
+            for name in ["CommandLine", "FutureLocations"] {
+                assert_eq!(
+                    properties.iter().find(|(key, _)| key == name),
+                    Some(&(
+                        name.to_string(),
+                        crate::learning_mode_windows::extractors::REDACTED_PATH.to_string()
+                    )),
+                );
+            }
+            assert!(properties.contains(&("SafeIdentifier".into(), "42".into())));
+            assert!(properties.contains(&("EventName".into(), "payload-name".into())));
+            assert!(!properties
+                .iter()
+                .any(|(name, _)| name.contains(r"C:\Users")));
+        }
+        assert_eq!(native, guarded);
+        assert!(native.verbose_logging.is_empty());
+        assert!(native.denials.is_empty());
+    }
+
+    #[test]
+    fn private_trace_relogging_preserves_selected_learning_mode_events() {
+        tracelogging::define_provider!(
+            LEARNING_MODE_PROVIDER,
+            "MxcTest.LearningMode",
+            id("811a1ddb-2e69-5f25-adc0-4b186170e760")
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.etl");
+        let destination = directory.path().join("scoped.etl");
+        record_private_trace(
+            &source,
+            &LEARNING_MODE_PROVIDER,
+            crate::learning_mode_windows::extractors::PRIVACY_LEARNING_MODE_PROVIDER,
+            || {
+                let unrelated = || {
+                    tracelogging::write_event!(
+                        LEARNING_MODE_PROVIDER,
+                        "Unrelated",
+                        id_version(999, 0),
+                        u32("Value", &1),
+                    )
+                };
+                vec![
+                    unrelated(),
+                    tracelogging::write_event!(
+                        LEARNING_MODE_PROVIDER,
+                        "AccessCheck",
+                        id_version(14, 0),
+                        cstr8("ObjectType", "File"),
+                        cstr8("ObjectName", r"C:\selected.txt"),
+                        u32("AccessMask", &1),
+                    ),
+                    unrelated(),
+                ]
+            },
+        );
+        let pid = std::process::id();
+        let lifetimes = [ProcessLifetime {
+            pid,
+            start_filetime: 0,
+            end_filetime: u64::MAX,
+        }];
+
+        let selection = select_learning_mode_events_for_relogging(&source, &lifetimes).unwrap();
+        assert_eq!(selection.total_event_count, 3);
+        assert_eq!(selection.selected_event_indices, [0, 1, 2]);
+        assert_eq!(selection.selected_event_pids, [pid, pid, pid]);
+
+        let native = crate::learning_mode_windows::EtlDenialAnalyzer
+            .analyze_for_process_lifetimes(&source, &lifetimes)
+            .unwrap();
+        filter_trace_for_process_lifetimes(&source, &destination, &lifetimes).unwrap();
+        let guarded = crate::learning_mode_windows::EtlDenialAnalyzer
+            .analyze_relogged_for_process_lifetimes(&destination, &lifetimes)
+            .unwrap();
+        assert_eq!(native.denials.len(), 1);
+        assert_eq!(native.denials[0].resource, r"C:\selected.txt");
+        assert_eq!(native, guarded);
+
+        struct ScriptedRelogger(Vec<u32>);
+        impl TraceRelogger for ScriptedRelogger {
+            fn process(
+                &self,
+                _source: &Path,
+                destination: &Path,
+                selection: RelogSelectionState,
+            ) -> Result<(), AnalyzeError> {
+                for pid in &self.0 {
+                    selection.observe_known_provider_event(*pid);
+                }
+                std::fs::write(destination, b"etl").map_err(|source| AnalyzeError::Open {
+                    path: destination.display().to_string(),
+                    source,
+                })
+            }
+        }
+        for (observed, reconciled) in [
+            (vec![pid, pid, pid], true),
+            (vec![], false),
+            (vec![pid], false),
+            (vec![pid, pid], false),
+            (vec![pid + 1, pid + 1, pid + 1], false),
+        ] {
+            assert_eq!(
+                relog_trace_with(
+                    &source,
+                    &directory.path().join("scripted.etl"),
+                    &lifetimes,
+                    &ScriptedRelogger(observed),
+                )
+                .is_ok(),
+                reconciled
+            );
+        }
+    }
 
     const START: u64 = 100;
     const END: u64 = 200;

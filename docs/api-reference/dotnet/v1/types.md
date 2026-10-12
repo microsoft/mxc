@@ -174,7 +174,7 @@ public sealed class ContainerRequest
 
 ## `Microsoft.Mxc.Sdk.V1.Containment`
 
-Choose one of the SDK-supported containment configurations.
+Choose one of the SDK-defined `Containment` subclasses listed below.
 
 ```csharp
 public abstract class Containment
@@ -1111,7 +1111,7 @@ public sealed class ProvisionOptions
 
 ## `Microsoft.Mxc.Sdk.V1.ProvisionRequest`
 
-Closed request for provisioning a supported containment.
+SDK-defined base type for backend-specific provision requests.
 
 ```csharp
 public abstract class ProvisionRequest
@@ -1123,7 +1123,7 @@ public abstract class ProvisionRequest
 
 ## `Microsoft.Mxc.Sdk.V1.ProvisionMetadata`
 
-Closed backend-specific metadata returned by provisioning.
+SDK-defined base type for backend-specific metadata returned by provisioning.
 
 ```csharp
 public abstract class ProvisionMetadata

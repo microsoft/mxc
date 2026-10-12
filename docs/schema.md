@@ -5,9 +5,13 @@
 
 MXC uses a JSON configuration file. The current stable schema is at
 [`schemas/stable/mxc-config.schema.1.0.0.json`](../schemas/stable/mxc-config.schema.1.0.0.json).
-For development, the exact schema at
+For development, the schema for version `1.1.0-alpha` at
 [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
+
+See the [consumer glossary](glossary.md) for terminology. This guide describes
+["MXC request JSON"](#mxc-request-json); typed SDK callers use the types in the
+[SDK reference](api-reference/README.md) instead.
 
 Editors that support JSON Schema will provide autocomplete and validation when
 you add a `"$schema"` reference to your config file. Use the stable schema for
@@ -20,6 +24,53 @@ production configs and the dev schema when working on experimental features:
 // Development (experimental features)
 "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json"
 ```
+
+### "MXC request JSON"
+
+"MXC request JSON" is a versioned request object defined by the
+[published schemas](../schemas/stable/) or
+[development schema](../schemas/dev/mxc-config.schema.1.1.0-alpha.json).
+Executors and `mxc_ffi`, MXC's C-callable library, use the same registered
+contracts. There is no additional free-form FFI format.
+
+Typed Rust, .NET, and Node SDK callers use `ContainerRequest`,
+`ProvisionRequest`, and `ExecutionRequest`, not JSON. Node and .NET produce
+"MXC request JSON" internally.
+
+Creation requests omit `phase` and `sandboxId`. Lifecycle requests include
+`phase`, and operations after provision include `sandboxId`. For executor
+lifecycle calls, supply those values through `--operation` and `--container-id`,
+not in the JSON file. The executor inserts them before using the same contract
+parser.
+
+For example, starting a provisioned WSLc container uses this "MXC request JSON"
+with `mxc_run_state_aware_json`:
+
+```json
+{
+    "version": "1.0.0",
+    "phase": "start",
+    "sandboxId": "wslc:0123456789abcdef0123456789abcdef"
+}
+```
+
+To supply the same request through the executor, save the non-routing fields
+as `start.json`:
+
+```json
+{
+    "version": "1.0.0"
+}
+```
+
+```text
+wxc-exec.exe start.json --operation start --container-id wslc:0123456789abcdef0123456789abcdef
+```
+
+Replace the example ID with the one returned by provision. The C-callable
+functions take NUL-terminated UTF-8 JSON strings. The schemas specify fields
+and values; backend validation checks whether the requested policy can run.
+For full lifecycle examples, see [container lifecycle JSON requests](#container-lifecycle-json-requests).
 
 ### Directional networking (supported contracts)
 
@@ -86,13 +137,13 @@ to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
 
 The `defaultPolicy`, `enforcementMode`, `allowLocalNetwork`, `allowedHosts`,
 `blockedHosts`, and `network.proxy` fields belonged to retired contracts.
-No supported exact contract accepts them. Migrate existing policies to
+No supported contract accepts them. Migrate existing policies to
 directional fields and `runtimeConfig.networkProxy` rather than changing
 the version string alone.
 
 ### IsolationSession unrestricted networking (0.9)
 
-IsolationSession cannot restrict networking. Exact v0.9 requests must describe
+IsolationSession cannot restrict networking. JSON requests for `0.9.0-alpha` must describe
 that actual posture through the standard directional network fields:
 
 ```json
@@ -244,13 +295,13 @@ that can be executed independently.
 }
 ```
 
-> **State-aware fields.** The `phase` top-level field is the **state-aware
-> discriminator**: a request that includes it is parsed as a state-aware
-> lifecycle request (see below), *not* the one-shot config above. The `sandboxId`
-> top-level field is state-aware-only — a one-shot request carrying `sandboxId`
+> **Lifecycle operation fields.** The `phase` top-level field selects a
+> container lifecycle operation: JSON that includes it is parsed as input for
+> that operation (see below), *not* the create-and-run configuration above. The `sandboxId`
+> top-level field is only for lifecycle operations; a create-and-run JSON request carrying `sandboxId`
 > is rejected with a parse error. Callers cannot supply `correlationVector`;
 > it is rejected as an unknown field because lifecycle correlation is internal
-> to MXC and is not part of the request or response contract. See
+> to MXC and is not a declared JSON request or response field. See
 > [Container lifecycle architecture](development/architecture/container-lifecycle.md)
 > and [telemetry architecture](development/architecture/telemetry.md).
 
@@ -276,10 +327,10 @@ use:
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
 
-WSL Container one-shot runs accept an explicit `process.cwd` only as a local
+WSL Container create-and-run execution accepts an explicit `process.cwd` only as a local
 Windows drive path, which is mapped under `/mnt/<drive>` (for example
 `C:\work` becomes `/mnt/c/work`); any other value is rejected before the
-container is created. WSL Container state-aware `exec` takes an absolute
+container is created. WSL Container execution in an existing container (`exec`) takes an absolute
 in-container path instead. See
 [`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md).
 
@@ -383,9 +434,9 @@ refuse any supplied `ui` at every phase on both surfaces**, and each accepts an
 omitted one without applying any UI restriction — so the section's default-deny
 reading does not hold on either. The reasons differ: no `ui` posture is truthful
 for a session-isolated sandbox (see
-[IsolationSession state-aware Rust architecture](development/architecture/backends/isolation-session/state-aware-rust.md)),
+[IsolationSession Rust lifecycle architecture](development/architecture/backends/isolation-session/state-aware-rust.md)),
 while WSLc has no mechanism to enforce UI restrictions on a container (see
-[`backends/wslc/wslc-state-aware.md`](backends/wslc/wslc-state-aware.md)).
+[WSLc container lifecycle guide](backends/wslc/wslc-state-aware.md)).
 The Windows `processContainer.ui` sub-block carries the ProcessContainer-only
 fields `isolation`, `desktopSystemControl`, `systemSettings`, and `ime`.
 `processContainer.filesystem` carries `enumeratePaths`. Both sub-blocks are
@@ -419,12 +470,12 @@ force a particular backend.
 | Value | Description |
 |-------|-------------|
 | `"processcontainer"` | (Default) Windows process-level isolation. Resolves to AppContainer (legacy) or BaseContainer (newer OS sandbox API) at run time depending on host capabilities and the `--experimental` flag. |
-| `"windows_sandbox"` | Windows Sandbox VM isolation. Dual-mode: a transient **one-shot** runner that launches a fresh disposable VM per execution, and a **state-aware** lifecycle backed by a long-lived per-sandbox daemon. |
+| `"windows_sandbox"` | Windows Sandbox VM isolation. Supports create-and-run execution with a fresh disposable VM per execution, and container lifecycle operations backed by a long-lived per-container daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
-| `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session. Dual-mode: one-shot and state-aware. |
+| `"isolation_session"` | Windows isolation session: create-and-run execution uses a freshly provisioned isolated user account in its own OS-managed session. Container lifecycle operations can retain the session between executions. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 
@@ -432,15 +483,18 @@ Only the backend section matching the selected `containment` value is accepted;
 a config that also carries an unrelated backend's section is **rejected** with a
 "Multiple containment backends configured" error rather than silently ignored.
 
-### State-aware lifecycle envelope
+### Container lifecycle JSON requests
 
-The exact development schema documents a multi-phase envelope shape for the
-state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
-`deprovision`). Where the one-shot config above is a self-contained
-`ExecutionRequest` to run once, a state-aware envelope identifies which
-phase is being driven against an existing provisioned sandbox.
+These examples use ["MXC request JSON"](#mxc-request-json). For executor
+calls, use the conversion described above.
 
-State-aware envelopes use an exact backend-specific contract:
+The development schema documents JSON objects for container lifecycle
+operations (`provision` / `start` / `exec` / `stop` / `deprovision`).
+The create-and-run JSON above describes container setup and a workload together.
+Lifecycle JSON instead identifies an operation: `provision` allocates a new
+container; later operations use the returned `sandboxId`.
+
+Choose a supported contract version for the backend and operation:
 
 - IsolationSession uses published `0.9.0-alpha`.
 - WSLC uses published `0.9.0-alpha`, or development `1.1.0-alpha` for
@@ -448,9 +502,9 @@ State-aware envelopes use an exact backend-specific contract:
   `1.1.0-alpha`.
 
 Contracts before `0.9.0-alpha` are retired. The supported published
-`0.9.0-alpha` and `1.0.0` contracts contain one-shot plus IsolationSession
-and WSLC state-aware request roots. This Windows Sandbox example therefore uses the
-exact development schema:
+`0.9.0-alpha` and `1.0.0` contracts describe create-and-run JSON requests plus
+IsolationSession and WSLC lifecycle JSON requests. This Windows Sandbox example therefore uses the
+development schema for `1.1.0-alpha`:
 
 ```json
 {
@@ -464,7 +518,7 @@ exact development schema:
                                            // (the backend is inferred from sandboxId).
     "process": { "commandLine": "echo hi" }
     // Cross-cutting fields (process / filesystem / network / ui) sit at the TOP
-    // level, exactly as in a one-shot request -- there is no wrapping `config`
+    // level, exactly as in a create-and-run request -- there is no wrapping `config`
     // object. Backend- and phase-specific config, when a phase has any, nests
     // under its permanent backend section, e.g.:
     //   "isolationSession": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } }
@@ -481,12 +535,12 @@ Phase / sandboxId / containment validation:
 | `stop`          | **Required** | Ignored if present |
 | `deprovision`   | **Required** | Ignored if present |
 
-State-aware-capable backends today are `isolation_session`, `windows_sandbox`,
+Backends supporting container lifecycle operations today are `isolation_session`, `windows_sandbox`,
 and `wslc` (all Windows-only). IsolationSession does not require runtime
 experimental authorization; Windows Sandbox does.
 
 WSLC `provision` accepts `wslc.provision.portMappings`, the same
-`windowsPort` / `containerPort` / `protocol` entries as the one-shot
+`windowsPort` / `containerPort` / `protocol` entries as the create-and-run
 `wslc.portMappings` list, applied to the sandbox's own container:
 
 ```json
@@ -515,14 +569,14 @@ posture is rejected at provision.
 
 Two entries claiming the same `windowsPort` are rejected on both surfaces. The
 session sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) stay
-one-shot-only, because the state-aware daemon shares one WSL session across
+available only for create-and-run execution, because the lifecycle daemon shares one WSL session across
 every sandbox and cannot size them individually.
 
 Full lifecycle API: [container lifecycle](container-lifecycle.md).
 
 ### Schema Versioning
 
-MXC execution config files require a `version` field naming an exact registered
+MXC execution config files require a `version` field naming a supported
 contract. Version spelling, including patch and prerelease, is significant;
 there is no range, latest-version, or missing-version fallback.
 
@@ -531,13 +585,13 @@ yet stable — breaking changes may occur before publication. Version `1.0.0`
 is the first stable contract. After `1.0.0`, breaking changes require a major
 version bump per semver.
 
-Registered contracts:
+Supported contracts:
 
 | Config `version` | Status |
 |---|---|
 | `"0.9.0-alpha"` | Published; minimum supported |
 | `"1.0.0"` | Published; current stable |
-| `"1.1.0-alpha"` | Mutable development contract |
+| `"1.1.0-alpha"` | Development contract; may change |
 
 An absent version, a retired version, or any unregistered spelling such as
 `0.6.1-alpha`, `0.10.0-alpha`, or `1.0.1` is rejected.

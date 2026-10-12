@@ -5,8 +5,9 @@
 Node.js / TypeScript SDK for MXC (Microsoft eXecution Containers). The
 versioned public request, execution, and lifecycle APIs are exported from
 `@microsoft/mxc-sdk/v1`, including platform discovery, errors, and telemetry consent.
-The package root exports no public APIs. These APIs use the SDK-owned V1 contract; callers
-do not select the wire version.
+The package root exports no public APIs. These APIs use the SDK-selected contract
+version; callers do not select it. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md)
+for terminology.
 
 ```bash
 npm install @microsoft/mxc-sdk
@@ -68,8 +69,8 @@ Each operation accepts its own optional options type: `RunOptions`,
 Execution options do not support `dryRun`.
 
 `ContainerRequest` holds the command, cross-backend filesystem, network, and UI
-settings, and the selected backend's typed configuration. The SDK selects its
-exact V1 contract; callers do not provide a schema version or raw executor
+settings, and the selected backend's typed configuration. The SDK selects the
+contract version for V1; callers do not provide a schema version or executor JSON
 configuration.
 
 When UI settings are supplied, `ui.disable` explicitly controls whether UI is
@@ -156,7 +157,7 @@ IsolationSession exec with a caller-driven terminal and returns a
 `Promise<MxcPtyProcess>`. Set `options.size` for initial dimensions; it defaults
 to 24 rows by 80 columns.
 IsolationSession provision requires an explicit unrestricted directional
-network posture; WSLC network posture is fixed at provision. See the
+network permissions; WSLC network permissions are fixed at provision. See the
 [IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-typescript.md) and
 [WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides for backend and phase
 requirements.
@@ -183,12 +184,12 @@ The runtime values are typed as `NetworkRuntimeConfig`.
 
 The creation containment types are compile-time-only choices under the
 `Containment` namespace, such as `Containment.Process` and
-`Containment.ProcessContainer`. `Containment` is also their closed union;
+`Containment.ProcessContainer`. `Containment` is the union of these SDK-defined types;
 the SDK does not create runtime containment objects or factories.
 
 `ContainerRequest` uses the named `FilesystemPolicy`, `NetworkPolicy`, and
 `UiPolicy` types for cross-backend restrictions. Backend-specific settings
-remain on the selected containment configuration.
+remain on the selected `Containment` member, such as `Containment.ProcessContainer`.
 
 ## Public V1 types
 

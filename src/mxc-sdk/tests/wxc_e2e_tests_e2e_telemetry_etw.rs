@@ -137,6 +137,8 @@ fn build_instrumented_wxc_exec() -> PathBuf {
             "build",
             "-p",
             "wxc",
+            "-p",
+            "plm",
             // `test-support` is what makes `MXC_TEST_LOCALAPPDATA_OVERRIDE`
             // observable to the child; without it the consent store is the real
             // per-user one and this test would mutate developer state.
@@ -238,12 +240,14 @@ fn run_traced_execution(exe: &Path, local_app_data: &Path) -> std::process::Outp
 fn write_capture_config(workdir: &Path) -> PathBuf {
     let config_path = workdir.join("capture-config.json");
     let output_path = workdir.join("denials.json");
+    let denied_file = workdir.join("denied.txt");
+    std::fs::write(&denied_file, "telemetry E2E fixture").expect("failed to write denied fixture");
     let config = serde_json::json!({
         "version": "0.9.0-alpha",
         "containerId": "TelemetryVerboseDenialsE2E",
         "containment": "processcontainer",
         "process": {
-            "commandLine": "cmd.exe /c type C:\\Windows\\System32\\config\\SAM >nul 2>&1 & exit /b 0"
+            "commandLine": format!("cmd.exe /d /c type \"{}\" & exit /b 0", denied_file.display())
         },
         "processContainer": {
             "captureDenials": {
@@ -299,7 +303,7 @@ fn find_verbose_artifact(workdir: &Path) -> Option<PathBuf> {
 /// Decodes an `.etl` to XML and returns the text, or `None` if it holds no
 /// decodable events (`tracerpt` reports failure on an empty trace).
 fn decode_trace(etl: &Path, workdir: &Path) -> Option<String> {
-    let dump = workdir.join("dump.xml");
+    let dump = workdir.join(etl.file_name()?).with_extension("xml");
     let _ = std::fs::remove_file(&dump);
     Command::new("tracerpt")
         .arg(etl)
@@ -476,7 +480,7 @@ fn test_verbose_denials_etw_payload_honors_consent() {
         &std::fs::read(&verbose_path).expect("failed to read verbose artifact"),
     )
     .expect("verbose artifact was not valid JSON");
-    assert_eq!(verbose["version"], 2);
+    assert_eq!(verbose["version"], 4);
 
     let granted_dump = decode_trace(&granted_etl, &workdir)
         .expect("tracerpt produced no output for the verbose telemetry run");
