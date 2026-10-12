@@ -238,7 +238,14 @@ extends:
                   # OneBranch's "Publish VPack SBOM Manifest" step expects
                   # _manifest/spdx_2.2/ at the top of VPackContents. The
                   # per-arch SBOMs are identical source-wise, so promote x64's.
-                  Copy-Item -Recurse -Force "$(ob_outputDirectory)\x64\_manifest" "$(ob_outputDirectory)\_manifest"
+                  # Promote ONLY spdx_2.2: upstream artifacts now also carry
+                  # _manifest/spdx_3.0/. Create vPack enumerates the content,
+                  # then deletes and regenerates the top-level _manifest as
+                  # SPDX 2.2 only, so a promoted spdx_3.0 file is reported as
+                  # MissingFile and fails the task (ContentManifestGenerationException).
+                  $topManifest = "$(ob_outputDirectory)\_manifest"
+                  New-Item -ItemType Directory -Force -Path $topManifest | Out-Null
+                  Copy-Item -Recurse -Force "$(ob_outputDirectory)\x64\_manifest\spdx_2.2" "$topManifest\spdx_2.2"
 
                   # Stage isolation_session test collateral under isolation_session_test_bundle/.
                   $isoSrcMain = "$(Pipeline.Workspace)\IsoSession-TestPackage\mxc-iso-test-bundle-main-x64"
