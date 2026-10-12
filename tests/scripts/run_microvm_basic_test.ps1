@@ -32,6 +32,21 @@ if (-not (Test-Path $WxcExec)) {
     exit 1
 }
 
+$NvxRoot = Join-Path $BinDir "nvx"
+$RequiredRuntime = @(
+    "SHA256SUMS",
+    "SOURCE-MANIFEST.json",
+    "bin\openvmm.exe",
+    "guest\vmlinux",
+    "guest\initramfs.cpio.gz"
+)
+$MissingRuntime = $RequiredRuntime | Where-Object { -not (Test-Path (Join-Path $NvxRoot $_)) }
+if ($MissingRuntime) {
+    Write-Host "ERROR: NVX runtime is incomplete under $NvxRoot" -ForegroundColor Red
+    $MissingRuntime | ForEach-Object { Write-Host "       - $_" }
+    exit 1
+}
+
 Write-Host "Running MicroVM basic smoke test..." -ForegroundColor Cyan
 & $WxcExec --debug --experimental $TestConfig
 $exitCode = $LASTEXITCODE

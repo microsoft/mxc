@@ -32,7 +32,7 @@ string_enum! {
         Vm => ["vm"],
         /// Select the Windows Sandbox backend.
         WindowsSandbox => ["windows_sandbox"],
-        /// Select the NanVix micro-VM backend.
+        /// Select the Windows x64 NVX micro-VM backend.
         Microvm => ["microvm"],
         /// Select the Hyperlight micro-VM backend.
         Hyperlight => ["hyperlight"],

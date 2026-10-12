@@ -245,7 +245,7 @@ every entry.
   `prepare-null-device --no-sacl`. T1 needs them too: the suite deliberately
   drives the AppContainer fallback tiers, and an unprepared host fails those
   launches with `WIN32_ERROR(5)` instead of reporting a policy result.
-- `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
+- `microvm` — asserts the NVX runtime is in the artifact, adds a Defender
   exclusion for the binary directory, and requires the Windows Hypervisor
   Platform feature *and* a running hypervisor.
 - `wslc` — asserts `wslcsdk.dll` shipped, requires the WSL and
@@ -281,8 +281,6 @@ a process-container job selects follows from that build.
   LXC after RHEL 7 and ships no replacement. Without the zone assignment the
   default zone rejects the container's IPv4 DHCP, and a container holding only
   an IPv6 address fails every network test.
-- `microvm` — asserts the NanVix payload exists.
-
 Every install above goes through two shared helpers rather than its own
 package-manager chain: `resolve_package_manager` picks the first of `apt-get`,
 `dnf`, `yum`, or `microdnf` on the host and caches it, and `install_packages`

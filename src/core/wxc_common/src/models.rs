@@ -26,7 +26,7 @@ pub enum ContainmentBackend {
     Lxc,
     /// VM-based isolation.
     Vm,
-    /// MicroVM isolation via Windows Hypervisor Platform (internally powered by NanVix).
+    /// NVX MicroVM isolation on Windows x64 through Windows Hypervisor Platform.
     #[serde(rename = "microvm")]
     MicroVm,
     /// MicroVM isolation via Hyperlight + Unikraft, using an embedded

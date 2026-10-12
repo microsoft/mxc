@@ -3,11 +3,11 @@
 
 <#
 .SYNOPSIS
-    Runs MicroVM E2E tests. Requires WHP and Nanvix binaries next to wxc-exec.exe.
+    Runs NVX MicroVM E2E tests. Requires WHP and the NVX runtime next to wxc-exec.exe.
 
 .DESCRIPTION
     - Locates wxc-exec.exe (built with --features microvm)
-    - Verifies Nanvix binaries are present
+    - Verifies the NVX runtime is present
     - Runs each test config via wxc-exec, validates exit codes and stdout content
     - Reports pass/fail summary with per-test performance timing
     - Writes microvm-perf-results.json for CI artifact consumption
@@ -86,15 +86,14 @@ if (-not (Test-Path $WxcExePath)) {
 
 $wxcExe = Resolve-Path $WxcExePath
 
-# -- Verify MicroVM binaries --------------------------------------------------
+# -- Verify NVX runtime -------------------------------------------------------
 
 $requiredBinaries = @(
-    "nanvixd.exe",
-    "nanvix_rootfs.img",
-    "python3.initrd",
-    "bin\kernel.elf",
-    "snapshots\kernel.vmem",
-    "snapshots\kernel.whp.cbor"
+    "nvx\SHA256SUMS",
+    "nvx\SOURCE-MANIFEST.json",
+    "nvx\bin\openvmm.exe",
+    "nvx\guest\vmlinux",
+    "nvx\guest\initramfs.cpio.gz"
 )
 $binDir = Split-Path $wxcExe
 $missing = $requiredBinaries | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
@@ -114,10 +113,10 @@ Write-Host "binaries: $binDir"
 $tests = @(
     @{ Config = "microvm_hello.json";        ExpectedExit = 0;  Description = "Hello world";                    OutputContains = "sum=100" },
     @{ Config = "microvm_exit_code.json";    ExpectedExit = 42; Description = "Exit code propagation" },
-    @{ Config = "microvm_multiline.json";    ExpectedExit = 0;  Description = "Multi-line script (fibonacci)";  OutputContains = "fib(" },
-    @{ Config = "microvm_stdlib.json";       ExpectedExit = 0;  Description = "Stdlib (json, math, hashlib)";   OutputContains = "pi" },
+    @{ Config = "microvm_multiline.json";    ExpectedExit = 0;  Description = "Multi-line shell loop";          OutputContains = "item 9" },
+    @{ Config = "microvm_stdlib.json";       ExpectedExit = 0;  Description = "Alpine guest identity";          OutputContains = "Alpine Linux" },
     @{ Config = "microvm_large_output.json"; ExpectedExit = 0;  Description = "Large stdout (1000 lines)";      OutputContains = "line 999" },
-    @{ Config = "microvm_error.json";        ExpectedExit = 1;  Description = "Python exception";               OutputContains = "ValueError" },
+    @{ Config = "microvm_error.json";        ExpectedExit = 1;  Description = "Stderr and nonzero exit";        OutputContains = "intentional test error" },
     @{ Config = "microvm_timeout.json";      ExpectedExit = -1; Description = "Timeout kills VM" }
 )
 

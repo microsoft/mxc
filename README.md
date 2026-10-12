@@ -9,7 +9,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 
 - **Cross-platform**: Windows, Linux, and macOS support with platform-appropriate containment backends
 - **JSON-based Configuration**: Define execution parameters and security policies via a versioned JSON schema
-- **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NanVix), Hyperlight, IsolationSession, and WSLC
+- **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NVX), Hyperlight, IsolationSession, and WSLC
 - **Policy-driven Sandboxing**:
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
     - **Network Policy**: Proxy support (cooperative on Linux/macOS), allow/block outbound, and backend-dependent host filtering
@@ -27,7 +27,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
 | Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
-| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | — |
+| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `hyperlight` | — |
 | macOS ARM64 / x64 (schema `0.9.0-alpha`+) | `seatbelt` | — | — |
 
 
@@ -70,7 +70,7 @@ layout, crate responsibilities, dependency direction, and execution surfaces.
 build.bat                  # Release build for current architecture
 build.bat --debug          # Debug build
 build.bat --all            # Release build for both x64 and ARM64
-build.bat --with-microvm   # Include NanVix micro-VM binaries
+build.bat --with-microvm   # Include the pinned NVX runtime (Windows x64)
 ```
 
 #### Linux

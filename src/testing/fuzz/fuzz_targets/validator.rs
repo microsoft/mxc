@@ -7,7 +7,7 @@
 // path that `--dry-run` takes through the binary.
 //
 // Runner-specific validation coverage:
-//   - NanVix (MicroVm): always (no extra features)
+//   - NVX (MicroVm): requires `--features microvm`
 //   - Hyperlight: requires `--features hyperlight`
 //   - IsolationSession: requires `--features isolation_session`
 //   - Seatbelt: macOS-only, not available in Windows fuzz builds
