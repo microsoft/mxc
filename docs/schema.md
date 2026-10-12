@@ -8,6 +8,8 @@ MXC uses a JSON configuration file. The current stable schema is at
 For development, the schema for version `1.1.0-alpha` at
 [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
+For self-contained references to what each supported version accepts, see
+[containment policy language](containment-policy/README.md).
 
 See the [consumer glossary](glossary.md) for terminology. This guide describes
 ["MXC request JSON"](#mxc-request-json); typed SDK callers use the types in the
