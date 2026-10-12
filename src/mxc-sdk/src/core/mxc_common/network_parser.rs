@@ -165,9 +165,8 @@ fn convert_allowed_proxy_peer(
 
 fn validate_directional_proxy_policy(policy: &ContainerPolicy) -> Result<(), WxcError> {
     let Some(egress) = policy.network_egress.as_ref() else {
-        return Err(WxcError::ConfigParse(
-            "runtimeConfig.networkProxy requires an egress policy".to_string(),
-        ));
+        // Omitted egress is effective ruleless deny; preserve its authored absence.
+        return Ok(());
     };
     if egress.default != NetworkAction::Deny || !egress.allow.is_empty() || !egress.deny.is_empty()
     {
@@ -463,6 +462,29 @@ mod proxy_policy_tests {
             error.to_string().contains("egress.default='deny'"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn ingress_only_runtime_proxy_preserves_implicit_deny_egress() {
+        for containment in [
+            ContainmentBackend::ProcessContainer,
+            ContainmentBackend::Lxc,
+            ContainmentBackend::Seatbelt,
+        ] {
+            let mut sections = directional_sections("http://127.0.0.1:8080");
+            sections.network.as_mut().unwrap().egress = None;
+            let mut policy = ContainerPolicy::default();
+
+            parse_network_policy(&mut policy, sections, &containment).unwrap();
+
+            assert!(policy.network_egress.is_none());
+            assert!(policy.network_mode_specified);
+            assert!(policy.runtime_network_proxy_specified);
+            assert!(policy.network_proxy.is_enabled());
+            let ingress = policy.network_ingress.unwrap();
+            assert_eq!(ingress.default, NetworkAction::Allow);
+            assert_eq!(ingress.host_loopback, NetworkAction::Allow);
+        }
     }
 
     #[test]

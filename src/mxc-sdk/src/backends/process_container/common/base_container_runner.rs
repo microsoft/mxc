@@ -302,23 +302,38 @@ impl BaseContainerRunner {
     }
 
     #[cfg(test)]
-    fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
-        let version = Self::choose_min_required_psec_version_for_request(request, false);
-        build_psec_v1_security_environment_spec(
-            request,
-            version,
-            version >= SecurityEnvironmentVersion::V1_1,
-            request.policy.capture_denials.is_some(),
-        )
-    }
-
-    #[cfg(test)]
     fn with_capture_factory(capture_factory: Arc<dyn CaptureSessionFactory>) -> Self {
         Self {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory,
             request_serviceability_confirmed: true,
         }
+    }
+
+    fn build_capture_aware_security_environment_spec(
+        &self,
+        request: &ExecutionRequest,
+        version: SecurityEnvironmentVersion,
+        supports_network_ingress: bool,
+    ) -> Result<Vec<u8>, ScriptResponse> {
+        let capture_network_decisions = match request.policy.capture_denials.as_ref() {
+            Some(_) => self
+                .capture_factory
+                .trace_sources()
+                .map_err(|error| {
+                    ScriptResponse::error(&format!(
+                        "captureDenials: failed to inspect learning-mode trace sources: {error}"
+                    ))
+                })?
+                .includes_network(),
+            None => false,
+        };
+        Ok(build_psec_v1_security_environment_spec(
+            request,
+            version,
+            supports_network_ingress,
+            capture_network_decisions,
+        ))
     }
 
     fn cleanup_capture_begin_failure(&mut self, logger: &mut Logger) {
@@ -571,24 +586,12 @@ impl BaseContainerRunner {
 
         let supports_network_ingress = psec_version >= SecurityEnvironmentVersion::V1_1
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress);
-        let capture_network_decisions = match capture_denials.as_ref() {
-            Some(_) => self
-                .capture_factory
-                .trace_sources()
-                .map_err(|error| {
-                    ScriptResponse::error(&format!(
-                        "captureDenials: failed to inspect learning-mode trace sources: {error}"
-                    ))
-                })?
-                .includes_network(),
-            None => false,
-        };
-        let process_security_environment_spec = build_psec_v1_security_environment_spec(
-            request,
-            psec_version,
-            supports_network_ingress,
-            capture_network_decisions,
-        );
+        let process_security_environment_spec = self
+            .build_capture_aware_security_environment_spec(
+                request,
+                psec_version,
+                supports_network_ingress,
+            )?;
         let _ = writeln!(
             logger,
             "process security environment spec built (PSEC {}.{}, {} bytes)",
@@ -2324,6 +2327,19 @@ mod tests {
         })
     }
 
+    impl BaseContainerRunner {
+        fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
+            let version = Self::choose_min_required_psec_version_for_request(request, false);
+            Self::with_capture_factory(fake_capture_factory())
+                .build_capture_aware_security_environment_spec(
+                    request,
+                    version,
+                    version >= SecurityEnvironmentVersion::V1_1,
+                )
+                .unwrap()
+        }
+    }
+
     struct FakeAnalyzer {
         result: Result<AnalysisResult, &'static str>,
     }
@@ -3002,18 +3018,39 @@ mod tests {
             ..Default::default()
         });
 
-        for (capture_network_decisions, expected_capabilities) in
-            [(false, None), (true, Some("internetClient"))]
-        {
-            let bytes = build_psec_v1_security_environment_spec(
-                &request,
-                SecurityEnvironmentVersion::V1_0,
-                false,
-                capture_network_decisions,
-            );
+        for (trace_sources, capture_enabled, expected_capabilities) in [
+            (LearningModeTraceSources::AccessOnly, true, None),
+            (
+                LearningModeTraceSources::AccessAndNetwork,
+                true,
+                Some("internetClient"),
+            ),
+            (LearningModeTraceSources::AccessOnly, false, None),
+            (LearningModeTraceSources::AccessAndNetwork, false, None),
+        ] {
+            request.policy.capture_denials = capture_enabled.then(Default::default);
+            let factory = Arc::new(FakeCaptureFactory {
+                trace_sources,
+                begin_error: None,
+                finish_error: None,
+                begin_calls: AtomicUsize::new(0),
+                finish_calls: Arc::new(AtomicUsize::new(0)),
+            });
+            let runner = BaseContainerRunner::with_capture_factory(factory);
+            let bytes = runner
+                .build_capture_aware_security_environment_spec(
+                    &request,
+                    SecurityEnvironmentVersion::V1_0,
+                    false,
+                )
+                .unwrap();
             let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
 
             assert_eq!(spec.capabilities(), expected_capabilities);
+            let egress = spec.network_policy().unwrap().egress().unwrap();
+            assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+            assert!(egress.allow().is_none());
+            assert!(egress.deny().is_none());
         }
     }
 
