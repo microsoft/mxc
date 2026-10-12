@@ -77,8 +77,9 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
 
 # Preflight: warm the WSLC image cache so per-test timings stay clear of one-off
 # download cost. The runner pulls on a miss by itself, so -SkipSetup is a
-# supported way to exercise that path instead. These are create-and-run tests,
-# so the lifecycle store slots are left alone.
+# supported way to exercise that path instead. The lifecycle fixtures provision
+# with the isolated posture, which refuses a registry pull, so the daemon's slot
+# has to be warmed here too or the delegated suite below starts cold.
 if (-not $SkipSetup) {
     $SetupScript = Join-Path $RepoRoot "scripts\setup-wslc.ps1"
     if (Test-Path $SetupScript) {
@@ -93,7 +94,7 @@ if (-not $SkipSetup) {
             "ghcr.io/linuxserver/baseimage-alpine:3.21",
             "quay.io/fedora/fedora-minimal:latest"
         )
-        & $SetupScript -WxcExecPath $WxcExec -Image $images -DaemonSlots 0 -Force
+        & $SetupScript -WxcExecPath $WxcExec -Image $images -DaemonSlots 1 -Force
         if ($LASTEXITCODE -ne 0) {
             Write-Host "WARN: setup-wslc.ps1 reported failures; continuing with tests anyway." -ForegroundColor Yellow
         }
@@ -467,8 +468,9 @@ $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false_rejected.json" `
 Write-Host "`n--- State-Aware Lifecycle Tests ---" -ForegroundColor Cyan
 # Delegate the multi-invocation provision/start/exec/stop/deprovision lifecycle
 # to its owning harness (it needs the daemon binary, mints + threads sandbox ids,
-# and drives the idle-teardown watchdog). Images are already pre-pulled above, so
-# skip its redundant preflight. Fold its exit code into the summary.
+# and drives the idle-teardown watchdog). The preflight above warmed the daemon
+# store slot as well, so skip its redundant preflight. Fold its exit code into
+# the summary.
 $saScript = Join-Path $PSScriptRoot "run_wslc_state_aware_tests.ps1"
 $saArgs = @{ WxcExecPath = $WxcExec; SkipSetup = $true }
 if ($Debug) { $saArgs.Debug = $true }

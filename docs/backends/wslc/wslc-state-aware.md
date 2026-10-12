@@ -163,9 +163,17 @@ create-and-run WSLc execution on the same host failed with
 A returned slot keeps its images — that is the point of leasing rather than
 minting. A slot that has never been leased holds nothing at all, and an uncached
 image under the isolated posture is refused before the VM is reached, so a cold
-slot fails a provision outright rather than pulling. Warm the pool with
-`scripts\setup-wslc.ps1 -DaemonSlots <n>` (see
-[the getting-started guide](wsl-container-getting-started.md#step-3--container-images-optional-pre-pull)).
+slot fails a provision outright rather than pulling. Warm the pool with either:
+
+```powershell
+.\scripts\setup-wslc.ps1 -Image alpine:latest -DaemonSlots 1
+wxc-exec.exe --setup-wslc --image alpine:latest --wslc-daemon-slots 1
+```
+
+Both default to 0 and warm slots from 0 up, so `1` is what a daemon holding one
+session needs. A count above the pool capacity is clamped to it. See
+[the getting-started guide](wsl-container-getting-started.md#step-3--container-images-optional-pre-pull)
+for the create-and-run store, which these do not replace.
 
 Slots are identified by index and are never repurposed, so nothing accumulates
 and no startup collection is needed; disk is bounded by one VHDX per slot.

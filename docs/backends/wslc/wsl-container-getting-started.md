@@ -141,13 +141,13 @@ cost once per image, not once per run.
 > `wxc-exec.exe`), otherwise the runner will not find what you just
 > pulled and will pull it again under its own path.
 
-> **Container lifecycle operations use a different store.** The state-aware
+> **Container lifecycle operations use a different store.** The lifecycle
 > daemon leases its store from a pool under
-> `%LOCALAPPDATA%\mxc\wslc-store-slots`, which `-StoragePath` does not reach.
-> `setup-wslc.ps1` warms the first slot as well by default; `-DaemonSlots 0`
-> skips it, and a larger count warms more slots at a pull and a multi-GiB store
-> each. On `wxc-exec.exe` the equivalent is `--wslc-daemon-slots <n>`, which
-> defaults to `0`. See
+> `%LOCALAPPDATA%\mxc\wslc-store-slots` (or `%TEMP%\mxc\wslc-store-slots` when
+> `%LOCALAPPDATA%` is unresolvable), which `-StoragePath` does not reach.
+> Warm it with `setup-wslc.ps1 -DaemonSlots 1`, or `--wslc-daemon-slots 1` on
+> `wxc-exec.exe`; both default to 0, and each slot warmed costs another pull
+> and another multi-GiB store. See
 > [the lifecycle guide](wslc-state-aware.md#image-store).
 
 > **Bring-up reaches the network.** A cache miss makes the host fetch

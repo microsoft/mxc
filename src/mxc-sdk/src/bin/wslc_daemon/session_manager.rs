@@ -49,7 +49,7 @@ use mxc_sdk::wslc_common::daemon_protocol::{
 use mxc_sdk::wslc_common::image;
 use mxc_sdk::wslc_common::policy_mapping;
 use mxc_sdk::wslc_common::process_env::EnvScope;
-use mxc_sdk::wslc_common::store_slots::{StoreSlotError, StoreSlotLease, StoreSlotPool};
+use mxc_sdk::wslc_common::store_slots::{self, StoreSlotError, StoreSlotLease, StoreSlotPool};
 use mxc_sdk::wslc_common::wslc_bindings::{
     WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
@@ -899,6 +899,11 @@ impl Worker {
 
         let sdk = self.sdk.as_ref().expect("session ensured");
         let session = self.session.as_ref().expect("session ensured").as_raw();
+        let store = image::StoreHint::DaemonSlot(
+            self.store_lease
+                .as_ref()
+                .map_or(0, store_slots::StoreSlotLease::index),
+        );
 
         // SAFETY: `sdk`/`session` are valid.
         let step = unsafe {
@@ -907,7 +912,7 @@ impl Worker {
                 session,
                 &config.image,
                 config.image_tar_path.as_deref(),
-                None,
+                &store,
                 match config.network {
                     NetworkMode::None => image::RegistryAccess::Denied,
                     NetworkMode::Bridged => image::RegistryAccess::Allowed,
@@ -938,7 +943,7 @@ impl Worker {
                         sdk,
                         session,
                         &config.image,
-                        None,
+                        &store,
                         "[WSLC][daemon]",
                         move |outcome| {
                             let _ = done.send(WorkerCommand::PullFinished { token, outcome });

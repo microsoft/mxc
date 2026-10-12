@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! A bounded pool of reusable WSLc image stores for the state-aware daemon.
+//! A bounded pool of reusable WSLc image stores for the container-lifecycle
+//! daemon.
 //!
 //! A WSLc "store" is a host directory the caller hands to `WslcCreateSession`;
 //! the SDK creates `storage.vhdx` inside it and mounts that VHDX into the
@@ -80,13 +81,9 @@ fn slot_path_in(root: &Path, index: usize) -> PathBuf {
     root.join(format!("slot-{index}"))
 }
 
-/// The paths of the first `count` slots, lowest index first.
-///
-/// Warming opens each store in turn rather than holding one for a session's
-/// lifetime, so it takes paths without leasing.
-pub fn slot_paths(count: usize) -> Vec<PathBuf> {
-    let root = pool_root();
-    (0..count).map(|index| slot_path_in(&root, index)).collect()
+/// The path of slot `index` in this host's pool.
+pub fn slot_path(index: usize) -> PathBuf {
+    slot_path_in(&pool_root(), index)
 }
 
 /// Why a slot could not be leased.
@@ -466,6 +463,19 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn warming_targets_the_same_store_leasing_takes() {
+        let pool = StoreSlotPool::new();
+
+        for index in 0..pool.capacity() {
+            assert_eq!(
+                slot_path(index),
+                pool.slot_path(index),
+                "warming a slot the pool would not hand out leaves the daemon cold"
+            );
+        }
+    }
 }
 
 /// Pool behaviour that only a live WSL2 host can answer.
@@ -487,8 +497,8 @@ mod host_tests {
     use crate::wslc_common::image::pull_image;
     use crate::wslc_common::sdk_init::init_and_load_sdk;
 
-    /// Small, and the default the state-aware backend uses, so a developer's
-    /// warm cache likely already has it.
+    /// Small, and the default the container-lifecycle backend uses, so a
+    /// developer's warm cache likely already has it.
     const CACHE_IMAGE: &str = "alpine:latest";
 
     /// A pool rooted somewhere disposable, so a run leaves no multi-GiB stores
@@ -631,7 +641,7 @@ mod host_tests {
                 sdk,
                 session.as_raw(),
                 CACHE_IMAGE,
-                Some(&store),
+                &crate::wslc_common::image::StoreHint::DaemonSlot(lease.index()),
                 "[slot]",
                 &mut log,
             )

@@ -19,7 +19,7 @@
     (the `wslc.storagePath` field of the config, or the
     runner's default of `%TEMP%\mxc-wslc-sessions` when omitted).
 
-    Container lifecycle operations do not read that store. The state-aware
+    Container lifecycle operations do not read that store. The lifecycle
     daemon leases its store from a pool under
     %LOCALAPPDATA%\mxc\wslc-store-slots, so -DaemonSlots warms those slots
     separately.
@@ -40,14 +40,15 @@
     (`%TEMP%\mxc-wslc-sessions`) is used. Set this if your runtime configs
     override `wslc.storagePath`. This reaches create-and-run execution only;
     use -DaemonSlots for the container-lifecycle store.
-
 .PARAMETER DaemonSlots
     How many container-lifecycle store slots to warm as well, from slot 0 up.
-    The state-aware daemon leases its store from a separate pool under
+    The lifecycle daemon leases its store from a separate pool under
     %LOCALAPPDATA%\mxc\wslc-store-slots, which -StoragePath does not reach, and
-    a slot that has never been leased holds no images. Defaults to 1, which is
-    what a daemon holding one session uses. Pass 0 to warm the create-and-run
-    cache only; each slot costs another pull and another multi-GiB store.
+    a slot that has never been leased holds no images. Defaults to 0, matching
+    `wxc-exec.exe --wslc-daemon-slots`, so warming a create-and-run cache stays
+    one pull per image. Pass 1 before running container lifecycle operations
+    against an isolated posture; each slot costs another pull and another
+    multi-GiB store.
 
 .PARAMETER DebugLogs
     Enable verbose logging from wxc-exec (passes `--debug`).
@@ -68,8 +69,8 @@
     Pulls into a non-default cache directory.
 
 .EXAMPLE
-    .\setup-wslc.ps1 -DaemonSlots 0
-    Pulls for create-and-run execution only, leaving the lifecycle slots alone.
+    .\setup-wslc.ps1 -DaemonSlots 1
+    Also warms the store slot the container-lifecycle daemon leases.
 #>
 
 [CmdletBinding()]
@@ -78,7 +79,7 @@ param(
     [string]$WxcExecPath,
     [string]$StoragePath,
     [ValidateRange(0, 64)]
-    [int]$DaemonSlots = 1,
+    [int]$DaemonSlots = 0,
     [switch]$DebugLogs,
     [switch]$Force
 )

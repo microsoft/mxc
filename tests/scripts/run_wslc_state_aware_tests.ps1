@@ -1863,6 +1863,42 @@ try {
     }
 }
 
+# ---------------- Lifecycle S: store isolation from create-and-run ----------------
+
+# A store's VHDX admits one live session, and the daemon used to default to the
+# create-and-run store, so this combination is what failed. Must stay ahead of
+# test H, which drives the daemon to exit.
+Run-StateAwareTest "S: create-and-run execution succeeds while a sandbox is live" {
+    $script:storeSandbox = Provision-Sandbox
+    Assert-True ($null -ne $script:storeSandbox) "provisioned a sandbox to hold the daemon's store"
+    if ($null -eq $script:storeSandbox) { return }
+
+    try {
+        Assert-True (Test-DaemonRunning) "the daemon is live and holding its store slot"
+
+        $oneShotConfig = Join-Path $RepoRoot "tests\examples\wslc_hello_world.json"
+        if (-not (Test-Path $oneShotConfig)) {
+            Assert-True $false "create-and-run fixture not found at $oneShotConfig"
+            return
+        }
+
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $output = & $WxcExec --config $oneShotConfig 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevPref
+
+        Assert-True ($exitCode -eq 0) "create-and-run run exits 0 while a sandbox is provisioned"
+        Assert-True ($output -notmatch '0x80070020') `
+            "create-and-run run reports no sharing violation (got: $($output.Trim()))"
+        Assert-True ($output -match 'Hello from WSL Container') `
+            "create-and-run run produced its own output"
+    } finally {
+        $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' `
+            -SandboxId $script:storeSandbox
+    }
+}
+
 # ---------------- Lifecycle H: idle teardown ----------------
 
 # All sandboxes above have been deprovisioned, so the daemon's live-container

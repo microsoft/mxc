@@ -845,7 +845,7 @@ impl WSLContainerRunner {
             session_guard.as_raw(),
             &self.config.image,
             self.config.image_tar_path.as_deref(),
-            self.config.storage_path.as_deref(),
+            &image::StoreHint::CreateAndRun(self.config.storage_path.clone()),
             registry,
             "[WSLC]",
             logger,
