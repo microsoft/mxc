@@ -115,6 +115,17 @@ impl NvxRunner {
 }
 
 fn reject_deferred_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
+    if !request.lifecycle.destroy_on_exit {
+        return Err(MxcError::policy_validation(
+            "the initial NVX integration requires lifecycle.destroyOnExit=true",
+        ));
+    }
+    if request.lifecycle.preserve_policy {
+        return Err(MxcError::policy_validation(
+            "the initial NVX integration requires lifecycle.preservePolicy=false",
+        ));
+    }
+
     let policy = &request.policy;
     let filesystem_supplied = !policy.readonly_paths.is_empty()
         || !policy.readwrite_paths.is_empty()
@@ -162,4 +173,57 @@ fn map_nvx_error(error: aci_edge_sandboxes::Error) -> MxcError {
         _ => MxcErrorCode::BackendError,
     };
     MxcError::new(code, error.message())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> ExecutionRequest {
+        ExecutionRequest {
+            script_code: "printf 'ok\\n'".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_destroy_on_exit_false() {
+        let mut request = request();
+        request.lifecycle.destroy_on_exit = false;
+        let error = reject_deferred_policy(&request).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert!(error.message.contains("destroyOnExit=true"));
+    }
+
+    #[test]
+    fn rejects_preserve_policy_true() {
+        let mut request = request();
+        request.lifecycle.preserve_policy = true;
+        let error = reject_deferred_policy(&request).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert!(error.message.contains("preservePolicy=false"));
+    }
+
+    #[test]
+    fn rejects_filesystem_network_and_ui_policy() {
+        let mut filesystem = request();
+        filesystem
+            .policy
+            .readonly_paths
+            .push(r"C:\input".to_string());
+        assert!(reject_deferred_policy(&filesystem).is_err());
+
+        let mut network = request();
+        network.policy.network_specified = true;
+        assert!(reject_deferred_policy(&network).is_err());
+
+        let mut ui = request();
+        ui.policy.ui_specified = true;
+        assert!(reject_deferred_policy(&ui).is_err());
+    }
+
+    #[test]
+    fn accepts_process_only_defaults() {
+        assert!(reject_deferred_policy(&request()).is_ok());
+    }
 }
