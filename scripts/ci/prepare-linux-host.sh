@@ -6,7 +6,7 @@ set -euo pipefail
 # matrix entry works on Ubuntu, Debian, and RHEL images.
 
 usage() {
-    echo "Usage: $0 <bubblewrap|lxc|microvm> <binary-directory>" >&2
+    echo "Usage: $0 <bubblewrap|lxc> <binary-directory>" >&2
 }
 
 if [[ $# -ne 2 ]]; then
@@ -310,11 +310,6 @@ case "$backend" in
         fi
         start_lxc_bridge
         ensure_bridge_firewall_zone
-        ;;
-    microvm)
-        for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do
-            test -f "$binary_directory/$file"
-        done
         ;;
     *)
         usage

@@ -1546,8 +1546,6 @@ dependencies = [
  "lxc_common",
  "mxc_build_common",
  "mxc_engine",
- "nanvix_binaries",
- "nanvix_build_common",
  "wxc_common",
 ]
 
@@ -1714,7 +1712,6 @@ dependencies = [
  "learning_mode_core",
  "lxc_common",
  "mxc_config_contract",
- "nanvix_runner",
  "nvx_runner",
  "plm",
  "process_container_common",
@@ -1774,40 +1771,6 @@ version = "0.9.0"
 dependencies = [
  "tracelogging",
  "uuid",
-]
-
-[[package]]
-name = "nanvix_binaries"
-version = "0.9.0"
-dependencies = [
- "nanvix_build_common",
- "nanvix_common",
-]
-
-[[package]]
-name = "nanvix_build_common"
-version = "0.9.0"
-dependencies = [
- "nanvix_common",
-]
-
-[[package]]
-name = "nanvix_common"
-version = "0.9.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "nanvix_runner"
-version = "0.9.0"
-dependencies = [
- "libc",
- "nanvix_common",
- "uuid",
- "windows",
- "wxc_common",
 ]
 
 [[package]]
@@ -3415,14 +3378,13 @@ dependencies = [
 name = "wxc"
 version = "0.9.0"
 dependencies = [
+ "aci_edge_sandboxes",
  "anyhow",
  "clap",
  "hyperlight_common",
  "learning_mode_core",
  "mxc_build_common",
  "mxc_engine",
- "nanvix_binaries",
- "nanvix_build_common",
  "plm",
  "process_container_common",
  "serde_json",
@@ -3443,7 +3405,6 @@ dependencies = [
  "libc",
  "mxc_config_contract",
  "mxc_telemetry",
- "nanvix_common",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -3452,7 +3413,6 @@ dependencies = [
  "thiserror",
  "unicode-general-category",
  "url",
- "uuid",
  "widestring",
  "windows",
  "windows-core",

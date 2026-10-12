@@ -36,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
         match req.containment {
             #[cfg(feature = "microvm")]
             ContainmentBackend::MicroVm => {
-                let runner = nanvix_runner::NanVixScriptRunner::new();
+                let runner = nvx_runner::NvxRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             #[cfg(feature = "hyperlight")]
