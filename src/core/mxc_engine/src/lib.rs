@@ -92,6 +92,11 @@ pub struct CapturedExecutionResult {
     pub stderr: Vec<u8>,
 }
 
+pub enum OneShotExecution {
+    Captured(CapturedExecutionResult),
+    Streaming(Box<dyn SandboxProcess>),
+}
+
 /// Spawn a streaming [`SandboxProcess`] handle for a normalized
 /// [`ExecutionRequest`].
 ///
@@ -136,30 +141,28 @@ pub fn spawn_one_shot_json(
 }
 
 #[doc(hidden)]
-pub fn run_nvx_one_shot_json(
+pub fn execute_one_shot_json(
     request_json: &str,
     experimental: bool,
-) -> Result<CapturedExecutionResult, Error> {
+) -> Result<OneShotExecution, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
 
-    if request.containment != ContainmentBackend::MicroVm {
-        return Err(Error::from(MxcError::unsupported_containment(
-            "the NVX test entry point requires containment 'microvm'",
-        )));
+    if request.containment == ContainmentBackend::MicroVm {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        {
+            return run_captured_execution_request(&request, logger)
+                .map(OneShotExecution::Captured);
+        }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+        {
+            return Err(Error::from(MxcError::backend_unavailable(
+                "MicroVM requires Windows x64 and a build with the microvm feature",
+            )));
+        }
     }
 
-    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
-    {
-        run_captured_execution_request(&request, logger)
-    }
-    #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
-    {
-        let _ = logger;
-        Err(Error::from(MxcError::backend_unavailable(
-            "NVX requires Windows x64 and the mxc_engine microvm feature",
-        )))
-    }
+    spawn_execution_request_with_logger(&request, logger).map(OneShotExecution::Streaming)
 }
 
 fn parse_one_shot_json(

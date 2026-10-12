@@ -13,7 +13,6 @@ path = "src/lib.rs"
 wxc_common.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
-nanvix_runner = { workspace = true, optional = true }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight_common = { workspace = true, optional = true }
 
@@ -46,8 +45,8 @@ seatbelt_common = { workspace = true }
 
 [features]
 default = []
-# Enables the existing Nanvix executor and the hidden Windows x64 NVX SDK path.
-microvm = ["dep:nvx_runner", "nvx_runner/bundled", "dep:nanvix_runner"]
+# Enables the Windows x64 NVX MicroVM backend.
+microvm = ["dep:nvx_runner", "nvx_runner/bundled"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
 isolation_session = [

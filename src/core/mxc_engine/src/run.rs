@@ -292,16 +292,16 @@ fn resolve_runner_inner_windows(
             "VM backend not yet implemented",
         )),
         ContainmentBackend::MicroVm => {
-            #[cfg(feature = "microvm")]
+            #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
             {
                 Ok(ResolvedRunner::without_guard(Box::new(
-                    nanvix_runner::NanVixScriptRunner::new(),
+                    nvx_runner::NvxRunner::new(),
                 )))
             }
-            #[cfg(not(feature = "microvm"))]
+            #[cfg(not(all(feature = "microvm", target_arch = "x86_64")))]
             {
-                Err(MxcError::unsupported_containment(
-                    "MicroVM backend not compiled in (build with --features microvm)",
+                Err(MxcError::backend_unavailable(
+                    "MicroVM requires Windows x64 and a build with --features microvm",
                 ))
             }
         }
@@ -355,20 +355,9 @@ fn resolve_runner_inner(
 
     match request.containment {
         ContainmentBackend::Hyperlight => resolve_hyperlight(),
-        ContainmentBackend::MicroVm => {
-            #[cfg(feature = "microvm")]
-            {
-                Ok(ResolvedRunner::without_guard(Box::new(
-                    nanvix_runner::NanVixScriptRunner::new(),
-                )))
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                Err(MxcError::unsupported_containment(
-                    "MicroVM backend not compiled in (build with --features microvm)",
-                ))
-            }
-        }
+        ContainmentBackend::MicroVm => Err(MxcError::unsupported_containment(
+            "the MicroVM backend is available only on Windows x64",
+        )),
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
         )))),
