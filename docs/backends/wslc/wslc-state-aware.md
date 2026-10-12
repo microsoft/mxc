@@ -55,7 +55,7 @@ waits for the run, because deleting the container would free a handle the run is
 | Lifecycle backend | `src/mxc-sdk/src/backends/wslc/common/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and shared policy fields into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
 | Policy support checks | `src/mxc-sdk/src/backends/wslc/common/policy.rs` | Per-phase validation of which policy fields are enforced or rejected. |
 | Daemon client | `src/mxc-sdk/src/backends/wslc/common/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
-| Store slot pool | `src/mxc-sdk/src/backends/wslc/common/store_slots.rs` | Owns the daemon's image stores: slot paths, leasing, and the capacity knob. See [Image store](#image-store). |
+| Store slot pool | `src/mxc-sdk/src/backends/wslc/common/store_slots.rs` | Owns the daemon's image stores: slot paths and leasing. See [Image store](#image-store). |
 | Daemon | `src/mxc-sdk/src/bin/wslc_daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
 | Engine routing | `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | Selects the WSLc lifecycle backend (Windows + `wslc` feature). |
 | Prefix registration | `src/mxc-sdk/src/tools/mxc_common/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
@@ -140,11 +140,10 @@ A WSLc store is a host directory handed to `WslcCreateSession`; the SDK creates
 VM, where it holds the session's pulled images. A warmed store runs to a couple
 of GiB.
 
-The daemon leases its store from a fixed pool rather than taking a caller-named
-path:
+The daemon leases its store from a pool rather than taking a caller-named path:
 
 ```text
-%LOCALAPPDATA%\mxc\wslc-store-slots\slot-0 .. slot-3
+%LOCALAPPDATA%\mxc\wslc-store-slots\slot-0, slot-1, …
 ```
 
 `%TEMP%\mxc\wslc-store-slots` is used instead when `%LOCALAPPDATA%` is
@@ -157,6 +156,11 @@ Separating the two is what lets both surfaces run at once. A store's VHDX admits
 one live session, so while the daemon held `%TEMP%\mxc-wslc-sessions` every
 create-and-run WSLc execution on the same host failed with
 `WslcListSessionImages failed: HRESULT 0x80070020` until the daemon idled out.
+
+The pool does not cap how many sessions a host may run, and a slot count would
+be the wrong control for that: a session carries its own cpu and memory, so the
+same count can mean very different host load. Admission belongs with the work
+that lets a caller request a second session.
 
 ### Slot contents and disk
 
@@ -171,15 +175,14 @@ wxc-exec.exe --setup-wslc --image alpine:latest --wslc-daemon-slots 1
 ```
 
 Both default to 0 and warm slots from 0 up, so `1` is what a daemon holding one
-session needs. A count above the pool capacity is clamped to it. See
+session needs. See
 [the getting-started guide](wsl-container-getting-started.md#step-3--container-images-optional-pre-pull)
 for the create-and-run store, which these do not replace.
 
-Slots are identified by index and are never repurposed, so nothing accumulates
-and no startup collection is needed; disk is bounded by one VHDX per slot.
-Reclaim it by deleting the pool directory while no daemon is running. Lowering
-`MXC_WSLC_STORE_SLOTS` leaves the higher-numbered directories in place, inert
-and safe to delete.
+A slot directory is created when it is first leased, so an unused index costs
+nothing. Slots are identified by index and never repurposed, so nothing
+accumulates beyond the number of sessions the host has actually run at once.
+Reclaim the disk by deleting the pool directory while no daemon is running.
 
 ### Store exclusivity
 
@@ -195,10 +198,6 @@ be handed the same slot. A holder outside that bookkeeping — typically a daemo
 from a previous build still inside its idle window — fails the provision with an
 error naming the slot, rather than relocating the session onto a cold slot and
 reporting a missing image instead.
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `MXC_WSLC_STORE_SLOTS` | `4` | Slots the pool offers. Unset, empty, non-numeric, or zero falls back to the default. |
 
 ### exec output semantics
 

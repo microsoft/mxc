@@ -945,9 +945,6 @@ fn with_implicit_tag(name: &str) -> String {
 /// leased holds no images at all, and an uncached image under the default
 /// deny-egress posture is refused before the VM is reached.
 ///
-/// `daemon_slots` is clamped to the pool's capacity, since warming a slot the
-/// pool will never hand out costs a pull and a multi-GiB store for nothing.
-///
 /// # Safety
 /// Must be called once per process before any other WSLC SDK functions
 /// (it initialises COM via `init_and_load_sdk`).
@@ -962,16 +959,6 @@ pub unsafe fn setup_pull_image(
         Err(resp) => return Err(resp.error_message),
     };
 
-    let capacity = store_slots::configured_slot_count();
-    let wanted = daemon_slots.min(capacity);
-    if daemon_slots > capacity {
-        let _ = writeln!(
-            logger,
-            "[WSLC setup] {daemon_slots} slots requested but the pool offers {capacity}; \
-             warming {wanted}"
-        );
-    }
-
     warm_store(
         sdk,
         image_name,
@@ -980,7 +967,7 @@ pub unsafe fn setup_pull_image(
         logger,
     )?;
 
-    for index in 0..wanted {
+    for index in 0..daemon_slots {
         let slot = store_slots::slot_path(index);
         std::fs::create_dir_all(&slot).map_err(|e| {
             format!(
@@ -995,7 +982,7 @@ pub unsafe fn setup_pull_image(
             Some(&slot.to_string_lossy()),
             logger,
         )
-        .map_err(|e| format!("{e} (slot {index} of {wanted}; earlier slots were warmed)"))?;
+        .map_err(|e| format!("{e} (slot {index} of {daemon_slots}; earlier slots were warmed)"))?;
     }
 
     Ok(())

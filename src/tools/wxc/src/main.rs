@@ -138,12 +138,16 @@ struct Cli {
 
     /// Also warm the first N container-lifecycle store slots, which the
     /// lifecycle daemon leases from and `--storage-path` does not reach.
-    /// Clamped to the pool capacity (`MXC_WSLC_STORE_SLOTS`, default 4), since
-    /// a slot the pool never hands out costs a pull and a multi-GiB store for
-    /// nothing. Defaults to 0 so warming a create-and-run cache stays one pull
-    /// per image. Requires `--setup-wslc`.
-    #[arg(long = "wslc-daemon-slots", value_name = "N", requires = "setup_wslc")]
-    wslc_daemon_slots: Option<usize>,
+    /// Defaults to 0 so warming a create-and-run cache stays one pull per
+    /// image; each slot warmed adds a pull and a multi-GiB store.
+    /// Requires `--setup-wslc`.
+    #[arg(
+        long = "wslc-daemon-slots",
+        value_name = "N",
+        value_parser = clap::value_parser!(u16).range(0..=64),
+        requires = "setup_wslc"
+    )]
+    wslc_daemon_slots: Option<u16>,
 
     /// Run the fallback detector and emit JSON, without spawning a sandbox.
     #[arg(long)]
@@ -1226,7 +1230,7 @@ fn main() {
                 mxc_sdk::wslc_common::image::setup_pull_image(
                     image,
                     cli.storage_path.as_deref(),
-                    cli.wslc_daemon_slots.unwrap_or(0),
+                    cli.wslc_daemon_slots.unwrap_or(0) as usize,
                     &mut logger,
                 )
             };

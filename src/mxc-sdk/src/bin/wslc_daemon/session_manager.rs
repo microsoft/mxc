@@ -872,7 +872,7 @@ impl Worker {
                 })
                 .map_err(|e| match e {
                     StoreSlotError::Refused { source, .. } => sr_err(source),
-                    exhausted_or_io => WorkerError::Backend(anyhow::anyhow!("{exhausted_or_io}")),
+                    pool_failure => WorkerError::Backend(anyhow::anyhow!("{pool_failure}")),
                 })?;
 
             self.session = Some(session);
