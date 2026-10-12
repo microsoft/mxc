@@ -422,6 +422,30 @@ mod linux_tests {
         );
         assert!(error.message.contains("seatbelt"));
     }
+
+    #[test]
+    fn microvm_is_rejected_instead_of_falling_back_to_lxc() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::MicroVm,
+            experimental_enabled: true,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("MicroVM must not fall back to LXC on Linux"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.code,
+            wxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
+        );
+        assert_eq!(
+            error.message,
+            "the MicroVM backend is available only on Windows x64"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

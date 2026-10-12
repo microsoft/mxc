@@ -6,6 +6,11 @@ license.workspace = true
 publish = false
 description = "End-to-end integration tests for MXC"
 
+[features]
+# Retains the disconnected Nanvix/KVM characterization suite without running
+# or compiling it in active MXC validation.
+legacy-nanvix-tests = []
+
 [dependencies]
 base64.workspace = true
 serde.workspace = true
