@@ -171,9 +171,14 @@ Filesystem discovery helpers and their result/options types live under
 `container_type: Some(ToolsPolicyContainerType::ProcessContainer)` to exclude
 directories with ALL APPLICATION PACKAGES access on Windows. ACL inspection is
 bounded to five seconds per directory; failures retain the directory and use
-the configured diagnostic sink. `user_profile_policy` discovers standard
-per-user tool locations, and `temporary_files_policy` returns existing
-temporary storage without creating directories.
+the configured diagnostic sink. PowerShell discovery omits the synthetic
+system-drive root by default; use
+`available_tools_policy_with_powershell_drive_root_read` only when recursive
+whole-drive reads on BaseContainer are acceptable. A drive root explicitly
+supplied through `PATH` or another discovered environment variable is still
+returned as a tool path. `user_profile_policy` discovers standard per-user tool
+locations, and `temporary_files_policy` returns existing temporary storage
+without creating directories.
 
 ## Internal modules and executor binaries
 

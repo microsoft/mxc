@@ -43,7 +43,9 @@ export interface ToolsPolicyOptions {
      *
      * Defaults to `false`. Opting in permits recursive whole-drive reads on
      * BaseContainer. PowerShell startup that only needs to stat the drive root
-     * should use host preparation or tier-supported configuration instead.
+     * should use host preparation or tier-supported configuration instead. A
+     * drive root explicitly supplied through PATH or another discovered
+     * environment variable remains in `readonlyPaths`.
      */
     allowPowerShellDriveRootRead?: boolean;
 }
@@ -292,7 +294,9 @@ function getPowerShellPolicy(
  * is true (the default is `false`). That opt-in permits recursive whole-drive
  * reads on BaseContainer. PowerShell startup that stats the drive root may
  * need explicit host preparation or tier-supported configuration; the opt-in
- * is the compatibility path for callers who accept the broad read.
+ * is the compatibility path for callers who accept the broad read. This option
+ * controls only the synthetic PowerShell grant; an explicitly discovered drive
+ * root remains in the result.
  *
  * ACL inspection failures retain the directory and emit a diagnostic warning.
  *

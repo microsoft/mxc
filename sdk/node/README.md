@@ -269,9 +269,12 @@ PSReadLine history directory to `readwritePaths` and leaves the system-drive
 root out of `readonlyPaths`. Set `allowPowerShellDriveRootRead: true` to
 restore that root for callers who accept the compatibility grant. On
 BaseContainer, a drive-root `readonlyPaths` entry permits recursive reads of
-the whole drive, including unrelated user files. `getUserProfilePolicy` uses
-the supplied environment, and `getTemporaryFilesPolicy` returns existing
-temporary storage without creating directories.
+the whole drive, including unrelated user files. This option controls only the
+synthetic root added for PowerShell compatibility; a drive root explicitly
+supplied through `PATH` or another discovered environment variable is still
+returned as a tool path. `getUserProfilePolicy` uses the supplied environment,
+and `getTemporaryFilesPolicy` returns existing temporary storage without
+creating directories.
 
 PowerShell startup may still need to stat the system-drive root. Use explicit
 host preparation or tier-supported configuration for that check.

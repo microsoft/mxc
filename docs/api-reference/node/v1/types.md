@@ -954,6 +954,7 @@ Options for getAvailableToolsPolicy.
 ```typescript
 export interface ToolsPolicyOptions {
   containerType?: 'processcontainer';
+  allowPowerShellDriveRootRead?: boolean;
 }
 ```
 
