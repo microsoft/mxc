@@ -55,12 +55,11 @@ jobs:
           $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
           $required = @(
             "wxc-exec.exe",
-            "nanvixd.exe",
-            "nanvix_rootfs.img",
-            "python3.initrd",
-            "bin\kernel.elf",
-            "snapshots\kernel.vmem",
-            "snapshots\kernel.whp.cbor"
+            "nvx\SHA256SUMS",
+            "nvx\SOURCE-MANIFEST.json",
+            "nvx\bin\openvmm.exe",
+            "nvx\guest\vmlinux",
+            "nvx\guest\initramfs.cpio.gz"
           )
           $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
           if ($missing) {

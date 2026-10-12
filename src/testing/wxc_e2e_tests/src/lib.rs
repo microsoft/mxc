@@ -160,23 +160,22 @@ pub fn has_daemon() -> bool {
     }
 }
 
-/// Return whether the NanVix runtime binaries are available next to wxc-exec.
-pub fn has_nanvix_binaries() -> bool {
+/// Return whether the NVX runtime is available next to wxc-exec.
+pub fn has_nvx_runtime() -> bool {
     let Some(exe) = find_binary("wxc-exec.exe") else {
         return false;
     };
-    let exe_dir = exe.parent().unwrap_or(Path::new("."));
-    // Flat binaries staged next to wxc-exec.exe by `nanvix_binaries`.
-    let flat_present = ["nanvixd.exe", "nanvix_rootfs.img", "python3.initrd"]
-        .iter()
-        .all(|name| exe_dir.join(name).exists());
-    // Kernel binary now lives under `bin/` (nanvixd locates it via -bin-dir).
-    let bin_present = ["kernel.elf"]
-        .iter()
-        .all(|name| exe_dir.join("bin").join(name).exists());
-    let present = flat_present && bin_present;
+    let root = exe.parent().unwrap_or(Path::new(".")).join("nvx");
+    let required = [
+        "SHA256SUMS",
+        "SOURCE-MANIFEST.json",
+        "bin/openvmm.exe",
+        "guest/vmlinux",
+        "guest/initramfs.cpio.gz",
+    ];
+    let present = required.iter().all(|path| root.join(path).is_file());
     if !present {
-        println!("SKIPPED: NanVix binaries not found next to wxc-exec.exe");
+        println!("SKIPPED: NVX runtime not found next to wxc-exec.exe");
     }
     present
 }

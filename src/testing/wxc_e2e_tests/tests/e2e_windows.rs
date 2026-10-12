@@ -14,14 +14,14 @@ use serde::Serialize;
 use wxc_e2e_tests::{
     assert_exit, assert_pwsh, assert_python, assert_success,
     assert_success_or_skip_missing_prerequisite, examples_dir, has_hyperlight_runtime,
-    has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
+    has_hyperlight_snapshot, has_nvx_runtime, has_test_driver, has_windows_sandbox_feature,
     has_wxc_exe, repo_root, run_test_driver, run_wxc_config, run_wxc_config_value, run_wxc_example,
     test_configs_dir, TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
 static HAS_TEST_DRIVER: OnceLock<bool> = OnceLock::new();
-static HAS_NANVIX_BINARIES: OnceLock<bool> = OnceLock::new();
+static HAS_NVX_RUNTIME: OnceLock<bool> = OnceLock::new();
 static HAS_WINDOWS_SANDBOX: OnceLock<bool> = OnceLock::new();
 static HAS_HYPERLIGHT: OnceLock<bool> = OnceLock::new();
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -37,9 +37,9 @@ fn cached_has_test_driver() -> bool {
     *HAS_TEST_DRIVER.get_or_init(has_test_driver)
 }
 
-/// Caches the NanVix binary probe to avoid repeated prerequisite work.
-fn cached_has_nanvix_binaries() -> bool {
-    *HAS_NANVIX_BINARIES.get_or_init(has_nanvix_binaries)
+/// Caches the NVX runtime probe to avoid repeated prerequisite work.
+fn cached_has_nvx_runtime() -> bool {
+    *HAS_NVX_RUNTIME.get_or_init(has_nvx_runtime)
 }
 
 /// Caches the Windows Sandbox feature probe.
@@ -127,92 +127,54 @@ fn microvm_basic() {
 }
 
 fn microvm_network() {
-    // Drives the `-allow-host-networking` path: the guest opens a loopback TCP
-    // socket, completes a ping/pong round-trip, and prints NET_OK. Without host
-    // networking enabled the guest's socket() call fails (errno 134) and the
-    // process exits non-zero, so a clean exit + marker proves the flag wiring.
-    let result = run_wxc_config("microvm_network.json", &["--debug", "--experimental"]);
-    assert_eq!(
-        result.code,
-        Some(0),
-        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
-        result.code,
-        result.stdout,
-        result.stderr
-    );
-    let combined = result.combined_output_with_decoded_base64();
-    assert!(
-        combined.contains("NET_OK"),
-        "guest network round-trip marker missing\ncombined: {}",
-        combined
-    );
-}
-
-/// Full network isolation is supported; directional filtering is separately
-/// rejected because the legacy guest filter does not implement that contract.
-fn microvm_network_blocked() {
-    let source = "import _socket\n\
-                  try:\n\
-                  \x20   s = _socket.socket(2, 1, 0)\n\
-                  \x20   print('UNEXPECTED_NETWORK', flush=True)\n\
-                  except OSError as e:\n\
-                  \x20   print('RESULT ERRNO %d' % (e.errno,), flush=True)\n";
-    let blocked = serde_json::json!({
+    let request = serde_json::json!({
         "version": "1.1.0-alpha",
-        "process": { "commandLine": source, "timeout": 30000 },
         "containment": "microvm",
+        "process": {
+            "commandLine": "printf 'UNEXPECTED_EXECUTION\\n'",
+            "timeout": 30000
+        },
         "network": {
             "egress": { "default": "deny" },
             "ingress": { "default": "deny", "hostLoopback": "deny" }
         }
     });
-    let blocked_result = run_wxc_config_value(
-        "microvm_network_blocked",
-        &blocked,
+    let result = run_wxc_config_value(
+        "microvm_network_rejected",
+        &request,
         &["--debug", "--experimental"],
     );
-    let blocked_out = blocked_result.combined_output_with_decoded_base64();
-    assert_eq!(
-        blocked_result.code,
-        Some(0),
-        "isolated run should exit cleanly (the guest catches the error)\ncombined: {}",
-        blocked_out
-    );
+    let combined = result.combined_output_with_decoded_base64();
     assert!(
-        blocked_out.contains("RESULT ERRNO 134"),
-        "isolated guest sockets should remain unavailable (errno 134)\ncombined: {}",
-        blocked_out
+        result.code != Some(0) && combined.contains("policy_validation"),
+        "network policy must fail closed\ncombined: {}",
+        combined
     );
+    assert!(!combined.contains("UNEXPECTED_EXECUTION"));
+}
 
-    let filtered = serde_json::json!({
+fn microvm_filesystem_rejected() {
+    let request = serde_json::json!({
         "version": "1.1.0-alpha",
-        "process": { "commandLine": "print('UNEXPECTED_EXECUTION')", "timeout": 30000 },
         "containment": "microvm",
-        "network": {
-            "egress": {
-                "default": "allow",
-                "deny": [{ "to": [{ "cidr": "203.0.113.0/24" }] }]
-            },
-            "ingress": { "default": "allow", "hostLoopback": "allow" }
-        }
+        "process": {
+            "commandLine": "printf 'UNEXPECTED_EXECUTION\\n'",
+            "timeout": 30000
+        },
+        "filesystem": { "readonlyPaths": ["C:\\Windows"] }
     });
-    let filtered_result = run_wxc_config_value(
-        "microvm_directional_filter_rejected",
-        &filtered,
+    let result = run_wxc_config_value(
+        "microvm_filesystem_rejected",
+        &request,
         &["--debug", "--experimental"],
     );
-    let filtered_out = filtered_result.combined_output_with_decoded_base64();
-    assert_ne!(
-        filtered_result.code,
-        Some(0),
-        "unsupported directional filtering must fail before execution\ncombined: {}",
-        filtered_out
-    );
+    let combined = result.combined_output_with_decoded_base64();
     assert!(
-        filtered_out.contains("NanVix cannot enforce directional egress rules"),
-        "expected the backend's explicit unsupported-filtering error\ncombined: {}",
-        filtered_out
+        result.code != Some(0) && combined.contains("policy_validation"),
+        "filesystem policy must fail closed\ncombined: {}",
+        combined
     );
+    assert!(!combined.contains("UNEXPECTED_EXECUTION"));
 }
 
 /// Drives `processContainer.captureDenials` end to end and asserts the
@@ -602,7 +564,7 @@ fn test_microvm_basic() {
     if !cached_has_wxc_exe() {
         return;
     }
-    if !cached_has_nanvix_binaries() {
+    if !cached_has_nvx_runtime() {
         return;
     }
     with_test_lock(microvm_basic);
@@ -613,21 +575,21 @@ fn test_microvm_network() {
     if !cached_has_wxc_exe() {
         return;
     }
-    if !cached_has_nanvix_binaries() {
+    if !cached_has_nvx_runtime() {
         return;
     }
     with_test_lock(microvm_network);
 }
 
 #[test]
-fn test_microvm_network_blocked() {
+fn test_microvm_filesystem_rejected() {
     if !cached_has_wxc_exe() {
         return;
     }
-    if !cached_has_nanvix_binaries() {
+    if !cached_has_nvx_runtime() {
         return;
     }
-    with_test_lock(microvm_network_blocked);
+    with_test_lock(microvm_filesystem_rejected);
 }
 
 #[test]
@@ -647,7 +609,7 @@ fn test_microvm_suite() {
     if !cached_has_wxc_exe() {
         return;
     }
-    if !cached_has_nanvix_binaries() {
+    if !cached_has_nvx_runtime() {
         return;
     }
     with_test_lock(microvm_suite);
@@ -847,15 +809,15 @@ fn microvm_suite() {
         MicrovmCase {
             config: "microvm_multiline.json",
             expected_exit: Some(0),
-            description: "Multi-line script (fibonacci)",
-            output_contains: Some("fib("),
+            description: "Multi-line shell loop",
+            output_contains: Some("item 9"),
             expect_non_zero: false,
         },
         MicrovmCase {
             config: "microvm_stdlib.json",
             expected_exit: Some(0),
-            description: "Stdlib (json, math, hashlib)",
-            output_contains: Some("pi"),
+            description: "Alpine guest identity",
+            output_contains: Some("Alpine Linux"),
             expect_non_zero: false,
         },
         MicrovmCase {
@@ -868,8 +830,8 @@ fn microvm_suite() {
         MicrovmCase {
             config: "microvm_error.json",
             expected_exit: Some(1),
-            description: "Python exception",
-            output_contains: Some("ValueError"),
+            description: "Stderr and nonzero exit",
+            output_contains: Some("intentional test error"),
             expect_non_zero: false,
         },
         MicrovmCase {
