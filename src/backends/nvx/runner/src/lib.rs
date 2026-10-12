@@ -8,8 +8,9 @@ use std::time::Duration;
 use aci_edge_sandboxes::openvmm::OpenVmmConfig;
 use aci_edge_sandboxes::{AciEdgeSandbox, ExecOutcome, ExecRequest, ProvisionRequest};
 use wxc_common::logger::Logger;
-use wxc_common::models::ExecutionRequest;
+use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, MxcErrorCode};
+use wxc_common::script_runner::ScriptRunner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapturedOutcome {
@@ -111,6 +112,52 @@ impl NvxRunner {
             stdout: output.stdout,
             stderr: output.stderr,
         })
+    }
+}
+
+impl ScriptRunner for NvxRunner {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        reject_deferred_policy(request).map_err(|error| ScriptResponse::rejected(&error.message))
+    }
+
+    fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        match self.run_captured(request, logger) {
+            Ok(result) => captured_to_script_response(result),
+            Err(error) if error.code == MxcErrorCode::PolicyValidation => {
+                ScriptResponse::rejected(&error.message)
+            }
+            Err(error) => ScriptResponse {
+                exit_code: -1,
+                error_message: error.to_string(),
+                failure_phase: if error.code == MxcErrorCode::BackendUnavailable {
+                    FailurePhase::BackendUnavailable
+                } else {
+                    FailurePhase::PostLaunchFailed
+                },
+                ..Default::default()
+            },
+        }
+    }
+}
+
+fn captured_to_script_response(result: CapturedRun) -> ScriptResponse {
+    let standard_out = String::from_utf8_lossy(&result.stdout).into_owned();
+    let standard_err = String::from_utf8_lossy(&result.stderr).into_owned();
+    match result.outcome {
+        CapturedOutcome::Exited(exit_code) => ScriptResponse {
+            exit_code,
+            standard_out,
+            standard_err,
+            ..Default::default()
+        },
+        CapturedOutcome::TimedOut => ScriptResponse {
+            exit_code: -1,
+            standard_out,
+            standard_err,
+            error_message: "NVX workload timed out".to_string(),
+            failure_phase: FailurePhase::Timeout,
+            ..Default::default()
+        },
     }
 }
 
@@ -225,5 +272,31 @@ mod tests {
     #[test]
     fn accepts_process_only_defaults() {
         assert!(reject_deferred_policy(&request()).is_ok());
+    }
+
+    #[test]
+    fn executor_adapter_preserves_exit_and_output() {
+        let response = captured_to_script_response(CapturedRun {
+            outcome: CapturedOutcome::Exited(42),
+            warnings: Vec::new(),
+            stdout: b"out".to_vec(),
+            stderr: b"err".to_vec(),
+        });
+        assert_eq!(response.exit_code, 42);
+        assert_eq!(response.standard_out, "out");
+        assert_eq!(response.standard_err, "err");
+        assert!(response.error_message.is_empty());
+    }
+
+    #[test]
+    fn executor_adapter_marks_timeout() {
+        let response = captured_to_script_response(CapturedRun {
+            outcome: CapturedOutcome::TimedOut,
+            warnings: Vec::new(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        });
+        assert_eq!(response.exit_code, -1);
+        assert_eq!(response.failure_phase, FailurePhase::Timeout);
     }
 }
