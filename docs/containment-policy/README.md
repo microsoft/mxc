@@ -6,7 +6,7 @@ and cover both create-and-run execution and container lifecycle operations.
 
 | Request `version` | Contract | Status |
 |---|---|---|
-| `0.9.0-alpha` | [0.9.0](0.9.0/policy.md) | Published; minimum supported |
+| `0.9.0-alpha` | [0.9.0-alpha](0.9.0/policy.md) | Published; minimum supported |
 | `1.0.0` | [1.0.0](1.0.0/policy.md) | Published; current stable |
 | `1.1.0-alpha` | [Development](dev/policy.md) | Mutable; may change before publication |
 

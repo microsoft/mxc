@@ -156,9 +156,11 @@ restrict networking: its request must explicitly set **all three** actions to
 section is rejected for IsolationSession. MicroVM permits all-deny isolated
 or explicitly all-allow unrestricted host networking; mixed postures and
 per-destination rules are rejected. Hyperlight rejects a supplied `network`
-section. Windows Sandbox only supports blocked networking for create-and-run
-execution; allow policies, host filters, and proxies are rejected. Backend
-support is not implied by a field appearing in this development contract.
+section. Windows Sandbox create-and-run execution blocks networking when
+`network` is omitted; it rejects supplied `network.egress` or
+`network.ingress` sections (even empty or deny-only), host filters, and
+proxies. Backend support is not implied by a field appearing in this
+development contract.
 
 ## Container lifecycle operations
 

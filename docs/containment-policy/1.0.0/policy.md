@@ -6,7 +6,7 @@ schema](../../../schemas/stable/mxc-config.schema.1.0.0.json) is the
 machine-readable field reference. This guide covers create-and-run requests
 and container lifecycle operations independently of other documents.
 High-level Rust, .NET, and Node v1 SDK APIs target this contract internally;
-raw JSON callers must supply the exact version string.
+callers submitting MXC request JSON must supply the exact version string.
 
 The request is a closed JSON object: unknown fields and unsupported fields for
 the selected phase are rejected. `$schema` (a string for editor validation) and
