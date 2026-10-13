@@ -87,6 +87,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The resolver file only governs lookups that reach nss_dns. A chain that
+# starts with a module answering from somewhere else -- systemd-resolved
+# answers from a daemon outside this namespace, and refuses a reserved TLD
+# without asking anyone -- would never query the peer below. Pin the chain to
+# the databases this test reasons about. bwrap binds /etc, so the sandbox
+# resolves through the same chain.
+NSSWITCH_PATH="/etc/nsswitch.conf"
+if [ -f "$NSSWITCH_PATH" ]; then
+    printf 'passwd: files\ngroup: files\nshadow: files\nhosts: files dns\n' \
+        >"$WORK_DIR/nsswitch.conf"
+    if ! mount --bind "$WORK_DIR/nsswitch.conf" "$NSSWITCH_PATH"; then
+        echo "FAIL: could not pin the name-service chain at $NSSWITCH_PATH."
+        exit 1
+    fi
+fi
+
 # Without this the stub address is unreachable and the peer cannot be bound.
 ip link set lo up
 
