@@ -131,6 +131,14 @@ Or pull a single image directly:
     --setup-wslc --image alpine:latest
 ```
 
+Repeat `--image` to pull several in one go, which opens each store once instead
+of once per image:
+
+```powershell
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe `
+    --setup-wslc --image alpine:latest --image python:3.12-alpine
+```
+
 Pulled images persist in the cache until you remove them — pay the
 cost once per image, not once per run.
 
@@ -221,6 +229,25 @@ prepare a machine that will run offline — warm the cache first:
 ```powershell
 .\scripts\setup-wslc.ps1 -Image <image>
 ```
+
+### How warming works
+
+A store is a directory holding a `storage.vhdx`, and the SDK offers no way to
+write into one directly — a pull needs a live session. So warming opens a
+short-lived WSLc session against each target store, pulls every requested image
+into it, and releases it. The session is only a way to reach the file; what
+persists is the VHDX, which a later run or a lifecycle daemon reads.
+
+One session is opened per *store*, not per image, so warming three images into
+two stores costs two sessions rather than six. Passing every image to one
+invocation is therefore cheaper than invoking the tool once per image:
+
+```powershell
+.\scripts\setup-wslc.ps1 -Image alpine:latest, python:3.12-alpine -DaemonSlots 1
+```
+
+That warms two stores — the create-and-run store and lifecycle slot 0 — with
+both images, booting two utility VMs in total.
 
 ## Usage
 

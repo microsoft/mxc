@@ -134,7 +134,14 @@ if (-not $SkipSetup) {
         Write-Host "Pre-pulling WSLc images (pass -SkipSetup to skip)..." -ForegroundColor Cyan
         & $SetupScript -WxcExecPath $WxcExec -Image @("alpine:latest", "python:3.12-alpine") -DaemonSlots 1 -Force
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "WARN: setup-wslc.ps1 reported failures; continuing anyway." -ForegroundColor Yellow
+            # Continuing would leave slot 0 cold, and the isolated fixtures
+            # cannot pull, so every later provision fails for a reason that
+            # looks nothing like this preflight.
+            Write-Host "ERROR: setup-wslc.ps1 failed to warm daemon store slot 0." -ForegroundColor Red
+            Write-Host "  The lifecycle fixtures provision with the isolated posture, which refuses a" -ForegroundColor Yellow
+            Write-Host "  registry pull, so a cold slot fails every provision rather than pulling." -ForegroundColor Yellow
+            Write-Host "  Resolve the setup failure above, or pass -SkipSetup if slot 0 is already warm." -ForegroundColor Yellow
+            exit 1
         }
         Write-Host ""
     } else {

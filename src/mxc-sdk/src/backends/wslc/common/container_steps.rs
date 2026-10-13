@@ -792,22 +792,6 @@ fn store_access_failure(hr: HRESULT, storage_path: &str) -> ScriptResponse {
     }
 }
 
-/// Names of the images a session's store holds.
-///
-/// This is the cheapest call that proves a session handle is usable rather than
-/// merely non-null, since it has to reach the store's VHDX to answer.
-///
-/// # Safety
-/// `sdk` must hold valid function pointers and `session` must be a live handle.
-pub unsafe fn list_session_image_names(
-    sdk: &WslcSdk,
-    session: WslcSession,
-) -> Result<Vec<String>, ScriptResponse> {
-    list_stored_images(sdk, session)
-        .map(|stored| stored.into_iter().map(|entry| entry.name).collect())
-        .map_err(|hr| sdk_error("WslcListSessionImages failed", hr, ""))
-}
-
 /// One entry of a session's image store.
 pub(crate) struct StoredImage {
     pub(crate) name: String,

@@ -175,8 +175,11 @@ wxc-exec.exe --setup-wslc --image alpine:latest --wslc-daemon-slots 1
 ```
 
 Both default to 0 and warm slots from 0 up, so `1` is what a daemon holding one
-session needs. See
-[the getting-started guide](wsl-container-getting-started.md#step-3--container-images-optional-pre-pull)
+session needs. Each store is opened once and filled with every image given, so
+pass them all to one invocation. See
+[the getting-started guide](wsl-container-getting-started.md#how-warming-works)
+for how warming works, and
+[Step 3](wsl-container-getting-started.md#step-3--container-images-optional-pre-pull)
 for the create-and-run store, which these do not replace.
 
 A slot directory is created when it is first leased, so an unused index costs

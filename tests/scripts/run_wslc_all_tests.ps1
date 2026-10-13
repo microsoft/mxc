@@ -96,7 +96,13 @@ if (-not $SkipSetup) {
         )
         & $SetupScript -WxcExecPath $WxcExec -Image $images -DaemonSlots 1 -Force
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "WARN: setup-wslc.ps1 reported failures; continuing with tests anyway." -ForegroundColor Yellow
+            # The create-and-run half pulls on a miss, but the delegated
+            # lifecycle suite provisions with the isolated posture and cannot,
+            # so a cold slot 0 surfaces much later as unrelated failures.
+            Write-Host "ERROR: setup-wslc.ps1 failed; daemon store slot 0 may be cold." -ForegroundColor Red
+            Write-Host "  The delegated lifecycle suite refuses registry pulls, so it cannot recover." -ForegroundColor Yellow
+            Write-Host "  Resolve the setup failure above, or pass -SkipSetup if both stores are warm." -ForegroundColor Yellow
+            exit 1
         }
         Write-Host ""
     } else {

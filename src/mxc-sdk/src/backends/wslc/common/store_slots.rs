@@ -447,9 +447,13 @@ mod host_tests {
     use super::*;
 
     use crate::mxc_common::logger::{Logger, Mode};
-    use crate::wslc_common::container_steps::{create_daemon_session, list_session_image_names};
+    use crate::wslc_common::container_steps::{create_daemon_session, list_stored_images};
     use crate::wslc_common::image::pull_image;
     use crate::wslc_common::sdk_init::init_and_load_sdk;
+
+    fn image_names(stored: Vec<crate::wslc_common::container_steps::StoredImage>) -> Vec<String> {
+        stored.into_iter().map(|entry| entry.name).collect()
+    }
 
     /// Small, and the default the container-lifecycle backend uses, so a
     /// developer's warm cache likely already has it.
@@ -502,20 +506,20 @@ mod host_tests {
         // Both handles have to be usable *while the other is live*, not merely
         // created: a session that cannot read its store is not a working one.
         // SAFETY: both sessions are live.
-        unsafe { list_session_image_names(sdk, session_a.as_raw()) }
+        unsafe { list_stored_images(sdk, session_a.as_raw()) }
             .expect("session A must stay usable while B is live");
         // SAFETY: both sessions are live.
-        unsafe { list_session_image_names(sdk, session_b.as_raw()) }
+        unsafe { list_stored_images(sdk, session_b.as_raw()) }
             .expect("session B must be usable while A is live");
         // SAFETY: session A is live.
-        unsafe { list_session_image_names(sdk, session_a.as_raw()) }
+        unsafe { list_stored_images(sdk, session_a.as_raw()) }
             .expect("session A must still be usable after B was used");
 
         drop(session_b);
         drop(lease_b);
 
         // SAFETY: session A is live.
-        unsafe { list_session_image_names(sdk, session_a.as_raw()) }
+        unsafe { list_stored_images(sdk, session_a.as_raw()) }
             .expect("session A must survive session B's release");
     }
 
@@ -560,7 +564,7 @@ mod host_tests {
         );
 
         // SAFETY: the holder is still live.
-        unsafe { list_session_image_names(sdk, holder.as_raw()) }
+        unsafe { list_stored_images(sdk, holder.as_raw()) }
             .expect("refusing the second session must leave the holder usable");
     }
 
@@ -582,7 +586,8 @@ mod host_tests {
         let store = lease.path().to_string_lossy().to_string();
 
         // SAFETY: the session is live.
-        let cold = unsafe { list_session_image_names(sdk, session.as_raw()) }.expect("list cold");
+        let cold =
+            image_names(unsafe { list_stored_images(sdk, session.as_raw()) }.expect("list cold"));
         assert!(
             cold.is_empty(),
             "a slot that has never been leased holds no images, which is why a \
@@ -602,7 +607,8 @@ mod host_tests {
         }
         .expect("pull must succeed; this test needs egress");
         // SAFETY: the session is live.
-        let warmed = unsafe { list_session_image_names(sdk, session.as_raw()) }.expect("list warm");
+        let warmed =
+            image_names(unsafe { list_stored_images(sdk, session.as_raw()) }.expect("list warm"));
         assert!(!warmed.is_empty(), "the pull must have filled the store");
 
         drop(session);
@@ -618,8 +624,9 @@ mod host_tests {
             .expect("re-lease after return");
         assert_eq!(next_lease.path().to_string_lossy(), store);
         // SAFETY: the session is live.
-        let reopened =
-            unsafe { list_session_image_names(sdk, next_session.as_raw()) }.expect("list reopened");
+        let reopened = image_names(
+            unsafe { list_stored_images(sdk, next_session.as_raw()) }.expect("list reopened"),
+        );
 
         assert_eq!(
             warmed, reopened,

@@ -9,11 +9,11 @@
     Warms the WSLC SDK image cache ahead of time. A run pulls on a cache miss
     by itself, so this is an optimisation rather than a prerequisite — it moves
     the download off the critical path of a later run, and it is how you
-    populate a cache for a host that cannot reach a registry. Each image is
-    pulled via `wxc-exec.exe --setup-wslc --image <name>`, which opens a minimal
-    WSLC session against the configured `storage_path` and invokes
-    `WslcPullSessionImage`. The pulled images persist in that storage path
-    and become visible to subsequent runtime executions.
+    populate a cache for a host that cannot reach a registry. All images are
+    pulled via a single `wxc-exec.exe --setup-wslc --image <name> ...`
+    invocation per store, which opens one WSLC session against that store and
+    invokes `WslcPullSessionImage` for each image. The pulled images persist in
+    that storage path and become visible to subsequent runtime executions.
 
     The storage path you pass here MUST match the value used at run time
     (the `wslc.storagePath` field of the config, or the
@@ -54,7 +54,9 @@
     Enable verbose logging from wxc-exec (passes `--debug`).
 
 .PARAMETER Force
-    Continue pulling subsequent images even if one fails.
+    Retained for compatibility. Every image is now pulled in one `wxc-exec`
+    invocation per store, which always attempts them all and reports each
+    failure, so there is no longer a run to continue past.
 
 .EXAMPLE
     .\setup-wslc.ps1
@@ -128,37 +130,36 @@ if ($DaemonSlots -gt 0) {
 Write-Host "Images       : $($Image -join ', ')`n" -ForegroundColor Gray
 
 $failed = @()
+Write-Host "  pulling $($Image.Count) image(s) ... " -NoNewline
+
+$wxcArgs = @("--setup-wslc")
 foreach ($img in $Image) {
-    Write-Host "  $img ... " -NoNewline
-    $wxcArgs = @("--setup-wslc", "--image", $img)
-    if ($StoragePath) {
-        $wxcArgs += @("--storage-path", $StoragePath)
-    }
-    if ($DaemonSlots -gt 0) {
-        $wxcArgs += @("--wslc-daemon-slots", "$DaemonSlots")
-    }
-    if ($DebugLogs) {
-        $wxcArgs += "--debug"
-    }
+    $wxcArgs += @("--image", $img)
+}
+if ($StoragePath) {
+    $wxcArgs += @("--storage-path", $StoragePath)
+}
+if ($DaemonSlots -gt 0) {
+    $wxcArgs += @("--wslc-daemon-slots", "$DaemonSlots")
+}
+if ($DebugLogs) {
+    $wxcArgs += "--debug"
+}
 
-    $prevPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $output = & $WxcExec @wxcArgs 2>&1 | Out-String
-    $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = $prevPref
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$output = & $WxcExec @wxcArgs 2>&1 | Out-String
+$exitCode = $LASTEXITCODE
+$ErrorActionPreference = $prevPref
 
-    if ($exitCode -eq 0) {
-        Write-Host "OK" -ForegroundColor Green
-    } else {
-        Write-Host "FAIL (exit $exitCode)" -ForegroundColor Red
-        $output -split "`n" | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
-            Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray
-        }
-        $failed += $img
-        if (-not $Force) {
-            break
-        }
+if ($exitCode -eq 0) {
+    Write-Host "OK" -ForegroundColor Green
+} else {
+    Write-Host "FAIL (exit $exitCode)" -ForegroundColor Red
+    $output -split "`n" | Where-Object { $_.Trim() -ne "" } | ForEach-Object {
+        Write-Host "    > $($_.TrimEnd())" -ForegroundColor Gray
     }
+    $failed += $Image
 }
 
 Write-Host ""
