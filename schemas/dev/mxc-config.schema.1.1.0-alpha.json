@@ -1148,8 +1148,8 @@
           "description": "Optional desktop-resource isolation level."
         },
         "systemSettings": {
-          "description": "Optional system-settings access level.",
-          "type": "string"
+          "$ref": "#/definitions/ProcessContainerUiSystemSettings",
+          "description": "Optional system-settings access level."
         }
       },
       "type": "object"
@@ -1181,6 +1181,38 @@
           "description": "Atoms",
           "enum": [
             "atoms"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ProcessContainerUiSystemSettings": {
+      "oneOf": [
+        {
+          "description": "None",
+          "enum": [
+            "none"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Parameters",
+          "enum": [
+            "parameters"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Display",
+          "enum": [
+            "display"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "All",
+          "enum": [
+            "all"
           ],
           "type": "string"
         }

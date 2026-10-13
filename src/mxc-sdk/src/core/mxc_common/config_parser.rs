@@ -1466,8 +1466,12 @@ fn normalize_common_request_ir(
                 .to_string();
             policy.base_process_ui.desktop_system_control =
                 raw_ui.desktop_system_control.unwrap_or(false);
-            policy.base_process_ui.system_settings =
-                raw_ui.system_settings.unwrap_or_else(|| "none".to_string());
+            policy.base_process_ui.system_settings = raw_ui
+                .system_settings
+                .as_ref()
+                .map(wire::UiSystemSettings::as_str)
+                .unwrap_or("none")
+                .to_string();
             policy.base_process_ui.ime = raw_ui.ime.unwrap_or(false);
         }
 

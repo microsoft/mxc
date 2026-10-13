@@ -431,13 +431,32 @@ fn process_container_request_maps_expected_wire_fields() {
         Some(super::wire::UiIsolation::Container)
     ));
     assert_eq!(process_container_ui.desktop_system_control, Some(true));
-    assert_eq!(
+    assert!(matches!(
         process_container_ui.system_settings,
-        Some("none".to_string())
-    );
+        Some(super::wire::UiSystemSettings::None)
+    ));
     assert_eq!(process_container_ui.ime, Some(true));
 
     assert!(wire.lxc.is_none());
+}
+
+#[test]
+fn unknown_process_container_ui_system_settings_maps_to_none() {
+    let json = r#"{
+        "version": "1.0.0",
+        "containment": "processcontainer",
+        "process": {"commandLine": "echo hello"},
+        "processContainer": {"ui": {"systemSettings": "unsupported"}}
+    }"#;
+
+    let setting = adapt(json)
+        .process_container
+        .expect("processContainer")
+        .ui
+        .expect("processContainer.ui")
+        .system_settings
+        .expect("systemSettings");
+    assert!(matches!(setting, super::wire::UiSystemSettings::None));
 }
 
 #[test]

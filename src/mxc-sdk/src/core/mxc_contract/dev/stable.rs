@@ -124,6 +124,21 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// System settings for ProcessContainer desktop resources.
+    #[derive(Debug)]
+    pub enum ProcessContainerUiSystemSettings {
+        /// Block system-parameter and display-setting changes.
+        None => ["none"],
+        /// Block display-setting changes, but not system-parameter changes.
+        Parameters => ["parameters"],
+        /// Block system-parameter changes, but not display-setting changes.
+        Display => ["display"],
+        /// Do not block either system-parameter or display-setting changes.
+        All => ["all"],
+    }
+}
+
 /// ProcessContainer-specific user-interface policy.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -137,7 +152,7 @@ pub struct ProcessContainerUi {
     pub desktop_system_control: OptionalField<bool>,
     /// Optional system-settings access level.
     #[serde(default)]
-    pub system_settings: OptionalField<String>,
+    pub system_settings: OptionalField<ProcessContainerUiSystemSettings>,
     /// Whether Input Method Editor access is allowed.
     #[serde(default)]
     pub ime: OptionalField<bool>,
