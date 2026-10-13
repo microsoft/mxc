@@ -10,7 +10,6 @@ import {
     ExecutionResult,
     UnsupportedV1NetworkFields,
 } from './types.js';
-import { applyLinuxNetworkPolicy } from '../helper.js';
 import { diagLog } from '../diagnostic.js';
 import { MxcError } from './errors.js';
 import { prepareOneShotRequest } from '../bindings/one-shot.js';
@@ -129,14 +128,13 @@ function buildWslcContainerConfig(
 /**
  * Builds the Bubblewrap (bwrap) portion of a ContainerConfig.
  * Bubblewrap is Linux-only and uses shared cross-backend fields only —
- * no backend-specific config block. Network enforcement via iptables
- * reuses the same approach as LXC.
+ * no backend-specific config block. Network policy uses shared directional
+ * fields enforced by the native backend.
  */
 function buildBubblewrapConfig(
     config: ContainerConfig,
 ): ContainerConfig {
     config.containment = 'bubblewrap';
-    applyLinuxNetworkPolicy(config);
     return config;
 }
 
@@ -150,7 +148,6 @@ function buildLinuxProcessConfig(
         distribution: 'alpine',
         release: '3.23',
     };
-    applyLinuxNetworkPolicy(config);
     return config;
 }
 

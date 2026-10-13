@@ -251,34 +251,6 @@ export interface FilesystemConfig {
   clearPolicyOnExit?: boolean;
 }
 
-/**
- * Network access configuration. Legacy fields remain for TypeScript source
- * compatibility only; every registered exact contract rejects them. Use
- * directional fields and runtimeConfig.networkProxy instead.
- */
-export interface NetworkConfig extends DirectionalNetworkConfig {
-  /**
-   * Retired enforcement selector; registered contracts reject this field.
-   * @deprecated Use directional network policy instead.
-   */
-  enforcementMode?: 'capabilities' | 'firewall' | 'both';
-  /** @deprecated Use egress.default instead; registered contracts reject this field. */
-  defaultPolicy?: 'allow' | 'block';
-  /**
-   * @deprecated Use ingress.default instead; registered contracts reject this field.
-   */
-  allowLocalNetwork?: boolean;
-  /** @deprecated Use numeric CIDR egress rules or proxy-side hostname filtering. */
-  allowedHosts?: string[];
-  /** @deprecated Use numeric CIDR egress rules or proxy-side hostname filtering. */
-  blockedHosts?: string[];
-  /** @deprecated Registered contracts reject network.proxy. Use
-   * runtimeConfig.networkProxy with the backend's supported policy posture. */
-  proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
-  /** @deprecated Use lifecycle.preservePolicy; registered contracts reject this field. */
-  removeRulesOnExit?: boolean;
-}
-
 /** Directional network policy used by provisioning. */
 export interface DirectionalNetworkConfig {
   /** Outbound network policy. */
@@ -450,7 +422,7 @@ export interface ContainerConfig {
   /** Filesystem access configuration */
   filesystem?: FilesystemConfig;
   /** Network access configuration */
-  network?: NetworkConfig;
+  network?: DirectionalNetworkConfig;
   /** Runtime values supplied separately from sandbox policy. */
   runtimeConfig?: NetworkRuntimeConfig;
   /** Telemetry configuration for TraceLogging ETW support */
