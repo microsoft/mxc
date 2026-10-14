@@ -37,7 +37,8 @@ use super::error::{
 };
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
-    create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_eof, create_relay_thread_with_stop,
+    duplicate_handle, PipeRelayWithStopParams,
 };
 use super::process_options::{
     build_iso_process_options, with_service_timeout_grace, ProcessOptions,
@@ -549,16 +550,16 @@ impl IsolationSessionManager {
             // resize records.
             enum StdinRelayKind {
                 None,
-                CancellablePipe,
-                Pipe(PipeRelayWithStopParams),
-                Console(ConsoleRelayParams),
+                PipeOrFile,
+                ConsoleByteStream(PipeRelayWithStopParams),
+                ConsoleInteractive(ConsoleRelayParams),
             }
 
             let stdin_relay_state = if stdin_handle_val == 0 {
                 StdinRelayKind::None
             } else {
                 match classify_stdin_handle(wxc_stdin) {
-                    StdinHandleKind::PipeOrFile => StdinRelayKind::CancellablePipe,
+                    StdinHandleKind::PipeOrFile => StdinRelayKind::PipeOrFile,
                     StdinHandleKind::Console => {
                         // Owned, like the output relays': `process.Close()`
                         // releases the original while this relay may still be
@@ -579,7 +580,7 @@ impl IsolationSessionManager {
                             // released when the thread frees the params it owns.
                             let process_for_resize = process.clone();
                             let impersonation = self.impersonation.clone();
-                            StdinRelayKind::Console(ConsoleRelayParams {
+                            StdinRelayKind::ConsoleInteractive(ConsoleRelayParams {
                                 h_read: wxc_stdin,
                                 h_write: stdin_h_write,
                                 h_stop_event: stdin_h_stop,
@@ -591,7 +592,7 @@ impl IsolationSessionManager {
                                 }),
                             })
                         } else {
-                            StdinRelayKind::Pipe(PipeRelayWithStopParams {
+                            StdinRelayKind::ConsoleByteStream(PipeRelayWithStopParams {
                                 h_read: wxc_stdin,
                                 h_write: stdin_h_write,
                                 h_stop_event: stdin_h_stop,
@@ -605,22 +606,33 @@ impl IsolationSessionManager {
             // them on the heap under the relay thread's ownership.
             scope.stdin = match stdin_relay_state {
                 StdinRelayKind::None => None,
-                StdinRelayKind::CancellablePipe => {
+                StdinRelayKind::PipeOrFile => {
+                    // Ensure the agent's stdin will close on EOF for pipe/file-backed 
+                    // stdin.
+                    let process_for_eof = process.clone();
+                    let impersonation = self.impersonation.clone();
+                    let on_eof: Box<dyn FnOnce() + Send> = Box::new(move || {
+                        let _ = owned_thread::call(&impersonation, || {
+                            let _ = process_for_eof.CloseStandardInput();
+                            Ok(())
+                        });
+                    });
                     let (thread, canceller) = unsafe {
-                        create_relay_thread(
+                        create_relay_thread_with_eof(
                             wxc_stdin,
                             HANDLE(stdin_handle_val as *mut core::ffi::c_void),
+                            Some(on_eof),
                         )
                     }
                     .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?;
                     scope.stdin_canceller = Some(canceller);
                     Some(thread)
                 }
-                StdinRelayKind::Pipe(params) => Some(
+                StdinRelayKind::ConsoleByteStream(params) => Some(
                     unsafe { create_relay_thread_with_stop(params) }
                         .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
                 ),
-                StdinRelayKind::Console(params) => {
+                StdinRelayKind::ConsoleInteractive(params) => {
                     Some(unsafe { create_console_relay_thread(params) }.map_err(|e| {
                         lifecycle_err(format!("create console-aware stdin relay: {}", e))
                     })?)

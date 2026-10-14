@@ -52,6 +52,7 @@ pub(super) fn duplicate_handle(handle: HANDLE) -> Result<OwnedHandle, WxcError> 
 struct PipeRelayParams {
     reader: InterruptiblePipeReader,
     h_write: OwnedHandle,
+    on_eof: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// Thread procedure for relaying data between two handles.
@@ -66,9 +67,13 @@ unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) 
     let mut params = unsafe { Box::from_raw(param as *mut PipeRelayParams) };
     let mut buffer = [0u8; BUFFER_SIZE as usize];
 
-    loop {
+    let reached_source_eof = loop {
         let bytes_read = match params.reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            // `Ok(0)` is reported for a genuine source EOF *and* for a fired
+            // canceller, so disambiguate with `was_cancelled` to determine if
+            // this is a genuine EOF.
+            Ok(0) => break !params.reader.was_cancelled(),
+            Err(_) => break false,
             Ok(n) => n,
         };
 
@@ -82,10 +87,16 @@ unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) 
         .is_err()
             || bytes_written as usize != bytes_read
         {
-            break;
+            break false;
         }
 
         let _ = FlushFileBuffers(params.h_write.get());
+    };
+
+    if reached_source_eof {
+        if let Some(on_eof) = params.on_eof.take() {
+            on_eof();
+        }
     }
 
     0
@@ -102,11 +113,25 @@ pub(super) unsafe fn create_relay_thread(
     h_read: HANDLE,
     h_write: HANDLE,
 ) -> Result<(OwnedHandle, PipeReadCanceller), WxcError> {
+    unsafe { create_relay_thread_with_eof(h_read, h_write, None) }
+}
+
+/// As [`create_relay_thread`], but runs `on_eof` once if the relay ends because
+/// the source reached a genuine, uncancelled EOF. Pipe/file-backed stdin uses
+/// this to propagate end-of-input to the agent (`CloseStandardInput`); a fired
+/// canceller or a write error does **not** run it, so the forced-teardown path
+/// stays distinct from natural end-of-input.
+pub(super) unsafe fn create_relay_thread_with_eof(
+    h_read: HANDLE,
+    h_write: HANDLE,
+    on_eof: Option<Box<dyn FnOnce() + Send>>,
+) -> Result<(OwnedHandle, PipeReadCanceller), WxcError> {
     let reader = InterruptiblePipeReader::new(duplicate_handle(h_read)?);
     let canceller = reader.canceller();
     let raw = Box::into_raw(Box::new(PipeRelayParams {
         reader,
         h_write: duplicate_handle(h_write)?,
+        on_eof,
     }));
     match unsafe {
         CreateThread(
@@ -440,7 +465,92 @@ mod tests {
         assert_eq!(read_from_pipe(dest_send.get()), "");
     }
 
-    /// Closing the source handle the relay was built from does not disturb it:
+    /// A genuine, uncancelled source EOF must run the relay's `on_eof` hook —
+    /// this is what closes the agent's stdin so a read-to-EOF workload exits.
+    #[test]
+    fn a_pipe_relay_at_source_eof_runs_its_eof_callback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (source_read, source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_cb = Arc::clone(&fired);
+        let on_eof: Box<dyn FnOnce() + Send> =
+            Box::new(move || fired_cb.store(true, Ordering::SeqCst));
+
+        let (relay_thread, _canceller) = unsafe {
+            create_relay_thread_with_eof(source_read.get(), dest_write.get(), Some(on_eof)).unwrap()
+        };
+
+        // Drain concurrently so the relay's post-write FlushFileBuffers returns.
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        let mut written = 0u32;
+        unsafe {
+            WriteFile(
+                source_write.get(),
+                Some(b"payload"),
+                Some(&mut written),
+                None,
+            )
+            .unwrap();
+        }
+        // Source EOF: the relay copies the payload, reads `Ok(0)`, runs on_eof.
+        drop(source_write);
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay_thread.get(), 5000) },
+            WAIT_OBJECT_0,
+            "the relay should reach EOF and exit"
+        );
+        // The hook runs inside the thread proc before it returns, so by the time
+        // the thread is signalled the flag is already set.
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "a genuine source EOF must run the EOF callback"
+        );
+
+        drop(dest_write);
+        assert_eq!(reader.join().unwrap(), "payload");
+    }
+
+    /// A cancellation also surfaces as `Ok(0)`, but it is forced teardown, not
+    /// end-of-input — the `on_eof` hook must not run (otherwise shutdown would
+    /// spuriously close the agent's stdin).
+    #[test]
+    fn a_cancelled_pipe_relay_does_not_run_its_eof_callback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (source_read, _source_write) = create_test_pipes();
+        let (_dest_read, dest_write) = create_test_pipes();
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_cb = Arc::clone(&fired);
+        let on_eof: Box<dyn FnOnce() + Send> =
+            Box::new(move || fired_cb.store(true, Ordering::SeqCst));
+
+        let (relay_thread, canceller) = unsafe {
+            create_relay_thread_with_eof(source_read.get(), dest_write.get(), Some(on_eof)).unwrap()
+        };
+
+        // Parked in `ReadFile` (`_source_write` keeps it from reaching EOF).
+        canceller.close();
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay_thread.get(), 5000) },
+            WAIT_OBJECT_0,
+            "the cancelled relay should exit"
+        );
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "cancellation is not EOF: the callback must not run"
+        );
+    }
+
     /// it reads a duplicate. This is what lets `IsoSessionProcess::Close` run
     /// unconditionally.
     #[test]

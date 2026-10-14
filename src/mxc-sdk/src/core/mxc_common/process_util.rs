@@ -163,6 +163,13 @@ impl InterruptiblePipeReader {
         PipeReadCanceller(Arc::downgrade(&self.0))
     }
 
+    /// Whether a [`PipeReadCanceller`] has already fired for this reader. A
+    /// cancelled read reports `Ok(0)` just like a genuine EOF, so a relay that
+    /// must act only on real end-of-input checks this to tell them apart.
+    pub fn was_cancelled(&self) -> bool {
+        self.0.lock().cancelled
+    }
+
     pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
         self.0.handle.try_clone_owned_handle()
     }
