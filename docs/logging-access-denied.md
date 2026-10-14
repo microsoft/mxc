@@ -269,7 +269,13 @@ MXC currently recognizes two normalized source domains:
   `udp://[2001:db8::1]:53`. These decisions remain actionable network denials.
 
 `NetworkDecisionV1` retains its original 24-property event ID/version `1`
-schema. Tessera attribution is carried only in the existing `Reason` field:
+schema. Before interpreting Tessera reasons `100`–`103`, MXC requires
+`SourceDomain: 2`, `ProviderGuid: {2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}`,
+and `SublayerGuid: {7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}` in the event
+payload. These WFP identity fields are distinct from the ETW provider GUID
+above; a `Reason` value alone does not establish Tessera attribution.
+Once that identity is validated, the existing `Reason` field distinguishes
+the policy decisions below:
 
 | Source/reason | Meaning | Version-5 recommendation |
 |---|---|---|
@@ -435,10 +441,10 @@ Version `4` adds the schema `eventName` field, the network-decision provider,
 and `schemaUnavailable` outcome used by scoped verbose diagnostics. Version
 `5` adds MXC's internal WFP-specific outcome reasons, typed network decision
 reason, reason-specific configuration recommendation, and exact endpoint
-components. Option-aware native
-`captureDenials` writes version 5 even when a particular trace contains no WFP
-occurrences. Legacy and guarded capture paths may still produce their
-corresponding legacy document version. MXC readers that consume captured
+components. All native PSEC `captureDenials` results write version 5,
+including legacy access-only `StartLearningModeTrace` capture and traces
+with no WFP occurrences. The guarded-WPR fallback currently writes version 4
+through the legacy verbose writer. MXC readers that consume captured
 artifacts dispatch versions 3, 4, and 5 to separate closed contracts. They
 reject unknown fields, newer providers/reasons under an older version label,
 and every unsupported version rather than interpreting newer vocabulary with
