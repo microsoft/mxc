@@ -181,23 +181,26 @@ Common consequences of this default:
   paths (including `..` and paths near policy mounts) are left to Bubblewrap;
   silence does not prove a cwd is accessible. The hint does not change
   execution or replace Bubblewrap's error.
-- DNS works on systemd-resolved, NetworkManager, and resolvconf hosts
-  because the corresponding `/run/...` directories are bound. The common
-  symlink targets *outside* `/run` are covered too: `/var/run/...`-routed
-  `/etc/resolv.conf` symlinks resolve via a synthesised `/var/run -> /run`
-  compat symlink, and WSL's `/mnt/wsl/resolv.conf` is bound directly.
-  Neither exposes host `/var` or `/mnt` contents. Hosts that point
-  `/etc/resolv.conf` at some other custom location still need that target
-  listed in `readonlyPaths`. Bubblewrap retains a mount-configuration hint
-  for SDK callers, which `lxc-exec` also prints to stderr, when a direct,
-  absolute resolver symlink target has no overlapping known mount
-  destination. The check reads the link but does not resolve or stat its
-  target or policy paths; a missing file or symlink alias can make the hint
-  inapplicable. Check the link and consider listing its containing directory
-  in `readonlyPaths`. Relative targets, uncertain mounts, and synthetic
-  destinations such as `/tmp` and `/var/run` suppress the hint. Silence
-  does not prove DNS is available; the hint never changes mounts or the
-  run's outcome.
+- The sandbox can *read* the host's resolver on systemd-resolved,
+  NetworkManager, and resolvconf hosts because the corresponding `/run/...`
+  directories are bound. The common symlink targets *outside* `/run` are
+  covered too: `/var/run/...`-routed `/etc/resolv.conf` symlinks resolve via a
+  synthesised `/var/run -> /run` compat symlink, and WSL's
+  `/mnt/wsl/resolv.conf` is bound directly. Neither exposes host `/var` or
+  `/mnt` contents. Hosts that point `/etc/resolv.conf` at some other custom
+  location still need that target listed in `readonlyPaths`. Bubblewrap
+  retains a mount-configuration hint for SDK callers, which `lxc-exec` also
+  prints to stderr, when a direct, absolute resolver symlink target has no
+  overlapping known mount destination. The check reads the link but does not
+  resolve or stat its target or policy paths; a missing file or symlink alias
+  can make the hint inapplicable. Check the link and consider listing its
+  containing directory in `readonlyPaths`. Relative targets, uncertain
+  mounts, and synthetic destinations such as `/tmp` and `/var/run` suppress
+  the hint. Silence does not prove DNS is available; the hint never changes
+  mounts or the run's outcome.
+
+  Reading the file is not the same as reaching the nameserver it names — see
+  [Loopback resolvers](#loopback-resolvers).
 
 Files in `/etc` that contain secrets (`/etc/shadow`, `/etc/sudoers`,
 `/etc/ssh/ssh_host_*_key`) are mode `0400` / `0640` `root` and remain
@@ -319,6 +322,67 @@ at validation time rather than resolved on the caller's behalf. The backend
 does not resolve, because the sandbox resolves names itself and a lookup that
 disagreed with the one behind the rules would hand the workload an address the
 chain never authorized.
+
+### Loopback resolvers
+
+Every mode runs the sandbox in its own network namespace, so a nameserver on
+the host's loopback — `systemd-resolved`'s stub at `127.0.0.53`, a local
+`dnsmasq` at `127.0.0.1` — names an address that belongs to the sandbox's own
+empty loopback. Binding the host's resolver directories makes the file
+readable; it does not make that address reachable, and names do not resolve.
+
+Under **address filtering**, MXC therefore replaces the sandbox's resolver with
+slirp's built-in forwarder, `10.0.2.3`. libslirp rewrites a query sent there to
+the first IPv4 nameserver in the *host's* `/etc/resolv.conf` and sends it from
+the host's network namespace, which is what puts the host's stub back in reach.
+`search`, `domain`, `sortlist`, and `options` are carried over unchanged, since
+they decide which names resolve. Comments and unrecognized lines are not: the
+replacement can land on a path the filesystem policy never granted, so only the
+resolver's own behavior crosses that boundary.
+
+The replacement applies only when the host's own resolvers are **all** loopback
+addresses and **at least one** is IPv4, so it cannot redirect name resolution
+that already works, and it never applies when slirp has no IPv4 nameserver to
+forward to. The file is mounted over the path the `/etc/resolv.conf` symlink
+chain ends at — resolved through every component, not just the leaf, because
+bwrap cannot create a mount point under an unresolved symlink and aborts the
+sandbox when asked to.
+
+**The pin never costs you a sandbox.** It improves on a resolver the sandbox
+already cannot reach, so every failure gives up the pin rather than the run:
+a resolver path that cannot be followed, one the filesystem policy denies, a
+resolver file that exists but cannot be read, and a failure to write the
+replacement all leave the sandbox exactly as it would have started without
+this feature, each with a warning naming the cause. A host with no
+`/etc/resolv.conf` at all is silent — there is no loopback stub to rescue.
+
+A policy that names `/etc/resolv.conf` (or the path its symlink chain ends at)
+in `readonlyPaths` / `readwritePaths` is supplying its own resolver, and the
+sandbox keeps that one — with a warning, because a resolver naming only
+loopback nameservers is unreachable from the sandbox whoever mounted it.
+Listing an ancestor such as `/etc` is not treated as a choice about the
+resolver.
+
+Two cases are deliberately untouched:
+
+- **`runtimeConfig.networkProxy`** — a proxy-only chain opens no port 53 and
+  the proxy resolves on the workload's behalf.
+- **Ruleless `egress.default: "deny"`** — the sandbox has no connectivity at
+  all, so it has nothing to resolve with.
+
+Under `egress.default: "deny"` *with* rules, the chain's terminal verdict still
+governs: a query to `10.0.2.3` is dropped unless a rule permits it. MXC warns
+at launch when it pins the resolver and the chain admits nothing to
+`10.0.2.3:53`, naming the rule to add — allow `10.0.2.3/32` on port 53 with
+protocol `any`. Both protocols are needed: a resolver falls back to TCP for an
+answer that does not fit a datagram, and `options use-vc` makes it use TCP for
+everything. The rule is not added automatically: the chain is the caller's
+policy.
+
+> ⚠️ slirp's forwarder reaches the host's resolver by design, and the chain's
+> `-d 10.0.2.2/32 -j DROP` rule — which closes the sandbox's path to host
+> loopback services — does not cover it. Name resolution is the one host
+> loopback service an address-filtered sandbox can reach.
 
 **IPv6 rules are filtered, but IPv6 traffic has nowhere to go.** The two are
 separate concerns and only the second is missing. Filtering works: an IPv6 rule

@@ -586,15 +586,6 @@ mod platform {
     const IO_RETRY_DELAY: Duration = Duration::ZERO;
     #[cfg(not(test))]
     const IO_RETRY_DELAY: Duration = Duration::from_millis(20);
-    #[cfg(test)]
-    const STORE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(1);
-    #[cfg(not(test))]
-    const STORE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
-    #[cfg(test)]
-    const STORE_LOCK_RETRY_ATTEMPTS: u32 = 1_000;
-    #[cfg(not(test))]
-    const STORE_LOCK_RETRY_ATTEMPTS: u32 = IO_RETRY_ATTEMPTS;
-
     /// `ERROR_SHARING_VIOLATION` — another handle holds the file with a
     /// conflicting share mode (AV scanner, indexer, racing sibling process).
     const ERROR_SHARING_VIOLATION: i32 = 32;
@@ -746,6 +737,12 @@ mod platform {
         operation: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            LockFileEx, FILE_SHARE_READ, FILE_SHARE_WRITE, LOCKFILE_EXCLUSIVE_LOCK,
+        };
+        use windows::Win32::System::IO::OVERLAPPED;
 
         let path = consent_file_path().ok_or_else(|| {
             "could not resolve %LocalAppData%; cannot lock telemetry consent".to_string()
@@ -755,26 +752,35 @@ mod platform {
             .ok_or_else(|| "invalid telemetry consent path".to_string())?;
         fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
         let lock_path = dir.join(CONSENT_LOCK_FILE);
-        let mut attempts = 0;
-        let file = loop {
-            let mut options = fs::OpenOptions::new();
-            // The file persists; the exclusive open handle, not path
-            // existence or delayed delete-on-close, represents ownership.
-            options.write(true).create(true).share_mode(0);
-            match options.open(&lock_path) {
-                Ok(file) => break file,
-                Err(error)
-                    if attempts + 1 < STORE_LOCK_RETRY_ATTEMPTS
-                        && is_transient_io_error(&error) =>
-                {
-                    attempts += 1;
-                    std::thread::sleep(STORE_LOCK_RETRY_DELAY);
-                }
-                Err(error) => {
-                    return Err(format!("failed to lock telemetry consent: {error}"));
-                }
-            }
-        };
+        let mut options = fs::OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0);
+        let file = with_io_retry(|| options.open(&lock_path))
+            .map_err(|error| format!("failed to open telemetry consent lock: {error}"))?;
+
+        // The persistent file is only the rendezvous point. LockFileEx waits
+        // for the current owner instead of making correctness depend on a
+        // fixed retry budget under scheduler or filesystem contention.
+        // SAFETY: an all-zero `OVERLAPPED` selects byte offset 0 and has no
+        // pointer or resource fields that require separate initialization.
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        // SAFETY: `file` owns a valid synchronous handle and remains alive for
+        // the lock's lifetime. The call completes synchronously, so the
+        // mutable `overlapped` pointer remains valid until LockFileEx returns.
+        unsafe {
+            LockFileEx(
+                HANDLE(file.as_raw_handle()),
+                LOCKFILE_EXCLUSIVE_LOCK,
+                None,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        }
+        .map_err(|error| format!("failed to lock telemetry consent: {error}"))?;
         let _lock = file;
         operation()
     }
@@ -2092,6 +2098,40 @@ mod tests {
             });
             let status = status_rx.recv().expect("consent status after lock release");
             assert_eq!(status.effective_state, ConsentState::Granted);
+        }
+
+        #[test]
+        fn store_lock_waits_beyond_the_previous_retry_budget() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _guard = LocalAppDataGuard::set(tmp.path());
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+            std::thread::scope(|scope| {
+                platform::with_store_lock(|| {
+                    scope.spawn(move || {
+                        started_tx.send(()).expect("send writer start");
+                        result_tx
+                            .send(set_consent(true, "cli"))
+                            .expect("send writer result");
+                    });
+                    started_rx.recv().expect("writer start");
+                    assert!(
+                        result_rx
+                            .recv_timeout(std::time::Duration::from_millis(1_100))
+                            .is_err(),
+                        "the waiting writer must not exhaust a retry budget"
+                    );
+                    Ok(())
+                })
+                .expect("store lock");
+            });
+
+            result_rx
+                .recv()
+                .expect("writer result after lock release")
+                .expect("waiting writer must acquire the released lock");
+            assert_eq!(get_consent(), ConsentState::Granted);
         }
 
         #[test]

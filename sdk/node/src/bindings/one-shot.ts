@@ -22,7 +22,7 @@ import { MxcError } from '../v1/errors.js';
 import { SDK_CONTRACT_VERSION } from '../v1/contract-version.js';
 import type {
   ContainerConfig,
-  NetworkConfig,
+  DirectionalNetworkConfig,
   PortMapping,
   ProcessContainerConfig,
   WslcConfig,
@@ -114,7 +114,7 @@ function assertIntegerRange(
   }
 }
 
-function validateNetworkPorts(network: NetworkConfig | undefined): void {
+function validateNetworkPorts(network: DirectionalNetworkConfig | undefined): void {
   const egress = network?.egress;
   const rules = [...(egress?.allow ?? []), ...(egress?.deny ?? [])];
   for (const [ruleIndex, rule] of rules.entries()) {

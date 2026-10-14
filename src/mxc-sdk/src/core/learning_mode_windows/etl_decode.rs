@@ -2690,6 +2690,111 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual benchmark: run with --release --ignored --nocapture"]
+    fn benchmark_high_cardinality_network_capture() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        use crate::learning_mode_core::capture_diagnostics::{
+            parse_supported_verbose_document, write_capture_verbose_logging_document,
+            CaptureVerboseLoggingDocument,
+        };
+
+        // Exercise the production post-TDH path, not ETL I/O or OS trace teardown.
+        for event_count in [4_096usize, 100_000, MAX_PROCESSED_EVENTS] {
+            for distinct in [false, true] {
+                let mut event = network_event(
+                    777,
+                    600,
+                    &[
+                        ("SourceDomain", "2"),
+                        ("Reason", "100"),
+                        ("FieldFlags", "63"),
+                        ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
+                        ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
+                        ("ApplicationId", r"\Device\HarddiskVolume3\app.exe"),
+                        ("Protocol", "6"),
+                        ("LocalAddress", "192.0.2.1"),
+                        ("LocalPort", "49152"),
+                        ("RemoteAddress", "203.0.113.10"),
+                        ("RemotePort", "443"),
+                    ],
+                );
+                let mut accumulator = Accumulator::analyze();
+                let started = Instant::now();
+                for index in 0..event_count {
+                    if distinct {
+                        for (name, value) in &mut event.parts.props {
+                            match name.as_str() {
+                                // Descending keys also exercise front-of-vector insertion.
+                                "FilterId" => *value = (10_000_000 - index).to_string(),
+                                "LocalPort" => *value = (49_152 + index % 16_384).to_string(),
+                                _ => {}
+                            }
+                        }
+                    }
+                    handle_decoded_event(
+                        black_box(&event.parts),
+                        event.pid,
+                        event.filetime,
+                        &mut accumulator,
+                    );
+                }
+                let analysis = accumulator.into_capture_analysis().unwrap();
+                let decode_elapsed = started.elapsed();
+                assert_eq!(analysis.denials.len(), 1);
+                assert_eq!(
+                    analysis.network_verbose_logging.total_occurrences,
+                    event_count as u64
+                );
+                let expected_groups = if distinct {
+                    event_count.min(MAX_VERBOSE_LOGGING_GROUPS)
+                } else {
+                    1
+                };
+                assert_eq!(
+                    analysis.network_verbose_logging.signatures.len(),
+                    expected_groups
+                );
+                assert_eq!(
+                    analysis.network_verbose_logging.overflow_occurrences,
+                    (if distinct {
+                        event_count - expected_groups
+                    } else {
+                        0
+                    }) as u64
+                );
+
+                let started = Instant::now();
+                let document = analysis.verbose_document();
+                let mut bytes = Vec::new();
+                write_capture_verbose_logging_document(&mut bytes, &document).unwrap();
+                let write_elapsed = started.elapsed();
+
+                let started = Instant::now();
+                for _ in 0..10 {
+                    black_box(parse_supported_verbose_document(black_box(&bytes)).unwrap());
+                }
+                let validate_elapsed = started.elapsed() / 10;
+                let started = Instant::now();
+                for _ in 0..10 {
+                    black_box(
+                        serde_json::from_slice::<CaptureVerboseLoggingDocument>(black_box(&bytes))
+                            .unwrap(),
+                    );
+                }
+                let typed_decode_elapsed = started.elapsed() / 10;
+                println!(
+                    "events={event_count} distinct={distinct} groups={expected_groups} \
+                     bytes={} post_tdh={decode_elapsed:?} merge_write={write_elapsed:?} \
+                     versioned_validate={validate_elapsed:?} typed_decode={typed_decode_elapsed:?}",
+                    bytes.len(),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn managed_network_events_route_actionable_and_verbose_outcomes() {
         let common = [
             ("SchemaVersion", "1"),

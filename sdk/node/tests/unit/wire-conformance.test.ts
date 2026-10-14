@@ -1,14 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Exact v1.1 one-shot type conformance oracle.
+// Exact v1.0 one-shot type conformance oracle.
 //
-// The generated module `../../src/generated/v1_1_0_alpha/wire.ts` is emitted
-// from the exact v1.1 contract. It is the source of truth for the raw one-shot
-// shape produced by the current high-level SDK builder.
+// The generated module `../../src/generated/v1_0_0/wire.ts` is emitted
+// from the published v1.0 contract. It is the source of truth for the raw
+// one-shot shape produced by the high-level V1 SDK builder.
 //
 // This file asserts — at COMPILE TIME — that the hand-written public SDK types
-// in `../../src/types.ts` still conform to that generated shape. If the Rust
+// in `../../src/v1/types.ts` still conform to that generated shape. If the Rust
 // exact contract changes (a field renamed/removed, an enum value added/dropped,
 // a type narrowed) the regenerated oracle shifts and these assertions stop
 // compiling, so `npm run build:test-unit` fails. The runtime body is a no-op;
@@ -17,12 +17,11 @@
 // Mapping rationale:
 //  * The exact contract rejects null and requires one-shot `process`. The
 //    high-level builder supplies the exact version, process, and LXC defaults;
-//    `PublicV1OneShotConfig` models that emitted raw shape.
-//  * `NetworkConfig` intentionally spans historical public versions. Its
-//    public-only key assertion documents the legacy fields omitted from v1.1
-//    raw JSON while keeping directional field conformance exact.
+//    `PublicV1OneShotConfig` models that emitted raw shape after containment
+//    validation excludes development-only choices.
+//  * Network comparisons use the directional fields emitted by the V1 builder.
 //  * Stable WSLC is additionally checked against the published v0.9 one-shot
-//    contract because this stack exposes WSLC in both v0.9 and v1.1.
+//    contract because this stack exposes WSLC in both v0.9 and v1.0.
 //  * `OnlyInPublic` additionally catches a public field whose wire counterpart
 //    was renamed or removed (width subtyping alone would not), and is asserted
 //    to equal a documented, explicit set of SDK-only fields — so a NEW
@@ -61,6 +60,7 @@ import type {
 import type {
   Containment as InternalContainment,
 } from '../../src/v1/types.js';
+import type { SDK_CONTRACT_VERSION } from '../../src/v1/contract-version.js';
 import type {
   ContainerId as InternalContainerId,
 } from '../../src/v1/lifecycle-types.js';
@@ -85,7 +85,6 @@ import type {
   ProcessConfig,
   LifecycleConfig,
   FilesystemConfig,
-  NetworkConfig,
   DirectionalNetworkConfig,
   NetworkEgressConfig,
   NetworkIngressConfig,
@@ -103,8 +102,6 @@ import type {
   TelemetryConfig,
   ContainerConfig,
   ClipboardPolicy as PublicClipboardPolicy,
-  ContainmentType,
-  ContainmentBackend,
 } from '../../src/v1/types.js';
 
 import type {
@@ -134,7 +131,7 @@ import type {
   ProcessContainerUiIsolation as WireUiIsolation,
   TransportProtocol as WireTransportProtocol,
   Version as WireVersion,
-} from '../../src/generated/v1_1_0_alpha/wire.js';
+} from '../../src/generated/v1_0_0/wire.js';
 
 import type {
   OneShotWslc as WireV09Wslc,
@@ -151,6 +148,7 @@ import type {
 
 // --- enum / union conformance ---------------------------------------------
 
+type _SdkContractVersion = AssertTrue<Equivalent<typeof SDK_CONTRACT_VERSION, WireVersion>>;
 type _V1BackendConfigExport = AssertTrue<
   Equivalent<V1Containment, InternalContainment>
 >;
@@ -203,10 +201,9 @@ type _ExecutionResultExitCode = AssertTrue<Assignable<ExecutionResult['exitCode'
 // Clipboard policy must be value-for-value identical to the wire enum.
 type _Clipboard = AssertTrue<Equivalent<PublicClipboardPolicy, WireClipboardPolicy>>;
 
-// The SDK splits containment into abstract intents + concrete backends; their
-// union must cover exactly the wire `Containment` enum.
+// V1 creation supports exactly the containment choices in its published wire contract.
 type _Containment = AssertTrue<
-  Equivalent<ContainmentType | ContainmentBackend, WireContainment>
+  Equivalent<V1Containment['type'], WireContainment>
 >;
 
 // Enum-backed object fields are checked bidirectionally so an exact-contract
@@ -226,6 +223,9 @@ type _NetworkPortProtocol = AssertTrue<
 type _BaseProcessUiIsolation = AssertTrue<
   Equivalent<NonNullable<BaseProcessUiConfig['isolation']>, WireUiIsolation>
 >;
+type _BaseProcessUiSystemSettings = AssertTrue<
+  Equivalent<BaseProcessUiConfig['systemSettings'], NonNullable<WireBaseProcessUi['systemSettings']>>
+>;
 type _PortProtocol = AssertTrue<
   Equivalent<NonNullable<PublicPortMapping['protocol']>, WireTransportProtocol>
 >;
@@ -237,7 +237,7 @@ type _PortProtocol = AssertTrue<
 type _ProcessVals = AssertTrue<Assignable<ProcessConfig, WireProcess>>;
 type _LifecycleVals = AssertTrue<Assignable<LifecycleConfig, WireLifecycle>>;
 type _FilesystemVals = AssertTrue<Assignable<FilesystemConfig, WireFilesystem>>;
-type _NetworkVals = AssertTrue<Assignable<NetworkConfig, WireNetwork>>;
+type _NetworkVals = AssertTrue<Assignable<DirectionalNetworkConfig, WireNetwork>>;
 type _NetworkEgressVals = AssertTrue<Assignable<NetworkEgressConfig, WireNetworkEgress>>;
 type _NetworkIngressVals = AssertTrue<Assignable<NetworkIngressConfig, WireNetworkIngress>>;
 type _NetworkPeerVals = AssertTrue<Assignable<NetworkPeerConfig, WireNetworkPeer>>;
@@ -280,21 +280,7 @@ type _TelemetryKeys = AssertTrue<Equivalent<OnlyInPublic<TelemetryConfig, WireTe
 // into `lifecycle.preservePolicy`; it is not a wire `filesystem` field.
 type _FilesystemKeys = AssertTrue<Equivalent<OnlyInPublic<FilesystemConfig, WireFilesystem>, 'clearPolicyOnExit'>>;
 
-// The public network type spans historical contracts. Exact v1.1 emits only
-// directional fields; the listed legacy and SDK-only fields are deliberately
-// absent from its raw JSON mapping.
-type _NetworkKeys = AssertTrue<
-  Equivalent<
-    OnlyInPublic<NetworkConfig, WireNetwork>,
-    | 'enforcementMode'
-    | 'defaultPolicy'
-    | 'allowLocalNetwork'
-    | 'allowedHosts'
-    | 'blockedHosts'
-    | 'proxy'
-    | 'removeRulesOnExit'
-  >
->;
+type _NetworkKeys = AssertTrue<Equivalent<OnlyInPublic<DirectionalNetworkConfig, WireNetwork>, never>>;
 
 // `ProcessContainerConfig.name` is the deprecated AppContainer profile name
 // (superseded by top-level `containerId`); not a wire `processContainer` field.
@@ -307,18 +293,20 @@ type _LxcKeys = AssertTrue<Equivalent<OnlyInPublic<RawV1LxcConfig, WireLxc>, nev
 // --- ROOT conformance (review finding F1) ---------------------------------
 // Without these, a top-level wire field rename/removal regenerates wire.ts but
 // no assertion notices, so the leaf-only checks above are not enough.
-// `PublicV1OneShotConfig` models the current high-level builder output:
-//  * its value shape must be assignable to exact v1.1 `OneShotRequest`; and
+// `PublicV1OneShotConfig` models the current high-level builder output,
+// excluding the development-only Hyperlight section of the public raw config:
+//  * its value shape must be assignable to exact v1.0 `OneShotRequest`; and
 //  * it must have no public-only root keys.
 // A new root divergence fails the build.
 type PublicV1OneShotConfig = Omit<
   ContainerConfig,
-  'version' | 'process' | 'network' | 'lxc' | 'appContainer'
+  'version' | 'process' | 'network' | 'lxc' | 'appContainer' | 'containment' | 'hyperlight'
 > & {
   version: WireVersion;
   process: ProcessConfig;
   network?: DirectionalNetworkConfig;
   lxc?: RawV1LxcConfig;
+  containment?: V1Containment['type'];
 };
 type _RootVals = AssertTrue<Assignable<PublicV1OneShotConfig, WireMxcConfig>>;
 type _RootKeys = AssertTrue<
@@ -334,7 +322,7 @@ type _RootKeys = AssertTrue<
 type _ProcessWireKeys = AssertTrue<Equivalent<OnlyInWire<ProcessConfig, WireProcess>, never>>;
 type _LifecycleWireKeys = AssertTrue<Equivalent<OnlyInWire<LifecycleConfig, WireLifecycle>, never>>;
 type _FilesystemWireKeys = AssertTrue<Equivalent<OnlyInWire<FilesystemConfig, WireFilesystem>, never>>;
-type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
+type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<DirectionalNetworkConfig, WireNetwork>, never>>;
 type _NetworkEgressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkEgressConfig, WireNetworkEgress>, never>>;
 type _NetworkIngressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkIngressConfig, WireNetworkIngress>, never>>;
 type _NetworkPeerWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPeerConfig, WireNetworkPeer>, never>>;
@@ -358,26 +346,24 @@ type _SeatbeltWireKeys = AssertTrue<
 >;
 type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, WireTelemetry>, never>>;
 
-// Root: the high-level builder intentionally omits schema metadata, fallback,
-// development-only test and Windows Sandbox sections.
+// Root: the high-level builder intentionally omits schema metadata and fallback.
 type _RootWireKeys = AssertTrue<
   Equivalent<
     OnlyInWire<PublicV1OneShotConfig, WireMxcConfig>,
     | '$schema'
     | '_comment'
     | 'fallback'
-    | 'test'
-    | 'windowsSandbox'
   >
 >;
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
-  _V1BackendConfigExport, _V1IdExport,
+  _SdkContractVersion, _V1BackendConfigExport, _V1IdExport,
   _ContainerRequestFilesystem, _ContainerRequestNetwork, _ContainerRequestContainment,
   _Clipboard, _Containment,
   _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
-  _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,
+  _NetworkPortProtocol, _BaseProcessUiIsolation, _BaseProcessUiSystemSettings,
+  _PortProtocol,
   _ProcessVals, _LifecycleVals, _FilesystemVals, _NetworkVals, _UiVals,
   _NetworkEgressVals, _NetworkIngressVals, _NetworkPeerVals, _NetworkPortVals,
   _NetworkRuleVals, _RuntimeConfigVals,

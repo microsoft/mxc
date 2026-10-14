@@ -47,14 +47,20 @@ pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
 /// - We deliberately do NOT bind `/run` wholesale: `/run/user/<uid>`
 ///   holds the caller's D-Bus session socket, keyring sockets, and
 ///   ssh-agent socket. We only bind the well-known DNS stub-resolver
-///   directories so name resolution still works when `/etc/resolv.conf`
+///   directories so the resolver file is *readable* when `/etc/resolv.conf`
 ///   is a symlink (the default on systemd-resolved hosts).
-/// - To keep DNS working when `/etc/resolv.conf` points *outside* those
-///   dirs, we also synthesise a `/var/run -> /run` compat symlink (for
+/// - To keep that file readable when `/etc/resolv.conf` points *outside*
+///   those dirs, we also synthesise a `/var/run -> /run` compat symlink (for
 ///   `/var/run/...`-routed targets — older RHEL/CentOS-era and some
 ///   container images) and `--ro-bind-try` `/mnt/wsl/resolv.conf` (for
 ///   WSL). Neither exposes host `/var` or `/mnt` contents — only the
 ///   resolver path itself.
+/// - Readable is not reachable. A nameserver on the host's loopback — the
+///   systemd-resolved stub at `127.0.0.53`, a local `dnsmasq` — belongs to
+///   the sandbox's own empty loopback once it is in a private network
+///   namespace, so these binds alone leave names unresolvable. Reaching such
+///   a resolver is what `proxy_network::ResolverPin` does, by pointing the
+///   sandbox at slirp's forwarder.
 /// - `/etc` is bound whole because cherry-picking files (`passwd`,
 ///   `nsswitch.conf`, `ssl/`, `ld.so.conf*`, …) is fragile and breaks
 ///   tools that read other config files. Files with sensitive contents
@@ -95,6 +101,11 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     // because the baseline is emitted via `--ro-bind-try`.
     "/mnt/wsl/resolv.conf",
 ];
+
+/// The compatibility symlink the sandbox gets in place of a real `/var/run`,
+/// and the directory it points at.
+pub(crate) const COMPAT_RUN_LINK: &str = "/var/run";
+pub(crate) const COMPAT_RUN_TARGET: &str = "/run";
 
 /// An absolute resolver target with no overlapping known mount destination.
 /// This lexical check does not resolve host or sandbox symlinks.
@@ -446,7 +457,11 @@ pub(crate) fn build_args_classified_with_mode(
     // intermediate path would dangle inside the sandbox and DNS would
     // silently fail. The symlink rescues the whole `/var/run/...` family and
     // pulls no host `/var` contents in (bwrap synthesises an empty `/var`).
-    args.extend(["--symlink".into(), "/run".into(), "/var/run".into()]);
+    args.extend([
+        "--symlink".into(),
+        COMPAT_RUN_TARGET.into(),
+        COMPAT_RUN_LINK.into(),
+    ]);
 
     // Standard virtual filesystems (applied before policy mounts so policy
     // paths under /dev, /proc, or /tmp survive).
@@ -1584,10 +1599,10 @@ mod tests {
         }
     }
 
-    /// DNS stub-resolver dirs must be in the baseline so `/etc/resolv.conf`
-    /// symlinks resolve when the caller has network access. Emitted via
-    /// `--ro-bind-try` so hosts without systemd-resolved / NetworkManager /
-    /// resolvconf still build a valid argument vector.
+    /// DNS stub-resolver dirs must be in the baseline so an `/etc/resolv.conf`
+    /// symlink has a target to resolve to. Emitted via `--ro-bind-try` so hosts
+    /// without systemd-resolved / NetworkManager / resolvconf still build a
+    /// valid argument vector.
     #[test]
     fn baseline_includes_dns_stub_resolver_dirs() {
         let args = build_args(&base_request(), None);
@@ -1601,8 +1616,8 @@ mod tests {
                 .any(|w| w[0] == "--ro-bind-try" && w[1] == path && w[2] == path);
             assert!(
                 found,
-                "baseline must emit `--ro-bind-try {} {}` so DNS works when \
-                 /etc/resolv.conf is a symlink",
+                "baseline must emit `--ro-bind-try {} {}` so the sandbox can read \
+                 /etc/resolv.conf when it is a symlink",
                 path, path
             );
         }

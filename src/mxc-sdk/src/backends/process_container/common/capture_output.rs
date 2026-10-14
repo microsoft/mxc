@@ -22,7 +22,7 @@ use crate::learning_mode_core::{
     capture_diagnostics::{write_capture_verbose_logging_document, CaptureAnalysis},
     verbose_logging_sibling_path, write_document, write_paired_output_files,
     write_verbose_logging_document, AnalysisResult, DenialSummary, DenialsDocument,
-    DenialsOutputPointer, ExistingOutputPolicy, VerboseLoggingDocument,
+    DenialsOutputPointer, DeniedResource, ExistingOutputPolicy, VerboseLoggingDocument,
 };
 use crate::mxc_common::models::CaptureDenialsOutput;
 
@@ -62,33 +62,14 @@ pub fn write_denials_document(
     exit_code: i32,
     output_path: &Path,
 ) -> std::io::Result<CaptureDenialsOutput> {
-    let verbose_logging_path = verbose_logging_output_path(output_path)?;
-    let summary = DenialSummary::new(
-        exit_code,
-        analysis.denials.len(),
-        analysis.denied_resources_truncated,
-    );
-    let document = DenialsDocument::new(analysis.denials, summary);
     let verbose_logging_document = VerboseLoggingDocument::new(&analysis.verbose_logging);
-
-    write_paired_output_files(
-        "captureDenials",
+    write_denials_document_pair(
+        analysis.denials,
+        analysis.denied_resources_truncated,
+        exit_code,
         output_path,
-        &verbose_logging_path,
-        ExistingOutputPolicy::CreateNew,
-        |writer| write_document(writer, &document),
         |writer| write_verbose_logging_document(writer, &verbose_logging_document),
-    )?;
-
-    let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
-    Ok(CaptureDenialsOutput {
-        kind: pointer.kind,
-        output_path: pointer.output_path,
-        exit_code: pointer.exit_code,
-        total_denials: pointer.total_denials,
-        denied_resources_truncated: pointer.denied_resources_truncated,
-        etl_path: None,
-    })
+    )
 }
 
 /// Writes native capture analysis with the complete internal v5 diagnostics.
@@ -97,22 +78,33 @@ pub(crate) fn write_capture_denials_document(
     exit_code: i32,
     output_path: &Path,
 ) -> std::io::Result<CaptureDenialsOutput> {
-    let verbose_logging_path = verbose_logging_output_path(output_path)?;
     let verbose_logging_document = analysis.verbose_document();
-    let summary = DenialSummary::new(
-        exit_code,
-        analysis.denials.len(),
+    write_denials_document_pair(
+        analysis.denials,
         analysis.denied_resources_truncated,
-    );
-    let document = DenialsDocument::new(analysis.denials, summary);
+        exit_code,
+        output_path,
+        |writer| write_capture_verbose_logging_document(writer, &verbose_logging_document),
+    )
+}
 
+fn write_denials_document_pair(
+    denials: Vec<DeniedResource>,
+    denied_resources_truncated: bool,
+    exit_code: i32,
+    output_path: &Path,
+    write_verbose: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<CaptureDenialsOutput> {
+    let verbose_logging_path = verbose_logging_output_path(output_path)?;
+    let summary = DenialSummary::new(exit_code, denials.len(), denied_resources_truncated);
+    let document = DenialsDocument::new(denials, summary);
     write_paired_output_files(
         "captureDenials",
         output_path,
         &verbose_logging_path,
         ExistingOutputPolicy::CreateNew,
         |writer| write_document(writer, &document),
-        |writer| write_capture_verbose_logging_document(writer, &verbose_logging_document),
+        write_verbose,
     )?;
 
     let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
@@ -412,7 +404,13 @@ mod tests {
             network_verbose_logging,
         };
 
-        write_capture_denials_document(analysis, 0, &output_path).unwrap();
+        let metadata = write_capture_denials_document(analysis, 7, &output_path).unwrap();
+        assert_eq!(metadata.kind, CaptureDenialsOutput::KIND);
+        assert_eq!(metadata.output_path, output_path.to_string_lossy());
+        assert_eq!(metadata.exit_code, 7);
+        assert_eq!(metadata.total_denials, 1);
+        assert!(!metadata.denied_resources_truncated);
+        assert!(metadata.etl_path.is_none());
 
         let verbose: serde_json::Value = serde_json::from_slice(
             &std::fs::read(verbose_logging_output_path(&output_path).unwrap()).unwrap(),
@@ -480,6 +478,26 @@ mod tests {
         std::fs::write(&verbose_logging_path, b"existing").expect("seed verbose logging output");
 
         write_denials_document(AnalysisResult::complete(Vec::new()), 0, &output_path)
+            .expect_err("collision should fail");
+
+        assert!(!output_path.exists());
+        assert_eq!(std::fs::read(verbose_logging_path).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn native_verbose_logging_collision_leaves_actionable_output_absent() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        let verbose_logging_path = verbose_logging_output_path(&output_path).unwrap();
+        std::fs::write(&verbose_logging_path, b"existing").unwrap();
+        let analysis = CaptureAnalysis {
+            denials: Vec::new(),
+            denied_resources_truncated: false,
+            verbose_logging: Default::default(),
+            network_verbose_logging: Default::default(),
+        };
+
+        write_capture_denials_document(analysis, 0, &output_path)
             .expect_err("collision should fail");
 
         assert!(!output_path.exists());

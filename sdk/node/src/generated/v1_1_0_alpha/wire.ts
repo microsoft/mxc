@@ -631,10 +631,12 @@ export interface ProcessContainerUi {
   /**
    * Optional system-settings access level.
    */
-  systemSettings?: string;
+  systemSettings?: ProcessContainerUiSystemSettings;
 }
 
 export type ProcessContainerUiIsolation = "container" | "desktop" | "handles" | "atoms";
+
+export type ProcessContainerUiSystemSettings = "none" | "parameters" | "display" | "all";
 
 export type ProvisionPhase = "provision";
 

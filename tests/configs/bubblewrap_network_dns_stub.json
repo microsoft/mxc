@@ -1,0 +1,21 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-DNS-Stub",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "sh -c \"echo SANDBOX_RESOLV_BEGIN; cat /etc/resolv.conf; echo SANDBOX_RESOLV_END; getent hosts mxc-dns-probe.invalid || echo MXC_DNS_LOOKUP_FAILED\"",
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}
