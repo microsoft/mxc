@@ -1115,11 +1115,14 @@ fn create_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)
     #[cfg(target_os = "macos")]
     {
         // macOS has no `pipe2`, and `O_CLOEXEC` applies only to `open`, so
-        // close-on-exec has to be set in a second call. A concurrent
-        // `fork`+`exec` in the same process can inherit the descriptors in
-        // between. The platform offers no atomic alternative, and Rust's own
-        // `Stdio::piped()` has the identical window on macOS, so this matches
-        // the standard library rather than adding a new class of exposure.
+        // close-on-exec must be set in a second call. A `fork`+`exec` racing
+        // on another thread can inherit the ends in between and hold them
+        // open, delaying EOF.
+        //
+        // Accepted rather than fixed: Rust's own `Stdio::piped()` has the same
+        // window on macOS, so the descriptors carrying a workload's streams
+        // already have it, and spawns owned by the embedding application are
+        // outside this crate's control either way.
         let (read, write) = nix::unistd::pipe().map_err(std::io::Error::from)?;
         set_cloexec(read.as_raw_fd())?;
         set_cloexec(write.as_raw_fd())?;
@@ -1517,13 +1520,19 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl PtyDrain {
         const TIMEOUT: Duration = Duration::from_secs(20);
+        /// How long [`Drop`] waits for an uncancellable worker before leaving
+        /// it running. Only reached while unwinding.
+        const DROP_GRACE: Duration = Duration::from_secs(2);
 
+        /// Only for native-pipe readers, which have no canceller. Drains of a
+        /// PTY reader must use [`Self::start_cancellable`] so [`Drop`] can
+        /// unblock the worker.
         fn start(source: Box<dyn Read + Send>) -> Self {
             Self::start_inner(source, None)
         }
 
-        /// Preferred over [`Self::start`]: the canceller lets [`Drop`] unblock
-        /// the worker so a failing test cannot leave it holding the primary.
+        /// The canceller lets [`Drop`] unblock the worker, so a failing test
+        /// cannot leave it parked holding the primary.
         fn start_cancellable(source: (Box<dyn Read + Send>, PtyReadCanceller)) -> Self {
             Self::start_inner(source.0, Some(source.1))
         }
@@ -1577,6 +1586,13 @@ mod tests {
             }
         }
 
+        /// Cancels the read so a parked worker reaches end of input.
+        fn cancel(&self) {
+            if let Some(canceller) = &self.canceller {
+                canceller.close();
+            }
+        }
+
         /// Waits for end of input and returns the full output.
         fn finish(mut self) -> String {
             self.finished
@@ -1589,16 +1605,27 @@ mod tests {
         }
     }
 
-    /// Joins the worker rather than detaching it. A detached worker still owns
-    /// the reader, so dropping `LivePty` would not close the final primary and
-    /// a failing test would hang instead of failing.
+    /// Releases the worker rather than detaching it. A detached PTY worker
+    /// still owns the reader, so dropping `LivePty` would not close the final
+    /// primary and a failing test would hang instead of failing.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl Drop for PtyDrain {
         fn drop(&mut self) {
-            if let Some(worker) = self.worker.take() {
-                if let Some(canceller) = &self.canceller {
-                    canceller.close();
-                }
+            let Some(worker) = self.worker.take() else {
+                return;
+            };
+            if let Some(canceller) = &self.canceller {
+                // Cancelling unblocks the read, so the join cannot outlast it.
+                canceller.close();
+                let _ = worker.join();
+                return;
+            }
+            // A native-pipe drain has nothing to cancel: only the bridge closes
+            // the write end, and while unwinding it outlives this drop. Joining
+            // would hang, so wait briefly and otherwise leave the worker to
+            // finish on its own. It holds a pipe read end, not the primary, so
+            // dropping `LivePty` still closes the terminal.
+            if self.finished.recv_timeout(Self::DROP_GRACE).is_ok() {
                 let _ = worker.join();
             }
         }
@@ -1790,11 +1817,12 @@ mod tests {
         drop(command);
 
         terminal.close_writer();
-        let (reader, canceller) = terminal
-            .take_unclaimed_reader()
-            .expect("take unclaimed reader")
-            .expect("reader was unclaimed");
-        let drain = PtyDrain::start(reader);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .take_unclaimed_reader()
+                .expect("take unclaimed reader")
+                .expect("reader was unclaimed"),
+        );
         assert!(
             terminal
                 .take_unclaimed_reader()
@@ -1806,7 +1834,7 @@ mod tests {
         assert!(wait_for_exit(&mut child).success());
         let seen = drain.wait_for("drained-to-exit");
         assert!(seen.contains("drained-to-exit"), "got: {seen:?}");
-        canceller.close();
+        drain.cancel();
         drop(terminal);
         let _ = drain.finish();
     }
@@ -1964,20 +1992,23 @@ mod tests {
         let mut child = command.spawn().expect("spawn child");
         drop(command);
 
-        let (mut writer, output): (Box<dyn Write + Send>, Box<dyn Read + Send>) = if native {
+        let (mut writer, drain): (Box<dyn Write + Send>, PtyDrain) = if native {
             let stdio = terminal.take_native_stdio().expect("take native stdio");
             (
                 Box::new(std::fs::File::from(stdio.stdin)),
-                Box::new(std::fs::File::from(stdio.stdout)),
+                PtyDrain::start(Box::new(std::fs::File::from(stdio.stdout))),
             )
         } else {
             (
                 Box::new(terminal.take_writer().expect("take writer")),
-                terminal.try_clone_reader().expect("clone reader"),
+                PtyDrain::start_cancellable(
+                    terminal
+                        .try_clone_reader_with_canceller()
+                        .expect("clone reader"),
+                ),
             )
         };
 
-        let drain = PtyDrain::start(output);
         drain.wait_for("ready");
         writer.write_all(input).expect("write terminal input");
         drop(writer);
@@ -2053,17 +2084,23 @@ mod tests {
         let mut child = command.spawn().expect("spawn child");
         drop(command);
 
-        let (writer, output): (Option<Box<dyn Write + Send>>, Box<dyn Read + Send>) = if native {
+        let (writer, drain): (Option<Box<dyn Write + Send>>, PtyDrain) = if native {
             let stdio = terminal.take_native_stdio().expect("take native stdio");
             (
                 Some(Box::new(std::fs::File::from(stdio.stdin))),
-                Box::new(std::fs::File::from(stdio.stdout)),
+                PtyDrain::start(Box::new(std::fs::File::from(stdio.stdout))),
             )
         } else {
-            (None, terminal.try_clone_reader().expect("clone reader"))
+            (
+                None,
+                PtyDrain::start_cancellable(
+                    terminal
+                        .try_clone_reader_with_canceller()
+                        .expect("clone reader"),
+                ),
+            )
         };
 
-        let drain = PtyDrain::start(output);
         drain.wait_for("ready");
         match writer {
             Some(writer) => drop(writer),
@@ -2154,19 +2191,20 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let (reader, closer) = terminal
-            .try_clone_reader_with_canceller()
-            .expect("clone reader");
 
         // The drain must already be running: on Darwin the foreground shell
         // cannot exit while its output sits in the terminal queue.
-        let drain = PtyDrain::start(reader);
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
         assert!(wait_for_exit(&mut child).success());
         drain.wait_for("foreground-exited");
 
         // The backgrounded `sleep` still holds the secondary open, so the read
         // parks until it is cancelled.
-        closer.close();
+        drain.cancel();
         let output = drain.finish();
         assert!(output.contains("foreground-exited"), "got: {output:?}");
     }
@@ -2331,6 +2369,16 @@ mod tests {
 
         terminal.finish_native_bridge();
         drop(input);
+
+        // If cancellation injected end of input, the shell leaves its `read`,
+        // prints the marker and exits. Still being blocked is the evidence, so
+        // check it before the kill can suppress it.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            child.try_wait().expect("poll child").is_none(),
+            "cancellation ended the shell's `read`"
+        );
+
         // SAFETY: the child created its own session with its PID as the process-group ID.
         unsafe {
             libc::kill(-session, libc::SIGKILL);
