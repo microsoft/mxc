@@ -71,6 +71,26 @@ Select the current native build using `MXC_FFI_DIR` for Node and the managed
 prebuilt-native MSBuild properties for .NET. These are opt-in host tests, not
 substitutes for the PR build matrix.
 
+### Local Windows capture diagnostics benchmark
+
+From `src`, run:
+
+```text
+cargo test --release -p mxc-sdk --lib benchmark_high_cardinality_network_capture -- --ignored --nocapture
+```
+
+This opt-in benchmark exercises the production network extractor, bounded
+aggregation, denial deduplication, v5 document construction, JSON writing, and
+version-specific validation. It compares repeated signatures with changing
+filter IDs and ephemeral local ports for connections to the same destination,
+at 4,096, 100,000, and 1,000,000 events. It reports retained groups, output bytes,
+post-TDH processing time, document construction/writing time, and average
+version-dispatching validation versus direct v5 deserialization time.
+It also checks denial and overflow accounting. Timings are measurements, not
+CI pass/fail thresholds. This synthetic decoded-event workload excludes TDH
+decoding, ETL I/O, and native trace stop/close, so it is not an end-to-end OS
+capture or teardown measurement.
+
 ## Azure Pipelines (optional on PRs, required on `main`)
 
 The ADO pipeline (`MXC-PR-Build`) is the Azure version of the PR pipeline. The official

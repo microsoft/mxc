@@ -439,13 +439,40 @@ fn process_container_request_maps_expected_wire_fields() {
         Some(super::wire::UiIsolation::Container)
     ));
     assert_eq!(process_container_ui.desktop_system_control, Some(true));
-    assert_eq!(
+    assert!(matches!(
         process_container_ui.system_settings,
-        Some("none".to_string())
-    );
+        Some(super::wire::UiSystemSettings::None)
+    ));
     assert_eq!(process_container_ui.ime, Some(true));
 
     assert!(wire.lxc.is_none());
+}
+
+#[test]
+fn every_process_container_ui_system_settings_maps_to_the_expected_value() {
+    for setting in ["none", "parameters", "display", "all"] {
+        let json = format!(
+            r#"{{
+                "version": "1.1.0-alpha",
+                "containment": "processcontainer",
+                "process": {{"commandLine": "echo hello"}},
+                "processContainer": {{"ui": {{"systemSettings": "{setting}"}}}}
+            }}"#
+        );
+
+        let mapped = adapt(&json)
+            .process_container
+            .expect("processContainer")
+            .ui
+            .expect("processContainer.ui")
+            .system_settings
+            .expect("systemSettings");
+        assert_eq!(
+            serde_json::to_value(&mapped).unwrap(),
+            serde_json::json!(setting)
+        );
+        assert_eq!(mapped.as_str(), setting);
+    }
 }
 
 #[test]

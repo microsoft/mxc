@@ -167,6 +167,40 @@ fn rejects_invalid_process_container_ui_isolation_value() {
 }
 
 #[test]
+fn accepts_every_process_container_ui_system_settings_value() {
+    for process_container_ui_system_settings in ["none", "parameters", "display", "all"] {
+        let json = format!(
+            r#"{{
+                "version": "1.1.0-alpha",
+                "processContainer": {{
+                    "ui": {{
+                        "systemSettings": "{process_container_ui_system_settings}"
+                    }}
+                }},
+                "process": {{"commandLine": "echo"}}
+            }}"#
+        );
+
+        assert_valid(&json);
+    }
+}
+
+#[test]
+fn rejects_invalid_process_container_ui_system_settings_value() {
+    assert_invalid(
+        r#"{
+            "version": "1.1.0-alpha",
+            "processContainer": {
+                "ui": {
+                    "systemSettings": "invalid"
+                }
+            },
+            "process": {"commandLine": "echo"}
+        }"#,
+    );
+}
+
+#[test]
 fn accepts_every_capture_denials_mode_value() {
     for capture_denials_mode in ["allow", "block"] {
         let json = format!(

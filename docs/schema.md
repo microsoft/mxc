@@ -8,6 +8,8 @@ MXC uses a JSON configuration file. The current stable schema is at
 For development, the schema for version `1.1.0-alpha` at
 [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
+For self-contained references to what each supported version accepts, see
+[containment policy language](containment-policy/README.md).
 
 See the [consumer glossary](glossary.md) for terminology. This guide describes
 ["MXC request JSON"](#mxc-request-json); typed SDK callers use the types in the
@@ -106,6 +108,8 @@ depends on the backend; see its guide. When `network`, `network.egress`, or
 Both ingress controls also default to `deny` when omitted. `hostLoopback`
 resolves independently of `ingress.default`, so host-loopback access must
 be requested explicitly.
+A runtime proxy may omit `network.egress`: the effective egress policy is
+still `deny` with no direct allow or deny rules.
 A ProcessContainer proxy requires `ingress.default: "allow"`. Identity-scoped
 proxies set a non-blank `allowedProxyPeer` and keep `hostLoopback: "deny"`;
 identity-less host proxies omit `allowedProxyPeer` and require

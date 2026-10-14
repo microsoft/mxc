@@ -108,19 +108,21 @@ pub fn finalize(
             )
         })?;
     validate_metadata(capture, &document)?;
-    let _: mxc_sdk::learning_mode_core::VerboseLoggingDocument =
-        serde_json::from_slice(&std::fs::read(&source_verbose_logging).map_err(|error| {
-            format!(
-                "failed to read captureDenials verbose logging output {}: {error}",
-                source_verbose_logging.display()
-            )
-        })?)
-        .map_err(|error| {
-            format!(
-                "captureDenials verbose logging output {} is not valid JSON: {error}",
-                source_verbose_logging.display()
-            )
-        })?;
+    let verbose_logging_bytes = std::fs::read(&source_verbose_logging).map_err(|error| {
+        format!(
+            "failed to read captureDenials verbose logging output {}: {error}",
+            source_verbose_logging.display()
+        )
+    })?;
+    mxc_sdk::learning_mode_core::verbose_logging::validate_verbose_logging_document(
+        &verbose_logging_bytes,
+    )
+    .map_err(|error| {
+        format!(
+            "captureDenials verbose logging output {} is not valid JSON: {error}",
+            source_verbose_logging.display()
+        )
+    })?;
 
     let final_denials = context.log_dir.join("denials.json");
     let final_verbose_logging = mxc_sdk::learning_mode_core::verbose_logging_sibling_path(
@@ -370,6 +372,47 @@ mod tests {
             capture.etl_path.as_deref().map(Path::new),
             Some(log_dir.join("trace.etl").as_path())
         );
+    }
+
+    #[test]
+    fn finalize_accepts_version_five_verbose_logging() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        let source_verbose_logging =
+            mxc_sdk::learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap();
+        std::fs::write(
+            &source_verbose_logging,
+            br#"{
+                "version": 5,
+                "signatures": [],
+                "summary": {
+                    "totalOccurrences": 0,
+                    "overflowOccurrences": 0,
+                    "actionableOverflowOccurrences": 0,
+                    "aggregateGroupsTruncated": false,
+                    "processedEventsTruncated": false,
+                    "actionableLimitReached": false
+                }
+            }"#,
+        )
+        .unwrap();
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: None,
+        };
+
+        finalize(&mut response, &context, directory.path(), false).unwrap();
+
+        assert!(!source_verbose_logging.exists());
+        let published = std::fs::read_to_string(log_dir.join("denials.verbose.json")).unwrap();
+        assert!(published.contains("\"version\": 5"));
     }
 
     #[test]

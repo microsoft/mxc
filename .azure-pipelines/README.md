@@ -28,10 +28,9 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
   It verifies the .NET SDK/runtime setup and packs both NuGet variants with
   synthetic native inputs so pipeline and package-contract failures surface
   without waiting for the cross-platform Rust artifacts.
-- `OneBranch.DotNet.Release.yml` selects the payload for the requested target,
-  and publishes the signed package to the internal `Mxc-Azure-Feed` by default.
-  Queue-time selection can instead publish the fixed-version package publicly
-  to NuGet.org through the `MXC Nuget` service connection.
+- `1ES.Release.Nuget.yml` lets the runner publish the signed .NET SDK package to
+  the internal `Mxc-Azure-Feed` by default, or to NuGet.org through ESRP.
+- `1ES.Release.Npm.yml` publishes the signed npm SDK package through ESRP.
 
 ### Rust crates.io release
 

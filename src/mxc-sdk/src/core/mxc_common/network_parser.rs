@@ -66,12 +66,7 @@ fn convert_wire_proxy_at(url_str: &str, path: &str) -> Result<ProxyConfig, WxcEr
     })
 }
 
-fn convert_egress(egress: Option<wire::NetworkEgress>) -> Result<NetworkEgressPolicy, WxcError> {
-    let egress = egress.unwrap_or(wire::NetworkEgress {
-        default: None,
-        allow: None,
-        deny: None,
-    });
+fn convert_egress(egress: wire::NetworkEgress) -> Result<NetworkEgressPolicy, WxcError> {
     Ok(NetworkEgressPolicy {
         default: egress.default.map(convert_action).unwrap_or_default(),
         allow: convert_rules(egress.allow.unwrap_or_default(), "network.egress.allow")?,
@@ -119,14 +114,13 @@ pub(crate) fn parse_network_policy(
             // metadata is intentionally excluded because it may be supplied at exec.
             policy.network_mode_specified = has_directional_policy_fields(&network);
 
-            let egress = convert_egress(network.egress)?;
-            policy.network_egress = Some(egress);
+            policy.network_egress = network.egress.map(convert_egress).transpose()?;
 
             let ingress = convert_ingress(network.ingress);
             policy.network_ingress = Some(ingress);
         }
         None => {
-            policy.network_egress = Some(NetworkEgressPolicy::default());
+            policy.network_egress = None;
             policy.network_ingress = Some(NetworkIngressPolicy::default());
         }
     }
@@ -171,9 +165,8 @@ fn convert_allowed_proxy_peer(
 
 fn validate_directional_proxy_policy(policy: &ContainerPolicy) -> Result<(), WxcError> {
     let Some(egress) = policy.network_egress.as_ref() else {
-        return Err(WxcError::ConfigParse(
-            "runtimeConfig.networkProxy requires an egress policy".to_string(),
-        ));
+        // Omitted egress is effective ruleless deny; preserve its authored absence.
+        return Ok(());
     };
     if egress.default != NetworkAction::Deny || !egress.allow.is_empty() || !egress.deny.is_empty()
     {
@@ -469,6 +462,29 @@ mod proxy_policy_tests {
             error.to_string().contains("egress.default='deny'"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn ingress_only_runtime_proxy_preserves_implicit_deny_egress() {
+        for containment in [
+            ContainmentBackend::ProcessContainer,
+            ContainmentBackend::Lxc,
+            ContainmentBackend::Seatbelt,
+        ] {
+            let mut sections = directional_sections("http://127.0.0.1:8080");
+            sections.network.as_mut().unwrap().egress = None;
+            let mut policy = ContainerPolicy::default();
+
+            parse_network_policy(&mut policy, sections, &containment).unwrap();
+
+            assert!(policy.network_egress.is_none());
+            assert!(policy.network_mode_specified);
+            assert!(policy.runtime_network_proxy_specified);
+            assert!(policy.network_proxy.is_enabled());
+            let ingress = policy.network_ingress.unwrap();
+            assert_eq!(ingress.default, NetworkAction::Allow);
+            assert_eq!(ingress.host_loopback, NetworkAction::Allow);
+        }
     }
 
     #[test]

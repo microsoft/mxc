@@ -135,8 +135,8 @@ contract-valid, and no relaxed schema twin is generated.
   history and published registry identities.
 - `validate-configs.js` validates the repository config corpus against exact
   registered schemas discovered from the same registry command.
-- `wire-conformance.test.ts` checks the Node one-shot public-to-raw v1.1
-  mapping against the exact generated v1.1 oracle.
+- `wire-conformance.test.ts` checks the Node one-shot public-to-raw v1.0
+  mapping against the exact generated published v1.0 oracle.
 - `wire-conformance-state-aware.test.ts` checks backend-specific state-aware
   public types against the exact v0.9 and v1.1 oracles.
 - `check-schema-versions.js` and `check-version-sync.js` enforce schema and

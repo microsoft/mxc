@@ -11,24 +11,11 @@ resources:
     ref: refs/tags/release
   pipelines:
   # Reference pipeline that created the signed npm artifacts so we can consume them later
-  - pipeline: MXC 
+  - pipeline: MXC
     source: 'MXC-Official-Build'
     trigger: none
-
-
-# Parameters for ESRP release info will be passed from the ADO UI.
-parameters:
-  - name: ESRPInfo
-    type: object
-    default:
-      serviceName: ''
-      tenantId: ''
-      azureKeyVaultName: ''
-      authCertName: ''
-      signCertName: ''
-      clientId: ''
-      ApproversEmail: ''
-      OwnersEmail: ''
+variables:
+  - group: MXC-ESRP-Signing
 
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
@@ -68,21 +55,19 @@ extends:
         - task: EsrpRelease@10
           displayName: 'Publish to NPM'
           inputs:
-            connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+            connectedservicename: $(serviceName)
             usemanagedidentity: false
-            keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-            authcertname: ${{ parameters.ESRPInfo.authCertName }}
-            signcertname: ${{ parameters.ESRPInfo.signCertName }}
-            clientid: ${{ parameters.ESRPInfo.clientId }}
+            keyvaultname: $(azureKeyVaultName)
+            authcertname: $(authCertName)
+            signcertname: $(signCertName)
+            clientid: $(clientId)
             intent: 'PackageDistribution'
             contenttype: npm
             contentsource: 'Folder'
             folderlocation: '$(Pipeline.Workspace)/packages'
-            owners: ${{ parameters.ESRPInfo.OwnersEmail }}
-            approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+            owners: $(ownersEmail)
+            approvers: $(approversEmail)
             waitforreleasecompletion: true
             serviceendpointurl: 'https://api.esrp.microsoft.com'
             mainpublisher: ESRPRELPACMAN
-            domaintenantid: ${{ parameters.ESRPInfo.tenantId }} 
-
-  
+            domaintenantid: $(tenantId)

@@ -221,7 +221,7 @@ pub struct BaseProcessUi {
     /// Whether desktop system control is allowed.
     pub desktop_system_control: Option<bool>,
     /// System settings access level.
-    pub system_settings: Option<String>,
+    pub system_settings: Option<UiSystemSettings>,
     /// Whether the IME (Input Method Editor) is allowed.
     pub ime: Option<bool>,
 }
@@ -244,6 +244,28 @@ impl UiIsolation {
             UiIsolation::Handles => "handles",
             UiIsolation::Atoms => "atoms",
             UiIsolation::Container => "container",
+        }
+    }
+}
+
+/// Desktop UI system settings access level.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UiSystemSettings {
+    None,
+    Parameters,
+    Display,
+    All,
+}
+
+impl UiSystemSettings {
+    /// Lowercase wire-format string matching the schema enum values.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UiSystemSettings::None => "none",
+            UiSystemSettings::Parameters => "parameters",
+            UiSystemSettings::Display => "display",
+            UiSystemSettings::All => "all",
         }
     }
 }

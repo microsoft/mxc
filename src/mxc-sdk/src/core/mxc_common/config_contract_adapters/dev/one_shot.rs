@@ -142,6 +142,19 @@ fn convert_process_container_ui_isolation(
     }
 }
 
+fn convert_process_container_ui_system_settings(
+    value: contract::ProcessContainerUiSystemSettings,
+) -> wire::UiSystemSettings {
+    match value {
+        contract::ProcessContainerUiSystemSettings::None => wire::UiSystemSettings::None,
+        contract::ProcessContainerUiSystemSettings::Parameters => {
+            wire::UiSystemSettings::Parameters
+        }
+        contract::ProcessContainerUiSystemSettings::Display => wire::UiSystemSettings::Display,
+        contract::ProcessContainerUiSystemSettings::All => wire::UiSystemSettings::All,
+    }
+}
+
 fn convert_process_container_ui(value: contract::ProcessContainerUi) -> wire::BaseProcessUi {
     let contract::ProcessContainerUi {
         isolation,
@@ -154,7 +167,9 @@ fn convert_process_container_ui(value: contract::ProcessContainerUi) -> wire::Ba
             .into_option()
             .map(convert_process_container_ui_isolation),
         desktop_system_control: desktop_system_control.into_option(),
-        system_settings: system_settings.into_option(),
+        system_settings: system_settings
+            .into_option()
+            .map(convert_process_container_ui_system_settings),
         ime: ime.into_option(),
     }
 }
