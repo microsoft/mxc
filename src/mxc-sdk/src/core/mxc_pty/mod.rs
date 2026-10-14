@@ -377,12 +377,6 @@ impl LivePty {
         unsafe {
             use std::os::unix::process::CommandExt;
             command.pre_exec(move || {
-                // Drop anything captured through the macOS close-on-exec
-                // window before handing the process to the workload.
-                #[cfg(target_os = "macos")]
-                crate::core_modules::mxc_common::inherited_descriptors::
-                    close_unmarked_inherited_descriptors();
-
                 nix::unistd::setsid().map_err(std::io::Error::from)?;
                 let _ = libc::ioctl(0, libc::TIOCSCTTY as _, 0);
 
@@ -1120,8 +1114,12 @@ fn create_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)
     }
     #[cfg(target_os = "macos")]
     {
-        // Darwin has no `pipe2`, so close-on-exec is set immediately after
-        // creation. This matches what `std::process` does for its own stdio.
+        // macOS has no `pipe2`, and `O_CLOEXEC` applies only to `open`, so
+        // close-on-exec has to be set in a second call. A concurrent
+        // `fork`+`exec` in the same process can inherit the descriptors in
+        // between. The platform offers no atomic alternative, and Rust's own
+        // `Stdio::piped()` has the identical window on macOS, so this matches
+        // the standard library rather than adding a new class of exposure.
         let (read, write) = nix::unistd::pipe().map_err(std::io::Error::from)?;
         set_cloexec(read.as_raw_fd())?;
         set_cloexec(write.as_raw_fd())?;
@@ -1513,13 +1511,27 @@ mod tests {
         collected: Arc<Mutex<Vec<u8>>>,
         worker: Option<std::thread::JoinHandle<()>>,
         finished: std::sync::mpsc::Receiver<()>,
+        canceller: Option<PtyReadCanceller>,
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl PtyDrain {
         const TIMEOUT: Duration = Duration::from_secs(20);
 
-        fn start(mut source: Box<dyn Read + Send>) -> Self {
+        fn start(source: Box<dyn Read + Send>) -> Self {
+            Self::start_inner(source, None)
+        }
+
+        /// Preferred over [`Self::start`]: the canceller lets [`Drop`] unblock
+        /// the worker so a failing test cannot leave it holding the primary.
+        fn start_cancellable(source: (Box<dyn Read + Send>, PtyReadCanceller)) -> Self {
+            Self::start_inner(source.0, Some(source.1))
+        }
+
+        fn start_inner(
+            mut source: Box<dyn Read + Send>,
+            canceller: Option<PtyReadCanceller>,
+        ) -> Self {
             let collected = Arc::new(Mutex::new(Vec::new()));
             let sink = Arc::clone(&collected);
             let (done, finished) = std::sync::mpsc::sync_channel(1);
@@ -1539,6 +1551,7 @@ mod tests {
                 collected,
                 worker: Some(worker),
                 finished,
+                canceller,
             }
         }
 
@@ -1573,6 +1586,21 @@ mod tests {
                 worker.join().expect("terminal drain thread");
             }
             self.snapshot()
+        }
+    }
+
+    /// Joins the worker rather than detaching it. A detached worker still owns
+    /// the reader, so dropping `LivePty` would not close the final primary and
+    /// a failing test would hang instead of failing.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Drop for PtyDrain {
+        fn drop(&mut self) {
+            if let Some(worker) = self.worker.take() {
+                if let Some(canceller) = &self.canceller {
+                    canceller.close();
+                }
+                let _ = worker.join();
+            }
         }
     }
 
@@ -1639,7 +1667,11 @@ mod tests {
 
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
         let mut writer = terminal.take_writer().expect("take writer");
         writer.write_all(b"hello\r").expect("write input");
         drop(writer);
@@ -1662,7 +1694,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         let mut writer = terminal.take_writer().expect("take writer");
         writer
@@ -1687,7 +1723,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         terminal.close_writer();
         // Closing again is a no-op, and the writer can no longer be taken.
@@ -1718,7 +1758,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         let mut writer = terminal.take_writer().expect("take writer");
         terminal.close_writer();
@@ -1776,7 +1820,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         assert!(
             terminal
@@ -1825,7 +1873,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         let started = std::time::Instant::now();
         drop(terminal.take_writer().expect("take writer"));
@@ -1849,7 +1901,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         let mut fill = terminal
             .access
@@ -2071,7 +2127,11 @@ mod tests {
         let mut child = command.spawn().expect("spawn child");
         drop(command);
 
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
         let mut writer = terminal.take_writer().expect("take writer");
         let mut input = b"x\n".repeat(128 * 1024);
         input.extend_from_slice(b"partial-line");
@@ -2523,7 +2583,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
         let mut writer = terminal.take_writer().expect("take writer");
 
         drain.wait_for("ready");
@@ -2564,7 +2628,11 @@ mod tests {
         .expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         drain.wait_for("ready");
         terminal
@@ -2599,7 +2667,11 @@ mod tests {
             .expect("attach forwarded PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         drain.wait_for("ready");
         drop(terminal.take_writer().expect("take writer"));
@@ -2623,7 +2695,11 @@ mod tests {
         let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
         let mut child = command.spawn().expect("spawn child");
         drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
+        let drain = PtyDrain::start_cancellable(
+            terminal
+                .try_clone_reader_with_canceller()
+                .expect("clone reader"),
+        );
 
         drain.wait_for("ready");
         drop(terminal.take_writer().expect("take writer"));
@@ -2673,44 +2749,9 @@ mod tests {
         drop((read, write));
     }
 
-    /// A descriptor caught in the macOS close-on-exec window must not reach
-    /// the workload.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn attach_closes_descriptors_captured_through_the_cloexec_window() {
-        use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-
-        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        // A pipe left unmarked, exactly as the window leaves one.
-        let mut fds = [0 as RawFd; 2];
-        // SAFETY: `fds` is a valid 2-element array for `pipe` to fill.
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-        // SAFETY: `pipe` succeeded, so both fds are freshly owned here.
-        let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        // SAFETY: as above, for the write end.
-        let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-        let target = write.as_raw_fd();
-
-        let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg(format!(
-            "if echo leaked >&{target} 2>/dev/null; then echo LEAKED; else echo CLOSED; fi"
-        ));
-        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
-        let mut child = command.spawn().expect("spawn child");
-        drop(command);
-        let drain = PtyDrain::start(terminal.try_clone_reader().expect("clone reader"));
-
-        assert!(wait_for_exit(&mut child).success());
-        drop(terminal);
-        let output = drain.finish();
-        assert!(output.contains("CLOSED"), "fd {target} leaked: {output:?}");
-        drop((read, write));
-    }
-
-    /// The scrub must spare the pipe the Rust runtime uses to report a failed
-    /// `exec`; closing it would make every failure look like a success.
-    #[cfg(target_os = "macos")]
+    /// A failed `exec` must still surface as a spawn error after `attach`
+    /// has rewired stdio onto the terminal.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn attach_still_reports_a_failed_exec() {
         let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());

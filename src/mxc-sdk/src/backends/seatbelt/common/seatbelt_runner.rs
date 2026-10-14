@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::mxc_common::inherited_descriptors::close_unmarked_inherited_descriptors;
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
@@ -965,8 +964,7 @@ impl Drop for SeatbeltSandboxProcess {
 /// `pre_exec` runs between `fork()` and `exec()`. Session/PTY setup uses
 /// async-signal-safe syscalls before the pre-allocated `sandbox_init` call.
 /// `sandbox_init` is not formally async-signal-safe but is used in this
-/// pattern by Chromium and other production macOS sandboxes. A final hook
-/// then drops descriptors that are not marked close-on-exec.
+/// pattern by Chromium and other production macOS sandboxes.
 fn build_sandbox_command(
     profile: &str,
     script_code: &str,
@@ -1053,19 +1051,6 @@ fn build_sandbox_command(
                 }
                 return Err(std::io::Error::from_raw_os_error(libc::EPERM));
             }
-            Ok(())
-        });
-    }
-
-    // Registered last so it runs immediately before `exec`: `sandbox_init`
-    // keeps whatever descriptors it needs, and nothing can expose a new one
-    // afterwards. Also covers runs without a PTY, which `LivePty` never sees.
-    //
-    // SAFETY: the closure runs after fork(), before exec(), and the scrub uses
-    // only async-signal-safe calls.
-    unsafe {
-        command.pre_exec(|| {
-            close_unmarked_inherited_descriptors();
             Ok(())
         });
     }

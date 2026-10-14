@@ -220,8 +220,9 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 ///
 /// Linux gets this atomically from `pipe2`. macOS has no such variant, so the
 /// ends are inheritable between creation and the `fcntl` that marks them; a
-/// spawn racing on another thread can capture them. `LivePty` closes anything
-/// that slips through from its `pre_exec` hook.
+/// spawn racing on another thread can capture them. The platform offers no
+/// atomic alternative, and Rust's own `Stdio::piped()` has the same window on
+/// macOS.
 fn new_wake_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     #[cfg(target_os = "linux")]
     {

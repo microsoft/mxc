@@ -72,11 +72,6 @@ pub mod system_dir;
 #[cfg(unix)]
 pub mod interruptible_reader;
 
-// macOS-only: no atomic close-on-exec pipe exists, so inherited descriptors
-// are scrubbed between `fork` and `exec` instead.
-#[cfg(target_os = "macos")]
-pub mod inherited_descriptors;
-
 // Linux-only: used by the backends that realise filesystem policy as bind
 // mounts, which must resolve a destination before mounting over it.
 #[cfg(target_os = "linux")]
