@@ -400,7 +400,13 @@ MXC's native product capture path retains the complete groups in version 5.
 Every successful decode also writes a deterministic sibling file:
 `denials.<run-id>.json` produces `denials.<run-id>.verbose.json`. This verbose
 logging artifact is a bounded, sensitive-value-redacted superset containing
-policy denial occurrences plus diagnostic outcomes omitted from the policy file:
+policy denial occurrences plus diagnostic outcomes omitted from the policy file.
+
+The following is an **abridged, non-literal example**, not a complete producer
+output or an expected-output fixture. Only two `properties` entries are shown
+for readability. Accepted `NetworkDecisionV1` events contain all 24 schema
+properties; the emitted signature retains their sanitized properties subject
+to the redaction, timestamp omission, and bounds described below.
 
 ```json
 {
