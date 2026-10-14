@@ -15,7 +15,9 @@ use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
 use crate::mxc_common::state_aware_input::StateAwareInput;
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
-use crate::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use crate::mxc_common::state_aware_request::{
+    MxcRequest, ParsedStateAwareRequest, Phase, TargetIdKind,
+};
 use crate::mxc_common::wire;
 use crate::mxc_contract::dev::{probe_phase, Phase as ContractPhase};
 use crate::mxc_contract::{probe_version, supported_versions, ContractVersion, VersionProbeError};
@@ -662,7 +664,7 @@ pub fn load_mxc_request_from_json_with_options(
     result
 }
 
-/// Parses a state-aware request whose operation and sandbox identity were
+/// Parses a state-aware request whose operation and target identity were
 /// supplied by the executor command line.
 ///
 /// Raw exact JSON entry points continue to accept the registered phase-bearing
@@ -687,24 +689,32 @@ pub fn load_state_aware_request_from_json_with_options(
             )));
         }
 
-        match (phase, sandbox_id) {
-            (Phase::Provision, Some(_)) => {
+        // The CLI collapses whichever identity flag it was given into one
+        // argument, so the rejection below can name a flag the caller did not
+        // pass once more than one exists.
+        let required_flag = match phase.target_id_kind() {
+            TargetIdKind::None => None,
+            TargetIdKind::SandboxId => Some("--container-id"),
+            TargetIdKind::SessionId => Some("--session-id"),
+        };
+        match (required_flag, sandbox_id) {
+            (None, Some(_)) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    "the provision operation does not accept --container-id",
+                    format!("the {phase} operation does not accept --container-id"),
                 )));
             }
-            (Phase::Provision, None) => {}
-            (_, None) => {
+            (None, None) => {}
+            (Some(flag), None) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    format!("the {phase} operation requires --container-id"),
+                    format!("the {phase} operation requires {flag}"),
                 )));
             }
-            (_, Some("")) => {
+            (Some(flag), Some("")) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    "--container-id must not be empty",
+                    format!("{flag} must not be empty"),
                 )));
             }
-            (_, Some(_)) => {}
+            (Some(_), Some(_)) => {}
         }
 
         let source =
@@ -714,7 +724,10 @@ pub fn load_state_aware_request_from_json_with_options(
                 ))
             })?;
         let routed_json = source
-            .splice_lifecycle_routing(phase.as_str(), sandbox_id)
+            .splice_lifecycle_routing(
+                phase.as_str(),
+                phase.target_id_kind().wire_member().zip(sandbox_id),
+            )
             .ok_or_else(|| {
                 ParseError::StateAware(MxcError::malformed_request(
                     "failed to apply lifecycle routing arguments",
@@ -1635,6 +1648,8 @@ fn normalize_state_aware(
         NormalizationContext {
             phase: operation.phase(),
             containment: match &operation {
+                StateAwareOperation::ProvisionSession(_)
+                | StateAwareOperation::DeprovisionSession { .. } => Some(wire::Containment::Wslc),
                 StateAwareOperation::Provision(provision) => Some(match provision {
                     StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
                     StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
@@ -1678,7 +1693,7 @@ fn normalize_state_aware_common(
     logger: &mut Logger,
 ) -> Result<ExecutionRequest, WxcError> {
     let network_supplied = common.network.is_some();
-    common.containment = if context.phase == Phase::Provision {
+    common.containment = if context.phase.routes_by_containment() {
         context.containment
     } else {
         context.sandbox_id.and_then(state_aware_containment_from_id)
@@ -4576,6 +4591,67 @@ mod tests {
         )
         .unwrap_err();
         assert!(start_error.message().contains("requires --container-id"));
+    }
+
+    #[test]
+    fn operation_cli_transport_gives_session_phases_their_own_identity_category() {
+        let provision_session_error = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::ProvisionSession,
+            Some("wslcsess:abc"),
+            &[],
+        )
+        .unwrap_err();
+        assert!(provision_session_error
+            .message()
+            .contains("the provision-session operation does not accept --container-id"));
+
+        let missing = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::DeprovisionSession,
+            None,
+            &[],
+        )
+        .unwrap_err();
+        assert!(missing
+            .message()
+            .contains("the deprovision-session operation requires --session-id"));
+
+        let empty = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::DeprovisionSession,
+            Some(""),
+            &[],
+        )
+        .unwrap_err();
+        assert!(empty.message().contains("--session-id must not be empty"));
+    }
+
+    #[test]
+    fn session_phases_pass_cli_routing_and_are_then_refused_by_every_registered_contract() {
+        for (phase, session_id) in [
+            (Phase::ProvisionSession, None),
+            (Phase::DeprovisionSession, Some("wslcsess:abcd")),
+        ] {
+            let error = load_state_aware_request_from_json_with_options(
+                r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+                &mut test_logger(),
+                phase,
+                session_id,
+                &[],
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.message(),
+                "malformed_request: Unsupported phase",
+                "{phase} must reach the contract's phase probe, so the refusal comes from the \
+                 registered contracts rather than from the routing category"
+            );
+        }
     }
 
     #[test]

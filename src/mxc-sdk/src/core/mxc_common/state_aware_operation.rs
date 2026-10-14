@@ -4,11 +4,13 @@
 //! Backend-neutral lifecycle operations produced by exact contract adaptation.
 //!
 //! The operation determines its phase and routing data. Provision retains its
-//! backend even when no configuration was supplied. Later phases always carry
-//! an ID, whose contents are validated at the existing dispatch boundary.
+//! backend even when no configuration was supplied. Sandbox-addressed phases
+//! always carry an ID, whose contents are validated at the existing dispatch
+//! boundary.
 
 use crate::mxc_common::models::{
     ContainmentBackend, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_request::Phase;
 
@@ -39,30 +41,41 @@ impl StateAwareProvision {
 /// Execution process settings, policy, and telemetry belong to the common
 /// `ExecutionRequest`, not this payload. Empty backend phase sections do not
 /// manufacture backend configurations for non-provision operations.
+///
+/// The two session operations are WSLc-only: no other backend owns a session
+/// a sandbox can be placed into, so no other backend is expressible here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateAwareOperation {
+    ProvisionSession(Option<WslcProvisionSessionConfig>),
     Provision(StateAwareProvision),
     Start { sandbox_id: String },
     Exec { sandbox_id: String },
     Stop { sandbox_id: String },
     Deprovision { sandbox_id: String },
+    DeprovisionSession { session_id: String },
 }
 
 impl StateAwareOperation {
     /// Phase derived from the operation, never an independent discriminator.
     pub fn phase(&self) -> Phase {
         match self {
+            Self::ProvisionSession(_) => Phase::ProvisionSession,
             Self::Provision(_) => Phase::Provision,
             Self::Start { .. } => Phase::Start,
             Self::Exec { .. } => Phase::Exec,
             Self::Stop { .. } => Phase::Stop,
             Self::Deprovision { .. } => Phase::Deprovision,
+            Self::DeprovisionSession { .. } => Phase::DeprovisionSession,
         }
     }
 
-    /// Declared containment for provision; later phases route by sandbox ID.
+    /// Declared containment for the phases that route by containment; the rest
+    /// route by sandbox ID.
     pub fn containment(&self) -> Option<ContainmentBackend> {
         match self {
+            Self::ProvisionSession(_) | Self::DeprovisionSession { .. } => {
+                Some(ContainmentBackend::Wslc)
+            }
             Self::Provision(provision) => Some(provision.containment()),
             Self::Start { .. }
             | Self::Exec { .. }
@@ -71,14 +84,30 @@ impl StateAwareOperation {
         }
     }
 
-    /// Required ID for later phases; provision has not created an ID yet.
+    /// Required ID for sandbox-addressed phases; the rest create their own
+    /// identity or address a session.
     pub fn sandbox_id(&self) -> Option<&str> {
         match self {
-            Self::Provision(_) => None,
+            Self::ProvisionSession(_) | Self::Provision(_) | Self::DeprovisionSession { .. } => {
+                None
+            }
             Self::Start { sandbox_id }
             | Self::Exec { sandbox_id }
             | Self::Stop { sandbox_id }
             | Self::Deprovision { sandbox_id } => Some(sandbox_id),
+        }
+    }
+
+    /// Required ID for session-addressed phases.
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::DeprovisionSession { session_id } => Some(session_id),
+            Self::ProvisionSession(_)
+            | Self::Provision(_)
+            | Self::Start { .. }
+            | Self::Exec { .. }
+            | Self::Stop { .. }
+            | Self::Deprovision { .. } => None,
         }
     }
 
@@ -97,11 +126,16 @@ impl StateAwareOperation {
                     None => Ok(()),
                 }
             }
-            Self::Provision(_)
+
+            // Session sizing carries no cross-backend constraint; the WSLc
+            // backend decides what it can honor.
+            Self::ProvisionSession(_)
+            | Self::Provision(_)
             | Self::Start { .. }
             | Self::Exec { .. }
             | Self::Stop { .. }
-            | Self::Deprovision { .. } => Ok(()),
+            | Self::Deprovision { .. }
+            | Self::DeprovisionSession { .. } => Ok(()),
         }
     }
 }
@@ -162,7 +196,44 @@ mod tests {
             assert_eq!(operation.phase(), phase);
             assert_eq!(operation.containment(), None);
             assert_eq!(operation.sandbox_id(), Some(id));
+            assert_eq!(operation.session_id(), None);
         }
+    }
+
+    #[test]
+    fn session_operations_are_wslc_and_keep_their_id_off_the_sandbox_accessor() {
+        let provision = StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
+            cpu_count: Some(4),
+            memory_mb: Some(8192),
+            gpu: Some(true),
+        }));
+        assert_eq!(provision.phase(), Phase::ProvisionSession);
+        assert_eq!(provision.containment(), Some(ContainmentBackend::Wslc));
+        assert_eq!(provision.sandbox_id(), None);
+        assert_eq!(provision.session_id(), None);
+
+        let deprovision = StateAwareOperation::DeprovisionSession {
+            session_id: "wslcsess:abcd".into(),
+        };
+        assert_eq!(deprovision.phase(), Phase::DeprovisionSession);
+        assert_eq!(deprovision.containment(), Some(ContainmentBackend::Wslc));
+        assert_eq!(deprovision.sandbox_id(), None);
+        assert_eq!(deprovision.session_id(), Some("wslcsess:abcd"));
+    }
+
+    #[test]
+    fn session_sizing_presence_and_empty_values_are_distinct() {
+        assert_ne!(
+            StateAwareOperation::ProvisionSession(None),
+            StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig::default()))
+        );
+        assert_ne!(
+            StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig::default())),
+            StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
+                gpu: Some(false),
+                ..WslcProvisionSessionConfig::default()
+            }))
+        );
     }
 
     #[test]

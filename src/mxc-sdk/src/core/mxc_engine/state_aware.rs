@@ -52,9 +52,10 @@ fn isolation_session_unavailable() -> MxcError {
 
 /// This phase's telemetry correlation vector, purely internal to MXC: no
 /// caller ever supplies or relays one. `provision` (whose `sandboxId` doesn't
-/// exist yet) mints a fresh vector; every later phase recalls the same
+/// exist yet) mints a fresh vector; every later sandbox phase recalls the same
 /// lifecycle root persisted by `provision` and spins a distinct child off it —
-/// see [`telemetry::correlation_state`].
+/// see [`telemetry::correlation_state`]. Session phases carry no `sandboxId`,
+/// so each seeds its own vector.
 fn phase_correlation(active: bool, phase: Phase, sandbox_id: Option<&str>) -> String {
     telemetry::correlation_state::pre_dispatch_vector(active, phase == Phase::Provision, sandbox_id)
 }
@@ -169,6 +170,7 @@ pub enum EngineProvisionMetadata {
 #[non_exhaustive]
 pub struct EngineStateAwareResult {
     pub sandbox_id: Option<String>,
+    pub session_id: Option<String>,
     pub metadata: Option<EngineProvisionMetadata>,
     pub warnings: Vec<String>,
 }
@@ -178,6 +180,7 @@ impl EngineStateAwareResult {
     fn empty() -> Self {
         Self {
             sandbox_id: None,
+            session_id: None,
             metadata: None,
             warnings: Vec::new(),
         }
@@ -187,7 +190,18 @@ impl EngineStateAwareResult {
     fn provision(sandbox_id: String, metadata: Option<EngineProvisionMetadata>) -> Self {
         Self {
             sandbox_id: Some(sandbox_id),
+            session_id: None,
             metadata,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn provision_session(session_id: String) -> Self {
+        Self {
+            sandbox_id: None,
+            session_id: Some(session_id),
+            metadata: None,
             warnings: Vec::new(),
         }
     }
@@ -212,6 +226,9 @@ fn typed_dispatch_result<
 ) -> Result<EngineStateAwareResult, MxcError> {
     match outcome {
         TypedDispatchOutcome::DryRun => Ok(EngineStateAwareResult::empty()),
+        TypedDispatchOutcome::ProvisionSession(result) => {
+            Ok(EngineStateAwareResult::provision_session(result.session_id))
+        }
         TypedDispatchOutcome::Provision(result) => Ok(EngineStateAwareResult::provision(
             result.sandbox_id,
             result
@@ -243,6 +260,7 @@ fn typed_dispatch_result<
             }
             Ok(EngineStateAwareResult::empty())
         }
+        TypedDispatchOutcome::DeprovisionSession => Ok(EngineStateAwareResult::empty()),
         TypedDispatchOutcome::ExecCompleted { .. } => Err(MxcError::backend_error(
             "typed envelope dispatch returned an exec completion",
         )),
@@ -682,7 +700,14 @@ fn run_state_aware_envelope(
                 );
             }
         }
-        _ => {}
+
+        // Lifecycle records are keyed by sandbox ID, so a session phase has
+        // nothing to persist against and nothing to recall.
+        Phase::ProvisionSession
+        | Phase::DeprovisionSession
+        | Phase::Start
+        | Phase::Exec
+        | Phase::Stop => {}
     }
     telemetry::emit_sdk_state_aware_with_kind(
         telemetry_active,
@@ -839,7 +864,14 @@ pub fn run_typed_state_aware_request(
                 );
             }
         }
-        _ => {}
+
+        // Lifecycle records are keyed by sandbox ID, so a session phase has
+        // nothing to persist against and nothing to recall.
+        Phase::ProvisionSession
+        | Phase::DeprovisionSession
+        | Phase::Start
+        | Phase::Exec
+        | Phase::Stop => {}
     }
     telemetry::emit_sdk_state_aware_typed(
         telemetry_active,
@@ -1591,6 +1623,98 @@ mod tests {
         assert!(error
             .message
             .contains("compiled without the `wslc` feature"));
+    }
+
+    fn session_operations() -> [StateAwareOperation; 2] {
+        [
+            StateAwareOperation::ProvisionSession(None),
+            StateAwareOperation::DeprovisionSession {
+                session_id: "wslcsess:00000000000000000000000000000000".to_string(),
+            },
+        ]
+    }
+
+    fn parsed_session(operation: StateAwareOperation) -> ParsedStateAwareRequest {
+        let input = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation).unwrap();
+        normalize_sdk_state_aware(input, false, &mut Logger::new(Mode::Buffer)).unwrap()
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "wslc")))]
+    #[test]
+    fn a_session_phase_without_wslc_reports_the_backend_not_the_request() {
+        for operation in session_operations() {
+            for dry_run in [false, true] {
+                let error =
+                    run_state_aware(parsed_session(operation.clone()), dry_run).unwrap_err();
+                assert_eq!(error.code, MxcErrorCode::BackendUnavailable, "{dry_run}");
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn a_session_phase_reaches_wslc_and_is_refused_as_unsupported_until_it_is_implemented() {
+        for operation in session_operations() {
+            for dry_run in [false, true] {
+                let error =
+                    run_state_aware(parsed_session(operation.clone()), dry_run).unwrap_err();
+                assert_eq!(error.code, MxcErrorCode::UnsupportedPhase, "{dry_run}");
+                assert!(error.message.contains("wslc"), "{error:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn session_operations_require_the_development_contract() {
+        for operation in session_operations() {
+            let error = SdkStateAwareInput::new(ContractVersion::V1_0_0, operation).unwrap_err();
+            assert!(error.to_string().contains("1.1.0-alpha"), "{error}",);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_minted_session_id_reaches_the_typed_result_without_being_mistaken_for_a_sandbox() {
+        let minted = typed_dispatch_result(
+            TypedDispatchOutcome::<(), (), (), ()>::ProvisionSession(
+                crate::mxc_common::state_aware_backend::ProvisionSessionResult {
+                    session_id: "wslcsess:abcd".to_string(),
+                },
+            ),
+            no_provision_metadata,
+        )
+        .unwrap();
+        assert_eq!(minted.session_id.as_deref(), Some("wslcsess:abcd"));
+        assert_eq!(minted.sandbox_id, None);
+        assert_eq!(minted.metadata, None);
+
+        let released = typed_dispatch_result(
+            TypedDispatchOutcome::<(), (), (), ()>::DeprovisionSession,
+            no_provision_metadata,
+        )
+        .unwrap();
+        assert_eq!(released.session_id, None);
+        assert_eq!(released.sandbox_id, None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_sdk_facade_cannot_silently_discard_a_minted_session_id() {
+        let result = crate::state_aware_sdk::StateAwareResult::from_engine(
+            EngineStateAwareResult::provision_session("wslcsess:abcd".to_string()),
+        );
+        assert_eq!(result.session_id.as_deref(), Some("wslcsess:abcd"));
+
+        assert!(
+            result.clone().into_lifecycle().is_err(),
+            "a minted session id must not pass as an empty lifecycle result, leaving the \
+             caller no way to release the session"
+        );
+        assert!(
+            result.into_validation().is_err(),
+            "a minted session id must not pass as a dry-run result, leaving the caller no \
+             way to release the session"
+        );
     }
 
     #[cfg(target_os = "windows")]

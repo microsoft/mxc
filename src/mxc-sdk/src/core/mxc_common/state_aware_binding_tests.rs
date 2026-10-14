@@ -24,6 +24,7 @@ enum Config {
     Unit,
     Isolation(Option<String>),
     Wslc(Option<String>, Option<String>, Option<Vec<PortMapping>>),
+    WslcSession(Option<u32>, Option<u64>, Option<bool>),
 }
 
 trait Case: Sized {
@@ -181,6 +182,34 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
             None,
         )
     }
+    fn validate_provision_session(
+        &self,
+        request: &ExecutionRequest,
+        config: Option<&WslcProvisionSessionConfig>,
+    ) -> Result<(), MxcError> {
+        self.observe(
+            true,
+            Phase::ProvisionSession,
+            None,
+            request,
+            observe_session(config),
+            None,
+        )
+    }
+    fn validate_deprovision_session(
+        &self,
+        session_id: &str,
+        request: &ExecutionRequest,
+    ) -> Result<(), MxcError> {
+        self.observe(
+            true,
+            Phase::DeprovisionSession,
+            Some(session_id),
+            request,
+            Config::Absent,
+            None,
+        )
+    }
     fn validate_start(
         &self,
         id: &str,
@@ -237,6 +266,39 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
             sandbox_id: format!("{}:created", C::PREFIX),
             metadata: None,
         })
+    }
+    fn provision_session(
+        &mut self,
+        request: &ExecutionRequest,
+        config: Option<WslcProvisionSessionConfig>,
+    ) -> Result<crate::mxc_common::state_aware_backend::ProvisionSessionResult, MxcError> {
+        self.observe(
+            false,
+            Phase::ProvisionSession,
+            None,
+            request,
+            observe_session(config.as_ref()),
+            None,
+        )?;
+        Ok(
+            crate::mxc_common::state_aware_backend::ProvisionSessionResult {
+                session_id: "wslcsess:created".to_string(),
+            },
+        )
+    }
+    fn deprovision_session(
+        &mut self,
+        session_id: &str,
+        request: &ExecutionRequest,
+    ) -> Result<(), MxcError> {
+        self.observe(
+            false,
+            Phase::DeprovisionSession,
+            Some(session_id),
+            request,
+            Config::Absent,
+            None,
+        )
     }
     fn start(
         &mut self,
@@ -316,6 +378,12 @@ fn unit(config: Option<&()>) -> Config {
     config.map_or(Config::Absent, |_| Config::Unit)
 }
 
+fn observe_session(config: Option<&WslcProvisionSessionConfig>) -> Config {
+    config.map_or(Config::Absent, |config| {
+        Config::WslcSession(config.cpu_count, config.memory_mb, config.gpu)
+    })
+}
+
 fn input<C: Case>(phase: Phase) -> Value {
     let mut value = json!({
         "version": if C::BACKEND == "isolation_session" {
@@ -357,14 +425,31 @@ fn parse(input: &Value) -> ParsedStateAwareRequest {
 }
 
 fn assert_dispatch<C: Case>(input: &Value, expected_config: Config) {
+    assert_dispatch_parsed::<C>(|| parse(input), expected_config);
+}
+
+/// Drive one request through the validation / execution / dry-run matrix.
+///
+/// Takes a builder rather than a JSON value because session phases have no
+/// JSON form to parse.
+fn assert_dispatch_parsed<C: Case>(
+    build: impl Fn() -> ParsedStateAwareRequest,
+    expected_config: Config,
+) {
     for (dry_run, reject_validation) in [(false, false), (true, false), (false, true)] {
-        let parsed = parse(input);
+        let parsed = build();
         let phase = parsed.phase();
-        let id = parsed.sandbox_id().map(str::to_owned);
+        let id = parsed
+            .sandbox_id()
+            .or_else(|| parsed.session_id())
+            .map(str::to_owned);
         let common = common_snapshot(parsed.request());
         let bound = C::bind(parsed).unwrap();
         assert_eq!(bound.phase(), phase);
-        assert_eq!(bound.sandbox_id(), id.as_deref());
+        assert_eq!(
+            bound.sandbox_id().or_else(|| bound.session_id()),
+            id.as_deref()
+        );
         assert_eq!(common_snapshot(bound.request()), common);
         let mut backend = Recording::<C>::new(reject_validation);
         let outcome = dispatch_state_aware(&mut backend, bound, dry_run);
@@ -580,4 +665,86 @@ fn incompatible_backend_operations_never_bind_as_absent_configuration() {
     mismatch::<WindowsSandbox, Wslc>();
     mismatch::<Wslc, Isolation>();
     mismatch::<Wslc, WindowsSandbox>();
+}
+
+fn session_parsed(operation: StateAwareOperation) -> ParsedStateAwareRequest {
+    ParsedStateAwareRequest::new(ExecutionRequest::default(), operation)
+}
+
+#[test]
+fn wslc_binding_carries_session_sizing_and_the_session_id_through() {
+    let sizing = WslcProvisionSessionConfig {
+        cpu_count: Some(4),
+        memory_mb: Some(8192),
+        gpu: Some(true),
+    };
+    let bound = bind_wslc::<Recording<Wslc>>(session_parsed(
+        StateAwareOperation::ProvisionSession(Some(sizing)),
+    ))
+    .unwrap();
+    assert_eq!(bound.phase(), Phase::ProvisionSession);
+    assert_eq!(bound.sandbox_id(), None);
+    let (_, operation) = bound.into_parts();
+    let BoundStateAwareOperation::ProvisionSession(config) = operation else {
+        panic!("expected a bound session provision");
+    };
+    assert_eq!(config, Some(sizing));
+
+    let bound =
+        bind_wslc::<Recording<Wslc>>(session_parsed(StateAwareOperation::DeprovisionSession {
+            session_id: "wslcsess:abcd".into(),
+        }))
+        .unwrap();
+    assert_eq!(bound.phase(), Phase::DeprovisionSession);
+    assert_eq!(bound.sandbox_id(), None);
+    let (_, operation) = bound.into_parts();
+    let BoundStateAwareOperation::DeprovisionSession { session_id } = operation else {
+        panic!("expected a bound session deprovision");
+    };
+    assert_eq!(session_id, "wslcsess:abcd");
+}
+
+#[test]
+fn session_operations_never_bind_to_a_backend_without_sessions() {
+    for operation in [
+        StateAwareOperation::ProvisionSession(None),
+        StateAwareOperation::DeprovisionSession {
+            session_id: "wslcsess:abcd".into(),
+        },
+    ] {
+        let error =
+            bind_isolation_session::<Recording<Isolation>>(session_parsed(operation.clone()))
+                .unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        let error = bind_windows_sandbox::<Recording<WindowsSandbox>>(session_parsed(operation))
+            .unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+    }
+}
+
+#[test]
+fn session_phases_keep_the_same_validation_execution_and_dry_run_order_as_every_other_phase() {
+    assert_dispatch_parsed::<Wslc>(
+        || session_parsed(StateAwareOperation::ProvisionSession(None)),
+        Config::Absent,
+    );
+
+    let sizing = WslcProvisionSessionConfig {
+        cpu_count: Some(4),
+        memory_mb: Some(8192),
+        gpu: Some(true),
+    };
+    assert_dispatch_parsed::<Wslc>(
+        || session_parsed(StateAwareOperation::ProvisionSession(Some(sizing))),
+        Config::WslcSession(Some(4), Some(8192), Some(true)),
+    );
+
+    assert_dispatch_parsed::<Wslc>(
+        || {
+            session_parsed(StateAwareOperation::DeprovisionSession {
+                session_id: "wslcsess:abcd".into(),
+            })
+        },
+        Config::Absent,
+    );
 }

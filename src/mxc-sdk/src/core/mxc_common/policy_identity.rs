@@ -79,6 +79,7 @@ use serde_json::{Map, Value};
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{
     ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 
@@ -104,6 +105,11 @@ pub fn policy_hash(request: &ExecutionRequest) -> String {
 /// Only allow-listed provision fields enter the hash. An absent config remains
 /// JSON `null`, a present config with no fields remains `{}`, and explicit empty
 /// strings remain distinct, preserving identities for exact accepted requests.
+///
+/// A session's identity covers the sizing it declares. A sandbox placed into an
+/// existing session declares none, and this hash is computed from the request
+/// before dispatch, so a sandbox's identity does not cover the sizing of the
+/// session it joins.
 pub fn state_aware_policy_hash(
     request: &ExecutionRequest,
     backend: &str,
@@ -171,7 +177,28 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             | StateAwareProvision::WindowsSandbox
             | StateAwareProvision::Wslc(None),
         ) => Value::Null,
-        // Sandbox IDs are not policy and can contain account identities.
+
+        StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
+            cpu_count,
+            memory_mb,
+            gpu,
+        })) => {
+            let mut config = Map::new();
+            if let Some(cpu_count) = cpu_count {
+                config.insert("cpuCount".into(), Value::from(*cpu_count));
+            }
+            if let Some(memory_mb) = memory_mb {
+                config.insert("memoryMb".into(), Value::from(*memory_mb));
+            }
+            if let Some(gpu) = gpu {
+                config.insert("gpu".into(), Value::Bool(*gpu));
+            }
+            Value::Object(config)
+        }
+        StateAwareOperation::ProvisionSession(None) => Value::Null,
+
+        // Sandbox and session IDs are not policy and can contain account
+        // identities.
         StateAwareOperation::Start {
             sandbox_id: _excluded_sandbox_id,
         }
@@ -183,6 +210,9 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         }
         | StateAwareOperation::Deprovision {
             sandbox_id: _excluded_sandbox_id,
+        } => Value::Null,
+        StateAwareOperation::DeprovisionSession {
+            session_id: _excluded_session_id,
         } => Value::Null,
     }
 }
@@ -877,6 +907,70 @@ mod tests {
             cfg.memory_mb = Some(4096);
         }
         assert_ne!(policy_hash(&changed), policy_hash(&more));
+    }
+
+    #[test]
+    fn session_sizing_changes_the_hash_and_the_session_id_does_not() {
+        let base = request();
+        let sized = |config: Option<WslcProvisionSessionConfig>| {
+            state_aware_policy_hash(
+                &base,
+                "wslc",
+                &StateAwareOperation::ProvisionSession(config),
+            )
+        };
+
+        let absent = sized(None);
+        let empty = sized(Some(WslcProvisionSessionConfig::default()));
+        assert_ne!(absent, empty);
+
+        let four_cpus = sized(Some(WslcProvisionSessionConfig {
+            cpu_count: Some(4),
+            ..Default::default()
+        }));
+        let eight_cpus = sized(Some(WslcProvisionSessionConfig {
+            cpu_count: Some(8),
+            ..Default::default()
+        }));
+        assert_ne!(four_cpus, eight_cpus);
+        assert_ne!(empty, four_cpus);
+
+        let small = sized(Some(WslcProvisionSessionConfig {
+            memory_mb: Some(4096),
+            ..Default::default()
+        }));
+        let large = sized(Some(WslcProvisionSessionConfig {
+            memory_mb: Some(8192),
+            ..Default::default()
+        }));
+        assert_ne!(small, large);
+        assert_ne!(empty, small);
+
+        assert_ne!(
+            four_cpus, small,
+            "cpuCount and memoryMb must project to distinct keys"
+        );
+        let gpu_off = sized(Some(WslcProvisionSessionConfig {
+            gpu: Some(false),
+            ..Default::default()
+        }));
+        let gpu_on = sized(Some(WslcProvisionSessionConfig {
+            gpu: Some(true),
+            ..Default::default()
+        }));
+        assert_ne!(gpu_off, gpu_on);
+        assert_ne!(empty, gpu_off);
+
+        let release = |session_id: &str| {
+            state_aware_policy_hash(
+                &base,
+                "wslc",
+                &StateAwareOperation::DeprovisionSession {
+                    session_id: session_id.to_string(),
+                },
+            )
+        };
+        assert_eq!(release("wslcsess:aaaa"), release("wslcsess:bbbb"));
     }
 
     fn parse_state_aware(

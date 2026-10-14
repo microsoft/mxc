@@ -5,24 +5,28 @@
 //!
 //! Backends opt into state-aware dispatch by implementing
 //! `StatefulSandboxBackend` alongside (or instead of) `ScriptRunner`. The trait
-//! exposes the five lifecycle phases — provision, start, exec, stop,
-//! deprovision — plus per-phase validation hooks.
+//! exposes the five sandbox lifecycle phases — provision, start, exec, stop,
+//! deprovision — plus the two session phases that bracket them, plus per-phase
+//! validation hooks.
 //!
 //! Methods take `&ExecutionRequest` (the same one-shot domain model used by every
-//! existing backend) plus the typed `sandbox_id` for non-provision phases and
-//! an optional backend-specific config object. Cross-cutting policy fields
+//! existing backend) plus the typed `sandbox_id` for sandbox-addressed phases,
+//! the `session_id` for `deprovision_session`, and an optional
+//! backend-specific config object where the phase defines one. Cross-cutting
+//! policy fields
 //! flow through `request.policy`; per-exec process info flows through
 //! `request.script_code` / `working_directory` / `script_timeout` / `env`.
 //!
 //! Most phase methods have default no-op bodies — only `exec` is strictly
 //! required. The default `provision` body mints `<ID_PREFIX>:<token>` for
 //! stateless-underneath backends; backends with native session work override
-//! it.
+//! it. The two session phases are the exception: their defaults refuse, so a
+//! backend that owns no session needs no code to say so.
 
 use serde::Serialize;
 
 use crate::mxc_common::id::mint_random_token;
-use crate::mxc_common::models::ExecutionRequest;
+use crate::mxc_common::models::{ExecutionRequest, WslcProvisionSessionConfig};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
 
@@ -53,6 +57,13 @@ pub fn null_pipe_handle() -> PipeHandle {
 pub struct ProvisionResult<M> {
     pub sandbox_id: String,
     pub metadata: Option<M>,
+}
+
+/// Session-provision-phase result. Carries the freshly-minted `session_id`
+/// that later provisions name to place their sandboxes in this session.
+#[derive(Debug)]
+pub struct ProvisionSessionResult {
+    pub session_id: String,
 }
 
 /// Start-phase result. Backends with no useful metadata return `None`.
@@ -215,13 +226,27 @@ impl std::fmt::Debug for ExecHandle {
     }
 }
 
+/// The error a backend returns when it is asked for a session operation it
+/// does not implement.
+///
+/// Shared so the refusal reads identically whichever backend raises it, and so
+/// a caller can tell "this backend has no sessions" apart from "your request
+/// was malformed".
+fn unsupported_session_operation(backend: &str, operation: &str) -> MxcError {
+    MxcError::unsupported_phase(format!(
+        "the {backend} backend does not support {operation}: it owns no session that sandboxes \
+         are placed into"
+    ))
+}
+
 /// State-aware backend trait. Backends declare their `ID_PREFIX` and the
 /// per-phase typed config / metadata associated types, then override only
 /// the phase methods where they have substantive work.
 pub trait StatefulSandboxBackend {
     /// Backend identifier prefix. Forms the leading `<tag>:` segment of every
     /// `sandbox_id` minted by the default `provision` body, and is the routing
-    /// key the dispatcher uses to resolve non-provision calls to this backend.
+    /// key the dispatcher uses to resolve sandbox-addressed calls to this
+    /// backend.
     const ID_PREFIX: &'static str;
 
     /// Wire-format `containment` value for this backend, matching the SDK's
@@ -239,6 +264,19 @@ pub trait StatefulSandboxBackend {
     type StartMetadata: Serialize;
     type StopMetadata: Serialize;
     type DeprovisionMetadata: Serialize;
+
+    /// Optional. Default refuses: a backend that owns no session cannot mint
+    /// one. Override when the backend hosts sandboxes inside a session.
+    fn provision_session(
+        &mut self,
+        _request: &ExecutionRequest,
+        _config: Option<WslcProvisionSessionConfig>,
+    ) -> Result<ProvisionSessionResult, MxcError> {
+        Err(unsupported_session_operation(
+            Self::BACKEND_KEY,
+            "provisioning a session",
+        ))
+    }
 
     /// Optional. Default mints `<ID_PREFIX>:<random-token>` and returns no
     /// metadata. Override when the backend has native provision work.
@@ -338,16 +376,44 @@ pub trait StatefulSandboxBackend {
         Ok(DeprovisionResult { metadata: None })
     }
 
+    /// Optional. Default refuses, for the same reason as `provision_session`.
+    fn deprovision_session(
+        &mut self,
+        _session_id: &str,
+        _request: &ExecutionRequest,
+    ) -> Result<(), MxcError> {
+        Err(unsupported_session_operation(
+            Self::BACKEND_KEY,
+            "deprovisioning a session",
+        ))
+    }
+
     /// Per-phase validation hooks. The dispatcher calls these before the
-    /// corresponding phase method. Default: accept all requests. Override to
-    /// add backend-specific checks (config field semantics, policy honor
-    /// enforcement, id format checks beyond the prefix).
+    /// corresponding phase method. Default: accept all requests, except for the
+    /// session phases, which refuse exactly as their phase method does.
+    ///
+    /// A permissive default here would let a dry run of an unsupported session
+    /// operation report success on a backend that cannot perform it.
+    ///
+    /// Override to add backend-specific checks (config field semantics, policy
+    /// honor enforcement, id format checks beyond the prefix).
     fn validate_provision(
         &self,
         _request: &ExecutionRequest,
         _config: Option<&Self::ProvisionConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
+    }
+
+    fn validate_provision_session(
+        &self,
+        _request: &ExecutionRequest,
+        _config: Option<&WslcProvisionSessionConfig>,
+    ) -> Result<(), MxcError> {
+        Err(unsupported_session_operation(
+            Self::BACKEND_KEY,
+            "provisioning a session",
+        ))
     }
 
     fn validate_start(
@@ -385,6 +451,17 @@ pub trait StatefulSandboxBackend {
     ) -> Result<(), MxcError> {
         Ok(())
     }
+
+    fn validate_deprovision_session(
+        &self,
+        _session_id: &str,
+        _request: &ExecutionRequest,
+    ) -> Result<(), MxcError> {
+        Err(unsupported_session_operation(
+            Self::BACKEND_KEY,
+            "deprovisioning a session",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +479,7 @@ mod tests {
         const ID_PREFIX: &'static str = "stub";
         const BACKEND_KEY: &'static str = "stub_backend";
         type ProvisionConfig = ();
+
         type StartConfig = ();
         type ExecConfig = ();
         type StopConfig = ();
@@ -489,6 +567,32 @@ mod tests {
         b.validate_exec("stub:abcd1234", &req, None).unwrap();
         b.validate_stop("stub:abcd1234", &req, None).unwrap();
         b.validate_deprovision("stub:abcd1234", &req, None).unwrap();
+    }
+
+    #[test]
+    fn default_session_phases_refuse_as_unsupported() {
+        let mut b = StubBackend;
+        let req = ExecutionRequest::default();
+        for error in [
+            b.provision_session(&req, None).unwrap_err(),
+            b.deprovision_session("wslcsess:abcd", &req).unwrap_err(),
+        ] {
+            assert_eq!(error.code, MxcErrorCode::UnsupportedPhase);
+            assert!(error.message.contains("stub_backend"), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn default_session_validation_refuses_so_a_dry_run_cannot_report_success() {
+        let b = StubBackend;
+        let req = ExecutionRequest::default();
+        for error in [
+            b.validate_provision_session(&req, None).unwrap_err(),
+            b.validate_deprovision_session("wslcsess:abcd", &req)
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code, MxcErrorCode::UnsupportedPhase);
+        }
     }
 
     #[test]
