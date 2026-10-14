@@ -98,9 +98,11 @@ ones.
 | Backend | How presence is detected today | Where | Risk with this method |
 | --- | --- | --- | --- |
 | `base-container` | `BaseContainerRunner::is_base_container_api_present()` calls `IsApiSetImplemented` for the process-security-environment API set. It does not load `processmodel.dll`, create a security environment, or start a process. | Rust | This proves that Windows implements the API-set contract; request-specific support bits are queried separately when the policy requires them. |
-| `windows_sandbox` | `isWindowsSandboxAvailable()` runs `dism /online /get-featureinfo `<br>`/featurename:Containers-DisposableClientVM ` and looks for `State : Enabled`<br>if DISM throws (usually non-elevated) it falls back to<br>`fs.existsSync(%SystemRoot%\\System32\\WindowsSandbox.exe)`; result cached. | TypeScript SDK | `dism /online` needs elevation, so a non-elevated caller can't tell *disabled* from<br>*no permission* and drops to the exe-existence checkwhich proves the feature is installed,<br>not that a sandbox VM can boot. (Also in Rust: `windows_sandbox_lifecycle::availability`; the TypeScript copy is removed by §4.2 step 2.) |
-| `lxc` | `isLxcAvailable()` runs `lxc-ls --version`; a clean exit means available. | TypeScript SDK | Only proves the `lxc-ls` CLI is on `PATH`, not that liblxc is loadable or that the caller has<br>the privileges to actually start a container, so it can report available on a host where a real run fails.<br>(Also in Rust: `lxc_common::availability`; the TypeScript copy is removed by §4.2 step 2.) |
+| `windows_sandbox` | `isWindowsSandboxAvailable()` runs `dism /online /get-featureinfo `<br>`/featurename:Containers-DisposableClientVM ` and looks for `State : Enabled`<br>if DISM throws (usually non-elevated) it falls back to<br>`fs.existsSync(%SystemRoot%\\System32\\WindowsSandbox.exe)`; result cached. | TypeScript SDK | `dism /online` needs elevation, so a non-elevated caller can't tell *disabled* from<br>*no permission* and drops to the exe-existence checkwhich proves the feature is installed,<br>not that a sandbox VM can boot. (Dupe'd in Rust: `windows_sandbox_lifecycle::availability`) |
+| `lxc` | `isLxcAvailable()` runs `lxc-ls --version`; a clean exit means available. | TypeScript SDK | Only proves the `lxc-ls` CLI is on `PATH`, not that liblxc is loadable or that the caller has<br>the privileges to actually start a container, so it can report available on a host where a real run fails.<br>(Dupe'd in Rust: `lxc_common::availability`) |
 | `wslc` | `wslc_common::is_available()` confirms WSL2 and the WSLC runtime are present. | Rust | Resolving `wslcsdk.dll` alone is not sufficient and is not what this checks;<br>`WslcSdk::load()` still runs on the *execute* path. Feature-gated. |
+| `isolation_session` | `IsoSessionOps` activates and reports a `LocalAgentUser` feature level above zero. Queries API-class registration rather than a build number (#761); a `CLASS_E_CLASSNOTAVAILABLE` / `REGDB_E_CLASSNOTREG` activation failure means unavailable. | Rust | |
+| `hyperlight` | Has a hypervisor check on each supported host — `is_whp_available()` on Windows, `is_kvm_available()` on Linux — neither of which boots a VM. | Rust | |
 
 ### 3.2 Isolation tiers (process-container only)
 
@@ -115,30 +117,12 @@ reachable, already exist in `process_container_common`:
 | `appcontainer-dacl` | always (universal Windows floor) | — |
 
 
-
 ## 4. The probe gap today
 
-### 4.1 Backends still missing a Rust detector
-
-Only `microvm` lacks a *probe-suitable* (cheap, no persistent host mutation, no
-process/VM launch) host detector in Rust, so a truthful availability signal for
-it **cannot be built just yet**. `vm` is an abstract intent that resolves to a
-concrete backend per host and is never probed in its own right.
-
-| Backend | What a real probe needs | What exists today | Risk if faked |
-| --- | --- | --- | --- |
-| `microvm` | feature compiled, NanVix runtime files staged, and WHP usable on Windows or `/dev/kvm` readable/writable on Linux | nothing | checking only a hypervisor can report availability when required runtime files are missing |
-
-The detectors for the other previously-missing backends:
-
-| Backend | Detector | Note |
-| --- | --- | --- |
-| `windows_sandbox` | `WindowsSandbox.exe` present in the system directory | Windows installs it only with *Containers-DisposableClientVM* enabled. The DISM query needs elevation and this probe runs unelevated, so the `.exe` check is the probe, not a fallback. |
-| `isolation_session` | `IsoSessionOps` activates and reports a `LocalAgentUser` feature level above zero | Queries API-class registration rather than a build number (#761); a `CLASS_E_CLASSNOTAVAILABLE` / `REGDB_E_CLASSNOTREG` activation failure means unavailable. |
-| `lxc` | `lxc-ls --version` exits cleanly within a 3s bound | §4.2, step 1. |
-
-`hyperlight` has a hypervisor check on each supported host — `is_whp_available()`
-on Windows, `is_kvm_available()` on Linux — neither of which boots a VM.
+### 4.1. Backends with no probe
+- `microvm` needs a probe that checks for: (1) feature compiled, (2) NanVix runtime files staged, and (3) WHP usable on Windows or `/dev/kvm` readable/writable on Linux
+- `vm` is an abstract intent that resolves to a 
+  concrete backend per host and is never probed in its own right.
 
 ### 4.2 The parity rule: detect once, project into TS
 
@@ -154,9 +138,6 @@ result rather than compute its own.
 | 3. Names flow from serde | Backend names (`Containment`) and tier strings (`IsolationTier::as_str()`) are already Rust-serialized;<br>TypeScript consumes them as-is instead of hand-re-encoding. | Removes the wire-name drift class structurally. |
 
 See §7.9 for why the canonical probe stays in Rust rather than moving into the TypeScript layer.
-
-
-
 
 ## 5. Testing
 - Every returned `backend` is a valid

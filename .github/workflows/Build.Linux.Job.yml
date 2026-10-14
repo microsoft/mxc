@@ -160,6 +160,17 @@ jobs:
           run_pinned "LXC dispatch arm" -p mxc-sdk --lib streaming_lxc_reaches_the_backend_on_linux
           run_pinned "LXC FFI routing" -p mxc_ffi --test ffi extern_spawn_json_reaches_the_lxc_backend
           run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
+          run_pinned "Probe coverage" -p mxc-sdk --lib mxc_engine::probe
+          run_pinned "Backend registry" -p mxc-sdk --lib mxc_engine::backend_registry
+
+          # Hyperlight is a Linux backend only on x64, and the probe reports it
+          # from a feature-gated branch the default build never compiles.
+          if [ -n "${{ matrix.features }}" ]; then
+            run_pinned "Probe coverage (${{ matrix.features }})" \
+              --features "${{ matrix.features }}" -p mxc-sdk --lib mxc_engine::probe
+            run_pinned "Backend registry (${{ matrix.features }})" \
+              --features "${{ matrix.features }}" -p mxc-sdk --lib mxc_engine::backend_registry
+          fi
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.

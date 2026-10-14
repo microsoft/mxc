@@ -163,11 +163,24 @@ fn macos_backends_with(sandbox_exec_present: bool) -> Vec<AvailableBackend> {
 #[cfg(target_os = "linux")]
 fn linux_backends() -> Vec<AvailableBackend> {
     linux_backends_with(
-        crate::bwrap_common::bwrap_version::probe_bwrap().is_ok(),
+        LinuxHostAvailability {
+            bubblewrap: crate::bwrap_common::bwrap_version::probe_bwrap().is_ok(),
+            lxc: crate::lxc_common::availability::is_lxc_available(),
+            hyperlight: hyperlight_host_available(),
+        },
         crate::bwrap_common::proxy_network::probe_proxy_enforcement,
-        crate::lxc_common::availability::is_lxc_available(),
-        hyperlight_host_available(),
     )
+}
+
+/// Host checks for the Linux backends, resolved by [`available_backends`] and
+/// injected so the reporting is testable without a host that has (or lacks)
+/// them. Named fields so a detector cannot be wired to the wrong backend.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, Default)]
+struct LinuxHostAvailability {
+    bubblewrap: bool,
+    lxc: bool,
+    hyperlight: bool,
 }
 
 /// Split from [`linux_backends`] so the reporting is testable without a host
@@ -176,21 +189,19 @@ fn linux_backends() -> Vec<AvailableBackend> {
 /// meaningful once `bwrap` itself is usable.
 #[cfg(target_os = "linux")]
 fn linux_backends_with(
-    bwrap_available: bool,
+    hosts: LinuxHostAvailability,
     proxy_enforcement: impl FnOnce() -> Result<(), String>,
-    lxc_available: bool,
-    hyperlight_available: bool,
 ) -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
-    if bwrap_available {
+    if hosts.bubblewrap {
         backends.push(bubblewrap_backend(proxy_enforcement()));
     }
-    if lxc_available {
+    if hosts.lxc {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::Lxc.wire_name(),
         ));
     }
-    if hyperlight_available {
+    if hosts.hyperlight {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::Hyperlight.wire_name(),
         ));
@@ -407,12 +418,123 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn backends_with_host_checks_passing() -> Vec<AvailableBackend> {
-        linux_backends_with(true, || Ok(()), true, true)
+        linux_backends_with(
+            LinuxHostAvailability {
+                bubblewrap: true,
+                lxc: true,
+                hyperlight: true,
+            },
+            || Ok(()),
+        )
     }
 
     #[cfg(target_os = "macos")]
     fn backends_with_host_checks_passing() -> Vec<AvailableBackend> {
         macos_backends_with(true)
+    }
+
+    fn reported_names(backends: &[AvailableBackend]) -> Vec<&str> {
+        backends
+            .iter()
+            .map(|entry| entry.backend.as_str())
+            .collect()
+    }
+
+    /// Enabling all host checks at once cannot tell one detector's wiring from
+    /// another's, so each is enabled alone and must produce exactly its own
+    /// backend. A detector wired to the wrong branch fails here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn each_linux_host_check_reports_only_its_own_backend() {
+        let cases = [
+            (
+                "bubblewrap",
+                LinuxHostAvailability {
+                    bubblewrap: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "lxc",
+                LinuxHostAvailability {
+                    lxc: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "hyperlight",
+                LinuxHostAvailability {
+                    hyperlight: true,
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (expected, hosts) in cases {
+            let reported = linux_backends_with(hosts, || Ok(()));
+            assert_eq!(reported_names(&reported), vec![expected]);
+        }
+        assert!(linux_backends_with(LinuxHostAvailability::default(), || Ok(())).is_empty());
+    }
+
+    /// `processcontainer` has no host check and is always reported, so each
+    /// optional backend's check must add exactly itself.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn each_windows_host_check_reports_only_its_own_backend() {
+        let cases = [
+            (
+                "windows_sandbox",
+                WindowsHostAvailability {
+                    windows_sandbox: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "wslc",
+                WindowsHostAvailability {
+                    wslc: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "isolation_session",
+                WindowsHostAvailability {
+                    isolation_session: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "hyperlight",
+                WindowsHostAvailability {
+                    hyperlight: true,
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (expected, hosts) in cases {
+            let reported = windows_backends(
+                select_tier(true, false),
+                ProcessContainerCapabilities::default(),
+                hosts,
+            );
+            assert_eq!(
+                reported_names(&reported),
+                vec!["processcontainer", expected]
+            );
+        }
+        let reported = windows_backends(
+            select_tier(true, false),
+            ProcessContainerCapabilities::default(),
+            WindowsHostAvailability::default(),
+        );
+        assert_eq!(reported_names(&reported), vec!["processcontainer"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_host_check_reports_only_seatbelt() {
+        assert_eq!(reported_names(&macos_backends_with(true)), vec!["seatbelt"]);
+        assert!(macos_backends_with(false).is_empty());
     }
 
     /// The forward half of the probe-coverage gate: every backend the registry
@@ -536,7 +658,12 @@ mod tests {
     #[test]
     fn every_reported_backend_uses_a_canonical_name() {
         let known = backend_registry::all_containment_names();
-        for entry in available_backends() {
+        let reported = backends_with_host_checks_passing();
+        assert!(
+            !reported.is_empty(),
+            "every target reports at least one backend once its host checks pass"
+        );
+        for entry in reported {
             assert!(
                 known.contains(&entry.backend),
                 "reported backend {:?} is not a canonical backend name",
@@ -567,7 +694,12 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn no_backend_reports_a_tier_off_windows() {
-        for entry in available_backends() {
+        let reported = backends_with_host_checks_passing();
+        assert!(
+            !reported.is_empty(),
+            "every target reports at least one backend once its host checks pass"
+        );
+        for entry in reported {
             assert_eq!(
                 entry.tier, None,
                 "{} reported a tier, but no non-Windows backend has a tier ladder",
@@ -580,7 +712,7 @@ mod tests {
     #[test]
     fn every_reported_tier_is_a_canonical_tier_string() {
         let canonical = canonical_tiers();
-        for entry in available_backends() {
+        for entry in backends_with_host_checks_passing() {
             if let Some(tier) = entry.tier {
                 assert!(
                     canonical.contains(&tier.as_str()),
@@ -793,7 +925,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn processcontainer_never_appears_off_windows() {
-        assert!(available_backends()
+        assert!(backends_with_host_checks_passing()
             .iter()
             .all(|b| b.backend != "processcontainer"));
     }
