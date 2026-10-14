@@ -2370,23 +2370,42 @@ mod tests {
         terminal.finish_native_bridge();
         drop(input);
 
-        // If cancellation injected end of input, the shell leaves its `read`,
-        // prints the marker and exits. Still being blocked is the evidence, so
-        // check it before the kill can suppress it.
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(
-            child.try_wait().expect("poll child").is_none(),
-            "cancellation ended the shell's `read`"
-        );
+        // The bridge has stopped copying, so watch the primary directly and
+        // keep draining it. An undrained terminal would wedge the shell mid
+        // exit, which looks exactly like it never left its `read`.
+        let watch = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < watch {
+            text.push_str(&drain_available(stdio.stdout.as_raw_fd()));
+            text.push_str(&drain_available(terminal.primary.as_raw_fd()));
+            assert!(!text.contains("eof-injected"), "got: {text:?}");
+            assert!(
+                child.try_wait().expect("poll child").is_none(),
+                "cancellation ended the shell's `read`; got: {text:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         // SAFETY: the child created its own session with its PID as the process-group ID.
         unsafe {
             libc::kill(-session, libc::SIGKILL);
         }
-        let _ = child.wait();
 
-        let mut output = std::fs::File::from(stdio.stdout);
-        output.read_to_string(&mut text).expect("read output");
+        // Reap on a deadline, still draining: a Darwin child stuck writing to a
+        // full terminal does not die until the queue drains.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            text.push_str(&drain_available(stdio.stdout.as_raw_fd()));
+            text.push_str(&drain_available(terminal.primary.as_raw_fd()));
+            if child.try_wait().expect("poll child").is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell did not exit after SIGKILL; got: {text:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         assert!(text.contains("done"), "got: {text:?}");
         assert!(!text.contains("eof-injected"), "got: {text:?}");
     }
