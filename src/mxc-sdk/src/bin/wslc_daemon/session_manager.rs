@@ -3098,7 +3098,8 @@ mod tests {
     // pull, so `alpine:latest` has to be cached in the store slot this worker
     // leases — slot 0 of the pool, since it holds one session. Warm it with
     // `scripts\setup-wslc.ps1 -DaemonSlots 1`. It is `#[ignore]`d and run
-    // explicitly with `cargo test -p mxc-sdk --features wslc --lib -- --ignored`.
+    // explicitly with:
+    // `cargo test -p mxc-sdk --features wslc --bin wxc-wslc-daemon -- --ignored`
     #[tokio::test]
     #[ignore = "requires a WSL2 host with alpine:latest cached in daemon store slot 0"]
     async fn full_lifecycle_on_wsl_host() {

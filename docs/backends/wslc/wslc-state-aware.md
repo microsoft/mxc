@@ -152,6 +152,11 @@ when it is released, so a daemon holding one session always runs on `slot-0`.
 Create-and-run execution keeps its own default of `%TEMP%\mxc-wslc-sessions` and
 never touches the pool.
 
+Both the daemon and the command that warms the pool resolve these variables from
+their own environment, so warm the pool as the user the daemon runs as. A
+refusal names the directory it needs filled, so a warm that reports success
+against a different directory has filled the wrong store.
+
 Separating the two is what lets both surfaces run at once. A store's VHDX admits
 one live session, so while the daemon held `%TEMP%\mxc-wslc-sessions` every
 create-and-run WSLc execution on the same host failed with

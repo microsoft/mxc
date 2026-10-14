@@ -378,7 +378,7 @@ fn pull_failure(
             budget.as_secs(),
             PULL_TIMEOUT_ENV,
             image,
-            store.warm_args(),
+            store.warm_instruction(),
         )),
         WSLC_E_IMAGE_NOT_FOUND => WslcError::Rejected(format!(
             "WSLC image '{}' could not be pulled: {}. Check the image name and tag. \
@@ -404,7 +404,7 @@ fn pull_failure(
             image,
             detail,
             image,
-            store.warm_args(),
+            store.warm_instruction(),
         )),
     }
     .into_response()
@@ -455,12 +455,18 @@ impl StoreHint {
         }
     }
 
-    /// The arguments that point `--setup-wslc` at this store, if it needs any.
-    fn warm_args(&self) -> String {
+    /// The arguments that point `--setup-wslc` at this store, naming the
+    /// directory when the arguments leave it to be re-resolved from the
+    /// environment of whoever runs them.
+    fn warm_instruction(&self) -> String {
         match self {
-            StoreHint::CreateAndRun(None) => String::new(),
             StoreHint::CreateAndRun(Some(path)) => format!(" --storage-path \"{}\"", path),
-            StoreHint::DaemonSlot(index) => format!(" --wslc-daemon-slots {}", index + 1),
+            StoreHint::CreateAndRun(None) => format!(" (which fills {})", self.store_path()),
+            StoreHint::DaemonSlot(index) => format!(
+                " --wslc-daemon-slots {} (which fills {})",
+                index + 1,
+                self.store_path()
+            ),
         }
     }
 }
@@ -757,7 +763,7 @@ fn no_egress_refusal(image: &str, store: &StoreHint) -> ScriptResponse {
          See docs/backends/wslc/wsl-container-getting-started.md.",
         image,
         image,
-        store.warm_args(),
+        store.warm_instruction(),
     ))
     .into_response()
 }
@@ -947,7 +953,8 @@ fn with_implicit_tag(name: &str) -> String {
 /// The lifecycle daemon leases its store from a separate pool, so warming the
 /// create-and-run store does not warm the daemon's. A slot that has never been
 /// leased holds no images at all, and an uncached image under the default
-/// deny-egress posture is refused before the VM is reached.///
+/// deny-egress posture is refused before the VM is reached.
+///
 /// # Safety
 /// Must be called once per process before any other WSLC SDK functions
 /// (it initialises COM via `init_and_load_sdk`).
@@ -1598,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn a_default_store_adds_no_path_argument() {
+    fn a_default_store_names_its_directory_without_a_path_argument() {
         let resp = failure(
             "alpine:latest",
             &StoreHint::CreateAndRun(None),
@@ -1606,6 +1613,13 @@ mod tests {
             "down",
         );
         assert!(!resp.error_message.contains("--storage-path"));
+        assert!(
+            resp.error_message
+                .contains(&StoreHint::CreateAndRun(None).store_path()),
+            "a reader whose TEMP differs warms a different store unless the \
+             default is named: {}",
+            resp.error_message
+        );
     }
 
     #[test]
@@ -1638,10 +1652,24 @@ mod tests {
 
     #[test]
     fn a_higher_slot_asks_for_enough_slots_to_reach_it() {
-        assert_eq!(
-            StoreHint::DaemonSlot(2).warm_args(),
-            " --wslc-daemon-slots 3",
-            "warming is counted from slot 0, so reaching slot 2 takes 3 slots"
+        let instruction = StoreHint::DaemonSlot(2).warm_instruction();
+        assert!(
+            instruction.starts_with(" --wslc-daemon-slots 3"),
+            "warming is counted from slot 0, so reaching slot 2 takes 3 slots: \
+             {instruction}"
+        );
+    }
+
+    #[test]
+    fn a_slot_remediation_names_the_store_it_fills() {
+        let slot = StoreHint::DaemonSlot(1);
+        let instruction = slot.warm_instruction();
+
+        assert!(
+            instruction.contains(&slot.store_path()),
+            "--wslc-daemon-slots re-resolves the pool from the environment of \
+             whoever runs it, so a remediation that does not name the store can \
+             warm a different one: {instruction}"
         );
     }
 
