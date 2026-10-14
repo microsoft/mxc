@@ -252,13 +252,16 @@ that can be executed independently.
                                            // path in output metadata. Defaults to false.
                                            // Retention requires a terminal wait; abandoning the
                                            // process handle deletes the internal trace.
-                                           // Requires native PSEC/V2 capture; guarded-WPR fallback
-                                           // rejects retention rather than exposing a host-wide ETL.
+                                           // Supported by native PSEC and guarded-WPR capture.
+                                           // Guarded WPR retains only a workload-process-filtered
+                                           // ETL, never its host-wide source trace.
         }
                                            // Omit outputPath for a managed JSON output file.
-                                           // Native PSEC/V2 capture cannot combine with leastPrivilege
-                                           // or runtimeConfig.networkProxy. Hosts without that complete native set
-                                           // retain an eligible legacy containment tier and use guarded WPR.
+                                           // Native PSEC capture supports runtimeConfig.networkProxy
+                                           // without adding the direct-egress capture capability.
+                                           // leastPrivilege and other proxy policies use a compatible
+                                           // AppContainer tier with guarded WPR. Hosts without compatible
+                                           // native capture exports also use that fallback.
                                            // If guarded-WPR prerequisites are unavailable, the request
                                            // fails before MXC creates the sandbox.
     },
