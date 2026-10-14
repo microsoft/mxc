@@ -364,8 +364,14 @@ recommendation map to this direct-egress policy:
 ```
 
 Use `/128` for an observed IPv6 address. Preserve `udp` and its observed port
-the same way. An ICMP endpoint produces a portless rule. Apply this
-transformation only when `configurationRecommendation` is `addEgressAllow`;
+the same way. ICMP resources distinguish the address families:
+IPv4 uses `icmp://203.0.113.10`, while IPv6 uses
+`icmpv6://[2001:db8::1]`. Neither resource includes a port.
+For both families, version-5 `networkEndpoint.protocol` and the authored
+policy protocol are `"icmp"`; the policy uses `{ "protocol": "icmp" }`
+without a `port` field. Do not copy the IPv6 resource scheme `icmpv6` into
+the policy protocol. Apply this transformation only when
+`configurationRecommendation` is `addEgressAllow`;
 `reviewEgressDeny`, `reviewAllowExclusion`, and `useConfiguredProxy` require
 the reason-specific policy changes in the table above, not an additional allow
 rule.
