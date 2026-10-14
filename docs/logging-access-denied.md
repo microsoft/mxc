@@ -277,13 +277,13 @@ above; a `Reason` value alone does not establish Tessera attribution.
 Once that identity is validated, the existing `Reason` field distinguishes
 the policy decisions below:
 
-| Source/reason | Meaning | Version-5 recommendation |
-|---|---|---|
-| App Isolation `1` | Missing capability | `addCapability`: add the exact capability named by the actionable record. |
-| Tessera `100` | Direct default deny | `addEgressAllow`: author an exact egress allow only when the numeric endpoint and protocol are representable. |
-| Tessera `101` | Authored explicit deny | `reviewEgressDeny`: remove or narrow the matching deny if that authored restriction is unintended. Adding an allow does not override a deny. |
-| Tessera `102` | Exclusion from an allow rule | `reviewAllowExclusion`: review or narrow the matching `to[].except` entry rather than broadening the existing allow. |
-| Tessera `103` | Proxy-containment baseline | `useConfiguredProxy`: route the workload through `runtimeConfig.networkProxy` rather than enabling direct egress. |
+| Source/reason | Version-5 `networkDecisionReason` | Meaning | Version-5 recommendation |
+|---|---|---|---|
+| App Isolation `1` | `appIsolationMissingCapability` | Missing capability | `addCapability`: add the exact capability named by the actionable record. |
+| Tessera `100` | `directDefaultDeny` | Direct default deny | `addEgressAllow`: author an exact egress allow only when the numeric endpoint and protocol are representable. |
+| Tessera `101` | `authoredExplicitDeny` | Authored explicit deny | `reviewEgressDeny`: remove or narrow the matching deny if that authored restriction is unintended. Adding an allow does not override a deny. |
+| Tessera `102` | `allowExclusion` | Exclusion from an allow rule | `reviewAllowExclusion`: review or narrow the matching `to[].except` entry rather than broadening the existing allow. |
+| Tessera `103` | `proxyContainment` | Proxy-containment baseline | `useConfiguredProxy`: route the workload through `runtimeConfig.networkProxy` rather than enabling direct egress. |
 
 The internal WFP provider-data format used to produce the reason is not part of
 the ETW contract. MXC does not parse provider data or require additional policy
@@ -504,9 +504,12 @@ a digest is derived from a sensitive value.
 Only Learning Mode events are decoded: Kernel-General events 14, 27, and 28,
 PermissiveLearningMode events 14, 27, and 4907, and NetworkDecision event 1.
 Other provider and event ID pairs are ignored. `unsupportedEventSchema` means
-the event has no actionable extractor. NetworkDecision records are kept only by
-unscoped analysis, with PID 0 and that reason; the local file keeps their
-sanitized properties, including remote endpoints, while telemetry drops them.
+the event has no supported actionable extractor. Native NetworkDecision analysis
+emits actionable denials or diagnostic outcomes according to the
+[network denial contract](#network-denial-sources) above, with PID 0. Local
+verbose logging retains sanitized network properties, including remote
+endpoints, while telemetry drops those properties. Guarded-WPR analysis
+excludes brokered NetworkDecision records.
 
 Per-event TDH failures use these predefined diagnostic reasons:
 `eventPayloadMalformed` means the payload is malformed or conflicts with its declared schema,
@@ -515,11 +518,13 @@ decoding, and `unsupportedPropertyEncoding` means the decoder cannot consume
 that property shape. When TDH exposes it, the schema-declared name is retained
 as the bounded `eventName` signature field. Free-form decoder errors are
 never serialized. `schemaUnavailable` means the event schema could not be
-obtained. Analysis continues but sets `deniedResourcesTruncated` because the
-unreadable event may have been a denial; network decisions are not denials, so
-they do not. Schema failures
-remain fatal for raw decoding and for scoping brokered capability events in
-guarded traces.
+obtained. For non-network Learning Mode events, analysis continues but sets
+`deniedResourcesTruncated` because the unreadable event may have been a denial.
+NetworkDecision provider schema failures are recorded diagnostically without
+setting that flag or producing an actionable record; successfully decoded
+network events can still produce the actionable denials described above.
+Schema failures remain fatal for raw decoding and for scoping brokered
+capability events in guarded traces.
 
 To keep diagnostics bounded, verbose logging retains at most 4,096 distinct
 signatures, 24 sorted properties per signature, and 256 characters per property
