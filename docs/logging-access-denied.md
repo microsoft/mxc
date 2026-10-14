@@ -257,6 +257,12 @@ decision. The exception is also not applied when `network.egress` is absent,
 when the request supplies ingress only, when capture is disabled, or when proxy
 mode is selected.
 
+Tessera is an internal Windows component name used in this guide to explain
+direct-network policy enforcement. The name is not exposed in public JSON:
+actionable `DeniedResource` records have no `source` field, and verbose
+logging uses `provider: "learningModeNetworkDecision"` and the
+`networkDecisionReason` values documented below, not `source: "Tessera"`.
+
 MXC currently recognizes two normalized source domains:
 
 - App Isolation missing-capability decisions map capability IDs `0`, `1`, and
