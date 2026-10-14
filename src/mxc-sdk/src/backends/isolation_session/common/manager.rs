@@ -607,7 +607,7 @@ impl IsolationSessionManager {
             scope.stdin = match stdin_relay_state {
                 StdinRelayKind::None => None,
                 StdinRelayKind::PipeOrFile => {
-                    // Ensure the agent's stdin will close on EOF for pipe/file-backed 
+                    // Ensure the agent's stdin will close on EOF for pipe/file-backed
                     // stdin.
                     let process_for_eof = process.clone();
                     let impersonation = self.impersonation.clone();
