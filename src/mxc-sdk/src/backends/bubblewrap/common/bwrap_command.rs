@@ -466,7 +466,23 @@ pub(crate) fn build_args_classified_with_mode(
     // Standard virtual filesystems (applied before policy mounts so policy
     // paths under /dev, /proc, or /tmp survive).
     args.extend(["--dev".into(), "/dev".into()]);
-    args.extend(["--proc".into(), "/proc".into()]);
+
+    let procfs_policy = request.env.as_ref().and_then(|environment| {
+        environment.iter().find_map(|entry| {
+            entry
+                .strip_prefix(crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV)
+                .and_then(|value| value.strip_prefix('='))
+        })
+    });
+    let mount_procfs = match procfs_policy {
+        Some("off") => false,
+        Some("on") | None => true,
+        Some(_) => false,
+    };
+    if mount_procfs {
+        args.extend(["--proc".into(), "/proc".into()]);
+    }
+
     args.extend(["--tmpfs".into(), "/tmp".into()]);
 
     // Policy mounts, emitted in most-specific-path-wins order so a deeper path
@@ -511,6 +527,9 @@ pub(crate) fn build_args_classified_with_mode(
     for env_str in resolved_env(request) {
         // An entry with no `=` names no variable, so it is dropped here too.
         if let Some((key, value)) = env_str.split_once('=') {
+            if key == crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV {
+                continue;
+            }
             // When the proxy is active, drop any caller-supplied proxy env
             // entries so they cannot override the values we set below.
             if proxy_address.is_some() && is_managed_proxy_key(key) {
@@ -954,6 +973,52 @@ mod tests {
         assert!(args.contains(&"--unshare-pid".to_string()));
         assert!(args.contains(&"--unshare-ipc".to_string()));
         assert!(args.contains(&"--unshare-uts".to_string()));
+    }
+
+    #[test]
+    fn explicit_procfs_omit_keeps_pid_namespace_and_hides_internal_marker() {
+        let mut request = base_request();
+        request.env = Some(vec![format!(
+            "{}=off",
+            crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
+        )]);
+        request.inherit_default_env = true;
+
+        let args = build_args(&request, None);
+
+        let separator = args.iter().position(|argument| argument == "--").unwrap();
+        assert!(args[..separator]
+            .iter()
+            .any(|argument| argument == "--unshare-pid"));
+        assert!(!args[..separator]
+            .iter()
+            .any(|argument| argument == "--proc"));
+        assert!(!args.windows(3).any(|window| window[0] == "--setenv"
+            && window[1] == crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV));
+        assert!(args
+            .windows(3)
+            .any(|window| window == ["--setenv", "PATH", DEFAULT_PATH]));
+    }
+
+    #[test]
+    fn explicit_procfs_mount_and_legacy_default_keep_procfs_available() {
+        let mut request = base_request();
+        request.env = Some(vec![format!(
+            "{}=on",
+            crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
+        )]);
+        request.inherit_default_env = true;
+        let explicit_mount = build_args(&request, None);
+        assert!(explicit_mount
+            .windows(2)
+            .any(|window| window == ["--proc", "/proc"]));
+
+        request.env = None;
+        request.inherit_default_env = false;
+        let legacy_default = build_args(&request, None);
+        assert!(legacy_default
+            .windows(2)
+            .any(|window| window == ["--proc", "/proc"]));
     }
 
     /// Dropping this flag silently reintroduces a real leak: a backgrounded

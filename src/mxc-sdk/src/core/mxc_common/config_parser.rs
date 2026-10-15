@@ -1338,6 +1338,21 @@ fn normalize_common_request_ir(
             None => (String::new(), String::new(), 0, None, false),
         };
 
+    if env.as_ref().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry
+                .split_once('=')
+                .is_some_and(|(key, _)| key == crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV)
+        })
+    }) {
+        let message = format!(
+            "process.env must not set reserved variable {}",
+            crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
+        );
+        logger.log_line(&message);
+        return Err(WxcError::ConfigParse(message));
+    }
+
     // Containment backend selection. The wire enum has already constrained the
     // value to a known variant (invalid strings fail at deserialize); abstract
     // intents and the omitted case resolve to the OS-native backend here.
@@ -4359,6 +4374,20 @@ mod tests {
 
         assert!(request.policy.readonly_paths.is_empty());
         assert_eq!(request.policy.enumerate_paths, vec!["C:\\tools"]);
+    }
+
+    #[test]
+    fn external_process_environment_cannot_set_internal_procfs_control() {
+        for value in ["off", "on"] {
+            let json = format!(
+                r#"{{"version":"1.0.0","process":{{"commandLine":"echo hi","env":["{}={value}"]}}}}"#,
+                crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
+            );
+            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
+            assert!(error
+                .message()
+                .contains("process.env must not set reserved variable"));
+        }
     }
 
     #[test]

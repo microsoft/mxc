@@ -140,12 +140,50 @@ Bubblewrap creates a namespace-isolated process by:
    `$HOME`, `/root`, `/opt`, `/var`, `/sys`, and `/run/user/<uid>` — is
    invisible inside the sandbox.
 3. Layering filesystem policy overrides (read-write, read-only, denied paths)
-4. Setting up minimal `/dev`, `/proc`, and `/tmp`
+4. Setting up minimal `/dev` and `/tmp`; `/proc` is mounted only when the
+  selected procfs policy requests it
 5. Clearing the environment and applying only requested variables
 6. Executing the command via `sh -c`
 
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
+
+### Procfs policy and migration
+
+Bubblewrap always creates a private PID namespace. Mounting a fresh procfs at
+`/proc` exposes that namespace's process view, not the host PID namespace. With
+procfs omitted, `/proc` is absent from Bubblewrap's empty-by-default root unless
+the caller explicitly mounts a path there.
+
+The typed V1 API exposes `ProcfsPolicy` through
+`spawn_with_procfs_policy`, `run_with_procfs_policy`, and the PTY equivalent.
+`ProcfsPolicy::default()` is `Omit`, the least-privilege choice. `Mount` opts in
+to a fresh procfs; `LegacyBackendDefault` preserves the historical behavior.
+The existing `FilesystemPolicy` shape and the published JSON contract are
+unchanged.
+
+The internal control variable used to carry the typed choice is rejected in
+external `process.env` input and removed before the sandboxed child environment
+is assembled. Procfs selection is therefore not an undocumented JSON option.
+
+Tentative compatibility schedule:
+
+1. **V1.0.x:** Existing `spawn`, `run`, PTY, and versioned JSON entrypoints
+  preserve their historical backend behavior. New callers can select the
+  secure default with `ProcfsPolicy::default()`; callers requiring historical
+  behavior can name `LegacyBackendDefault` explicitly.
+2. **V1.1:** Mark the legacy typed entrypoints as deprecated, with migration
+  guidance to the procfs-policy entrypoints. Do not change runtime behavior in
+  this minor release. Versioned JSON requests remain unchanged.
+3. **V2.0:** Make the unqualified typed entrypoints default to `Omit`. Keep
+  `LegacyBackendDefault` available for compatibility-sensitive workloads, and
+  preserve the behavior of existing V1 JSON schemas. A future wire-schema
+  version may add an explicit `mountProcfs` field; older schemas must retain
+  their original semantics.
+
+The release timing is tentative and should be confirmed against downstream
+usage data. Do not emit warnings for explicit `Mount` or explicit
+`LegacyBackendDefault` selections.
 
 ### Deny-by-default filesystem
 
