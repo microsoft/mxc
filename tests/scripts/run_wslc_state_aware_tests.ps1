@@ -25,6 +25,7 @@
 
     Explicit-session tests cover shared sandboxes and independent lifetimes
     for identically sized VMs.
+    The cold-store regression warms one private store and requires registry access.
 
     Requires: Windows 11, WSL2, the WSLC SDK runtime (wslcsdk.dll staged next
     to the binaries), registry access or an already-cached alpine:latest, and a
@@ -55,6 +56,7 @@
 .PARAMETER SkipSetup
     Skip the image-cache warming preflight. The provision fixtures declare deny
     egress, so daemon store slots 0 through 2 must already contain the images.
+    The cold-store regression still warms its own isolated store.
 
 .EXAMPLE
     .\run_wslc_state_aware_tests.ps1
@@ -2098,15 +2100,15 @@ try {
             "a refused provision mints no sandbox"
     } | Out-Null
 
-    Run-StateAwareTest "K: a malformed session id is refused as malformed_id" {
+    Run-StateAwareTest "K: a malformed placement session id is refused as malformed_id" {
         $req = @{
             version = '1.1.0-alpha'
-            phase = 'deprovision-session'
+            phase = 'provision'
             containment = 'wslc'
-            sessionId = 'wslcsess:not-hex'
+            wslc = @{ provision = @{ sessionId = 'wslcsess:not-hex' } }
         }
         $r = Invoke-StateAware -Request $req
-        $null = Assert-ErrorEnvelope $r 'malformed_id' "release with a malformed session id"
+        $null = Assert-ErrorEnvelope $r 'malformed_id' "placement with a malformed session id"
     } | Out-Null
 } finally {
     foreach ($session in $explicitSessions) {
@@ -2142,6 +2144,105 @@ try {
         } | Out-Null
     }
 }
+
+# ---------------- Lifecycle L: one warmed slot ----------------
+
+Run-StateAwareTest "L: isolated provision names the cold store when the only warm slot is held" {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ("mxc-wslc-cold-" + [guid]::NewGuid().ToString('N'))
+    $root = [IO.Path]::GetFullPath($root)
+    $oldLocalAppData = $env:LOCALAPPDATA
+    $oldStateRoot = $env:MXC_WSLC_STATE_ROOT
+    $sessionIds = [System.Collections.Generic.List[string]]::new()
+    $warmSandboxId = $null
+    $coldSandboxId = $null
+    $daemonProcess = $null
+    $null = New-Item -ItemType Directory -Path $root
+    try {
+
+        # Keep this test's stores and daemon discovery separate from normal runs.
+        $env:LOCALAPPDATA = $root
+        $env:MXC_WSLC_STATE_ROOT = Join-Path $root 'records'
+        & (Join-Path $RepoRoot 'scripts\setup-wslc.ps1') -WxcExecPath $WxcExec `
+            -StoragePath (Join-Path $root 'create-and-run') -Image @('alpine:latest') `
+            -DaemonSlots 1 -Force
+        $setupExit = $LASTEXITCODE
+        Assert-True ($setupExit -eq 0) "the private pool was warmed with -DaemonSlots 1"
+        if ($setupExit -ne 0) { return }
+
+        $coldStore = Join-Path $root 'mxc\wslc-store-slots\slot-1'
+        Assert-True (-not (Test-Path $coldStore)) "setup left the second slot cold"
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_session.json'
+        $record = Get-Content (Join-Path $env:MXC_WSLC_STATE_ROOT 'daemon.json') -Raw | ConvertFrom-Json
+        $daemonProcess = [System.Diagnostics.Process]::GetProcessById([int]$record.pid)
+        $envObj = Assert-ResultEnvelope $r "create the warm session"
+        if ($null -eq $envObj) { return }
+        $warmSessionId = [string]$envObj.result.sessionId
+        $sessionIds.Add($warmSessionId)
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_in_session.json' `
+            -SessionId $warmSessionId
+        $envObj = Assert-ResultEnvelope $r "hold the only warm slot with a sandbox"
+        if ($null -eq $envObj) { return }
+        $warmSandboxId = [string]$envObj.result.sandboxId
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_session.json'
+        $envObj = Assert-ResultEnvelope $r "create a session on the second slot"
+        if ($null -eq $envObj) { return }
+        $coldSessionId = [string]$envObj.result.sessionId
+        $sessionIds.Add($coldSessionId)
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_in_session.json' `
+            -SessionId $coldSessionId
+        $envObj = Assert-ErrorEnvelope $r 'policy_validation' "isolated provision on the cold store"
+        $coldSandboxId = [string]$envObj.result.sandboxId
+        $message = [string]$envObj.error.message
+        Assert-True ($message.Contains('daemon image store slot 1')) `
+            "the refusal names the selected slot"
+        Assert-True ($message.Contains($coldStore)) `
+            "the refusal names the actual private store path"
+        Assert-True ($message.Contains("cold for image 'alpine:latest'")) `
+            "the refusal identifies the cold cache rather than a missing registry image"
+        Assert-True ($message.Contains('No container was created')) `
+            "the cold-store refusal happens before container creation"
+        Assert-True ($null -eq $envObj.result.sandboxId) "the refused provision returns no sandbox"
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $warmSandboxId
+        $null = Assert-ResultEnvelope $r "start the original warm sandbox after the refusal"
+        $null = Get-SandboxBootId -SandboxId $warmSandboxId -What 'the original warm sandbox'
+    } finally {
+        try {
+            foreach ($sandboxId in @($warmSandboxId, $coldSandboxId)) {
+                if (-not $sandboxId) { continue }
+                $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' `
+                    -SandboxId $sandboxId
+                $null = Assert-ResultEnvelope $r "cleanup a private sandbox"
+            }
+            foreach ($sessionId in $sessionIds) {
+                $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+                    -SessionId $sessionId
+                $envObj = Parse-Envelope -Stdout $r.Stdout
+                if ((Envelope-Arm $envObj) -ne 'error' -or
+                    $envObj.error.code -ne 'not_provisioned') {
+                    $null = Assert-ResultEnvelope $r "cleanup a private session"
+                }
+            }
+        } finally {
+            try {
+                if ($null -ne $daemonProcess -and -not $daemonProcess.WaitForExit(60000)) {
+                    Assert-True $false "the private test daemon did not exit after cleanup"
+                    Stop-Process -Id $daemonProcess.Id -Force
+                    $daemonProcess.WaitForExit()
+                }
+            } finally {
+                if ($null -ne $daemonProcess) { $daemonProcess.Dispose() }
+                $env:LOCALAPPDATA = $oldLocalAppData
+                $env:MXC_WSLC_STATE_ROOT = $oldStateRoot
+            }
+        }
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+} | Out-Null
 
 # ---------------- Lifecycle S: store isolation from create-and-run ----------------
 

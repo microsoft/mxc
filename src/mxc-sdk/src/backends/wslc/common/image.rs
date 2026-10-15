@@ -809,8 +809,18 @@ pub unsafe fn begin_resolve(
     }
 }
 
-/// The refusal for an uncached image a sandbox declaring no egress cannot pull.
 fn no_egress_refusal(image: &str, store: &StoreHint) -> ScriptResponse {
+    if let StoreHint::DaemonSlot(index) = store {
+        return WslcError::Rejected(format!(
+            "WSLC isolated provision refused: daemon image store slot {index} at '{}' is cold \
+             for image '{image}'. No container was created. Release the session or let it \
+             expire before warming this store with wxc-exec.exe --setup-wslc --image {image}{}. \
+             Alternatively, import a local tar with wslc.provision.imageTarPath or allow egress.",
+            store.store_path(),
+            store.warm_args(),
+        ))
+        .into_response();
+    }
     WslcError::Rejected(format!(
         "WSLC image '{}' is not cached, and this sandbox declares no egress. \
          Pulling it would reach the registry on the host's network, before the \
@@ -1705,6 +1715,22 @@ mod tests {
              against the same cold slot: {}",
             lifecycle.error_message
         );
+    }
+
+    #[test]
+    fn an_isolated_provision_names_the_selected_cold_store_and_how_to_warm_it() {
+        let refusal = no_egress_refusal("alpine:latest", &StoreHint::DaemonSlot(1));
+        let message = refusal.error_message;
+        assert_eq!(
+            refusal.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+        assert!(message.contains("daemon image store slot 1"));
+        assert!(message.contains(store_slots::slot_path(1).to_string_lossy().as_ref()));
+        assert!(message.contains("cold for image 'alpine:latest'"));
+        assert!(message.contains("No container was created"));
+        assert!(message.contains("--wslc-daemon-slots 2"));
+        assert!(message.contains("wslc.provision.imageTarPath"));
     }
 
     #[test]

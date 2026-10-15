@@ -400,8 +400,11 @@ that lets a caller request a second session.
 
 A returned slot keeps its images — that is the point of leasing rather than
 minting. A slot that has never been leased holds nothing at all, and an uncached
-image under the isolated posture is refused before the VM is reached, so a cold
-slot fails a provision outright rather than pulling. Warm the pool with either:
+image under the isolated posture is refused before a container is created.
+The error names the selected store's slot and path, the uncached image, and
+the command to warm it. MXC does not relocate the session to another store or
+pull outside the declared network policy. The SDK session may already be
+running when its image cache is inspected. Warm the pool with either:
 
 ```powershell
 .\scripts\setup-wslc.ps1 -Image alpine:latest -DaemonSlots 1
@@ -702,6 +705,13 @@ boot IDs. They also keep two identically sized sessions alive together and
 check that releasing one leaves the other's sandbox usable. The setup
 preflight warms three stores for the implicit session and the two explicit
 sessions, because isolated provisions cannot pull into a cold store.
+
+The cold-store regression uses a private pool and daemon discovery root,
+warms only slot 0 with `-DaemonSlots 1`, and holds that slot with a sandbox.
+An isolated provision on slot 1 must name the cold store in its refusal,
+leave no container behind, and leave the original warm sandbox usable.
+This case needs registry access even with `-SkipSetup`; it does not reuse or
+modify the normal image cache.
 
 The concurrency section launches a phase without waiting for it (`Start-StateAware` /
 `Wait-StateAware`), which is what lets it observe two sandboxes running at once, a refused

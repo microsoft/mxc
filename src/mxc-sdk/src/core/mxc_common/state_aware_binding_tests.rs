@@ -692,7 +692,7 @@ fn wslc_binding_carries_session_sizing_and_the_session_id_through() {
 
     let bound =
         bind_wslc::<Recording<Wslc>>(session_parsed(StateAwareOperation::DeprovisionSession {
-            session_id: "wslcsess:abcd".into(),
+            session_id: "wslcsess:0123456789abcdef0123456789abcdef".into(),
         }))
         .unwrap();
     assert_eq!(bound.phase(), Phase::DeprovisionSession);
@@ -701,7 +701,7 @@ fn wslc_binding_carries_session_sizing_and_the_session_id_through() {
     let BoundStateAwareOperation::DeprovisionSession { session_id } = operation else {
         panic!("expected a bound session deprovision");
     };
-    assert_eq!(session_id, "wslcsess:abcd");
+    assert_eq!(session_id, "wslcsess:0123456789abcdef0123456789abcdef");
 }
 
 #[test]
@@ -709,7 +709,7 @@ fn session_operations_never_bind_to_a_backend_without_sessions() {
     for operation in [
         StateAwareOperation::ProvisionSession(None),
         StateAwareOperation::DeprovisionSession {
-            session_id: "wslcsess:abcd".into(),
+            session_id: "wslcsess:0123456789abcdef0123456789abcdef".into(),
         },
     ] {
         let error =
@@ -742,7 +742,7 @@ fn session_phases_keep_the_same_validation_execution_and_dry_run_order_as_every_
     assert_dispatch_parsed::<Wslc>(
         || {
             session_parsed(StateAwareOperation::DeprovisionSession {
-                session_id: "wslcsess:abcd".into(),
+                session_id: "wslcsess:0123456789abcdef0123456789abcdef".into(),
             })
         },
         Config::Absent,

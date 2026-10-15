@@ -4683,7 +4683,7 @@ mod tests {
             r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
             &mut test_logger(),
             Phase::ProvisionSession,
-            Some(session_flag("wslcsess:abc")),
+            Some(session_flag("wslcsess:0123456789abcdef0123456789abcdef")),
             &[],
         )
         .unwrap_err();
@@ -4720,7 +4720,7 @@ mod tests {
             r#"{"version":"1.1.0-alpha"}"#,
             &mut test_logger(),
             Phase::Start,
-            Some(session_flag("wslcsess:abcd")),
+            Some(session_flag("wslcsess:0123456789abcdef0123456789abcdef")),
             &[],
         )
         .unwrap_err();

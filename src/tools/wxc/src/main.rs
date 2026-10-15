@@ -546,14 +546,9 @@ fn run_state_aware_main(
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
 
-    // This phase's Microsoft Correlation Vector (MS-CV), purely internal to
-    // MXC — no caller supplies or relays one. `provision` seeds a fresh
-    // vector (persisted post-dispatch below, once its `sandbox_id` exists);
-    // every later phase recalls that persisted lifecycle root and spins a
-    // child off it. Empty when telemetry is inactive.
     let correlation = telemetry::correlation_state::pre_dispatch_vector(
         telemetry_active,
-        is_provision,
+        parsed.phase(),
         sandbox_id.as_deref(),
     );
 
@@ -3179,14 +3174,31 @@ mod tests {
 
     #[test]
     fn pre_dispatch_vector_is_empty_when_telemetry_inactive() {
-        // Inactive telemetry does no RNG/clock work regardless of phase.
-        assert!(telemetry::correlation_state::pre_dispatch_vector(false, true, None).is_empty());
-        assert!(telemetry::correlation_state::pre_dispatch_vector(
-            false,
-            false,
-            Some("wsb:12345678")
-        )
-        .is_empty());
+        for phase in [
+            Phase::ProvisionSession,
+            Phase::Provision,
+            Phase::Start,
+            Phase::Exec,
+            Phase::Stop,
+            Phase::Deprovision,
+            Phase::DeprovisionSession,
+        ] {
+            assert!(
+                telemetry::correlation_state::pre_dispatch_vector(false, phase, None).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn session_phase_correlation_never_creates_the_sandbox_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("correlation");
+        let _guard = StoreDirGuard::set(&store);
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            let vector = telemetry::correlation_state::pre_dispatch_vector(true, phase, None);
+            assert!(telemetry::correlation_vector::is_relayable(&vector));
+        }
+        assert!(!store.exists());
     }
 
     #[test]
@@ -3195,19 +3207,18 @@ mod tests {
         let _guard = StoreDirGuard::set(tmp.path());
         let sandbox_id = "wsb:12345678";
 
-        // Active provision seeds a fresh valid vector.
-        let provisioned = telemetry::correlation_state::pre_dispatch_vector(true, true, None);
+        let provisioned =
+            telemetry::correlation_state::pre_dispatch_vector(true, Phase::Provision, None);
         assert!(telemetry::correlation_vector::is_relayable(&provisioned));
 
-        // Persisting it (as `run_state_aware_main` does post-dispatch) lets a
-        // later phase recall it and spin a distinct child off the same base.
         let outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
             serde_json::json!({ "result": { "sandboxId": sandbox_id } }),
         ));
         telemetry::correlation_state::on_provision_outcome(true, &provisioned, &outcome);
 
         let base_prefix = provisioned.split('.').next().unwrap();
-        let spun = telemetry::correlation_state::pre_dispatch_vector(true, false, Some(sandbox_id));
+        let spun =
+            telemetry::correlation_state::pre_dispatch_vector(true, Phase::Start, Some(sandbox_id));
         assert!(spun.starts_with(&format!("{base_prefix}.")), "{spun:?}");
         assert_ne!(spun, provisioned);
     }

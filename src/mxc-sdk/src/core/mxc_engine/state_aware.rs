@@ -50,14 +50,8 @@ fn isolation_session_unavailable() -> MxcError {
     )
 }
 
-/// This phase's telemetry correlation vector, purely internal to MXC: no
-/// caller ever supplies or relays one. `provision` (whose `sandboxId` doesn't
-/// exist yet) mints a fresh vector; every later sandbox phase recalls the same
-/// lifecycle root persisted by `provision` and spins a distinct child off it —
-/// see [`telemetry::correlation_state`]. Session phases carry no `sandboxId`,
-/// so each seeds its own vector.
 fn phase_correlation(active: bool, phase: Phase, sandbox_id: Option<&str>) -> String {
-    telemetry::correlation_state::pre_dispatch_vector(active, phase == Phase::Provision, sandbox_id)
+    telemetry::correlation_state::pre_dispatch_vector(active, phase, sandbox_id)
 }
 
 fn surface_attached_warnings(logger: &mut Logger, mut surface: impl FnMut(&str)) {
@@ -1395,6 +1389,20 @@ mod tests {
     }
 
     #[test]
+    fn session_phase_correlation_does_not_open_the_sandbox_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("correlation");
+        let _guard = StoreDirGuard::set(&store);
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            assert!(telemetry::correlation_vector::is_relayable(
+                &phase_correlation(true, phase, None,)
+            ));
+            assert!(phase_correlation(false, phase, None).is_empty());
+        }
+        assert!(!store.exists());
+    }
+
+    #[test]
     fn attached_warning_surface_drains_retained_warnings() {
         let mut logger = Logger::new(Mode::Buffer);
         logger.warning_line("first");
@@ -1771,13 +1779,16 @@ mod tests {
         let minted = typed_dispatch_result(
             TypedDispatchOutcome::<(), (), (), ()>::ProvisionSession(
                 crate::mxc_common::state_aware_backend::ProvisionSessionResult {
-                    session_id: "wslcsess:abcd".to_string(),
+                    session_id: "wslcsess:0123456789abcdef0123456789abcdef".to_string(),
                 },
             ),
             no_provision_metadata,
         )
         .unwrap();
-        assert_eq!(minted.session_id.as_deref(), Some("wslcsess:abcd"));
+        assert_eq!(
+            minted.session_id.as_deref(),
+            Some("wslcsess:0123456789abcdef0123456789abcdef")
+        );
         assert_eq!(minted.sandbox_id, None);
         assert_eq!(minted.metadata, None);
 
@@ -1794,9 +1805,14 @@ mod tests {
     #[test]
     fn the_sdk_facade_cannot_silently_discard_a_minted_session_id() {
         let result = crate::state_aware_sdk::StateAwareResult::from_engine(
-            EngineStateAwareResult::provision_session("wslcsess:abcd".to_string()),
+            EngineStateAwareResult::provision_session(
+                "wslcsess:0123456789abcdef0123456789abcdef".to_string(),
+            ),
         );
-        assert_eq!(result.session_id.as_deref(), Some("wslcsess:abcd"));
+        assert_eq!(
+            result.session_id.as_deref(),
+            Some("wslcsess:0123456789abcdef0123456789abcdef")
+        );
 
         assert!(
             result.clone().into_lifecycle().is_err(),
