@@ -537,6 +537,70 @@ mod tests {
         assert!(macos_backends_with(false).is_empty());
     }
 
+    /// Holds each backend in the real [`available_backends`] to its own
+    /// detector, catching a disconnected or misassigned detector.
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    fn assert_probe_matches_detectors(detectors: &[(&str, bool)]) {
+        let backends = available_backends();
+        let reported = reported_names(&backends);
+        for (name, detected) in detectors {
+            assert_eq!(
+                reported.contains(name),
+                *detected,
+                "{name}: the probe reported {}, but its detector returned {detected}",
+                reported.contains(name)
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_probe_reports_what_its_detectors_found() {
+        assert_probe_matches_detectors(&[
+            (
+                ContainmentBackend::Bubblewrap.wire_name(),
+                crate::bwrap_common::bwrap_version::probe_bwrap().is_ok(),
+            ),
+            (
+                ContainmentBackend::Lxc.wire_name(),
+                crate::lxc_common::availability::is_lxc_available(),
+            ),
+            (
+                ContainmentBackend::Hyperlight.wire_name(),
+                hyperlight_host_available(),
+            ),
+        ]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_windows_probe_reports_what_its_detectors_found() {
+        assert_probe_matches_detectors(&[
+            (
+                ContainmentBackend::WindowsSandbox.wire_name(),
+                crate::windows_sandbox_lifecycle::availability::is_windows_sandbox_available(),
+            ),
+            (ContainmentBackend::Wslc.wire_name(), wslc_host_available()),
+            (
+                ContainmentBackend::IsolationSession.wire_name(),
+                isolation_session_host_available(),
+            ),
+            (
+                ContainmentBackend::Hyperlight.wire_name(),
+                hyperlight_host_available(),
+            ),
+        ]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_probe_reports_what_its_detector_found() {
+        assert_probe_matches_detectors(&[(
+            ContainmentBackend::Seatbelt.wire_name(),
+            std::path::Path::new("/usr/bin/sandbox-exec").exists(),
+        )]);
+    }
+
     /// The forward half of the probe-coverage gate: every backend the registry
     /// claims to detect on this target must actually be emitted by the real
     /// reporting function once its host check passes. Registering a backend as
