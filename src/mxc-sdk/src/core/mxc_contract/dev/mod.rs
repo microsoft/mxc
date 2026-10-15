@@ -224,6 +224,7 @@ mod network;
 mod one_shot;
 mod primitives;
 mod request;
+mod resources;
 #[cfg(feature = "schema-gen")]
 mod schema;
 mod stable;
@@ -239,6 +240,7 @@ pub use network::{
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
 pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
 pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
+pub use resources::{ResourcePriority, Resources};
 #[cfg(feature = "schema-gen")]
 pub use schema::development_schema;
 pub use stable::{

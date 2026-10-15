@@ -12,7 +12,7 @@ use std::time::Duration;
 
 pub use crate::mxc_common::models::{
     CaptureDenialsErrorOutput as CaptureDenialsError, CaptureDenialsOutput as CaptureDenialsResult,
-    SandboxOutputMetadata as ExecutionMetadata,
+    ResourceLimit, ResourceUsage, SandboxOutputMetadata as ExecutionMetadata,
 };
 use crate::mxc_common::sandbox_process::{
     NativeStdio, SandboxProcess, StreamCloser as InnerCloser,
@@ -904,6 +904,7 @@ mod tests {
                     etl_path: None,
                 }),
                 capture_denials_error: None,
+                resource_usage: None,
             }),
             stdout: None,
             release_output: None,

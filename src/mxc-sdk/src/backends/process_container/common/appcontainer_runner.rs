@@ -40,7 +40,7 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
     ContainerPolicy, ContainmentBackend, ExecutionRequest, FailurePhase, ProxyAddress,
-    SandboxOutputMetadata, ScriptResponse,
+    ResourceUsage, SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -1195,12 +1195,15 @@ impl AppContainerScriptRunner {
         // successfully attach the Job Object, OR TerminateProcess. Anything
         // that returns an error in this block must terminate first.
         let job = match (|| -> Result<UiJobObject, WxcError> {
-            let job = UiJobObject::new()?;
+            let mut job = UiJobObject::new()?;
             let restrictions = ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
                 &request.policy.base_process_ui,
             );
             job.set_ui_limits(&restrictions)?;
+            if let Some(resources) = request.policy.resources.as_ref() {
+                job.apply_resource_limits(resources)?;
+            }
             job.assign_process(process_handle.get())?;
             Ok(job)
         })() {
@@ -1852,6 +1855,8 @@ struct AppContainerSandboxProcess {
     process: SendOwnedHandle,
     _thread: SendOwnedHandle,
     job: crate::process_container_common::job_object::UiJobObject,
+    /// Whether the request supplied `resources`, asking for usage.
+    reports_resource_usage: bool,
     pid: u32,
     stdin: Option<PipeWriter>,
     stdout: Option<InterruptiblePipeReader>,
@@ -1917,6 +1922,7 @@ impl AppContainerSandboxProcess {
             process,
             _thread: thread,
             job: child.job,
+            reports_resource_usage: request.policy.resources.is_some(),
             pid: child.pid,
             stdin,
             stdout,
@@ -1968,6 +1974,19 @@ impl AppContainerSandboxProcess {
                 .i64("error_code", error.code().0 as i64);
             self.audit_logger.log_audit_event(&record);
         }
+    }
+
+    /// The job's resource usage when the request asked for it. A run that
+    /// MXC ended, by timeout or kill, reports no limit.
+    fn resource_usage(&self, natural_exit: bool) -> Option<ResourceUsage> {
+        if !self.reports_resource_usage {
+            return None;
+        }
+        let mut usage = self.job.resource_usage().ok()?;
+        if !natural_exit {
+            usage.limit_exceeded = None;
+        }
+        Some(usage)
     }
 
     fn timeout_result(&mut self) -> std::io::Result<i32> {
@@ -2239,7 +2258,13 @@ impl SandboxProcess for AppContainerSandboxProcess {
         // Record the child's exit code so `run_teardown` can stamp it into the
         // denials summary. On a timeout / wait failure there is no exit code.
         self.last_exit_code = result.as_ref().ok().copied();
+        let resource_usage = self.resource_usage(result.is_ok());
         let teardown_result = self.run_teardown(true);
+        if let Some(usage) = resource_usage {
+            self.output_metadata
+                .get_or_insert_with(Default::default)
+                .resource_usage = Some(usage);
+        }
         capture_output::combine_process_and_teardown_results(result, teardown_result)
     }
 }

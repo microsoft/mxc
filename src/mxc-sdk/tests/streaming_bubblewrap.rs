@@ -282,3 +282,189 @@ fn streaming_bubblewrap_reports_no_output_metadata() {
         "Bubblewrap should report no structured output metadata"
     );
 }
+
+/// A raw `1.1.0-alpha` Bubblewrap request with the given `resources` section.
+fn bwrap_resources_json(command: &str, resources: &str) -> String {
+    serde_json::json!({
+        "version": "1.1.0-alpha",
+        "containment": "bubblewrap",
+        "process": { "commandLine": command, "timeout": 60_000 },
+        "resources": serde_json::from_str::<serde_json::Value>(resources).unwrap(),
+    })
+    .to_string()
+}
+
+/// Run `command` under `resources`, returning its exit and resource usage.
+fn run_with_resources(
+    command: &str,
+    resources: &str,
+) -> (WaitResult, String, Option<mxc_sdk::v1::ResourceUsage>) {
+    use std::io::Read;
+
+    let mut proc =
+        mxc_sdk::__ffi::spawn_container_json(&bwrap_resources_json(command, resources), false)
+            .expect("spawn");
+    let mut stdout = proc.take_stdout().expect("stdout available");
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).expect("read stdout");
+    let outcome = proc.wait().expect("wait");
+    let usage = proc
+        .output_metadata()
+        .and_then(|metadata| metadata.resource_usage);
+    (outcome, out, usage)
+}
+
+#[test]
+fn streaming_bubblewrap_empty_resources_report_usage_without_limits() {
+    if !bwrap_available() {
+        return;
+    }
+    let (outcome, out, usage) = run_with_resources(
+        "i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done; ulimit -t; ulimit -d",
+        "{}",
+    );
+
+    assert_eq!(outcome, WaitResult::Exited(0));
+    assert_eq!(out, "unlimited\nunlimited\n");
+    let usage = usage.expect("resource usage reported");
+    assert!(
+        usage.user_cpu_time_us + usage.system_cpu_time_us > 0,
+        "{usage:?}"
+    );
+    assert!(usage.peak_memory_bytes.is_some_and(|bytes| bytes > 0));
+    assert_eq!(usage.limit_exceeded, None);
+}
+
+#[test]
+fn streaming_bubblewrap_usage_includes_waited_for_descendants() {
+    if !bwrap_available() {
+        return;
+    }
+    let busy = "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done";
+    let (outcome, _, usage) =
+        run_with_resources(&format!("sh -c '{busy}' & sh -c '{busy}' & wait"), "{}");
+
+    assert_eq!(outcome, WaitResult::Exited(0));
+    let alone = run_with_resources(busy, "{}").2.expect("usage");
+    let both = usage.expect("usage");
+    let total =
+        |usage: &mxc_sdk::v1::ResourceUsage| usage.user_cpu_time_us + usage.system_cpu_time_us;
+    assert!(
+        total(&both) > total(&alone) * 3 / 2,
+        "two busy children ({both:?}) should cost more than one ({alone:?})"
+    );
+}
+
+#[test]
+fn streaming_bubblewrap_cpu_time_limit_stops_the_workload() {
+    if !bwrap_available() {
+        return;
+    }
+    let start = std::time::Instant::now();
+    let (outcome, _, usage) = run_with_resources("while :; do :; done", r#"{"cpuTimeMs": 1000}"#);
+
+    assert_ne!(outcome, WaitResult::Exited(0));
+    assert!(start.elapsed() < std::time::Duration::from_secs(30));
+    let usage = usage.expect("resource usage reported");
+    assert_eq!(
+        usage.limit_exceeded,
+        Some(mxc_sdk::v1::ResourceLimit::CpuTime)
+    );
+    assert!(usage.user_cpu_time_us + usage.system_cpu_time_us >= 900_000);
+}
+
+#[test]
+fn streaming_bubblewrap_cpu_time_limit_stops_a_workload_that_ignores_sigxcpu() {
+    if !bwrap_available() {
+        return;
+    }
+    let start = std::time::Instant::now();
+    let (outcome, _, usage) = run_with_resources(
+        "trap '' XCPU; while :; do :; done",
+        r#"{"cpuTimeMs": 1000}"#,
+    );
+
+    assert_ne!(outcome, WaitResult::Exited(0));
+    assert!(start.elapsed() < std::time::Duration::from_secs(30));
+    assert_eq!(
+        usage.expect("resource usage reported").limit_exceeded,
+        Some(mxc_sdk::v1::ResourceLimit::CpuTime)
+    );
+}
+
+#[test]
+fn streaming_bubblewrap_cpu_time_limit_is_rounded_up_to_seconds() {
+    if !bwrap_available() {
+        return;
+    }
+    let (outcome, out, usage) = run_with_resources("ulimit -t", r#"{"cpuTimeMs": 1500}"#);
+
+    assert_eq!(outcome, WaitResult::Exited(0));
+    assert_eq!(out, "2\n");
+    assert_eq!(usage.expect("usage").limit_exceeded, None);
+}
+
+#[test]
+fn streaming_bubblewrap_memory_limit_fails_large_allocations() {
+    if !bwrap_available() {
+        return;
+    }
+    let allocate = "python3 -c 'bytearray(512 * 1024 * 1024); print(\"allocated\")'";
+    let (outcome, out, _) = run_with_resources(allocate, "{}");
+    if outcome != WaitResult::Exited(0) {
+        println!("SKIPPED: python3 cannot allocate 512 MB in the sandbox: {outcome:?}");
+        return;
+    }
+    assert_eq!(out, "allocated\n");
+
+    let (outcome, out, usage) =
+        run_with_resources(&format!("ulimit -d; {allocate}"), r#"{"memoryMb": 256}"#);
+
+    assert_eq!(out, "262144\n", "RLIMIT_DATA is reported in KiB");
+    assert_ne!(outcome, WaitResult::Exited(0));
+    assert_eq!(usage.expect("usage").limit_exceeded, None);
+}
+
+#[test]
+fn streaming_bubblewrap_priority_sets_the_nice_value() {
+    if !bwrap_available() {
+        return;
+    }
+    // The workload never gets a higher priority than the test runner, which
+    // some CI hosts start above normal.
+    // SAFETY: getpriority only queries the calling process.
+    let parent = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+    for (priority, nice) in [
+        ("normal", parent),
+        ("low", parent.max(10)),
+        ("idle", parent.max(19)),
+    ] {
+        let nice = nice.to_string();
+        let (outcome, out, _) = run_with_resources(
+            "cut -d ' ' -f 19 /proc/self/stat",
+            &format!(r#"{{"priority": "{priority}"}}"#),
+        );
+
+        assert_eq!(outcome, WaitResult::Exited(0));
+        assert_eq!(out.trim(), nice, "{priority}");
+    }
+}
+
+#[test]
+fn streaming_bubblewrap_rejects_max_processes() {
+    if !bwrap_available() {
+        return;
+    }
+    let error = mxc_sdk::__ffi::spawn_container_json(
+        &bwrap_resources_json("true", r#"{"maxProcesses": 8}"#),
+        false,
+    )
+    .err()
+    .expect("maxProcesses must be rejected");
+
+    assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
+    assert!(
+        error.message.contains("resources.maxProcesses"),
+        "{error:?}"
+    );
+}

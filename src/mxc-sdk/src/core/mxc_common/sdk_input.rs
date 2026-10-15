@@ -181,6 +181,7 @@ impl SdkStateAwareInput {
                 network_proxy: runtime.network_proxy,
             }),
             ui: None,
+            resources: None,
             seatbelt: None,
             telemetry: self.telemetry_opt_in.map(|enabled| wire::Telemetry {
                 enabled: Some(enabled),

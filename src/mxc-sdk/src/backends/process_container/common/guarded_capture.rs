@@ -290,6 +290,7 @@ fn finalize_analysis(
                     metadata: Some(SandboxOutputMetadata {
                         capture_denials: Some(success),
                         capture_denials_error: None,
+                        resource_usage: None,
                     }),
                     result: Ok(()),
                 }
@@ -307,6 +308,7 @@ fn finalize_analysis(
                             message: message.clone(),
                             etl_path: String::new(),
                         }),
+                        resource_usage: None,
                     }),
                     result: Err(message),
                 }
@@ -326,6 +328,7 @@ fn finalize_analysis(
                     message: message.clone(),
                     etl_path,
                 }),
+                resource_usage: None,
             });
             GuardedCaptureFinalization {
                 metadata,

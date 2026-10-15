@@ -473,6 +473,7 @@ mod tests {
                     message: "decode failed".to_string(),
                     etl_path: r"C:\retained\capture.etl".to_string(),
                 }),
+                resource_usage: None,
             })),
             ..Default::default()
         };
@@ -744,6 +745,7 @@ mod tests {
                     etl_path: Some(etl_path.to_string_lossy().into_owned()),
                 }),
                 capture_denials_error: None,
+                resource_usage: None,
             })),
             ..Default::default()
         }

@@ -894,6 +894,10 @@
           "$ref": "#/definitions/ProcessContainer",
           "description": "Optional ProcessContainer settings."
         },
+        "resources": {
+          "$ref": "#/definitions/Resources",
+          "description": "Optional resource limits and usage reporting."
+        },
         "runtimeConfig": {
           "$ref": "#/definitions/RuntimeConfig",
           "description": "Optional runtime configuration settings."
@@ -1223,6 +1227,60 @@
         "provision"
       ],
       "type": "string"
+    },
+    "ResourcePriority": {
+      "oneOf": [
+        {
+          "description": "Normal",
+          "enum": [
+            "normal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Low",
+          "enum": [
+            "low"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Idle",
+          "enum": [
+            "idle"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Resources": {
+      "additionalProperties": false,
+      "description": "Resource limits for the workload, and a request for its resource usage.\n\nSupplying this object, even empty, asks the backend to report the workload's resource usage with its result. Every field is optional; an omitted field leaves that resource unlimited.",
+      "properties": {
+        "cpuTimeMs": {
+          "description": "CPU time each process in the workload may use, in milliseconds.",
+          "maximum": 18446744073709551615,
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "maxProcesses": {
+          "description": "Number of processes the workload may run at the same time.",
+          "maximum": 4294967295,
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "memoryMb": {
+          "description": "Memory each process in the workload may commit, in megabytes.",
+          "maximum": 18446744073709551615,
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "priority": {
+          "$ref": "#/definitions/ResourcePriority",
+          "description": "Scheduling priority for every process in the workload."
+        }
+      },
+      "type": "object"
     },
     "RuntimeConfig": {
       "additionalProperties": false,

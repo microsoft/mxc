@@ -8,8 +8,8 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, SeatbeltConfig,
-    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, ResourcePolicy,
+    SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
@@ -1592,6 +1592,13 @@ fn normalize_common_request_ir(
     // otherwise indistinguishable from an absent one, and a backend that cannot
     // honor UI restrictions has no way to tell "caller asked for lockdown" from
     // "caller said nothing". Twin of `network_specified`.
+    policy.resources = cfg.resources.map(|raw| ResourcePolicy {
+        cpu_time_ms: raw.cpu_time_ms,
+        memory_mb: raw.memory_mb,
+        max_processes: raw.max_processes,
+        priority: raw.priority.unwrap_or_default(),
+    });
+
     policy.ui_specified = cfg.ui.is_some();
     if let Some(raw_ui) = cfg.ui {
         let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
@@ -4672,5 +4679,62 @@ mod tests {
                 .contains("Overriding policy process.commandLine"),
             "one-shot overrides retain their primary diagnostic"
         );
+    }
+
+    fn one_shot_policy(json: &str) -> ContainerPolicy {
+        match parse_exact_for_test(json).unwrap() {
+            MxcRequest::OneShot(request) => request.policy,
+            MxcRequest::StateAware(_) => panic!("expected a one-shot request"),
+        }
+    }
+
+    #[test]
+    fn resources_normalize_into_the_container_policy() {
+        let policy = one_shot_policy(
+            r#"{
+                "version": "1.1.0-alpha",
+                "process": {"commandLine": "echo hello"},
+                "resources": {"cpuTimeMs": 1500, "memoryMb": 256, "maxProcesses": 4, "priority": "idle"}
+            }"#,
+        );
+
+        assert_eq!(
+            policy.resources,
+            Some(ResourcePolicy {
+                cpu_time_ms: Some(1500),
+                memory_mb: Some(256),
+                max_processes: Some(4),
+                priority: crate::mxc_common::models::ResourcePriority::Idle,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_resources_request_usage_without_limits() {
+        let policy = one_shot_policy(
+            r#"{
+                "version": "1.1.0-alpha",
+                "process": {"commandLine": "echo hello"},
+                "resources": {}
+            }"#,
+        );
+
+        assert_eq!(policy.resources, Some(ResourcePolicy::default()));
+    }
+
+    #[test]
+    fn omitted_resources_leave_the_policy_unlimited_and_unreported() {
+        let policy = one_shot_policy(
+            r#"{
+                "version": "1.1.0-alpha",
+                "process": {"commandLine": "echo hello"}
+            }"#,
+        );
+
+        assert_eq!(policy.resources, None);
+        assert!(serde_json::to_value(&policy)
+            .unwrap()
+            .get("resources")
+            .is_none());
     }
 }

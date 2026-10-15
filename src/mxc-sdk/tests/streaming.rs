@@ -659,3 +659,142 @@ fn streaming_honors_sub_500ms_timeout() {
         start.elapsed()
     );
 }
+
+/// A raw `1.1.0-alpha` Seatbelt request with the given `resources` section.
+fn seatbelt_resources_json(command: &str, resources: &str) -> String {
+    serde_json::json!({
+        "version": "1.1.0-alpha",
+        "containment": "seatbelt",
+        "process": { "commandLine": command, "timeout": 60_000 },
+        "resources": serde_json::from_str::<serde_json::Value>(resources).unwrap(),
+    })
+    .to_string()
+}
+
+/// Run `command` under `resources`, returning its exit, stdout, and usage.
+fn run_with_resources(
+    command: &str,
+    resources: &str,
+) -> (WaitResult, String, Option<mxc_sdk::v1::ResourceUsage>) {
+    use std::io::Read;
+
+    let mut proc =
+        mxc_sdk::__ffi::spawn_container_json(&seatbelt_resources_json(command, resources), false)
+            .expect("spawn");
+    let mut stdout = proc.take_stdout().expect("stdout available");
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).expect("read stdout");
+    let outcome = proc.wait().expect("wait");
+    let usage = proc
+        .output_metadata()
+        .and_then(|metadata| metadata.resource_usage);
+    (outcome, out, usage)
+}
+
+#[test]
+fn seatbelt_reports_no_output_metadata_without_resources() {
+    let mut proc = spawn(seatbelt_request("true", 0), Default::default()).expect("spawn");
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
+    assert!(proc.output_metadata().is_none());
+}
+
+#[test]
+fn seatbelt_empty_resources_report_usage_without_limits() {
+    let busy = "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done";
+    let (outcome, out, usage) = run_with_resources(
+        &format!("sh -c '{busy}' & sh -c '{busy}' & wait; ulimit -t"),
+        "{}",
+    );
+
+    assert_eq!(outcome, WaitResult::Exited(0));
+    assert_eq!(out, "unlimited\n");
+    let usage = usage.expect("resource usage reported");
+    assert!(
+        usage.user_cpu_time_us + usage.system_cpu_time_us > 100_000,
+        "the usage includes both waited-for children: {usage:?}"
+    );
+    assert_eq!(usage.peak_memory_bytes, None);
+    assert_eq!(usage.limit_exceeded, None);
+}
+
+#[test]
+fn seatbelt_cpu_time_limit_stops_the_workload() {
+    let start = std::time::Instant::now();
+    let (outcome, _, usage) = run_with_resources("while :; do :; done", r#"{"cpuTimeMs": 1000}"#);
+
+    assert_ne!(outcome, WaitResult::Exited(0));
+    assert!(start.elapsed() < std::time::Duration::from_secs(30));
+    let usage = usage.expect("resource usage reported");
+    assert_eq!(
+        usage.limit_exceeded,
+        Some(mxc_sdk::v1::ResourceLimit::CpuTime)
+    );
+}
+
+#[test]
+fn seatbelt_cpu_time_limit_stops_a_workload_that_ignores_sigxcpu() {
+    let start = std::time::Instant::now();
+    let (outcome, _, usage) = run_with_resources(
+        "perl -e '$SIG{XCPU} = q(IGNORE); 1 while 1'",
+        r#"{"cpuTimeMs": 1000}"#,
+    );
+
+    assert_ne!(outcome, WaitResult::Exited(0));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(30),
+        "macOS sends only SIGXCPU, so MXC must kill the workload itself"
+    );
+    assert_eq!(
+        usage.expect("resource usage reported").limit_exceeded,
+        Some(mxc_sdk::v1::ResourceLimit::CpuTime)
+    );
+}
+
+#[test]
+fn seatbelt_cpu_time_limit_is_rounded_up_to_seconds() {
+    let (outcome, out, usage) = run_with_resources("ulimit -t", r#"{"cpuTimeMs": 1500}"#);
+
+    assert_eq!(outcome, WaitResult::Exited(0));
+    assert_eq!(out, "2\n");
+    assert_eq!(usage.expect("usage").limit_exceeded, None);
+}
+
+#[test]
+fn seatbelt_priority_sets_the_nice_value() {
+    // The workload never gets a higher priority than the test runner, which
+    // some CI hosts start above normal.
+    // SAFETY: getpriority only queries the calling process.
+    let parent = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+    for (priority, nice) in [
+        ("normal", parent),
+        ("low", parent.max(10)),
+        ("idle", parent.max(19)),
+    ] {
+        let nice = nice.to_string();
+        let (outcome, out, _) = run_with_resources(
+            "perl -e 'print getpriority(0, 0), \"\\n\"'",
+            &format!(r#"{{"priority": "{priority}"}}"#),
+        );
+
+        assert_eq!(outcome, WaitResult::Exited(0));
+        assert_eq!(out.trim(), nice, "{priority}");
+    }
+}
+
+#[test]
+fn seatbelt_rejects_memory_and_max_processes() {
+    for (resources, field) in [
+        (r#"{"memoryMb": 512}"#, "resources.memoryMb"),
+        (r#"{"maxProcesses": 8}"#, "resources.maxProcesses"),
+    ] {
+        let error = mxc_sdk::__ffi::spawn_container_json(
+            &seatbelt_resources_json("true", resources),
+            false,
+        )
+        .err()
+        .expect("the limit must be rejected");
+
+        assert_eq!(error.code, mxc_sdk::v1::ErrorCode::PolicyValidation);
+        assert!(error.message.contains(field), "{error:?}");
+    }
+}

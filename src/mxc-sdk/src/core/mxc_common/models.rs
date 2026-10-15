@@ -733,6 +733,39 @@ pub struct ContainerPolicy {
     /// `Some`, the runner records the sandboxed process's ungranted access
     /// attempts to a learning-mode ETL trace. `None` disables capture.
     pub capture_denials: Option<CaptureDenialsConfig>,
+    /// Resource limits (from `resources`). `Some`, even with every limit
+    /// unset, also asks the backend to report the workload's resource usage.
+    /// `None` leaves resources unlimited and unreported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourcePolicy>,
+}
+
+/// Scheduling priority for a workload (from `resources.priority`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResourcePriority {
+    /// The host's normal priority.
+    #[default]
+    Normal,
+    /// Below normal priority: nice 10 on Unix, `BELOW_NORMAL_PRIORITY_CLASS`
+    /// on Windows.
+    Low,
+    /// The lowest priority: nice 19 on Unix, `IDLE_PRIORITY_CLASS` on Windows.
+    Idle,
+}
+
+/// Resource limits for a workload (from `resources`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourcePolicy {
+    /// CPU time each process may use, in milliseconds.
+    pub cpu_time_ms: Option<u64>,
+    /// Memory each process may commit, in megabytes.
+    pub memory_mb: Option<u64>,
+    /// Number of processes the workload may run at the same time.
+    pub max_processes: Option<u32>,
+    /// Scheduling priority for every process in the workload.
+    pub priority: ResourcePriority,
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
@@ -1237,6 +1270,41 @@ pub struct SandboxOutputMetadata {
     /// Failure details and retained ETL location when capture finalization fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_denials_error: Option<CaptureDenialsErrorOutput>,
+    /// Resources the workload used, reported when the request supplied
+    /// `resources` and the backend could measure them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_usage: Option<ResourceUsage>,
+}
+
+/// A resource limit from the request's `resources` policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResourceLimit {
+    /// `resources.cpuTimeMs`.
+    CpuTime,
+    /// `resources.memoryMb`.
+    Memory,
+    /// `resources.maxProcesses`.
+    MaxProcesses,
+}
+
+/// Resources a workload used, measured by its backend after it exited.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceUsage {
+    /// User-mode CPU time of the workload and every descendant it waited for,
+    /// in microseconds.
+    pub user_cpu_time_us: u64,
+    /// Kernel-mode CPU time of the workload and every descendant it waited
+    /// for, in microseconds.
+    pub system_cpu_time_us: u64,
+    /// Peak memory of the workload's largest process, in bytes, when the
+    /// backend can measure it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_bytes: Option<u64>,
+    /// The limit the workload ran into, when the backend can tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_exceeded: Option<ResourceLimit>,
 }
 
 /// Structured diagnostics for a failed captureDenials finalization.
@@ -1561,6 +1629,7 @@ mod tests {
                 message: "decode failed".to_string(),
                 etl_path: "capture.etl".to_string(),
             }),
+            resource_usage: None,
         };
 
         let value = serde_json::to_value(metadata).expect("serialize metadata");

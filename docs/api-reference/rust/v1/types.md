@@ -504,6 +504,39 @@ Structured outputs produced by optional container features.
 pub struct ExecutionMetadata {
   pub capture_denials: Option<CaptureDenialsResult>,
   pub capture_denials_error: Option<CaptureDenialsError>,
+  pub resource_usage: Option<ResourceUsage>,
+}
+```
+
+`resource_usage` is present when the request supplied the development
+contract's `resources` section and the backend measured the workload. The typed
+V1 request targets `1.0.0`, which has no `resources`, so it is reached through
+"MXC request JSON" with version `1.1.0-alpha`.
+
+
+## `mxc_sdk::v1::ResourceUsage`
+
+Resources a workload used, measured by its backend after it exited.
+
+```rust
+pub struct ResourceUsage {
+  pub user_cpu_time_us: u64,
+  pub system_cpu_time_us: u64,
+  pub peak_memory_bytes: Option<u64>,
+  pub limit_exceeded: Option<ResourceLimit>,
+}
+```
+
+
+## `mxc_sdk::v1::ResourceLimit`
+
+A resource limit from the `resources` policy that a workload ran into.
+
+```rust
+pub enum ResourceLimit {
+  CpuTime,
+  Memory,
+  MaxProcesses,
 }
 ```
 

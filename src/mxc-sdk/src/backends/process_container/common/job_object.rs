@@ -15,21 +15,30 @@ use std::mem::size_of;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
-    SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT, JOB_OBJECT_UILIMIT_DESKTOP,
-    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
+    JobObjectBasicAccountingInformation, JobObjectBasicUIRestrictions,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PRIORITY_CLASS,
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME, JOB_OBJECT_UILIMIT,
+    JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
     JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
     JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
 };
-use windows::Win32::System::SystemServices::JOB_OBJECT_UILIMIT_IME;
+use windows::Win32::System::SystemServices::{
+    JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT, JOB_OBJECT_MSG_END_OF_PROCESS_TIME,
+    JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT, JOB_OBJECT_UILIMIT_IME,
+};
+use windows::Win32::System::Threading::{BELOW_NORMAL_PRIORITY_CLASS, IDLE_PRIORITY_CLASS};
+use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED};
 use windows_core::PCWSTR;
 
 use crate::mxc_common::error::WxcError;
+use crate::mxc_common::models::{ResourceLimit, ResourcePolicy, ResourcePriority, ResourceUsage};
 use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
 
 /// Helper for loading `RtlGetVersion` from `ntdll.dll` to get the true
@@ -111,6 +120,10 @@ const MIN_BUILD_FOR_IME_LIMIT: u32 = 22621;
 /// UI-limit set on those builds.
 const MIN_BUILD_FOR_INJECTION_LIMIT: u32 = 26100;
 const JOB_EMPTY_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Job object times are counted in 100-nanosecond intervals.
+const TICKS_PER_MILLISECOND: u64 = 10_000;
+const TICKS_PER_MICROSECOND: i64 = 10;
+const BYTES_PER_MB: u64 = 1024 * 1024;
 const JOB_EMPTY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Cached OS build number (queried once via `RtlGetVersion`).
@@ -228,6 +241,50 @@ pub fn to_job_object_uilimit_mask(r: &EffectiveUiRestrictions) -> u32 {
 /// restrictions. The job HANDLE is closed when this value is dropped.
 pub struct UiJobObject {
     handle: HANDLE,
+    /// Receives the job's limit notifications once resource limits apply.
+    completion_port: Option<HANDLE>,
+}
+
+/// Write `policy`'s limits into `limits`, keeping the flags already set.
+fn set_resource_limits(limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION, policy: &ResourcePolicy) {
+    let basic = &mut limits.BasicLimitInformation;
+    if let Some(ms) = policy.cpu_time_ms {
+        basic.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
+        basic.PerProcessUserTimeLimit =
+            i64::try_from(ms.saturating_mul(TICKS_PER_MILLISECOND)).unwrap_or(i64::MAX);
+    }
+    if let Some(processes) = policy.max_processes {
+        basic.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        basic.ActiveProcessLimit = processes;
+    }
+    let priority_class = match policy.priority {
+        ResourcePriority::Normal => None,
+        ResourcePriority::Low => Some(BELOW_NORMAL_PRIORITY_CLASS),
+        ResourcePriority::Idle => Some(IDLE_PRIORITY_CLASS),
+    };
+    if let Some(priority_class) = priority_class {
+        basic.LimitFlags |= JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+        basic.PriorityClass = priority_class.0;
+    }
+    if let Some(mb) = policy.memory_mb {
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        limits.ProcessMemoryLimit =
+            usize::try_from(mb.saturating_mul(BYTES_PER_MB)).unwrap_or(usize::MAX);
+    }
+}
+
+/// The limit a job notification message reports, if it reports one.
+fn limit_for_message(message: u32) -> Option<ResourceLimit> {
+    match message {
+        JOB_OBJECT_MSG_END_OF_PROCESS_TIME => Some(ResourceLimit::CpuTime),
+        JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT => Some(ResourceLimit::Memory),
+        JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT => Some(ResourceLimit::MaxProcesses),
+        _ => None,
+    }
+}
+
+fn ticks_to_micros(ticks: i64) -> u64 {
+    u64::try_from(ticks / TICKS_PER_MICROSECOND).unwrap_or(0)
 }
 
 impl UiJobObject {
@@ -254,7 +311,126 @@ impl UiJobObject {
                 "SetInformationJobObject(KILL_ON_JOB_CLOSE): {error}"
             )));
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            completion_port: None,
+        })
+    }
+
+    fn extended_limits(&self) -> Result<JOBOBJECT_EXTENDED_LIMIT_INFORMATION, WxcError> {
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        // SAFETY: `self.handle` is a valid job handle and `limits` matches the
+        // requested information class and buffer length.
+        unsafe {
+            QueryInformationJobObject(
+                Some(self.handle),
+                JobObjectExtendedLimitInformation,
+                &mut limits as *mut _ as *mut c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                None,
+            )
+        }
+        .map_err(|error| {
+            WxcError::Process(format!("QueryInformationJobObject(ExtendedLimit): {error}"))
+        })?;
+        Ok(limits)
+    }
+
+    /// Applies `policy`'s resource limits to every process in the job and
+    /// starts collecting the job's limit notifications for
+    /// [`Self::resource_usage`]. Call before the first process is resumed.
+    ///
+    /// CPU time is the per-process user-mode time limit, memory the
+    /// per-process committed-memory limit, and processes the active-process
+    /// limit; the priority class applies to every process in the job.
+    pub fn apply_resource_limits(&mut self, policy: &ResourcePolicy) -> Result<(), WxcError> {
+        let mut limits = self.extended_limits()?;
+        set_resource_limits(&mut limits, policy);
+        // SAFETY: `limits` is a valid, fully-initialized struct living on the
+        // stack for the duration of the call, with its size passed alongside.
+        unsafe {
+            SetInformationJobObject(
+                self.handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        }
+        .map_err(|error| WxcError::Process(format!("SetInformationJobObject(limits): {error}")))?;
+
+        // SAFETY: a new port that is not associated with any file handle.
+        let port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1) }
+            .map_err(|error| WxcError::Process(format!("CreateIoCompletionPort: {error}")))?;
+        self.completion_port = Some(port);
+        let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: std::ptr::null_mut(),
+            CompletionPort: port,
+        };
+        // SAFETY: `association` lives on the stack for the duration of the
+        // call, and the port outlives the job association (both close on drop).
+        unsafe {
+            SetInformationJobObject(
+                self.handle,
+                JobObjectAssociateCompletionPortInformation,
+                &association as *const _ as *const c_void,
+                size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+            )
+        }
+        .map_err(|error| {
+            WxcError::Process(format!(
+                "SetInformationJobObject(AssociateCompletionPort): {error}"
+            ))
+        })
+    }
+
+    /// Returns the CPU time and peak memory of every process the job ever
+    /// held, and the first limit the job reported a process ran into.
+    pub fn resource_usage(&self) -> Result<ResourceUsage, WxcError> {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        // SAFETY: `self.handle` is a valid job handle and `accounting` matches
+        // the requested information class and buffer length.
+        unsafe {
+            QueryInformationJobObject(
+                Some(self.handle),
+                JobObjectBasicAccountingInformation,
+                &mut accounting as *mut _ as *mut c_void,
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                None,
+            )
+        }
+        .map_err(|error| {
+            WxcError::Process(format!(
+                "QueryInformationJobObject(BasicAccounting): {error}"
+            ))
+        })?;
+        let limits = self.extended_limits()?;
+        Ok(ResourceUsage {
+            user_cpu_time_us: ticks_to_micros(accounting.TotalUserTime),
+            system_cpu_time_us: ticks_to_micros(accounting.TotalKernelTime),
+            peak_memory_bytes: u64::try_from(limits.PeakProcessMemoryUsed).ok(),
+            limit_exceeded: self.first_limit_notification(),
+        })
+    }
+
+    fn first_limit_notification(&self) -> Option<ResourceLimit> {
+        let port = self.completion_port?;
+        let mut first = None;
+        loop {
+            let mut message = 0u32;
+            let mut key = 0usize;
+            let mut overlapped: *mut OVERLAPPED = std::ptr::null_mut();
+            // SAFETY: every out-pointer is valid for the call; a zero timeout
+            // returns an error once the queue is empty.
+            let dequeued = unsafe {
+                GetQueuedCompletionStatus(port, &mut message, &mut key, &mut overlapped, 0)
+            };
+            if dequeued.is_err() {
+                return first;
+            }
+            if first.is_none() {
+                first = limit_for_message(message);
+            }
+        }
     }
 
     /// Applies the given UI restrictions via `JobObjectBasicUIRestrictions`.
@@ -414,6 +590,13 @@ impl UiJobObject {
 
 impl Drop for UiJobObject {
     fn drop(&mut self) {
+        if let Some(port) = self.completion_port.take() {
+            // SAFETY: the port was created by CreateIoCompletionPort and is
+            // owned by this value.
+            unsafe {
+                let _ = CloseHandle(port);
+            }
+        }
         if !self.handle.is_invalid() {
             // SAFETY: `self.handle` was produced by CreateJobObjectW and has
             // not been closed elsewhere — `UiJobObject` owns it.
@@ -689,5 +872,176 @@ mod tests {
         let build = os_build_number();
         // Any Windows 10+ build number should be >= 10240.
         assert!(build >= 10240, "unexpected build number: {build}");
+    }
+
+    fn spawn_cmd(command: &str) -> std::process::Child {
+        Command::new("cmd.exe")
+            .args(["/C", command])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn child")
+    }
+
+    fn wait_for_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(status) = child.try_wait().expect("query child") {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "child outlived its limit");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn resource_limits_keep_kill_on_job_close() {
+        let mut job = UiJobObject::new().expect("create job");
+        job.apply_resource_limits(&ResourcePolicy {
+            cpu_time_ms: Some(1500),
+            memory_mb: Some(256),
+            max_processes: Some(4),
+            priority: ResourcePriority::Low,
+        })
+        .expect("apply limits");
+
+        let limits = job.extended_limits().expect("query limits");
+        let basic = limits.BasicLimitInformation;
+        for flag in [
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_PROCESS_TIME,
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+            JOB_OBJECT_LIMIT_PRIORITY_CLASS,
+        ] {
+            assert_eq!(basic.LimitFlags & flag, flag, "{flag:?}");
+        }
+        assert_eq!(basic.PerProcessUserTimeLimit, 15_000_000);
+        assert_eq!(limits.ProcessMemoryLimit, 256 * 1024 * 1024);
+        assert_eq!(basic.ActiveProcessLimit, 4);
+        assert_eq!(basic.PriorityClass, BELOW_NORMAL_PRIORITY_CLASS.0);
+    }
+
+    #[test]
+    fn priority_class_applies_to_assigned_processes() {
+        use windows::Win32::System::Threading::GetPriorityClass;
+
+        let mut job = UiJobObject::new().expect("create job");
+        job.apply_resource_limits(&ResourcePolicy {
+            priority: ResourcePriority::Idle,
+            ..Default::default()
+        })
+        .expect("apply limits");
+        let mut child = spawn_cmd("ping -n 999 127.0.0.1 >nul");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        // SAFETY: the child handle stays valid until the child is reaped.
+        let class = unsafe { GetPriorityClass(HANDLE(child.as_raw_handle())) };
+        assert_eq!(class, IDLE_PRIORITY_CLASS.0);
+
+        job.terminate_and_wait(u32::MAX).expect("terminate");
+        child.wait().expect("reap child");
+    }
+
+    #[test]
+    fn cpu_time_limit_ends_the_process_and_is_reported() {
+        let mut job = UiJobObject::new().expect("create job");
+        job.apply_resource_limits(&ResourcePolicy {
+            cpu_time_ms: Some(500),
+            ..Default::default()
+        })
+        .expect("apply limits");
+        let mut child = spawn_cmd("for /l %i in (0,0,1) do @rem");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        let status = wait_for_exit(&mut child);
+        assert!(!status.success());
+        job.wait_for_empty().expect("job drains");
+
+        let usage = job.resource_usage().expect("usage");
+        assert_eq!(usage.limit_exceeded, Some(ResourceLimit::CpuTime));
+        assert!(usage.user_cpu_time_us >= 500_000, "{usage:?}");
+    }
+
+    #[test]
+    fn active_process_limit_refuses_another_process_and_is_reported() {
+        let mut job = UiJobObject::new().expect("create job");
+        job.apply_resource_limits(&ResourcePolicy {
+            max_processes: Some(1),
+            ..Default::default()
+        })
+        .expect("apply limits");
+        // The first ping may start before the assignment below, outside the
+        // job; the second starts once cmd.exe is the job's only process.
+        let mut child = spawn_cmd("ping -n 2 127.0.0.1 >nul & ping -n 2 127.0.0.1 >nul");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        let status = wait_for_exit(&mut child);
+        assert!(!status.success(), "the second ping.exe must not start");
+        let usage = job.resource_usage().expect("usage");
+        assert_eq!(usage.limit_exceeded, Some(ResourceLimit::MaxProcesses));
+    }
+
+    #[test]
+    fn memory_limit_fails_large_allocations_and_is_reported() {
+        let mut job = UiJobObject::new().expect("create job");
+        job.apply_resource_limits(&ResourcePolicy {
+            memory_mb: Some(128),
+            ..Default::default()
+        })
+        .expect("apply limits");
+        // PowerShell allocates long after startup, so it is in the job by then.
+        let mut child = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Milliseconds 500; try { $bytes = New-Object byte[] (512MB); exit 0 } catch { exit 3 }",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn powershell");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        assert!(!wait_for_exit(&mut child).success());
+        let usage = job.resource_usage().expect("usage");
+        assert_eq!(usage.limit_exceeded, Some(ResourceLimit::Memory));
+    }
+
+    #[test]
+    fn usage_without_a_limit_reports_no_limit() {
+        let mut job = UiJobObject::new().expect("create job");
+        job.apply_resource_limits(&ResourcePolicy::default())
+            .expect("apply limits");
+        let mut child = spawn_cmd("for /l %i in (1,1,20000) do @rem");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        assert!(wait_for_exit(&mut child).success());
+        let usage = job.resource_usage().expect("usage");
+        assert_eq!(usage.limit_exceeded, None);
+        assert!(usage.user_cpu_time_us + usage.system_cpu_time_us > 0);
+        assert!(usage.peak_memory_bytes.is_some_and(|bytes| bytes > 0));
+    }
+
+    #[test]
+    fn limit_messages_map_to_resource_limits() {
+        assert_eq!(
+            limit_for_message(JOB_OBJECT_MSG_END_OF_PROCESS_TIME),
+            Some(ResourceLimit::CpuTime)
+        );
+        assert_eq!(
+            limit_for_message(JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT),
+            Some(ResourceLimit::Memory)
+        );
+        assert_eq!(
+            limit_for_message(JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT),
+            Some(ResourceLimit::MaxProcesses)
+        );
+        assert_eq!(limit_for_message(4), None);
     }
 }

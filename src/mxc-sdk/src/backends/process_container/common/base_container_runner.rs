@@ -41,7 +41,7 @@ use crate::mxc_common::log_symbols::EMOJI_SECTION;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
-    FailurePhase, SandboxOutputMetadata, ScriptResponse,
+    FailurePhase, ResourceUsage, SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -1072,7 +1072,12 @@ impl BaseContainerRunner {
         //
         // The child was created suspended (CREATE_SUSPENDED) and is resumed only
         // after this assignment, so no descendant it spawns can escape the job.
-        let job = match UiJobObject::new().and_then(|job| {
+        let job = match UiJobObject::new().and_then(|mut job| {
+            // Limits apply before the first process joins, so nothing the
+            // workload starts can run unlimited.
+            if let Some(resources) = request.policy.resources.as_ref() {
+                job.apply_resource_limits(resources)?;
+            }
             // Pass the raw handle — `assign_process` borrows it and does not
             // take ownership. Wrapping it in a temporary `OwnedHandle` here
             // would close `pi.hProcess` when the temporary dropped, leaving the
@@ -1191,6 +1196,7 @@ impl BaseContainerRunner {
             thread: OwnedHandle::new(pi.hThread),
             pid: pi.dwProcessId,
             job: Some(job),
+            reports_resource_usage: request.policy.resources.is_some(),
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
@@ -1222,6 +1228,8 @@ struct BaseChild {
     /// the job cannot be set up); the `Option` is retained so `kill()` can keep
     /// a root-only fallback as defense-in-depth.
     job: Option<UiJobObject>,
+    /// Whether the request supplied `resources`, asking for usage.
+    reports_resource_usage: bool,
     stdin_write: Option<OwnedHandle>,
     stdout_read: Option<OwnedHandle>,
     stderr_read: Option<OwnedHandle>,
@@ -1325,6 +1333,8 @@ struct BaseContainerSandboxProcess {
     process: SendOwnedHandle,
     _thread: SendOwnedHandle,
     job: Option<UiJobObject>,
+    /// Whether the request supplied `resources`, asking for usage.
+    reports_resource_usage: bool,
     pid: u32,
     stdin: Option<PipeWriter>,
     stdout: Option<InterruptiblePipeReader>,
@@ -1381,6 +1391,7 @@ impl BaseContainerSandboxProcess {
             process,
             _thread: thread,
             job: child.job.take(),
+            reports_resource_usage: child.reports_resource_usage,
             pid: child.pid,
             stdin,
             stdout,
@@ -1513,6 +1524,7 @@ impl BaseContainerSandboxProcess {
                                     .map(|path| path.to_string_lossy().into_owned())
                                     .unwrap_or_default(),
                             }),
+                            resource_usage: None,
                         });
                         Err(error)
                     }
@@ -1527,6 +1539,7 @@ impl BaseContainerSandboxProcess {
                                     message: error.to_string(),
                                     etl_path: etl_path.to_string_lossy().into_owned(),
                                 }),
+                                resource_usage: None,
                             });
                         }
                         Err(error)
@@ -1535,6 +1548,7 @@ impl BaseContainerSandboxProcess {
                         self.output_metadata = Some(SandboxOutputMetadata {
                             capture_denials: Some(metadata.clone()),
                             capture_denials_error: None,
+                            resource_usage: None,
                         });
                         Ok(Some(metadata))
                     }
@@ -1543,6 +1557,7 @@ impl BaseContainerSandboxProcess {
                             self.output_metadata = Some(SandboxOutputMetadata {
                                 capture_denials: Some(metadata.clone()),
                                 capture_denials_error: None,
+                                resource_usage: None,
                             });
                         } else if retain_etl && etl_was_sealed {
                             if let Some(etl_path) = etl_path.as_deref() {
@@ -1552,6 +1567,7 @@ impl BaseContainerSandboxProcess {
                                         message: error.to_string(),
                                         etl_path: etl_path.to_string_lossy().into_owned(),
                                     }),
+                                    resource_usage: None,
                                 });
                             }
                         }
@@ -1640,6 +1656,19 @@ impl BaseContainerSandboxProcess {
                 .i64("error_code", error.code().0 as i64);
             self.audit_logger.log_audit_event(&record);
         }
+    }
+
+    /// The job's resource usage when the request asked for it. A run that
+    /// MXC ended, by timeout or kill, reports no limit.
+    fn resource_usage(&self, natural_exit: bool) -> Option<ResourceUsage> {
+        if !self.reports_resource_usage {
+            return None;
+        }
+        let mut usage = self.job.as_ref()?.resource_usage().ok()?;
+        if !natural_exit {
+            usage.limit_exceeded = None;
+        }
+        Some(usage)
     }
 
     fn timeout_result(&mut self) -> std::io::Result<i32> {
@@ -1962,7 +1991,13 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         // Record the child's exit code so `run_teardown` can stamp it into the
         // denials summary. On a timeout / wait failure there is no exit code.
         self.last_exit_code = result.as_ref().ok().copied();
+        let resource_usage = self.resource_usage(result.is_ok());
         let teardown_result = self.run_teardown(true);
+        if let Some(usage) = resource_usage {
+            self.output_metadata
+                .get_or_insert_with(Default::default)
+                .resource_usage = Some(usage);
+        }
         combine_process_and_teardown_results(result, teardown_result)
     }
 }

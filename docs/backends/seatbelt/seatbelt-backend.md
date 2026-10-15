@@ -79,6 +79,8 @@ remains deny rather than inheriting ingress allow.
 | Proxy peer identity pinning | ❌ | Rejected — not supported |
 | Named containers, attach, lifecycle | ❌ | Not applicable — process-scoped |
 | Caller-controlled PTY | ✅ | Direct `exec` only; incompatible with `guiAccess` and legacy `launchMethod: "open"` |
+| CPU time limit and priority (`resources`) | ✅ | `RLIMIT_CPU` plus a watchdog, and a nice value; see [Resource limits](#resource-limits) |
+| Memory or process-count limit (`resources`) | ❌ | Rejected — macOS rejects memory rlimits, and has no per-workload process counter |
 
 The short version: **Seatbelt gives you an on/off switch for outbound network
 plus a loopback exception. It has no concept of "this host but not that one."**
@@ -342,6 +344,29 @@ combined with `runtimeConfig.networkProxy`.
 | `ui.disable: true` (default) | Denies mach-lookup of `com.apple.windowserver.active`, `com.apple.windowserver.session`, and `com.apple.coreservices.launchservicesd` |
 | `ui.clipboard: "none"` (default) | Denies mach-lookup of `com.apple.pasteboard.1` |
 | `ui.injection: false` (default) | Denies `iokit-open` of `IOHIDLibUserClient` |
+
+## Resource limits
+
+The development contract's `resources` section (see
+[Resource Limits](../../schema.md#resource-limits)) is applied to the process
+MXC launches, and every process it starts inherits it:
+
+- `cpuTimeMs` sets `RLIMIT_CPU`, rounded up to whole seconds. macOS answers
+  the limit with a single `SIGXCPU`, which a program can catch or ignore, and
+  never escalates. A watchdog therefore checks the workload's session (or, with
+  inherited stdio, its process group) every 100 ms and kills any member whose
+  own CPU time reached the limit. Like the timeout's tree kill, it does not
+  reach a process that leaves the session or group.
+- `priority` sets nice 10 (`low`) or 19 (`idle`).
+- `memoryMb` is rejected: macOS refuses `RLIMIT_DATA`, `RLIMIT_AS`, and
+  `RLIMIT_RSS` with `EINVAL`.
+- `maxProcesses` is rejected: macOS has no per-workload process counter, and
+  `RLIMIT_NPROC` counts every process of the user.
+
+A run with `resources` reports `resourceUsage` in its output metadata. The CPU
+times come from `proc_pid_rusage` on the exited process before MXC reaps it,
+and include every descendant it waited for. `peakMemoryBytes` is omitted:
+macOS reports the exited process's own peak footprint, not its descendants'.
 
 ## Seatbelt-specific options
 
@@ -639,6 +664,14 @@ deliberate: the alternative is a rule that matches nothing, which for
 | `guiAccess: true` with `ui.disable: true`, or with no `ui` section | The GUI rules are only emitted when UI is enabled, so the request would otherwise be dropped without a word |
 | `guiAccess: true` with piped stdio or a caller-controlled PTY | GUI mode needs inherited stdio and an externally owned terminal |
 | `launchMethod` in a supported contract | The field is retired and rejected during JSON parsing |
+
+#### Resources
+
+| Config | Why it's rejected |
+|---|---|
+| `resources.memoryMb` | macOS rejects memory rlimits |
+| `resources.maxProcesses` | No per-workload process counter |
+| `resources` with the legacy `launchMethod: "open"` | The workload runs inside Terminal.app, not as a child of MXC |
 
 ## Limitations
 

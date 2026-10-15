@@ -26,12 +26,17 @@ use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
+use crate::mxc_common::models::{
+    ExecutionRequest, LaunchMethod, ProxyAddress, ResourceLimit, SandboxOutputMetadata,
+    ScriptResponse,
+};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -41,6 +46,7 @@ use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
+use crate::mxc_unix_resources::{ChildAccounting, UnixResourceLimits};
 
 #[cfg(test)]
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
@@ -152,6 +158,110 @@ fn kill_session_members(session_id: libc::pid_t) -> std::io::Result<()> {
         std::thread::yield_now();
     }
     first_error.map_or(Ok(()), Err)
+}
+
+/// Which processes belong to a workload: the members of the session or the
+/// process group its leader started.
+#[derive(Debug, Clone, Copy)]
+enum Membership {
+    Session(libc::pid_t),
+    Group(libc::pid_t),
+}
+
+impl Membership {
+    fn contains(self, pid: libc::pid_t) -> bool {
+        // SAFETY: `getsid` and `getpgid` only query the process `pid`.
+        match self {
+            Self::Session(session) => (unsafe { libc::getsid(pid) }) == session,
+            Self::Group(group) => (unsafe { libc::getpgid(pid) }) == group,
+        }
+    }
+}
+
+/// Enforces `resources.cpuTimeMs` on every member of the workload.
+///
+/// macOS answers `RLIMIT_CPU` with a single `SIGXCPU`, which a program can
+/// catch or ignore, and never escalates to `SIGKILL`. The watchdog kills any
+/// member whose own CPU time reaches the limit, so the limit holds against
+/// such a program too. Like the timeout's tree kill, it reaches the processes
+/// that stay in the workload's session or process group.
+struct CpuTimeWatchdog {
+    stop: Arc<AtomicBool>,
+    fired: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CpuTimeWatchdog {
+    const INTERVAL: Duration = Duration::from_millis(100);
+
+    fn start(membership: Membership, limit_us: u64) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let fired = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            let fired = Arc::clone(&fired);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    if kill_members_over_cpu_time(membership, limit_us).unwrap_or(false) {
+                        fired.store(true, Ordering::Release);
+                    }
+                    std::thread::sleep(Self::INTERVAL);
+                }
+            })
+        };
+        Self {
+            stop,
+            fired,
+            thread: Some(thread),
+        }
+    }
+
+    /// Stop watching. Returns whether the watchdog killed a process.
+    fn finish(&mut self) -> bool {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.fired.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for CpuTimeWatchdog {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// Kill every member of `membership` whose own CPU time reached `limit_us`.
+/// Returns whether it killed one.
+fn kill_members_over_cpu_time(membership: Membership, limit_us: u64) -> std::io::Result<bool> {
+    let mut killed = false;
+    // SAFETY: `getpid` has no preconditions.
+    let current_pid = unsafe { libc::getpid() };
+    for pid in list_all_pids()? {
+        if pid <= 0 || pid == current_pid {
+            continue;
+        }
+        let Some(mut token) = process_audit_token(pid)? else {
+            continue;
+        };
+        if !membership.contains(pid) {
+            continue;
+        }
+        let Some(used) = crate::mxc_unix_resources::process_cpu_time_us(pid)? else {
+            continue;
+        };
+        if used < limit_us {
+            continue;
+        }
+        // SAFETY: libproc validates the token's PID version atomically with
+        // process lookup before signaling.
+        let error = unsafe { proc_signal_with_audittoken(&mut token, libc::SIGKILL) };
+        if error == 0 {
+            killed = true;
+        }
+    }
+    Ok(killed)
 }
 
 fn process_audit_token(pid: libc::pid_t) -> std::io::Result<Option<AuditToken>> {
@@ -282,6 +392,17 @@ impl SandboxBackend for SeatbeltScriptRunner {
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
             .map_err(error_response)?;
 
+        let open_launch = request
+            .seatbelt
+            .as_ref()
+            .is_some_and(|seatbelt| seatbelt.launch_method == LaunchMethod::Open);
+        if open_launch && request.policy.resources.is_some() {
+            return Err(ScriptResponse::rejected(
+                "resources is not supported with Seatbelt launchMethod 'open', which runs the \
+                 workload inside Terminal.app rather than as a child of MXC",
+            ));
+        }
+
         Ok(())
     }
 
@@ -366,7 +487,15 @@ fn spawn_exec(
     // backgrounded group reading the inherited TTY can be SIGTTIN-stopped, so
     // this is limited to timeout-bounded runs, which are inherently
     // non-interactive.
-    let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
+    let resource_limits = request
+        .policy
+        .resources
+        .as_ref()
+        .map(UnixResourceLimits::new);
+    // A CPU time limit needs the same group, for its watchdog.
+    let cpu_time_us = resource_limits.and_then(|limits| limits.cpu_time_us());
+    let new_group =
+        stdio == StdioMode::Inherit && (timeout_from(request).is_some() || cpu_time_us.is_some());
     let (mut command, pty) = build_sandbox_command(
         profile,
         &request.script_code,
@@ -376,6 +505,7 @@ fn spawn_exec(
             StdioMode::Pty(size) => Some(size),
             _ => None,
         },
+        resource_limits,
         logger,
     )?;
 
@@ -459,6 +589,14 @@ fn spawn_exec(
     let started = Instant::now();
     let session_id =
         (new_session || matches!(stdio, StdioMode::Pty(_))).then_some(child.id() as libc::pid_t);
+    let cpu_time_watchdog = cpu_time_us.map(|limit_us| {
+        let leader = child.id() as libc::pid_t;
+        let membership = match session_id {
+            Some(session) => Membership::Session(session),
+            None => Membership::Group(leader),
+        };
+        CpuTimeWatchdog::start(membership, limit_us)
+    });
     Ok(Box::new(SeatbeltSandboxProcess {
         child,
         stdin,
@@ -474,6 +612,9 @@ fn spawn_exec(
         group: new_session || new_group || stdio != StdioMode::Inherit,
         session_id,
         cleanup: Vec::new(),
+        accounting: resource_limits.map(ChildAccounting::new),
+        cpu_time_watchdog,
+        output_metadata: None,
     }))
 }
 
@@ -631,6 +772,9 @@ fn spawn_open(
         group: false,
         session_id: None,
         cleanup: vec![profile_path, helper_path, command_path],
+        accounting: None,
+        cpu_time_watchdog: None,
+        output_metadata: None,
     }))
 }
 
@@ -665,6 +809,11 @@ struct SeatbeltSandboxProcess {
     session_id: Option<libc::pid_t>,
     /// Temp files to remove once the child exits (Open mode); empty otherwise.
     cleanup: Vec<String>,
+    /// Usage accounting, when the request supplied `resources`.
+    accounting: Option<ChildAccounting>,
+    /// Enforces `resources.cpuTimeMs` against programs that ignore `SIGXCPU`.
+    cpu_time_watchdog: Option<CpuTimeWatchdog>,
+    output_metadata: Option<SandboxOutputMetadata>,
 }
 
 impl SeatbeltSandboxProcess {
@@ -677,6 +826,41 @@ impl SeatbeltSandboxProcess {
         let files = std::mem::take(&mut self.cleanup);
         let refs: Vec<&str> = files.iter().map(String::as_str).collect();
         cleanup_files(&refs);
+    }
+
+    /// `Child::try_wait`, first recording the exited child's resource usage
+    /// when the request asked for it, since reaping discards it.
+    fn try_wait_child(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        match self.accounting.as_mut() {
+            Some(accounting) => accounting.try_wait(&mut self.child),
+            None => self.child.try_wait(),
+        }
+    }
+
+    /// Reap the child, waiting at most `timeout`, recording its usage first.
+    fn reap_with_timeout(&mut self, timeout: Option<Duration>) -> Result<ExitStatus, WaitError> {
+        match self.accounting.as_mut() {
+            Some(accounting) => accounting.reap_with_timeout(&mut self.child, timeout),
+            None => wait_with_timeout(&mut self.child, timeout),
+        }
+    }
+
+    /// Publish the recorded resource usage as output metadata.
+    fn finish_accounting(&mut self, natural_exit: bool) {
+        let watchdog_fired = self
+            .cpu_time_watchdog
+            .take()
+            .is_some_and(|mut watchdog| watchdog.finish());
+        if let (true, Some(accounting)) = (watchdog_fired, self.accounting.as_mut()) {
+            accounting.record_enforced(ResourceLimit::CpuTime);
+        }
+        if let Some(metadata) = self
+            .accounting
+            .as_ref()
+            .and_then(|accounting| accounting.output_metadata(natural_exit))
+        {
+            self.output_metadata = Some(metadata);
+        }
     }
 }
 
@@ -707,6 +891,10 @@ impl SandboxProcess for SeatbeltSandboxProcess {
 
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         take_boxed_write(&mut self.stdin)
+    }
+
+    fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.output_metadata.as_ref()
     }
 
     fn is_pty(&self) -> bool {
@@ -790,7 +978,8 @@ impl SandboxProcess for SeatbeltSandboxProcess {
                 "Seatbelt: process timed out",
             ));
         }
-        if let Some(status) = self.child.try_wait()? {
+        if let Some(status) = self.try_wait_child()? {
+            self.finish_accounting(true);
             return Ok(Some(status.code().unwrap_or(-1)));
         }
         if self
@@ -818,6 +1007,11 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
+        // Record the usage of a leader that has already exited before the
+        // checks below reap it.
+        if self.accounting.is_some() {
+            self.try_wait_child()?;
+        }
         if let Some(session_id) = self.session_id {
             return session_kill(&mut self.child, session_id);
         }
@@ -842,20 +1036,23 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
         const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-        let result = if let Some(session_id) = self.session_id {
-            terminate_session_and_reap(&mut self.child, session_id, REAP_TIMEOUT)
-        } else {
-            self.kill()?;
-            match wait_with_timeout(&mut self.child, Some(REAP_TIMEOUT)) {
-                Ok(_) => Ok(()),
-                Err(WaitError::Timeout) => Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Seatbelt: killed process did not become reapable within 5 seconds",
-                )),
-                Err(WaitError::Io(error)) => Err(error),
-            }
+        // `kill` signals the owned session, or the group or process, exactly
+        // as `terminate_session_and_reap` would; the reap then records usage.
+        self.kill()?;
+        let result = match self.reap_with_timeout(Some(REAP_TIMEOUT)) {
+            Ok(_) => Ok(()),
+            Err(WaitError::Timeout) if self.session_id.is_some() => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Seatbelt: killed process did not become reapable before the deadline",
+            )),
+            Err(WaitError::Timeout) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Seatbelt: killed process did not become reapable within 5 seconds",
+            )),
+            Err(WaitError::Io(error)) => Err(error),
         };
         result?;
+        self.finish_accounting(false);
         self.timed_out = true;
         Ok(())
     }
@@ -901,8 +1098,11 @@ impl SandboxProcess for SeatbeltSandboxProcess {
                 "Seatbelt: process timed out",
             ))
         } else {
-            match wait_with_timeout(&mut self.child, remaining_timeout) {
-                Ok(status) => Ok(status.code().unwrap_or(-1)),
+            match self.reap_with_timeout(remaining_timeout) {
+                Ok(status) => {
+                    self.finish_accounting(true);
+                    Ok(status.code().unwrap_or(-1))
+                }
                 Err(WaitError::Timeout) => {
                     if let Err(error) = self.kill_for_timeout() {
                         let error =
@@ -971,6 +1171,7 @@ fn build_sandbox_command(
     new_session: bool,
     new_group: bool,
     pty_size: Option<PtySize>,
+    resource_limits: Option<UnixResourceLimits>,
     logger: &mut Logger,
 ) -> Result<(Command, Option<LivePty>), ScriptResponse> {
     let profile_cstr = CString::new(profile)
@@ -1028,6 +1229,12 @@ fn build_sandbox_command(
             .map_err(|error| error_response(format!("Seatbelt: failed to allocate PTY: {error}")))
         })
         .transpose()?;
+
+    // The workload and everything it starts inherit the rlimits and nice
+    // value, set before the profile so the sandbox cannot interfere.
+    if let Some(limits) = resource_limits {
+        limits.apply_to(&mut command);
+    }
 
     // SAFETY: The closure runs after fork(), before exec(). We only call
     // sandbox_init with a pre-allocated CString — no Rust allocations
@@ -1353,6 +1560,22 @@ mod tests {
         .err()
         .expect("open PTY must be rejected");
         assert!(error.error_message.contains("caller-owned PTY"));
+    }
+
+    #[test]
+    fn open_launch_rejects_resources() {
+        let mut request = base_request();
+        request.containment = crate::mxc_common::models::ContainmentBackend::Seatbelt;
+        request.seatbelt = Some(SeatbeltConfig {
+            launch_method: LaunchMethod::Open,
+            ..Default::default()
+        });
+        request.policy.resources = Some(Default::default());
+
+        let error = SeatbeltScriptRunner::new()
+            .validate(&request)
+            .expect_err("resources need the workload as MXC's child");
+        assert!(error.error_message.contains("launchMethod 'open'"));
     }
 
     #[test]

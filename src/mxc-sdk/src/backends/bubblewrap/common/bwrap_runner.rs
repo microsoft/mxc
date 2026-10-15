@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, SandboxOutputMetadata, ScriptResponse};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -35,6 +35,7 @@ use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
+use crate::mxc_unix_resources::{ChildAccounting, UnixResourceLimits};
 
 use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
@@ -595,6 +596,15 @@ impl BubblewrapScriptRunner {
         if let Some(startup) = network_startup.as_ref() {
             startup.prepare_command(&mut command);
         }
+        // bwrap and everything it starts inherit the rlimits and nice value.
+        let resource_limits = request
+            .policy
+            .resources
+            .as_ref()
+            .map(UnixResourceLimits::new);
+        if let Some(limits) = resource_limits {
+            limits.apply_to(&mut command);
+        }
 
         let mut child = match command.spawn() {
             Ok(process) => process,
@@ -685,6 +695,8 @@ impl BubblewrapScriptRunner {
             started,
             timed_out: false,
             termination_error: None,
+            accounting: resource_limits.map(ChildAccounting::new),
+            output_metadata: None,
         })
     }
 }
@@ -713,11 +725,44 @@ struct BwrapChild {
     started: Instant,
     timed_out: bool,
     termination_error: Option<String>,
+    /// Usage accounting, when the request supplied `resources`.
+    accounting: Option<ChildAccounting>,
+    output_metadata: Option<SandboxOutputMetadata>,
 }
 
 impl BwrapChild {
     fn lock_child(&self) -> MutexGuard<'_, Child> {
         self.child.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `Child::try_wait`, first recording the exited child's resource usage
+    /// when the request asked for it, since reaping discards it.
+    fn try_wait_child(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+        match self.accounting.as_mut() {
+            Some(accounting) => accounting.try_wait(&mut child),
+            None => child.try_wait(),
+        }
+    }
+
+    /// Reap the child, waiting at most `timeout`, recording its usage first.
+    fn reap_with_timeout(&mut self, timeout: Duration) -> Result<ExitStatus, WaitError> {
+        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+        match self.accounting.as_mut() {
+            Some(accounting) => accounting.reap_with_timeout(&mut child, Some(timeout)),
+            None => wait_with_timeout(&mut child, Some(timeout)),
+        }
+    }
+
+    /// Publish the recorded resource usage as output metadata.
+    fn finish_accounting(&mut self, natural_exit: bool) {
+        if let Some(metadata) = self
+            .accounting
+            .as_ref()
+            .and_then(|accounting| accounting.output_metadata(natural_exit))
+        {
+            self.output_metadata = Some(metadata);
+        }
     }
 
     /// Tear down per-run private network state.
@@ -776,7 +821,7 @@ impl BubblewrapSandboxProcess {
             .map(|timeout| self.inner.started + timeout);
         let mut interval = MIN_POLL;
         loop {
-            let exited = match self.inner.lock_child().try_wait() {
+            let exited = match self.inner.try_wait_child() {
                 Ok(exited) => exited,
                 Err(error) => return BwrapOutcome::Io(error),
             };
@@ -848,6 +893,10 @@ impl SandboxProcess for BubblewrapSandboxProcess {
 
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         take_boxed_write(&mut self.inner.stdin)
+    }
+
+    fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.inner.output_metadata.as_ref()
     }
 
     fn is_pty(&self) -> bool {
@@ -936,7 +985,8 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                 "Bubblewrap: script timed out",
             ));
         }
-        if let Some(status) = self.inner.lock_child().try_wait()? {
+        if let Some(status) = self.inner.try_wait_child()? {
+            self.inner.finish_accounting(true);
             return Ok(Some(status.code().unwrap_or(-1)));
         }
         if self
@@ -969,11 +1019,16 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         // No-op once the child has exited and been reaped: its pid/pgid can be
         // recycled, so signaling it could hit an unrelated process (group). A
         // reaped `Child` returns its cached status here without a syscall.
-        let mut child = self.inner.lock_child();
-        if child.try_wait()?.is_some() {
+        let inner = &mut self.inner;
+        let mut child = inner.child.lock().unwrap_or_else(PoisonError::into_inner);
+        let exited = match inner.accounting.as_mut() {
+            Some(accounting) => accounting.try_wait(&mut child)?,
+            None => child.try_wait()?,
+        };
+        if exited.is_some() {
             return Ok(());
         }
-        if self.inner.group {
+        if inner.group {
             // Pipes and PTY modes give bwrap its own process group.
             group_kill(&mut child)
         } else {
@@ -990,10 +1045,9 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
         self.kill()?;
-        let mut child = self.inner.lock_child();
-        match wait_with_timeout(&mut child, Some(REAP_TIMEOUT)) {
+        match self.inner.reap_with_timeout(REAP_TIMEOUT) {
             Ok(_) => {
-                drop(child);
+                self.inner.finish_accounting(false);
                 self.inner.timed_out = true;
                 Ok(())
             }
@@ -1046,7 +1100,10 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             ))
         } else {
             match self.await_outcome() {
-                BwrapOutcome::Exited(status) => Ok(status.code().unwrap_or(-1)),
+                BwrapOutcome::Exited(status) => {
+                    self.inner.finish_accounting(true);
+                    Ok(status.code().unwrap_or(-1))
+                }
                 BwrapOutcome::ProviderLost => {
                     let _ = self.kill();
                     let _ = self.inner.lock_child().wait();

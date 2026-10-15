@@ -7,9 +7,18 @@ pub(crate) use mxc_sdk::mxc_contract::dev::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
     StartRequest, StopRequest,
 };
-pub(crate) const OPTIONAL_EMPTY_OBJECT_ADDITIONS: &[&str] =
-    &[r#""test": {}"#, r#""windowsSandbox": {}"#, r#""wslc": {}"#];
+pub(crate) const OPTIONAL_EMPTY_OBJECT_ADDITIONS: &[&str] = &[
+    r#""resources": {}"#,
+    r#""test": {}"#,
+    r#""windowsSandbox": {}"#,
+    r#""wslc": {}"#,
+];
 pub(crate) const OPTIONAL_NULL_FIELD_ADDITIONS: &[(&str, &str)] = &[
+    ("resources", r#""resources": null"#),
+    ("resources.cpuTimeMs", r#""resources": {"cpuTimeMs": null}"#),
+    ("resources.memoryMb", r#""resources": {"memoryMb": null}"#),
+    ("resources.maxProcesses", r#""resources": {"maxProcesses": null}"#),
+    ("resources.priority", r#""resources": {"priority": null}"#),
     ("test", r#""test": null"#),
     ("test.message", r#""test": {"message": null}"#),
     ("windowsSandbox", r#""windowsSandbox": null"#),
@@ -64,6 +73,8 @@ mod one_shot_backend_sections;
 mod optional_fields;
 #[path = "v1_1_0_alpha/request.rs"]
 mod request;
+#[path = "v1_1_0_alpha/resources.rs"]
+mod resources;
 #[path = "v1_1_0_alpha/seatbelt.rs"]
 mod seatbelt;
 #[path = "support/state_aware.rs"]

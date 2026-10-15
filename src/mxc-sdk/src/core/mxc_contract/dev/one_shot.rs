@@ -4,6 +4,7 @@
 use super::experimental::{OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
 use super::network::Network;
 use super::primitives::OptionalField;
+use super::resources::Resources;
 use super::stable::{
     Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt,
     Telemetry, Ui,
@@ -82,6 +83,9 @@ pub struct Request {
     /// Optional cross-platform user-interface policy.
     #[serde(default)]
     pub ui: OptionalField<Ui>,
+    /// Optional resource limits and usage reporting.
+    #[serde(default)]
+    pub resources: OptionalField<Resources>,
     /// Optional ProcessContainer settings.
     #[serde(default)]
     pub process_container: OptionalField<ProcessContainer>,

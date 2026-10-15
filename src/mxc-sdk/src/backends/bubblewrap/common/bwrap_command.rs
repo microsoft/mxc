@@ -436,6 +436,15 @@ pub(crate) fn build_args_classified_with_mode(
     // removed the network enforcement it was sandboxed by.
     args.push("--die-with-parent".into());
 
+    // Resource usage reaches MXC only through `bwrap`, our child, and only
+    // for processes `bwrap` waits for. Its PID 1 reaper reports the workload's
+    // exit through an eventfd and is never waited for, taking the workload's
+    // usage with it, so a run that asks for usage starts the workload as PID 1
+    // instead. The namespace still dies with it.
+    if request.policy.resources.is_some() {
+        args.push("--as-pid-1".into());
+    }
+
     // Every supported mode has a private namespace; slirp provides connectivity
     // only after its firewall is installed.
     args.push("--unshare-net".into());
@@ -945,6 +954,15 @@ mod tests {
             ResolvedNetworkMode::from_request(&request, false),
             ResolvedNetworkMode::Isolated
         );
+    }
+
+    #[test]
+    fn only_a_run_that_asks_for_resource_usage_starts_the_workload_as_pid_1() {
+        assert!(!build_args(&base_request(), None).contains(&"--as-pid-1".to_string()));
+
+        let mut request = base_request();
+        request.policy.resources = Some(Default::default());
+        assert!(build_args(&request, None).contains(&"--as-pid-1".to_string()));
     }
 
     #[test]

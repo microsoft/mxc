@@ -452,6 +452,20 @@ pub struct Telemetry {
     pub enabled: Option<bool>,
 }
 
+/// Resource limits and usage reporting (`resources`).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Resources {
+    /// CPU time each process may use, in milliseconds.
+    pub cpu_time_ms: Option<u64>,
+    /// Memory each process may commit, in megabytes.
+    pub memory_mb: Option<u64>,
+    /// Number of processes the workload may run at the same time.
+    pub max_processes: Option<u32>,
+    /// Scheduling priority for every process in the workload.
+    pub priority: Option<crate::mxc_common::models::ResourcePriority>,
+}
+
 /// Placeholder experimental feature.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

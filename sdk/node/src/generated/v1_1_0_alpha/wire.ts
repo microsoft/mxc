@@ -421,6 +421,10 @@ export interface OneShotRequest {
    */
   processContainer?: ProcessContainer;
   /**
+   * Optional resource limits and usage reporting.
+   */
+  resources?: Resources;
+  /**
    * Optional runtime configuration settings.
    */
   runtimeConfig?: RuntimeConfig;
@@ -639,6 +643,32 @@ export type ProcessContainerUiIsolation = "container" | "desktop" | "handles" | 
 export type ProcessContainerUiSystemSettings = "none" | "parameters" | "display" | "all";
 
 export type ProvisionPhase = "provision";
+
+export type ResourcePriority = "normal" | "low" | "idle";
+
+/**
+ * Resource limits for the workload, and a request for its resource usage.
+ *
+ * Supplying this object, even empty, asks the backend to report the workload's resource usage with its result. Every field is optional; an omitted field leaves that resource unlimited.
+ */
+export interface Resources {
+  /**
+   * CPU time each process in the workload may use, in milliseconds.
+   */
+  cpuTimeMs?: number;
+  /**
+   * Number of processes the workload may run at the same time.
+   */
+  maxProcesses?: number;
+  /**
+   * Memory each process in the workload may commit, in megabytes.
+   */
+  memoryMb?: number;
+  /**
+   * Scheduling priority for every process in the workload.
+   */
+  priority?: ResourcePriority;
+}
 
 /**
  * Runtime configuration supplied alongside the sandbox policy.

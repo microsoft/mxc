@@ -646,6 +646,43 @@ Standard `process` fields work as expected:
 }
 ```
 
+### Resource limits
+
+The development contract's `resources` section (see
+[Resource Limits](../../schema.md#resource-limits)) is enforced with rlimits
+and a nice value that MXC sets on `bwrap` before it starts, so every process
+in the sandbox inherits them:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "containment": "bubblewrap",
+  "process": { "commandLine": "python3 build.py" },
+  "resources": { "cpuTimeMs": 120000, "memoryMb": 2048, "priority": "low" }
+}
+```
+
+- `cpuTimeMs` sets `RLIMIT_CPU`, rounded up to whole seconds, with equal soft
+  and hard limits: a process that reaches it is killed with `SIGKILL`.
+- `memoryMb` sets `RLIMIT_DATA`, which covers the heap and private writable
+  mappings on Linux 4.7 and later. `RLIMIT_AS` would also count address space
+  that is reserved but never used, which breaks LibreOffice and runtimes that
+  reserve large regions up front. A 2 GB `RLIMIT_AS` crashes `soffice
+  --convert-to pdf`; a 2 GB `RLIMIT_DATA` lets it convert while a script
+  allocating 3 GB gets `MemoryError`.
+- `priority` sets nice 10 (`low`) or 19 (`idle`). A workload already running
+  at a lower priority keeps it.
+- `maxProcesses` is rejected: counting a workload's processes needs a
+  per-workload cgroup, and `RLIMIT_NPROC` counts every process of the user.
+
+A run with `resources` reports `resourceUsage` in its output metadata, read
+from `bwrap` with `waitid(WNOWAIT)` before it is reaped. `bwrap`'s PID 1
+reaper reports the workload's exit through an eventfd and is never waited
+for, so its usage would not reach `bwrap`. A run with `resources` therefore
+starts the workload as PID 1 (`--as-pid-1`). The namespace still dies with
+it, but the workload reaps its own orphans, and, like any PID 1, it ignores
+signals sent from inside the sandbox that it has no handler for.
+
 ## Network proxy (private namespace, unprivileged)
 
 Bubblewrap supports an **unprivileged, cooperative network proxy** that

@@ -13,6 +13,8 @@ mod experimental;
 mod network;
 #[path = "version_boundaries/process_container.rs"]
 mod process_container;
+#[path = "version_boundaries/resources.rs"]
+mod resources;
 #[path = "version_boundaries/seatbelt.rs"]
 mod seatbelt;
 #[path = "version_boundaries/state_aware.rs"]

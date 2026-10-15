@@ -65,6 +65,31 @@ fn convert_ui(value: contract::Ui) -> wire::Ui {
     }
 }
 
+fn convert_resource_priority(
+    value: contract::ResourcePriority,
+) -> crate::mxc_common::models::ResourcePriority {
+    match value {
+        contract::ResourcePriority::Normal => crate::mxc_common::models::ResourcePriority::Normal,
+        contract::ResourcePriority::Low => crate::mxc_common::models::ResourcePriority::Low,
+        contract::ResourcePriority::Idle => crate::mxc_common::models::ResourcePriority::Idle,
+    }
+}
+
+fn convert_resources(value: contract::Resources) -> wire::Resources {
+    let contract::Resources {
+        cpu_time_ms,
+        memory_mb,
+        max_processes,
+        priority,
+    } = value;
+    wire::Resources {
+        cpu_time_ms: cpu_time_ms.into_option().map(std::num::NonZeroU64::get),
+        memory_mb: memory_mb.into_option().map(std::num::NonZeroU64::get),
+        max_processes: max_processes.into_option().map(std::num::NonZeroU32::get),
+        priority: priority.into_option().map(convert_resource_priority),
+    }
+}
+
 fn convert_capture_denials_mode(value: contract::CaptureDenialsMode) -> wire::CaptureDenialsMode {
     match value {
         contract::CaptureDenialsMode::Block => wire::CaptureDenialsMode::Block,
@@ -289,6 +314,7 @@ pub(super) fn into_common_request_ir(
         lxc,
         process_container,
         ui,
+        resources,
         seatbelt,
         runtime_config,
         telemetry,
@@ -318,6 +344,7 @@ pub(super) fn into_common_request_ir(
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
         telemetry: telemetry.into_option().map(convert_telemetry),
         ui: ui.into_option().map(convert_ui),
+        resources: resources.into_option().map(convert_resources),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         test_feature: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),

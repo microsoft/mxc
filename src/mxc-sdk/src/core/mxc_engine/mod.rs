@@ -1279,6 +1279,7 @@ mod telemetry_process_tests {
                 etl_path: None,
             }),
             capture_denials_error: None,
+            resource_usage: None,
         };
         let mut process = TelemetryProcess::new(
             Box::new(StubProcess {

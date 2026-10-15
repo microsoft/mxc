@@ -25,6 +25,7 @@ pub(crate) struct CommonRequestIR {
     pub(crate) network: Option<wire::Network>,
     pub(crate) runtime_config: Option<wire::RuntimeConfig>,
     pub(crate) ui: Option<wire::Ui>,
+    pub(crate) resources: Option<wire::Resources>,
     pub(crate) seatbelt: Option<wire::Seatbelt>,
     pub(crate) telemetry: Option<wire::Telemetry>,
     pub(crate) test_feature: Option<wire::TestFeature>,

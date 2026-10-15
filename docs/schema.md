@@ -298,6 +298,13 @@ that can be executed independently.
 
     "hyperlight": {                        // Hyperlight settings (v0.10+)
         "runtime": "node"                  // Guest runtime: agent (default), python, python-shell, node, bash or dotnet-jit
+    },
+
+    "resources": {                         // Resource limits and usage (1.1.0-alpha; see "Resource Limits")
+        "cpuTimeMs": 120000,               // CPU time per process, in ms
+        "memoryMb": 2048,                  // Committed memory per process, in MB
+        "maxProcesses": 64,                // Processes running at once (ProcessContainer only)
+        "priority": "low"                  // "normal" (default), "low", or "idle"
     }
 }
 ```
@@ -456,6 +463,64 @@ The `fallback` section gates the runner's host-impacting fallbacks. Each flag is
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `allowDaclMutation` | boolean | `true` | When the BaseContainer feature and the OS-side filesystem broker helper are both unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback; the run will then fail on machines that require Tier 3. |
+
+### Resource Limits
+
+The `resources` section, available in the development contract
+`1.1.0-alpha`, limits what the workload may consume and asks the backend to
+report what it used. Every field is optional, and an omitted field leaves that
+resource unlimited. Supplying the section, even as `{}`, adds a
+`resourceUsage` object to the run's output metadata.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cpuTimeMs` | integer > 0 | CPU time each process in the workload may use, in milliseconds. A process that exceeds it is terminated. |
+| `memoryMb` | integer > 0 | Memory each process in the workload may commit, in megabytes. Allocations beyond it fail; how the program reacts to that is up to the program. |
+| `maxProcesses` | integer > 0 | Number of processes the workload may run at the same time. Creating another one fails. |
+| `priority` | enum | `"normal"` (default), `"low"`, or `"idle"`: the scheduling priority of every process in the workload. |
+
+**Per-backend support.** A backend that cannot enforce a supplied field rejects
+the request before it creates a sandbox, and a backend that enforces none of
+them rejects any `resources` section.
+
+| Field | Bubblewrap | Seatbelt | ProcessContainer | Other backends |
+|-------|------------|----------|------------------|----------------|
+| `cpuTimeMs` | `RLIMIT_CPU`, rounded up to whole seconds | `RLIMIT_CPU`, rounded up to whole seconds, plus a watchdog | Job object per-process user-mode time limit | Rejected |
+| `memoryMb` | `RLIMIT_DATA` | Rejected: macOS rejects memory rlimits | Job object per-process committed-memory limit | Rejected |
+| `maxProcesses` | Rejected | Rejected | Job object active-process limit | Rejected |
+| `priority` | nice 10 (`low`) or 19 (`idle`) | nice 10 (`low`) or 19 (`idle`) | `BELOW_NORMAL` or `IDLE` priority class | Rejected unless `"normal"` |
+
+On Bubblewrap and Seatbelt, the limits are rlimits set on the process MXC
+launches, which every descendant inherits. Each process therefore gets its own
+CPU time and memory budget, and a process inside the sandbox can lower its own
+limits further but not raise them. Bubblewrap limits memory with
+`RLIMIT_DATA` rather than `RLIMIT_AS` because the address-space limit also
+counts reservations that are never committed: LibreOffice, JIT runtimes, and
+programs with many threads fail under an `RLIMIT_AS` far above what they
+actually use. `RLIMIT_DATA` covers the heap and private writable mappings
+(Linux 4.7 and later), which is where a runaway allocation lands. macOS answers
+`RLIMIT_CPU` with a `SIGXCPU` that a program can ignore, so Seatbelt also kills
+any process in the workload's session whose CPU time reached the limit. See
+the [Bubblewrap](backends/bwrap/bubblewrap-backend.md#resource-limits) and
+[Seatbelt](backends/seatbelt/seatbelt-backend.md#resource-limits) guides.
+
+On ProcessContainer, MXC sets the limits on the job object the workload is
+assigned to before it resumes, so every descendant is covered. The job counts
+CPU time in user mode only.
+
+Neither Bubblewrap nor Seatbelt can count a workload's processes without a
+per-workload cgroup. `RLIMIT_NPROC` counts every process of the user, including
+ones outside the sandbox, so MXC does not use it.
+
+**Resource usage.** When `resources` is supplied, the output metadata carries
+`resourceUsage`:
+
+| Field | Description |
+|-------|-------------|
+| `userCpuTimeUs` | User-mode CPU time of the workload and every descendant it waited for, in microseconds. |
+| `systemCpuTimeUs` | Kernel-mode CPU time, likewise. |
+| `peakMemoryBytes` | Peak memory of the workload's largest process: resident set size on Bubblewrap, committed memory on ProcessContainer. Omitted on Seatbelt, which cannot measure descendants' peak memory without reaping them. |
+| `limitExceeded` | `"cpuTime"`, `"memory"`, or `"maxProcesses"` when the workload ran into that limit and the backend can tell. ProcessContainer reports every limit from job object notifications. Bubblewrap and Seatbelt report `"cpuTime"` when the workload was terminated by `SIGXCPU`, or by `SIGKILL` after using at least the limit, and Seatbelt also when its watchdog killed a process. A memory limit only makes allocations fail, and neither can tell when a program saw that. |
 
 ### Containment Backends
 

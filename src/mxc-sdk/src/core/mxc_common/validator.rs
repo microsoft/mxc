@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 
 use crate::mxc_common::error::WxcError;
-use crate::mxc_common::models::{ExecutionRequest, NetworkAction, PortMapping, ScriptResponse};
+use crate::mxc_common::models::{
+    ContainmentBackend, ExecutionRequest, NetworkAction, PortMapping, ResourcePriority,
+    ScriptResponse,
+};
 use crate::mxc_common::mxc_error::MxcError;
 use std::collections::HashSet;
 
@@ -144,11 +147,132 @@ pub fn validate_state_aware_network_policy_support(
         .map_err(|response| MxcError::policy_validation(response.error_message))
 }
 
+/// Declares which resource limits a backend enforces.
+///
+/// Every backend reports resource usage when it declares any support, so a
+/// request with an empty `resources` object is accepted exactly where some
+/// limit could be.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourcePolicySupport(u8);
+
+impl ResourcePolicySupport {
+    /// Support for `resources.cpuTimeMs`.
+    pub const CPU_TIME: Self = Self(1 << 0);
+
+    /// Support for `resources.memoryMb`.
+    pub const MEMORY: Self = Self(1 << 1);
+
+    /// Support for `resources.maxProcesses`.
+    pub const MAX_PROCESSES: Self = Self(1 << 2);
+
+    /// Support for a non-normal `resources.priority`.
+    pub const PRIORITY: Self = Self(1 << 3);
+
+    /// A backend that enforces every resource limit.
+    pub const ALL: Self =
+        Self(Self::CPU_TIME.0 | Self::MEMORY.0 | Self::MAX_PROCESSES.0 | Self::PRIORITY.0);
+
+    /// The resource limits `backend` enforces. A backend that enforces any
+    /// limit also reports resource usage.
+    ///
+    /// Bubblewrap sets rlimits and a nice value on `bwrap`, which every
+    /// process in the sandbox inherits. It has no per-workload process
+    /// counter: `RLIMIT_NPROC` counts every process of the user. Seatbelt
+    /// does the same on the process it launches, but macOS rejects memory
+    /// rlimits (`RLIMIT_DATA`, `RLIMIT_AS`, `RLIMIT_RSS`) with `EINVAL`.
+    /// ProcessContainer enforces every limit through the job object its
+    /// workload is assigned to before it is resumed.
+    pub const fn for_backend(backend: &ContainmentBackend) -> Self {
+        match backend {
+            ContainmentBackend::Bubblewrap => {
+                Self(Self::CPU_TIME.0 | Self::MEMORY.0 | Self::PRIORITY.0)
+            }
+            ContainmentBackend::Seatbelt => Self(Self::CPU_TIME.0 | Self::PRIORITY.0),
+            ContainmentBackend::ProcessContainer => Self::ALL,
+            ContainmentBackend::Wslc
+            | ContainmentBackend::Lxc
+            | ContainmentBackend::Vm
+            | ContainmentBackend::MicroVm
+            | ContainmentBackend::Hyperlight
+            | ContainmentBackend::WindowsSandbox
+            | ContainmentBackend::IsolationSession => Self(0),
+        }
+    }
+
+    /// Returns whether all features in `required` are supported.
+    pub const fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for ResourcePolicySupport {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// Reject resource limits that the selected backend cannot enforce.
+pub fn validate_resource_policy_support(
+    request: &ExecutionRequest,
+    support: ResourcePolicySupport,
+) -> Result<(), ScriptResponse> {
+    let Some(resources) = request.policy.resources.as_ref() else {
+        return Ok(());
+    };
+    let backend = request.containment.wire_name();
+    if support.is_empty() {
+        return Err(ScriptResponse::rejected(&format!(
+            "resources is not supported by the '{backend}' backend"
+        )));
+    }
+    let requested = [
+        (
+            resources.cpu_time_ms.is_some(),
+            ResourcePolicySupport::CPU_TIME,
+            "resources.cpuTimeMs",
+        ),
+        (
+            resources.memory_mb.is_some(),
+            ResourcePolicySupport::MEMORY,
+            "resources.memoryMb",
+        ),
+        (
+            resources.max_processes.is_some(),
+            ResourcePolicySupport::MAX_PROCESSES,
+            "resources.maxProcesses",
+        ),
+        (
+            resources.priority != ResourcePriority::Normal,
+            ResourcePolicySupport::PRIORITY,
+            "resources.priority",
+        ),
+    ];
+    for (present, feature, field) in requested {
+        if present && !support.contains(feature) {
+            return Err(ScriptResponse::rejected(&format!(
+                "{field} is not supported by the '{backend}' backend"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validates non-backend-specific parts of the request (e.g. non-empty script).
 pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if request.script_code.is_empty() {
         return Err(ScriptResponse::error("Script content must not be empty."));
     }
+
+    validate_resource_policy_support(
+        request,
+        ResourcePolicySupport::for_backend(&request.containment),
+    )?;
 
     if !request.policy.enumerate_paths.is_empty()
         && request.containment != crate::mxc_common::models::ContainmentBackend::ProcessContainer
@@ -547,5 +671,130 @@ mod tests {
 
         assert_eq!(error.code, MxcErrorCode::PolicyValidation);
         assert!(error.message.contains("network.egress.default"));
+    }
+
+    fn request_with_resources(
+        containment: ContainmentBackend,
+        resources: crate::mxc_common::models::ResourcePolicy,
+    ) -> ExecutionRequest {
+        let mut request = ExecutionRequest {
+            script_code: "echo".to_string(),
+            containment,
+            ..Default::default()
+        };
+        request.policy.resources = Some(resources);
+        request
+    }
+
+    fn every_resource_limit() -> crate::mxc_common::models::ResourcePolicy {
+        crate::mxc_common::models::ResourcePolicy {
+            cpu_time_ms: Some(1000),
+            memory_mb: Some(512),
+            max_processes: Some(8),
+            priority: ResourcePriority::Idle,
+        }
+    }
+
+    #[test]
+    fn omitted_resources_are_accepted_by_every_backend() {
+        for containment in [
+            ContainmentBackend::Wslc,
+            ContainmentBackend::Lxc,
+            ContainmentBackend::IsolationSession,
+            ContainmentBackend::Bubblewrap,
+        ] {
+            let request = ExecutionRequest {
+                script_code: "echo".to_string(),
+                containment,
+                ..Default::default()
+            };
+            assert!(validate_common(&request).is_ok());
+        }
+    }
+
+    #[test]
+    fn backends_without_resource_support_reject_even_empty_resources() {
+        for containment in [
+            ContainmentBackend::Wslc,
+            ContainmentBackend::Lxc,
+            ContainmentBackend::Vm,
+            ContainmentBackend::MicroVm,
+            ContainmentBackend::Hyperlight,
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::IsolationSession,
+        ] {
+            let request = request_with_resources(containment, Default::default());
+            let error = validate_common(&request).unwrap_err();
+            assert_eq!(
+                error.failure_phase,
+                crate::mxc_common::models::FailurePhase::Rejected
+            );
+            assert!(error.error_message.contains("resources is not supported"));
+        }
+    }
+
+    #[test]
+    fn bubblewrap_enforces_every_limit_but_max_processes() {
+        let mut resources = every_resource_limit();
+        let request = request_with_resources(ContainmentBackend::Bubblewrap, resources);
+        let error = validate_common(&request).unwrap_err();
+        assert!(error.error_message.contains("resources.maxProcesses"));
+
+        resources.max_processes = None;
+        let request = request_with_resources(ContainmentBackend::Bubblewrap, resources);
+        assert!(validate_common(&request).is_ok());
+    }
+
+    #[test]
+    fn seatbelt_enforces_cpu_time_and_priority_only() {
+        let mut resources = every_resource_limit();
+        resources.max_processes = None;
+        let request = request_with_resources(ContainmentBackend::Seatbelt, resources);
+        let error = validate_common(&request).unwrap_err();
+        assert!(error.error_message.contains("resources.memoryMb"));
+
+        resources.memory_mb = None;
+        let request = request_with_resources(ContainmentBackend::Seatbelt, resources);
+        assert!(validate_common(&request).is_ok());
+    }
+
+    #[test]
+    fn process_container_enforces_every_resource_limit() {
+        let request =
+            request_with_resources(ContainmentBackend::ProcessContainer, every_resource_limit());
+        assert!(validate_common(&request).is_ok());
+    }
+
+    #[test]
+    fn each_unsupported_limit_is_rejected_by_name() {
+        for (missing, field) in [
+            (ResourcePolicySupport::CPU_TIME, "resources.cpuTimeMs"),
+            (ResourcePolicySupport::MEMORY, "resources.memoryMb"),
+            (
+                ResourcePolicySupport::MAX_PROCESSES,
+                "resources.maxProcesses",
+            ),
+            (ResourcePolicySupport::PRIORITY, "resources.priority"),
+        ] {
+            let support = ResourcePolicySupport(ResourcePolicySupport::ALL.0 & !missing.0);
+            let request =
+                request_with_resources(ContainmentBackend::Bubblewrap, every_resource_limit());
+            let error = validate_resource_policy_support(&request, support).unwrap_err();
+            assert!(error.error_message.contains(field), "{field}");
+            assert!(error.error_message.contains("'bubblewrap' backend"));
+        }
+    }
+
+    #[test]
+    fn normal_priority_needs_no_priority_support() {
+        let support = ResourcePolicySupport::CPU_TIME;
+        let request = request_with_resources(
+            ContainmentBackend::Bubblewrap,
+            crate::mxc_common::models::ResourcePolicy {
+                priority: ResourcePriority::Normal,
+                ..Default::default()
+            },
+        );
+        assert!(validate_resource_policy_support(&request, support).is_ok());
     }
 }

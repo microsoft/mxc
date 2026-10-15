@@ -291,6 +291,7 @@ pub(super) fn into_common_request_ir(
         test_feature: None,
         windows_sandbox: None,
         hyperlight: None,
+        resources: None,
     }
 }
 
