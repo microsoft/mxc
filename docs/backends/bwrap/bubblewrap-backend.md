@@ -185,6 +185,24 @@ The release timing is tentative and should be confirmed against downstream
 usage data. Do not emit warnings for explicit `Mount` or explicit
 `LegacyBackendDefault` selections.
 
+### Fuzzing the procfs request boundary
+
+The `procfs_policy` cargo-fuzz target exercises the external MXC request parser
+and asserts that an accepted request cannot retain the reserved internal
+`MXC_INTERNAL_MOUNT_PROCFS` environment variable. It does not start a sandboxed
+process. Run a bounded campaign from the MXC repository root:
+
+```bash
+cargo +nightly fuzz run procfs_policy --fuzz-dir src/testing/fuzz -- \
+  -max_total_time=30 -max_len=4096
+```
+
+The 2026-10-15 Linux run completed 2,276,062 executions in 31 seconds without a
+crash. Curated JSON inputs under
+`src/testing/fuzz/corpus/procfs_policy/` cover ordinary environment values and
+the reserved variable with omit, mount, and unknown values; generated corpus
+entries and artifacts remain local.
+
 ### Deny-by-default filesystem
 
 The baseline mirrors the macOS Seatbelt backend's `(deny default)` posture:
