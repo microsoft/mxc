@@ -238,7 +238,9 @@ sandbox policy:
 Feature-enabled Windows builds can add WFP decisions to the managed Learning
 Mode ETL through the manifested
 `Microsoft-Windows-LearningMode-NetworkDecision` provider
-(`{71237669-21C3-4101-BD2F-FF38945D725A}`). MXC accepts event ID `1`,
+(`{301EC03D-2951-5EFB-6D99-59C64628BBFC}`). MXC also recognizes the earlier
+provider identity `{71237669-21C3-4101-BD2F-FF38945D725A}` and retains the
+observed GUID in verbose signatures. MXC accepts event ID `1`,
 `NetworkDecisionV1`, with schema version `1`. The OS Learning Mode broker owns
 the WFP subscription, runtime-filter lookup, subject scoping, event
 normalization, queue draining, and ETW flush before the trace is sealed.
@@ -421,7 +423,7 @@ to the redaction, timestamp omission, and bounds described below.
     {
       "signature": {
         "provider": "learningModeNetworkDecision",
-        "providerGuid": "{71237669-21C3-4101-BD2F-FF38945D725A}",
+        "providerGuid": "{301EC03D-2951-5EFB-6D99-59C64628BBFC}",
         "eventId": 1,
         "eventName": "NetworkDecisionV1",
         "reason": "actionable",

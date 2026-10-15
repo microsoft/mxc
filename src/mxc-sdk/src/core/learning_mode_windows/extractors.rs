@@ -70,8 +70,9 @@ pub(crate) const PRIVACY_LEARNING_MODE_PROVIDER: GUID = GUID {
     data4: [0xad, 0xc0, 0x4b, 0x18, 0x61, 0x70, 0xe7, 0x60],
 };
 
-pub(crate) const NETWORK_DECISION_PROVIDER: GUID =
-    GUID::from_u128(0x71237669_21c3_4101_bd2f_ff38945d725a);
+use super::network_extractors::is_network_decision_provider;
+#[cfg(test)]
+pub(crate) use super::network_extractors::NETWORK_DECISION_PROVIDER;
 pub(crate) const NETWORK_DECISION_EVENT_ID: u16 = 1;
 
 pub(crate) const ACCESS_CHECK_EVENT_ID: u16 = 14;
@@ -166,7 +167,7 @@ pub fn extract_denial(
 pub(crate) fn verbose_logging_classification(
     parts: &DecodedEventParts,
 ) -> (Option<AccessType>, Option<ResourceType>) {
-    if parts.provider == super::network_extractors::NETWORK_DECISION_PROVIDER {
+    if is_network_decision_provider(parts.provider) {
         return super::network_extractors::verbose_logging_classification(parts);
     }
 
@@ -235,7 +236,7 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
                 | LEARNING_MODE_VIOLATION_EVENT_ID
                 | PRIVACY_ACCESS_CHECK_EVENT_ID
         )
-    } else if provider == NETWORK_DECISION_PROVIDER {
+    } else if is_network_decision_provider(provider) {
         event_id == NETWORK_DECISION_EVENT_ID
     } else {
         false
@@ -243,11 +244,11 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
 }
 
 pub(crate) fn is_process_scoped_event(provider: GUID, event_id: u16) -> bool {
-    provider != NETWORK_DECISION_PROVIDER && is_learning_mode_event(provider, event_id)
+    !is_network_decision_provider(provider) && is_learning_mode_event(provider, event_id)
 }
 
 pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) -> Option<u32> {
-    if parts.provider == NETWORK_DECISION_PROVIDER {
+    if is_network_decision_provider(parts.provider) {
         // Public WFP NetEvents carry package/application identity but no
         // reliable workload PID. PID 0 is the explicit wire sentinel for
         // unavailable process identity.

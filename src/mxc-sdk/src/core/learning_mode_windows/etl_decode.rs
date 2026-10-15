@@ -473,6 +473,7 @@ impl<'visitor> Accumulator<'visitor> {
 
     fn record_network_outcome(
         &mut self,
+        provider: windows::core::GUID,
         event_id: u16,
         event_name: Option<String>,
         analysis: &crate::learning_mode_windows::network_extractors::NetworkDecisionAnalysis,
@@ -480,7 +481,9 @@ impl<'visitor> Accumulator<'visitor> {
         let (access_type, resource_type) = analysis.classification;
         self.record_capture_signature(CaptureVerboseLoggingSignature {
             provider: CaptureVerboseLoggingProvider::LearningModeNetworkDecision,
-            provider_guid: "{71237669-21C3-4101-BD2F-FF38945D725A}".to_string(),
+            provider_guid: crate::learning_mode_windows::extractors::format_guid_braced_uppercase(
+                provider,
+            ),
             event_id,
             event_name,
             reason: analysis.reason,
@@ -578,7 +581,8 @@ impl<'visitor> Accumulator<'visitor> {
         if error.event_kind().is_none() && is_process_scoped_event(provider, event_id) {
             self.truncated = true;
         }
-        if provider == crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER {
+        if crate::learning_mode_windows::network_extractors::is_network_decision_provider(provider)
+        {
             let reason = match error.event_kind() {
                 Some(tdh_decode::EventDecodeKind::PayloadMalformed) => {
                     CaptureVerboseLoggingOutcomeReason::EventPayloadMalformed
@@ -603,6 +607,7 @@ impl<'visitor> Accumulator<'visitor> {
                 })
                 .map(|(_, value)| value);
             self.record_network_outcome(
+                provider,
                 event_id,
                 event_name,
                 &crate::learning_mode_windows::network_extractors::NetworkDecisionAnalysis {
@@ -1099,7 +1104,9 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         let category =
             crate::learning_mode_windows::extractors::verbose_logging_provider_for_guid(provider);
         let is_network =
-            provider == crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER;
+            crate::learning_mode_windows::network_extractors::is_network_decision_provider(
+                provider,
+            );
         if category.is_none() && !is_network {
             // Unrelated provider: unrelated host traffic, ignored entirely
             // (not aggregated as an excluded Learning Mode outcome).
@@ -1127,6 +1134,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
             // paying for a TDH decode.
             if is_network {
                 acc.record_network_outcome(
+                    provider,
                     event_id,
                     None,
                     &crate::learning_mode_windows::network_extractors::NetworkDecisionAnalysis {
@@ -1300,8 +1308,9 @@ fn handle_decoded_event(
     filetime: u64,
     acc: &mut Accumulator<'_>,
 ) {
-    if parts.provider == crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER
-    {
+    if crate::learning_mode_windows::network_extractors::is_network_decision_provider(
+        parts.provider,
+    ) {
         if !acc.event_in_scope(0, filetime) || !acc.begin_event() {
             return;
         }
@@ -1309,6 +1318,7 @@ fn handle_decoded_event(
             crate::learning_mode_windows::network_extractors::analyze_network_decision(parts);
         let denial = analysis.denial.clone();
         acc.record_network_outcome(
+            parts.provider,
             parts.event_id,
             (parts.event_id
                 == crate::learning_mode_windows::network_extractors::NETWORK_DECISION_EVENT_ID)
@@ -2690,6 +2700,55 @@ mod tests {
     }
 
     #[test]
+    fn manifest_network_provider_is_actionable_and_preserves_observed_guid() {
+        use crate::learning_mode_windows::network_extractors::{
+            MANIFEST_NETWORK_DECISION_PROVIDER, NETWORK_DECISION_PROVIDER,
+        };
+
+        for provider in [
+            NETWORK_DECISION_PROVIDER,
+            MANIFEST_NETWORK_DECISION_PROVIDER,
+        ] {
+            let mut event = network_event(
+                777,
+                600,
+                &[
+                    ("SourceDomain", "2"),
+                    ("Reason", "100"),
+                    ("FieldFlags", "63"),
+                    ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
+                    ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
+                    ("ApplicationId", r"\Device\HarddiskVolume3\app.exe"),
+                    ("Protocol", "6"),
+                    ("LocalAddress", "192.0.2.1"),
+                    ("LocalPort", "49152"),
+                    ("RemoteAddress", "203.0.113.10"),
+                    ("RemotePort", "443"),
+                    ("IsLoopback", "false"),
+                ],
+            );
+            event.parts.provider = provider;
+            assert!(is_learning_mode_event(provider, 1));
+            assert!(!is_process_scoped_event(provider, 1));
+            assert_eq!(
+                crate::learning_mode_windows::extractors::effective_event_pid(&event.parts, 777),
+                Some(0),
+            );
+            let mut accumulator = Accumulator::analyze();
+            handle_decoded_event(&event.parts, 777, 600, &mut accumulator);
+            assert_eq!(accumulator.denials.len(), 1);
+            assert_eq!(accumulator.denials[0].resource, "tcp://203.0.113.10:443");
+            let signature = &accumulator.network_verbose_logging.signatures[0].signature;
+            assert_eq!(
+                signature.provider_guid,
+                crate::learning_mode_windows::extractors::format_guid_braced_uppercase(provider),
+            );
+            assert!(signature.reason.is_actionable());
+            assert_eq!(signature.pid, 0);
+        }
+    }
+
+    #[test]
     #[ignore = "manual benchmark: run with --release --ignored --nocapture"]
     fn benchmark_high_cardinality_network_capture() {
         use std::hint::black_box;
@@ -3957,7 +4016,12 @@ mod tests {
             classification: (None, None),
             properties: vec![("Large".to_string(), "x".repeat(remaining_bytes))],
         };
-        accumulator.record_network_outcome(1, Some("NetworkDecisionV1".to_string()), &analysis);
+        accumulator.record_network_outcome(
+            crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER,
+            1,
+            Some("NetworkDecisionV1".to_string()),
+            &analysis,
+        );
 
         assert_eq!(accumulator.network_verbose_logging.overflow_occurrences, 1);
         assert!(!accumulator.network_verbose_logging_actionable_only_saturated);
@@ -3966,7 +4030,12 @@ mod tests {
             properties: Vec::new(),
             ..analysis
         };
-        accumulator.record_network_outcome(2, None, &analysis);
+        accumulator.record_network_outcome(
+            crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER,
+            2,
+            None,
+            &analysis,
+        );
 
         assert_eq!(accumulator.network_verbose_logging.signatures.len(), 1);
         assert_eq!(accumulator.network_verbose_logging.overflow_occurrences, 1);
@@ -4228,6 +4297,7 @@ mod tests {
     fn network_diagnostics_preserve_observed_event_identity() {
         let mut unsupported = Accumulator::analyze();
         unsupported.record_network_outcome(
+            crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER,
             999,
             None,
             &crate::learning_mode_windows::network_extractors::NetworkDecisionAnalysis {
