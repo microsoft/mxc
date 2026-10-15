@@ -817,7 +817,7 @@ fn no_egress_refusal(image: &str, store: &StoreHint) -> ScriptResponse {
              expire before warming this store with wxc-exec.exe --setup-wslc --image {image}{}. \
              Alternatively, import a local tar with wslc.provision.imageTarPath or allow egress.",
             store.store_path(),
-            store.warm_args(),
+            store.warm_instruction(),
         ))
         .into_response();
     }

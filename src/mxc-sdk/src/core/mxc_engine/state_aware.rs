@@ -975,6 +975,7 @@ pub fn exec_state_aware_pty_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
     use crate::mxc_common::models::ExecutionRequest;
     use crate::mxc_common::mxc_error::MxcErrorCode;
     use crate::mxc_common::sdk_input::{
