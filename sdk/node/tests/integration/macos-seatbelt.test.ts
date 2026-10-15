@@ -57,7 +57,7 @@ describe('macOS Seatbelt Container', {
       "const { getPlatformSupport, getAvailableBackends } = await import('@microsoft/mxc-sdk/v1');" +
       'console.log(JSON.stringify({ support: getPlatformSupport(), backends: getAvailableBackends() }));';
     const output = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
-      cwd: path.dirname(new URL(import.meta.url).pathname),
+      cwd: new URL('.', import.meta.url),
       encoding: 'utf-8',
       timeout: 30000,
     });
