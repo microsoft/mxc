@@ -6,6 +6,7 @@ use super::state_aware::{probe_containment, Containment, ContainmentProbeError};
 use super::state_aware::{probe_phase, Phase, PhaseProbeError};
 use super::state_aware::{
     DeprovisionRequest, ExecRequest, ProvisionRequest, StartRequest, StopRequest,
+    WslcDeprovisionSessionRequest, WslcProvisionSessionRequest,
 };
 use super::NetworkAction;
 
@@ -14,6 +15,8 @@ use super::NetworkAction;
 pub enum Request {
     /// A one-shot execution request with no lifecycle phase.
     OneShot(Box<OneShotRequest>),
+    ProvisionSession(WslcProvisionSessionRequest),
+
     /// A state-aware provision request selected by its containment backend.
     Provision(ProvisionRequest),
     /// A state-aware start request.
@@ -24,6 +27,7 @@ pub enum Request {
     Stop(StopRequest),
     /// A state-aware deprovision request.
     Deprovision(DeprovisionRequest),
+    DeprovisionSession(WslcDeprovisionSessionRequest),
 }
 
 /// An error encountered while selecting or deserializing a development request.
@@ -74,6 +78,18 @@ fn parse_provision(json: &str) -> Result<ProvisionRequest, RequestParseError> {
             deserialize(json, "IsolationSession provision").map(ProvisionRequest::IsolationSession)
         }
         Containment::Wslc => deserialize(json, "WSLC provision").map(ProvisionRequest::Wslc),
+    }
+}
+
+fn parse_session<T>(json: &str, contract: &'static str) -> Result<T, RequestParseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match probe_containment(json)? {
+        Containment::Wslc => deserialize(json, contract),
+        other => Err(RequestParseError::Containment(
+            ContainmentProbeError::UnsupportedContainment(other.as_str().to_string()),
+        )),
     }
 }
 
@@ -130,28 +146,20 @@ fn validate_isolation_session_one_shot_network(
     Ok(())
 }
 
-/// Selects and deserializes one exact development request from raw JSON source.
-///
-/// An absent `phase` selects the one-shot contract. A present phase selects its
-/// corresponding state-aware contract, with provision requests additionally
-/// selected by their required `containment` declaration. The selected concrete
-/// request still requires the exact `1.1.0-alpha` version marker.
-///
-/// # Errors
-///
-/// Returns [`RequestParseError::Phase`] when the phase declaration is malformed
-/// or unsupported, [`RequestParseError::Containment`] when a provision
-/// containment declaration is malformed or unsupported, and
-/// [`RequestParseError::InvalidRequest`] when the selected concrete contract
-/// rejects the document. Returns [`RequestParseError::InvalidCombination`] when
-/// individually valid fields violate a request-level invariant.
+/// Parse an MXC request using the development contract.
 pub fn parse_request(json: &str) -> Result<Request, RequestParseError> {
     match probe_phase(json)? {
         None => parse_one_shot(json),
+        Some(Phase::ProvisionSession) => {
+            parse_session(json, "WSLC provision-session").map(Request::ProvisionSession)
+        }
         Some(Phase::Provision) => parse_provision(json).map(Request::Provision),
         Some(Phase::Start) => deserialize(json, "start").map(Request::Start),
         Some(Phase::Exec) => deserialize(json, "exec").map(Request::Exec),
         Some(Phase::Stop) => deserialize(json, "stop").map(Request::Stop),
         Some(Phase::Deprovision) => deserialize(json, "deprovision").map(Request::Deprovision),
+        Some(Phase::DeprovisionSession) => {
+            parse_session(json, "WSLC deprovision-session").map(Request::DeprovisionSession)
+        }
     }
 }

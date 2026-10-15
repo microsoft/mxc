@@ -17,10 +17,8 @@
 #   .\run_wslc_all_tests.ps1 -SkipSetup   # skip pre-pull (assume cache is warm)
 #
 # Image pre-pull:
-#   This script invokes scripts\setup-wslc.ps1 as a preflight to populate the
-#   WSLC image cache. The runner pulls on a cache miss by itself, so this only
-#   keeps per-test timings clear of one-off download cost. Pass -SkipSetup to
-#   bypass and let the first test that needs an image pull it.
+#   Warm the create-and-run store and three daemon stores. The lifecycle
+#   fixtures deny egress, so -SkipSetup requires all of these stores to be warm.
 #
 # Prerequisites for tar import tests:
 #
@@ -75,11 +73,8 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
     exit 1
 }
 
-# Preflight: warm the WSLC image cache so per-test timings stay clear of one-off
-# download cost. The runner pulls on a miss by itself, so -SkipSetup is a
-# supported way to exercise that path instead. The lifecycle fixtures provision
-# with the isolated posture, which refuses a registry pull, so the daemon's slot
-# has to be warmed here too or the delegated suite below starts cold.
+# Preflight: warm the create-and-run store and stores for the implicit session
+# and two explicit sessions.
 if (-not $SkipSetup) {
     $SetupScript = Join-Path $RepoRoot "scripts\setup-wslc.ps1"
     if (Test-Path $SetupScript) {
@@ -94,14 +89,11 @@ if (-not $SkipSetup) {
             "ghcr.io/linuxserver/baseimage-alpine:3.21",
             "quay.io/fedora/fedora-minimal:latest"
         )
-        & $SetupScript -WxcExecPath $WxcExec -Image $images -DaemonSlots 1 -Force
+        & $SetupScript -WxcExecPath $WxcExec -Image $images -DaemonSlots 3 -Force
         if ($LASTEXITCODE -ne 0) {
-            # The create-and-run half pulls on a miss, but the delegated
-            # lifecycle suite provisions with the isolated posture and cannot,
-            # so a cold slot 0 surfaces much later as unrelated failures.
-            Write-Host "ERROR: setup-wslc.ps1 failed; daemon store slot 0 may be cold." -ForegroundColor Red
+            Write-Host "ERROR: setup-wslc.ps1 failed; daemon store slots 0 through 2 may be cold." -ForegroundColor Red
             Write-Host "  The delegated lifecycle suite refuses registry pulls, so it cannot recover." -ForegroundColor Yellow
-            Write-Host "  Resolve the setup failure above, or pass -SkipSetup if both stores are warm." -ForegroundColor Yellow
+            Write-Host "  Resolve the setup failure above, or pass -SkipSetup if all stores are warm." -ForegroundColor Yellow
             exit 1
         }
         Write-Host ""
@@ -477,11 +469,6 @@ $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false_rejected.json" `
     -OutputContains "destroyOnExit=false"))
 
 Write-Host "`n--- State-Aware Lifecycle Tests ---" -ForegroundColor Cyan
-# Delegate the multi-invocation provision/start/exec/stop/deprovision lifecycle
-# to its owning harness (it needs the daemon binary, mints + threads sandbox ids,
-# and drives the idle-teardown watchdog). The preflight above warmed the daemon
-# store slot as well, so skip its redundant preflight. Fold its exit code into
-# the summary.
 $saScript = Join-Path $PSScriptRoot "run_wslc_state_aware_tests.ps1"
 $saArgs = @{ WxcExecPath = $WxcExec; SkipSetup = $true }
 if ($Debug) { $saArgs.Debug = $true }

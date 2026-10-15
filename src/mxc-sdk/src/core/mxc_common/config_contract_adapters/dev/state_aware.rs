@@ -5,7 +5,9 @@ use crate::mxc_common::config_contract_adapters::dev::common::{
     convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
 use crate::mxc_common::error::WxcError;
-use crate::mxc_common::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
+use crate::mxc_common::models::{
+    IsolationSessionProvisionConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
+};
 use crate::mxc_common::state_aware_input::StateAwareInput;
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::mxc_common::wire;
@@ -72,11 +74,13 @@ fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig
     let contract::WslcProvision {
         image,
         image_tar_path,
+        session_id,
         port_mappings,
     } = value;
     WslcProvisionConfig {
         image: image.into_option(),
         image_tar_path: image_tar_path.into_option(),
+        session_id: session_id.into_option(),
         port_mappings: port_mappings.into_option().map(|mappings| {
             mappings
                 .into_iter()
@@ -89,6 +93,30 @@ fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig
 fn convert_state_aware_wslc(value: contract::StateAwareWslc) -> Option<WslcProvisionConfig> {
     let contract::StateAwareWslc { provision } = value;
     provision.into_option().map(convert_wslc_provision)
+}
+
+fn convert_wslc_provision_session(
+    value: contract::WslcProvisionSession,
+) -> WslcProvisionSessionConfig {
+    let contract::WslcProvisionSession {
+        cpu_count,
+        memory_mb,
+        gpu,
+    } = value;
+    WslcProvisionSessionConfig {
+        cpu_count: cpu_count.into_option(),
+        memory_mb: memory_mb.into_option(),
+        gpu: gpu.into_option(),
+    }
+}
+
+fn convert_state_aware_wslc_session(
+    value: contract::StateAwareWslcSession,
+) -> Option<WslcProvisionSessionConfig> {
+    let contract::StateAwareWslcSession { provision_session } = value;
+    provision_session
+        .into_option()
+        .map(convert_wslc_provision_session)
 }
 
 fn state_aware_common(
@@ -121,6 +149,25 @@ fn state_aware_common(
         ui: None,
         hyperlight: None,
     }
+}
+
+pub(super) fn provision_session_into_input(
+    request: contract::WslcProvisionSessionRequest,
+) -> Result<StateAwareInput, WxcError> {
+    let contract::WslcProvisionSessionRequest {
+        schema,
+        comment,
+        version,
+        phase: contract::ProvisionSessionPhase,
+        containment: contract::WslcContainment,
+        telemetry,
+        wslc,
+    } = request;
+    let sizing = wslc
+        .into_option()
+        .and_then(convert_state_aware_wslc_session);
+    let common = state_aware_common(schema, comment, version, telemetry);
+    StateAwareInput::new(common, StateAwareOperation::ProvisionSession(sizing))
 }
 
 pub(super) fn provision_into_input(
@@ -265,6 +312,25 @@ pub(super) fn deprovision_into_input(
     } = request;
     let common = state_aware_common(schema, comment, version, telemetry);
     StateAwareInput::new(common, StateAwareOperation::Deprovision { sandbox_id })
+}
+
+pub(super) fn deprovision_session_into_input(
+    request: contract::WslcDeprovisionSessionRequest,
+) -> Result<StateAwareInput, WxcError> {
+    let contract::WslcDeprovisionSessionRequest {
+        schema,
+        comment,
+        version,
+        phase: contract::DeprovisionSessionPhase,
+        containment: contract::WslcContainment,
+        session_id,
+        telemetry,
+    } = request;
+    let common = state_aware_common(schema, comment, version, telemetry);
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::DeprovisionSession { session_id },
+    )
 }
 
 #[cfg(test)]

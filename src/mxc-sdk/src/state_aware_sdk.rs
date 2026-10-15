@@ -55,6 +55,7 @@ impl ProvisionContainment {
                     Some(crate::mxc_common::models::WslcProvisionConfig {
                         image: image.clone(),
                         image_tar_path: image_tar_path.clone(),
+                        session_id: None,
                         port_mappings: None,
                     })
                 };

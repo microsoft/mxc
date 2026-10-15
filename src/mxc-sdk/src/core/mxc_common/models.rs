@@ -256,6 +256,9 @@ pub struct WslcProvisionConfig {
     /// Local image tarball to import instead of pulling an image.
     pub image_tar_path: Option<String>,
 
+    /// Join this session, or the shared default session when absent.
+    pub session_id: Option<String>,
+
     /// Host-to-container TCP forwards applied to the sandbox's own container.
     pub port_mappings: Option<Vec<PortMapping>>,
 }

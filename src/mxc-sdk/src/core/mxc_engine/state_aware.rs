@@ -981,6 +981,7 @@ pub fn exec_state_aware_pty_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mxc_common::models::ExecutionRequest;
     use crate::mxc_common::mxc_error::MxcErrorCode;
     use crate::mxc_common::sdk_input::{
         SdkFilesystemInput, SdkNetworkAction, SdkNetworkEgressInput, SdkNetworkIngressInput,
@@ -1009,6 +1010,7 @@ mod tests {
             Some(crate::mxc_common::models::WslcProvisionConfig {
                 image,
                 image_tar_path,
+                session_id: None,
                 port_mappings: None,
             })
         };
@@ -1634,14 +1636,17 @@ mod tests {
         ]
     }
 
+    fn parsed_session(operation: StateAwareOperation) -> ParsedStateAwareRequest {
+        let input = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation).unwrap();
+        normalize_sdk_state_aware(input, false, &mut Logger::new(Mode::Buffer)).unwrap()
+    }
+
     fn session_refusal_on_each_route(
         operation: &StateAwareOperation,
         dry_run: bool,
     ) -> [(&'static str, Error); 2] {
         let input = || SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation.clone());
-        let parsed =
-            normalize_sdk_state_aware(input().unwrap(), false, &mut Logger::new(Mode::Buffer))
-                .unwrap();
+        let parsed = parsed_session(operation.clone());
         let envelope = run_state_aware(parsed, dry_run).unwrap_err();
         let typed = run_typed_state_aware_request(input().unwrap(), false, dry_run).unwrap_err();
         [
@@ -1668,17 +1673,86 @@ mod tests {
 
     #[cfg(all(target_os = "windows", feature = "wslc"))]
     #[test]
-    fn a_session_phase_reaches_wslc_and_is_refused_as_unsupported_until_it_is_implemented() {
+    fn a_dry_run_session_phase_validates_without_minting_or_booting_anything() {
         for operation in session_operations() {
+            let envelope = run_state_aware(parsed_session(operation.clone()), true).unwrap();
+            let DispatchOutcome::Envelope(envelope) = envelope else {
+                panic!("a dry run must return a result envelope");
+            };
+            assert_eq!(envelope, serde_json::json!({"result": {}}));
+            let input = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation).unwrap();
+            let result = run_typed_state_aware_request(input, false, true).unwrap();
+            assert_eq!(
+                result.session_id, None,
+                "a dry run must not mint a session id"
+            );
+            assert_eq!(result.sandbox_id, None);
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn invalid_session_sizing_is_refused_before_live_or_dry_run_dispatch() {
+        for config in [
+            crate::mxc_common::models::WslcProvisionSessionConfig {
+                memory_mb: Some(u64::from(u32::MAX) + 1),
+                ..Default::default()
+            },
+            crate::mxc_common::models::WslcProvisionSessionConfig {
+                cpu_count: Some(u32::MAX),
+                ..Default::default()
+            },
+        ] {
             for dry_run in [false, true] {
+                let operation = StateAwareOperation::ProvisionSession(Some(config));
                 for (route, error) in session_refusal_on_each_route(&operation, dry_run) {
                     assert_eq!(
                         error.code,
-                        crate::ErrorCode::UnsupportedPhase,
-                        "{route} with dry_run={dry_run}: {error:?}"
+                        crate::ErrorCode::PolicyValidation,
+                        "{route}, {config:?}, dry_run={dry_run}: {error:?}"
                     );
-                    assert!(error.message.contains("wslc"), "{route}: {error:?}");
                 }
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn zero_session_sizing_validates_as_the_sdk_default() {
+        let parsed = parsed_session(StateAwareOperation::ProvisionSession(Some(
+            crate::mxc_common::models::WslcProvisionSessionConfig {
+                cpu_count: Some(0),
+                memory_mb: Some(0),
+                gpu: Some(false),
+            },
+        )));
+        let result = run_state_aware_typed(parsed, true).unwrap();
+        assert!(result.session_id.is_none());
+        assert!(result.sandbox_id.is_none());
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn a_malformed_session_id_is_refused_before_the_daemon_is_contacted() {
+        for session_id in [
+            "wslcsess:short",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef",
+            "wslcsess:0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            for dry_run in [false, true] {
+                let parsed = ParsedStateAwareRequest::new(
+                    ExecutionRequest::default(),
+                    StateAwareOperation::DeprovisionSession {
+                        session_id: session_id.to_string(),
+                    },
+                );
+                let error = run_state_aware(parsed, dry_run).unwrap_err();
+                assert_eq!(
+                    error.code,
+                    MxcErrorCode::MalformedId,
+                    "{session_id} ({dry_run}): {error:?}"
+                );
             }
         }
     }
