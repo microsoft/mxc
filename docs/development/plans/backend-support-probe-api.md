@@ -52,8 +52,7 @@ pub enum BackendCapability {
 
 /// Probe the host and return only the backends it can currently run.
 /// An empty `Vec` means "no backend this API can currently affirm on this host"
-/// (e.g. an unsupported platform, Linux with neither `bwrap` nor `lxc`, or
-/// macOS without `sandbox-exec`) — it is a normal result, not an error.
+/// (e.g. an unsupported platform, or Linux with neither `bwrap` nor `lxc`) — it is a normal result, not an error.
 pub fn available_backends() -> Vec<AvailableBackend>;
 ```
 
@@ -145,7 +144,7 @@ See §7.9 for why the canonical probe stays in Rust rather than moving into the 
 - On Windows the result contains `processcontainer` with a `tier` of one of the three known strings;
 `appcontainer-dacl` is the floor when nothing higher is reachable.
 - On non-Windows, `processcontainer` never appears.
-- On macOS, `seatbelt` appears with `tier: None` when `/usr/bin/sandbox-exec` exists.
+- On macOS, `seatbelt` appears with `tier: None` when `sandbox_init` resolves.
 - A serde snapshot pins the camelCase JSON shape
 (`{"backend":"…","tier":"…"}`) and verifies that `tier` is **omitted** when `None`
 (`#[serde(skip_serializing_if = "Option::is_none")]`), never serialized as `null`.
@@ -194,6 +193,9 @@ contract of this API.
 
    Still open: it is not yet the transport for the rest of `getPlatformSupport()` on Linux,
    so the drift risk in step 2 stands, and Windows is untouched.
+
+   **Landed (macOS).** `getPlatformSupport()` reads Seatbelt availability from
+   `getAvailableBackends()` (`mxc_ffi`) and fails closed if that call throws.
 
 ---
 

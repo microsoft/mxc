@@ -21,8 +21,7 @@ Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
 and operation options. Create-and-run PTY support covers IsolationSession, Bubblewrap,
 LXC, and Seatbelt direct execution. Existing-container PTY support remains
-IsolationSession-only. Seatbelt PTY rejects `guiAccess` and legacy
-`launchMethod: "open"`. A PTY gives the
+IsolationSession-only. Seatbelt PTY rejects `guiAccess`. A PTY gives the
 caller explicit input, output, resize, and process ownership instead of
 attaching the workload to the host process's global console streams.
 

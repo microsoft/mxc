@@ -1161,7 +1161,6 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
     let wire::Seatbelt {
         profile_override,
         gui_access,
-        launch_method,
         nested_pty,
         keychain_access,
         extra_mach_lookups,
@@ -1169,7 +1168,6 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
     SeatbeltConfig {
         profile_override,
         gui_access: gui_access.unwrap_or(false),
-        launch_method: launch_method.map(Into::into).unwrap_or_default(),
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),

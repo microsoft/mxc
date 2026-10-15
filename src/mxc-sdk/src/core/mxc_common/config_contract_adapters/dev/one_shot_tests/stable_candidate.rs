@@ -604,7 +604,6 @@ fn seatbelt_request_maps_expected_wire_fields() {
         Some("custom-profile.sb")
     );
     assert_eq!(seatbelt.gui_access, Some(true));
-    assert!(seatbelt.launch_method.is_none());
     assert_eq!(seatbelt.nested_pty, Some(true));
     assert_eq!(seatbelt.keychain_access, Some(true));
     assert_eq!(
@@ -683,7 +682,6 @@ fn empty_seatbelt_section_maps_to_present_empty_wire_section() {
     let seatbelt = wire.seatbelt.expect("seatbelt should be populated");
     assert!(seatbelt.profile_override.is_none());
     assert!(seatbelt.gui_access.is_none());
-    assert!(seatbelt.launch_method.is_none());
     assert!(seatbelt.nested_pty.is_none());
     assert!(seatbelt.keychain_access.is_none());
     assert!(seatbelt.extra_mach_lookups.is_none());

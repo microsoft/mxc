@@ -189,7 +189,6 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
     wire::Seatbelt {
         profile_override: profile_override.into_option(),
         gui_access: gui_access.into_option(),
-        launch_method: None,
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),

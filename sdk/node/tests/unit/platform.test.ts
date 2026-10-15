@@ -26,6 +26,7 @@ import {
   _runLinuxProbe,
   _linuxProbeTimeouts,
   _setLxcAvailabilityProbe,
+  _setDarwinBackendsReader,
   _setPlatformDiagnosticLogger,
   findWxcExecutable,
   _resetWxcExecutableCache,
@@ -225,6 +226,38 @@ const allUiCapabilities = {
   canBlockSystemParameterChanges: true,
   canBlockDisplaySettingsChanges: true,
 };
+
+describe('getPlatformSupport on macOS', { skip: os.platform() !== 'darwin' }, () => {
+  beforeEach(() => _resetPlatformSupportCache());
+  afterEach(() => {
+    _setDarwinBackendsReader(null);
+    _resetPlatformSupportCache();
+  });
+
+  it('reports seatbelt when the native probe does', () => {
+    _setDarwinBackendsReader(() => [{ backend: 'seatbelt', capabilities: [], warnings: [] }]);
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, true);
+    assert.deepStrictEqual(support.availableMethods, ['seatbelt']);
+  });
+
+  it('is unsupported when the native probe omits seatbelt', () => {
+    _setDarwinBackendsReader(() => []);
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, false);
+    assert.deepStrictEqual(support.availableMethods, []);
+    assert.match(support.reason ?? '', /sandbox_init/);
+  });
+
+  it('fails closed when the native probe throws', () => {
+    _setDarwinBackendsReader(() => {
+      throw new Error('mxc_ffi not found');
+    });
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, false);
+    assert.match(support.reason ?? '', /mxc_ffi not found/);
+  });
+});
 
 describe('getPlatformSupport probe integration', () => {
   beforeEach(() => {

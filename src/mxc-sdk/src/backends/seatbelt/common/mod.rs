@@ -11,8 +11,8 @@
 //!   everywhere even though only macOS can execute them.
 //! - [`default_env`] resolves the schema-0.9 default `process.env` block.
 //!   Platform-agnostic for the same reason.
-//! - [`seatbelt_runner`] is gated to `target_os = "macos"` since it spawns
-//!   `/usr/bin/sandbox-exec`.
+//! - [`seatbelt_runner`] is gated to `target_os = "macos"` since it calls
+//!   `sandbox_init()`.
 
 pub mod default_env;
 pub mod profile_builder;

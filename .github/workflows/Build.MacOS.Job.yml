@@ -48,7 +48,7 @@ jobs:
 
       # mxc-sdk includes the Seatbelt executor characterization tests.
       # mxc-exec-mac (built above via -p mxc_darwin) is what they drive; the
-      # tests skip via has_platform_exec() if it is missing. sandbox-exec needs
+      # tests skip via has_platform_exec() if it is missing. sandbox_init needs
       # no elevation, so they run in this standard macOS job.
       - name: Test
         run: |

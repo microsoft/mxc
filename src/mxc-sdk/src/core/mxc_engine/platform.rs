@@ -140,7 +140,7 @@ where
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
-        if std::path::Path::new("/usr/bin/sandbox-exec").exists() {
+        if crate::seatbelt_common::seatbelt_runner::sandbox_init_available() {
             PlatformSupport {
                 is_supported: true,
                 available_methods: vec![ContainmentBackend::Seatbelt.wire_name().to_string()],
@@ -149,7 +149,7 @@ pub fn platform_support() -> PlatformSupport {
         } else {
             PlatformSupport {
                 reason: Some(
-                    "/usr/bin/sandbox-exec not found; macOS install is incomplete".to_string(),
+                    "sandbox_init is unavailable; macOS install is incomplete".to_string(),
                 ),
                 ..Default::default()
             }

@@ -137,7 +137,7 @@ operation options and return no execution output.
 `v1::spawn_with_pty` creates a container with a caller-controlled terminal.
 Create-and-run PTY support is available for IsolationSession on Windows, Bubblewrap
 and LXC on Linux, and Seatbelt direct execution on macOS. LXC requires root.
-Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
+Seatbelt rejects PTY mode with `guiAccess`.
 `wait()` requests canonical-mode terminal EOF for untaken input; raw-mode
 applications must use their own completion protocol. Untaken merged output is
 drained and discarded without waiting indefinitely for descendants that keep

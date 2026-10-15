@@ -19,8 +19,7 @@ Creation takes `ContainerRequest` and operation options. Existing-container
 execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
 and operation options. Create-and-run PTY support covers IsolationSession, Bubblewrap,
 LXC, and Seatbelt direct execution. Existing-container PTY support remains
-IsolationSession-only. Seatbelt PTY rejects `guiAccess` and legacy
-`launchMethod: "open"`. Terminal handles
+IsolationSession-only. Seatbelt PTY rejects `guiAccess`. Terminal handles
 give the caller explicit input, output, resize, and process ownership; there
 is no separate public attached-console launch API or API accepting ["MXC request JSON"](../../../schema.md#mxc-request-json).
 

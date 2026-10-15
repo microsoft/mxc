@@ -144,15 +144,15 @@ pub fn to_json_pretty(backends: &[AvailableBackend]) -> Result<String, serde_jso
 
 #[cfg(target_os = "macos")]
 fn macos_backends() -> Vec<AvailableBackend> {
-    macos_backends_with(std::path::Path::new("/usr/bin/sandbox-exec").exists())
+    macos_backends_with(crate::seatbelt_common::seatbelt_runner::sandbox_init_available())
 }
 
 /// Split from [`macos_backends`] so the reporting is testable without
 /// depending on what the test host has installed.
 #[cfg(target_os = "macos")]
-fn macos_backends_with(sandbox_exec_present: bool) -> Vec<AvailableBackend> {
+fn macos_backends_with(sandbox_init_available: bool) -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
-    if sandbox_exec_present {
+    if sandbox_init_available {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::Seatbelt.wire_name(),
         ));
@@ -597,7 +597,7 @@ mod tests {
     fn the_macos_probe_reports_what_its_detector_found() {
         assert_probe_matches_detectors(&[(
             ContainmentBackend::Seatbelt.wire_name(),
-            std::path::Path::new("/usr/bin/sandbox-exec").exists(),
+            crate::seatbelt_common::seatbelt_runner::sandbox_init_available(),
         )]);
     }
 

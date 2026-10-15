@@ -41,7 +41,7 @@ pub enum ContainmentBackend {
     IsolationSession,
     /// macOS Seatbelt sandbox backend.
     /// Implemented on top of the OS-bundled sandbox facility (Apple's
-    /// internal codename for the App Sandbox / `sandbox-exec` machinery
+    /// internal codename for the App Sandbox / `sandbox_init` machinery
     /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
     Seatbelt,
     /// Bubblewrap — unprivileged Linux sandboxing via user namespaces.
@@ -151,19 +151,6 @@ pub struct SeatbeltConfig {
     #[serde(rename = "guiAccess", default)]
     pub gui_access: bool,
 
-    /// How to launch the sandboxed process.
-    ///
-    /// - `"exec"` (default): fork → sandbox_init() → exec. Stdio is inherited
-    ///   when `guiAccess` is true, piped otherwise. Works for most
-    ///   third-party GUI apps and all CLI commands.
-    /// - `"open"`: launch via macOS LaunchServices (`open -n -W`). Required
-    ///   for Apple system apps (e.g. Terminal.app) that have Launch
-    ///   Constraints preventing direct exec from third-party processes.
-    ///   The sandbox is applied to the shell/command running *inside* the
-    ///   launched app via the `sandbox-exec` CLI tool, not to the app itself.
-    #[serde(rename = "launchMethod", default)]
-    pub launch_method: LaunchMethod,
-
     /// Allow the inner process to allocate its own pseudo-terminals via
     /// `posix_openpt`. Defaults to `true` because most agent-style
     /// workloads spawn shells (tests, `git`, `gh`, REPLs) that fail
@@ -207,31 +194,9 @@ impl Default for SeatbeltConfig {
         Self {
             profile_override: None,
             gui_access: false,
-            launch_method: LaunchMethod::default(),
             nested_pty: true,
             keychain_access: false,
             extra_mach_lookups: Vec::new(),
-        }
-    }
-}
-
-/// How to launch the sandboxed process in the Seatbelt backend.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LaunchMethod {
-    /// Direct fork → sandbox_init() → exec (default).
-    #[default]
-    Exec,
-    /// Launch via macOS LaunchServices (`open`). The sandbox is applied to
-    /// the command running inside the launched terminal app via sandbox-exec.
-    Open,
-}
-
-impl From<crate::mxc_common::wire::LaunchMethod> for LaunchMethod {
-    fn from(m: crate::mxc_common::wire::LaunchMethod) -> Self {
-        match m {
-            crate::mxc_common::wire::LaunchMethod::Exec => Self::Exec,
-            crate::mxc_common::wire::LaunchMethod::Open => Self::Open,
         }
     }
 }

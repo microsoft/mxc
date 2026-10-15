@@ -420,25 +420,12 @@ pub struct Seatbelt {
     pub profile_override: Option<String>,
     /// Allow GUI (WindowServer) access.
     pub gui_access: Option<bool>,
-    /// Inner process launch method.
-    pub launch_method: Option<LaunchMethod>,
     /// Attach the inner process to a nested pty (default true).
     pub nested_pty: Option<bool>,
     /// Allow Keychain access.
     pub keychain_access: Option<bool>,
     /// Additional Mach service global-names the inner process may resolve.
     pub extra_mach_lookups: Option<Vec<String>>,
-}
-
-/// Seatbelt inner-process launch method.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LaunchMethod {
-    /// sandbox_init() + exec (default). Works for third-party GUI apps.
-    Exec,
-    /// Launch via macOS LaunchServices (`open`), then apply the sandbox to the
-    /// inner shell via sandbox-exec. Required for apps with launch constraints.
-    Open,
 }
 
 /// Telemetry configuration (`telemetry`).

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Pure builder that converts an [`ExecutionRequest`] into a TinyScheme sandbox
-//! profile string suitable for `/usr/bin/sandbox-exec -p <profile>`.
+//! profile string suitable for `sandbox_init()` or `sandbox-exec -p <profile>`.
 //!
 //! This module is platform-agnostic — it is just string generation — so it
 //! is unit-tested on every host (Windows / Linux / macOS) in CI.

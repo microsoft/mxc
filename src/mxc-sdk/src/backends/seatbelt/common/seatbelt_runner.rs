@@ -13,16 +13,11 @@
 //! binary runs under a pty), while `Pipes` exposes stdout/stderr/stdin
 //! handles the caller can stream and `Pty` exposes a caller-owned terminal.
 //!
-//! For apps that require LaunchServices (`launchMethod: "open"`), the runner
-//! writes a sandbox helper script and launches the target app via `open -n -W`,
-//! applying the sandbox to the command running inside the app.
-//!
 //! Compiled only on macOS — the rest of the workspace continues to build
 //! on Windows / Linux unchanged.
 
 use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
-use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -31,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, ProxyAddress, ScriptResponse};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -228,6 +223,12 @@ const PROXY_INJECT_KEYS: &[&str] = &[
 // macOS 15+.
 // ---------------------------------------------------------------------------
 
+/// Whether `sandbox_init` resolves in this process, as the exec path needs.
+pub(crate) fn sandbox_init_available() -> bool {
+    // SAFETY: `dlsym` only reads the NUL-terminated symbol name.
+    !unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"sandbox_init".as_ptr()) }.is_null()
+}
+
 #[link(name = "sandbox")]
 extern "C" {
     fn sandbox_init(
@@ -310,23 +311,12 @@ impl SandboxBackend for SeatbeltScriptRunner {
         let profile = build_profile_with_proxy(request, proxy_address).map_err(error_response)?;
         log_generated_profile(&profile, logger);
 
-        // Determine launch method + GUI access from the seatbelt config.
-        let launch_method = request
-            .seatbelt
-            .as_ref()
-            .map(|s| s.launch_method.clone())
-            .unwrap_or_default();
         // Effective posture, not the raw flag: a `guiAccess` the UI policy
         // suppressed emits no GUI rules, so it must not cost the caller
         // streaming either.
         let gui_access = crate::seatbelt_common::seatbelt_policy::gui_access_effective(request);
 
-        match launch_method {
-            LaunchMethod::Exec => {
-                spawn_exec(&profile, request, gui_access, stdio, logger, proxy_address)
-            }
-            LaunchMethod::Open => spawn_open(&profile, request, stdio, logger, proxy_address),
-        }
+        spawn_exec(&profile, request, gui_access, stdio, logger, proxy_address)
     }
 }
 
@@ -473,164 +463,6 @@ fn spawn_exec(
         termination_error: None,
         group: new_session || new_group || stdio != StdioMode::Inherit,
         session_id,
-        cleanup: Vec::new(),
-    }))
-}
-
-/// LaunchServices launch path: write a sandbox helper + `.command` file and run
-/// it in Terminal.app via `open -n -W`. Required for Apple system apps with
-/// Launch Constraints (e.g. Terminal.app). The sandboxed shell runs inside
-/// Terminal, not as our child, so there are no pipes to stream — only the
-/// `open -W` waiter — and [`StdioMode::Pipes`] is rejected.
-fn spawn_open(
-    profile: &str,
-    request: &ExecutionRequest,
-    stdio: StdioMode,
-    logger: &mut Logger,
-    proxy_address: Option<&ProxyAddress>,
-) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-    if stdio != StdioMode::Inherit {
-        let mode = if stdio == StdioMode::Pipes {
-            "stream over pipes"
-        } else {
-            "expose a caller-owned PTY"
-        };
-        return Err(error_response(format!(
-            "Seatbelt launchMethod 'open' launches Terminal.app and cannot {mode}"
-        )));
-    }
-
-    let _ = writeln!(
-        logger,
-        "Seatbelt: using LaunchServices (open) launch method"
-    );
-
-    // 1. Write the profile to a secure temp file.
-    let profile_path = match write_secure_temp_file("mxc_sb_profile_", profile, 0o600) {
-        Ok(p) => p,
-        Err(e) => return Err(error_response(format!("failed to write profile: {e}"))),
-    };
-
-    // 2. Resolve the working directory the way the exec path does. Terminal
-    //    runs the helper from its own directory, so the helper must `cd`
-    //    itself, and needs an absolute target. Fail here rather than inside a
-    //    Terminal window: `open -W` reports its own exit status, not the
-    //    helper's.
-    let resolved_cwd = resolved_working_directory_opt(request);
-    let cwd = match absolute_working_directory(
-        resolved_cwd
-            .as_deref()
-            .unwrap_or(UNRESOLVED_WORKING_DIRECTORY),
-    ) {
-        Ok(cwd) => cwd,
-        Err(e) => {
-            let _ = fs::remove_file(&profile_path);
-            return Err(error_response(format!(
-                "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
-            )));
-        }
-    };
-    if let Some(reason) = working_directory_error(&cwd) {
-        let _ = fs::remove_file(&profile_path);
-        return Err(error_response(reason));
-    }
-    // An unresolved cwd starts the child at `/`, which is no one's home.
-    let home_dir = resolved_cwd.as_ref().map(|_| cwd.clone());
-
-    // 3. Build environment exports for the helper script. When a proxy is
-    //    active its HTTP_PROXY/HTTPS_PROXY vars are injected and caller-supplied
-    //    proxy vars stripped (see `resolve_environment`).
-    let mut env_exports = String::new();
-    for (key, value) in resolve_environment(request, proxy_address, home_dir.as_deref()) {
-        // Validate key is a safe shell identifier to prevent injection.
-        if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            || key.is_empty()
-            || key.starts_with(|c: char| c.is_ascii_digit())
-        {
-            continue; // Skip invalid env var names
-        }
-        // Shell-escape the value.
-        let escaped = escape_single_quoted(&value);
-        let _ = writeln!(env_exports, "export {key}='{escaped}'");
-    }
-
-    // 4. Create the sandbox helper script.
-    // This script is executed inside the terminal app. It:
-    //   a) Enters the resolved working directory and exports `PWD`
-    //   b) Calls sandbox-exec with the profile file to sandbox the shell
-    //   c) Execs the user's command inside the sandbox
-    let helper_content =
-        build_helper_script(&env_exports, &cwd, &profile_path, &request.script_code);
-
-    let helper_path = match write_secure_temp_file("mxc_sb_helper_", &helper_content, 0o700) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = fs::remove_file(&profile_path);
-            return Err(error_response(format!(
-                "failed to write helper script: {e}"
-            )));
-        }
-    };
-
-    // 5. Create the .command file that Terminal will execute.
-    let command_content = format!("#!/bin/sh\nexec '{}'\n", helper_path);
-    let command_path = match write_secure_temp_file("mxc_sb_launch_", &command_content, 0o700) {
-        Ok(p) => {
-            // Rename to .command extension so Terminal recognizes it.
-            let new_path = format!("{p}.command");
-            if let Err(e) = fs::rename(&p, &new_path) {
-                let _ = fs::remove_file(&p);
-                let _ = fs::remove_file(&profile_path);
-                let _ = fs::remove_file(&helper_path);
-                return Err(error_response(format!("failed to rename to .command: {e}")));
-            }
-            new_path
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&profile_path);
-            let _ = fs::remove_file(&helper_path);
-            return Err(error_response(format!(
-                "failed to write .command file: {e}"
-            )));
-        }
-    };
-
-    let _ = writeln!(logger, "Seatbelt: launching via: open -n -W {command_path}");
-
-    // 6. Launch via `open -n -W`.
-    let child = match Command::new("open")
-        .args(["-n", "-W", "-a", "Terminal", &command_path])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            cleanup_files(&[&profile_path, &helper_path, &command_path]);
-            return Err(error_response(format!("failed to launch via open: {e}")));
-        }
-    };
-
-    // The `open -W` process is the thing to wait on; the sandboxed shell runs
-    // inside Terminal. No streamable stdio; the temp files are removed once the
-    // handle's `wait()` (or drop) runs.
-    let started = Instant::now();
-    Ok(Box::new(SeatbeltSandboxProcess {
-        child,
-        stdin: None,
-        stdout: None,
-        stderr: None,
-        stdout_canceller: None,
-        stderr_canceller: None,
-        pty: None,
-        timeout: timeout_from(request),
-        started,
-        timed_out: false,
-        termination_error: None,
-        group: false,
-        session_id: None,
-        cleanup: vec![profile_path, helper_path, command_path],
     }))
 }
 
@@ -639,7 +471,7 @@ fn spawn_open(
 struct SeatbeltSandboxProcess {
     child: std::process::Child,
     /// Pipe ends — `Some` only for [`StdioMode::Pipes`]; `None` for inherited
-    /// stdio / Open mode (the streams are the binary's own, or detached). The
+    /// stdio, where the streams are the binary's own. The
     /// reads are wrapped so they can be cancelled out-of-band (see the
     /// `*_canceller` fields).
     stdin: Option<std::process::ChildStdin>,
@@ -663,21 +495,6 @@ struct SeatbeltSandboxProcess {
     /// The child leads an owned session, so job-control descendants in other
     /// process groups can be terminated without touching the host session.
     session_id: Option<libc::pid_t>,
-    /// Temp files to remove once the child exits (Open mode); empty otherwise.
-    cleanup: Vec<String>,
-}
-
-impl SeatbeltSandboxProcess {
-    /// Remove Open-mode temp files (profile / helper / `.command`) after the
-    /// child exits. Safe to call from both `wait()` and `drop`.
-    fn run_cleanup(&mut self) {
-        if self.cleanup.is_empty() {
-            return;
-        }
-        let files = std::mem::take(&mut self.cleanup);
-        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-        cleanup_files(&refs);
-    }
 }
 
 impl SandboxProcess for SeatbeltSandboxProcess {
@@ -832,7 +649,7 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             // sandboxed descendants are terminated too.
             group_kill(&mut self.child)
         } else {
-            // Inherited / Open mode: a single process sharing the binary's
+            // Inherited stdio: a single process sharing the binary's
             // process group, so signal just it (a group-kill would hit the
             // binary itself).
             self.child.kill()
@@ -933,7 +750,6 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             pty.finish_native_bridge();
         }
         cancel_and_join_discard(pty_thread, &pty_canceller);
-        self.run_cleanup();
         result
     }
 }
@@ -950,7 +766,6 @@ impl Drop for SeatbeltSandboxProcess {
             let _ = self.kill();
             let _ = wait_with_timeout(&mut self.child, Some(DROP_REAP_TIMEOUT));
         }
-        self.run_cleanup();
     }
 }
 
@@ -1112,9 +927,8 @@ const UNRESOLVED_WORKING_DIRECTORY: &str = "/";
 /// Resolve the working directory for the sandboxed child, or `None` when the
 /// request resolves none.
 ///
-/// Both launch paths resolve through here and hand the same value to the
-/// environment, so the default `HOME` cannot name a directory the child never
-/// entered — re-deriving it separately would also miss the `~` expansion.
+/// The same value feeds the environment, so the default `HOME` cannot name a
+/// directory the child never entered.
 fn resolved_working_directory_opt(request: &ExecutionRequest) -> Option<String> {
     let expand = |path: &str| {
         crate::seatbelt_common::profile_builder::expand_tilde(path)
@@ -1126,8 +940,7 @@ fn resolved_working_directory_opt(request: &ExecutionRequest) -> Option<String> 
 }
 
 /// Anchor a resolved working directory to the launcher's directory when it is
-/// relative — `chdir` gives the exec path that anchor, the helper script (which
-/// runs from Terminal's directory) has none.
+/// relative.
 fn absolute_working_directory(path: &str) -> std::io::Result<String> {
     absolute_working_directory_with(path, std::env::current_dir)
 }
@@ -1135,7 +948,7 @@ fn absolute_working_directory(path: &str) -> std::io::Result<String> {
 /// [`absolute_working_directory`] with an injectable launch directory. Only
 /// consulted for a relative value: `chdir` accepts an absolute path even when
 /// the launcher's own directory has been removed, so querying it eagerly would
-/// reject a request the exec path launches fine.
+/// reject a request that launches fine.
 fn absolute_working_directory_with(
     path: &str,
     launch_dir: impl FnOnce() -> std::io::Result<PathBuf>,
@@ -1145,64 +958,6 @@ fn absolute_working_directory_with(
         return Ok(path.to_string());
     }
     Ok(launch_dir()?.join(candidate).to_string_lossy().into_owned())
-}
-
-/// Returns the error message for when the resolved cwd isn't usable
-fn working_directory_error(path: &str) -> Option<String> {
-    match fs::metadata(path) {
-        Ok(meta) if !meta.is_dir() => Some(format!(
-            "seatbelt working directory '{path}' is not a directory"
-        )),
-        Ok(_) if !is_searchable(path) => Some(format!(
-            "seatbelt working directory '{path}' cannot be entered: no search (execute) permission"
-        )),
-        Ok(_) => None,
-        Err(e) => Some(format!(
-            "seatbelt working directory '{path}' cannot be used: {e}"
-        )),
-    }
-}
-
-/// Does the calling user hold search permission on `path`? Answers for the real
-/// uid — `mxc-exec` is not setuid — and cannot speak for a Terminal running as a
-/// different user, so the helper keeps its own `cd` guard.
-fn is_searchable(path: &str) -> bool {
-    let Ok(c_path) = CString::new(path) else {
-        // An interior NUL would be truncated by any C API it reaches.
-        return false;
-    };
-    // SAFETY: `access` reads the NUL-terminated string it is given and returns
-    // an int; `c_path` owns that buffer and outlives the call.
-    unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
-}
-
-/// Escape `value` for interpolation inside a single-quoted `/bin/sh` word:
-/// close the quoted run, emit a literal `'`, then reopen it. The caller
-/// supplies the surrounding quotes.
-fn escape_single_quoted(value: &str) -> String {
-    value.replace('\'', "'\\''")
-}
-
-/// Build the `/bin/sh` helper script Terminal runs for the `open` launch
-/// method.
-fn build_helper_script(
-    env_exports: &str,
-    working_directory: &str,
-    profile_path: &str,
-    script_code: &str,
-) -> String {
-    let cwd = escape_single_quoted(working_directory);
-    format!(
-        "#!/bin/sh\n\
-         # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
-         {env_exports}\
-         cd '{cwd}' || {{ echo 'mxc: cannot enter working directory {cwd}' >&2; exit 1; }}\n\
-         PWD='{cwd}'\n\
-         export PWD\n\
-         exec /usr/bin/sandbox-exec -f '{profile}' /bin/sh -c 'clear; {script}'\n",
-        profile = escape_single_quoted(profile_path),
-        script = escape_single_quoted(script_code),
-    )
 }
 
 /// Populate `command`'s environment from a cleared baseline: never inherit the
@@ -1230,8 +985,7 @@ fn apply_clean_environment(
 /// ([`PROXY_ENV_KEYS`]) are dropped so sandboxed code cannot override or
 /// bypass the proxy, then the injected keys ([`PROXY_INJECT_KEYS`]:
 /// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and their lowercase forms) are
-/// set to the proxy URL. Shared by the exec and open launch paths
-/// so both enforce the proxy identically.
+/// set to the proxy URL.
 ///
 /// `working_directory` is the directory the caller will start the child in, so
 /// the default `HOME` names it; see [`resolved_env`].
@@ -1254,59 +1008,6 @@ fn resolve_environment(
         }
     }
     pairs
-}
-
-/// Write `content` to a temp file with a cryptographically random name and the
-/// given permissions mode. Uses `O_CREAT | O_EXCL` (create_new) to avoid
-/// symlink-following and collisions, and sets permissions immediately after
-/// creation on the open file descriptor to close the TOCTOU window.
-fn write_secure_temp_file(
-    prefix: &str,
-    content: &str,
-    mode: u32,
-) -> Result<String, std::io::Error> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let dir = std::env::temp_dir();
-
-    // Retry loop in case of (unlikely) collision with create_new.
-    for _ in 0..8 {
-        let random: u64 = {
-            // Use /dev/urandom for unpredictable temp names.
-            let mut buf = [0u8; 8];
-            let mut f = fs::File::open("/dev/urandom")?;
-            std::io::Read::read_exact(&mut f, &mut buf)?;
-            u64::from_ne_bytes(buf)
-        };
-        let path = dir.join(format!("{prefix}{random:016x}"));
-
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true) // O_EXCL: fail if exists, no symlink follow
-            .mode(mode) // Set permissions atomically at creation
-            .open(&path)
-        {
-            Ok(mut file) => {
-                file.write_all(content.as_bytes())?;
-                return Ok(path.to_string_lossy().to_string());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "failed to create unique temp file after 8 attempts",
-    ))
-}
-
-/// Remove a list of temp files, ignoring errors.
-fn cleanup_files(paths: &[&str]) {
-    for path in paths {
-        let _ = fs::remove_file(path);
-    }
 }
 
 #[cfg(test)]
@@ -1337,21 +1038,6 @@ mod tests {
         )
         .err()
         .expect("guiAccess PTY must be rejected");
-        assert!(error.error_message.contains("caller-owned PTY"));
-    }
-
-    #[test]
-    fn open_launch_rejects_caller_owned_pty() {
-        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        let error = spawn_open(
-            "(version 1)\n(allow default)",
-            &base_request(),
-            StdioMode::Pty(PtySize::default()),
-            &mut logger,
-            None,
-        )
-        .err()
-        .expect("open PTY must be rejected");
         assert!(error.error_message.contains("caller-owned PTY"));
     }
 
@@ -1700,96 +1386,9 @@ mod tests {
         );
     }
 
+    /// An explicit directory wins; otherwise the first policy grant is used.
     #[test]
-    fn write_secure_temp_file_sets_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = write_secure_temp_file("mxc_test_", "hello", 0o700).unwrap();
-        let meta = fs::metadata(&path).unwrap();
-        // Verify permissions (mask with 0o777 to ignore setuid/sticky bits)
-        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
-        // Verify content
-        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
-        fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn write_secure_temp_file_no_collisions() {
-        let mut paths = Vec::new();
-        for _ in 0..10 {
-            let path = write_secure_temp_file("mxc_collision_test_", "data", 0o600).unwrap();
-            assert!(!paths.contains(&path), "collision detected: {path}");
-            paths.push(path);
-        }
-        for p in &paths {
-            let _ = fs::remove_file(p);
-        }
-    }
-
-    /// The `open` helper must place the child the same way `spawn_exec` does.
-    /// Terminal starts the script in its own directory, so without these two
-    /// lines the request's working directory is silently discarded.
-    #[test]
-    fn open_helper_enters_working_directory_and_exports_pwd() {
-        let script = build_helper_script("", "/tmp/mxc_work", "/tmp/profile.sb", "pwd");
-        assert!(script.contains("cd '/tmp/mxc_work' ||"), "{script}");
-        assert!(
-            script.contains("PWD='/tmp/mxc_work'\nexport PWD\n"),
-            "{script}"
-        );
-        assert!(
-            script.contains(
-                "exec /usr/bin/sandbox-exec -f '/tmp/profile.sb' /bin/sh -c 'clear; pwd'"
-            ),
-            "{script}"
-        );
-    }
-
-    /// A failed `cd` must abort. A bare `cd` would leave the shell in
-    /// Terminal's directory and run the workload in the wrong place.
-    #[test]
-    fn open_helper_aborts_when_the_working_directory_is_unusable() {
-        let script = build_helper_script("", "/tmp/gone", "/tmp/profile.sb", "pwd");
-        let cd_line = script
-            .lines()
-            .find(|line| line.starts_with("cd "))
-            .expect("cd line");
-        assert!(cd_line.contains("exit 1"), "{cd_line}");
-        assert!(
-            script.find("cd '/tmp/gone'").unwrap()
-                < script.find("exec /usr/bin/sandbox-exec").unwrap(),
-            "{script}"
-        );
-    }
-
-    /// `PWD` is assigned after the caller's exports so a request carrying its
-    /// own `PWD` cannot leave the variable disagreeing with the real directory.
-    #[test]
-    fn open_helper_pwd_export_wins_over_caller_environment() {
-        let script = build_helper_script("export PWD='/elsewhere'\n", "/tmp/real", "/p.sb", "pwd");
-        assert!(
-            script.find("export PWD='/elsewhere'").unwrap()
-                < script.find("PWD='/tmp/real'").unwrap(),
-            "{script}"
-        );
-    }
-
-    /// Every interpolated value lands inside a single-quoted shell word, so a
-    /// quote in any of them must be escaped rather than closing the word.
-    #[test]
-    fn open_helper_escapes_single_quotes() {
-        let script = build_helper_script("", "/tmp/it's", "/tmp/o'brien.sb", "echo 'hi'");
-        assert!(script.contains(r"cd '/tmp/it'\''s'"), "{script}");
-        assert!(script.contains(r"PWD='/tmp/it'\''s'"), "{script}");
-        assert!(script.contains(r"-f '/tmp/o'\''brien.sb'"), "{script}");
-        assert!(script.contains(r"'clear; echo '\''hi'\'''"), "{script}");
-    }
-
-    /// The `open` path resolves the directory through the same
-    /// `resolved_working_directory_opt` the exec path uses, including its
-    /// policy-grant fallback when the request names no explicit directory.
-    #[test]
-    fn open_helper_uses_the_same_resolution_as_exec() {
+    fn working_directory_resolves_explicit_then_policy_grant() {
         let mut explicit = base_request();
         explicit.working_directory = "/tmp/explicit".into();
         assert_eq!(
@@ -1803,14 +1402,6 @@ mod tests {
             resolved_working_directory_opt(&policy_fallback).as_deref(),
             Some("/tmp")
         );
-
-        let script = build_helper_script(
-            "",
-            &resolved_working_directory_opt(&policy_fallback).unwrap(),
-            "/p.sb",
-            "pwd",
-        );
-        assert!(script.contains("cd '/tmp' ||"), "{script}");
     }
 
     /// With nothing to resolve, the child still has to start somewhere, but
@@ -1839,28 +1430,14 @@ mod tests {
         assert_eq!(env_value(&pairs, "HOME"), Some("/Users/someone/work"));
     }
 
-    /// A relative `process.cwd` means "relative to the launching process" —
-    /// that is what `chdir` gives the exec path. The helper script runs from
-    /// Terminal's directory instead, so the value must be anchored before it is
-    /// embedded. The two bases here stand in for the launcher and Terminal:
-    /// the same relative request must not be able to name both directories.
+    /// A relative `process.cwd` is relative to the launching process.
     #[test]
     fn relative_working_directory_is_anchored_to_the_launching_process() {
         let launcher = || Ok(PathBuf::from("/tmp/launcher"));
-        let terminal = || Ok(PathBuf::from("/Users/someone"));
-
-        let anchored = absolute_working_directory_with("work", launcher).unwrap();
-        assert_eq!(anchored, "/tmp/launcher/work");
-        assert_ne!(
-            anchored,
-            absolute_working_directory_with("work", terminal).unwrap()
+        assert_eq!(
+            absolute_working_directory_with("work", launcher).unwrap(),
+            "/tmp/launcher/work"
         );
-
-        // Anchored means absolute, so the directory the helper runs from can no
-        // longer change where it lands.
-        let script = build_helper_script("", &anchored, "/p.sb", "pwd");
-        assert!(script.contains("cd '/tmp/launcher/work' ||"), "{script}");
-        assert!(script.contains("PWD='/tmp/launcher/work'"), "{script}");
     }
 
     /// An absolute directory is passed through spelled exactly as written —
@@ -1890,65 +1467,5 @@ mod tests {
         };
         let err = absolute_working_directory_with("work", gone).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-    }
-
-    /// A stat check passes a directory `chdir` refuses, so test the search bit.
-    #[test]
-    fn unsearchable_working_directory_is_rejected() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!("mxc_nox_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir(&dir).unwrap();
-        let path = dir.to_string_lossy().into_owned();
-
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
-        let stat_says_directory = Path::new(&path).is_dir();
-        let reason = working_directory_error(&path);
-
-        // Restore before asserting so a failure cannot leave the dir behind.
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::remove_dir_all(&dir).unwrap();
-
-        assert!(
-            stat_says_directory,
-            "precondition: is_dir() sees a directory"
-        );
-        let reason = reason.expect("an unsearchable directory must be rejected");
-        assert!(reason.contains("search"), "{reason}");
-    }
-
-    /// A usable directory is accepted; a file or missing path names its reason.
-    #[test]
-    fn working_directory_error_accepts_usable_and_names_the_failure() {
-        let dir = std::env::temp_dir();
-        assert_eq!(working_directory_error(&dir.to_string_lossy()), None);
-
-        let file = dir.join(format!("mxc_file_{}", std::process::id()));
-        fs::write(&file, "x").unwrap();
-        let reason = working_directory_error(&file.to_string_lossy());
-        fs::remove_file(&file).unwrap();
-        assert!(
-            reason
-                .as_deref()
-                .unwrap_or_default()
-                .contains("not a directory"),
-            "{reason:?}"
-        );
-
-        let missing = working_directory_error("/tmp/mxc_definitely_absent_2f9a");
-        assert!(
-            missing
-                .as_deref()
-                .unwrap_or_default()
-                .contains("cannot be used"),
-            "{missing:?}"
-        );
-    }
-
-    /// An interior NUL can never name a usable directory.
-    #[test]
-    fn working_directory_with_interior_nul_is_not_searchable() {
-        assert!(!is_searchable("/tmp/\0/etc"));
     }
 }

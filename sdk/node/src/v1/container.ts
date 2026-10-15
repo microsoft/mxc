@@ -154,7 +154,7 @@ function buildLinuxProcessConfig(
 /**
  * Builds the macOS process container (seatbelt) portion of a ContainerConfig.
  *
- * The seatbelt backend's `sandbox-exec` reads a TinyScheme profile
+ * The seatbelt backend applies a TinyScheme profile
  * generated server-side by `seatbelt_common::profile_builder`, so the SDK
  * only needs to set the containment type and ensure the top-level `seatbelt`
  * config block exists — the policy fields on `ContainerConfig` (filesystem /

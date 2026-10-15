@@ -105,7 +105,7 @@ Console.WriteLine($"exit={result.ExitCode}");
 resizing support. Initial dimensions default to 24 rows by 80 columns.
 PTY stderr is merged into `Output`. Closing `Input` requests terminal EOF in
 canonical mode; raw-mode applications must use their own completion protocol.
-Seatbelt rejects PTY mode with `guiAccess` or legacy `launchMethod: "open"`.
+Seatbelt rejects PTY mode with `guiAccess`.
 Unsupported combinations are rejected before sandbox creation.
 
 ## Lifecycle API

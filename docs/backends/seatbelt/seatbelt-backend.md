@@ -78,7 +78,7 @@ remains deny rather than inheriting ingress allow.
 | Firewall / packet-filter enforcement mode | ❌ | Rejected — no packet-filter layer |
 | Proxy peer identity pinning | ❌ | Rejected — not supported |
 | Named containers, attach, lifecycle | ❌ | Not applicable — process-scoped |
-| Caller-controlled PTY | ✅ | Direct `exec` only; incompatible with `guiAccess` and legacy `launchMethod: "open"` |
+| Caller-controlled PTY | ✅ | Incompatible with `guiAccess` |
 
 The short version: **Seatbelt gives you an on/off switch for outbound network
 plus a loopback exception. It has no concept of "this host but not that one."**
@@ -382,14 +382,6 @@ in `global-name`). Read access to `/private/var/db/mds` and
 baseline `/Library` and `/System` allows.
 </details>
 
-
-> **`launchMethod` is retired with the pre-0.9 contracts.** A
-> `0.9.0-alpha` config that sets it is rejected; drop the field and the process
-> is launched with `exec`, like every other backend. On the older schemas,
-> `"exec"` (the default) applies `sandbox_init()` then execs directly, while
-> `"open"` runs the command as the first shell of a Terminal.app instance — and
-> sandboxes that shell. Terminal itself runs unsandboxed.
-
 ## Process environment
 
 **The host environment is never inherited.** The child always starts from a
@@ -456,10 +448,7 @@ adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
 `readonlyPaths[0]` → `/`. A `~` default is tilde-expanded the same way policy
 paths are. `PWD` is exported to the resolved directory.
 
-Both launch methods apply it: `exec` sets it on the child process, while `open`
-performs the `cd` and the `PWD` export inside the generated helper script,
-since Terminal would otherwise start the workload in its own directory. A
-relative `cwd` is resolved against the MXC process's directory on both paths.
+A relative `cwd` is resolved against the MXC process's directory.
 
 **Note:** `getcwd()` only succeeds when the directory *itself* is readable under the profile. An
 out-of-policy `cwd` makes callers that resolve relative paths (`git`, Python's

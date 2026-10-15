@@ -419,17 +419,23 @@ function computeSupport(): PlatformSupport {
   const platform = os.platform();
   const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
 
-  // Non-Windows platforms do not currently have native probes, so fields that
-  // depend on probe data (including uiCapabilities) stay omitted.
+  // Tier and UI fields come only from the Windows probe, so they stay omitted
+  // elsewhere.
   if (platform === 'darwin') {
-    // seatbelt is the only containment backend on macOS.
-    // /usr/bin/sandbox-exec ships with every release of macOS so the check
-    // is effectively just confirming we're on a supported OS.
-    if (isSeatbeltAvailable()) {
+    // Project the native probe rather than re-detecting Seatbelt here.
+    let backends: AvailableBackend[];
+    try {
+      backends = darwinBackendsReader();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      support.reason = `Seatbelt availability could not be read from the native probe: ${message}`;
+      return support;
+    }
+    if (backends.some((entry) => entry.backend === 'seatbelt')) {
       support.isSupported = true;
       support.availableMethods = ['seatbelt'];
     } else {
-      support.reason = '/usr/bin/sandbox-exec not found; macOS install is incomplete';
+      support.reason = 'Seatbelt is unavailable: sandbox_init could not be resolved';
     }
     return support;
   }
@@ -501,6 +507,13 @@ let lxcAvailabilityProbe = defaultLxcAvailabilityProbe;
 /** @internal Test-only: override the LXC availability probe. */
 export function _setLxcAvailabilityProbe(fn: (() => boolean) | null): void {
   lxcAvailabilityProbe = fn ?? defaultLxcAvailabilityProbe;
+}
+
+let darwinBackendsReader: () => AvailableBackend[] = getAvailableBackends;
+
+/** @internal Test-only: override the native backend reader used on macOS. */
+export function _setDarwinBackendsReader(fn: (() => AvailableBackend[]) | null): void {
+  darwinBackendsReader = fn ?? getAvailableBackends;
 }
 
 let platformDiagnosticLogger: (message: string) => void = diagLog;
@@ -898,19 +911,6 @@ export function _probeBubblewrap(): BubblewrapProbe {
     };
   }
   return { available: true };
-}
-
-/**
- * Check if the macOS sandbox is available. `/usr/bin/sandbox-exec` is part
- * of the macOS base install and present on every shipping version of macOS,
- * so this is effectively a sanity check for a corrupted install.
- */
-function isSeatbeltAvailable(): boolean {
-  try {
-    return fs.existsSync('/usr/bin/sandbox-exec');
-  } catch {
-    return false;
-  }
 }
 
 /**
