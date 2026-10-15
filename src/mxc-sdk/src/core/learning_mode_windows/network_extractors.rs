@@ -16,19 +16,12 @@ use windows::core::GUID;
 use super::extractors::{sanitize_properties, DecodedEventParts, RawDenial};
 
 pub(crate) const NETWORK_DECISION_PROVIDER: GUID = GUID {
-    data1: 0x7123_7669,
-    data2: 0x21c3,
-    data3: 0x4101,
-    data4: [0xbd, 0x2f, 0xff, 0x38, 0x94, 0x5d, 0x72, 0x5a],
+    data1: 0x301e_c03d,
+    data2: 0x2951,
+    data3: 0x5efb,
+    data4: [0x6d, 0x99, 0x59, 0xc6, 0x46, 0x28, 0xbb, 0xfc],
 };
-/// Manifest provider registered by Microsoft-Windows-LearningMode-NetworkDecision.
-pub(crate) const MANIFEST_NETWORK_DECISION_PROVIDER: GUID =
-    GUID::from_u128(0x301ec03d_2951_5efb_6d99_59c64628bbfc);
 pub(crate) const NETWORK_DECISION_EVENT_ID: u16 = 1;
-
-pub(crate) fn is_network_decision_provider(provider: GUID) -> bool {
-    provider == NETWORK_DECISION_PROVIDER || provider == MANIFEST_NETWORK_DECISION_PROVIDER
-}
 
 const SCHEMA_VERSION_V1: u16 = 1;
 const SOURCE_APP_ISOLATION: u8 = 1;
@@ -113,8 +106,7 @@ pub(crate) fn analyze_network_decision(parts: &DecodedEventParts) -> NetworkDeci
 fn analyze_network_decision_inner(
     parts: &DecodedEventParts,
 ) -> Result<NetworkDecisionAnalysis, CaptureVerboseLoggingOutcomeReason> {
-    if !is_network_decision_provider(parts.provider) || parts.event_id != NETWORK_DECISION_EVENT_ID
-    {
+    if parts.provider != NETWORK_DECISION_PROVIDER || parts.event_id != NETWORK_DECISION_EVENT_ID {
         return Err(CaptureVerboseLoggingOutcomeReason::UnsupportedEventSchema);
     }
     if !NETWORK_DECISION_V1_FIELDS
