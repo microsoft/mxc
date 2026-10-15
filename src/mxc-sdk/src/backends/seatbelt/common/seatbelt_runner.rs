@@ -226,7 +226,7 @@ const PROXY_INJECT_KEYS: &[&str] = &[
 /// Whether `sandbox_init` resolves in this process, as the exec path needs.
 pub(crate) fn sandbox_init_available() -> bool {
     // SAFETY: `dlsym` only reads the NUL-terminated symbol name.
-    !unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"sandbox_init".as_ptr()) }.is_null()
+    !unsafe { libc::dlsym(libc::RTLD_SELF, c"sandbox_init".as_ptr()) }.is_null()
 }
 
 #[link(name = "sandbox")]

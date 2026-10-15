@@ -3,7 +3,7 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -48,6 +48,26 @@ describe('macOS Seatbelt Container', {
       fs.rmSync(tempDir, { recursive: true, force: true });
       tempDir = '';
     }
+  });
+
+  // A fresh process makes koffi's local-visibility load the first to map
+  // mxc_ffi, so the native sandbox_init lookup runs unmocked and uncached.
+  it('reports seatbelt from native discovery in a fresh process', () => {
+    const script =
+      "const { getPlatformSupport, getAvailableBackends } = await import('@microsoft/mxc-sdk/v1');" +
+      'console.log(JSON.stringify({ support: getPlatformSupport(), backends: getAvailableBackends() }));';
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: path.dirname(new URL(import.meta.url).pathname),
+      encoding: 'utf-8',
+      timeout: 30000,
+    });
+    const { support, backends } = JSON.parse(output) as {
+      support: { isSupported: boolean; availableMethods: string[]; reason?: string };
+      backends: { backend: string }[];
+    };
+    assert.ok(support.isSupported, `seatbelt must be supported: ${output}`);
+    assert.deepStrictEqual(support.availableMethods, ['seatbelt']);
+    assert.ok(backends.some((entry) => entry.backend === 'seatbelt'), output);
   });
 
   it('should execute hello world in seatbelt sandbox', async () => {
