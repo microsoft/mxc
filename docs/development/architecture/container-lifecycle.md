@@ -1063,7 +1063,9 @@ is the sole phase authority. Provision carries
 or `Wslc(Option<WslcProvisionConfig>)`. `ProvisionSession` carries
 `Option<WslcProvisionSessionConfig>` and is WSLc-only; `DeprovisionSession`
 carries a required `session_id`, reachable through `session_id()` rather than
-`sandbox_id()`. The sandbox-addressed variants each carry a required
+`sandbox_id()`. Because routing never reads a session id, operation validation
+rejects one that is not `wslcsess:` followed by 32 lowercase hex digits, the form
+the WSLc daemon mints. The sandbox-addressed variants each carry a required
 `sandbox_id`, with no backend-specific configuration today. Exec process
 settings stay in the common request.
 
@@ -1078,11 +1080,12 @@ the parser and schema generation.
 ### 9.2 The trait
 
 Backends implement the trait with two consts (id prefix and backend key, §5),
-associated types for each phase's config and metadata, and method overrides where they
-have substantive work.
+associated types for each sandbox phase's config and metadata, and method overrides
+where they have substantive work.
 Most methods have default no-op bodies; only `exec` is strictly required. Use `()` for
 any associated type the backend does not need. The two session phases are the
-exception: their defaults refuse with `unsupported_phase`, so a backend that
+exception: they take the concrete `WslcProvisionSessionConfig`, return no backend
+metadata, and their defaults refuse with `unsupported_phase`, so a backend that
 owns no session needs no code to say so, and a dry run of a session phase
 cannot report success on a backend that cannot perform it.
 
@@ -1477,6 +1480,12 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
 ) -> Result<DispatchOutcome, MxcError> {
     let (request, operation) = bound.into_parts();
     match operation {
+        BoundStateAwareOperation::ProvisionSession(config) => {
+            backend.validate_provision_session(&request, config.as_ref())?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            let result = backend.provision_session(&request, config)?;
+            Ok(DispatchOutcome::Envelope(provision_session_envelope(result)))
+        }
         BoundStateAwareOperation::Provision(config) => {
             backend.validate_provision(&request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
@@ -1510,6 +1519,12 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
             let result = backend.deprovision(&sandbox_id, &request, config)?;
             Ok(DispatchOutcome::Envelope(deprovision_envelope(result)))
+        }
+        BoundStateAwareOperation::DeprovisionSession { session_id } => {
+            backend.validate_deprovision_session(&session_id, &request)?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            backend.deprovision_session(&session_id, &request)?;
+            Ok(DispatchOutcome::Envelope(empty_envelope()))
         }
     }
 }

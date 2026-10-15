@@ -210,7 +210,6 @@ fn wslc_port_mappings_requested(operation: &StateAwareOperation) -> bool {
     )
 }
 
-/// Session phases exist only in the `1.1.0-alpha` exact contract.
 fn session_operation(operation: &StateAwareOperation) -> bool {
     matches!(
         operation,

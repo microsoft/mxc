@@ -6,7 +6,8 @@
 //! The operation determines its phase and routing data. Provision retains its
 //! backend even when no configuration was supplied. Sandbox-addressed phases
 //! always carry an ID, whose contents are validated at the existing dispatch
-//! boundary.
+//! boundary. A session ID is checked by `validate` instead, because routing
+//! never reads it.
 
 use crate::mxc_common::models::{
     ContainmentBackend, IsolationSessionProvisionConfig, WslcProvisionConfig,
@@ -111,7 +112,8 @@ impl StateAwareOperation {
         }
     }
 
-    /// Reject backend configuration the selected backend cannot enforce.
+    /// Reject backend configuration the selected backend cannot enforce, and
+    /// session ids not in the form the WSLc daemon mints.
     ///
     /// Both the JSON and typed-SDK entry points call this, so neither surface
     /// can accept a payload the other rejects.
@@ -126,6 +128,7 @@ impl StateAwareOperation {
                     None => Ok(()),
                 }
             }
+            Self::DeprovisionSession { session_id } => validate_session_id(session_id),
 
             // Session sizing carries no cross-backend constraint; the WSLc
             // backend decides what it can honor.
@@ -134,9 +137,30 @@ impl StateAwareOperation {
             | Self::Start { .. }
             | Self::Exec { .. }
             | Self::Stop { .. }
-            | Self::Deprovision { .. }
-            | Self::DeprovisionSession { .. } => Ok(()),
+            | Self::Deprovision { .. } => Ok(()),
         }
+    }
+}
+
+const SESSION_ID_TAG: &str = "wslcsess:";
+const SESSION_ID_HEX_DIGITS: usize = 32;
+
+fn validate_session_id(session_id: &str) -> Result<(), crate::mxc_common::error::WxcError> {
+    let well_formed = session_id
+        .strip_prefix(SESSION_ID_TAG)
+        .is_some_and(|token| {
+            token.len() == SESSION_ID_HEX_DIGITS
+                && token
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        });
+    if well_formed {
+        Ok(())
+    } else {
+        Err(crate::mxc_common::error::WxcError::ConfigParse(format!(
+            "a session id must be `{SESSION_ID_TAG}` followed by {SESSION_ID_HEX_DIGITS} \
+             lowercase hex digits"
+        )))
     }
 }
 
@@ -219,6 +243,34 @@ mod tests {
         assert_eq!(deprovision.containment(), Some(ContainmentBackend::Wslc));
         assert_eq!(deprovision.sandbox_id(), None);
         assert_eq!(deprovision.session_id(), Some("wslcsess:abcd"));
+    }
+
+    #[test]
+    fn a_session_id_must_have_the_form_the_daemon_mints() {
+        let release = |session_id: &str| {
+            StateAwareOperation::DeprovisionSession {
+                session_id: session_id.into(),
+            }
+            .validate()
+        };
+        assert!(release("wslcsess:0123456789abcdef0123456789abcdef").is_ok());
+
+        for malformed in [
+            "",
+            "wslcsess:",
+            "wslcsess:abcd",
+            "wslcsess:0123456789abcdef0123456789abcdef0",
+            "wslcsess:0123456789ABCDEF0123456789ABCDEF",
+            "wslcsess:0123456789abcdef0123456789abcdeg",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef",
+        ] {
+            let error = release(malformed).expect_err(malformed).to_string();
+            assert!(
+                error.contains("`wslcsess:` followed by 32 lowercase hex digits"),
+                "the refusal of {malformed:?} must name the expected form, got: {error}"
+            );
+        }
     }
 
     #[test]

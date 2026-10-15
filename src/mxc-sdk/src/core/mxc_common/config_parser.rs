@@ -4655,6 +4655,47 @@ mod tests {
     }
 
     #[test]
+    fn typed_session_operations_normalize_to_wslc_with_no_network_posture() {
+        let normalize = |operation| {
+            let input = crate::mxc_common::sdk_input::SdkStateAwareInput::new(
+                ContractVersion::V1_1_0Alpha,
+                operation,
+            )
+            .unwrap();
+            normalize_sdk_state_aware_request(input, &mut test_logger()).unwrap()
+        };
+
+        let provision = normalize(StateAwareOperation::Provision(StateAwareProvision::Wslc(
+            None,
+        )));
+        assert!(
+            provision.request().policy.network_ingress.is_some(),
+            "a provision without a network section must get the default ingress posture"
+        );
+
+        for operation in [
+            StateAwareOperation::ProvisionSession(None),
+            StateAwareOperation::DeprovisionSession {
+                session_id: "wslcsess:0123456789abcdef0123456789abcdef".into(),
+            },
+        ] {
+            let parsed = normalize(operation);
+            let phase = parsed.phase();
+            let policy = &parsed.request().policy;
+            assert_eq!(
+                parsed.request().containment,
+                ContainmentBackend::Wslc,
+                "{phase}"
+            );
+            assert!(!policy.network_specified, "{phase}");
+            assert!(
+                policy.network_egress.is_none() && policy.network_ingress.is_none(),
+                "{phase} declares no network posture, so it must not inherit the provision default"
+            );
+        }
+    }
+
+    #[test]
     fn operation_cli_transport_routes_all_errors_to_diagnostic_only() {
         for json in [
             "{ not json",

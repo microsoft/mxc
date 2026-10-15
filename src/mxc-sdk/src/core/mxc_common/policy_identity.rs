@@ -910,67 +910,81 @@ mod tests {
     }
 
     #[test]
-    fn session_sizing_changes_the_hash_and_the_session_id_does_not() {
-        let base = request();
-        let sized = |config: Option<WslcProvisionSessionConfig>| {
-            state_aware_policy_hash(
-                &base,
-                "wslc",
-                &StateAwareOperation::ProvisionSession(config),
-            )
+    fn state_aware_session_hash_preserves_exact_sizing_shape() {
+        let request = request();
+        let sizing = |cpu_count, memory_mb, gpu| {
+            Some(WslcProvisionSessionConfig {
+                cpu_count,
+                memory_mb,
+                gpu,
+            })
         };
+        let mut hashes = std::collections::HashSet::new();
+        for (config, expected_config) in [
+            (None, Value::Null),
+            (sizing(None, None, None), serde_json::json!({})),
+            (
+                sizing(Some(4), None, None),
+                serde_json::json!({"cpuCount": 4}),
+            ),
+            (
+                sizing(Some(8), None, None),
+                serde_json::json!({"cpuCount": 8}),
+            ),
+            (
+                sizing(None, Some(4), None),
+                serde_json::json!({"memoryMb": 4}),
+            ),
+            (
+                sizing(None, Some(4096), None),
+                serde_json::json!({"memoryMb": 4096}),
+            ),
+            (
+                sizing(None, None, Some(false)),
+                serde_json::json!({"gpu": false}),
+            ),
+            (
+                sizing(None, None, Some(true)),
+                serde_json::json!({"gpu": true}),
+            ),
+            (
+                sizing(Some(4), Some(4), Some(true)),
+                serde_json::json!({"cpuCount": 4, "memoryMb": 4, "gpu": true}),
+            ),
+        ] {
+            let operation = StateAwareOperation::ProvisionSession(config);
+            assert_eq!(
+                state_aware_config_projection(&operation),
+                expected_config,
+                "{operation:?}"
+            );
+            let hash = state_aware_policy_hash(&request, "wslc", &operation);
+            assert_eq!(
+                hash,
+                expected_state_aware_hash(&request, "wslc", "provision-session", expected_config),
+                "{operation:?}"
+            );
+            assert!(
+                hashes.insert(hash),
+                "absent, empty and supplied sizing fields must stay distinct, even when two \
+                 fields carry the same value: {operation:?}"
+            );
+        }
+    }
 
-        let absent = sized(None);
-        let empty = sized(Some(WslcProvisionSessionConfig::default()));
-        assert_ne!(absent, empty);
-
-        let four_cpus = sized(Some(WslcProvisionSessionConfig {
-            cpu_count: Some(4),
-            ..Default::default()
-        }));
-        let eight_cpus = sized(Some(WslcProvisionSessionConfig {
-            cpu_count: Some(8),
-            ..Default::default()
-        }));
-        assert_ne!(four_cpus, eight_cpus);
-        assert_ne!(empty, four_cpus);
-
-        let small = sized(Some(WslcProvisionSessionConfig {
-            memory_mb: Some(4096),
-            ..Default::default()
-        }));
-        let large = sized(Some(WslcProvisionSessionConfig {
-            memory_mb: Some(8192),
-            ..Default::default()
-        }));
-        assert_ne!(small, large);
-        assert_ne!(empty, small);
-
-        assert_ne!(
-            four_cpus, small,
-            "cpuCount and memoryMb must project to distinct keys"
-        );
-        let gpu_off = sized(Some(WslcProvisionSessionConfig {
-            gpu: Some(false),
-            ..Default::default()
-        }));
-        let gpu_on = sized(Some(WslcProvisionSessionConfig {
-            gpu: Some(true),
-            ..Default::default()
-        }));
-        assert_ne!(gpu_off, gpu_on);
-        assert_ne!(empty, gpu_off);
-
-        let release = |session_id: &str| {
-            state_aware_policy_hash(
-                &base,
-                "wslc",
-                &StateAwareOperation::DeprovisionSession {
-                    session_id: session_id.to_string(),
-                },
-            )
-        };
-        assert_eq!(release("wslcsess:aaaa"), release("wslcsess:bbbb"));
+    #[test]
+    fn state_aware_session_hash_excludes_the_session_id() {
+        let request = request();
+        for session_id in ["wslcsess:aaaa", "wslcsess:bbbb"] {
+            let operation = StateAwareOperation::DeprovisionSession {
+                session_id: session_id.into(),
+            };
+            assert_eq!(
+                state_aware_policy_hash(&request, "wslc", &operation),
+                expected_state_aware_hash(&request, "wslc", "deprovision-session", Value::Null),
+                "the session id must not enter the policy identity: {session_id}"
+            );
+        }
     }
 
     fn parse_state_aware(
@@ -1175,38 +1189,48 @@ mod tests {
         let mut hashes = std::collections::HashSet::new();
         for (operation, expected_phase) in [
             (
-                StateAwareOperation::Provision(StateAwareProvision::WindowsSandbox),
+                StateAwareOperation::ProvisionSession(None),
+                "provision-session",
+            ),
+            (
+                StateAwareOperation::Provision(StateAwareProvision::Wslc(None)),
                 "provision",
             ),
             (
                 StateAwareOperation::Start {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "start",
             ),
             (
                 StateAwareOperation::Exec {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "exec",
             ),
             (
                 StateAwareOperation::Stop {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "stop",
             ),
             (
                 StateAwareOperation::Deprovision {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "deprovision",
             ),
+            (
+                StateAwareOperation::DeprovisionSession {
+                    session_id: "wslcsess:deadbeef".into(),
+                },
+                "deprovision-session",
+            ),
         ] {
-            let hash = state_aware_policy_hash(&request, "windows_sandbox", &operation);
+            let hash = state_aware_policy_hash(&request, "wslc", &operation);
             assert_eq!(
                 hash,
-                expected_state_aware_hash(&request, "windows_sandbox", expected_phase, Value::Null)
+                expected_state_aware_hash(&request, "wslc", expected_phase, Value::Null)
             );
             assert!(hashes.insert(hash), "phase must affect the policy hash");
         }

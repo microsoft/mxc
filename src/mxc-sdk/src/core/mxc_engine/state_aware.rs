@@ -1634,9 +1634,20 @@ mod tests {
         ]
     }
 
-    fn parsed_session(operation: StateAwareOperation) -> ParsedStateAwareRequest {
-        let input = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation).unwrap();
-        normalize_sdk_state_aware(input, false, &mut Logger::new(Mode::Buffer)).unwrap()
+    fn session_refusal_on_each_route(
+        operation: &StateAwareOperation,
+        dry_run: bool,
+    ) -> [(&'static str, Error); 2] {
+        let input = || SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation.clone());
+        let parsed =
+            normalize_sdk_state_aware(input().unwrap(), false, &mut Logger::new(Mode::Buffer))
+                .unwrap();
+        let envelope = run_state_aware(parsed, dry_run).unwrap_err();
+        let typed = run_typed_state_aware_request(input().unwrap(), false, dry_run).unwrap_err();
+        [
+            ("run_state_aware", envelope.into()),
+            ("run_typed_state_aware_request", typed),
+        ]
     }
 
     #[cfg(not(all(target_os = "windows", feature = "wslc")))]
@@ -1644,9 +1655,13 @@ mod tests {
     fn a_session_phase_without_wslc_reports_the_backend_not_the_request() {
         for operation in session_operations() {
             for dry_run in [false, true] {
-                let error =
-                    run_state_aware(parsed_session(operation.clone()), dry_run).unwrap_err();
-                assert_eq!(error.code, MxcErrorCode::BackendUnavailable, "{dry_run}");
+                for (route, error) in session_refusal_on_each_route(&operation, dry_run) {
+                    assert_eq!(
+                        error.code,
+                        crate::ErrorCode::BackendUnavailable,
+                        "{route} with dry_run={dry_run}: {error:?}"
+                    );
+                }
             }
         }
     }
@@ -1656,10 +1671,14 @@ mod tests {
     fn a_session_phase_reaches_wslc_and_is_refused_as_unsupported_until_it_is_implemented() {
         for operation in session_operations() {
             for dry_run in [false, true] {
-                let error =
-                    run_state_aware(parsed_session(operation.clone()), dry_run).unwrap_err();
-                assert_eq!(error.code, MxcErrorCode::UnsupportedPhase, "{dry_run}");
-                assert!(error.message.contains("wslc"), "{error:?}");
+                for (route, error) in session_refusal_on_each_route(&operation, dry_run) {
+                    assert_eq!(
+                        error.code,
+                        crate::ErrorCode::UnsupportedPhase,
+                        "{route} with dry_run={dry_run}: {error:?}"
+                    );
+                    assert!(error.message.contains("wslc"), "{route}: {error:?}");
+                }
             }
         }
     }
