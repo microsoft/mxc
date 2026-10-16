@@ -253,6 +253,13 @@ The Rust style guidelines used in this repo are documented in [`.github/instruct
 
 Testing is a key component in the development workflow. We expect contributors to add or update tests alongside their changes.
 
+Features need functional coverage in the applicable CI suite, and bug fixes
+need a regression scenario for the reported failure. Backend behavior belongs
+in the scheduled/nightly validation suites on suitable hosts; see the
+[validation runbook](docs/development/build-and-test/ci-validation-infrastructure.md).
+Unit tests support isolated logic but do not replace this behavior coverage.
+Documentation-only edits do not need runtime tests.
+
 ```bash
 # Rust unit tests (from src/)
 cargo test --workspace
@@ -272,7 +279,14 @@ PowerShell and shell helper scripts that drive the executor end-to-end live unde
 
 ### Code review
 
-When the change is ready, mark the Draft PR as **Ready for Review**. The PR template asks you to confirm CLA acceptance and to update [`.github/copilot-instructions.md`](./.github/copilot-instructions.md) if your change affects build commands, project architecture, or key conventions.
+When the change is ready, mark the Draft PR as **Ready for Review**. The PR
+template asks you to confirm CLA acceptance and update agent guidance if build
+commands, architecture, or key conventions change. Technical repository rules
+live in [`.github/copilot-instructions.md`](./.github/copilot-instructions.md).
+[`AGENTS.md`](./AGENTS.md) references those rules and adds design, communication,
+and validation expectations; `CLAUDE.md` points to that guidance.
+Repository-specific review checks live in the
+[MXC code-review skill](./.github/skills/mxc-code-review/SKILL.md).
 
 PR builds don't run automatically — Microsoft ADO policy requires a Microsoft employee to comment `/azp run` to start the `MXC-PR-Build` pipeline. See [pull request builds](./docs/development/build-and-test/pull-requests.md) for details.
 

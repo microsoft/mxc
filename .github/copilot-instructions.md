@@ -78,14 +78,17 @@ Prefer the smallest test command covering the change. Host-dependent backend sui
 - Production parsing dispatches through exact closed contracts and their
   version-specific adapters into private `CommonRequestIR` normalization input.
 - Preserve optional-field presence through parsing and binding. Apply defaults and semantic validation in the backend.
+
 - New features use their intended permanent JSON location in the exact
   development contract. JSON placement, publication eligibility, and runtime
   experimental authorization are separate. Update the matching closed request
   types, adapt them into `CommonRequestIR` or a phase-specific runtime config,
   and regenerate the registered exact schema and TypeScript artifacts.
+
 - Never edit `schemas/stable/`; released schemas are immutable.
 - Never hand-edit generated development schemas or generated TypeScript wire types.
 - `schemas/schema-version.json` is the canonical source for compatibility constants.
+
 - In the .NET SDK (`sdk/dotnet/`), every serialized or deserialized wire type
   must be registered as a `[JsonSerializable]` root in `MxcJsonContext`
   (`MxcJsonSerialization.cs`) and routed through the `MxcJson` helpers, so the
@@ -152,3 +155,10 @@ When creating issues through an API, explicitly set the issue type and these exa
 | Task | `Task` | `Issue-Task`, `Needs-Triage` |
 
 Do not fabricate missing required issue fields. For security issues or BSODs, do not attach dumps, logs, or traces to a public GitHub issue; direct sensitive material to `secure@microsoft.com` and reference the issue.
+
+## Engineering and review guidance
+
+Follow the additional [design, communication, and validation standards](../AGENTS.md#design-for-the-codebase-not-just-the-feature)
+in `AGENTS.md`. Use the [MXC review skill](skills/mxc-code-review/SKILL.md)
+when reviewing changes, including its requirements for functional CI validation
+and bug regression coverage.
