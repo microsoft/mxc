@@ -982,7 +982,7 @@ mod tests {
             assert_eq!(
                 state_aware_policy_hash(&request, "wslc", &operation),
                 expected_state_aware_hash(&request, "wslc", "deprovision-session", Value::Null),
-                "the session id must not enter the policy identity: {session_id}"
+                "the session id must not enter the policy identity"
             );
         }
     }
