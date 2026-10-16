@@ -8,7 +8,8 @@ use serde_json::{json, Value};
 
 use super::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcProvisionRequest,
+    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcDeprovisionSessionRequest,
+    WslcProvisionRequest, WslcProvisionSessionRequest,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -47,6 +48,14 @@ fn provision_dispatch(windows_sandbox: Value, isolation_session: Value, wslc: Va
                 Value::Bool(false),
             ),
         ),
+    )
+}
+
+fn session_dispatch(wslc: Value) -> Value {
+    branch(
+        discriminator("containment", "wslc"),
+        wslc,
+        Value::Bool(false),
     )
 }
 
@@ -98,28 +107,38 @@ fn one_shot_dispatch(one_shot: Value) -> Value {
 
 #[allow(clippy::too_many_arguments)]
 fn phase_dispatch(
+    provision_session: Value,
     provision: Value,
     start: Value,
     exec: Value,
     stop: Value,
     deprovision: Value,
+    deprovision_session: Value,
 ) -> Value {
     branch(
-        discriminator("phase", "provision"),
-        provision,
+        discriminator("phase", "provision-session"),
+        provision_session,
         branch(
-            discriminator("phase", "start"),
-            start,
+            discriminator("phase", "provision"),
+            provision,
             branch(
-                discriminator("phase", "exec"),
-                exec,
+                discriminator("phase", "start"),
+                start,
                 branch(
-                    discriminator("phase", "stop"),
-                    stop,
+                    discriminator("phase", "exec"),
+                    exec,
                     branch(
-                        discriminator("phase", "deprovision"),
-                        deprovision,
-                        Value::Bool(false),
+                        discriminator("phase", "stop"),
+                        stop,
+                        branch(
+                            discriminator("phase", "deprovision"),
+                            deprovision,
+                            branch(
+                                discriminator("phase", "deprovision-session"),
+                                deprovision_session,
+                                Value::Bool(false),
+                            ),
+                        ),
                     ),
                 ),
             ),
@@ -127,16 +146,12 @@ fn phase_dispatch(
     )
 }
 
-/// Generates the unrendered JSON Schema for the mutable `1.1.0-alpha`
-/// development contract.
-///
-/// The document selects one of eight closed request roots through nested
-/// `if`/`then` discriminators. This avoids reporting validation failures from
-/// unrelated lifecycle phases while retaining a shared definitions table.
+/// Generate the development contract's JSON Schema.
 pub fn development_schema() -> Value {
     let mut generator = SchemaGenerator::default();
 
     let one_shot = subschema::<OneShotRequest>(&mut generator);
+    let wslc_session = subschema::<WslcProvisionSessionRequest>(&mut generator);
     let windows_sandbox = subschema::<WindowsSandboxProvisionRequest>(&mut generator);
     let isolation_session = subschema::<IsolationSessionProvisionRequest>(&mut generator);
     let wslc = subschema::<WslcProvisionRequest>(&mut generator);
@@ -144,9 +159,18 @@ pub fn development_schema() -> Value {
     let exec = subschema::<ExecRequest>(&mut generator);
     let stop = subschema::<StopRequest>(&mut generator);
     let deprovision = subschema::<DeprovisionRequest>(&mut generator);
+    let wslc_release_session = subschema::<WslcDeprovisionSessionRequest>(&mut generator);
 
     let provision = provision_dispatch(windows_sandbox, isolation_session, wslc);
-    let state_aware = phase_dispatch(provision, start, exec, stop, deprovision);
+    let state_aware = phase_dispatch(
+        session_dispatch(wslc_session),
+        provision,
+        start,
+        exec,
+        stop,
+        deprovision,
+        session_dispatch(wslc_release_session),
+    );
     let dispatch = branch(
         json!({ "required": ["phase"] }),
         state_aware,
@@ -172,6 +196,7 @@ mod tests {
 
     const ROOT_NAMES: &[&str] = &[
         "OneShotRequest",
+        "WslcProvisionSessionRequest",
         "WindowsSandboxProvisionRequest",
         "IsolationSessionProvisionRequest",
         "WslcProvisionRequest",
@@ -179,6 +204,7 @@ mod tests {
         "ExecRequest",
         "StopRequest",
         "DeprovisionRequest",
+        "WslcDeprovisionSessionRequest",
     ];
 
     #[test]
@@ -189,6 +215,7 @@ mod tests {
             regenerated_schema: development_schema(),
             request_roots: ROOT_NAMES,
             phase_markers: &[
+                ("WslcProvisionSessionRequest", "provision-session"),
                 ("WindowsSandboxProvisionRequest", "provision"),
                 ("IsolationSessionProvisionRequest", "provision"),
                 ("WslcProvisionRequest", "provision"),
@@ -196,11 +223,14 @@ mod tests {
                 ("ExecRequest", "exec"),
                 ("StopRequest", "stop"),
                 ("DeprovisionRequest", "deprovision"),
+                ("WslcDeprovisionSessionRequest", "deprovision-session"),
             ],
             containment_markers: &[
+                ("WslcProvisionSessionRequest", "wslc"),
                 ("WindowsSandboxProvisionRequest", "windows_sandbox"),
                 ("IsolationSessionProvisionRequest", "isolation_session"),
                 ("WslcProvisionRequest", "wslc"),
+                ("WslcDeprovisionSessionRequest", "wslc"),
             ],
             compatibility_aliases: false,
             one_shot_required: &["process"],

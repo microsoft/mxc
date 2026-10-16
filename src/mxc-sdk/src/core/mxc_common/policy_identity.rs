@@ -99,17 +99,7 @@ pub fn policy_hash(request: &ExecutionRequest) -> String {
     hash_canonical_json(&canonical)
 }
 
-/// Compute a state-aware policy identity from the backend resolved from the
-/// lifecycle request and its typed operation.
-///
-/// Only allow-listed provision fields enter the hash. An absent config remains
-/// JSON `null`, a present config with no fields remains `{}`, and explicit empty
-/// strings remain distinct, preserving identities for exact accepted requests.
-///
-/// A session's identity covers the sizing it declares. A sandbox placed into an
-/// existing session declares none, and this hash is computed from the request
-/// before dispatch, so a sandbox's identity does not cover the sizing of the
-/// session it joins.
+/// Hash the declared lifecycle policy without resolving the session's CPU, memory, or GPU settings.
 pub fn state_aware_policy_hash(
     request: &ExecutionRequest,
     backend: &str,
@@ -130,8 +120,6 @@ pub fn state_aware_policy_hash(
     hash_canonical_json(&canonical_json(&projection))
 }
 
-/// Exhaustive matching forces new operation/config fields to be classified
-/// explicitly instead of accidentally hashing a newly added secret.
 fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
     match operation {
         StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
@@ -146,6 +134,7 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(WslcProvisionConfig {
             image,
             image_tar_path,
+            session_id,
             port_mappings,
         }))) => {
             let mut config = Map::new();
@@ -154,6 +143,11 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             if let Some(image_tar_path) = image_tar_path {
                 config.insert("imageTarPath".into(), Value::String(image_tar_path.clone()));
+            }
+
+            // Session IDs are capabilities, so record their presence without their values.
+            if session_id.is_some() {
+                config.insert("joinsNamedSession".into(), Value::Bool(true));
             }
 
             // A forwarded host port is policy, so it belongs in the identity.
@@ -985,6 +979,61 @@ mod tests {
                 "the session id must not enter the policy identity"
             );
         }
+    }
+
+    #[test]
+    fn joining_a_session_is_recorded_without_distinguishing_which_session() {
+        let base = request();
+        let joined = |session_id: Option<&str>| {
+            state_aware_policy_hash(
+                &base,
+                "wslc",
+                &StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(
+                    WslcProvisionConfig {
+                        image: Some("alpine:latest".to_string()),
+                        session_id: session_id.map(str::to_string),
+                        ..Default::default()
+                    },
+                ))),
+            )
+        };
+
+        let implicit = joined(None);
+        let named = joined(Some("wslcsess:aaaa"));
+        assert_ne!(
+            implicit, named,
+            "a sandbox sized by the host defaults must not share an identity with one whose \
+             sizing was chosen by another request"
+        );
+        assert_eq!(
+            named,
+            joined(Some("wslcsess:bbbb")),
+            "the session id is a bearer capability and must not reach the identity"
+        );
+    }
+
+    #[test]
+    fn an_unnamed_session_leaves_the_provision_identity_untouched() {
+        let base = request();
+        let hash = |config: WslcProvisionConfig| {
+            state_aware_policy_hash(
+                &base,
+                "wslc",
+                &StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(config))),
+            )
+        };
+
+        assert_eq!(
+            hash(WslcProvisionConfig {
+                image: Some("alpine:latest".to_string()),
+                ..Default::default()
+            }),
+            hash(WslcProvisionConfig {
+                image: Some("alpine:latest".to_string()),
+                session_id: None,
+                ..Default::default()
+            })
+        );
     }
 
     fn parse_state_aware(

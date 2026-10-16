@@ -1,20 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Per-lifecycle persistence for the [`super::correlation_vector`] root, so a
-//! state-aware sandbox's phases share one telemetry lineage without a caller
-//! ever holding or relaying a vector.
-//!
-//! `provision` mints its vector the ordinary way ([`super::correlation_vector::seed`],
-//! before its `sandbox_id` exists) and, once dispatch mints that id, this module
-//! persists the vector under it. Every later phase recalls the persisted root
-//! and [`super::correlation_vector::spin`]s a child off it; `deprovision`
-//! forgets the record on success. A record that cannot be found or read (never
-//! persisted, removed, corrupted, or the store is unavailable) degrades to a
-//! fresh, disconnected [`super::correlation_vector::seed`] — lineage is lost,
-//! but a phase never derives a vector from `sandbox_id` itself, which — unlike
-//! a persisted root — is not guaranteed to carry 128 bits of entropy and, on
-//! some backends, can embed caller-supplied data.
+//! Per-sandbox telemetry correlation with independent vectors for session operations.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::state_aware_dispatch::DispatchOutcome;
+use crate::mxc_common::state_aware_request::Phase;
 
 use super::correlation_vector::{is_relayable, seed, spin};
 
@@ -33,19 +21,15 @@ const STORE_LOCK_RETRY_COUNT: usize = 200;
 const STORE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 const PRUNE_DELETE_LIMIT: usize = 256;
 
-/// Pre-dispatch correlation vector for a state-aware phase. `provision` always
-/// seeds a fresh vector (its `sandbox_id` doesn't exist yet — persist it via
-/// [`on_provision_outcome`] once dispatch mints one). Every other phase recalls
-/// the persisted lifecycle root for `sandbox_id` and spins a child off it, or
-/// seeds a fresh, disconnected vector if `sandbox_id` is absent or has no
-/// record. Returns an empty string when `active` is false, so an inactive
-/// telemetry provider pays for no RNG/clock/file-system work.
-pub fn pre_dispatch_vector(active: bool, is_provision: bool, sandbox_id: Option<&str>) -> String {
+pub fn pre_dispatch_vector(active: bool, phase: Phase, sandbox_id: Option<&str>) -> String {
     if !active {
         return String::new();
     }
+    if matches!(phase, Phase::ProvisionSession | Phase::DeprovisionSession) {
+        return seed();
+    }
     match sandbox_id {
-        Some(id) if !is_provision => {
+        Some(id) if phase != Phase::Provision => {
             // Load and refresh the active lifecycle before sweeping abandoned
             // records. Otherwise a valid sandbox whose last phase was over the
             // retention threshold ago would delete its own root here.
@@ -553,8 +537,48 @@ mod tests {
 
     #[test]
     fn inactive_pre_dispatch_vector_is_empty() {
-        assert_eq!(pre_dispatch_vector(false, true, None), "");
-        assert_eq!(pre_dispatch_vector(false, false, Some("wsb:abcdef01")), "");
+        assert_eq!(pre_dispatch_vector(false, Phase::Provision, None), "");
+        assert_eq!(
+            pre_dispatch_vector(false, Phase::Exec, Some("wsb:abcdef01")),
+            ""
+        );
+    }
+
+    #[test]
+    fn session_phases_seed_without_sweeping_sandbox_records() {
+        let store = Arc::new(MemoryStore::default());
+        let _guard = replace_store(store.clone());
+        let root = seed();
+        store.persist("wslc:existing", &root);
+
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            assert_eq!(pre_dispatch_vector(false, phase, None), "");
+            let first = pre_dispatch_vector(true, phase, None);
+            let second = pre_dispatch_vector(true, phase, None);
+            assert!(is_relayable(&first));
+            assert!(is_relayable(&second));
+            assert_ne!(first, second);
+        }
+        assert_eq!(*store.prune_count.lock().unwrap(), 0);
+        assert_eq!(
+            store.record("wslc:existing").as_deref(),
+            Some(root.as_str())
+        );
+    }
+
+    #[test]
+    fn session_phases_do_not_create_a_correlation_store_or_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("correlation");
+        let _guard = StoreDirGuard::set(&store);
+
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            assert!(is_relayable(&pre_dispatch_vector(true, phase, None)));
+        }
+        assert!(
+            !store.exists(),
+            "session phases must not access the sandbox correlation store"
+        );
     }
 
     #[test]
@@ -562,13 +586,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = StoreDirGuard::set(tmp.path());
 
-        let provisioned = pre_dispatch_vector(true, true, None);
+        let provisioned = pre_dispatch_vector(true, Phase::Provision, None);
         assert!(is_relayable(&provisioned));
 
         // A non-provision phase with no sandbox_id (should never happen in
         // practice; the parser requires one) still degrades to a fresh seed
         // rather than panicking or emitting an empty vector.
-        let no_id = pre_dispatch_vector(true, false, None);
+        let no_id = pre_dispatch_vector(true, Phase::Exec, None);
         assert!(is_relayable(&no_id));
     }
 
@@ -579,15 +603,15 @@ mod tests {
         let sandbox_id = "wsb:12345678";
 
         // provision: seed, then persist once the id is known.
-        let provisioned = pre_dispatch_vector(true, true, None);
+        let provisioned = pre_dispatch_vector(true, Phase::Provision, None);
         on_provision_outcome(true, &provisioned, &provision_envelope(sandbox_id));
 
         let base_of = |cv: &str| cv.split('.').next().unwrap().to_string();
         let provisioned_base = base_of(&provisioned);
 
         // start / exec / stop all recall the same root and spin off it.
-        for _ in 0..3 {
-            let spun = pre_dispatch_vector(true, false, Some(sandbox_id));
+        for phase in [Phase::Start, Phase::Exec, Phase::Stop] {
+            let spun = pre_dispatch_vector(true, phase, Some(sandbox_id));
             assert!(is_relayable(&spun));
             assert_eq!(base_of(&spun), provisioned_base);
             assert_ne!(
@@ -597,7 +621,7 @@ mod tests {
         }
 
         // deprovision recalls the same root one last time, then forgets it.
-        let deprovisioned = pre_dispatch_vector(true, false, Some(sandbox_id));
+        let deprovisioned = pre_dispatch_vector(true, Phase::Deprovision, Some(sandbox_id));
         assert_eq!(base_of(&deprovisioned), provisioned_base);
         on_deprovision_outcome(
             true,
@@ -608,7 +632,7 @@ mod tests {
 
         // A later phase (e.g. a caller mistakenly reusing the id after
         // teardown) finds no record and gets a disconnected vector.
-        let after_teardown = pre_dispatch_vector(true, false, Some(sandbox_id));
+        let after_teardown = pre_dispatch_vector(true, Phase::Exec, Some(sandbox_id));
         assert_ne!(base_of(&after_teardown), provisioned_base);
     }
 
@@ -645,7 +669,7 @@ mod tests {
         let _guard = StoreDirGuard::set(tmp.path());
         let sandbox_id = "wsb:87654321";
 
-        let provisioned = pre_dispatch_vector(true, true, None);
+        let provisioned = pre_dispatch_vector(true, Phase::Provision, None);
         on_provision_outcome(true, &provisioned, &provision_envelope(sandbox_id));
         let provisioned_base = provisioned.split('.').next().unwrap().to_string();
 
@@ -656,7 +680,7 @@ mod tests {
             &Err(MxcError::backend_error("teardown failed, please retry")),
         );
 
-        let retried = pre_dispatch_vector(true, false, Some(sandbox_id));
+        let retried = pre_dispatch_vector(true, Phase::Deprovision, Some(sandbox_id));
         assert_eq!(
             retried.split('.').next().unwrap(),
             provisioned_base,
@@ -669,7 +693,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = StoreDirGuard::set(tmp.path());
 
-        let provisioned = pre_dispatch_vector(true, true, None);
+        let provisioned = pre_dispatch_vector(true, Phase::Provision, None);
         // No `result.sandboxId` at all.
         on_provision_outcome(
             true,
@@ -678,8 +702,8 @@ mod tests {
         );
 
         // Nothing to recall for any id: every subsequent phase seeds fresh.
-        let a = pre_dispatch_vector(true, false, Some("wsb:abcdef01"));
-        let b = pre_dispatch_vector(true, false, Some("wsb:abcdef01"));
+        let a = pre_dispatch_vector(true, Phase::Exec, Some("wsb:abcdef01"));
+        let b = pre_dispatch_vector(true, Phase::Exec, Some("wsb:abcdef01"));
         assert_ne!(
             a.split('.').next().unwrap(),
             b.split('.').next().unwrap(),
@@ -692,15 +716,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = StoreDirGuard::set(tmp.path());
 
-        let provisioned = pre_dispatch_vector(true, true, None);
+        let provisioned = pre_dispatch_vector(true, Phase::Provision, None);
         on_provision_outcome(
             true,
             &provisioned,
             &Err(MxcError::backend_error("provisioning failed")),
         );
 
-        let a = pre_dispatch_vector(true, false, Some("wsb:abcdef01"));
-        let b = pre_dispatch_vector(true, false, Some("wsb:abcdef01"));
+        let a = pre_dispatch_vector(true, Phase::Exec, Some("wsb:abcdef01"));
+        let b = pre_dispatch_vector(true, Phase::Exec, Some("wsb:abcdef01"));
         assert_ne!(a.split('.').next().unwrap(), b.split('.').next().unwrap());
     }
 
@@ -777,8 +801,8 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         let _guard = replace_store(store.clone());
 
-        let _ = pre_dispatch_vector(true, true, None);
-        let _ = pre_dispatch_vector(true, true, None);
+        let _ = pre_dispatch_vector(true, Phase::Provision, None);
+        let _ = pre_dispatch_vector(true, Phase::Provision, None);
 
         assert_eq!(
             *store.prune_count.lock().unwrap_or_else(|e| e.into_inner()),
@@ -806,7 +830,7 @@ mod tests {
             store.record(sandbox_id).unwrap().split('.').next().unwrap(),
             base
         );
-        let later = pre_dispatch_vector(true, false, Some(sandbox_id));
+        let later = pre_dispatch_vector(true, Phase::Exec, Some(sandbox_id));
         assert_eq!(later.split('.').next().unwrap(), base);
     }
 
@@ -850,7 +874,7 @@ mod tests {
         filetime::set_file_mtime(&path, FileTime::from_system_time(stale_time)).unwrap();
         filetime::set_file_mtime(&abandoned_path, FileTime::from_system_time(stale_time)).unwrap();
 
-        let spun = pre_dispatch_vector(true, false, Some(sandbox_id));
+        let spun = pre_dispatch_vector(true, Phase::Exec, Some(sandbox_id));
         assert_eq!(spun.split('.').next().unwrap(), base);
         assert!(path.exists());
         assert!(
@@ -901,7 +925,7 @@ mod tests {
         )
         .unwrap();
 
-        let spun = pre_dispatch_vector(true, false, Some(sandbox_id));
+        let spun = pre_dispatch_vector(true, Phase::Exec, Some(sandbox_id));
         assert_eq!(spun.split('.').next().unwrap(), base);
         assert!(path.exists());
     }
@@ -918,7 +942,7 @@ mod tests {
             filetime::set_file_mtime(&path, FileTime::from_system_time(stale_time)).unwrap();
         }
 
-        let _ = pre_dispatch_vector(true, true, None);
+        let _ = pre_dispatch_vector(true, Phase::Provision, None);
 
         let remaining_records = fs::read_dir(tmp.path())
             .unwrap()
@@ -938,7 +962,7 @@ mod tests {
         let tmp_path = store.tmp_path("wsb:fresh000").unwrap();
         fs::create_dir_all(tmp.path()).unwrap();
         fs::write(&tmp_path, seed()).unwrap();
-        let _ = pre_dispatch_vector(true, true, None);
+        let _ = pre_dispatch_vector(true, Phase::Provision, None);
 
         assert!(
             tmp_path.exists(),
@@ -961,7 +985,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let _ = pre_dispatch_vector(true, true, None);
+        let _ = pre_dispatch_vector(true, Phase::Provision, None);
 
         assert!(
             !tmp_path.exists(),

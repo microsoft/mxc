@@ -679,6 +679,8 @@ mod tests {
     use std::cell::RefCell;
     use std::time::Duration;
 
+    const SESSION_ID: &str = "wslcsess:0123456789abcdef0123456789abcdef";
+
     /// Fully-configurable backend stub for dispatcher tests.
     /// Each phase is wired to either succeed (the default — empty result with
     /// no metadata) or fail with a typed `MxcError` (set via the `*_error`
@@ -1083,14 +1085,14 @@ mod tests {
         let env = assert_envelope(
             dispatch_state_aware(
                 &mut b,
-                session_bound(Phase::DeprovisionSession, Some("wslcsess:abcd")),
+                session_bound(Phase::DeprovisionSession, Some(SESSION_ID)),
                 false,
             )
             .unwrap(),
         );
         assert_eq!(b.validate_deprovision_session_calls.get(), 1);
         assert_eq!(b.deprovision_session_calls.get(), 1);
-        assert_eq!(*b.released.borrow(), vec!["wslcsess:abcd".to_string()]);
+        assert_eq!(*b.released.borrow(), vec![SESSION_ID.to_string()]);
         assert_eq!(env, json!({"result": {}}));
     }
 
@@ -1133,7 +1135,7 @@ mod tests {
         let mut b = SessionStubBackend::new();
         for bound in [
             session_bound(Phase::ProvisionSession, None),
-            session_bound(Phase::DeprovisionSession, Some("wslcsess:abcd")),
+            session_bound(Phase::DeprovisionSession, Some(SESSION_ID)),
         ] {
             assert_eq!(
                 assert_envelope(dispatch_state_aware(&mut b, bound, true).unwrap()),
@@ -1153,7 +1155,7 @@ mod tests {
             let mut b = StubBackend::new();
             for bound in [
                 bound(Phase::ProvisionSession, None),
-                bound(Phase::DeprovisionSession, Some("wslcsess:abcd")),
+                bound(Phase::DeprovisionSession, Some(SESSION_ID)),
             ] {
                 let error = dispatch_state_aware(&mut b, bound, dry_run).unwrap_err();
                 assert_eq!(error.code, MxcErrorCode::UnsupportedPhase, "{dry_run}");
@@ -1166,7 +1168,7 @@ mod tests {
     fn a_session_phase_cannot_be_streamed_as_an_exec() {
         let mut b = SessionStubBackend::new();
         for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
-            let bound = session_bound(phase, Some("wslcsess:abcd"));
+            let bound = session_bound(phase, Some(SESSION_ID));
             let error = dispatch_state_aware_exec(&mut b, bound).unwrap_err();
             assert_eq!(error.code, MxcErrorCode::MalformedRequest);
             assert_eq!(
@@ -1448,7 +1450,7 @@ mod tests {
         for operation in [
             StateAwareOperation::ProvisionSession(None),
             StateAwareOperation::DeprovisionSession {
-                session_id: "wslcsess:deadbeef".into(),
+                session_id: SESSION_ID.into(),
             },
         ] {
             let parsed = ParsedStateAwareRequest::new(ExecutionRequest::default(), operation);

@@ -446,8 +446,9 @@ Backend-routing fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `containment` | `ContainmentType` or `ContainmentBackend` member | One-shot: yes. State-aware: yes for `provision`, absent for `start` / `exec` / `stop` / `deprovision`. | Backend selection on calls that do not yet have a `sandboxId`. |
-| `sandboxId` | branded string | State-aware non-provision: yes. Otherwise absent. | Opaque sandbox id returned by `provision`. Carries the backend prefix used to route non-provision calls (§5). |
+| `containment` | `ContainmentType` or `ContainmentBackend` member | One-shot: yes. State-aware: yes for `provision` and both session phases, absent for `start` / `exec` / `stop` / `deprovision`. | Backend selection on calls that carry no backend-prefixed `sandboxId`. |
+| `sandboxId` | branded string | State-aware sandbox-addressed phases: yes. Otherwise absent. | Opaque sandbox id returned by `provision`. Carries the backend prefix used to route those calls (§5). |
+| `sessionId` | string | `deprovision-session`: yes. Otherwise absent. | Opaque session id returned by `provision-session`. Carries no routing prefix, which is why its phase declares `containment`. |
 
 State-aware-only fields:
 
@@ -458,27 +459,30 @@ State-aware-only fields:
 
 #### `wxc-exec` lifecycle transport
 
-"MXC request JSON" retains `phase` and `sandboxId`. Direct
+"MXC request JSON" retains `phase`, `sandboxId`, and `sessionId`. Direct
 `wxc-exec` lifecycle calls instead remove those routing fields from the supplied JSON
 and pass them as command-line arguments:
 
 ```text
+wxc-exec.exe policy.json --operation provision-session
 wxc-exec.exe policy.json --operation provision
 wxc-exec.exe policy.json --operation start --container-id iso:abc
 wxc-exec.exe policy.json --operation exec --container-id iso:abc -- command arg
 wxc-exec.exe policy.json --operation stop --container-id iso:abc
 wxc-exec.exe policy.json --operation deprovision --container-id iso:abc
+wxc-exec.exe policy.json --operation deprovision-session --session-id wslcsess:abc
 ```
 
-Provision JSON still contains `containment`; later operations route from the
-`--container-id` prefix. Supplying `phase` or `sandboxId` in CLI JSON is rejected rather
+Provision and session JSON still contains `containment`; sandbox-addressed operations route from the
+`--container-id` prefix. Supplying `phase`, `sandboxId`, or `sessionId` in CLI JSON is rejected rather
 than overriding the command-line routing. Without `--operation`, `wxc-exec` accepts
 only one-shot JSON.
 
 `--operation` cannot be combined with delete or maintenance routing, including
 `--delete`, its `--containername` option, setup modes, probing, force-reclaim, or
-audit modes. Lifecycle identity comes only from `--container-id`; conflicting options
-are rejected rather than ignored.
+audit modes. Lifecycle identity comes only from `--container-id` or `--session-id`,
+which are mutually exclusive; an operation supplied the wrong one is told which it
+wanted. Conflicting options are rejected rather than ignored.
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
 declare which phases honor them, see §10.3):

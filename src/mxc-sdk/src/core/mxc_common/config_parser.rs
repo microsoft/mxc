@@ -105,6 +105,12 @@ pub struct LoadOptions<'a> {
     pub cli_command: &'a [String],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliTargetId<'a> {
+    pub flag: &'a str,
+    pub value: &'a str,
+}
+
 /// Workspace-internal exact one-shot contract selected by a trusted typed
 /// producer.
 ///
@@ -204,6 +210,52 @@ fn exact_containment_error(error: crate::mxc_contract::dev::ContainmentProbeErro
         }
     };
     ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn session_containment_error(
+    phase: ContractPhase,
+    error: crate::mxc_contract::dev::ContainmentProbeError,
+) -> ParseError {
+    use crate::mxc_contract::dev::ContainmentProbeError;
+
+    let phase = phase.as_str();
+    match error {
+        ContainmentProbeError::InvalidDeclaration(source) => {
+            ParseError::StateAware(MxcError::malformed_request(format!(
+                "Invalid containment declaration for {phase} phase: {source}"
+            )))
+        }
+        ContainmentProbeError::UnsupportedContainment(_) => {
+            ParseError::StateAware(unsupported_session_containment(phase))
+        }
+    }
+}
+
+fn unsupported_session_containment(phase: &str) -> MxcError {
+    MxcError::unsupported_containment(format!(
+        "the {phase} phase requires containment \"wslc\": no other backend owns a session that \
+         sandboxes are placed into"
+    ))
+}
+
+fn deserialize_session_root<T>(
+    json: &str,
+    phase: ContractPhase,
+    contract: &'static str,
+) -> Result<T, ParseError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match crate::mxc_contract::dev::probe_containment(json)
+        .map_err(|error| session_containment_error(phase, error))?
+    {
+        crate::mxc_contract::dev::Containment::Wslc => {
+            deserialize_development_root(json, contract, "1.1", true)
+        }
+        _ => Err(ParseError::StateAware(unsupported_session_containment(
+            phase.as_str(),
+        ))),
+    }
 }
 
 fn development_network_migration(contract: &str, path: Option<&str>) -> Option<&'static str> {
@@ -486,6 +538,10 @@ fn deserialize_development_request(
                 .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
             Ok(Request::OneShot(Box::new(request)))
         }
+        Some(Phase::ProvisionSession) => {
+            deserialize_session_root(json, Phase::ProvisionSession, "WSLC provision-session")
+                .map(Request::ProvisionSession)
+        }
         Some(Phase::Provision) => {
             let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
                 Containment::WindowsSandbox => {
@@ -514,6 +570,10 @@ fn deserialize_development_request(
         }
         Some(Phase::Deprovision) => {
             deserialize_development_root(json, "deprovision", "1.1", true).map(Request::Deprovision)
+        }
+        Some(Phase::DeprovisionSession) => {
+            deserialize_session_root(json, Phase::DeprovisionSession, "WSLC deprovision-session")
+                .map(Request::DeprovisionSession)
         }
     }
 }
@@ -674,7 +734,7 @@ pub fn load_state_aware_request_from_json_with_options(
     json_str: &str,
     logger: &mut Logger,
     phase: Phase,
-    sandbox_id: Option<&str>,
+    target_id: Option<CliTargetId<'_>>,
     cli_command: &[String],
 ) -> Result<ParsedStateAwareRequest, ParseError> {
     let result = (|| {
@@ -689,18 +749,15 @@ pub fn load_state_aware_request_from_json_with_options(
             )));
         }
 
-        // The CLI collapses whichever identity flag it was given into one
-        // argument, so the rejection below can name a flag the caller did not
-        // pass once more than one exists.
         let required_flag = match phase.target_id_kind() {
             TargetIdKind::None => None,
             TargetIdKind::SandboxId => Some("--container-id"),
             TargetIdKind::SessionId => Some("--session-id"),
         };
-        match (required_flag, sandbox_id) {
-            (None, Some(_)) => {
+        match (required_flag, target_id) {
+            (None, Some(supplied)) => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
-                    format!("the {phase} operation does not accept --container-id"),
+                    format!("the {phase} operation does not accept {}", supplied.flag),
                 )));
             }
             (None, None) => {}
@@ -709,7 +766,15 @@ pub fn load_state_aware_request_from_json_with_options(
                     format!("the {phase} operation requires {flag}"),
                 )));
             }
-            (Some(flag), Some("")) => {
+            (Some(flag), Some(supplied)) if supplied.flag != flag => {
+                return Err(ParseError::StateAware(MxcError::malformed_request(
+                    format!(
+                        "the {phase} operation requires {flag}, not {}",
+                        supplied.flag
+                    ),
+                )));
+            }
+            (Some(flag), Some(supplied)) if supplied.value.is_empty() => {
                 return Err(ParseError::StateAware(MxcError::malformed_request(
                     format!("{flag} must not be empty"),
                 )));
@@ -726,7 +791,10 @@ pub fn load_state_aware_request_from_json_with_options(
         let routed_json = source
             .splice_lifecycle_routing(
                 phase.as_str(),
-                phase.target_id_kind().wire_member().zip(sandbox_id),
+                phase
+                    .target_id_kind()
+                    .wire_member()
+                    .zip(target_id.map(|supplied| supplied.value)),
             )
             .ok_or_else(|| {
                 ParseError::StateAware(MxcError::malformed_request(
@@ -1722,6 +1790,20 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    fn container_flag(value: &str) -> CliTargetId<'_> {
+        CliTargetId {
+            flag: "--container-id",
+            value,
+        }
+    }
+
+    fn session_flag(value: &str) -> CliTargetId<'_> {
+        CliTargetId {
+            flag: "--session-id",
+            value,
+        }
     }
 
     fn repository_root() -> PathBuf {
@@ -2967,6 +3049,7 @@ mod tests {
                 StateAwareProvision::Wslc(Some(crate::mxc_common::models::WslcProvisionConfig {
                     image: Some("alpine:latest".into()),
                     image_tar_path: None,
+                    session_id: None,
                     port_mappings: None,
                 })),
             ),
@@ -2975,6 +3058,7 @@ mod tests {
                 StateAwareProvision::Wslc(Some(crate::mxc_common::models::WslcProvisionConfig {
                     image: Some("python:3.12-alpine".into()),
                     image_tar_path: None,
+                    session_id: None,
                     port_mappings: Some(vec![crate::mxc_common::models::PortMapping {
                         windows_port: 18081,
                         container_port: 8080,
@@ -4541,7 +4625,7 @@ mod tests {
                 json,
                 &mut test_logger(),
                 phase,
-                sandbox_id,
+                sandbox_id.map(container_flag),
                 &[],
             )
             .unwrap_or_else(|error| panic!("{phase}: {error:?}"));
@@ -4560,7 +4644,7 @@ mod tests {
                 json,
                 &mut test_logger(),
                 Phase::Start,
-                Some("iso:cli"),
+                Some(container_flag("iso:cli")),
                 &[],
             )
             .unwrap_err();
@@ -4574,7 +4658,7 @@ mod tests {
             r#"{"version":"1.0.0","containment":"wslc"}"#,
             &mut test_logger(),
             Phase::Provision,
-            Some("wslc:abc"),
+            Some(container_flag("wslc:abc")),
             &[],
         )
         .unwrap_err();
@@ -4599,13 +4683,13 @@ mod tests {
             r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
             &mut test_logger(),
             Phase::ProvisionSession,
-            Some("wslcsess:abc"),
+            Some(session_flag("wslcsess:0123456789abcdef0123456789abcdef")),
             &[],
         )
         .unwrap_err();
         assert!(provision_session_error
             .message()
-            .contains("the provision-session operation does not accept --container-id"));
+            .contains("the provision-session operation does not accept --session-id"));
 
         let missing = load_state_aware_request_from_json_with_options(
             r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
@@ -4623,7 +4707,7 @@ mod tests {
             r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
             &mut test_logger(),
             Phase::DeprovisionSession,
-            Some(""),
+            Some(session_flag("")),
             &[],
         )
         .unwrap_err();
@@ -4631,26 +4715,129 @@ mod tests {
     }
 
     #[test]
-    fn session_phases_pass_cli_routing_and_are_then_refused_by_every_registered_contract() {
-        for (phase, session_id) in [
-            (Phase::ProvisionSession, None),
-            (Phase::DeprovisionSession, Some("wslcsess:abcd")),
+    fn a_rejection_names_the_identity_flag_the_caller_supplied() {
+        let wrong_flag_for_a_sandbox = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha"}"#,
+            &mut test_logger(),
+            Phase::Start,
+            Some(session_flag("wslcsess:0123456789abcdef0123456789abcdef")),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_flag_for_a_sandbox.message(),
+            "malformed_request: the start operation requires --container-id, not --session-id"
+        );
+
+        let wrong_flag_for_a_session = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::DeprovisionSession,
+            Some(container_flag("wslc:abcd")),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_flag_for_a_session.message(),
+            "malformed_request: the deprovision-session operation requires --session-id, not \
+             --container-id"
+        );
+
+        let unwanted_container_id = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::ProvisionSession,
+            Some(container_flag("wslc:abcd")),
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            unwanted_container_id.message(),
+            "malformed_request: the provision-session operation does not accept --container-id"
+        );
+    }
+
+    #[test]
+    fn session_phases_route_through_the_development_contract() {
+        let provisioned = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::ProvisionSession,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(provisioned.phase(), Phase::ProvisionSession);
+        assert_eq!(
+            provisioned.containment(),
+            Some(ContainmentBackend::Wslc),
+            "a session phase routes by its declared containment"
+        );
+        assert!(provisioned.session_id().is_none());
+
+        let released = load_state_aware_request_from_json_with_options(
+            r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::DeprovisionSession,
+            Some(session_flag("wslcsess:0123456789abcdef0123456789abcdef")),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(released.phase(), Phase::DeprovisionSession);
+        assert_eq!(
+            released.session_id(),
+            Some("wslcsess:0123456789abcdef0123456789abcdef")
+        );
+        assert!(released.sandbox_id().is_none());
+    }
+
+    #[test]
+    fn session_phases_are_refused_by_the_published_contracts() {
+        for version in [r#""0.9.0-alpha""#, r#""1.0.0""#] {
+            let error = load_state_aware_request_from_json_with_options(
+                &format!(r#"{{"version":{version},"containment":"wslc"}}"#),
+                &mut test_logger(),
+                Phase::ProvisionSession,
+                None,
+                &[],
+            )
+            .unwrap_err();
+            assert_eq!(error.message(), "malformed_request: Unsupported phase");
+        }
+    }
+
+    #[test]
+    fn a_session_phase_refuses_a_containment_that_owns_no_session() {
+        for (containment, phase, target) in [
+            (
+                r#""isolation_session""#,
+                Phase::ProvisionSession,
+                None::<&str>,
+            ),
+            (r#""windows_sandbox""#, Phase::ProvisionSession, None),
+            (r#""not_a_backend""#, Phase::ProvisionSession, None),
+            (
+                r#""isolation_session""#,
+                Phase::DeprovisionSession,
+                Some("wslcsess:0123456789abcdef0123456789abcdef"),
+            ),
         ] {
             let error = load_state_aware_request_from_json_with_options(
-                r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+                &format!(r#"{{"version":"1.1.0-alpha","containment":{containment}}}"#),
                 &mut test_logger(),
                 phase,
-                session_id,
+                target.map(session_flag),
                 &[],
             )
             .unwrap_err();
 
-            assert_eq!(
-                error.message(),
-                "malformed_request: Unsupported phase",
-                "{phase} must reach the contract's phase probe, so the refusal comes from the \
-                 registered contracts rather than from the routing category"
+            let message = error.message();
+            assert!(
+                message.starts_with("unsupported_containment:"),
+                "{containment} on {phase} must be refused as an unsupported containment, got \
+                 {message}"
             );
+            assert!(message.contains(r#"containment "wslc""#), "{message}");
         }
     }
 
@@ -4744,7 +4931,7 @@ mod tests {
             }"#,
             &mut logger,
             Phase::Exec,
-            Some("iso:abc"),
+            Some(container_flag("iso:abc")),
             &["echo".to_string(), "hello".to_string()],
         )
         .unwrap();

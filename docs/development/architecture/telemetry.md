@@ -175,7 +175,7 @@ the one-shot path, a clean non-zero sandbox exit is not treated as an MXC error.
 | `mxc.outcome` | string | `"success"` or `"failure"` |
 | `mxc.duration_ms` | uint64 | Total execution time |
 | `mxc.failure_reason` | string | Failure category (if applicable) |
-| `mxc.phase` | string | State-aware lifecycle phase (`provision`\|`start`\|`exec`\|`stop`\|`deprovision`); empty for one-shot executions |
+| `mxc.phase` | string | Lifecycle phase (`provision-session`\|`provision`\|`start`\|`exec`\|`stop`\|`deprovision`\|`deprovision-session`); empty for create-and-run execution |
 | `__TlgCV__` | string | Microsoft Correlation Vector (MS-CV) — the lifecycle correlation key (see [Correlating a lifecycle](#correlating-a-lifecycle)); empty for one-shot executions |
 
 ### MXC.Error
@@ -283,19 +283,19 @@ MS-CV is a hierarchical, propagatable identifier of the form
 `<base>.<element>.<element>…` — a random base (128 bits, 22 base64 chars) plus a
 dotted chain of decimal elements. MXC uses it as follows:
 
-- **`provision`** seeds a fresh random base (`correlation_vector::seed()`) and
-  returns it to the client in its result envelope as `result.correlationVector`.
-  This is the lifecycle's root vector.
-- The client **relays** that vector verbatim into every later phase (the SDK
-  surfaces it as `ProvisionResult.correlationVector` and accepts it back as
-  `SandboxSpawnOptions.correlationVector`, sent on the wire as the top-level
-  `correlationVector` field).
-- Each non-`provision` phase **spins** the relayed base
-  (`correlation_vector::spin()`) to derive a distinct child vector that still
-  shares the lifecycle's base prefix. Spin (rather than a plain extend) is used
-  because `exec` is multi-invocation and the client is a dumb relay — a plain
-  extend would collapse every phase to the same `base.0`, whereas spin folds in a
-  coarse timestamp + entropy so sibling phases get distinct, ordered vectors.
+- **`provision`** seeds a fresh random base and persists it locally once the
+  sandbox ID is known.
+- **`start`, `exec`, `stop`, and `deprovision`** recall that persisted root and
+  spin distinct child vectors sharing its base prefix. Successful deprovision
+  removes the record; a dry run keeps it.
+- Callers neither receive nor relay a correlation vector. It is internal to
+  MXC, not a JSON request or response field.
+
+`provision-session` and `deprovision-session` each seed an independent vector
+when telemetry is authorized. They do not read, create, refresh, sweep, or
+delete the sandbox correlation store. Session IDs are not correlation-store
+keys or vector seeds. This applies to the executor, raw JSON entry points,
+and typed engine calls. Sandbox operations retain their existing store cleanup.
 
 An analyst groups all phases of one lifecycle by the shared **base prefix** of
 `__TlgCV__`, and orders/​distinguishes phases within it by the spun elements.
@@ -307,11 +307,11 @@ element boundary, if needed to stay within the cap — never truncating a
 multi-digit element to a falsified value like `.42` → `.4`) and the vector is
 never mutated again. `increment` likewise freezes when its trailing element is
 already at `u32::MAX` and so cannot advance (the spec's value-overflow
-behaviour). Every later phase then relays and emits that same frozen vector
+behaviour). Every later sandbox phase then emits that same frozen vector
 verbatim, so correlation by base prefix still holds — only the per-phase
 ordering elements stop advancing.
 
-**Canonical validation.** A relayed vector is only built on (spun) when it is
+**Canonical validation.** A persisted vector is only built on (spun) when it is
 *relayable* — a well-formed mutable vector (canonical 22-char base64 base whose
 final char encodes a zero low nibble, followed by one or more canonical decimal
 `u32` elements) or a valid frozen (`!`-terminated) vector. Elements must be
@@ -325,15 +325,15 @@ base rather than emitted verbatim.
 The correlation vector is **not** derived from the `sandbox_id`, so no
 caller-supplied identity (e.g. a UPN embedded in an IsolationSession
 `iso:<upn>` id) is ever involved: the base is pure randomness. Spin is defensive
-— a missing, empty, or malformed relayed value falls back to a fresh seed rather
+— a missing, empty, or malformed stored value falls back to a fresh seed rather
 than panicking telemetry. `__TlgCV__` is empty for one-shot executions (which have
 no lifecycle to correlate) and for a crash during `provision` before the vector is
-stashed. It is only computed and emitted when experimental telemetry is active, so
-provision output is unchanged when telemetry is off.
+stashed. It is only computed and emitted when telemetry is authorized; response
+envelopes never contain it.
 
-**Why a relayed random vector rather than a hashed `sandbox_id`.** An alternative
+**Why a random vector rather than a hashed `sandbox_id`.** An alternative
 design would derive the correlation key deterministically from the `sandbox_id`
-(e.g. a hash), avoiding the wire/SDK relay entirely. We deliberately do **not** do
+(e.g. a hash), avoiding persistence of a random root. We deliberately do **not** do
 this, for two reasons:
 
 1. **PII-safety.** A `sandbox_id` is caller-influenced and can embed identity — an
@@ -349,9 +349,8 @@ this, for two reasons:
    the hierarchical parent/child structure (base prefix + spun elements) that lets
    an analyst reconstruct phase ordering, not just group-by a flat key.
 
-The client relay is therefore a required part of the design, not incidental
-plumbing: it is how the random root vector minted at `provision` reaches the later
-per-phase executor processes, which otherwise share no state.
+Local persistence lets the random root minted at `provision` reach later
+executor processes without exposing it to callers.
 
 ### Crash telemetry (panic hook)
 

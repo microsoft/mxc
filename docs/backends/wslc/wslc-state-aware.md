@@ -101,10 +101,10 @@ container has no networking for a forward to reach.
 
 The field requires development contract `1.1.0-alpha`. Requests declaring
 `0.9.0-alpha` cannot include it and must select `1.1.0-alpha` explicitly.
-The daemon shares one session (VM) but creates a separate container for each
-provision, so a mapping applies only to the container that declared it, unlike
-the session-wide `cpuCount` / `memoryMb` / `gpu` knobs that
-remain available only for create-and-run execution. `storagePath` is not among them either way:
+The daemon creates a separate container for each provision, so a mapping
+applies only to the container that declared it. `cpuCount`, `memoryMb`, and
+`gpu` instead size the session's VM and are set by `provision-session`
+(see [Sessions](#sessions)). `storagePath` remains create-and-run-only:
 the daemon leases its store from the slot pool rather than taking a caller-named
 path (see [Image store](#image-store)).
 
@@ -123,10 +123,32 @@ process already holds on loopback fails the `start` phase, not `provision`.
 A WSLc session is one WSL2 utility VM. A daemon holds as many of them as it is
 asked for, each with its own leased image store, and places sandboxes in them.
 
+A caller addresses a session through two lifecycle phases of its own:
+
+| Phase | Carries | Returns |
+|-------|---------|---------|
+| `provision-session` | `wslc.provisionSession.cpuCount`, `memoryMb`, `gpu` | `result.sessionId` |
+| `deprovision-session` | `sessionId` | an empty result |
+
+A sandbox joins one by naming it on `wslc.provision.sessionId`. Sizing belongs
+to the session, so `cpuCount: 4` means the VM has four virtual CPUs shared by
+every sandbox in it, not a four-CPU quota per sandbox — which is why a
+`provision` declares no sizing of its own.
+
+Both session phases declare `containment: "wslc"` and are routed by it, since a
+session ID carries no backend prefix to route by. WSLc is the only backend that
+owns a session, so a session phase naming any other containment is refused with
+`unsupported_containment`.
+
+Both phases require contract `1.1.0-alpha`. No v1 SDK can reach them: the Rust,
+Node, and .NET v1 surfaces all emit published contract `1.0.0`, which declares
+no session fields, so "MXC request JSON" through the FFI or `wxc-exec` is the
+only way to reach them until a new stable contract publishes.
+
 A `provision` that names no session joins the daemon's **implicit** session,
 which is booted on first use and shared by every request that names none. That
-is the whole of the daemon's behaviour, and the only reachable behaviour today:
-nothing on the public surface carries a session id yet.
+is what every provision did before sessions became addressable, so an existing
+caller is unaffected.
 
 Session ids take the form `wslcsess:<32 lowercase hex>`. The implicit session
 gets a random id like any other and it is never handed back, so one caller
@@ -134,9 +156,44 @@ cannot name the session everyone else is sharing and release it from under them.
 Releasing the implicit session by id is refused for the same reason; it goes
 when nothing is using it, or when the daemon does.
 
+> **A session ID is a bearer capability.** The daemon's pipe is owner-only, so
+> any same-user process holding one can place sandboxes in that session and
+> release it. Nothing well-known is ever minted — not `wslcsess:default`, not
+> anything derivable — and `wxc-exec` refuses an ID that is not
+> `wslcsess:` plus 32 lowercase hex before the daemon is contacted. Treat the
+> ID as opaque and keep it out of logs, as mxc does.
+
 The SDK is given one name per session, derived from its id
 (`mxc-wslc-daemon-<32 hex>`). Two live sessions under one name is an untested
 SDK failure mode, which is why the name is not fixed.
+
+### A sandbox's policy identity does not cover its session's sizing
+
+`MXC.PolicyHash` is computed from the request **before** dispatch. A
+`provision-session` hashes the sizing it declares, which is correct. A sandbox
+joining an existing session declares none, so two otherwise identical
+`provision` requests hash identically whether they land in a two-CPU VM or an
+eight-CPU VM with GPU passthrough — and `gpu` is a capability grant.
+
+The gap is accepted rather than papered over:
+
+- **Restating sizing on the provision request** would make the hash an
+  unverified caller claim. The request is hashed before the daemon resolves the
+  session, so a request could declare no GPU and still land in a session that
+  has one. A false attestation is worse than a known omission.
+- **Hashing the `sessionId`** would give two identically sized sessions
+  unrelated identities, and would put a bearer capability in a log.
+
+What the hash does record is the one related fact the request carries:
+`joinsNamedSession: true` when `wslc.provision.sessionId` is present, meaning
+this sandbox's VM was sized by another request rather than by the host defaults
+the implicit session uses. It does not identify which session, or what sizing.
+A request that names no session hashes exactly as it did before the session
+surface existed.
+
+Closing the gap properly means establishing identity after the backend resolves
+the session, which changes when identity is computed for every backend. That is
+tracked separately.
 
 ### How many sessions
 
@@ -215,6 +272,10 @@ failed ... (0x80004005)`, blaming the image store for a processor problem.
 Checking up front returns `policy_validation` naming the processor count and
 the host's.
 
+`memoryMb` must fit in the SDK's unsigned 32-bit megabyte field
+(`0` through `4294967295`). Session validation rejects a larger value before
+contacting the daemon, including during a dry run.
+
 `0` means "use the default" for both (2 processors, 2000 MB) and is passed
 through rather than measured. `gpu` is a feature flag, not a quantity; whether
 passthrough is available is answered by the runtime component check. The
@@ -257,23 +318,42 @@ an unused session until someone explicitly released it — makes an abandoned
 session pin a utility VM, a store slot, *and* the daemon, with nothing able to
 reclaim any of them short of ending the process by hand.
 
-## Sandbox IDs
+A `deprovision-session` naming a session that still holds something is
+**refused**, not cascaded. The sandboxes in a session are addressed
+individually and their owners still hold those ids, so deleting sandboxes the
+caller never named would be worse than an error. Deprovision them first, then
+release the session.
 
-`provision` mints an id of the form `wslc:<32 lowercase hex>` (`wslc:` + a UUID simple form).
-"MXC request JSON" carries this id in `sandboxId` for every post-provision phase
-(`start` / `exec` / `stop` / `deprovision`). Direct `wxc-exec` calls omit it from JSON and pass it
-as `--container-id`; the dispatcher derives the backend from the `wslc:` prefix (later operations do
-**not** repeat `containment`).
+## Sandbox and session IDs
+
+`provision` mints an id of the form `wslc:<32 lowercase hex>` (`wslc:` + a UUID simple form), and
+`provision-session` mints `wslcsess:<32 lowercase hex>` the same way.
+"MXC request JSON" carries the sandbox id in `sandboxId` for every post-provision phase
+(`start` / `exec` / `stop` / `deprovision`), and the session id in `sessionId` for
+`deprovision-session`. Direct `wxc-exec` calls omit the id from JSON and pass it
+as `--container-id` or `--session-id` respectively; the two flags are mutually exclusive, and a
+phase supplied the wrong one is told which it wanted. The dispatcher derives the backend from the
+`wslc:` prefix for sandbox-addressed phases (later operations do **not** repeat `containment`), and
+from the declared `containment` for the session phases.
+
+The session a sandbox joins is not a routing value, so it stays in the request body at
+`wslc.provision.sessionId` rather than moving to a flag.
 
 ## Phase → WSLc SDK mapping
 
 | Phase | Daemon action (WSLc SDK) |
 |-------|--------------------------|
-| provision | Load SDK, ensure the session (`WslcCreateSession` on first use), resolve/import image, `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
+| provision-session | Load SDK, lease a store slot, `WslcCreateSession` with the requested sizing on a thread of its own, then validate the session with a store probe. Returns the minted `sessionId`. |
+| provision | Load SDK, ensure the session (`WslcCreateSession` on first use when none was named), resolve/import image, `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
 | start | `WslcStartContainer` — starts the container minted at provision-time (the keepalive init keeps it warm across later `exec` phases); marks it `started`. |
 | exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr and return the process exit code. Stdin is unavailable because the WSLc SDK exposes no process-input API. A timeout or caller cancellation SIGKILLs the **process**, not the container. |
 | stop | `WslcStopContainer`. |
 | deprovision | `WslcDeleteContainer`. The session stays warm for the next provision and is released once nothing is using it (see [Session lifetime](#session-lifetime)). |
+| deprovision-session | Refuse while anything is still in the session, else terminate the VM and return its store slot. |
+
+A dry run of either session phase validates the request and stops there: no ID
+is minted, no VM is booted, no store slot is leased, and the daemon is never
+contacted.
 
 A session is created with the CPU count, memory, and GPU flag it was asked for,
 and always with a **boot timeout** (180s, the same budget create-and-run
@@ -320,8 +400,11 @@ that lets a caller request a second session.
 
 A returned slot keeps its images — that is the point of leasing rather than
 minting. A slot that has never been leased holds nothing at all, and an uncached
-image under the isolated posture is refused before the VM is reached, so a cold
-slot fails a provision outright rather than pulling. Warm the pool with either:
+image under the isolated posture is refused before a container is created.
+The error names the selected store's slot and path, the uncached image, and
+the command to warm it. MXC does not relocate the session to another store or
+pull outside the declared network policy. The SDK session may already be
+running when its image cache is inspected. Warm the pool with either:
 
 ```powershell
 .\scripts\setup-wslc.ps1 -Image alpine:latest -DaemonSlots 1
@@ -611,11 +694,24 @@ it can observe idle-teardown within seconds.
 ## Testing
 
 `tests/scripts/run_wslc_state_aware_tests.ps1` is the multi-invocation E2E harness (requires a WSL2
-host that can reach a registry or already has the image cached in daemon store slot 0, and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
+host that can reach a registry or already has the images cached in daemon store slots 0–2, and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
 core lifecycle, warm-reuse (a marker written by one `exec` is read back by a separate `exec`
 process — only possible if the container stayed warm), filesystem volumes, bridged networking +
 proxy, validation rejections, exec concurrency, and idle teardown. Fixtures live in
 `tests/configs/wslc_state_aware_*.json`.
+
+The session tests place two sandboxes in one session and compare their VM
+boot IDs. They also keep two identically sized sessions alive together and
+check that releasing one leaves the other's sandbox usable. The setup
+preflight warms three stores for the implicit session and the two explicit
+sessions, because isolated provisions cannot pull into a cold store.
+
+The cold-store regression uses a private pool and daemon discovery root,
+warms only slot 0 with `-DaemonSlots 1`, and holds that slot with a sandbox.
+An isolated provision on slot 1 must name the cold store in its refusal,
+leave no container behind, and leave the original warm sandbox usable.
+This case needs registry access even with `-SkipSetup`; it does not reuse or
+modify the normal image cache.
 
 The concurrency section launches a phase without waiting for it (`Start-StateAware` /
 `Wait-StateAware`), which is what lets it observe two sandboxes running at once, a refused
@@ -630,17 +726,24 @@ run individually or in an arbitrary order:
 - **Order is mandatory.** A sandbox must go through `provision → start → exec… → stop → deprovision`.
   `provision` is what boots the session and mints the id; every other phase fails without it
   (`start`/`exec` before provision → `not_provisioned` / `not_started`, and any phase after
-  `deprovision` → `not_provisioned`).
+  `deprovision` → `not_provisioned`). An explicit session widens that to
+  `provision-session → provision → start → exec… → stop → deprovision → deprovision-session`:
+  a `provision` cannot name a session that does not exist yet, and a
+  `deprovision-session` is refused while a sandbox is still in it.
 - **The id must be threaded through.** `provision` returns the real `wslc:<32-hex>` id on stdout
-  (`result.sandboxId`). The post-provision fixtures (`_start`, `_stop`, `_deprovision`, and every
-  `_exec_*`) ship with a literal **`{{SANDBOX_ID}}` placeholder**. These test inputs use
-  "MXC request JSON"; the harness replaces the placeholder before converting the request to
-  direct executor CLI form.
+  (`result.sandboxId`), and `provision-session` returns `wslcsess:<32-hex>` in `result.sessionId`.
+  The post-provision fixtures (`_start`, `_stop`, `_deprovision`, and every
+  `_exec_*`) ship with a literal **`{{SANDBOX_ID}}` placeholder**; the session fixtures
+  (`_provision_in_session`, `_deprovision_session`) ship with **`{{SESSION_ID}}`**. These test
+  inputs use "MXC request JSON"; the harness replaces the placeholders before converting the
+  request to direct executor CLI form.
 
 `run_wslc_state_aware_tests.ps1` handles both concerns automatically (it drives the phases in order
-and does the `{{SANDBOX_ID}}` substitution from each provision's output). It then removes `phase`
-and `sandboxId` from the JSON and passes them as `--operation` and `--container-id`. Exercise these
-fixtures **through the harness**, not by pointing `wxc-exec --config` at them directly.
+and does the `{{SANDBOX_ID}}` / `{{SESSION_ID}}` substitution from each provision's output). It then
+removes `phase` and the phase's routing id from the JSON and passes them as `--operation` and
+`--container-id` or `--session-id`. The session a `provision` joins stays in the body, since it is
+configuration rather than routing. Exercise these fixtures **through the harness**, not by pointing
+`wxc-exec --config` at them directly.
 
 ## Known limitations
 
@@ -654,8 +757,12 @@ fixtures **through the harness**, not by pointing `wxc-exec --config` at them di
   one-for-one, so it spans Rust, Node, .NET, the versioned references, and schema regeneration.
   This is tracked as follow-up work.
 
-- **No typed SDK can set port mappings yet.** The Rust, Node, and .NET v1 SDKs
-  all use published stable contract `1.0.0`, which does not declare the
-  field, and released schemas are immutable. "MXC request JSON" using contract `1.1.0-alpha` through the
-  FFI or `wxc-exec` is the only way to reach it today. Promoting `1.1.0-alpha`
-  to a stable release is what lets the three SDKs expose it together.
+- **No typed SDK can set port mappings or sessions yet.** The Rust, Node, and
+  .NET v1 SDKs all use published stable contract `1.0.0`, which declares
+  neither `wslc.provision.portMappings` nor any session field, and released
+  schemas are immutable. "MXC request JSON" using contract `1.1.0-alpha` through the
+  FFI or `wxc-exec` is the only way to reach them today. Promoting `1.1.0-alpha`
+  to a stable release is what lets the three SDKs expose them together.
+
+- **A sandbox's policy identity does not cover its session's sizing.** See
+  [the section above](#a-sandboxs-policy-identity-does-not-cover-its-sessions-sizing).

@@ -166,4 +166,5 @@ application-specific policy under `SOFTWARE\Policies\Microsoft\<app>`.
 ## See also
 
 - [Telemetry architecture](development/architecture/telemetry.md)
+- [Lifecycle correlation](development/architecture/telemetry.md#correlating-a-lifecycle)
 - [Telemetry consent design](development/architecture/telemetry-consent-design.md)

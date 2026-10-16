@@ -21,11 +21,17 @@ pub(crate) fn adapt_request(request: contract::Request) -> Result<AdaptedConfigR
                 one_shot::into_common_request_ir(*request),
             ));
         }
+        contract::Request::ProvisionSession(request) => {
+            state_aware::provision_session_into_input(request)
+        }
         contract::Request::Provision(request) => state_aware::provision_into_input(request),
         contract::Request::Start(request) => state_aware::start_into_input(request),
         contract::Request::Exec(request) => state_aware::exec_into_input(request),
         contract::Request::Stop(request) => state_aware::stop_into_input(request),
         contract::Request::Deprovision(request) => state_aware::deprovision_into_input(request),
+        contract::Request::DeprovisionSession(request) => {
+            state_aware::deprovision_session_into_input(request)
+        }
     }?;
     Ok(AdaptedConfigRequest::StateAware(input))
 }

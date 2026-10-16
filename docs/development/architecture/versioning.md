@@ -136,9 +136,12 @@ reasons:
   Raw SDK entry points enforce the same exact set. High-level v1 one-shot and
   state-aware APIs select stable `1.0.0` internally and expose only the
   backends supported by that contract. Capabilities the published contract does
-  not declare — Windows Sandbox state-aware, and
-  `wslc.provision.portMappings` — are reachable through the raw `1.1.0-alpha`
-  path only. The compatibility constants in
+  not declare — Windows Sandbox state-aware, `wslc.provision.portMappings`,
+  and WSLc session operations (`provision-session`, `deprovision-session`,
+  and `wslc.provision.sessionId`) — require MXC request JSON declaring
+  `1.1.0-alpha`, or the in-process engine with that contract.
+  `stateAwareWslc` names this development contract; it does not change the
+  published `1.0.0` target of the V1 SDKs. The compatibility constants in
   `schemas/schema-version.json` do not authorize other versions within their
   minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the

@@ -276,7 +276,10 @@ mod tests {
     fn lifecycle_routing_carries_a_session_id_in_its_own_member() {
         let source = CommandSource::parse(r#"{"version":"1.1.0-alpha"}"#).unwrap();
         let spliced = source
-            .splice_lifecycle_routing("deprovision-session", Some(("sessionId", "wslcsess:abcd")))
+            .splice_lifecycle_routing(
+                "deprovision-session",
+                Some(("sessionId", "wslcsess:0123456789abcdef0123456789abcdef")),
+            )
             .unwrap();
 
         assert_eq!(
@@ -284,7 +287,7 @@ mod tests {
             serde_json::json!({
                 "version": "1.1.0-alpha",
                 "phase": "deprovision-session",
-                "sessionId": "wslcsess:abcd"
+                "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
             })
         );
     }

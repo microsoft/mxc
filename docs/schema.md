@@ -39,11 +39,16 @@ Typed Rust, .NET, and Node SDK callers use `ContainerRequest`,
 `ProvisionRequest`, and `ExecutionRequest`, not JSON. Node and .NET produce
 "MXC request JSON" internally.
 
-Creation requests omit `phase` and `sandboxId`. Lifecycle requests include
-`phase`, and operations after provision include `sandboxId`. For executor
-lifecycle calls, supply those values through `--operation` and `--container-id`,
-not in the JSON file. The executor inserts them before using the same contract
-parser.
+Creation requests omit `phase`, `sandboxId`, and `sessionId`. Lifecycle
+requests include `phase`. Sandbox-addressed operations (`start`, `exec`,
+`stop`, and `deprovision`) take `sandboxId`; `deprovision-session` instead
+takes `sessionId`. Both provision operations create their own IDs.
+
+For executor lifecycle calls, supply `phase` through `--operation` and the
+target ID through `--container-id` or `--session-id`, not as top-level JSON
+fields. The executor inserts them before using the same contract parser.
+`wslc.provision.sessionId` stays in the JSON body: it selects the session a new
+sandbox joins, not the target of the operation.
 
 For example, starting a provisioned WSLc container uses this "MXC request JSON"
 with `mxc_run_state_aware_json`:
@@ -496,7 +501,8 @@ These examples use ["MXC request JSON"](#mxc-request-json). For executor
 calls, use the conversion described above.
 
 The development schema documents JSON objects for container lifecycle
-operations (`provision` / `start` / `exec` / `stop` / `deprovision`).
+operations (`provision-session` / `provision` / `start` / `exec` / `stop` /
+`deprovision` / `deprovision-session`).
 The create-and-run JSON above describes container setup and a workload together.
 Lifecycle JSON instead identifies an operation: `provision` allocates a new
 container; later operations use the returned `sandboxId`.
@@ -505,8 +511,8 @@ Choose a supported contract version for the backend and operation:
 
 - IsolationSession uses published `0.9.0-alpha`.
 - WSLC uses published `0.9.0-alpha`, or development `1.1.0-alpha` for
-  `wslc.provision.portMappings`; Windows Sandbox uses development
-  `1.1.0-alpha`.
+  `wslc.provision.portMappings` and the session operations; Windows Sandbox
+  uses development `1.1.0-alpha`.
 
 Contracts before `0.9.0-alpha` are retired. The supported published
 `0.9.0-alpha` and `1.0.0` contracts describe create-and-run JSON requests plus
@@ -517,30 +523,34 @@ development schema for `1.1.0-alpha`:
 {
     "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
     "version": "1.1.0-alpha",
-    "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
-    "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
-                                           // Prefix routes to the backend (wsb: -> windows_sandbox,
-                                           // iso: -> isolation_session).
-    "containment": "windows_sandbox",      // Required for `provision`; ignored for other phases
-                                           // (the backend is inferred from sandboxId).
+    "phase": "exec",
+    "sandboxId": "wsb:abcd1234",
     "process": { "commandLine": "echo hi" }
-    // Cross-cutting fields (process / filesystem / network / ui) sit at the TOP
-    // level, exactly as in a create-and-run request -- there is no wrapping `config`
-    // object. Backend- and phase-specific config, when a phase has any, nests
-    // under its permanent backend section, e.g.:
-    //   "isolationSession": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } }
 }
 ```
 
-Phase / sandboxId / containment validation:
+The `sandboxId` prefix routes sandbox-addressed operations to the backend;
+those requests do not accept `containment`. Provision and both WSLc session
+operations instead require `containment`. Cross-cutting policy stays at the
+top level, and backend-specific settings stay under the backend section
+(such as `wslc.provision`).
 
-| Phase | `sandboxId` | `containment` |
-|---|---|---|
-| `provision`     | (not allowed) | **Required** — picks the backend whose `provision` mints a fresh sandboxId |
-| `start`         | **Required** (`<prefix>:<token>`) | Ignored if present |
-| `exec`          | **Required** | Ignored if present |
-| `stop`          | **Required** | Ignored if present |
-| `deprovision`   | **Required** | Ignored if present |
+Phase / sandboxId / sessionId / containment validation:
+
+| Phase | `sandboxId` | `sessionId` | `containment` |
+|---|---|---|---|
+| `provision-session` | (not allowed) | (not allowed) | **Required** — `wslc` only |
+| `provision`     | (not allowed) | (not allowed) | **Required** — picks the backend whose `provision` mints a fresh sandboxId |
+| `start`         | **Required** (`<prefix>:<token>`) | (not allowed) | (not allowed) |
+| `exec`          | **Required** | (not allowed) | (not allowed) |
+| `stop`          | **Required** | (not allowed) | (not allowed) |
+| `deprovision`   | **Required** | (not allowed) | (not allowed) |
+| `deprovision-session` | (not allowed) | **Required** (`wslcsess:<token>`) | **Required** — `wslc` only |
+
+A session ID carries no backend prefix, so the session phases declare their
+containment instead of being routed by their target. Any containment other than
+`wslc` is refused with `unsupported_containment`: no other backend owns a
+session that sandboxes are placed into.
 
 Backends supporting container lifecycle operations today are `isolation_session`, `windows_sandbox`,
 and `wslc` (all Windows-only). IsolationSession does not require runtime
@@ -574,12 +584,60 @@ WSLC `provision` accepts `wslc.provision.portMappings`, the same
 Mappings require the bridged (all-`allow`) posture shown above; the isolated
 posture is rejected at provision.
 
-Two entries claiming the same `windowsPort` are rejected on both surfaces. The
-session sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) stay
-available only for create-and-run execution, because every lifecycle `provision`
-currently joins one shared session and so cannot size sandboxes individually.
-The daemon itself holds several independently sized sessions; what no caller can
-yet do is ask for one.
+Two entries claiming the same `windowsPort` are rejected on both surfaces.
+
+#### WSLC session operations
+
+Sizing is a property of the session rather than of a sandbox, so a WSLC caller
+asks for a sized session first and then places sandboxes in it:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "phase": "provision-session",
+    "containment": "wslc",
+    "wslc": {
+        "provisionSession": {
+            "cpuCount": 4,
+            "memoryMb": 8192,
+            "gpu": false
+        }
+    }
+}
+```
+
+The response carries `result.sessionId` (`wslcsess:<32 lowercase hex>`). A
+`provision` joins that session by naming it:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest",
+            "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+        }
+    }
+}
+```
+
+`cpuCount: 4` means the VM has four virtual CPUs shared by every sandbox in the
+session, not four per sandbox, which is why a `provision` declares no sizing of
+its own. Omitting `sessionId` joins an implicit session shared by every request
+that names none — the behaviour every WSLC `provision` had before these
+operations existed.
+
+A `deprovision-session` names the session in a top-level `sessionId` and is
+refused while any sandbox is still in it; deprovision those first. Session IDs
+are opaque bearer values: any same-user process holding one can release that
+session, so keep them out of logs.
+
+The create-and-run `wslc` section keeps its own `cpuCount` / `memoryMb` / `gpu`
+/ `storagePath` knobs, which size the session that one run creates for itself.
 
 Full lifecycle API: [container lifecycle](container-lifecycle.md).
 
