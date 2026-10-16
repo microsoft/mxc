@@ -435,7 +435,7 @@ function computeSupport(): PlatformSupport {
       support.isSupported = true;
       support.availableMethods = ['seatbelt'];
     } else {
-      support.reason = 'Seatbelt is unavailable: sandbox_init could not be resolved';
+      support.reason = 'Seatbelt could not be found on this installation of macOS. Your macOS install might be incomplete. (sandbox_init not found)';
     }
     return support;
   }

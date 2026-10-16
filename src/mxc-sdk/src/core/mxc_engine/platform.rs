@@ -149,7 +149,7 @@ pub fn platform_support() -> PlatformSupport {
         } else {
             PlatformSupport {
                 reason: Some(
-                    "sandbox_init is unavailable; macOS install is incomplete".to_string(),
+                    "Seatbelt could not be found on this installation of macOS. Your macOS install might be incomplete. (sandbox_init not found)".to_string(),
                 ),
                 ..Default::default()
             }
