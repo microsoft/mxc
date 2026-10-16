@@ -6,7 +6,7 @@
 //! `IsolationSessionManager` because the OS service may idle-restart
 //! between caller invocations.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 
 use serde::Serialize;
 
@@ -80,6 +80,34 @@ fn wants_interactive_console(stdio: ExecStdio, host_is_terminal: impl FnOnce() -
         ExecStdio::Relayed => host_is_terminal(),
         ExecStdio::Piped => false,
     }
+}
+
+/// Relayed execution owns host stdio, unlike the piped SDK path. Its local
+/// logger's warnings must reach stderr before that logger is discarded.
+fn completed_relayed_exec(
+    exit_code: i32,
+    logger: &Logger,
+    mut stderr: impl Write,
+) -> Result<ExecHandle, MxcError> {
+    for warning in logger.warnings() {
+        writeln!(stderr, "{warning}").map_err(|error| {
+            MxcError::backend_error(format!(
+                "failed to report isolation session output warning: {error}; {warning}"
+            ))
+        })?;
+    }
+
+    // Output was relayed inside `create_process`; null handles prevent the
+    // dispatcher from starting another relay.
+    let null = HANDLE(std::ptr::null_mut());
+    Ok(ExecHandle {
+        stdout: null,
+        stderr: null,
+        stdin: null,
+        stdin_closer: None,
+        waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+        terminator: Box::new(|| Ok(())),
+    })
 }
 
 impl StatefulSandboxBackend for IsolationSessionRunner {
@@ -323,20 +351,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                 // The output relay completed inside `create_process`. The
                 // dispatcher sees zero pipe handles, skips its own relay setup,
                 // and gets the exit code from the waiter closure.
-                let null = HANDLE(std::ptr::null_mut());
-                Ok(ExecHandle {
-                    stdout: null,
-                    stderr: null,
-                    stdin: null,
-                    stdin_closer: None,
-                    // `Exited`, never `TimedOut`: a backend serving
-                    // `ExecStdio::Relayed` reports an exit code, and the
-                    // relay rejects anything else.
-                    waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
-                    // Nothing to terminate: `create_process` returned only once
-                    // the process was gone.
-                    terminator: Box::new(|| Ok(())),
-                })
+                completed_relayed_exec(exit_code, &logger, std::io::stderr().lock())
             }
             ExecStdio::Piped => {
                 let options = build_process_options(
@@ -369,12 +384,50 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pipe_relay::OUTPUT_RELAY_TRUNCATION_WARNING;
     use super::*;
     use crate::mxc_common::models::{
         ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress,
         ProxyConfig,
     };
     use crate::mxc_common::mxc_error::MxcErrorCode;
+
+    #[test]
+    fn relayed_exec_reports_truncation_without_a_diagnostic_sink() {
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        logger.warning_line(OUTPUT_RELAY_TRUNCATION_WARNING);
+        let mut stderr = Vec::new();
+        let handle = completed_relayed_exec(42, &logger, &mut stderr).unwrap();
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            format!("{OUTPUT_RELAY_TRUNCATION_WARNING}\n")
+        );
+        assert!(handle.stdout.is_invalid());
+        assert!(handle.stderr.is_invalid());
+        assert!(handle.stdin.is_invalid());
+        assert!(matches!(
+            (handle.waiter)().unwrap(),
+            ExecOutcome::Exited(42)
+        ));
+    }
+
+    #[test]
+    fn relayed_exec_without_warnings_preserves_stderr() {
+        let logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let mut stderr = Vec::new();
+        let handle = completed_relayed_exec(0, &logger, &mut stderr).unwrap();
+        assert!(stderr.is_empty());
+        assert!(matches!((handle.waiter)().unwrap(), ExecOutcome::Exited(0)));
+    }
+
+    #[test]
+    fn relayed_exec_reports_warning_delivery_failure() {
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        logger.warning_line(OUTPUT_RELAY_TRUNCATION_WARNING);
+        let error = completed_relayed_exec(0, &logger, &mut [][..]).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::BackendError);
+        assert!(error.message.contains(OUTPUT_RELAY_TRUNCATION_WARNING));
+    }
 
     // ====== Wire-format constants ======
 

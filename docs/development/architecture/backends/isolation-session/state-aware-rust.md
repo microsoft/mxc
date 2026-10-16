@@ -421,6 +421,24 @@ waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
 service serialises (or rejects, depending on session state) at its own layer.
 
+### Output draining after relayed execution
+
+After waiting for the workload and stopping stdin forwarding, `create_process`
+copies remaining stdout and stderr until both finish, neither successfully
+writes output for five seconds, or 60 seconds pass, whichever comes first.
+These limits do not apply to SDK `Piped` execution.
+
+On timeout, MXC cancels reads, warns that output may be missing, and briefly
+waits for the copying threads to exit. Cancellation can discard data already
+read, but cannot interrupt blocked writes or flushes. Those threads may keep
+pipe handles open and finish writing after cleanup returns. Descendant
+processes and stdin handling are unchanged.
+
+Lifecycle `Relayed` execution sends warnings to host stderr and configured
+diagnostic output, preserving the workload exit code if warning delivery
+succeeds. Create-and-run execution stores warnings in the caller's logger;
+`wxc-exec` prints them to stderr.
+
 ### Deprovision and concurrent sandboxes
 
 `deprovision` removes only its own agent user (`deprovision_agent_user`).
