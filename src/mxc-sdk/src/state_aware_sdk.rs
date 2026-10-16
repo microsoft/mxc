@@ -340,13 +340,22 @@ pub struct ValidationResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StateAwareResult {
     pub sandbox_id: Option<String>,
+    pub session_id: Option<String>,
     pub metadata: Option<ProvisionMetadata>,
     pub warnings: Vec<String>,
 }
 
 impl StateAwareResult {
     pub(crate) fn from_engine(result: crate::mxc_engine::EngineStateAwareResult) -> Self {
-        let metadata = result.metadata.map(|metadata| match metadata {
+        // A result field added later is a compile error here rather than a
+        // dropped value.
+        let crate::mxc_engine::EngineStateAwareResult {
+            sandbox_id,
+            session_id,
+            metadata,
+            warnings,
+        } = result;
+        let metadata = metadata.map(|metadata| match metadata {
             crate::mxc_engine::EngineProvisionMetadata::IsolationSession {
                 agent_user_name,
                 agent_user_sid,
@@ -359,9 +368,10 @@ impl StateAwareResult {
             }),
         });
         Self {
-            sandbox_id: result.sandbox_id,
+            sandbox_id,
+            session_id,
             metadata,
-            warnings: result.warnings,
+            warnings,
         }
     }
 
@@ -377,7 +387,7 @@ impl StateAwareResult {
     }
 
     pub(crate) fn into_lifecycle(self) -> Result<LifecycleResult, MxcError> {
-        if self.sandbox_id.is_some() || self.metadata.is_some() {
+        if self.sandbox_id.is_some() || self.session_id.is_some() || self.metadata.is_some() {
             return Err(MxcError::backend_error(
                 "typed lifecycle operation returned provision-only output",
             ));
@@ -388,7 +398,7 @@ impl StateAwareResult {
     }
 
     pub(crate) fn into_validation(self) -> Result<ValidationResult, MxcError> {
-        if self.sandbox_id.is_some() || self.metadata.is_some() {
+        if self.sandbox_id.is_some() || self.session_id.is_some() || self.metadata.is_some() {
             return Err(MxcError::backend_error(
                 "typed dry run returned execution output",
             ));

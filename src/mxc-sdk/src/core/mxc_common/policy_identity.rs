@@ -79,6 +79,7 @@ use serde_json::{Map, Value};
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{
     ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 
@@ -104,6 +105,11 @@ pub fn policy_hash(request: &ExecutionRequest) -> String {
 /// Only allow-listed provision fields enter the hash. An absent config remains
 /// JSON `null`, a present config with no fields remains `{}`, and explicit empty
 /// strings remain distinct, preserving identities for exact accepted requests.
+///
+/// A session's identity covers the sizing it declares. A sandbox placed into an
+/// existing session declares none, and this hash is computed from the request
+/// before dispatch, so a sandbox's identity does not cover the sizing of the
+/// session it joins.
 pub fn state_aware_policy_hash(
     request: &ExecutionRequest,
     backend: &str,
@@ -171,7 +177,28 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             | StateAwareProvision::WindowsSandbox
             | StateAwareProvision::Wslc(None),
         ) => Value::Null,
-        // Sandbox IDs are not policy and can contain account identities.
+
+        StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
+            cpu_count,
+            memory_mb,
+            gpu,
+        })) => {
+            let mut config = Map::new();
+            if let Some(cpu_count) = cpu_count {
+                config.insert("cpuCount".into(), Value::from(*cpu_count));
+            }
+            if let Some(memory_mb) = memory_mb {
+                config.insert("memoryMb".into(), Value::from(*memory_mb));
+            }
+            if let Some(gpu) = gpu {
+                config.insert("gpu".into(), Value::Bool(*gpu));
+            }
+            Value::Object(config)
+        }
+        StateAwareOperation::ProvisionSession(None) => Value::Null,
+
+        // Sandbox and session IDs are not policy and can contain account
+        // identities.
         StateAwareOperation::Start {
             sandbox_id: _excluded_sandbox_id,
         }
@@ -183,6 +210,9 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         }
         | StateAwareOperation::Deprovision {
             sandbox_id: _excluded_sandbox_id,
+        } => Value::Null,
+        StateAwareOperation::DeprovisionSession {
+            session_id: _excluded_session_id,
         } => Value::Null,
     }
 }
@@ -879,6 +909,84 @@ mod tests {
         assert_ne!(policy_hash(&changed), policy_hash(&more));
     }
 
+    #[test]
+    fn state_aware_session_hash_preserves_exact_sizing_shape() {
+        let request = request();
+        let sizing = |cpu_count, memory_mb, gpu| {
+            Some(WslcProvisionSessionConfig {
+                cpu_count,
+                memory_mb,
+                gpu,
+            })
+        };
+        let mut hashes = std::collections::HashSet::new();
+        for (config, expected_config) in [
+            (None, Value::Null),
+            (sizing(None, None, None), serde_json::json!({})),
+            (
+                sizing(Some(4), None, None),
+                serde_json::json!({"cpuCount": 4}),
+            ),
+            (
+                sizing(Some(8), None, None),
+                serde_json::json!({"cpuCount": 8}),
+            ),
+            (
+                sizing(None, Some(4), None),
+                serde_json::json!({"memoryMb": 4}),
+            ),
+            (
+                sizing(None, Some(4096), None),
+                serde_json::json!({"memoryMb": 4096}),
+            ),
+            (
+                sizing(None, None, Some(false)),
+                serde_json::json!({"gpu": false}),
+            ),
+            (
+                sizing(None, None, Some(true)),
+                serde_json::json!({"gpu": true}),
+            ),
+            (
+                sizing(Some(4), Some(4), Some(true)),
+                serde_json::json!({"cpuCount": 4, "memoryMb": 4, "gpu": true}),
+            ),
+        ] {
+            let operation = StateAwareOperation::ProvisionSession(config);
+            assert_eq!(
+                state_aware_config_projection(&operation),
+                expected_config,
+                "{operation:?}"
+            );
+            let hash = state_aware_policy_hash(&request, "wslc", &operation);
+            assert_eq!(
+                hash,
+                expected_state_aware_hash(&request, "wslc", "provision-session", expected_config),
+                "{operation:?}"
+            );
+            assert!(
+                hashes.insert(hash),
+                "absent, empty and supplied sizing fields must stay distinct, even when two \
+                 fields carry the same value: {operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn state_aware_session_hash_excludes_the_session_id() {
+        let request = request();
+        for session_id in ["wslcsess:aaaa", "wslcsess:bbbb"] {
+            let operation = StateAwareOperation::DeprovisionSession {
+                session_id: session_id.into(),
+            };
+            assert_eq!(
+                state_aware_policy_hash(&request, "wslc", &operation),
+                expected_state_aware_hash(&request, "wslc", "deprovision-session", Value::Null),
+                "the session id must not enter the policy identity"
+            );
+        }
+    }
+
     fn parse_state_aware(
         json: &str,
     ) -> crate::mxc_common::state_aware_request::ParsedStateAwareRequest {
@@ -1081,38 +1189,48 @@ mod tests {
         let mut hashes = std::collections::HashSet::new();
         for (operation, expected_phase) in [
             (
-                StateAwareOperation::Provision(StateAwareProvision::WindowsSandbox),
+                StateAwareOperation::ProvisionSession(None),
+                "provision-session",
+            ),
+            (
+                StateAwareOperation::Provision(StateAwareProvision::Wslc(None)),
                 "provision",
             ),
             (
                 StateAwareOperation::Start {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "start",
             ),
             (
                 StateAwareOperation::Exec {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "exec",
             ),
             (
                 StateAwareOperation::Stop {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "stop",
             ),
             (
                 StateAwareOperation::Deprovision {
-                    sandbox_id: "wsb:deadbeef".into(),
+                    sandbox_id: "wslc:deadbeef".into(),
                 },
                 "deprovision",
             ),
+            (
+                StateAwareOperation::DeprovisionSession {
+                    session_id: "wslcsess:deadbeef".into(),
+                },
+                "deprovision-session",
+            ),
         ] {
-            let hash = state_aware_policy_hash(&request, "windows_sandbox", &operation);
+            let hash = state_aware_policy_hash(&request, "wslc", &operation);
             assert_eq!(
                 hash,
-                expected_state_aware_hash(&request, "windows_sandbox", expected_phase, Value::Null)
+                expected_state_aware_hash(&request, "wslc", expected_phase, Value::Null)
             );
             assert!(hashes.insert(hash), "phase must affect the policy hash");
         }

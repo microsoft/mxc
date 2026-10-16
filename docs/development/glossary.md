@@ -9,7 +9,7 @@ Shared terms: [consumer glossary](../glossary.md).
 
 | Existing term | Preferred wording | Specific meaning or example |
 |---|---|---|
-| State-aware / stateful API | Container lifecycle operations | Provision, start, exec, stop, deprovision; implemented by `StatefulSandboxBackend`. Use "manual lifecycle operations" when emphasizing caller-managed calls and cleanup. |
+| State-aware / stateful API | Container lifecycle operations | Provision, start, exec, stop, deprovision, bracketed by session provision and deprovision; implemented by `StatefulSandboxBackend`. Use "manual lifecycle operations" when emphasizing caller-managed calls and cleanup. |
 | One-shot | Create-and-run execution | Make container, run workload, clean up. |
 | Exact contract / exact registered contract | Contract | Versioned request rules in `mxc_contract`; identify the version, operation, and provision backend. A schema describes the contract. |
 | Wire format / wire contract | Interface-specific format / contract | Name the format: ["MXC request JSON"](../schema.md#mxc-request-json) or daemon binary frames. |

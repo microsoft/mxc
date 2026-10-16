@@ -138,6 +138,13 @@ impl SdkStateAwareInput {
                 version.as_str()
             )));
         }
+        if session_operation(&operation) && version != ContractVersion::V1_1_0Alpha {
+            return Err(WxcError::ConfigParse(format!(
+                "state-aware session operations require schema version \
+                 1.1.0-alpha, got {}",
+                version.as_str()
+            )));
+        }
         operation.validate()?;
         Ok(Self {
             version,
@@ -200,6 +207,13 @@ fn wslc_port_mappings_requested(operation: &StateAwareOperation) -> bool {
         StateAwareOperation::Provision(crate::mxc_common::state_aware_operation::StateAwareProvision::Wslc(
             Some(config)
         )) if config.port_mappings.is_some()
+    )
+}
+
+fn session_operation(operation: &StateAwareOperation) -> bool {
+    matches!(
+        operation,
+        StateAwareOperation::ProvisionSession(_) | StateAwareOperation::DeprovisionSession { .. }
     )
 }
 

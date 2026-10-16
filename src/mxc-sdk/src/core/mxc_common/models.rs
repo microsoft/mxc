@@ -260,6 +260,21 @@ pub struct WslcProvisionConfig {
     pub port_mappings: Option<Vec<PortMapping>>,
 }
 
+/// Runtime-owned state-aware session provision config for the WSLc backend.
+///
+/// Sizing belongs to the session, so these values describe the utility VM the
+/// session runs in rather than a per-sandbox quota. Defaulting remains a
+/// backend responsibility, so an absent field stays absent here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WslcProvisionSessionConfig {
+    pub cpu_count: Option<u32>,
+
+    pub memory_mb: Option<u64>,
+
+    /// Whether GPU passthrough is enabled.
+    pub gpu: Option<bool>,
+}
+
 /// Configuration specific to the LXC container backend.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
