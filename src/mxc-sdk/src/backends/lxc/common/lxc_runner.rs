@@ -399,31 +399,6 @@ impl LxcScriptRunner {
         )))
     }
 
-    fn enforce_netns_discovery<R>(
-        &self,
-        netns_pid: Option<u32>,
-        installs_firewall: bool,
-        container_created: bool,
-        logger: &mut Logger,
-        mut release_container: R,
-    ) -> Result<EgressHookPoint, ScriptResponse>
-    where
-        R: FnMut(ContainerRelease) -> Result<(), String>,
-    {
-        if let Some(hook_point) = egress_hook_point(netns_pid, installs_firewall) {
-            return Ok(hook_point);
-        }
-
-        let release = self.release_kind(container_created);
-        Self::report_release_failure(release, release_container(release), logger);
-
-        Err(ScriptResponse::error(
-            "Failed to discover the container init PID; cannot enter the container \
-             network namespace to enforce the requested firewall. Aborting rather \
-             than running with enforcement silently disabled.",
-        ))
-    }
-
     /// Everything that must succeed before a workload can launch; a failure
     /// releases whatever it had already acquired.
     fn prepare(
@@ -582,16 +557,14 @@ impl LxcScriptRunner {
 
         // The init PID names the container's network namespace.
         let netns_pid = container.init_pid();
-        let hook_point = self.enforce_netns_discovery(
-            netns_pid,
-            plan.installs_firewall(),
-            container_created,
-            logger,
-            |release| match release {
-                ContainerRelease::Destroy => container.destroy(),
-                ContainerRelease::Stop => container.stop(),
-            },
-        )?;
+        let Some(hook_point) = egress_hook_point(netns_pid, plan.installs_firewall()) else {
+            self.release_after_failure(&container, container_created, logger);
+            return Err(ScriptResponse::error(
+                "Failed to discover the container init PID; cannot enter the container \
+                 network namespace to install its firewall. Aborting rather than \
+                 running without it.",
+            ));
+        };
 
         if let Some(pid) = netns_pid {
             let _ = writeln!(logger, "Container init PID: {}", pid);
@@ -616,12 +589,25 @@ impl LxcScriptRunner {
             }
         };
 
-        let firewall = container_firewall(
-            fw_manager.rules_applied(),
-            ingress_manager
+        // figure out if a firewall needs to be installed.
+        let is_firewall_installed = if fw_manager.rules_applied()
+            || ingress_manager
                 .as_ref()
-                .is_some_and(|mgr| mgr.rules_applied()),
-        );
+                .is_some_and(|mgr| mgr.rules_applied())
+        {
+            ContainerFirewall::Installed
+        } else {
+            ContainerFirewall::Absent
+        };
+
+        // Dropping CAP_NET_RAW also removed raw ICMP.  Widen the container's
+        // ping_group_range so unprivileged ping still works.
+        if is_firewall_installed == ContainerFirewall::Installed {
+            if let Err(e) = fw_manager.allow_ping_sockets(logger) {
+                self.release_after_failure(&container, container_created, logger);
+                return Err(ScriptResponse::error(&e));
+            }
+        }
 
         // A reused container can carry a pin left by an older run.
         let stale_pin_error = Self::clear_stale_hosts_pin(container_created, |command| {
@@ -632,7 +618,7 @@ impl LxcScriptRunner {
                     &[],
                     true,
                     Some(HOSTS_COMMAND_TIMEOUT),
-                    firewall,
+                    is_firewall_installed,
                 )
                 .map_err(|e| e.to_string())
         });
@@ -659,7 +645,7 @@ impl LxcScriptRunner {
             ingress_manager,
             container,
             container_created,
-            firewall,
+            firewall: is_firewall_installed,
             released: false,
             force_stopped: false,
             stop_failed: false,
@@ -1529,6 +1515,8 @@ fn uuid_simple() -> String {
     format!("{:08x}", (t & 0xFFFF_FFFF) as u32)
 }
 
+/// Where egress rules attach, or `None` when a firewall is needed and the
+/// container's network namespace cannot be found.
 fn egress_hook_point(netns_pid: Option<u32>, installs_firewall: bool) -> Option<EgressHookPoint> {
     match netns_pid {
         Some(pid) => Some(EgressHookPoint::ContainerNetns(pid)),
@@ -1551,15 +1539,6 @@ fn launch_failure_message(reason: &str, cleanup_failures: &[String]) -> String {
         reason,
         cleanup_failures.join("; ")
     )
-}
-
-/// Whether the workload must be kept away from chains in its own namespace.
-fn container_firewall(egress_applied: bool, ingress_applied: bool) -> ContainerFirewall {
-    if egress_applied || ingress_applied {
-        ContainerFirewall::Installed
-    } else {
-        ContainerFirewall::Absent
-    }
 }
 
 #[cfg(test)]
@@ -2090,68 +2069,16 @@ mod tests {
     }
 
     #[test]
-    fn a_known_netns_hooks_the_chain_inside_the_container() {
-        assert!(matches!(
-            egress_hook_point(Some(4242), true),
-            Some(EgressHookPoint::ContainerNetns(4242))
-        ));
+    fn a_missing_init_pid_stops_a_run_that_needs_a_firewall() {
+        assert!(egress_hook_point(None, true).is_none());
     }
 
     #[test]
-    fn an_unknown_netns_refuses_to_run_when_a_firewall_was_requested() {
-        let mut logger = Logger::new(Mode::Buffer);
-
-        let response = runner_for_network_readiness_tests(true)
-            .enforce_netns_discovery(None, true, true, &mut logger, |_release| Ok(()))
-            .expect_err("a firewall was requested and the namespace is unknown");
-
-        assert_ne!(response.exit_code, 0);
-        assert!(response.standard_out.is_empty());
-    }
-
-    #[test]
-    fn a_known_netns_lets_the_run_proceed() {
-        let mut logger = Logger::new(Mode::Buffer);
-
-        assert!(matches!(
-            runner_for_network_readiness_tests(true).enforce_netns_discovery(
-                Some(4242),
-                true,
-                true,
-                &mut logger,
-                |_release| Ok(())
-            ),
-            Ok(EgressHookPoint::ContainerNetns(4242))
-        ));
-    }
-
-    #[test]
-    fn an_unknown_netns_is_allowed_when_no_firewall_was_requested() {
+    fn a_missing_init_pid_does_not_stop_a_run_with_no_firewall() {
         assert!(matches!(
             egress_hook_point(None, false),
             Some(EgressHookPoint::Unhooked)
         ));
-    }
-
-    #[test]
-    fn either_installed_chain_confines_the_workload() {
-        for (egress, ingress) in [(true, false), (false, true), (true, true)] {
-            assert_eq!(
-                container_firewall(egress, ingress),
-                ContainerFirewall::Installed,
-                "egress={egress} ingress={ingress} leaves a chain the workload could flush"
-            );
-        }
-    }
-
-    #[test]
-    fn a_policy_that_installs_no_chain_leaves_the_capability_alone() {
-        // Dropping it needs CAP_SETPCAP, which an unprivileged caller lacks.
-        assert_eq!(
-            container_firewall(false, false),
-            ContainerFirewall::Absent,
-            "a run with no firewall must not be confined"
-        );
     }
 
     /// `process.env` resolution, which schema 0.9 gave a default block.

@@ -24,7 +24,8 @@ Creates an LXC container to provide:
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
 - LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime)
-- Root privileges, or unprivileged LXC for a policy that asks for no network.
+- Root privileges, or [unprivileged LXC](#running-without-root) for a policy
+  that asks for no network.
   Filtering egress or ingress installs iptables rules in the container's
   network namespace, which requires root.
 
@@ -47,6 +48,36 @@ process.
 ```bash
 sudo pacman -S lxc
 ```
+
+### Running without root
+
+A config with no `network` section can run without sudo once the host is set up
+for unprivileged LXC.  Everything else needs root.
+
+1. Install `newuidmap` and `newgidmap` (`sudo apt install uidmap` on
+   Debian/Ubuntu).
+2. Make sure your account has a subordinate ID range.  On Ubuntu 24.04,
+   `useradd` creates one.  To check:
+   ```bash
+   grep "^$USER:" /etc/subuid /etc/subgid
+   ```
+   If nothing prints, an admin adds a range:
+   ```bash
+   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
+   ```
+3. Map the container's IDs onto that range in `~/.config/lxc/default.conf`,
+   using the start and count from step 2:
+   ```
+   lxc.include = /etc/lxc/default.conf
+   lxc.idmap = u 0 100000 65536
+   lxc.idmap = g 0 100000 65536
+   ```
+4. Let the container's root user reach its files under your home directory:
+   `chmod o+x ~`.
+
+`tests/scripts/run_lxc_rootless_no_network_test.sh` checks this with a temporary
+user.  CI runs it, and `run_lxc_all_tests.sh` leaves it out because it adds that
+user to the host.  Run it by hand with `sudo` when you need it locally.
 
 ### Container networking
 
@@ -333,12 +364,31 @@ The zone query should answer the zone you assigned.
   container init keeps `CAP_NET_ADMIN` there, so a process running as root inside
   the container can flush or delete them. The command MXC runs is attached with
   `CAP_NET_ADMIN` dropped from its bounding set whenever chains are installed, so
-  it cannot. Default-deny closes external reachability for a container that does
-  not deliberately tear it down, including services the workload itself starts.
-- **Raw sockets bypass egress filtering.** `CAP_NET_RAW` is retained so that an
-  explicit `protocol: "icmp"` allow works. It also permits `AF_PACKET` sockets,
-  which write link-layer frames straight to the interface without traversing the
-  filter chain.
+  it cannot. That same attach drops `CAP_NET_RAW`, the capability the kernel tests
+  when any packet-capable socket is created: `AF_PACKET` whatever the socket type,
+  `AF_XDP`, raw IP, and the legacy `SOCK_PACKET` the kernel rewrites into
+  `AF_PACKET`. The test sits in the kernel's socket-creation path, which both
+  `socket` and io_uring reach; the socket comes back `EPERM` by either route.
+  Without the drop a workload holding `CAP_NET_RAW` could put frames on the wire
+  beneath the chains, which filter at the IP layer. The drop also ends raw ICMP,
+  and MXC reopens unprivileged ping by widening `net.ipv4.ping_group_range` inside
+  the container.  The workload can then send ICMP Echo requests through a
+  `SOCK_DGRAM` `IPPROTO_ICMP` socket, and the kernel refuses every other ICMP type
+  on that socket.  A `protocol: "icmp"` policy rule is broader: it matches every
+  ICMP type at the firewall.  The rule decides which ICMP may pass; the workload
+  can only originate Echo. Default-deny
+  closes external reachability for a container that does not deliberately tear it
+  down, including services the workload itself starts.
+- **The drop covers the command MXC runs, not container init.** Init keeps
+  `CAP_NET_RAW` just as it keeps `CAP_NET_ADMIN`. A privileged process inside the
+  container can still open a packet socket. The kernel checks the capability at
+  creation, never at transmit, and an already-open descriptor handed to the
+  workload keeps sending.  An io_uring ring handed down the same way is the same
+  case: an operation submitted under a personality init registered runs with
+  init's credentials.  A ring the workload creates itself carries the workload's
+  credentials. Nothing in a stock container image opens either; closing the
+  gap entirely needs a gate below the socket layer, which this backend does not add
+  today.
 - **Policy is not in force while the container starts.** The chains are installed
   after the container has started and its address has settled, so container init
   and anything it starts run unfiltered in both directions for that interval. The

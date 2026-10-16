@@ -105,6 +105,12 @@ jobs:
           MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
         run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION bash tests/scripts/run_lxc_all_tests.sh
 
+      # Run a seperate test for non-privlaged LXC container test.
+      # LXC containers can run rootless, but with setup.
+      # To prevent tests runing state this test only runs during CI.
+      - name: Run LXC rootless no-network test
+        run: sudo bash tests/scripts/run_lxc_rootless_no_network_test.sh
+
       # The shell suite above does not cover the capability confinement, and the
       # Linux build lane runs this crate without LXC installed, so these tests
       # skip everywhere else.
