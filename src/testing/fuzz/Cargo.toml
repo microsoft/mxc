@@ -32,6 +32,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "procfs_policy"
+path = "fuzz_targets/procfs_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "base64_decode"
 path = "fuzz_targets/base64_decode.rs"
 test = false
