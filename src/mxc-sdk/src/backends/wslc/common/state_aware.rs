@@ -784,8 +784,8 @@ mod session_tests {
             "wslcsess:0123456789abcdef0123456789abcdeg",
         ] {
             let error = validate_session_id(session_id)
-                .expect_err(&format!("{session_id:?} must not be accepted"));
-            assert_eq!(error.code, MxcErrorCode::MalformedId, "{session_id:?}");
+                .expect_err("malformed session IDs must not be accepted");
+            assert_eq!(error.code, MxcErrorCode::MalformedId);
         }
     }
 

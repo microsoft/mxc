@@ -91,10 +91,9 @@ fn both_session_phases_declare_wslc_containment() {
     for operation in [provisioned, released] {
         assert_eq!(
             operation.containment(),
-            Some(crate::mxc_common::models::ContainmentBackend::Wslc),
-            "{operation:?}"
+            Some(crate::mxc_common::models::ContainmentBackend::Wslc)
         );
-        assert!(operation.sandbox_id().is_none(), "{operation:?}");
+        assert!(operation.sandbox_id().is_none());
     }
 }
 

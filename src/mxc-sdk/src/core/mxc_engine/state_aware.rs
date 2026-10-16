@@ -1757,11 +1757,7 @@ mod tests {
                     },
                 );
                 let error = run_state_aware(parsed, dry_run).unwrap_err();
-                assert_eq!(
-                    error.code,
-                    MxcErrorCode::MalformedId,
-                    "{session_id} ({dry_run}): {error:?}"
-                );
+                assert_eq!(error.code, MxcErrorCode::MalformedId, "dry_run={dry_run}");
             }
         }
     }
