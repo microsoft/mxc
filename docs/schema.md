@@ -576,8 +576,10 @@ posture is rejected at provision.
 
 Two entries claiming the same `windowsPort` are rejected on both surfaces. The
 session sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) stay
-available only for create-and-run execution, because the lifecycle daemon shares one WSL session across
-every sandbox and cannot size them individually.
+available only for create-and-run execution, because every lifecycle `provision`
+currently joins one shared session and so cannot size sandboxes individually.
+The daemon itself holds several independently sized sessions; what no caller can
+yet do is ask for one.
 
 Full lifecycle API: [container lifecycle](container-lifecycle.md).
 

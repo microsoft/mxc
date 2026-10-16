@@ -94,6 +94,7 @@ fn provisioned_and_started(client: &DaemonClient) -> String {
             volumes: Vec::new(),
             network: Default::default(),
             port_mappings: Vec::new(),
+            session_ref: None,
         })
         .expect("provision");
     client
@@ -297,6 +298,7 @@ fn full_lifecycle_over_pipe() {
             volumes: Vec::new(),
             network: Default::default(),
             port_mappings: Vec::new(),
+            session_ref: None,
         })
         .expect("provision");
 

@@ -12,13 +12,21 @@
 //! time, so each takes a thread of its own and posts its outcome back to the
 //! worker as another command.
 //!
-//! State-aware topology (decided): **one** shared `WslcSession` (the WSL2
-//! utility VM, booted lazily on first provision and amortised across all
-//! sandboxes) and a refcounted `sandbox_id -> container` map. The session is
-//! released when the last container is deprovisioned and the idle timeout
-//! elapses. Its image store is leased from
-//! [`mxc_sdk::wslc_common::store_slots`], which keeps the daemon off the store
-//! create-and-run execution defaults to.
+//! State-aware topology: the daemon holds as many `WslcSession`s (each a WSL2
+//! utility VM) as it is asked for, booted lazily and amortised across the
+//! sandboxes placed in them, plus a `sandbox_id -> container` map in which
+//! every entry names the session it belongs to. A request that names no session
+//! joins an implicit one.
+//!
+//! Each session's image store is leased from
+//! [`mxc_sdk::wslc_common::store_slots`]. A store's VHDX admits one live
+//! session, so the lease is also what stops two sessions colliding. Neither the
+//! pool nor this module bounds how many sessions may run.
+//!
+//! A session is released when nothing is using it any more: its hold is
+//! **derived** by scanning the maps (see [`Worker::session_hold`]) rather than
+//! counted, and a session observed holding nothing for the empty-session grace
+//! is reaped by [`Worker::reap_idle_sessions`].
 //!
 //! Each phase drives the real WSLc SDK via the reusable steps in
 //! [`mxc_sdk::wslc_common::container_steps`] and [`mxc_sdk::wslc_common::image`]: `provision`
@@ -41,35 +49,101 @@ use tokio::sync::{mpsc, oneshot};
 
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::{FailurePhase, ScriptResponse};
-use mxc_sdk::wslc_common::container_steps::{self, OutStream, OutputSink, ProcessSettings};
+use mxc_sdk::wslc_common::container_steps::{
+    self, OutStream, OutputSink, ProcessSettings, SessionSizing,
+};
 use mxc_sdk::wslc_common::daemon_protocol::{
-    DeprovisionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode, PortMapping,
-    ProvisionConfig, StartConfig, StopConfig,
+    DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode,
+    PortMapping, ProvisionConfig, ProvisionSessionConfig, StartConfig, StopConfig,
 };
 use mxc_sdk::wslc_common::image;
 use mxc_sdk::wslc_common::policy_mapping;
 use mxc_sdk::wslc_common::process_env::EnvScope;
-use mxc_sdk::wslc_common::store_slots::{self, StoreSlotError, StoreSlotLease, StoreSlotPool};
+use mxc_sdk::wslc_common::store_slots::{StoreSlotLease, StoreSlotPool};
 use mxc_sdk::wslc_common::wslc_bindings::{
     WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
 
-/// Fixed name of the single WSL2 utility-VM session the daemon owns.
-const SESSION_NAME: &str = "mxc-wslc-daemon";
-
-/// How long teardown waits for an abandoned pull before giving up on it.
-const PULL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long teardown waits for an off-worker exec before giving up on it.
-const EXEC_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Block until `in_flight` reads zero, or `budget` expires.
+/// Prefix of the name each session's WSL2 utility VM is created under.
 ///
-/// Reports whether the wait drained. A run that has not reported back is still
-/// using the container handle it was given, so releasing that handle while one
-/// is outstanding would free memory the SDK holds.
-fn wait_for_execs_in_flight(in_flight: &AtomicUsize, budget: Duration) -> bool {
-    let deadline = Instant::now() + budget;
+/// A second `WslcCreateSession` under a name already in use is untested, so the
+/// session id supplies the rest.
+const SESSION_NAME_PREFIX: &str = "mxc-wslc-daemon";
+
+/// The name the SDK is given for `session_ref`.
+fn session_name(session_ref: &str) -> String {
+    let suffix = session_ref
+        .rsplit_once(':')
+        .map_or(session_ref, |(_, suffix)| suffix);
+    format!("{SESSION_NAME_PREFIX}-{suffix}")
+}
+
+/// Environment override for how long a session may take to boot, in whole
+/// seconds.
+const SESSION_BOOT_DEADLINE_ENV: &str = "MXC_WSLC_DAEMON_SESSION_BOOT_SECS";
+
+/// How long a boot is given before the clients waiting on it are let go.
+///
+/// The SDK's boot timeout bounds `WslcCreateSession` only and the store probe
+/// after it can run for minutes, so this bounds the wait rather than the call.
+fn session_boot_deadline() -> Duration {
+    crate::resolve_duration(
+        std::env::var(SESSION_BOOT_DEADLINE_ENV).ok().as_deref(),
+        SESSION_BOOT_DEADLINE,
+    )
+}
+
+/// Comfortably past the SDK's own boot timeout, so this fires only when the
+/// store probe is the thing that hung.
+const SESSION_BOOT_DEADLINE: Duration = Duration::from_secs(600);
+
+/// How many session releases may be terminating at once.
+///
+/// Each takes a native thread, and a host that refuses to make one leaves the
+/// release to run on the worker every other sandbox is serialized behind.
+const MAX_CONCURRENT_RELEASES: usize = 4;
+
+/// Well past the under-a-second a terminate normally takes, so a boot stops
+/// waiting for a release's warm slot only once that release is stuck.
+const RELEASE_WAIT: Duration = Duration::from_secs(60);
+
+/// Environment override for how long a session holding nothing is kept, in
+/// whole seconds.
+const SESSION_IDLE_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_SESSION_IDLE_SECS";
+
+/// How long a session that holds nothing is kept before it is released.
+///
+/// Defaults to the daemon's idle window, since a session cannot outlive the
+/// daemon it lives in.
+fn session_grace() -> Duration {
+    session_grace_from(
+        std::env::var(SESSION_IDLE_TIMEOUT_ENV).ok().as_deref(),
+        std::env::var(crate::IDLE_TIMEOUT_ENV).ok().as_deref(),
+    )
+}
+
+/// Pure core of [`session_grace`], split out so the rule is testable
+/// without mutating process-global environment state.
+fn session_grace_from(session_override: Option<&str>, daemon_override: Option<&str>) -> Duration {
+    crate::resolve_duration(
+        session_override,
+        crate::resolve_duration(daemon_override, crate::IDLE_TIMEOUT),
+    )
+}
+
+/// How long teardown has to drain everything that is still running.
+///
+/// One budget covers the execs and then every session's pulls, so a daemon
+/// holding four sessions does not take four times as long to exit as one
+/// holding a single session.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Block until `in_flight` reads zero, or `deadline` passes.
+///
+/// A run that has not reported back is still using the handle it was given, so
+/// releasing that handle while one is outstanding would free memory the SDK
+/// holds.
+fn wait_for_in_flight(in_flight: &AtomicUsize, deadline: Instant) -> bool {
     while in_flight.load(Ordering::SeqCst) > 0 {
         if Instant::now() >= deadline {
             return false;
@@ -98,6 +172,9 @@ pub enum WorkerError {
     /// The referenced sandbox id is unknown to the daemon.
     NotProvisioned(String),
 
+    /// The referenced session id is unknown to the daemon.
+    UnknownSession(String),
+
     /// The sandbox exists but has not been started.
     NotStarted(String),
 
@@ -119,6 +196,7 @@ impl WorkerError {
     pub fn kind(&self) -> ErrKind {
         match self {
             WorkerError::NotProvisioned(_) => ErrKind::NotProvisioned,
+            WorkerError::UnknownSession(_) => ErrKind::NotProvisioned,
             WorkerError::NotStarted(_) => ErrKind::NotStarted,
             WorkerError::Busy(_) => ErrKind::Busy,
             WorkerError::Unavailable(_) => ErrKind::Unavailable,
@@ -132,6 +210,7 @@ impl std::fmt::Display for WorkerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WorkerError::NotProvisioned(id) => write!(f, "unknown sandbox {id}"),
+            WorkerError::UnknownSession(id) => write!(f, "unknown session {id}"),
             WorkerError::NotStarted(id) => write!(f, "sandbox {id} is not started"),
             WorkerError::Busy(id) => write!(f, "sandbox {id} already has an exec in flight"),
             WorkerError::Unavailable(e) | WorkerError::Rejected(e) | WorkerError::Backend(e) => {
@@ -152,6 +231,17 @@ impl From<anyhow::Error> for WorkerError {
 /// A unit of work dispatched from an async pipe handler to the WSLc worker
 /// thread. Each variant carries a `oneshot` reply channel the worker fulfils.
 pub enum WorkerCommand {
+    /// Boot a sized session, returning its minted id.
+    ProvisionSession {
+        config: ProvisionSessionConfig,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
+    },
+
+    /// Release a session nothing is using any more.
+    DeprovisionSession {
+        config: DeprovisionSessionConfig,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
+    },
     Provision {
         config: ProvisionConfig,
         reply: oneshot::Sender<Result<String, WorkerError>>,
@@ -160,6 +250,17 @@ pub enum WorkerCommand {
     /// a single variant is what forces it through [`Worker::dispatch`], so a new
     /// one cannot reach a container whose exec is still using its handle.
     Container(ContainerWork),
+
+    /// Report an off-worker session boot, from its boot thread.
+    SessionBooted {
+        session_ref: String,
+        outcome: Result<BootedSession, BootFailure>,
+    },
+
+    SessionReleased {
+        session_ref: String,
+        slot_returned: bool,
+    },
     /// Report a parked provision's pull, from the pull thread or its deadline.
     PullFinished {
         token: u64,
@@ -177,7 +278,8 @@ pub enum WorkerCommand {
     },
     /// Report the current live-container count (drives the idle watchdog).
     ContainerCount { reply: oneshot::Sender<usize> },
-    /// Release all containers + the session and stop the worker thread.
+
+    /// Release every container and session and stop the worker thread.
     Shutdown { reply: oneshot::Sender<()> },
 }
 
@@ -504,6 +606,26 @@ impl SessionHandle {
         &self.active_execs
     }
 
+    /// Boot a session, returning its minted `session_ref`.
+    pub async fn provision_session(
+        &self,
+        config: ProvisionSessionConfig,
+    ) -> Result<String, WorkerError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WorkerCommand::ProvisionSession { config, reply })?;
+        rx.await.map_err(worker_gone)?
+    }
+
+    /// Release a session nothing is using any more.
+    pub async fn deprovision_session(
+        &self,
+        config: DeprovisionSessionConfig,
+    ) -> Result<(), WorkerError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WorkerCommand::DeprovisionSession { config, reply })?;
+        rx.await.map_err(worker_gone)?
+    }
+
     /// Provision a container, returning its minted `sandbox_id`.
     pub async fn provision(&self, config: ProvisionConfig) -> Result<String, WorkerError> {
         let (reply, rx) = oneshot::channel();
@@ -661,6 +783,13 @@ struct ContainerEntry {
     retired: bool,
     container: WslcContainerGuard,
 
+    /// Which session's utility VM this container lives in.
+    ///
+    /// The container's handle belongs to that session, so this entry holds the
+    /// session open for as long as it exists, `retired` and `quarantined`
+    /// included.
+    session_ref: String,
+
     /// Keeps a quarantined sandbox counted against exec capacity, because a run
     /// whose termination was never confirmed may still hold a live process.
     exec_slot: Option<ExecSlotGuard>,
@@ -670,6 +799,10 @@ struct ContainerEntry {
 struct PendingProvision {
     config: ProvisionConfig,
     reply: oneshot::Sender<Result<String, WorkerError>>,
+
+    /// The session this provision will place its container in, pinned for as
+    /// long as this entry exists.
+    session_ref: String,
 
     /// Held only so dropping this entry retires the deadline thread.
     _retire_deadline: std::sync::mpsc::Sender<()>,
@@ -781,6 +914,10 @@ struct InFlightExec {
     container: WslcContainer,
     done: oneshot::Sender<Result<ExecTerminal, WorkerError>>,
 
+    /// Which session's utility VM the run is executing in, so it pins that
+    /// session even in the window where its container entry has already gone.
+    session_ref: String,
+
     /// Held only so the exec id stays reserved for as long as the run lasts.
     _registration: Arc<ExecRegistration>,
 
@@ -789,38 +926,337 @@ struct InFlightExec {
     parked: Vec<ContainerWork>,
 }
 
-/// The single-threaded WSLc session owner. Constructed and run entirely on the
-/// worker thread. Holds the lazily-loaded SDK and the one shared session (the
-/// WSL2 utility VM), plus the `sandbox_id -> container` map. The SDK/session/
-/// guard handles are `!Send` raw pointers; ownership stays here, and a pull or
-/// exec thread borrows one only for as long as its own in-flight counter says
-/// so.
+/// Everything booting one session needs, in a form that can cross a thread.
+struct SessionJob {
+    sdk: *const WslcSdk,
+    name: String,
+    store: String,
+    sizing: SessionSizing,
+}
+
+// SAFETY: the SDK is apartment-affine, not thread-affine, and both the worker
+// and the spawned thread join the MTA, where any member thread may call it. The
+// `sdk` pointer addresses the worker's `Box`, which teardown leaks rather than
+// frees while a boot is still counted in flight.
+unsafe impl Send for SessionJob {}
+
+/// A booted session handle on its way back to the worker.
+pub(crate) struct BootedSession(WslcSessionGuard);
+
+// SAFETY: as for `SessionJob`. The guard is moved, never shared, so only one
+// thread owns it at a time.
+unsafe impl Send for BootedSession {}
+
+pub(crate) struct BootFailure {
+    error: WorkerError,
+    store_may_be_held: bool,
+}
+
+impl From<WorkerError> for BootFailure {
+    fn from(error: WorkerError) -> Self {
+        Self {
+            error,
+            store_may_be_held: false,
+        }
+    }
+}
+
+/// Counts a session boot against teardown's drain for as long as it runs.
+struct SessionCount(Arc<AtomicUsize>);
+
+impl SessionCount {
+    fn enter(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(counter))
+    }
+}
+
+impl Drop for SessionCount {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Boot a session on a thread of its own, reporting back to the worker.
+///
+/// A boot the host cannot satisfy takes minutes to fail, which on the worker
+/// would stall every other sandbox on the daemon for that whole time.
+fn start_session_boot(
+    job: SessionJob,
+    session_ref: String,
+    worker: mpsc::UnboundedSender<WorkerCommand>,
+    in_flight: &Arc<AtomicUsize>,
+) -> Result<(), std::io::Error> {
+    let counted = SessionCount::enter(in_flight);
+    let spawned = std::thread::Builder::new()
+        .name("wslc-session-boot".to_string())
+        .spawn(move || {
+            // Declared before the job so it outlives the job's destructor, and
+            // released only after the report is queued, so a teardown that sees
+            // zero can rely on finding it.
+            let _counted = counted;
+
+            let job = job;
+
+            let outcome = match ComApartment::enter() {
+                Err(e) => Err(WorkerError::Backend(e).into()),
+                Ok(_apartment) => {
+                    let mut log = Logger::new(Mode::Console);
+
+                    // SAFETY: `sdk` is valid for as long as this is counted in
+                    // flight, and this thread is in the MTA.
+                    unsafe {
+                        container_steps::create_daemon_session(
+                            &*job.sdk, &job.name, &job.store, job.sizing, &mut log,
+                        )
+                    }
+                    .map(BootedSession)
+                    .map_err(|failure| BootFailure {
+                        error: sr_err(failure.response),
+                        store_may_be_held: failure.store_may_be_held,
+                    })
+                }
+            };
+
+            let _ = worker.send(WorkerCommand::SessionBooted {
+                session_ref,
+                outcome,
+            });
+        });
+
+    spawned.map(|_| ())
+}
+
+/// A session on its way to being terminated off the worker thread.
+struct SessionRelease {
+    /// Both taken by the thread that terminates the VM, so `Drop` below can
+    /// tell a release that ran from one that never started.
+    session: Option<WslcSessionGuard>,
+    store: Option<StoreSlotLease>,
+    name: String,
+}
+
+// SAFETY: as for `SessionJob`. The guard is moved, never shared, so only one
+// thread owns it at a time.
+unsafe impl Send for SessionRelease {}
+
+impl SessionRelease {
+    /// Take the pieces back when the release never started.
+    fn into_parts(mut self) -> (Option<WslcSessionGuard>, Option<StoreSlotLease>, String) {
+        (
+            self.session.take(),
+            self.store.take(),
+            std::mem::take(&mut self.name),
+        )
+    }
+}
+
+impl Drop for SessionRelease {
+    fn drop(&mut self) {
+        // Nothing ran this release, so the VM was never asked to stop. Leaking
+        // both is the only safe pair: terminating here would run on whichever
+        // thread dropped this, and returning the slot would hand out a store
+        // that VM still has mounted.
+        if let Some(session) = self.session.take() {
+            std::mem::forget(session);
+        }
+        if let Some(store) = self.store.take() {
+            std::mem::forget(store);
+        }
+    }
+}
+
+/// Terminate a session's VM on a thread of its own.
+///
+/// Stopping a VM is not instant, and the worker thread is where every other
+/// sandbox's work is serialized.  Returns the job to the caller when no thread
+/// could be started, since terminating it here is what this call exists to
+/// avoid.
+fn start_session_release(
+    job: SessionRelease,
+    session_ref: String,
+    in_flight: &Arc<AtomicUsize>,
+    reply: Option<oneshot::Sender<Result<(), WorkerError>>>,
+    worker: Option<mpsc::UnboundedSender<WorkerCommand>>,
+) -> Result<(), SessionRelease> {
+    let counted = SessionCount::enter(in_flight);
+
+    // The job travels through a lock rather than the closure so a spawn that
+    // never runs can hand it back instead of dropping it.
+    let pending = Arc::new(Mutex::new(Some(job)));
+    let taken = Arc::clone(&pending);
+
+    let spawned = std::thread::Builder::new()
+        .name("wslc-session-release".to_string())
+        .spawn(move || {
+            // Declared before the job so it outlives the job's destructor.
+            let _counted = counted;
+
+            let Some(mut job) = taken.lock().ok().and_then(|mut held| held.take()) else {
+                return;
+            };
+
+            let mut log = Logger::new(Mode::Console);
+            let mut slot_returned = false;
+            let outcome = match ComApartment::enter() {
+                Err(e) => Err(WorkerError::Backend(e)),
+                Ok(_apartment) => {
+                    let Some(session) = job.session.take() else {
+                        return;
+                    };
+                    let store = job.store.take();
+                    match container_steps::release_daemon_session(session, &job.name, &mut log) {
+                        Ok(()) => {
+                            slot_returned = store.is_some();
+                            drop(store);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            log.log_line(&format!(
+                                "session {session_ref} did not stop; keeping its store slot \
+                                 held: {}",
+                                e.error_message
+                            ));
+
+                            // The VM may still hold the store's VHDX open, so
+                            // the slot must never be handed out again.
+                            if let Some(store) = store {
+                                std::mem::forget(store);
+                            }
+                            Err(sr_err(e))
+                        }
+                    }
+                }
+            };
+
+            if let Some(reply) = reply {
+                let _ = reply.send(outcome);
+            }
+
+            // Lets a boot waiting for this slot start now rather than on the
+            // next poll.
+            if let Some(worker) = worker {
+                let _ = worker.send(WorkerCommand::SessionReleased {
+                    session_ref,
+                    slot_returned,
+                });
+            }
+        });
+
+    if spawned.is_ok() {
+        return Ok(());
+    }
+
+    match pending.lock().ok().and_then(|mut held| held.take()) {
+        Some(job) => Err(job),
+        None => Ok(()),
+    }
+}
+
+/// Where a request's session stands.
+#[derive(Debug)]
+enum SessionLookup {
+    /// Booted and usable now.
+    Ready(String),
+
+    /// Still booting on its own thread.
+    Booting(String),
+}
+
+/// A session whose VM is still booting on its own thread.
+struct PendingSession {
+    /// Leased before the boot starts, so nothing else is handed this slot
+    /// while a VM is opening it. Absent while this boot is waiting for a
+    /// releasing slot to come back rather than taking a cold one.
+    store: Option<StoreSlotLease>,
+    name: String,
+    sizing: SessionSizing,
+
+    /// The client waiting for this session's id, absent for the implicit
+    /// session that nobody requested directly.
+    reply: Option<oneshot::Sender<Result<String, WorkerError>>>,
+
+    /// Provisions that arrived while this session was still booting.
+    parked: Vec<(
+        ProvisionConfig,
+        oneshot::Sender<Result<String, WorkerError>>,
+    )>,
+
+    requested: Instant,
+
+    /// Set once the clients waiting on this boot have been let go. The entry
+    /// stays so a late report can still release the VM it created.
+    abandoned: bool,
+}
+
+/// One session the daemon holds: a WSL2 utility VM, its image store, and what
+/// it was sized as.
+///
+/// The session guard is declared before the store lease so the VM stops before
+/// its slot returns to the pool; a slot reissued while the VHDX is still
+/// mounted cannot be opened.
+struct SessionEntry {
+    session: WslcSessionGuard,
+
+    /// The store slot this session holds, returned to the pool on release.
+    store: StoreSlotLease,
+
+    /// The name the SDK knows this session by.
+    name: String,
+
+    /// What this session's VM was sized as.
+    sizing: SessionSizing,
+
+    /// Pulls started against this session that have not reported back.
+    pulls_in_flight: Arc<AtomicUsize>,
+
+    /// When this session was first observed holding nothing.
+    empty_since: Option<Instant>,
+}
+
+/// The single-threaded WSLc session owner, constructed and run entirely on the
+/// worker thread.
+///
+/// The SDK, session and container handles are `!Send` raw pointers; ownership
+/// stays here, and a pull, boot or exec thread borrows one only for as long as
+/// its own in-flight counter says so.
 struct Worker {
     logger: Logger,
     start_run: RunStarter,
-
-    // Field order is load-bearing on implicit drop: `containers` and `session`
-    // hold handles whose Drop calls into the SDK, so they must drop before `sdk`
-    // unloads `wslcsdk.dll`.
-    containers: HashMap<String, ContainerEntry>,
     pending: HashMap<u64, PendingProvision>,
     exec_in_flight: HashMap<String, InFlightExec>,
 
     /// Runs this worker started that have not reported back. Shared with the run
     /// threads, which outlive this struct whenever teardown abandons a handle.
     execs_in_flight: Arc<AtomicUsize>,
-    next_pull_token: u64,
-    session: Option<WslcSessionGuard>,
 
-    /// The store the live session holds, returned to the pool when the session
-    /// is released. Teardown that leaks the session leaks this with it, since
-    /// the leaked session keeps the store's VHDX mounted.
-    store_lease: Option<StoreSlotLease>,
+    /// Session boots that have not reported back, which hold the SDK while
+    /// they run.
+    sessions_in_flight: Arc<AtomicUsize>,
+
+    /// Session releases still terminating their VMs on their own threads.
+    releases_in_flight: Arc<AtomicUsize>,
+    release_began: HashMap<String, Instant>,
+    returned_slots_unleased: usize,
+    next_pull_token: u64,
     store_slots: StoreSlotPool,
 
-    /// Boxed so the address an off-worker pull or exec was handed survives this
-    /// struct being moved or the field being taken, which teardown does to leak
-    /// the SDK rather than unload it under a running thread.
+    /// Sessions whose VM is still booting, by session id.
+    pending_sessions: HashMap<String, PendingSession>,
+
+    /// The session a request that names none joins, minted on first use.
+    ///
+    /// Random like any other id and never handed to a client, so no caller can
+    /// name the session everyone else is sharing.
+    default_session: Option<String>,
+
+    // These three drop in declaration order: a container handle into its
+    // session, and both into the SDK before `wslcsdk.dll` unloads.
+    containers: HashMap<String, ContainerEntry>,
+    sessions: HashMap<String, SessionEntry>,
+
+    /// Boxed so an address handed to an off-worker thread survives teardown
+    /// taking the field to leak the SDK rather than unload it.
     sdk: Option<Box<WslcSdk>>,
 }
 
@@ -829,56 +1265,683 @@ impl Worker {
         Self {
             logger: Logger::new(Mode::Console),
             start_run: start_run_on_sdk,
-            sdk: None,
-            session: None,
-            store_lease: None,
-            store_slots: StoreSlotPool::new(),
-            containers: HashMap::new(),
             pending: HashMap::new(),
             exec_in_flight: HashMap::new(),
             execs_in_flight: Arc::new(AtomicUsize::new(0)),
+            sessions_in_flight: Arc::new(AtomicUsize::new(0)),
+            releases_in_flight: Arc::new(AtomicUsize::new(0)),
+            release_began: HashMap::new(),
+            returned_slots_unleased: 0,
             next_pull_token: 0,
+            store_slots: StoreSlotPool::new(),
+            pending_sessions: HashMap::new(),
+            default_session: None,
+            containers: HashMap::new(),
+            sessions: HashMap::new(),
+            sdk: None,
         }
     }
 
-    /// Lazily load the SDK and boot the shared session on first use. Idempotent.
-    fn ensure_session(&mut self) -> Result<(), WorkerError> {
+    /// What is still using `session_ref`.
+    ///
+    /// Derived on every call rather than tracked, since containers leave the
+    /// map by paths that do not agree and a stored count would drift across
+    /// them.
+    ///
+    /// A pull is counted separately from the provision that started it: the
+    /// provision entry goes as soon as either the pull or its deadline reports,
+    /// which can be long before the pull thread releases the handle.
+    fn session_hold(&self, session_ref: &str) -> usize {
+        let containers = self
+            .containers
+            .values()
+            .filter(|entry| entry.session_ref == session_ref)
+            .count();
+        let pending = self
+            .pending
+            .values()
+            .filter(|provision| provision.session_ref == session_ref)
+            .count();
+        let execs = self
+            .exec_in_flight
+            .values()
+            .filter(|exec| exec.session_ref == session_ref)
+            .count();
+        let pulls = self
+            .sessions
+            .get(session_ref)
+            .map_or(0, |entry| entry.pulls_in_flight.load(Ordering::SeqCst));
+
+        containers + pending + execs + pulls
+    }
+
+    /// Lazily load the SDK. Idempotent.
+    fn ensure_sdk(&mut self) -> Result<(), WorkerError> {
         if self.sdk.is_none() {
             // SAFETY: the worker thread is already in the MTA (see `ComApartment`).
             let sdk =
                 unsafe { container_steps::load_sdk_checked(&mut self.logger) }.map_err(sr_err)?;
             self.sdk = Some(Box::new(sdk));
         }
-        if self.session.is_none() {
-            let Self {
-                store_slots,
-                sdk,
-                logger,
-                ..
-            } = self;
-            let sdk = sdk.as_ref().expect("sdk loaded above");
-
-            let (lease, session) = store_slots
-                .lease_with(|store| {
-                    // SAFETY: `sdk` holds valid pointers and COM is initialised.
-                    unsafe {
-                        container_steps::create_daemon_session(
-                            sdk,
-                            SESSION_NAME,
-                            &store.to_string_lossy(),
-                            logger,
-                        )
-                    }
-                })
-                .map_err(|e| match e {
-                    StoreSlotError::Refused { source, .. } => sr_err(source),
-                    pool_failure => WorkerError::Backend(anyhow::anyhow!("{pool_failure}")),
-                })?;
-
-            self.session = Some(session);
-            self.store_lease = Some(lease);
-        }
         Ok(())
+    }
+
+    /// Start booting a session, returning the id it will have.
+    ///
+    /// Nothing bounds how many sessions a daemon holds. A count cannot express
+    /// host load, since each session carries its own cpu and memory, and the
+    /// host refuses what it cannot supply.
+    fn begin_session(
+        &mut self,
+        sizing: SessionSizing,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) -> Result<String, WorkerError> {
+        let session_ref = format!("wslcsess:{}", uuid::Uuid::new_v4().simple());
+        let name = session_name(&session_ref);
+
+        // A release still running holds the warm slot its session was using,
+        // so leasing now would hand this boot a cold one and refuse an
+        // isolated provision for a missing image.
+        if self.should_wait_for_a_release(Instant::now()) {
+            self.pending_sessions.insert(
+                session_ref.clone(),
+                PendingSession {
+                    store: None,
+                    name,
+                    sizing,
+                    reply: None,
+                    parked: Vec::new(),
+                    requested: Instant::now(),
+                    abandoned: false,
+                },
+            );
+            return Ok(session_ref);
+        }
+
+        let store = self.lease_and_boot(&session_ref, &name, sizing, worker)?;
+
+        self.pending_sessions.insert(
+            session_ref.clone(),
+            PendingSession {
+                store: Some(store),
+                name,
+                sizing,
+                reply: None,
+                parked: Vec::new(),
+                requested: Instant::now(),
+                abandoned: false,
+            },
+        );
+        Ok(session_ref)
+    }
+
+    /// Lease a store slot and start the boot thread that opens it.
+    fn lease_and_boot(
+        &mut self,
+        session_ref: &str,
+        name: &str,
+        sizing: SessionSizing,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) -> Result<StoreSlotLease, WorkerError> {
+        self.ensure_sdk()?;
+
+        // Leased here rather than on the boot thread, so a slot is never
+        // handed out twice while a VM is opening the store it points at.
+        let (store, ()) = self
+            .store_slots
+            .lease_with(|_| Ok::<(), std::convert::Infallible>(()))
+            .map_err(|e| WorkerError::Backend(anyhow::anyhow!("{e}")))?;
+
+        let sdk = self.sdk.as_ref().expect("sdk loaded above");
+        let job = SessionJob {
+            // The box's contents, not the field: teardown may take the field
+            // while this boot is still dereferencing the SDK.
+            sdk: &**sdk as *const WslcSdk,
+            name: name.to_string(),
+            store: store.path().to_string_lossy().to_string(),
+            sizing,
+        };
+
+        if let Err(e) = start_session_boot(
+            job,
+            session_ref.to_string(),
+            worker.clone(),
+            &self.sessions_in_flight,
+        ) {
+            // The lease drops with `store` here, returning the slot.
+            return Err(WorkerError::Backend(anyhow::anyhow!(
+                "could not start a thread to boot session {session_ref}: {e}"
+            )));
+        }
+
+        self.returned_slots_unleased = self.returned_slots_unleased.saturating_sub(1);
+        Ok(store)
+    }
+
+    fn should_wait_for_a_release(&self, now: Instant) -> bool {
+        self.returned_slots_unleased == 0
+            && self
+                .release_began
+                .values()
+                .any(|began| now.saturating_duration_since(*began) < RELEASE_WAIT)
+    }
+
+    /// Start the boots that were waiting for a releasing slot to come back.
+    fn start_deferred_boots(&mut self, worker: &mpsc::UnboundedSender<WorkerCommand>) {
+        self.start_deferred_boots_at(Instant::now(), worker);
+    }
+
+    fn start_deferred_boots_at(
+        &mut self,
+        now: Instant,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        let mut waiting: Vec<(String, String, SessionSizing, Instant)> = self
+            .pending_sessions
+            .iter()
+            .filter(|(_, pending)| pending.store.is_none() && !pending.abandoned)
+            .map(|(session_ref, pending)| {
+                (
+                    session_ref.clone(),
+                    pending.name.clone(),
+                    pending.sizing,
+                    pending.requested,
+                )
+            })
+            .collect();
+
+        waiting.sort_by_key(|(.., requested)| *requested);
+
+        for (session_ref, name, sizing, _) in waiting {
+            if self.should_wait_for_a_release(now) {
+                break;
+            }
+            match self.lease_and_boot(&session_ref, &name, sizing, worker) {
+                Ok(store) => {
+                    if let Some(pending) = self.pending_sessions.get_mut(&session_ref) {
+                        pending.store = Some(store);
+                    }
+                }
+                Err(e) => self.finish_session(&session_ref, Err(e.into()), worker),
+            }
+        }
+    }
+
+    fn finish_release(
+        &mut self,
+        session_ref: &str,
+        slot_returned: bool,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        self.release_began.remove(session_ref);
+        if slot_returned {
+            self.returned_slots_unleased += 1;
+        }
+        self.start_deferred_boots(worker);
+    }
+
+    /// Hand a booting session the client waiting on its id.
+    ///
+    /// Separate from [`Worker::begin_session`] so a boot that never started
+    /// leaves the reply with its caller to answer.
+    fn attach_session_reply(
+        &mut self,
+        session_ref: &str,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
+    ) {
+        match self.pending_sessions.get_mut(session_ref) {
+            Some(pending) => pending.reply = Some(reply),
+
+            // Answered rather than dropped, since a dropped reply reaches the
+            // client as a bare "worker gone".
+            None => {
+                let _ = reply.send(Ok(session_ref.to_string()));
+            }
+        }
+    }
+
+    /// Register a session whose VM finished booting, and release whatever
+    /// parked behind it.
+    fn finish_session(
+        &mut self,
+        session_ref: &str,
+        outcome: Result<BootedSession, BootFailure>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        let Some(pending) = self.pending_sessions.remove(session_ref) else {
+            return;
+        };
+        let PendingSession {
+            store,
+            name,
+            sizing,
+            reply,
+            parked,
+            abandoned,
+            ..
+        } = pending;
+
+        let booted = match outcome {
+            Ok(BootedSession(session)) => session,
+            Err(BootFailure {
+                error: e,
+                store_may_be_held,
+            }) => {
+                // Retired with the slot, so a later provision boots a fresh
+                // implicit session rather than parking behind one that will
+                // never arrive.
+                if self.default_session.as_deref() == Some(session_ref) {
+                    self.default_session = None;
+                }
+
+                // The VM may still hold the store's VHDX open, so the slot
+                // must never be handed out again.
+                if store_may_be_held {
+                    if let Some(store) = store {
+                        self.logger.log_line(&format!(
+                            "session {session_ref} failed to boot and its VM did not stop; \
+                             keeping its store slot held"
+                        ));
+                        std::mem::forget(store);
+                    }
+                }
+
+                let message = e.to_string();
+                if let Some(reply) = reply {
+                    let _ = reply.send(Err(e));
+                }
+                for (_, parked_reply) in parked {
+                    let _ = parked_reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                        "the WSLc session this provision was waiting for could not be \
+                         created: {message}"
+                    ))));
+                }
+                return;
+            }
+        };
+
+        // Everyone waiting on this boot was let go when it passed its deadline,
+        // so the VM it eventually produced has no owner.
+        if abandoned {
+            self.logger.log_line(&format!(
+                "session {session_ref} booted after it was given up on; releasing it"
+            ));
+
+            // A job handed back could not start a thread. Its `Drop` leaks the
+            // VM and keeps the slot held, which is the safe pair when nothing
+            // asked that VM to stop.
+            let _ = start_session_release(
+                SessionRelease {
+                    session: Some(booted),
+                    store,
+                    name,
+                },
+                session_ref.to_string(),
+                &self.releases_in_flight,
+                None,
+                Some(worker.clone()),
+            );
+            return;
+        }
+
+        // A boot only starts once it holds a lease, so a report without one has
+        // no store to own.
+        let Some(store) = store else {
+            self.logger.log_line(&format!(
+                "session {session_ref} reported a boot it had no store slot for; releasing it"
+            ));
+            let _ = start_session_release(
+                SessionRelease {
+                    session: Some(booted),
+                    store: None,
+                    name,
+                },
+                session_ref.to_string(),
+                &self.releases_in_flight,
+                None,
+                None,
+            );
+            return;
+        };
+
+        self.sessions.insert(
+            session_ref.to_string(),
+            SessionEntry {
+                session: booted,
+                store,
+                name,
+                sizing,
+                pulls_in_flight: Arc::new(AtomicUsize::new(0)),
+                empty_since: None,
+            },
+        );
+
+        if let Some(reply) = reply {
+            let _ = reply.send(Ok(session_ref.to_string()));
+        }
+
+        // Replayed only now the session is in the map, so each takes the
+        // ordinary path.
+        for (config, parked_reply) in parked {
+            self.begin_provision(config, parked_reply, worker);
+        }
+    }
+
+    /// Resolve the session a request names, booting the implicit one if it
+    /// named none and there is not one already.
+    /// Record that a session has just been given work.
+    ///
+    /// The reaper samples occupancy on its poll, so work that both starts and
+    /// finishes between two polls would otherwise leave the grace running from
+    /// before it arrived.
+    fn touch_session(&mut self, session_ref: &str) {
+        if let Some(entry) = self.sessions.get_mut(session_ref) {
+            entry.empty_since = None;
+        }
+    }
+
+    /// Whether a pending session is still worth waiting for.
+    ///
+    /// An abandoned entry keeps its slot until its boot thread settles, but
+    /// nothing may park behind it: no later poll revisits it, and a boot that
+    /// does land releases the VM rather than installing it.
+    fn is_booting(&self, session_ref: &str) -> bool {
+        self.pending_sessions
+            .get(session_ref)
+            .is_some_and(|pending| !pending.abandoned)
+    }
+
+    fn ensure_session(
+        &mut self,
+        requested: Option<&str>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) -> Result<SessionLookup, WorkerError> {
+        if let Some(session_ref) = requested {
+            return if self.sessions.contains_key(session_ref) {
+                Ok(SessionLookup::Ready(session_ref.to_string()))
+            } else if self.is_booting(session_ref) {
+                Ok(SessionLookup::Booting(session_ref.to_string()))
+            } else {
+                Err(WorkerError::UnknownSession(session_ref.to_string()))
+            };
+        }
+
+        // A reaped or failed implicit session leaves its id behind, so check
+        // the maps rather than trusting the field.
+        if let Some(existing) = self.default_session.clone() {
+            if self.sessions.contains_key(&existing) {
+                return Ok(SessionLookup::Ready(existing));
+            }
+            if self.is_booting(&existing) {
+                return Ok(SessionLookup::Booting(existing));
+            }
+        }
+
+        let session_ref = self.begin_session(SessionSizing::default(), worker)?;
+        self.default_session = Some(session_ref.clone());
+        Ok(SessionLookup::Booting(session_ref))
+    }
+
+    /// Release a session a client asked to be rid of.
+    ///
+    /// Refuses while anything is still using it rather than cascading, since
+    /// the sandboxes in a session are addressed individually and their owners
+    /// still hold those ids.
+    fn release_session(
+        &mut self,
+        session_ref: &str,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        if !self.sessions.contains_key(session_ref) {
+            let _ = reply.send(Err(WorkerError::UnknownSession(session_ref.to_string())));
+            return;
+        }
+
+        // The implicit session is shared by every request that named none, so
+        // no single caller may release it.
+        if self.default_session.as_deref() == Some(session_ref) {
+            let _ = reply.send(Err(WorkerError::Rejected(anyhow::anyhow!(
+                "session {session_ref} is the daemon's implicit session and is released only \
+                 once nothing is using it"
+            ))));
+            return;
+        }
+
+        let hold = self.session_hold(session_ref);
+        if hold > 0 {
+            let _ = reply.send(Err(WorkerError::Rejected(anyhow::anyhow!(
+                "session {session_ref} still has {hold} sandbox(es) or operation(s) in it; \
+                 deprovision them first"
+            ))));
+            return;
+        }
+
+        self.release_session_entry(session_ref, Some(reply), worker);
+    }
+
+    /// Hand a session's VM to a thread that terminates it.
+    ///
+    /// Returns without waiting: stopping a VM is not instant, and every other
+    /// sandbox's work is serialized behind this thread.
+    fn release_session_entry(
+        &mut self,
+        session_ref: &str,
+        reply: Option<oneshot::Sender<Result<(), WorkerError>>>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        let Some(entry) = self.sessions.remove(session_ref) else {
+            if let Some(reply) = reply {
+                let _ = reply.send(Ok(()));
+            }
+            return;
+        };
+        if self.default_session.as_deref() == Some(session_ref) {
+            self.default_session = None;
+        }
+
+        let SessionEntry {
+            session,
+            store,
+            name,
+            sizing,
+            pulls_in_flight,
+            empty_since,
+        } = entry;
+
+        self.logger.log_line(&format!(
+            "releasing session {session_ref} ('{name}', slot {}, cpu={}, memory_mb={}, gpu={})",
+            store.index(),
+            sizing
+                .cpu_count
+                .map_or_else(|| "host default".to_string(), |cpu| cpu.to_string()),
+            sizing
+                .memory_mb
+                .map_or_else(|| "host default".to_string(), |mb| mb.to_string()),
+            sizing.gpu,
+        ));
+
+        let started = start_session_release(
+            SessionRelease {
+                session: Some(session),
+                store: Some(store),
+                name,
+            },
+            session_ref.to_string(),
+            &self.releases_in_flight,
+            reply,
+            Some(worker.clone()),
+        );
+
+        let Err(job) = started else {
+            self.release_began
+                .insert(session_ref.to_string(), Instant::now());
+            return;
+        };
+
+        // No thread could be started, so the VM is untouched and its slot is
+        // still held. Putting the session back leaves the next poll to retry,
+        // rather than terminating it on this thread.
+        let (session, store, name) = job.into_parts();
+        let (Some(session), Some(store)) = (session, store) else {
+            return;
+        };
+        self.logger.log_line(&format!(
+            "could not start a release thread for session {session_ref}; it stays held \
+             until the next poll retries"
+        ));
+        self.sessions.insert(
+            session_ref.to_string(),
+            SessionEntry {
+                session,
+                store,
+                name,
+                sizing,
+                pulls_in_flight,
+                empty_since,
+            },
+        );
+    }
+
+    /// Let go of the clients waiting on a boot that has run past its deadline.
+    fn reap_stuck_boots(&mut self) {
+        self.reap_stuck_boots_at(Instant::now());
+    }
+
+    /// Pure core of [`Worker::reap_stuck_boots`], taking the clock so a test can
+    /// reach a deadline by moving `now` forward rather than a timestamp back.
+    fn reap_stuck_boots_at(&mut self, now: Instant) {
+        let deadline = session_boot_deadline();
+        let mut gave_up = Vec::new();
+
+        for (session_ref, pending) in self.pending_sessions.iter_mut() {
+            if pending.abandoned || now.saturating_duration_since(pending.requested) < deadline {
+                continue;
+            }
+            pending.abandoned = true;
+
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                    "the WSLc session did not finish booting within {}s",
+                    deadline.as_secs()
+                ))));
+            }
+            for (_, parked) in std::mem::take(&mut pending.parked) {
+                let _ = parked.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                    "the WSLc session this provision was waiting for did not finish \
+                     booting within {}s",
+                    deadline.as_secs()
+                ))));
+            }
+            gave_up.push(session_ref.clone());
+        }
+
+        for session_ref in gave_up {
+            // A boot still waiting for a slot has no thread that will ever
+            // report, so nothing else would remove it.
+            if self
+                .pending_sessions
+                .get(&session_ref)
+                .is_some_and(|pending| pending.store.is_none())
+            {
+                self.pending_sessions.remove(&session_ref);
+            }
+
+            // A later provision boots a fresh implicit session rather than
+            // parking behind one nothing is waiting for any more.
+            if self.default_session.as_deref() == Some(&session_ref) {
+                self.default_session = None;
+            }
+            self.logger.log_line(&format!(
+                "session {session_ref} has been booting for over {}s; the clients waiting \
+                 on it were let go",
+                deadline.as_secs()
+            ));
+        }
+    }
+
+    /// Release sessions that have held nothing for the empty-session grace.
+    ///
+    /// Waits for nothing, since blocking the watchdog's poll would stall every
+    /// other session's requests behind one that is busy.
+    fn reap_idle_sessions(&mut self, worker: &mpsc::UnboundedSender<WorkerCommand>) {
+        self.reap_idle_sessions_at(Instant::now(), worker);
+    }
+
+    /// What every session is holding, in one pass.
+    ///
+    /// Each [`Worker::session_hold`] is O(C + P + E), so calling it once per
+    /// session on the watchdog poll would be quadratic in the work the daemon
+    /// is already doing.
+    fn session_holds(&self) -> HashMap<String, usize> {
+        let mut holds: HashMap<String, usize> = self
+            .sessions
+            .keys()
+            .map(|session_ref| (session_ref.clone(), 0))
+            .collect();
+
+        let mut bump = |session_ref: &String| {
+            if let Some(hold) = holds.get_mut(session_ref) {
+                *hold += 1;
+            }
+        };
+        for entry in self.containers.values() {
+            bump(&entry.session_ref);
+        }
+        for provision in self.pending.values() {
+            bump(&provision.session_ref);
+        }
+        for exec in self.exec_in_flight.values() {
+            bump(&exec.session_ref);
+        }
+
+        for (session_ref, entry) in &self.sessions {
+            if let Some(hold) = holds.get_mut(session_ref) {
+                *hold += entry.pulls_in_flight.load(Ordering::SeqCst);
+            }
+        }
+
+        holds
+    }
+
+    /// Pure core of [`Worker::reap_idle_sessions`], taking the clock for the same
+    /// reason as [`Worker::reap_stuck_boots_at`].
+    fn reap_idle_sessions_at(
+        &mut self,
+        now: Instant,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        let grace = session_grace();
+        let holds = self.session_holds();
+
+        let mut expired = Vec::new();
+        for (session_ref, hold) in holds {
+            let Some(entry) = self.sessions.get_mut(&session_ref) else {
+                continue;
+            };
+            if hold > 0 {
+                entry.empty_since = None;
+                continue;
+            }
+            if now.saturating_duration_since(*entry.empty_since.get_or_insert(now)) >= grace {
+                expired.push(session_ref);
+            }
+        }
+
+        for session_ref in expired {
+            // Each release takes a native thread, and a host that refuses to
+            // make one would otherwise terminate on this thread. A session
+            // skipped here stays expired and is retried on the next poll.
+            if self.releases_in_flight.load(Ordering::SeqCst) >= MAX_CONCURRENT_RELEASES {
+                break;
+            }
+
+            self.logger.log_line(&format!(
+                "session {session_ref} has held nothing for {}s",
+                grace.as_secs()
+            ));
+            self.release_session_entry(&session_ref, None, worker);
+        }
     }
 
     /// Start a provision, parking it if the image has to be pulled.
@@ -892,18 +1955,31 @@ impl Worker {
         reply: oneshot::Sender<Result<String, WorkerError>>,
         worker: &mpsc::UnboundedSender<WorkerCommand>,
     ) {
-        if let Err(e) = self.ensure_session() {
-            let _ = reply.send(Err(e));
-            return;
-        }
+        let session_ref = match self.ensure_session(config.session_ref.as_deref(), worker) {
+            Ok(SessionLookup::Ready(session_ref)) => session_ref,
+            Ok(SessionLookup::Booting(session_ref)) => {
+                // Parking rather than waiting is what keeps this thread free,
+                // and what stops a second provision booting a second implicit
+                // session alongside the first.
+                self.pending_sessions
+                    .get_mut(&session_ref)
+                    .expect("ensure_session reported it booting")
+                    .parked
+                    .push((config, reply));
+                return;
+            }
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                return;
+            }
+        };
 
         let sdk = self.sdk.as_ref().expect("session ensured");
-        let session = self.session.as_ref().expect("session ensured").as_raw();
-        let store = image::StoreHint::DaemonSlot(
-            self.store_lease
-                .as_ref()
-                .map_or(0, store_slots::StoreSlotLease::index),
-        );
+        let session = self.sessions[&session_ref].session.as_raw();
+
+        // The slot this session leased, not the daemon's — a store hint naming
+        // another session's slot would send a caller to warm the wrong one.
+        let store = image::StoreHint::DaemonSlot(self.sessions[&session_ref].store.index());
 
         // SAFETY: `sdk`/`session` are valid.
         let step = unsafe {
@@ -931,20 +2007,26 @@ impl Worker {
 
         match step {
             image::ImageStep::Ready => {
-                let _ = reply.send(self.create_provisioned_container(&config));
+                let _ = reply.send(self.create_provisioned_container(&config, &session_ref));
             }
             image::ImageStep::Pull => {
                 let token = self.next_pull_token;
                 self.next_pull_token += 1;
 
                 let done = worker.clone();
+
+                // The pending entry below is not enough on its own: the
+                // deadline thread can report first, and removing that entry
+                // would unpin a session the pull thread still dereferences.
+                let counter = Arc::clone(&self.sessions[&session_ref].pulls_in_flight);
                 let started = unsafe {
-                    image::start_pull(
+                    image::start_pull_counted(
                         sdk,
                         session,
                         &config.image,
                         &store,
                         "[WSLC][daemon]",
+                        Some(counter),
                         move |outcome| {
                             let _ = done.send(WorkerCommand::PullFinished { token, outcome });
                         },
@@ -979,8 +2061,8 @@ impl Worker {
 
                 if armed.is_err() {
                     // Parking without a deadline is how a provision waits
-                    // forever, so refuse instead. The pull carries on and warms
-                    // the cache for a retry.
+                    // forever, so refuse instead. The pull carries on, counted
+                    // against its session, and warms the cache for a retry.
                     let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
                         "could not arm the pull deadline for image '{}'",
                         config.image
@@ -988,11 +2070,13 @@ impl Worker {
                     return;
                 }
 
+                self.touch_session(&session_ref);
                 self.pending.insert(
                     token,
                     PendingProvision {
                         config,
                         reply,
+                        session_ref,
                         _retire_deadline: retire_deadline,
                     },
                 );
@@ -1007,6 +2091,7 @@ impl Worker {
         let Some(PendingProvision {
             config,
             reply,
+            session_ref,
             _retire_deadline: _,
         }) = self.pending.remove(&token)
         else {
@@ -1019,7 +2104,11 @@ impl Worker {
         }
 
         let sdk = self.sdk.as_ref().expect("session ensured");
-        let session = self.session.as_ref().expect("session ensured").as_raw();
+
+        // The parked provision and its pull both pin this session, so it
+        // cannot be missing. A session released under a running pull has
+        // already been used after free, so there is nothing to recover.
+        let session = self.sessions[&session_ref].session.as_raw();
 
         // SAFETY: `sdk`/`session` are valid.
         if let Err(e) = unsafe {
@@ -1035,7 +2124,7 @@ impl Worker {
             return;
         }
 
-        let _ = reply.send(self.create_provisioned_container(&config));
+        let _ = reply.send(self.create_provisioned_container(&config, &session_ref));
     }
 
     /// Everything after the image is in the store: create the container and
@@ -1043,9 +2132,11 @@ impl Worker {
     fn create_provisioned_container(
         &mut self,
         config: &ProvisionConfig,
+        session_ref: &str,
     ) -> Result<String, WorkerError> {
         let sdk = self.sdk.as_ref().expect("session ensured");
-        let session = self.session.as_ref().expect("session ensured").as_raw();
+        let session = self.sessions[session_ref].session.as_raw();
+        let gpu = self.sessions[session_ref].sizing.gpu;
 
         let mounts: Vec<policy_mapping::VolumeMount> = config
             .volumes
@@ -1086,6 +2177,7 @@ impl Worker {
                 &mounts,
                 &port_mappings,
                 net_mode,
+                gpu,
                 &mut keepalive,
                 &mut self.logger,
             )
@@ -1093,6 +2185,7 @@ impl Worker {
         };
 
         let sandbox_id = format!("wslc:{}", uuid::Uuid::new_v4().simple());
+        self.touch_session(session_ref);
         self.containers.insert(
             sandbox_id.clone(),
             ContainerEntry {
@@ -1100,6 +2193,7 @@ impl Worker {
                 quarantined: false,
                 retired: false,
                 container,
+                session_ref: session_ref.to_string(),
                 exec_slot: None,
             },
         );
@@ -1208,6 +2302,11 @@ impl Worker {
             }
         };
 
+        // Recorded here rather than looked up when the run reports, because
+        // quarantine can delete the container entry while the run is still
+        // going.
+        let session_ref = self.containers[&config.sandbox_id].session_ref.clone();
+
         if cancellation.load(Ordering::Acquire) {
             if admit.send(Ok(())).is_ok() {
                 let _ = done.send(Ok(ExecTerminal::Cancelled));
@@ -1228,11 +2327,13 @@ impl Worker {
             return;
         }
 
+        self.touch_session(&session_ref);
         self.exec_in_flight.insert(
             sandbox_id,
             InFlightExec {
                 container,
                 done,
+                session_ref,
                 _registration: registration,
                 slot,
                 parked: Vec::new(),
@@ -1386,10 +2487,8 @@ impl Worker {
         // entry on failure above leaves it retryable.
         self.containers.remove(&config.sandbox_id);
 
-        // The shared session (and SDK) stay loaded so a subsequent provision
-        // reuses the already-booted WSL2 VM. The idle watchdog releases them via
-        // `shutdown` once the container count has stayed at zero for the idle
-        // timeout.
+        // The session and SDK stay loaded so a subsequent provision reuses the
+        // already-booted WSL2 VM.
         Ok(())
     }
 
@@ -1397,11 +2496,40 @@ impl Worker {
     /// thread may still be using one.
     ///
     /// Reached only on an unwind, where [`Worker::shutdown`]'s drain never ran.
-    fn abandon_if_borrowed(mut self, execs_in_flight: usize, pull_outstanding: bool) {
-        if execs_in_flight > 0 || pull_outstanding {
+    fn abandon_if_borrowed(
+        mut self,
+        execs_in_flight: usize,
+        sessions_in_flight: usize,
+        releases_in_flight: usize,
+        pull_outstanding: bool,
+    ) {
+        // A boot queues its report before releasing its count, so a pending
+        // entry can mean a live handle is sitting in the channel even when
+        // nothing reads as in flight.
+        let boot_reports_possible = !self.pending_sessions.is_empty();
+
+        if execs_in_flight > 0
+            || sessions_in_flight > 0
+            || releases_in_flight > 0
+            || pull_outstanding
+            || boot_reports_possible
+        {
             std::mem::forget(std::mem::take(&mut self.containers));
-            std::mem::forget(self.session.take());
-            std::mem::forget(self.store_lease.take());
+
+            // Forgets each store lease with its handle, so the slot stays
+            // held: an abandoned session keeps its VHDX mounted.
+            std::mem::forget(std::mem::take(&mut self.sessions));
+
+            // Only the lease: a boot still running is about to open that store,
+            // while the reply senders must drop so a client waiting on one sees
+            // the worker is gone rather than awaiting forever.
+            for (_, pending) in std::mem::take(&mut self.pending_sessions) {
+                let PendingSession { store, .. } = pending;
+                if let Some(store) = store {
+                    std::mem::forget(store);
+                }
+            }
+
             std::mem::forget(self.sdk.take());
         }
 
@@ -1417,6 +2545,24 @@ impl Worker {
         const SHUTTING_DOWN: &str = "the WSLc daemon is shutting down";
 
         match cmd {
+            WorkerCommand::ProvisionSession { reply, .. } => {
+                let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                    "{SHUTTING_DOWN}"
+                ))));
+            }
+            WorkerCommand::DeprovisionSession { reply, .. } => {
+                let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                    "{SHUTTING_DOWN}"
+                ))));
+            }
+
+            // Reached only once both drains have run, so any handle this
+            // carried has already been released by one of them.
+            WorkerCommand::SessionBooted { .. } => {}
+
+            // No boot starts once teardown has begun, so a returned slot wakes
+            // nothing.
+            WorkerCommand::SessionReleased { .. } => {}
             WorkerCommand::Provision { reply, .. } => {
                 let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
                     "{SHUTTING_DOWN}"
@@ -1439,15 +2585,18 @@ impl Worker {
         }
     }
 
-    /// Release every container and the session.
+    /// Release every container and every session.
     ///
-    /// A parked provision is answered rather than dropped, since a dropped
-    /// reply reaches its client as a bare "worker gone".
+    /// `drain_budget` bounds waiting for in-flight work across every session,
+    /// and then bounds terminating their VMs separately, so one stuck pull
+    /// cannot leave the rest no time to release.
     fn shutdown(
         &mut self,
         rx: &mut mpsc::UnboundedReceiver<WorkerCommand>,
         drain_budget: Duration,
     ) {
+        let deadline = Instant::now() + drain_budget;
+
         for (_, pending) in self.pending.drain() {
             let _ = pending.reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
                 "the WSLc daemon shut down while pulling image '{}'",
@@ -1455,9 +2604,25 @@ impl Worker {
             ))));
         }
 
+        // A session still booting has clients waiting on it twice over: the one
+        // that asked for the session, and every provision parked behind it.
+        for (session_ref, pending) in self.pending_sessions.iter_mut() {
+            if let Some(reply) = pending.reply.take() {
+                let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                    "the WSLc daemon shut down while session {session_ref} was booting"
+                ))));
+            }
+            for (_, parked) in std::mem::take(&mut pending.parked) {
+                let _ = parked.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                    "the WSLc daemon shut down while session {session_ref} was booting"
+                ))));
+            }
+        }
+
         // An off-worker exec is still using its container handle, so nothing
         // below may stop, delete or release one until the runs report back.
-        let execs_drained = wait_for_execs_in_flight(&self.execs_in_flight, drain_budget);
+        let execs_drained = wait_for_in_flight(&self.execs_in_flight, deadline);
+        let mut left_running = false;
 
         if execs_drained {
             // Every drained run queued its report before releasing its count, so
@@ -1478,6 +2643,13 @@ impl Worker {
                             ));
                         }
                     }
+
+                    // A boot that lands here owns a live handle, and the boot
+                    // drain below runs too late to catch it.
+                    WorkerCommand::SessionBooted {
+                        session_ref,
+                        outcome,
+                    } => left_running |= self.release_booted_during_shutdown(&session_ref, outcome),
                     other => self.refuse_while_shutting_down(other),
                 }
             }
@@ -1498,12 +2670,14 @@ impl Worker {
 
         if !execs_drained {
             self.logger.log_line(
-                "a WSLC exec is still running; leaking the session rather than \
+                "a WSLC exec is still running; leaking every session rather than \
                  releasing handles it is using",
             );
             std::mem::forget(std::mem::take(&mut self.containers));
-            std::mem::forget(self.session.take());
-            std::mem::forget(self.store_lease.take());
+            std::mem::forget(std::mem::take(&mut self.sessions));
+
+            // A boot still running is about to open the store its lease holds.
+            std::mem::forget(std::mem::take(&mut self.pending_sessions));
             std::mem::forget(self.sdk.take());
             return;
         }
@@ -1531,24 +2705,166 @@ impl Worker {
             self.containers.clear();
         }
 
-        // An abandoned pull is still using this session, so releasing it now
-        // would free memory the SDK holds. The leaked handles cost one
-        // process's worth of memory until it exits.
-        if !image::wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
+        self.release_sessions_for_shutdown(rx, deadline, drain_budget, left_running);
+    }
+
+    /// Release a session whose boot landed after teardown had begun, returning
+    /// whether its VM had to be left running.
+    fn release_booted_during_shutdown(
+        &mut self,
+        session_ref: &str,
+        outcome: Result<BootedSession, BootFailure>,
+    ) -> bool {
+        let Some(pending) = self.pending_sessions.remove(session_ref) else {
+            return false;
+        };
+        let PendingSession { store, name, .. } = pending;
+
+        let session = match outcome {
+            Ok(BootedSession(session)) => session,
+            Err(failure) => {
+                // The VM may still hold the store's VHDX open, so the slot
+                // must never be handed out again.
+                if failure.store_may_be_held {
+                    if let Some(store) = store {
+                        std::mem::forget(store);
+                    }
+                }
+                return false;
+            }
+        };
+
+        self.logger.log_line(&format!(
+            "session {session_ref} finished booting during shutdown; releasing it"
+        ));
+        self.release_during_shutdown(session_ref.to_string(), session, store, name)
+    }
+
+    /// Hand a session's VM to a release thread during teardown, returning
+    /// whether it had to be left running instead.
+    fn release_during_shutdown(
+        &self,
+        session_ref: String,
+        session: WslcSessionGuard,
+        store: Option<StoreSlotLease>,
+        name: String,
+    ) -> bool {
+        // A job handed back could not start a thread, and its `Drop` leaves
+        // both the VM and its slot held.
+        start_session_release(
+            SessionRelease {
+                session: Some(session),
+                store,
+                name,
+            },
+            session_ref,
+            &self.releases_in_flight,
+            None,
+            None,
+        )
+        .is_err()
+    }
+
+    /// Release the sessions nothing is still using and abandon the rest.
+    ///
+    /// Runs while the SDK is still loaded, since a session handle's `Drop`
+    /// calls into it.
+    fn release_sessions_for_shutdown(
+        &mut self,
+        rx: &mut mpsc::UnboundedReceiver<WorkerCommand>,
+        deadline: Instant,
+        drain_budget: Duration,
+        left_running: bool,
+    ) {
+        let mut abandoned = left_running;
+
+        // A boot still running holds the SDK and is about to open the store
+        // its lease points at.
+        if !wait_for_in_flight(&self.sessions_in_flight, deadline) {
             self.logger.log_line(
-                "a WSLC image pull is still running; leaking the session rather than \
-                 releasing a handle it is using",
+                "a WSLC session is still booting; leaking its store lease rather than \
+                 returning a slot the boot is about to open",
             );
-            std::mem::forget(self.session.take());
-            std::mem::forget(self.store_lease.take());
-            std::mem::forget(self.sdk.take());
-            return;
+            std::mem::forget(std::mem::take(&mut self.pending_sessions));
+            abandoned = true;
+        } else {
+            // A boot queues its report before releasing its count, so a drained
+            // counter can still leave a live session handle sitting in the
+            // channel. Releasing those here is what stops their `Drop` reaching
+            // an unloaded `wslcsdk.dll`.
+            while !self.pending_sessions.is_empty() {
+                let Ok(cmd) = rx.try_recv() else {
+                    break;
+                };
+                match cmd {
+                    WorkerCommand::SessionBooted {
+                        session_ref,
+                        outcome,
+                    } => abandoned |= self.release_booted_during_shutdown(&session_ref, outcome),
+                    other => self.refuse_while_shutting_down(other),
+                }
+            }
+
+            // Whatever is left never queued a report, so no VM reached its
+            // slot and dropping the entry returns it.
+            self.pending_sessions.clear();
         }
 
-        // Session guard drops before the SDK unloads the DLL.
-        self.session = None;
-        self.store_lease = None;
-        self.sdk = None;
+        // Waiting first, so one session's stuck pull cannot spend the budget the
+        // terminates below need.
+        let mut drained = Vec::new();
+        for (session_ref, entry) in self.sessions.drain() {
+            if !wait_for_in_flight(&entry.pulls_in_flight, deadline) {
+                self.logger.log_line(&format!(
+                    "a WSLC image pull is still running on session {session_ref}; leaking it \
+                     rather than releasing a handle the pull is using"
+                ));
+
+                // Forgets the store lease with the session, so the slot stays
+                // held: the leaked session keeps the store's VHDX mounted.
+                std::mem::forget(entry);
+                abandoned = true;
+                continue;
+            }
+
+            drained.push((session_ref, entry));
+        }
+
+        // A budget of its own rather than whatever the waits left behind, since
+        // leaking a slot costs capacity permanently and a slow terminate does
+        // not.
+        let release_deadline = Instant::now() + drain_budget;
+
+        // Every release starts at once, since nothing polls after teardown to
+        // start one held back.
+        for (session_ref, entry) in drained {
+            let SessionEntry {
+                session,
+                store,
+                name,
+                ..
+            } = entry;
+            abandoned |= self.release_during_shutdown(session_ref, session, Some(store), name);
+        }
+
+        // A release thread is still calling SDK function pointers, so the DLL
+        // has to stay mapped until it finishes.
+        if !wait_for_in_flight(&self.releases_in_flight, release_deadline) {
+            self.logger.log_line(
+                "a WSLC session is still terminating; leaking the SDK rather than unloading \
+                 it under a release thread",
+            );
+            abandoned = true;
+        }
+
+        // Last, and only once every session that could be released has been:
+        // dropping a session handle after this would call into an unloaded
+        // `wslcsdk.dll`.
+        if abandoned {
+            std::mem::forget(self.sdk.take());
+        } else {
+            self.sdk = None;
+        }
     }
 }
 
@@ -1585,6 +2901,40 @@ pub fn spawn() -> Result<SessionHandle> {
             let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 while let Some(cmd) = rx.blocking_recv() {
                     match cmd {
+                        WorkerCommand::ProvisionSession { config, reply } => {
+                            let sizing = SessionSizing {
+                                cpu_count: config.cpu_count,
+                                memory_mb: config.memory_mb,
+                                gpu: config.gpu,
+                            };
+
+                            // The reply travels with the pending session and is
+                            // answered once the VM is up, so a slow boot does
+                            // not hold this thread.
+                            match worker.begin_session(sizing, &worker_tx) {
+                                Ok(session_ref) => {
+                                    worker.attach_session_reply(&session_ref, reply);
+                                }
+                                Err(e) => {
+                                    let _ = reply.send(Err(e));
+                                }
+                            }
+                        }
+                        WorkerCommand::SessionBooted {
+                            session_ref,
+                            outcome,
+                        } => {
+                            worker.finish_session(&session_ref, outcome, &worker_tx);
+                        }
+                        WorkerCommand::SessionReleased {
+                            session_ref,
+                            slot_returned,
+                        } => {
+                            worker.finish_release(&session_ref, slot_returned, &worker_tx);
+                        }
+                        WorkerCommand::DeprovisionSession { config, reply } => {
+                            worker.release_session(&config.session_ref, reply, &worker_tx);
+                        }
                         WorkerCommand::Provision { config, reply } => {
                             worker.begin_provision(config, reply, &worker_tx);
                         }
@@ -1602,10 +2952,15 @@ pub fn spawn() -> Result<SessionHandle> {
                             let _ = reply.send(());
                         }
                         WorkerCommand::ContainerCount { reply } => {
+                            // This poll is the daemon's only periodic tick, so
+                            // the session reapers ride along on it.
+                            worker.reap_stuck_boots();
+                            worker.reap_idle_sessions(&worker_tx);
+                            worker.start_deferred_boots(&worker_tx);
                             let _ = reply.send(worker.live_container_count());
                         }
                         WorkerCommand::Shutdown { reply } => {
-                            worker.shutdown(&mut rx, EXEC_DRAIN_TIMEOUT);
+                            worker.shutdown(&mut rx, DRAIN_TIMEOUT);
                             let _ = reply.send(());
                             break;
                         }
@@ -1615,10 +2970,12 @@ pub fn spawn() -> Result<SessionHandle> {
 
             if served.is_err() {
                 let in_flight = worker.execs_in_flight.load(Ordering::SeqCst);
+                let booting = worker.sessions_in_flight.load(Ordering::SeqCst);
+                let releasing = worker.releases_in_flight.load(Ordering::SeqCst);
 
                 // A pull borrows the SDK and session the same way a run does.
                 let pull_outstanding = !image::wait_for_pulls_in_flight(Duration::ZERO);
-                worker.abandon_if_borrowed(in_flight, pull_outstanding);
+                worker.abandon_if_borrowed(in_flight, booting, releasing, pull_outstanding);
             }
         })
         .map_err(|e| anyhow::anyhow!("spawn WSLc worker thread: {e}"))?;
@@ -1715,6 +3072,9 @@ mod tests {
         assert!(to_model_port_mappings(&[]).is_empty());
     }
 
+    /// The session every test fixture attributes its containers and work to.
+    const TEST_SESSION: &str = "wslcsess:test";
+
     /// Build a worker entry around a handle that is never dereferenced.
     fn test_entry(retired: bool) -> ContainerEntry {
         unsafe extern "C" fn release_noop(
@@ -1733,6 +3093,7 @@ mod tests {
             // SAFETY: `release_noop` never dereferences the handle, so the guard
             // owns a value it can release without touching memory.
             container: unsafe { WslcContainerGuard::from_raw(sentinel, release_noop) },
+            session_ref: TEST_SESSION.to_string(),
             exec_slot: None,
         }
     }
@@ -1772,8 +3133,10 @@ mod tests {
                     volumes: Vec::new(),
                     network: Default::default(),
                     port_mappings: Vec::new(),
+                    session_ref: None,
                 },
                 reply,
+                session_ref: TEST_SESSION.to_string(),
                 _retire_deadline: std::sync::mpsc::channel().0,
             },
         );
@@ -1799,18 +3162,17 @@ mod tests {
                     volumes: Vec::new(),
                     network: Default::default(),
                     port_mappings: Vec::new(),
+                    session_ref: None,
                 },
                 reply,
+                session_ref: TEST_SESSION.to_string(),
                 _retire_deadline: std::sync::mpsc::channel().0,
             },
         );
 
         worker.finish_provision(
             3,
-            Err(image::pull_deadline_expired(
-                "alpine:latest",
-                PULL_DRAIN_TIMEOUT,
-            )),
+            Err(image::pull_deadline_expired("alpine:latest", DRAIN_TIMEOUT)),
         );
         assert!(rx.try_recv().is_ok(), "the first report answers the client");
 
@@ -1862,6 +3224,1766 @@ mod tests {
         let mut worker = Worker::new();
         worker.retire("wslc:never-existed");
         assert_eq!(worker.live_container_count(), 0);
+    }
+
+    // ---- Session bookkeeping (no WSL host; the handles are never used) ----
+
+    /// A worker whose store pool is a scratch directory, so leasing a slot
+    /// neither touches nor fills the real per-user pool.
+    fn worker_with_scratch_pool() -> (tempfile::TempDir, Worker) {
+        let root = tempfile::tempdir().expect("create scratch pool root");
+        let mut worker = Worker::new();
+        worker.store_slots = StoreSlotPool::with_root(root.path().to_path_buf());
+        (root, worker)
+    }
+
+    /// A worker whose store pool refuses every lease, so it never boots a real VM.
+    fn worker_whose_leases_fail() -> (tempfile::TempDir, Worker) {
+        let root = tempfile::tempdir().expect("create scratch pool root");
+        let blocker = root.path().join("blocker");
+        std::fs::write(&blocker, b"").expect("write blocker");
+
+        let mut worker = Worker::new();
+        worker.store_slots = StoreSlotPool::with_root(blocker);
+        (root, worker)
+    }
+
+    fn unread_queue() -> mpsc::UnboundedSender<WorkerCommand> {
+        mpsc::unbounded_channel().0
+    }
+
+    /// Register a session whose handle is never dereferenced.
+    fn register_test_session(worker: &mut Worker, session_ref: &str) {
+        unsafe extern "C" fn session_noop(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            0
+        }
+
+        // Non-null only because the guard rejects null; never used as a pointer.
+        let sentinel = std::ptr::dangling_mut();
+        let (store, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease a scratch slot");
+
+        worker.sessions.insert(
+            session_ref.to_string(),
+            SessionEntry {
+                // SAFETY: neither function pointer dereferences the handle, so
+                // the guard owns a value it can release without touching
+                // memory.
+                session: unsafe {
+                    WslcSessionGuard::from_raw(sentinel, session_noop, session_noop)
+                },
+                store,
+                name: session_name(session_ref),
+                sizing: SessionSizing::default(),
+                pulls_in_flight: Arc::new(AtomicUsize::new(0)),
+                empty_since: None,
+            },
+        );
+    }
+
+    /// Register a session whose boot is still running.
+    fn register_booting_session(worker: &mut Worker, session_ref: &str) {
+        let (store, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease a scratch slot");
+
+        worker.pending_sessions.insert(
+            session_ref.to_string(),
+            PendingSession {
+                store: Some(store),
+                name: session_name(session_ref),
+                sizing: SessionSizing::default(),
+                reply: None,
+                parked: Vec::new(),
+                requested: Instant::now(),
+                abandoned: false,
+            },
+        );
+    }
+
+    /// A provision that names no session, so it joins the implicit one.
+    fn test_provision_config() -> ProvisionConfig {
+        ProvisionConfig {
+            image: "alpine:latest".to_string(),
+            image_tar_path: None,
+            volumes: Vec::new(),
+            network: Default::default(),
+            port_mappings: Vec::new(),
+            session_ref: None,
+        }
+    }
+
+    #[test]
+    fn a_retired_container_still_holds_its_session_but_not_the_daemon() {
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:orphan".to_string(), test_entry(true));
+
+        assert_eq!(
+            worker.session_hold(TEST_SESSION),
+            1,
+            "releasing a session out from under a live container handle would \
+             leave that handle dangling"
+        );
+        assert_eq!(
+            worker.live_container_count(),
+            0,
+            "a retired sandbox must still not hold the daemon open"
+        );
+    }
+
+    /// Quarantine keeps the entry when its delete failed, so a process may
+    /// still be live in that container.
+    #[test]
+    fn a_quarantined_container_still_holds_its_session() {
+        let mut worker = Worker::new();
+        worker.containers.insert(
+            "wslc:quarantined".to_string(),
+            ContainerEntry {
+                quarantined: true,
+                ..test_entry(false)
+            },
+        );
+
+        assert_eq!(worker.session_hold(TEST_SESSION), 1);
+    }
+
+    #[test]
+    fn a_container_in_another_session_does_not_hold_this_one() {
+        let mut worker = Worker::new();
+        worker.containers.insert(
+            "wslc:elsewhere".to_string(),
+            ContainerEntry {
+                session_ref: "wslcsess:other".to_string(),
+                ..test_entry(false)
+            },
+        );
+
+        assert_eq!(worker.session_hold(TEST_SESSION), 0);
+        assert_eq!(worker.session_hold("wslcsess:other"), 1);
+    }
+
+    #[test]
+    fn a_parked_provision_holds_its_session() {
+        let mut worker = Worker::new();
+        let (reply, _rx) = oneshot::channel();
+        worker.pending.insert(
+            1,
+            PendingProvision {
+                config: ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                    port_mappings: Vec::new(),
+                    session_ref: None,
+                },
+                reply,
+                session_ref: TEST_SESSION.to_string(),
+                _retire_deadline: std::sync::mpsc::channel().0,
+            },
+        );
+
+        assert_eq!(worker.session_hold(TEST_SESSION), 1);
+    }
+
+    #[test]
+    fn an_in_flight_exec_holds_its_session() {
+        let mut worker = Worker::new();
+        let (in_flight, _done) = in_flight_exec("exec-1");
+        worker
+            .exec_in_flight
+            .insert("wslc:running".to_string(), in_flight);
+
+        assert_eq!(
+            worker.session_hold(TEST_SESSION),
+            1,
+            "a run is still using a container handle from this session, even \
+             once quarantine has taken the container entry away"
+        );
+    }
+
+    /// A pull and its deadline race, and the deadline winning removes the
+    /// pending entry while the pull thread still holds the session handle.
+    #[test]
+    fn an_in_flight_pull_holds_its_session_after_its_parked_provision_is_gone() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+
+        worker.sessions[TEST_SESSION]
+            .pulls_in_flight
+            .fetch_add(1, Ordering::SeqCst);
+
+        assert!(
+            worker.pending.is_empty(),
+            "the deadline already answered and removed the parked provision"
+        );
+        assert_eq!(
+            worker.session_hold(TEST_SESSION),
+            1,
+            "the pull thread still holds the session handle; reaping here is a \
+             use-after-free"
+        );
+    }
+
+    #[test]
+    fn a_session_holding_something_is_not_reaped() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+        worker
+            .containers
+            .insert("wslc:live".to_string(), test_entry(false));
+
+        age_out(&mut worker, TEST_SESSION);
+        worker.reap_idle_sessions_at(past_grace(), &unread_queue());
+
+        assert!(
+            worker.sessions.contains_key(TEST_SESSION),
+            "a session with a container in it must never be released"
+        );
+    }
+
+    #[test]
+    fn an_empty_session_is_kept_until_its_grace_elapses() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+
+        worker.reap_idle_sessions(&unread_queue());
+
+        assert!(
+            worker.sessions.contains_key(TEST_SESSION),
+            "an empty session is kept for the grace, so a caller that is about \
+             to place a container in it still can"
+        );
+        assert!(
+            worker.sessions[TEST_SESSION].empty_since.is_some(),
+            "the first pass that finds it empty must start its clock"
+        );
+    }
+
+    #[test]
+    fn an_empty_session_is_released_once_its_grace_elapses() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+        let slot = worker.sessions[TEST_SESSION].store.path().to_path_buf();
+
+        age_out(&mut worker, TEST_SESSION);
+        worker.reap_idle_sessions_at(past_grace(), &unread_queue());
+
+        assert!(
+            worker.sessions.is_empty(),
+            "an orphaned session would otherwise pin a VM, a store slot and the \
+             daemon itself, with nothing able to reclaim any of them"
+        );
+
+        assert!(
+            wait_for_in_flight(
+                &worker.releases_in_flight,
+                Instant::now() + Duration::from_secs(5)
+            ),
+            "the release thread must finish before the slot is inspected"
+        );
+
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after the reap");
+        assert_eq!(
+            relet.path(),
+            slot,
+            "releasing a session must give its store slot back to the pool"
+        );
+    }
+
+    /// An empty session holding the daemon open would let its grace run before
+    /// the idle timeout even started, doubling teardown.
+    #[test]
+    fn an_empty_session_does_not_hold_the_daemon_open() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+
+        assert_eq!(worker.live_container_count(), 0);
+    }
+
+    #[test]
+    fn a_session_that_becomes_busy_again_restarts_its_grace() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+
+        worker.reap_idle_sessions(&unread_queue());
+        assert!(worker.sessions[TEST_SESSION].empty_since.is_some());
+
+        worker
+            .containers
+            .insert("wslc:live".to_string(), test_entry(false));
+        worker.reap_idle_sessions(&unread_queue());
+
+        assert!(
+            worker.sessions[TEST_SESSION].empty_since.is_none(),
+            "work arriving must clear the clock, not leave a stale start time \
+             that reaps the session the moment it next goes empty"
+        );
+    }
+
+    #[test]
+    fn a_daemon_holds_as_many_sessions_as_it_is_asked_for() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+
+        for index in 0..16 {
+            register_test_session(&mut worker, &format!("wslcsess:many{index}"));
+        }
+
+        assert_eq!(worker.sessions.len(), 16);
+
+        let slots: std::collections::BTreeSet<usize> = worker
+            .sessions
+            .values()
+            .map(|entry| entry.store.index())
+            .collect();
+        assert_eq!(
+            slots.len(),
+            16,
+            "the store pool must mint a distinct slot per session rather than \
+             bounding them; two sessions sharing a store is the sharing \
+             violation the pool exists to prevent"
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_id_is_refused_rather_than_quietly_defaulted() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut worker = Worker::new();
+
+        let refusal = worker
+            .ensure_session(Some("wslcsess:never-existed"), &tx)
+            .expect_err("an unknown session must be refused");
+
+        assert_eq!(refusal.kind(), ErrKind::NotProvisioned);
+        assert!(
+            !refusal.to_string().contains("sandbox"),
+            "an unknown session must not be reported as an unknown sandbox: {refusal}"
+        );
+    }
+
+    #[test]
+    fn releasing_a_session_still_in_use_is_refused() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+        worker
+            .containers
+            .insert("wslc:live".to_string(), test_entry(false));
+
+        let refusal = refuse_release(&mut worker, TEST_SESSION);
+
+        assert_eq!(refusal.kind(), ErrKind::Rejected);
+        assert!(
+            worker.sessions.contains_key(TEST_SESSION),
+            "a refused release must leave the session alone"
+        );
+    }
+
+    /// The implicit session is shared by every request that named none, so one
+    /// caller releasing it would destroy another's sandboxes.
+    #[test]
+    fn releasing_the_implicit_session_is_refused() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+        worker.default_session = Some(TEST_SESSION.to_string());
+
+        let refusal = refuse_release(&mut worker, TEST_SESSION);
+
+        assert_eq!(refusal.kind(), ErrKind::Rejected);
+        assert!(worker.sessions.contains_key(TEST_SESSION));
+    }
+
+    #[test]
+    fn releasing_an_unknown_session_is_refused() {
+        let mut worker = Worker::new();
+
+        let refusal = refuse_release(&mut worker, "wslcsess:never-existed");
+
+        assert_eq!(refusal.kind(), ErrKind::NotProvisioned);
+    }
+
+    /// The reaper runs on the watchdog poll that every other request waits
+    /// behind, so terminating a VM must not happen on the worker thread.
+    /// Nothing else would ever answer these clients.
+    #[test]
+    fn a_boot_past_its_deadline_lets_its_waiting_clients_go() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_booting_session(&mut worker, TEST_SESSION);
+        worker.default_session = Some(TEST_SESSION.to_string());
+
+        let (reply, mut answer) = oneshot::channel();
+        let (parked, mut parked_answer) = oneshot::channel();
+        {
+            let pending = worker
+                .pending_sessions
+                .get_mut(TEST_SESSION)
+                .expect("the booting session");
+            pending.reply = Some(reply);
+            pending.parked.push((
+                ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                    port_mappings: Vec::new(),
+                    session_ref: None,
+                },
+                parked,
+            ));
+        }
+
+        worker.reap_stuck_boots_at(past_grace());
+
+        assert!(
+            answer
+                .try_recv()
+                .expect("the session request must be answered")
+                .is_err(),
+            "a boot nothing will ever report must not leave its client waiting"
+        );
+        assert!(
+            parked_answer
+                .try_recv()
+                .expect("the parked provision must be answered")
+                .is_err(),
+            "a provision parked behind a hung boot must be answered too"
+        );
+        assert!(
+            worker.default_session.is_none(),
+            "a later provision must boot a fresh implicit session rather than park \
+             behind one nothing is waiting for"
+        );
+    }
+
+    /// The boot thread is still running, so the store it is about to open must
+    /// not be handed to anything else.
+    #[test]
+    fn a_boot_given_up_on_keeps_its_store_slot() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let held = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+        worker
+            .pending_sessions
+            .get_mut(TEST_SESSION)
+            .expect("the booting session")
+            .requested = Instant::now();
+
+        worker.reap_stuck_boots_at(past_grace());
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after giving up");
+        assert_ne!(
+            next.path(),
+            held,
+            "the boot thread may still open this store, so its slot cannot be reissued"
+        );
+    }
+
+    /// A boot given up on still produces a VM, and nothing is waiting for it.
+    #[test]
+    fn a_boot_that_lands_after_being_given_up_on_is_released() {
+        static TERMINATED: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn terminate_counts(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            TERMINATED.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+        unsafe extern "C" fn release_ok(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            0
+        }
+
+        TERMINATED.store(0, Ordering::SeqCst);
+
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        worker
+            .pending_sessions
+            .get_mut(TEST_SESSION)
+            .expect("the booting session")
+            .requested = Instant::now();
+
+        worker.reap_stuck_boots_at(past_grace());
+
+        // SAFETY: neither function pointer dereferences the handle.
+        let booted = BootedSession(unsafe {
+            WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_counts, release_ok)
+        });
+        worker.finish_session(TEST_SESSION, Ok(booted), &worker_tx);
+
+        assert!(
+            wait_for_in_flight(
+                &worker.releases_in_flight,
+                Instant::now() + Duration::from_secs(5)
+            ),
+            "the release thread must finish"
+        );
+        assert_eq!(
+            TERMINATED.load(Ordering::SeqCst),
+            1,
+            "a VM nobody is waiting for must be stopped, not installed or leaked"
+        );
+        assert!(
+            !worker.sessions.contains_key(TEST_SESSION),
+            "a session given up on must not be installed by a late report"
+        );
+    }
+
+    #[test]
+    fn the_reaper_does_not_terminate_on_the_worker_thread() {
+        static STOPPING: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn terminate_slowly(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            STOPPING.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(400));
+            0
+        }
+        unsafe extern "C" fn release_ok(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            0
+        }
+
+        STOPPING.store(0, Ordering::SeqCst);
+
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (store, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease a scratch slot");
+
+        worker.sessions.insert(
+            TEST_SESSION.to_string(),
+            SessionEntry {
+                // SAFETY: neither function pointer dereferences the handle.
+                session: unsafe {
+                    WslcSessionGuard::from_raw(
+                        std::ptr::dangling_mut(),
+                        terminate_slowly,
+                        release_ok,
+                    )
+                },
+                store,
+                name: session_name(TEST_SESSION),
+                sizing: SessionSizing::default(),
+                pulls_in_flight: Arc::new(AtomicUsize::new(0)),
+                empty_since: None,
+            },
+        );
+
+        age_out(&mut worker, TEST_SESSION);
+        let expired = past_grace();
+
+        let started = Instant::now();
+        worker.reap_idle_sessions_at(expired, &unread_queue());
+        let on_worker = started.elapsed();
+
+        assert!(
+            on_worker < Duration::from_millis(200),
+            "the reaper returned in {on_worker:?}, so a 400ms terminate ran on the \
+             worker thread and stalled every other sandbox"
+        );
+
+        assert!(
+            wait_for_in_flight(
+                &worker.releases_in_flight,
+                Instant::now() + Duration::from_secs(5)
+            ),
+            "the release thread must still finish the terminate"
+        );
+        assert_eq!(
+            STOPPING.load(Ordering::SeqCst),
+            1,
+            "offloading must not skip stopping the VM"
+        );
+    }
+
+    #[test]
+    fn the_reaper_does_not_wait_on_a_session_that_is_still_pulling() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+        worker.sessions[TEST_SESSION]
+            .pulls_in_flight
+            .fetch_add(1, Ordering::SeqCst);
+
+        age_out(&mut worker, TEST_SESSION);
+        let expired = past_grace();
+        let started = Instant::now();
+        worker.reap_idle_sessions_at(expired, &unread_queue());
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the reaper must read the hold and move on; blocking here stalls \
+             every other session's requests behind this one"
+        );
+        assert!(worker.sessions.contains_key(TEST_SESSION));
+    }
+
+    #[test]
+    fn a_session_name_is_derived_from_its_id() {
+        assert_eq!(
+            session_name("wslcsess:0123456789abcdef"),
+            "mxc-wslc-daemon-0123456789abcdef",
+            "two sessions under one name is an untested SDK failure mode"
+        );
+        assert_ne!(
+            session_name("wslcsess:aaaa"),
+            session_name("wslcsess:bbbb"),
+            "distinct sessions must get distinct names"
+        );
+    }
+
+    /// Start a session's empty clock, so a reap at [`past_grace`] expires it.
+    fn age_out(worker: &mut Worker, session_ref: &str) {
+        worker
+            .sessions
+            .get_mut(session_ref)
+            .expect("session is registered")
+            .empty_since = Some(Instant::now());
+    }
+
+    /// A clock far enough ahead for any grace or boot deadline to have passed.
+    ///
+    /// Moving `now` forward rather than a timestamp back is what keeps these
+    /// tests working on a host that has been up for less than a day.
+    fn past_grace() -> Instant {
+        Instant::now() + Duration::from_secs(24 * 60 * 60)
+    }
+
+    #[test]
+    fn the_session_grace_defaults_to_the_daemon_idle_window() {
+        assert_eq!(
+            session_grace_from(None, None),
+            crate::IDLE_TIMEOUT,
+            "a session cannot outlive the daemon, so its grace must not claim a \
+             longer window than the daemon's own"
+        );
+    }
+
+    #[test]
+    fn shortening_the_daemon_idle_window_shortens_the_session_grace() {
+        assert_eq!(
+            session_grace_from(None, Some("20")),
+            Duration::from_secs(20),
+            "a test that drives teardown sets one knob, not two"
+        );
+    }
+
+    #[test]
+    fn the_session_grace_can_be_set_on_its_own() {
+        assert_eq!(
+            session_grace_from(Some("45"), Some("20")),
+            Duration::from_secs(45)
+        );
+    }
+
+    // ---- Teardown with several sessions (C5) ----
+
+    #[test]
+    fn shutdown_releases_a_session_nothing_is_using() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        register_test_session(&mut worker, TEST_SESSION);
+        let slot = worker.sessions[TEST_SESSION].store.path().to_path_buf();
+
+        worker.shutdown(&mut rx, Duration::from_secs(5));
+
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        assert_eq!(
+            relet.path(),
+            slot,
+            "a cleanly released session must give its store slot back"
+        );
+    }
+
+    /// Drive a release and read its refusal, which is sent before any thread
+    /// starts.
+    fn refuse_release(worker: &mut Worker, session_ref: &str) -> WorkerError {
+        let (reply, mut answer) = oneshot::channel();
+        worker.release_session(session_ref, reply, &unread_queue());
+        answer
+            .try_recv()
+            .expect("a refusal answers without a release thread")
+            .expect_err("this release must be refused")
+    }
+
+    /// Release a session and wait for its thread to settle the store slot.
+    fn release_and_settle(worker: &mut Worker, session_ref: &str) {
+        worker.release_session_entry(session_ref, None, &unread_queue());
+        assert!(
+            wait_for_in_flight(
+                &worker.releases_in_flight,
+                Instant::now() + Duration::from_secs(5)
+            ),
+            "the release thread must finish before the slot is inspected"
+        );
+    }
+
+    /// Register a session whose terminate reports a failure.
+    fn register_failing_session(worker: &mut Worker, session_ref: &str) -> std::path::PathBuf {
+        unsafe extern "C" fn terminate_fails(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            -2147467259
+        }
+        unsafe extern "C" fn release_ok(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            0
+        }
+
+        // Non-null only because the guard rejects null; never used as a pointer.
+        let sentinel = std::ptr::dangling_mut();
+        let (store, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease a scratch slot");
+        let slot = store.path().to_path_buf();
+
+        worker.sessions.insert(
+            session_ref.to_string(),
+            SessionEntry {
+                // SAFETY: neither function pointer dereferences the handle, so
+                // the guard owns a value it can release without touching
+                // memory.
+                session: unsafe {
+                    WslcSessionGuard::from_raw(sentinel, terminate_fails, release_ok)
+                },
+                store,
+                name: session_name(session_ref),
+                sizing: SessionSizing::default(),
+                pulls_in_flight: Arc::new(AtomicUsize::new(0)),
+                empty_since: None,
+            },
+        );
+
+        slot
+    }
+
+    /// A release that never started leaves the VM running, so returning its
+    /// slot would hand out a store that VM still has mounted.
+    #[test]
+    fn a_release_that_cannot_start_keeps_both_the_vm_and_the_slot() {
+        static TERMINATED: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn terminate_counts(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            TERMINATED.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+
+        TERMINATED.store(0, Ordering::SeqCst);
+
+        let (_root, worker) = worker_with_scratch_pool();
+        let (store, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease a scratch slot");
+        let held = store.path().to_path_buf();
+
+        {
+            // SAFETY: neither function pointer dereferences the handle.
+            let job = SessionRelease {
+                session: Some(unsafe {
+                    WslcSessionGuard::from_raw(
+                        std::ptr::dangling_mut(),
+                        terminate_counts,
+                        terminate_counts,
+                    )
+                }),
+                store: Some(store),
+                name: "mxc-never-started".to_string(),
+            };
+            drop(job);
+        }
+
+        assert_eq!(
+            TERMINATED.load(Ordering::SeqCst),
+            0,
+            "dropping an unstarted release must not terminate on whichever thread \
+             happens to be holding it"
+        );
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after the dropped release");
+        assert_ne!(
+            next.path(),
+            held,
+            "the VM was never stopped, so its slot cannot be reissued"
+        );
+    }
+
+    /// Mass expiry would otherwise ask the host for one native thread per
+    /// session at once.
+    #[test]
+    fn the_reaper_bounds_how_many_sessions_it_releases_at_once() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        for n in 0..(MAX_CONCURRENT_RELEASES + 2) {
+            register_test_session(&mut worker, &format!("wslcsess:idle-{n}"));
+        }
+        for n in 0..(MAX_CONCURRENT_RELEASES + 2) {
+            age_out(&mut worker, &format!("wslcsess:idle-{n}"));
+        }
+
+        // Standing in for releases already running, so the cap is reached with
+        // no thread actually in flight.
+        worker
+            .releases_in_flight
+            .store(MAX_CONCURRENT_RELEASES, Ordering::SeqCst);
+
+        worker.reap_idle_sessions_at(past_grace(), &unread_queue());
+
+        assert_eq!(
+            worker.sessions.len(),
+            MAX_CONCURRENT_RELEASES + 2,
+            "a poll at the release cap must leave every session for the next one"
+        );
+
+        worker.releases_in_flight.store(0, Ordering::SeqCst);
+    }
+
+    /// The aggregate the watchdog poll uses must agree with the per-session
+    /// scan it replaced.
+    #[test]
+    fn the_aggregate_hold_scan_matches_the_per_session_one() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_test_session(&mut worker, TEST_SESSION);
+        register_test_session(&mut worker, "wslcsess:other");
+
+        worker
+            .containers
+            .insert("wslc:a".to_string(), test_entry(false));
+        worker
+            .containers
+            .insert("wslc:b".to_string(), test_entry(false));
+        let mut other = test_entry(false);
+        other.session_ref = "wslcsess:other".to_string();
+        worker.containers.insert("wslc:c".to_string(), other);
+        worker.sessions[TEST_SESSION]
+            .pulls_in_flight
+            .fetch_add(1, Ordering::SeqCst);
+
+        let aggregate = worker.session_holds();
+
+        for session_ref in [TEST_SESSION, "wslcsess:other"] {
+            assert_eq!(
+                aggregate.get(session_ref).copied(),
+                Some(worker.session_hold(session_ref)),
+                "the aggregate disagrees with the per-session scan for {session_ref}"
+            );
+        }
+    }
+
+    /// A poll samples occupancy, so work that both starts and finishes between
+    /// two polls would leave the grace running from before it arrived.
+    #[test]
+    fn admitting_work_clears_a_grace_a_poll_already_started() {
+        let root = tempfile::tempdir().expect("scratch pool root");
+        let mut worker = worker_that_can_run();
+        worker.store_slots = StoreSlotPool::with_root(root.path().to_path_buf());
+        register_test_session(&mut worker, TEST_SESSION);
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+
+        // A grace that a poll started before this session was used again.
+        worker
+            .sessions
+            .get_mut(TEST_SESSION)
+            .expect("session is registered")
+            .empty_since = Some(Instant::now());
+
+        let exec = exec_work("wslc:ready", "grace-reset");
+        worker.dispatch(exec.work, &worker_tx);
+
+        assert!(
+            worker.sessions[TEST_SESSION].empty_since.is_none(),
+            "admitting work must clear the grace, or a session used between two \
+             polls is reaped on the strength of a stamp that predates the use"
+        );
+    }
+
+    /// The exec drain runs before the boot drain, so a boot landing during it
+    /// would otherwise be dropped into an unchecked terminate whose failure
+    /// nothing observes.
+    #[test]
+    fn the_exec_drain_releases_a_boot_that_lands_during_it() {
+        unsafe extern "C" fn terminate_fails(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            -2147467259
+        }
+        unsafe extern "C" fn release_ok(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            0
+        }
+
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let held = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+
+        // An exec still in flight is what makes the drain above run at all.
+        let (exec, _done_rx) = in_flight_exec("busy-exec");
+        worker.exec_in_flight.insert("wslc:busy".to_string(), exec);
+
+        // SAFETY: neither function pointer dereferences the handle.
+        let booted = BootedSession(unsafe {
+            WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_fails, release_ok)
+        });
+        tx.send(WorkerCommand::SessionBooted {
+            session_ref: TEST_SESSION.to_string(),
+            outcome: Ok(booted),
+        })
+        .expect("queue the boot report");
+
+        worker.shutdown(&mut rx, Duration::from_secs(5));
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        assert_ne!(
+            next.path(),
+            held,
+            "a boot landing during the exec drain must go through the checked \
+             release: dropping it hides the failed terminate, and the slot is \
+             handed out while that VM still has the store mounted"
+        );
+    }
+
+    /// A boot report can still be in the channel when every counter reads zero,
+    /// so an unwind must not unload the SDK underneath it.
+    #[test]
+    fn an_unwind_with_a_pending_boot_keeps_the_sdk() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let held = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+        let pool = std::mem::replace(&mut worker.store_slots, StoreSlotPool::new());
+
+        worker.abandon_if_borrowed(0, 0, 0, false);
+
+        let (next, ()) = pool
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after the unwind");
+        assert_ne!(
+            next.path(),
+            held,
+            "a boot that may still open this store must keep its slot"
+        );
+    }
+
+    /// Forgetting the whole pending map would stop a waiting client ever
+    /// learning the worker is gone.
+    #[test]
+    fn an_unwind_releases_the_clients_waiting_on_a_boot() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_booting_session(&mut worker, TEST_SESSION);
+
+        let (reply, mut answer) = oneshot::channel();
+        worker
+            .pending_sessions
+            .get_mut(TEST_SESSION)
+            .expect("the booting session")
+            .reply = Some(reply);
+
+        worker.abandon_if_borrowed(1, 0, 0, false);
+
+        assert!(
+            matches!(answer.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
+            "the reply sender must drop so a waiting client sees the worker is \
+             gone; a merely empty channel leaves it awaiting a response that \
+             never comes"
+        );
+    }
+
+    /// A release holds the warm slot its session was using, so leasing during
+    /// that window hands the replacement a cold one and an isolated provision
+    /// is refused for a missing image.
+    #[test]
+    fn a_boot_waits_rather_than_taking_a_slot_a_release_is_holding() {
+        let (_root, mut worker) = worker_whose_leases_fail();
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        worker
+            .release_began
+            .insert("wslcsess:releasing".to_string(), Instant::now());
+
+        let session_ref = worker
+            .begin_session(SessionSizing::default(), &worker_tx)
+            .expect("a boot waiting for a release must neither lease a slot nor load the SDK");
+
+        assert!(
+            worker.pending_sessions[&session_ref].store.is_none(),
+            "a boot started while a release holds the warm slot must wait for it \
+             rather than lease the next, cold one"
+        );
+        assert!(
+            worker.sdk.is_none(),
+            "a boot waiting for a release must not load the SDK"
+        );
+
+        worker.finish_release("wslcsess:releasing", true, &worker_tx);
+
+        assert!(
+            !worker.pending_sessions.contains_key(&session_ref),
+            "once the release is done the boot must stop waiting"
+        );
+    }
+
+    #[test]
+    fn a_finished_release_starts_a_waiting_boot_while_another_still_runs() {
+        let (_root, mut worker) = worker_whose_leases_fail();
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        for releasing in ["wslcsess:fast", "wslcsess:slow"] {
+            worker
+                .release_began
+                .insert(releasing.to_string(), Instant::now());
+        }
+        let waiting = worker
+            .begin_session(SessionSizing::default(), &worker_tx)
+            .expect("the boot is accepted");
+
+        worker.finish_release("wslcsess:fast", true, &worker_tx);
+
+        assert!(
+            !worker.pending_sessions.contains_key(&waiting),
+            "the slot the finished release returned is free and warm, so the boot \
+             must not keep waiting for the release still running"
+        );
+    }
+
+    #[test]
+    fn a_boot_stops_waiting_for_a_release_that_is_stuck() {
+        let (_root, mut worker) = worker_whose_leases_fail();
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        worker
+            .release_began
+            .insert("wslcsess:stuck".to_string(), Instant::now());
+        let waiting = worker
+            .begin_session(SessionSizing::default(), &worker_tx)
+            .expect("the boot is accepted");
+
+        worker.start_deferred_boots_at(
+            Instant::now() + RELEASE_WAIT - Duration::from_secs(1),
+            &worker_tx,
+        );
+        assert!(
+            worker.pending_sessions[&waiting].store.is_none(),
+            "a release still inside the wait may yet return the warm slot"
+        );
+
+        worker.start_deferred_boots_at(Instant::now() + RELEASE_WAIT, &worker_tx);
+        assert!(
+            !worker.pending_sessions.contains_key(&waiting),
+            "a release past the wait is stuck, and a boot waiting on it would never start"
+        );
+    }
+
+    #[test]
+    fn a_waiting_boot_past_its_deadline_is_removed() {
+        let (_root, mut worker) = worker_whose_leases_fail();
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        worker
+            .release_began
+            .insert("wslcsess:stuck".to_string(), Instant::now());
+        let waiting = worker
+            .begin_session(SessionSizing::default(), &worker_tx)
+            .expect("the boot is accepted");
+        let (reply, mut answer) = oneshot::channel();
+        worker.attach_session_reply(&waiting, reply);
+
+        worker.reap_stuck_boots_at(past_grace());
+
+        assert!(
+            answer
+                .try_recv()
+                .expect("the waiting client must be answered")
+                .is_err(),
+            "a boot past its deadline must fail its client"
+        );
+        assert!(
+            !worker.pending_sessions.contains_key(&waiting),
+            "a boot that never started must not stay in the map until shutdown"
+        );
+    }
+
+    #[test]
+    fn a_release_reports_its_returned_slot_back_to_the_worker() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (worker_tx, mut worker_rx) = mpsc::unbounded_channel();
+        register_test_session(&mut worker, TEST_SESSION);
+
+        worker.release_session_entry(TEST_SESSION, None, &worker_tx);
+        assert!(
+            worker.release_began.contains_key(TEST_SESSION),
+            "a boot must be able to tell this release is still running"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let report = loop {
+            match worker_rx.try_recv() {
+                Ok(cmd) => break cmd,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("the release thread never reported back: {e}"),
+            }
+        };
+        let WorkerCommand::SessionReleased {
+            session_ref,
+            slot_returned,
+        } = report
+        else {
+            panic!("expected a release report");
+        };
+        assert_eq!(session_ref, TEST_SESSION);
+        assert!(slot_returned, "a VM that stopped gives its slot back");
+
+        worker.finish_release(&session_ref, slot_returned, &worker_tx);
+        assert!(!worker.release_began.contains_key(TEST_SESSION));
+        assert_eq!(worker.returned_slots_unleased, 1);
+    }
+
+    /// Nothing revisits an abandoned boot, so parking behind one would wait
+    /// for a reply that never comes.
+    #[test]
+    fn a_named_provision_after_its_boot_was_given_up_on_is_refused() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+
+        assert!(
+            matches!(
+                worker.ensure_session(Some(TEST_SESSION), &worker_tx),
+                Ok(SessionLookup::Booting(_))
+            ),
+            "a boot still running is worth waiting for"
+        );
+
+        worker.reap_stuck_boots_at(past_grace());
+
+        let refused = worker
+            .ensure_session(Some(TEST_SESSION), &worker_tx)
+            .expect_err("a boot nothing will revisit must not accept new waiters");
+        assert_eq!(refused.kind(), ErrKind::NotProvisioned);
+    }
+
+    /// The implicit session must boot afresh rather than join an abandoned one.
+    #[test]
+    fn an_implicit_provision_after_a_given_up_boot_does_not_join_it() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_booting_session(&mut worker, TEST_SESSION);
+        worker.default_session = Some(TEST_SESSION.to_string());
+
+        worker.reap_stuck_boots_at(past_grace());
+
+        assert!(
+            !worker.is_booting(TEST_SESSION),
+            "an abandoned boot must not be routable"
+        );
+        assert!(
+            worker.default_session.is_none(),
+            "the implicit id must be retired so a later provision boots a fresh one"
+        );
+    }
+
+    /// A VM that did not stop may still have the store's VHDX open, so the slot
+    /// cannot go back even though the session entry is gone.
+    #[test]
+    fn a_failed_terminate_keeps_its_slot_out_of_the_pool() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let held = register_failing_session(&mut worker, TEST_SESSION);
+
+        release_and_settle(&mut worker, TEST_SESSION);
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after the failed release");
+        assert_ne!(
+            next.path(),
+            held,
+            "reissuing the slot of a VM that did not stop is the sharing violation \
+             the lease exists to prevent"
+        );
+    }
+
+    /// The same rule on the teardown path, which releases sessions through its
+    /// own loop rather than `release_session_entry`.
+    #[test]
+    fn shutdown_keeps_the_slot_of_a_session_that_would_not_terminate() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        let held = register_failing_session(&mut worker, TEST_SESSION);
+
+        worker.shutdown(&mut rx, Duration::from_secs(5));
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        assert_ne!(
+            next.path(),
+            held,
+            "teardown must not hand back a slot whose VM may still hold the VHDX"
+        );
+    }
+
+    /// A drained boot counter can still leave a live handle in the channel.
+    #[test]
+    fn shutdown_releases_a_boot_that_landed_while_it_was_draining() {
+        static TERMINATED: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn terminate_counts(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            TERMINATED.fetch_add(1, Ordering::SeqCst);
+            0
+        }
+        unsafe extern "C" fn release_ok(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            0
+        }
+
+        TERMINATED.store(0, Ordering::SeqCst);
+
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let slot = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+
+        // Non-null only because the guard rejects null; never used as a pointer.
+        let sentinel = std::ptr::dangling_mut();
+
+        // SAFETY: neither function pointer dereferences the handle.
+        let booted = BootedSession(unsafe {
+            WslcSessionGuard::from_raw(sentinel, terminate_counts, release_ok)
+        });
+        tx.send(WorkerCommand::SessionBooted {
+            session_ref: TEST_SESSION.to_string(),
+            outcome: Ok(booted),
+        })
+        .expect("queue the boot report");
+
+        worker.shutdown(&mut rx, Duration::from_secs(5));
+
+        assert_eq!(
+            TERMINATED.load(Ordering::SeqCst),
+            1,
+            "a session that booted during teardown must be released while the SDK \
+             is still loaded, not left for the channel to drop"
+        );
+
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        assert_eq!(
+            relet.path(),
+            slot,
+            "a session released cleanly during teardown gives its slot back"
+        );
+    }
+
+    #[test]
+    fn shutdown_does_not_wait_past_its_budget_for_a_terminate_that_hangs() {
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+
+        // Gives up after 10s on its own, so a regression fails the test
+        // instead of hanging it.
+        unsafe extern "C" fn terminate_hangs(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            for _ in 0..1000 {
+                if RELEASED.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            0
+        }
+        unsafe extern "C" fn release_ok(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            0
+        }
+
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        let (store, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease a scratch slot");
+        let held = store.path().to_path_buf();
+        worker.sessions.insert(
+            TEST_SESSION.to_string(),
+            SessionEntry {
+                // SAFETY: neither function pointer dereferences the handle.
+                session: unsafe {
+                    WslcSessionGuard::from_raw(
+                        std::ptr::dangling_mut(),
+                        terminate_hangs,
+                        release_ok,
+                    )
+                },
+                store,
+                name: session_name(TEST_SESSION),
+                sizing: SessionSizing::default(),
+                pulls_in_flight: Arc::new(AtomicUsize::new(0)),
+                empty_since: None,
+            },
+        );
+
+        let budget = Duration::from_millis(200);
+        let started = Instant::now();
+        worker.shutdown(&mut rx, budget);
+        let spent = started.elapsed();
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        RELEASED.store(true, Ordering::SeqCst);
+
+        assert!(
+            spent < Duration::from_secs(5),
+            "teardown took {spent:?} against a {budget:?} budget, so it waited on \
+             the terminate"
+        );
+        assert_ne!(
+            next.path(),
+            held,
+            "a VM still terminating may have the store mounted, so its slot must \
+             stay held"
+        );
+    }
+
+    #[test]
+    fn shutdown_does_not_wait_on_a_late_boot_whose_terminate_hangs() {
+        static RELEASED: AtomicBool = AtomicBool::new(false);
+
+        // Gives up after 10s on its own, so a regression fails the test
+        // instead of hanging it.
+        unsafe extern "C" fn terminate_hangs(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            for _ in 0..1000 {
+                if RELEASED.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            0
+        }
+        unsafe extern "C" fn release_ok(
+            _: mxc_sdk::wslc_common::wslc_bindings::WslcSession,
+        ) -> i32 {
+            0
+        }
+
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let held = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+
+        // SAFETY: neither function pointer dereferences the handle.
+        let booted = BootedSession(unsafe {
+            WslcSessionGuard::from_raw(std::ptr::dangling_mut(), terminate_hangs, release_ok)
+        });
+        tx.send(WorkerCommand::SessionBooted {
+            session_ref: TEST_SESSION.to_string(),
+            outcome: Ok(booted),
+        })
+        .expect("queue the boot report");
+
+        let started = Instant::now();
+        worker.shutdown(&mut rx, Duration::from_millis(200));
+        let spent = started.elapsed();
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        RELEASED.store(true, Ordering::SeqCst);
+
+        assert!(
+            spent < Duration::from_secs(5),
+            "teardown took {spent:?}, so it waited on the late boot's terminate"
+        );
+        assert_ne!(
+            next.path(),
+            held,
+            "a VM still terminating may have the store mounted, so its slot must \
+             stay held"
+        );
+    }
+
+    #[test]
+    fn a_failed_boot_whose_vm_did_not_stop_keeps_its_slot() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (worker_tx, _worker_rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let held = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+
+        worker.finish_session(
+            TEST_SESSION,
+            Err(BootFailure {
+                error: WorkerError::Backend(anyhow::anyhow!("store probe failed")),
+                store_may_be_held: true,
+            }),
+            &worker_tx,
+        );
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after the failed boot");
+        assert_ne!(
+            next.path(),
+            held,
+            "reissuing this slot hands out a store a VM may still have mounted"
+        );
+    }
+
+    #[test]
+    fn shutdown_keeps_the_slot_of_a_failed_boot_whose_vm_did_not_stop() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let held = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+        tx.send(WorkerCommand::SessionBooted {
+            session_ref: TEST_SESSION.to_string(),
+            outcome: Err(BootFailure {
+                error: WorkerError::Backend(anyhow::anyhow!("store probe failed")),
+                store_may_be_held: true,
+            }),
+        })
+        .expect("queue the boot report");
+
+        worker.shutdown(&mut rx, Duration::from_secs(5));
+
+        let (next, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        assert_ne!(
+            next.path(),
+            held,
+            "reissuing this slot hands out a store a VM may still have mounted"
+        );
+    }
+
+    #[test]
+    fn shutdown_abandons_a_pulling_session_and_keeps_its_slot_leased() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        register_test_session(&mut worker, TEST_SESSION);
+        let held = worker.sessions[TEST_SESSION].store.path().to_path_buf();
+        worker.sessions[TEST_SESSION]
+            .pulls_in_flight
+            .fetch_add(1, Ordering::SeqCst);
+
+        worker.shutdown(&mut rx, Duration::from_millis(100));
+
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("the pool still has a free slot");
+        assert_ne!(
+            relet.path(),
+            held,
+            "reissuing an abandoned session's slot hands out a store nothing \
+             can open"
+        );
+    }
+
+    #[test]
+    fn shutdown_releases_the_clean_sessions_alongside_a_dirty_one() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        register_test_session(&mut worker, "wslcsess:dirty");
+        register_test_session(&mut worker, "wslcsess:clean");
+        let clean = worker.sessions["wslcsess:clean"].store.path().to_path_buf();
+        worker.sessions["wslcsess:dirty"]
+            .pulls_in_flight
+            .fetch_add(1, Ordering::SeqCst);
+
+        worker.shutdown(&mut rx, Duration::from_millis(500));
+
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("the clean session's slot came back");
+        assert_eq!(
+            relet.path(),
+            clean,
+            "only the session a pull is still using may be abandoned"
+        );
+    }
+
+    #[test]
+    fn a_shutdown_drain_spends_one_budget_across_every_session() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        let budget = Duration::from_millis(300);
+        for session_ref in ["wslcsess:a", "wslcsess:b", "wslcsess:c", "wslcsess:d"] {
+            register_test_session(&mut worker, session_ref);
+            worker.sessions[session_ref]
+                .pulls_in_flight
+                .fetch_add(1, Ordering::SeqCst);
+        }
+
+        let started = Instant::now();
+        worker.shutdown(&mut rx, budget);
+        let spent = started.elapsed();
+
+        assert!(
+            spent < budget * 2,
+            "four stuck sessions took {spent:?} against a {budget:?} budget; the \
+             deadline must be shared, not spent once per session"
+        );
+    }
+
+    /// The worker has no SDK here, so the pending entry stands in for a boot
+    /// that is still running.
+    #[test]
+    fn a_booting_session_does_not_stall_the_worker() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_booting_session(&mut worker, TEST_SESSION);
+        worker
+            .containers
+            .insert("wslc:live".to_string(), started_entry());
+
+        // A command for an unrelated sandbox, dispatched while the boot stands.
+        let (work, mut reply) = stop_work("wslc:live");
+        worker.dispatch(work, &tx);
+
+        assert!(
+            reply.try_recv().is_ok(),
+            "a sandbox in another session must be served while one session boots"
+        );
+    }
+
+    /// Two implicit sessions would mean two VMs where the caller asked for
+    /// none.
+    #[test]
+    fn a_provision_during_the_implicit_boot_parks_rather_than_booting_a_second() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_booting_session(&mut worker, TEST_SESSION);
+        worker.default_session = Some(TEST_SESSION.to_string());
+
+        let (reply, mut rx) = oneshot::channel();
+        worker.begin_provision(test_provision_config(), reply, &tx);
+
+        assert_eq!(
+            worker.pending_sessions.len(),
+            1,
+            "a provision mid-boot must not boot a second implicit session"
+        );
+        assert_eq!(
+            worker.pending_sessions[TEST_SESSION].parked.len(),
+            1,
+            "it must park behind the boot already under way"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a parked provision is answered when its session is up, not before"
+        );
+    }
+
+    #[test]
+    fn a_failed_boot_answers_everything_parked_behind_it() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (_root, mut worker) = worker_with_scratch_pool();
+        register_booting_session(&mut worker, TEST_SESSION);
+        worker.default_session = Some(TEST_SESSION.to_string());
+        let slot = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+
+        let (session_reply, mut session_rx) = oneshot::channel();
+        worker.attach_session_reply(TEST_SESSION, session_reply);
+        let (reply, mut rx) = oneshot::channel();
+        worker.begin_provision(test_provision_config(), reply, &tx);
+
+        worker.finish_session(
+            TEST_SESSION,
+            Err(WorkerError::Backend(anyhow::anyhow!("ERROR_NO_SYSTEM_RESOURCES")).into()),
+            &tx,
+        );
+
+        assert!(
+            session_rx.try_recv().expect("the session asker").is_err(),
+            "the client that asked for the session must be told it failed"
+        );
+        assert!(
+            rx.try_recv().expect("the parked provision").is_err(),
+            "a provision parked behind a boot that failed must be answered, not \
+             left waiting on a session that will never exist"
+        );
+        assert!(
+            worker.default_session.is_none(),
+            "a failed implicit boot must retire its id, so the next provision \
+             starts a fresh one instead of parking behind a corpse"
+        );
+
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after the failed boot");
+        assert_eq!(
+            relet.path(),
+            slot,
+            "a boot that never created a VM must give its slot straight back"
+        );
+    }
+
+    /// A boot still running is about to create a VM on the store its lease
+    /// points at.
+    #[test]
+    fn a_shutdown_that_gives_up_on_an_exec_keeps_a_booting_sessions_slot() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let held = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+        worker
+            .containers
+            .insert("wslc:busy".to_string(), test_entry(false));
+        let (in_flight, _done) = in_flight_exec("running");
+        worker
+            .exec_in_flight
+            .insert("wslc:busy".to_string(), in_flight);
+
+        // The run never reports, so the drain can only expire.
+        let _counted = ExecCount::enter(&worker.execs_in_flight);
+        worker.shutdown(&mut rx, Duration::from_millis(100));
+
+        // The leases share the pool's bookkeeping, so moving it out keeps it
+        // live while the worker's maps drop the way the worker thread drops
+        // them.
+        let pool = std::mem::replace(&mut worker.store_slots, StoreSlotPool::new());
+        drop(worker);
+
+        let (relet, ()) = pool
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("the pool still has a free slot");
+        assert_ne!(
+            relet.path(),
+            held,
+            "reissuing a booting session's slot hands the next lease a store a \
+             VM is about to mount"
+        );
+    }
+
+    #[test]
+    fn a_shutdown_that_gives_up_on_a_boot_keeps_its_slot() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let held = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+
+        let _counted = SessionCount::enter(&worker.sessions_in_flight);
+        worker.shutdown(&mut rx, Duration::from_millis(100));
+
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("the pool still has a free slot");
+        assert_ne!(relet.path(), held);
+    }
+
+    #[test]
+    fn a_shutdown_with_no_boot_running_returns_a_pending_slot() {
+        let (_root, mut worker) = worker_with_scratch_pool();
+        let (_tx, mut rx) = mpsc::unbounded_channel();
+        register_booting_session(&mut worker, TEST_SESSION);
+        let slot = worker.pending_sessions[TEST_SESSION]
+            .store
+            .as_ref()
+            .expect("the booting session holds a slot")
+            .path()
+            .to_path_buf();
+
+        worker.shutdown(&mut rx, Duration::from_millis(100));
+
+        let (relet, ()) = worker
+            .store_slots
+            .lease_with(|_| Ok::<(), ()>(()))
+            .expect("lease after teardown");
+        assert_eq!(relet.path(), slot);
     }
 
     #[test]
@@ -2174,6 +5296,7 @@ mod tests {
             // SAFETY: `release` never dereferences the handle, so the guard owns
             // a value it can release without touching memory.
             container: unsafe { WslcContainerGuard::from_raw(sentinel, release) },
+            session_ref: TEST_SESSION.to_string(),
             exec_slot: None,
         }
     }
@@ -2195,6 +5318,7 @@ mod tests {
             InFlightExec {
                 container: std::ptr::dangling_mut(),
                 done,
+                session_ref: TEST_SESSION.to_string(),
                 _registration: registration,
                 slot: None,
                 parked: Vec::new(),
@@ -2771,7 +5895,7 @@ mod tests {
         })
         .unwrap();
 
-        worker.shutdown(&mut rx, EXEC_DRAIN_TIMEOUT);
+        worker.shutdown(&mut rx, DRAIN_TIMEOUT);
 
         assert_eq!(
             done.try_recv()
@@ -2803,7 +5927,7 @@ mod tests {
         })
         .unwrap();
 
-        worker.shutdown(&mut rx, EXEC_DRAIN_TIMEOUT);
+        worker.shutdown(&mut rx, DRAIN_TIMEOUT);
 
         assert_eq!(
             done.try_recv()
@@ -2829,7 +5953,7 @@ mod tests {
         let (work, mut reply) = stop_work("wslc:busy");
         worker.dispatch(work, &tx);
 
-        worker.shutdown(&mut rx, EXEC_DRAIN_TIMEOUT);
+        worker.shutdown(&mut rx, DRAIN_TIMEOUT);
 
         assert!(done
             .try_recv()
@@ -2886,13 +6010,15 @@ mod tests {
                     volumes: Vec::new(),
                     network: Default::default(),
                     port_mappings: Vec::new(),
+                    session_ref: None,
                 },
                 reply,
+                session_ref: TEST_SESSION.to_string(),
                 _retire_deadline: std::sync::mpsc::channel().0,
             },
         );
 
-        worker.abandon_if_borrowed(1, false);
+        worker.abandon_if_borrowed(1, 0, 0, false);
 
         assert!(
             matches!(done.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
@@ -2930,7 +6056,7 @@ mod tests {
             .containers
             .insert("wslc:busy".to_string(), flagged_entry(release));
 
-        worker.abandon_if_borrowed(1, false);
+        worker.abandon_if_borrowed(1, 0, 0, false);
 
         assert!(
             !RELEASED.load(Ordering::SeqCst),
@@ -2952,7 +6078,7 @@ mod tests {
             .containers
             .insert("wslc:pulling".to_string(), flagged_entry(release));
 
-        worker.abandon_if_borrowed(0, true);
+        worker.abandon_if_borrowed(0, 0, 0, true);
 
         assert!(
             !RELEASED.load(Ordering::SeqCst),
@@ -2974,7 +6100,7 @@ mod tests {
             .containers
             .insert("wslc:idle".to_string(), flagged_entry(release));
 
-        worker.abandon_if_borrowed(0, false);
+        worker.abandon_if_borrowed(0, 0, 0, false);
 
         assert!(
             RELEASED.load(Ordering::SeqCst),
@@ -3004,16 +6130,557 @@ mod tests {
     fn a_counted_exec_keeps_the_drain_from_reporting_clear() {
         let in_flight = AtomicUsize::new(1);
 
-        assert!(!wait_for_execs_in_flight(
+        assert!(!wait_for_in_flight(
             &in_flight,
-            Duration::from_millis(100)
+            Instant::now() + Duration::from_millis(100)
         ));
 
         in_flight.store(0, Ordering::SeqCst);
-        assert!(wait_for_execs_in_flight(
+        assert!(wait_for_in_flight(
             &in_flight,
-            Duration::from_millis(100)
+            Instant::now() + Duration::from_millis(100)
         ));
+    }
+
+    // ---- Multi-session behaviour on a live WSL2 host ----
+    //
+    // Each of these boots real utility VMs, so they are `#[ignore]`d and run
+    // explicitly, one at a time:
+    //
+    //   cargo test -p mxc-sdk --features wslc --bin wxc-wslc-daemon \
+    //       -- --ignored --nocapture --test-threads=1
+    //
+    // They lease from the real per-user slot pool, so warm it first with
+    // `scripts\setup-wslc.ps1 -DaemonSlots 2`.
+
+    /// The SDK has to accept the name derived from a session id. Two sessions
+    /// under one name is an untested failure mode, so the names must be
+    /// distinct *and* usable.
+    /// The behaviour the whole change exists for: a container lands in the
+    /// session it named, and releasing one session leaves the other working.
+    ///
+    /// A daemon that ignored `session_ref` and routed everything through the
+    /// implicit session would pass the single-session tests above.
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with alpine:latest cached in the daemon store slots"]
+    async fn each_session_runs_its_own_sandbox_and_outlives_the_others_release() {
+        async fn run_echo(handle: &SessionHandle, sandbox_id: &str, text: &str) -> String {
+            let mut exec = handle
+                .exec(
+                    ExecConfig {
+                        exec_id: format!("per-session-{text}"),
+                        run_token: format!("per-session-{text}-run"),
+                        sandbox_id: sandbox_id.to_string(),
+                        script_code: format!("echo {text}"),
+                        working_directory: String::new(),
+                        env: Vec::new(),
+                        env_scope: EnvScope::Merge,
+                        timeout_ms: 30_000,
+                    },
+                    None,
+                )
+                .await
+                .expect("exec must start");
+
+            let mut stdout = Vec::new();
+            while let Some((kind, data)) = exec.output.recv().await {
+                if kind == OutStream::Stdout {
+                    stdout.extend_from_slice(&data);
+                }
+            }
+            let _ = exec.done.await;
+            String::from_utf8_lossy(&stdout).trim().to_string()
+        }
+
+        async fn sandbox_in(handle: &SessionHandle, session_ref: &str) -> String {
+            let sandbox_id = handle
+                .provision(ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                    port_mappings: Vec::new(),
+                    session_ref: Some(session_ref.to_string()),
+                })
+                .await
+                .expect("provision into the named session");
+            handle
+                .start(StartConfig {
+                    sandbox_id: sandbox_id.clone(),
+                })
+                .await
+                .expect("start the sandbox");
+            sandbox_id
+        }
+
+        let handle = spawn().unwrap();
+
+        let first = handle
+            .provision_session(ProvisionSessionConfig::default())
+            .await
+            .expect("first session");
+        let second = handle
+            .provision_session(ProvisionSessionConfig::default())
+            .await
+            .expect("second session");
+        assert_ne!(first, second);
+
+        let in_first = sandbox_in(&handle, &first).await;
+        let in_second = sandbox_in(&handle, &second).await;
+
+        assert_eq!(run_echo(&handle, &in_first, "one").await, "one");
+        assert_eq!(
+            run_echo(&handle, &in_second, "two").await,
+            "two",
+            "a second session's sandbox must run in its own VM"
+        );
+
+        // Each sandbox is held by the session it named, so neither session can
+        // be released while its own sandbox is alive.
+        for session_ref in [&first, &second] {
+            let refusal = handle
+                .deprovision_session(DeprovisionSessionConfig {
+                    session_ref: session_ref.clone(),
+                })
+                .await
+                .expect_err("a session holding a sandbox must not be released");
+            assert_eq!(refusal.kind(), ErrKind::Rejected);
+        }
+
+        handle
+            .deprovision(DeprovisionConfig {
+                sandbox_id: in_first.clone(),
+            })
+            .await
+            .expect("deprovision the first sandbox");
+        handle
+            .deprovision_session(DeprovisionSessionConfig {
+                session_ref: first.clone(),
+            })
+            .await
+            .expect("the first session is empty now");
+
+        assert_eq!(
+            run_echo(&handle, &in_second, "still-here").await,
+            "still-here",
+            "releasing one session must not disturb another session's running sandbox"
+        );
+
+        handle
+            .deprovision(DeprovisionConfig {
+                sandbox_id: in_second,
+            })
+            .await
+            .expect("deprovision the second sandbox");
+        handle
+            .deprovision_session(DeprovisionSessionConfig {
+                session_ref: second,
+            })
+            .await
+            .expect("the second session is empty now");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with the WSLc SDK installed"]
+    async fn two_sessions_coexist_in_one_daemon() {
+        let handle = spawn().unwrap();
+
+        let first = handle
+            .provision_session(ProvisionSessionConfig::default())
+            .await
+            .expect("first session");
+        let second = handle
+            .provision_session(ProvisionSessionConfig::default())
+            .await
+            .expect("second session must not collide with the first");
+
+        assert_ne!(first, second);
+        assert!(
+            first.starts_with("wslcsess:"),
+            "a session id must be recognisable as one: {first}"
+        );
+
+        handle
+            .deprovision_session(DeprovisionSessionConfig {
+                session_ref: first.clone(),
+            })
+            .await
+            .expect("release the first session");
+        handle
+            .deprovision_session(DeprovisionSessionConfig {
+                session_ref: second,
+            })
+            .await
+            .expect("releasing one session must leave the other usable");
+
+        handle.shutdown().await.unwrap();
+    }
+
+    /// Host physical memory still available, in MB.
+    ///
+    /// Sampled around a session to answer whether `memoryMb` reserves memory or
+    /// merely caps it — the two have completely different consequences for
+    /// whether an oversized request is legitimate.
+    #[cfg(windows)]
+    fn available_memory_mb() -> u64 {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+        let mut status = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+
+        // SAFETY: `status` is a valid `MEMORYSTATUSEX` with `dwLength` set.
+        unsafe { GlobalMemoryStatusEx(&mut status) }.expect("read memory status");
+        status.ullAvailPhys / (1024 * 1024)
+    }
+
+    /// Measurement, not an assertion: are `memoryMb` and `cpuCount` caps or
+    /// reservations, and what does each do when asked for more than the host
+    /// has?
+    ///
+    /// The two parameters fail differently, so asking for both at once cannot
+    /// say which one was refused.
+    #[tokio::test]
+    #[ignore = "measurement: boots sessions sized past host capacity"]
+    async fn measure_whether_session_sizing_reserves_or_caps() {
+        let host = host_specs();
+        println!(
+            "host: {} MB installed, {} logical cpus, {} MB available\n",
+            host.total_memory_mb,
+            host.logical_cpus,
+            available_memory_mb()
+        );
+
+        let cases: Vec<(&str, Option<u32>, Option<u64>)> = vec![
+            ("baseline (host defaults)", None, None),
+            ("memory = 1x installed", None, Some(host.total_memory_mb)),
+            (
+                "memory = 2x installed",
+                None,
+                Some(host.total_memory_mb * 2),
+            ),
+            ("cpus = 1x logical", Some(host.logical_cpus), None),
+            ("cpus = 2x logical", Some(host.logical_cpus * 2), None),
+            ("cpus = 4x logical", Some(host.logical_cpus * 4), None),
+        ];
+
+        let handle = spawn().unwrap();
+        for (label, cpu_count, memory_mb) in cases {
+            let before = available_memory_mb();
+            let started = Instant::now();
+            let outcome = handle
+                .provision_session(ProvisionSessionConfig {
+                    cpu_count,
+                    memory_mb,
+                    gpu: false,
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            match outcome {
+                Err(e) => println!("{label}: REFUSED in {elapsed:.1?} -- {e}\n"),
+                Ok(session_ref) => {
+                    let delta = before as i64 - available_memory_mb() as i64;
+                    let guest = guest_resources(&handle, &session_ref).await;
+                    println!(
+                        "{label}: BOOTED in {elapsed:.1?}, host delta {delta} MB, \
+                         guest sees {guest}\n"
+                    );
+                    handle
+                        .deprovision_session(DeprovisionSessionConfig { session_ref })
+                        .await
+                        .expect("release");
+                }
+            }
+        }
+        handle.shutdown().await.unwrap();
+    }
+
+    /// Boot a throwaway sandbox in `session_ref` and report what the guest
+    /// believes its cpu count and memory are.
+    async fn guest_resources(handle: &SessionHandle, session_ref: &str) -> String {
+        let sandbox_id = match handle
+            .provision(ProvisionConfig {
+                image: "alpine:latest".to_string(),
+                image_tar_path: None,
+                volumes: Vec::new(),
+                network: Default::default(),
+                port_mappings: Vec::new(),
+                session_ref: Some(session_ref.to_string()),
+            })
+            .await
+        {
+            Ok(sandbox_id) => sandbox_id,
+            Err(e) => return format!("(could not provision to ask: {e})"),
+        };
+        if let Err(e) = handle
+            .start(StartConfig {
+                sandbox_id: sandbox_id.clone(),
+            })
+            .await
+        {
+            return format!("(could not start to ask: {e})");
+        }
+
+        let mut stream = handle
+            .exec(
+                ExecConfig {
+                    exec_id: format!("probe-{sandbox_id}"),
+                    run_token: "probe-run".to_string(),
+                    sandbox_id: sandbox_id.clone(),
+                    script_code: "echo cpus=$(nproc) mem=$(free -m | awk '/Mem:/{print $2}')MB"
+                        .to_string(),
+                    working_directory: String::new(),
+                    env: Vec::new(),
+                    env_scope: EnvScope::Merge,
+                    timeout_ms: 30_000,
+                },
+                None,
+            )
+            .await
+            .expect("exec");
+
+        let mut text = String::new();
+        while let Some((_, bytes)) = stream.output.recv().await {
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        let _ = stream.done.await;
+        handle
+            .deprovision(DeprovisionConfig { sandbox_id })
+            .await
+            .ok();
+        text.trim().to_string()
+    }
+
+    /// The host's installed memory and processor count.
+    #[cfg(windows)]
+    fn host_specs() -> container_steps::HostCapacity {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        use windows::Win32::System::Threading::{GetActiveProcessorCount, ALL_PROCESSOR_GROUPS};
+
+        let mut status = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+
+        // SAFETY: `status` is a valid `MEMORYSTATUSEX` with `dwLength` set.
+        unsafe { GlobalMemoryStatusEx(&mut status) }.expect("read memory status");
+
+        // The same count the production check reads, so a test cannot pass on a
+        // host whose processors it measures differently.
+        let logical_cpus = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
+
+        container_steps::HostCapacity {
+            total_memory_mb: status.ullTotalPhys / (1024 * 1024),
+            logical_cpus,
+        }
+    }
+
+    /// `memoryMb` is a ceiling the host backs on demand, so a session may ask
+    /// for more memory than the host has installed and the guest really gets
+    /// it.
+    ///
+    /// This is what makes refusing an oversized `memoryMb` the wrong thing to
+    /// do, so it is worth defending rather than leaving in a measurement's
+    /// output.
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with alpine:latest cached in the daemon store slots"]
+    async fn memory_past_what_the_host_has_installed_boots_and_the_guest_gets_it() {
+        let host = host_specs();
+        let requested_mb = host.total_memory_mb * 2;
+        let handle = spawn().unwrap();
+
+        let session_ref = handle
+            .provision_session(ProvisionSessionConfig {
+                cpu_count: None,
+                memory_mb: Some(requested_mb),
+                gpu: false,
+            })
+            .await
+            .expect("a ceiling past installed memory must be accepted");
+
+        let guest = guest_resources(&handle, &session_ref).await;
+        println!(
+            "requested {requested_mb} MB on a {} MB host; {guest}",
+            host.total_memory_mb
+        );
+
+        let guest_mb: u64 = guest
+            .split("mem=")
+            .nth(1)
+            .and_then(|rest| rest.trim_end_matches("MB").trim().parse().ok())
+            .unwrap_or_else(|| panic!("could not read the guest's memory from {guest:?}"));
+
+        assert!(
+            guest_mb > host.total_memory_mb,
+            "the guest reported {guest_mb} MB against a host with {} MB installed; \
+             if this ever fails, memoryMb stopped being a ceiling and the \
+             validator must start refusing oversized requests",
+            host.total_memory_mb
+        );
+
+        handle
+            .deprovision_session(DeprovisionSessionConfig { session_ref })
+            .await
+            .unwrap();
+        handle.shutdown().await.unwrap();
+    }
+
+    /// The SDK refuses an impossible processor count on its own, but names the
+    /// image store while doing it. This holds the ground that the refusal says
+    /// what actually went wrong.
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with the WSLc SDK installed"]
+    async fn too_many_processors_is_refused_naming_processors() {
+        let host = host_specs();
+        let handle = spawn().unwrap();
+
+        let refusal = handle
+            .provision_session(ProvisionSessionConfig {
+                cpu_count: Some(host.logical_cpus * 2),
+                memory_mb: None,
+                gpu: false,
+            })
+            .await
+            .expect_err("more processors than the host has must be refused");
+
+        println!("refused as {:?}: {refusal}", refusal.kind());
+        assert_eq!(refusal.kind(), ErrKind::Rejected);
+        let message = refusal.to_string();
+        assert!(
+            message.contains("cpu_count") && message.contains("logical processors"),
+            "the refusal must name the processor count: {message}"
+        );
+        assert!(
+            !message.contains("image store"),
+            "blaming the image store for a processor problem is what this \
+             replaces: {message}"
+        );
+
+        handle.shutdown().await.unwrap();
+    }
+
+    /// Nothing in mxc bounds a session's size, so the host's own refusal is the
+    /// only limit.
+    ///
+    /// `WslcCreateSession` accepts the request and the refusal arrives at the
+    /// store probe that follows, which is why this takes minutes rather than
+    /// seconds.
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host; takes ~15 minutes to fail"]
+    async fn a_session_larger_than_the_host_is_refused() {
+        let handle = spawn().unwrap();
+
+        let started = Instant::now();
+        let outcome = handle
+            .provision_session(ProvisionSessionConfig {
+                cpu_count: None,
+
+                // Far past any real host, and past what the SDK takes as MB.
+                memory_mb: Some(64 * 1024 * 1024),
+                gpu: false,
+            })
+            .await;
+        let elapsed = started.elapsed();
+
+        let refusal = match outcome {
+            Err(refusal) => refusal,
+            Ok(session_ref) => {
+                handle
+                    .deprovision_session(DeprovisionSessionConfig { session_ref })
+                    .await
+                    .ok();
+                handle.shutdown().await.unwrap();
+                panic!(
+                    "a host that cannot supply the memory must refuse; silently \
+                     clamping would mean sizing is not enforced and the host is \
+                     not the backstop the no-limit design assumes"
+                );
+            }
+        };
+
+        println!(
+            "refused after {elapsed:?} as {:?}: {refusal}",
+            refusal.kind()
+        );
+        assert_eq!(
+            refusal.kind(),
+            ErrKind::Backend,
+            "the host's own diagnosis is what the caller has to act on"
+        );
+
+        handle.shutdown().await.unwrap();
+    }
+
+    /// Sizing is applied at create, so a session asking for more than the host
+    /// has must fail as a session failure rather than at some later phase.
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with the WSLc SDK installed"]
+    async fn a_sized_session_boots() {
+        let handle = spawn().unwrap();
+
+        let session_ref = handle
+            .provision_session(ProvisionSessionConfig {
+                cpu_count: Some(2),
+                memory_mb: Some(2048),
+                gpu: false,
+            })
+            .await
+            .expect("a modestly sized session must boot");
+
+        handle
+            .deprovision_session(DeprovisionSessionConfig { session_ref })
+            .await
+            .unwrap();
+        handle.shutdown().await.unwrap();
+    }
+
+    /// A container provisioned into a named session must live in that session,
+    /// not in the implicit one.
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with alpine:latest cached in the daemon store slots"]
+    async fn a_sandbox_can_be_placed_in_a_named_session() {
+        let handle = spawn().unwrap();
+        let session_ref = handle
+            .provision_session(ProvisionSessionConfig::default())
+            .await
+            .expect("session");
+
+        let sandbox_id = handle
+            .provision(ProvisionConfig {
+                image: "alpine:latest".to_string(),
+                image_tar_path: None,
+                volumes: Vec::new(),
+                network: Default::default(),
+                port_mappings: Vec::new(),
+                session_ref: Some(session_ref.clone()),
+            })
+            .await
+            .expect("provision into the named session");
+
+        let refusal = handle
+            .deprovision_session(DeprovisionSessionConfig {
+                session_ref: session_ref.clone(),
+            })
+            .await
+            .expect_err("a session holding a sandbox must not be released");
+        assert_eq!(refusal.kind(), ErrKind::Rejected);
+
+        handle
+            .deprovision(DeprovisionConfig {
+                sandbox_id: sandbox_id.clone(),
+            })
+            .await
+            .unwrap();
+        handle
+            .deprovision_session(DeprovisionSessionConfig { session_ref })
+            .await
+            .expect("an emptied session releases");
+
+        handle.shutdown().await.unwrap();
     }
 
     /// Provision and start a sandbox on the live host, returning its id.
@@ -3025,6 +6692,7 @@ mod tests {
                 volumes: Vec::new(),
                 network: Default::default(),
                 port_mappings: Vec::new(),
+                session_ref: None,
             })
             .await
             .unwrap();
@@ -3113,6 +6781,7 @@ mod tests {
                 volumes: Vec::new(),
                 network: Default::default(),
                 port_mappings: Vec::new(),
+                session_ref: None,
             })
             .await
             .unwrap();
@@ -3188,6 +6857,7 @@ mod tests {
                     volumes: Vec::new(),
                     network: Default::default(),
                     port_mappings: Vec::new(),
+                    session_ref: None,
                 })
                 .await
         });
@@ -3353,6 +7023,7 @@ mod tests {
                 volumes: Vec::new(),
                 network: Default::default(),
                 port_mappings: Vec::new(),
+                session_ref: None,
             })
             .await
             .unwrap();

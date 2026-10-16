@@ -386,8 +386,10 @@ The separate `provision` operation takes the same list under
 
 The lifecycle daemon creates one container per sandbox, so a forward belongs
 to the sandbox that declared it. The session-wide `cpuCount` / `memoryMb` /
-`gpu` settings remain available only for create-and-run execution, because that daemon shares a
-single WSL session across every sandbox. `storagePath` is create-and-run-only
+`gpu` settings remain available only for create-and-run execution, because every
+lifecycle `provision` currently joins one shared session. The daemon itself holds
+several independently sized sessions; what no caller can yet do is ask for one.
+`storagePath` is create-and-run-only
 for a different reason: the daemon leases its store from a slot pool rather
 than taking a caller-named path, so warming its cache is a separate step. See
 [the lifecycle guide](wslc-state-aware.md#image-store).
