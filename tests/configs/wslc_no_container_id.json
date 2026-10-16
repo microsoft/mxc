@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "sh -c 'echo NO_CONTAINER_ID_OK'"
+  },
+  "network": {
+    "egress": { "default": "deny" }
+  },
+  "wslc": {
+    "image": "alpine:latest"
+  }
+}

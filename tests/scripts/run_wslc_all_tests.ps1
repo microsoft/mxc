@@ -248,6 +248,11 @@ $null = $results.Add((Run-WslcTest "wslc_exit_code.json" -ExpectedExit 42 -Outpu
 $null = $results.Add((Run-WslcTest "wslc_stderr.json" -OutputContains "stdout message"))
 $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 
+# `containerId` is optional, and WSLc refuses the empty session name that an
+# omitted one used to produce (WSLC_E_INVALID_SESSION_NAME, 0x80040608). Every
+# other config here sets the field, so this is the only guard on that path.
+$null = $results.Add((Run-WslcTest "wslc_no_container_id.json" -OutputContains "NO_CONTAINER_ID_OK"))
+
 Write-Host "`n--- Environment Tests ---" -ForegroundColor Cyan
 # PYTHON_VERSION is baked into the image by ENV. Unlike PATH and TERM, no shell
 # fabricates it when it starts without one, so its absence is real evidence that

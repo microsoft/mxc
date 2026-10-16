@@ -283,7 +283,7 @@ fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
         logger,
         "Container name: {}",
         if request.container_id.is_empty() {
-            "CLI"
+            "(assigned by the backend)"
         } else {
             &request.container_id
         }

@@ -492,6 +492,21 @@ fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), Script
     Ok(())
 }
 
+const GENERATED_SESSION_NAME_PREFIX: &str = "mxc-wslc-";
+
+/// Name the WSLc session a run gets, minting one when `containerId` is absent:
+/// WSLc refuses an empty name with `WSLC_E_INVALID_SESSION_NAME` (0x80040608).
+fn resolve_session_name(container_id: &str) -> String {
+    if container_id.is_empty() {
+        format!(
+            "{GENERATED_SESSION_NAME_PREFIX}{}",
+            uuid::Uuid::new_v4().simple()
+        )
+    } else {
+        container_id.to_string()
+    }
+}
+
 impl WSLContainerRunner {
     /// Configure session settings and create the session.
     /// Returns the session guard (RAII).
@@ -506,7 +521,8 @@ impl WSLContainerRunner {
         request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
-        let session_name: Vec<u16> = to_wide(&request.container_id);
+        let session_name_str = resolve_session_name(&request.container_id);
+        let session_name: Vec<u16> = to_wide(&session_name_str);
         let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("mxc-wslc-sessions")
@@ -574,7 +590,7 @@ impl WSLContainerRunner {
             let msg = err_msg.to_string_lossy();
             return Err(sdk_error("WslcCreateSession failed", hr, &msg));
         }
-        let _ = writeln!(logger, "[WSLC] Session created");
+        let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
 
         Ok(WslcSessionGuard::from_raw(
             session,
@@ -2269,5 +2285,30 @@ mod tests {
         let message = sdk_init::prerequisite_error(WslcComponentFlags(0x8000));
 
         assert!(message.contains("ensure WSL2 and the WSLC SDK are installed"));
+    }
+
+    #[test]
+    fn session_name_is_the_container_id_when_the_request_names_one() {
+        assert_eq!(resolve_session_name("pitest"), "pitest");
+        assert_eq!(resolve_session_name("wslc-hello-world"), "wslc-hello-world");
+    }
+
+    #[test]
+    fn absent_container_id_mints_a_session_name() {
+        let name = resolve_session_name("");
+
+        assert!(
+            name.starts_with(GENERATED_SESSION_NAME_PREFIX),
+            "expected a minted name, got: {name}"
+        );
+        assert!(
+            name.len() > GENERATED_SESSION_NAME_PREFIX.len(),
+            "an empty name is what WSLc refuses with WSLC_E_INVALID_SESSION_NAME, got: {name}"
+        );
+    }
+
+    #[test]
+    fn minted_session_names_do_not_repeat() {
+        assert_ne!(resolve_session_name(""), resolve_session_name(""));
     }
 }
