@@ -75,6 +75,7 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
 use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::validator::NetworkPolicySupport;
@@ -283,6 +284,44 @@ impl std::fmt::Display for DispatchError {
 }
 
 impl std::error::Error for DispatchError {}
+
+impl DispatchError {
+    /// The wire code this dispatch failure is reported under.
+    ///
+    /// A field the selected tier cannot represent, or an authored
+    /// `fallback.allowDaclMutation: false` the tier would have to override, is
+    /// a refusal of the policy: a changed request can run. The rest are the
+    /// tier itself being unavailable -- none could be built, or a required
+    /// provider is absent -- so the policy was never judged, which is the same
+    /// distinction the [`RejectionReason::RunnerUnavailable`] audit reason
+    /// draws. A SID that could not be derived carries its own code, and ACEs
+    /// that could not be applied are a runtime fault.
+    ///
+    /// [`RejectionReason::RunnerUnavailable`]: crate::mxc_common::audit::RejectionReason
+    pub fn error_code(&self) -> MxcErrorCode {
+        match self {
+            DispatchError::Fallback(
+                FallbackError::EnumeratePathsUnsupported
+                | FallbackError::IngressUnsupported
+                | FallbackError::DaclFallbackDisabled,
+            ) => MxcErrorCode::PolicyValidation,
+            DispatchError::Fallback(
+                FallbackError::WriteDacUnavailable { .. }
+                | FallbackError::SystemRootUnresolved { .. },
+            )
+            | DispatchError::CaptureDenialsUnsupported { .. }
+            | DispatchError::CaptureDenialsUnavailable { .. } => MxcErrorCode::BackendUnavailable,
+            DispatchError::Sid(error) => error.error_code(),
+            DispatchError::Dacl { .. } => MxcErrorCode::BackendError,
+        }
+    }
+
+    /// Convert to the typed error carried on the wire, keeping the `Display`
+    /// text as the message.
+    pub fn to_mxc_error(&self) -> MxcError {
+        MxcError::new(self.error_code(), self.to_string())
+    }
+}
 
 impl From<FallbackError> for DispatchError {
     fn from(e: FallbackError) -> Self {
@@ -819,6 +858,86 @@ mod tests {
     use crate::process_container_common::test_env::{
         BcUsableGuard, CaptureCapabilityGuard, ForceTierGuard, ENV_LOCK,
     };
+
+    #[test]
+    fn a_field_the_tier_cannot_represent_is_a_refusal_of_the_policy() {
+        // Documented as a rejection rather than a silent drop, and the caller
+        // is the one who can act: a request without the field runs.
+        for error in [
+            FallbackError::EnumeratePathsUnsupported,
+            FallbackError::IngressUnsupported,
+            FallbackError::DaclFallbackDisabled,
+        ] {
+            let dispatch = DispatchError::Fallback(error);
+            assert_eq!(
+                dispatch.error_code(),
+                MxcErrorCode::PolicyValidation,
+                "{dispatch}"
+            );
+            assert_eq!(dispatch.error_code().exit_code(), 1, "{dispatch}");
+        }
+    }
+
+    #[test]
+    fn a_tier_that_could_not_be_built_is_not_blamed_on_the_policy() {
+        // No tier exists to judge the policy against, so reporting a rejection
+        // would send the caller editing a config that was never the problem.
+        for error in [
+            FallbackError::WriteDacUnavailable {
+                path: PathBuf::from("C:\\work"),
+                reason: "access denied".to_string(),
+            },
+            FallbackError::SystemRootUnresolved {
+                reason: "GetWindowsDirectoryW failed".to_string(),
+            },
+        ] {
+            let dispatch = DispatchError::Fallback(error);
+            assert_eq!(
+                dispatch.error_code(),
+                MxcErrorCode::BackendUnavailable,
+                "{dispatch}"
+            );
+            assert_eq!(dispatch.error_code().exit_code(), -1, "{dispatch}");
+        }
+    }
+
+    #[test]
+    fn a_host_without_a_capture_provider_has_not_rejected_capture_denials() {
+        // The suites read acceptance as "not rejected during validation", and
+        // a host with no provider never got as far as judging the section.
+        for dispatch in [
+            DispatchError::CaptureDenialsUnsupported {
+                tier: IsolationTier::AppContainerDacl,
+            },
+            DispatchError::CaptureDenialsUnavailable {
+                tier: IsolationTier::AppContainerDacl,
+                reason: "WPR is not installed".to_string(),
+            },
+        ] {
+            assert_eq!(
+                dispatch.error_code(),
+                MxcErrorCode::BackendUnavailable,
+                "{dispatch}"
+            );
+            assert_eq!(dispatch.error_code().exit_code(), -1, "{dispatch}");
+        }
+    }
+
+    #[test]
+    fn a_failed_ace_apply_is_a_runtime_fault() {
+        let dispatch = DispatchError::Dacl {
+            error: DaclError::PathNotFound(PathBuf::from("C:\\work")),
+            warnings: Vec::new(),
+        };
+        assert_eq!(dispatch.error_code(), MxcErrorCode::BackendError);
+        assert_eq!(dispatch.error_code().exit_code(), -1);
+    }
+
+    #[test]
+    fn the_message_the_caller_already_sees_is_the_one_carried_on_the_wire() {
+        let dispatch = DispatchError::Fallback(FallbackError::IngressUnsupported);
+        assert_eq!(dispatch.to_mxc_error().message, dispatch.to_string());
+    }
 
     fn test_request(policy: ContainerPolicy) -> ExecutionRequest {
         ExecutionRequest {

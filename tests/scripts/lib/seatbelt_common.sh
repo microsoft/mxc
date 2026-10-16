@@ -189,6 +189,10 @@ expect_rejected() {
         fail "$label (the workload ran before the config was refused)" "$OUT"
     fi
     grep -qF "$marker" <<<"$OUT" || fail "$label (refused, but not for '$marker')" "$OUT"
+    # A refusal is a request fault: exit 1 with a request-side error code.
+    if [ "$RC" != 1 ] || ! grep -qE '"code":"(policy_validation|malformed_request)"' <<<"$OUT"; then
+        fail "$label (expected exit 1 with a policy_validation or malformed_request envelope, got exit $RC)" "$OUT"
+    fi
     pass "$label"
 }
 

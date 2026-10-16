@@ -1617,7 +1617,15 @@ mod tests {
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
-        assert_eq!(response.exit_code, -1, "overlap must fail the run");
+        assert_eq!(
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
+            "overlap must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
         assert!(
             response.error_message.contains("cannot be enforced"),
             "expected the overlap error, got: {}",
@@ -1666,8 +1674,13 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(
-            response.exit_code, -1,
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
             "junction-aliased deny must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             response.error_message.contains("cannot be enforced"),
@@ -1716,8 +1729,13 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(
-            response.exit_code, -1,
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
             "absent junction-aliased deny must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             response.error_message.contains("cannot be enforced"),

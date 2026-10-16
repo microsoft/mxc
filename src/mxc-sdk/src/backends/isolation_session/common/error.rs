@@ -251,7 +251,14 @@ impl std::fmt::Display for IsolationSessionError {
 
 impl From<IsolationSessionError> for ScriptResponse {
     fn from(err: IsolationSessionError) -> Self {
-        ScriptResponse::error(&err.to_string())
+        let message = err.to_string();
+        match err {
+            IsolationSessionError::Policy(_) => ScriptResponse::rejected(&message),
+            IsolationSessionError::ServiceUnavailable(_) => ScriptResponse::unavailable(&message),
+            IsolationSessionError::Lifecycle(_) | IsolationSessionError::Stale(_) => {
+                ScriptResponse::error(&message)
+            }
+        }
     }
 }
 
@@ -498,6 +505,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mxc_common::models::FailurePhase;
 
     fn api_failure(code: Option<u32>) -> IsoApiFailure {
         IsoApiFailure::new(
@@ -950,6 +958,23 @@ mod tests {
             .contains("IsoSessionOps.StopSessionAsync"));
         assert!(response.error_message.contains("0x80004005"));
         assert!(response.error_message.contains("remediation"));
+    }
+
+    /// The one-shot path has no structured envelope, so the phase on the
+    /// response is the only thing that tells the caller who is at fault.
+    #[test]
+    fn script_response_conversion_blames_the_same_side_as_the_wire_error() {
+        let refused: ScriptResponse = IsolationSessionError::Policy("no proxy".into()).into();
+        assert_eq!(refused.failure_phase, FailurePhase::Rejected);
+        assert_eq!(refused.exit_code, 1);
+
+        let unavailable: ScriptResponse = activation_error(REGDB_E_CLASSNOTREG_HRESULT, "x").into();
+        assert_eq!(unavailable.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(unavailable.exit_code, -1);
+
+        let runtime: ScriptResponse = lifecycle_err("create stdout relay: out of memory").into();
+        assert_eq!(runtime.failure_phase, FailurePhase::None);
+        assert_eq!(runtime.exit_code, -1);
     }
 
     // ── operation values ─────────────────────────────────────────────────

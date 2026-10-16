@@ -34,6 +34,23 @@ use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::models::{ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress};
 use crate::seatbelt_common::seatbelt_policy;
 
+/// Why a profile could not be built: the request, or the executor's host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileError {
+    /// The request names something the profile cannot express.
+    Policy(String),
+    /// The executor's environment lacks something the profile needs.
+    Host(String),
+}
+
+impl std::fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Policy(message) | Self::Host(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
 /// reachability to the resolved address supplied by the runner.
 ///
@@ -44,7 +61,7 @@ use crate::seatbelt_common::seatbelt_policy;
 pub fn build_profile_with_proxy(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
-) -> Result<String, String> {
+) -> Result<String, ProfileError> {
     if let Some(override_profile) = request
         .seatbelt
         .as_ref()
@@ -283,7 +300,7 @@ struct ResolvedPaths {
 }
 
 impl ResolvedPaths {
-    fn from_policy(policy: &ContainerPolicy) -> Result<Self, String> {
+    fn from_policy(policy: &ContainerPolicy) -> Result<Self, ProfileError> {
         let denied = resolve_all(&policy.denied_paths)?;
         let readonly = resolve_all(&policy.readonly_paths)?;
         let mut readwrite = resolve_all(&policy.readwrite_paths)?;
@@ -303,7 +320,7 @@ impl ResolvedPaths {
     }
 }
 
-fn resolve_all(paths: &[String]) -> Result<Vec<String>, String> {
+fn resolve_all(paths: &[String]) -> Result<Vec<String>, ProfileError> {
     paths.iter().map(|p| resolve_policy_path(p)).collect()
 }
 
@@ -636,7 +653,7 @@ fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
 /// stores under `/Library/Keychains` and `/System/Library/Keychains`
 /// are already covered by the baseline `/Library` and `/System`
 /// read-only allows, so we don't re-add them here.
-fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
+fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<(), ProfileError> {
     let enabled = request.seatbelt.as_ref().is_some_and(|c| c.keychain_access);
     if !enabled {
         return Ok(());
@@ -673,8 +690,11 @@ fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<
     out.push_str("    (subpath \"/private/var/db/mds\"))\n");
 
     let home = std::env::var("HOME").map_err(|_| {
-        "HOME environment variable not set; cannot expand '~/Library/Keychains' for keychainAccess"
-            .to_string()
+        ProfileError::Host(
+            "HOME environment variable not set; cannot expand '~/Library/Keychains' for \
+             keychainAccess"
+                .to_string(),
+        )
     })?;
     let user_keychains = format!("{home}/Library/Keychains");
     out.push_str(";; --- keychainAccess: user keychain DB + XPC/folder caches (read+write) ---\n");
@@ -708,9 +728,10 @@ fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
 ///
 /// All three steps are required. See [`expand_tilde`], [`normalize_lexical`]
 /// and [`resolve_macos_root_symlinks`].
-pub(crate) fn resolve_policy_path(path: &str) -> Result<String, String> {
-    let expanded = expand_tilde(path)?;
-    Ok(resolve_macos_root_symlinks(&normalize_lexical(&expanded)?))
+pub(crate) fn resolve_policy_path(path: &str) -> Result<String, ProfileError> {
+    let expanded = expand_tilde(path).map_err(ProfileError::Host)?;
+    let normalized = normalize_lexical(&expanded).map_err(ProfileError::Policy)?;
+    Ok(resolve_macos_root_symlinks(&normalized))
 }
 
 /// Collapse the lexical spellings of a path that leave a Seatbelt rule dead:
@@ -830,7 +851,7 @@ mod tests {
     use super::*;
     use crate::mxc_common::models::{NetworkAction, SeatbeltConfig, UiPolicy};
 
-    fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
+    fn build_profile(request: &ExecutionRequest) -> Result<String, ProfileError> {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
     }
 
@@ -1519,7 +1540,10 @@ mod tests {
         // would silently widen an allow and leave a deny dead.
         for path in ["/private/var/../tmp", "/tmp/..", "/..", "/a/b/../c"] {
             let err = resolve_policy_path(path).unwrap_err();
-            assert!(err.contains(".."), "{path} must be rejected, got {err}");
+            assert!(
+                matches!(&err, ProfileError::Policy(message) if message.contains("..")),
+                "{path} must be rejected as policy, got {err:?}"
+            );
         }
         // A path merely *containing* dots in a segment name is fine.
         assert_eq!(

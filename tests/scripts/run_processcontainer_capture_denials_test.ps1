@@ -6,8 +6,9 @@
 # `outputPath` is validated by validate_capture_denials_output_path during
 # config parsing, so Phase 14a's four rejections never reach the launch API —
 # rare process-container coverage that still produces signal on a host which
-# cannot start a container. The behavioral half (14b/14c) is host-dependent
-# and fails honestly where a run cannot start.
+# cannot start a container. The behavioral half (14b/14c) is host-dependent:
+# it skips where the host reports `backend_unavailable` for capture, and fails
+# honestly where a run cannot start for any other reason.
 #
 # Documented contract (docs/schema.md, updated 2026-09-10):
 #   * mode "block" (default) keeps access denied and logs it; "allow" permits
@@ -162,7 +163,13 @@ function Phase-CaptureDenialsModes {
         -CaptureDenialsMode 'allow'
     $log = Join-Path $ScratchRoot 'logs\cd-allow-warning.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
-    $all = "$(Read-Log $log)`n$($r.Stderr)"
+    $logText = Read-Log $log
+    if (Test-BackendUnavailable -Run $r -Log $logText) {
+        Record-Result -Phase 'P14b' -Name 'captureDenials mode=allow emits a security warning' -Status 'skip' `
+            -Detail 'the host reported backend_unavailable for capture, so no capture session exists to warn about'
+        return
+    }
+    $all = "$logText`n$($r.Stderr)"
     $sawWarning = [bool]($all -match '(?i)warn.{0,80}(denial|deny|audit|allow)|(?i)(denial|audit).{0,80}warn')
     Record-Result -Phase 'P14b' -Name 'captureDenials mode=allow emits a security warning' `
         -Pass $sawWarning `
@@ -182,11 +189,13 @@ function Phase-CaptureDenialsModes {
 function Phase-CaptureDenialsStampedPath {
     Section 'Phase 14c: captureDenials per-run output path'
 
+    $assertions = @(
+        'the actual denials output path is reported on stderr',
+        'the reported path is not the verbatim requested path (a per-run id is stamped in)',
+        'two runs of the same config report different output paths')
+
     if (-not $Script:Caps.CaptureDenialsUsable) {
-        foreach ($name in @(
-            'the actual denials output path is reported on stderr',
-            'the reported path is not the verbatim requested path (a per-run id is stamped in)',
-            'two runs of the same config report different output paths')) {
+        foreach ($name in $assertions) {
             Record-Result -Phase 'P14c' -Name $name -Status 'skip' `
                 -Detail 'no capture provider on this host, so the request fails before an output path is resolved'
         }
@@ -207,6 +216,14 @@ function Phase-CaptureDenialsStampedPath {
             -CaptureDenialsOutputPath $requested
         $log = Join-Path $ScratchRoot "logs\cd-stamped-$i.log"
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
+        if (Test-BackendUnavailable -Run $r -Log (Read-Log $log)) {
+            foreach ($name in $assertions) {
+                Record-Result -Phase 'P14c' -Name $name -Status 'skip' `
+                    -Detail ("the host reported backend_unavailable for capture (run $i), " +
+                             'so no output path is resolved')
+            }
+            return
+        }
         # stderr only: the one-line pointer is the CLI-boundary contract under
         # test, and the backend log carries its own copy of the resolved path,
         # so including the log would keep this green if the pointer were

@@ -153,6 +153,9 @@ const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str =
 const PSEC_INGRESS_UNSUPPORTED_MSG: &str =
     "network.ingress.hostLoopback='allow' requires Process Security Environment contract version \
      1.1 with ingress support";
+const PSEC_BASELINE_UNSUPPORTED_MSG: &str =
+    "this host does not support the baseline Process Security Environment contract version, so \
+     the BaseContainer backend cannot be provided";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
 
@@ -466,6 +469,25 @@ impl BaseContainerRunner {
         version
     }
 
+    /// Attribute an unsupported PSEC version: a version raised by a requested
+    /// policy feature is the request's fault, while an unsupported baseline
+    /// means the host does not implement the contract at all.
+    fn unsupported_psec_version_response(
+        request: &ExecutionRequest,
+        psec_version: SecurityEnvironmentVersion,
+    ) -> ScriptResponse {
+        if psec_version == SecurityEnvironmentVersion::V1_0 {
+            return ScriptResponse::unavailable(PSEC_BASELINE_UNSUPPORTED_MSG);
+        }
+        ScriptResponse::rejected(if !request.policy.enumerate_paths.is_empty() {
+            PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
+        } else if unrestricted_host_loopback_allowed(&request.policy) {
+            PSEC_INGRESS_UNSUPPORTED_MSG
+        } else {
+            "the required Process Security Environment schema version is not supported"
+        })
+    }
+
     /// The single BaseContainer serviceability decision point: return the first
     /// reason the request cannot be enforced, or
     /// [`BaseContainerRequestDecision::Serviceable`] when every check passes.
@@ -542,31 +564,23 @@ impl BaseContainerRunner {
 
         let proxy_loopback_workaround =
             Self::psec_1_0_proxy_loopback_workaround(request, secenv::supports_version).map_err(
-                |error| ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(&format!(
+                |error| {
+                    ScriptResponse::unavailable(&format!(
                         "failed to query PSEC proxy compatibility support: {error}"
                     ))
                 },
             )?;
         let psec_version =
             Self::choose_min_required_psec_version_for_request(request, proxy_loopback_workaround);
-        let version_supported =
-            secenv::supports_version(psec_version).map_err(|error| ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(&format!(
-                    "failed to query Process Security Environment contract support: {error}"
-                ))
-            })?;
+        let version_supported = secenv::supports_version(psec_version).map_err(|error| {
+            ScriptResponse::unavailable(&format!(
+                "failed to query Process Security Environment contract support: {error}"
+            ))
+        })?;
         if !version_supported {
-            return Err(ScriptResponse::rejected(
-                if !request.policy.enumerate_paths.is_empty() {
-                    PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
-                } else if unrestricted_host_loopback_allowed(&request.policy) {
-                    PSEC_INGRESS_UNSUPPORTED_MSG
-                } else {
-                    "the required Process Security Environment schema version is not supported"
-                },
+            return Err(Self::unsupported_psec_version_response(
+                request,
+                psec_version,
             ));
         }
 
@@ -852,13 +866,7 @@ impl BaseContainerRunner {
                             FailurePhase::LaunchFailed
                         };
                         self.cleanup_capture_begin_failure(logger);
-                        return Err(ScriptResponse {
-                            exit_code: -1,
-                            error_message: msg.clone(),
-                            standard_err: msg,
-                            failure_phase,
-                            ..Default::default()
-                        });
+                        return Err(ScriptResponse::failed(failure_phase, &msg));
                     }
                 }
             } else {
@@ -886,13 +894,7 @@ impl BaseContainerRunner {
                         } else {
                             FailurePhase::LaunchFailed
                         };
-                        return Err(ScriptResponse {
-                            exit_code: -1,
-                            error_message: msg.clone(),
-                            standard_err: msg,
-                            failure_phase,
-                            ..Default::default()
-                        });
+                        return Err(ScriptResponse::failed(failure_phase, &msg));
                     }
                 }
             }
@@ -948,13 +950,7 @@ impl BaseContainerRunner {
                     if capture_denials.is_some() {
                         self.cleanup_capture_begin_failure(logger);
                     }
-                    return Err(ScriptResponse {
-                        exit_code: -1,
-                        error_message: msg.clone(),
-                        standard_err: msg,
-                        failure_phase,
-                        ..Default::default()
-                    });
+                    return Err(ScriptResponse::failed(failure_phase, &msg));
                 }
             };
         let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
@@ -1039,12 +1035,8 @@ impl BaseContainerRunner {
             };
 
             return Err(ScriptResponse {
-                exit_code: -1,
-                error_message: diag.message.clone(),
-                standard_err: diag.message,
                 extended_error,
-                failure_phase,
-                ..Default::default()
+                ..ScriptResponse::failed(failure_phase, &diag.message)
             });
         }
 
@@ -1120,12 +1112,8 @@ impl BaseContainerRunner {
                     );
                 }
                 return Err(ScriptResponse {
-                    exit_code: -1,
-                    error_message: JOB_SETUP_FAILED_MSG.to_string(),
-                    standard_err: JOB_SETUP_FAILED_MSG.to_string(),
                     extended_error,
-                    failure_phase: FailurePhase::LaunchFailed,
-                    ..Default::default()
+                    ..ScriptResponse::failed(FailurePhase::LaunchFailed, JOB_SETUP_FAILED_MSG)
                 });
             }
         };
@@ -1160,10 +1148,7 @@ impl BaseContainerRunner {
                 );
             }
             self.proxy_coordinator.stop(logger);
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::LaunchFailed,
-                ..ScriptResponse::error(&message)
-            });
+            return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &message));
         }
 
         crate::mxc_common::telemetry::log_network_policy_applied(
@@ -1269,13 +1254,10 @@ impl SandboxBackend for BaseContainerRunner {
         if !self.request_serviceability_confirmed
             && !Self::can_backend_service_request(request).can_service_request()
         {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(
-                    "the request cannot be represented by the process security environment \
-                     available on this host",
-                )
-            });
+            return Err(ScriptResponse::unavailable(
+                "the request cannot be represented by the process security environment \
+                 available on this host",
+            ));
         }
         if request.policy.least_privilege_mode {
             return Err(ScriptResponse::rejected(
@@ -2153,6 +2135,36 @@ mod tests {
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
     use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A host that does not implement the baseline contract cannot be fixed by
+    /// rewriting the request; a version raised by a requested feature can.
+    #[test]
+    fn an_unsupported_psec_baseline_is_unavailable_not_rejected() {
+        let plain = ExecutionRequest::default();
+        let baseline = BaseContainerRunner::unsupported_psec_version_response(
+            &plain,
+            SecurityEnvironmentVersion::V1_0,
+        );
+        assert_eq!(baseline.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            baseline.exit_code,
+            FailurePhase::BackendUnavailable.failure_exit_code()
+        );
+
+        let enumerate = ExecutionRequest {
+            policy: ContainerPolicy {
+                enumerate_paths: vec![r"C:\project".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let raised = BaseContainerRunner::unsupported_psec_version_response(
+            &enumerate,
+            SecurityEnvironmentVersion::V1_1,
+        );
+        assert_eq!(raised.failure_phase, FailurePhase::Rejected);
+        assert_eq!(raised.error_message, PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG);
+    }
 
     #[test]
     fn native_capture_probe_requires_base_container_and_complete_learning_mode_abi() {

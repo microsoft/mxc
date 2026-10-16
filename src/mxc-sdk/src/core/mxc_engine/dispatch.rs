@@ -297,7 +297,7 @@ fn spawn_process_container(
     match spawn_with_fallback(request, logger, StdioMode::Pipes, capture_factory) {
         Ok(dispatched) => {
             for w in &dispatched.warnings {
-                let _ = writeln!(logger, "warning: {w}");
+                logger.warning_line(w);
             }
             let _ = writeln!(
                 logger,
@@ -307,15 +307,13 @@ fn spawn_process_container(
             Ok(dispatched.process)
         }
         Err(SpawnDispatchError::Dispatch(e)) => {
-            // Surface any retained-entry DACL warnings through the logger so the
-            // caller's buffer flush still reports them — mirroring the
-            // run-to-completion `resolve_runner_inner`.
+            // Retain DACL warnings so a failed dispatch still reports them.
             if let DispatchError::Dacl { warnings, .. } = &e {
                 for w in warnings {
-                    let _ = writeln!(logger, "dacl warning: {w}");
+                    logger.warning_line(w);
                 }
             }
-            Err(MxcError::backend_unavailable(format!("{e}")))
+            Err(e.to_mxc_error())
         }
         Err(SpawnDispatchError::Spawn {
             response,
@@ -328,7 +326,7 @@ fn spawn_process_container(
             // before its separate spawn attempt, so a spawn failure never loses
             // them there either.
             for w in &warnings {
-                let _ = writeln!(logger, "warning: {w}");
+                logger.warning_line(w);
             }
             let _ = writeln!(logger, "selected isolation tier: {}", tier.as_str());
             Err(map_spawn_error(*response))
@@ -368,7 +366,7 @@ fn spawn_wslc(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::unsupported_containment(
+        Err(MxcError::backend_unavailable(
             "WSLC backend not compiled. Rebuild with --features wslc.",
         ))
     }
@@ -420,7 +418,7 @@ fn spawn_isolation_session(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::unsupported_containment(
+        Err(MxcError::backend_unavailable(
             "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
         ))
     }
@@ -440,7 +438,7 @@ fn spawn_isolation_session_pty(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::unsupported_containment(
+        Err(MxcError::backend_unavailable(
             "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
         ))
     }
@@ -600,6 +598,22 @@ mod tests {
         };
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
         assert!(err.message.contains("Windows"), "got: {}", err.message);
+    }
+
+    #[cfg(all(target_os = "windows", not(feature = "wslc")))]
+    #[test]
+    fn streaming_reports_a_backend_this_build_omits_as_unavailable() {
+        // Run-to-completion resolution calls the same build/host pair
+        // `backend_unavailable`, so streaming must not hand the caller a
+        // different code for it.
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Wslc;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_runner(&request, &mut logger) {
+            Ok(_) => panic!("a backend this build omits must not spawn"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
     }
 
     #[cfg(not(target_os = "linux"))]

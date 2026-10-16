@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, ProxyAddress, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ProxyAddress, ScriptResponse};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -40,7 +40,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 #[cfg(test)]
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
-use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
+use crate::seatbelt_common::profile_builder::{build_profile_with_proxy, ProfileError};
 
 #[link(name = "proc")]
 unsafe extern "C" {
@@ -279,9 +279,9 @@ impl SandboxBackend for SeatbeltScriptRunner {
         // Seatbelt's own invariants — the only home for them, so a caller that
         // builds an ExecutionRequest directly gets the same rules.
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
-            .map_err(error_response)?;
+            .map_err(rejected_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
-            .map_err(error_response)?;
+            .map_err(rejected_response)?;
 
         Ok(())
     }
@@ -308,7 +308,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
                 crate::mxc_common::proxy_env::redact_proxy_url(&address.to_url())
             ));
         }
-        let profile = build_profile_with_proxy(request, proxy_address).map_err(error_response)?;
+        let profile =
+            build_profile_with_proxy(request, proxy_address).map_err(profile_error_response)?;
         log_generated_profile(&profile, logger);
 
         // Effective posture, not the raw flag: a `guiAccess` the UI policy
@@ -341,7 +342,7 @@ fn spawn_exec(
         } else {
             "a caller-owned PTY"
         };
-        return Err(error_response(format!(
+        return Err(rejected_response(format!(
             "Seatbelt guiAccess requires inherited stdio and cannot use {mode}"
         )));
     }
@@ -383,7 +384,7 @@ fn spawn_exec(
     ) {
         Ok(cwd) => cwd,
         Err(e) => {
-            return Err(error_response(format!(
+            return Err(launch_failed_response(format!(
                 "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
             )))
         }
@@ -418,7 +419,7 @@ fn spawn_exec(
 
     let mut child = command
         .spawn()
-        .map_err(|error| error_response(spawn_error(&error)))?;
+        .map_err(|error| launch_failed_response(spawn_error(&error)))?;
 
     let (stdin, stdout, stderr) = match stdio {
         StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
@@ -439,7 +440,7 @@ fn spawn_exec(
                 let _ = child.kill();
                 let _ = child.wait();
                 let error = out_result.err().or(err_result.err());
-                return Err(error_response(format!(
+                return Err(launch_failed_response(format!(
                     "Seatbelt: failed to wrap stdio pipes: {}",
                     error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
                 )));
@@ -788,8 +789,9 @@ fn build_sandbox_command(
     pty_size: Option<PtySize>,
     logger: &mut Logger,
 ) -> Result<(Command, Option<LivePty>), ScriptResponse> {
-    let profile_cstr = CString::new(profile)
-        .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
+    let profile_cstr = CString::new(profile).map_err(|e| {
+        rejected_response(format!("seatbelt profile contains embedded NUL byte: {e}"))
+    })?;
 
     let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
 
@@ -840,7 +842,9 @@ fn build_sandbox_command(
                 },
                 &[],
             )
-            .map_err(|error| error_response(format!("Seatbelt: failed to allocate PTY: {error}")))
+            .map_err(|error| {
+                launch_failed_response(format!("Seatbelt: failed to allocate PTY: {error}"))
+            })
         })
         .transpose()?;
 
@@ -886,11 +890,22 @@ fn log_generated_profile(profile: &str, logger: &mut Logger) {
     let _ = writeln!(logger, "{PROFILE_LOG_END}");
 }
 
-fn error_response(message: String) -> ScriptResponse {
-    ScriptResponse {
-        exit_code: -1,
-        error_message: message,
-        ..Default::default()
+/// A request this backend refuses: the host is fine, so only a changed request
+/// can succeed.
+fn rejected_response(message: String) -> ScriptResponse {
+    ScriptResponse::rejected(&message)
+}
+
+/// A fault while bringing the sandboxed child up, after the request was
+/// accepted.
+fn launch_failed_response(message: String) -> ScriptResponse {
+    ScriptResponse::failed(FailurePhase::LaunchFailed, &message)
+}
+
+fn profile_error_response(error: ProfileError) -> ScriptResponse {
+    match error {
+        ProfileError::Policy(message) => rejected_response(message),
+        ProfileError::Host(message) => launch_failed_response(message),
     }
 }
 
@@ -1039,6 +1054,19 @@ mod tests {
         .err()
         .expect("guiAccess PTY must be rejected");
         assert!(error.error_message.contains("caller-owned PTY"));
+        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert_eq!(error.exit_code, FailurePhase::Rejected.failure_exit_code());
+    }
+
+    #[test]
+    fn a_failed_launch_keeps_the_generic_backend_error_code() {
+        let response = launch_failed_response("failed to spawn sandboxed process".into());
+        assert_eq!(response.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(
+            response.failure_phase.error_code(),
+            crate::mxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+        assert_eq!(response.exit_code, -1);
     }
 
     #[test]
@@ -1221,6 +1249,11 @@ mod tests {
         assert!(response.error_message.contains("hostLoopback='allow'"));
         assert!(response.error_message.contains("default='deny'"));
         assert!(!response.error_message.contains("inherit 'default'"));
+        assert_eq!(response.failure_phase, FailurePhase::Rejected);
+        assert_eq!(
+            response.exit_code,
+            FailurePhase::Rejected.failure_exit_code()
+        );
     }
 
     /// The other divergent pair is expressible and must be accepted: it is the

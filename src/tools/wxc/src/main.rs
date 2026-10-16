@@ -17,8 +17,10 @@ use mxc_sdk::mxc_common::diagnostic::DiagnosticConfig;
 use mxc_sdk::mxc_common::error::WxcError;
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use mxc_sdk::mxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
-use mxc_sdk::mxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use mxc_sdk::mxc_common::mxc_error::{MxcError, MxcErrorCode};
+use mxc_sdk::mxc_common::script_runner::{
+    emit_mxc_error_exit, emit_warning_envelopes, handle_dry_run_exit, ScriptRunner,
+};
 use mxc_sdk::mxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use mxc_sdk::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use mxc_sdk::mxc_common::telemetry;
@@ -366,7 +368,7 @@ fn logger_for_cli(cli: &Cli) -> Logger {
 
     if let Some(ref log_path) = cli.log_file {
         if let Err(error) = logger.enable_file_sink(std::path::Path::new(log_path)) {
-            eprintln!("Warning: could not open log file '{log_path}': {error}");
+            emit_warning_envelopes(&[format!("could not open log file '{log_path}': {error}")]);
         }
     }
 
@@ -589,9 +591,7 @@ fn run_state_aware_main(
             diagnostic_logger.log_audit_event(&record);
         }
     }
-    for warning in logger.take_warnings() {
-        eprintln!("{warning}");
-    }
+    mxc_sdk::mxc_common::script_runner::emit_warning_envelopes(&logger.take_warnings());
     let buffered = logger.get_buffer().to_string();
     if !buffered.is_empty() {
         eprint!("{}", buffered);
@@ -673,15 +673,15 @@ fn run_state_aware_main(
             process::exit(0);
         }
         StateAwareExit::ExecCode(exit_code) => process::exit(exit_code),
-        StateAwareExit::Error(json) => {
+        StateAwareExit::Error(json, exit_code) => {
             println!("{}", json);
-            process::exit(1);
+            process::exit(exit_code);
         }
-        StateAwareExit::ExecError(json) => {
+        StateAwareExit::ExecError(json, exit_code) => {
             // The script's own stderr may not end in a newline, and gluing the
             // envelope onto those bytes would leave it unparseable.
             eprintln!("\n{}", json);
-            process::exit(1);
+            process::exit(exit_code);
         }
     }
 }
@@ -695,10 +695,10 @@ enum StateAwareExit {
     Envelope(String),
     /// Exit with this script exit code (its output was already streamed).
     ExecCode(i32),
-    /// Print this JSON error envelope to stdout, then exit 1.
-    Error(String),
-    /// Print this JSON error envelope to stderr, then exit 1.
-    ExecError(String),
+    /// Print this JSON error envelope to stdout, then exit with the code's status.
+    Error(String, i32),
+    /// Print this JSON error envelope to stderr, then exit with the code's status.
+    ExecError(String, i32),
 }
 
 /// Map a dispatch outcome to its terminal exit action. Pure — it neither prints
@@ -714,22 +714,28 @@ fn finalize_state_aware_outcome(
         Ok(DispatchOutcome::ExecCompleted { exit_code }) => StateAwareExit::ExecCode(exit_code),
         Err(e) => {
             let json = error_envelope_string(&e);
+            let exit_code = e.code.exit_code();
 
             // A failed exec has already streamed the script's output to stdout,
             // so an envelope appended there would corrupt both. A dry run
             // streams nothing and keeps its envelope on stdout.
             if phase == "exec" && !dry_run {
-                StateAwareExit::ExecError(json)
+                StateAwareExit::ExecError(json, exit_code)
             } else {
-                StateAwareExit::Error(json)
+                StateAwareExit::Error(json, exit_code)
             }
         }
     }
 }
 
+/// Where a request failure is written, which differs by request shape.
 enum RequestErrorRoute<'a> {
-    Diagnostic,
-    Envelope(&'a MxcError),
+    /// One-shot: a typed envelope on stderr, beside the diagnostics, because
+    /// stdout belongs to the script's own output.
+    Stderr(MxcError),
+    /// State-aware: the envelope *is* the operation's response document, so it
+    /// goes to stdout where the caller parses the result.
+    Stdout(&'a MxcError),
 }
 
 fn request_error_route(error: &ParseError) -> RequestErrorRoute<'_> {
@@ -737,8 +743,8 @@ fn request_error_route(error: &ParseError) -> RequestErrorRoute<'_> {
         ParseError::Decode(_)
         | ParseError::Version(_)
         | ParseError::OneShot(_)
-        | ParseError::OneShotMalformed(_) => RequestErrorRoute::Diagnostic,
-        ParseError::StateAware(e) => RequestErrorRoute::Envelope(e),
+        | ParseError::OneShotMalformed(_) => RequestErrorRoute::Stderr(error.to_mxc_error()),
+        ParseError::StateAware(e) => RequestErrorRoute::Stdout(e),
     }
 }
 
@@ -747,10 +753,8 @@ fn reject_state_aware_without_operation(logger: &mut Logger) -> ! {
         remove 'phase' and 'sandboxId' from the config JSON";
     let error = ParseError::OneShot(WxcError::ConfigParse(message.to_string()));
     log_request_parse_rejection(logger, &error, None);
-    eprintln!("Request error");
-    eprintln!("{message}");
     eprint!("{}", logger.get_buffer());
-    process::exit(1);
+    emit_mxc_error_exit(&MxcError::malformed_request(message));
 }
 
 fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError, phase: Option<Phase>) {
@@ -803,18 +807,9 @@ fn print_error_envelope(error: &MxcError) {
 
 /// Serialise `error` to its JSON response-envelope string. Split out of
 /// [`print_error_envelope`] so [`finalize_state_aware_outcome`] can build the
-/// error-exit envelope without printing, and so both the print path and the
-/// state-aware exit path share one serialisation (including the last-resort
-/// fallback when the envelope itself fails to serialise).
+/// error-exit envelope without printing.
 fn error_envelope_string(error: &MxcError) -> String {
-    let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(error);
-    serde_json::to_string(&envelope).unwrap_or_else(|_| {
-        // Last-resort path: serialisation of the envelope itself failed — emit a
-        // minimal structurally-valid envelope so consumers that require
-        // `error.code` still parse something.
-        r#"{"error":{"code":"backend_error","message":"failed to serialise error envelope"}}"#
-            .to_string()
-    })
+    error.to_envelope_string()
 }
 
 fn config_input(cli: &Cli) -> Option<(String, bool)> {
@@ -1057,19 +1052,23 @@ fn main() {
     match mxc_sdk::mxc_common::filesystem_dacl::recover_orphaned_state() {
         Ok(report) => {
             if report.files_processed > 0 || !report.errors.is_empty() {
-                eprintln!(
+                let mut warnings = vec![format!(
                     "DACL recovery: {} file(s), {} ACE(s) restored, {} pruned (missing), {} error(s)",
                     report.files_processed,
                     report.aces_restored,
                     report.aces_pruned_missing,
                     report.errors.len()
+                )];
+                warnings.extend(
+                    report
+                        .errors
+                        .iter()
+                        .map(|e| format!("DACL recovery error: {e}")),
                 );
-                for e in &report.errors {
-                    eprintln!("  {e}");
-                }
+                emit_warning_envelopes(&warnings);
             }
         }
-        Err(e) => eprintln!("DACL recovery failed: {e}"),
+        Err(e) => emit_warning_envelopes(&[format!("DACL recovery failed: {e}")]),
     }
 
     // --probe is a detection-only fast path used by SDK
@@ -1093,15 +1092,17 @@ fn main() {
                 ) {
                     Ok(MxcRequest::OneShot(request)) => request,
                     Ok(MxcRequest::StateAware(_)) | Err(_) => {
-                        eprintln!("Error: failed to load probe config");
                         eprint!("{}", probe_logger.get_buffer());
-                        process::exit(1);
+                        emit_mxc_error_exit(&MxcError::malformed_request(
+                            "failed to load probe config",
+                        ));
                     }
                 },
                 Err(_) => {
-                    eprintln!("Error: failed to load probe config");
                     eprint!("{}", probe_logger.get_buffer());
-                    process::exit(1);
+                    emit_mxc_error_exit(&MxcError::malformed_request(
+                        "failed to load probe config",
+                    ));
                 }
             }
         } else {
@@ -1109,17 +1110,13 @@ fn main() {
         };
         let output = match mxc_sdk::mxc_engine::probe_execution_request(Some(&request)) {
             Ok(output) => output,
-            Err(error) => {
-                eprintln!("Error: {}", error.message);
-                process::exit(1);
-            }
+            Err(error) => emit_mxc_error_exit(&error.into_mxc_error()),
         };
         match mxc_sdk::process_container_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
-            Err(e) => {
-                eprintln!("Error: probe serialization failed: {e}");
-                process::exit(1);
-            }
+            Err(e) => emit_mxc_error_exit(&MxcError::backend_error(format!(
+                "probe serialization failed: {e}"
+            ))),
         }
         return;
     }
@@ -1288,9 +1285,7 @@ fn main() {
                 process::exit(1);
             }
             None => {
-                eprintln!("Request error");
-                eprintln!("{}", error.into_error());
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::malformed_request(error.into_error().to_string()));
             }
         },
         None => {
@@ -1307,8 +1302,7 @@ fn main() {
                     eprint!("{}", logger.get_buffer());
                     process::exit(1);
                 }
-                eprintln!("Error: {message}");
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::malformed_request(message));
             }
             None
         }
@@ -1318,10 +1312,9 @@ fn main() {
     if cli.delete {
         let name = match cli.containername {
             Some(ref n) => n.as_str(),
-            None => {
-                eprintln!("Error: --containername is required with --delete");
-                process::exit(1);
-            }
+            None => emit_mxc_error_exit(&MxcError::malformed_request(
+                "--containername is required with --delete",
+            )),
         };
         let success = delete_app_container_profile(name, &mut logger);
         print!("{}", logger.get_buffer());
@@ -1390,15 +1383,16 @@ fn main() {
         Err(error) => {
             log_request_parse_rejection(&mut logger, &error, None);
             match request_error_route(&error) {
-                RequestErrorRoute::Diagnostic => {
-                    eprint!("Request error\n{}", logger.get_buffer());
+                RequestErrorRoute::Stderr(typed) => {
+                    eprint!("{}", logger.get_buffer());
+                    emit_mxc_error_exit(&typed);
                 }
-                RequestErrorRoute::Envelope(e) => {
+                RequestErrorRoute::Stdout(e) => {
                     print_error_envelope(e);
                     eprint!("{}", logger.get_buffer());
+                    process::exit(e.code.exit_code());
                 }
             }
-            process::exit(1);
         }
     };
 
@@ -1449,35 +1443,34 @@ fn main() {
                 "containment",
                 "",
             );
-            eprintln!("Error: {message}");
             telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
                 requested_sandbox_kind,
                 telemetry::FailureReason::ConfigError,
             );
-            process::exit(1);
+            emit_mxc_error_exit(&MxcError::policy_validation(message));
         }
         let injected = apply_permissive_learning_mode(&mut request.policy.capabilities);
         let context = match audit::prepare_request(&mut request, config_file_path(&cli)) {
             Ok(context) => context,
             Err(message) => {
-                eprintln!("Error: {message}");
                 telemetry::emit_early_exit_with_kind(
                     telemetry_active,
                     &request.containment,
                     requested_sandbox_kind,
                     telemetry::FailureReason::ConfigError,
                 );
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::backend_error(message));
             }
         };
         audit_context = Some(context);
         logger.log("WARNING: --audit enabled - AppContainer restrictions will NOT be enforced\n");
         if injected && cli.audit_verbose {
-            eprintln!(
-                "[mxc] permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
-            );
+            emit_warning_envelopes(&[
+                "permissiveLearningMode injected via --audit - AppContainer restrictions are NOT enforced"
+                    .to_string(),
+            ]);
         }
     }
 
@@ -1491,9 +1484,6 @@ fn main() {
             "process.commandLine",
             "",
         );
-        eprintln!(
-            "Error: no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path."
-        );
         eprint!("{}", logger.get_buffer());
         telemetry::emit_early_exit_with_kind(
             telemetry_active,
@@ -1501,7 +1491,9 @@ fn main() {
             requested_sandbox_kind,
             telemetry::FailureReason::ConfigError,
         );
-        process::exit(1);
+        emit_mxc_error_exit(&MxcError::malformed_request(
+            "no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path.",
+        ));
     }
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
@@ -1610,22 +1602,23 @@ fn main() {
             resolved.runner
         }
         Err(e) => {
+            let error = e.into_mxc_error();
             log_config_rejected(
                 &mut logger,
-                RejectionReason::RunnerUnavailable,
+                rejection_reason_for(&error),
                 request.containment.wire_name(),
                 "containment",
                 "",
             );
-            eprintln!("error: {}", e.message);
             eprint!("{}", logger.get_buffer());
+            emit_warning_envelopes(&logger.take_warnings());
             telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
                 requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
-            process::exit(1);
+            emit_mxc_error_exit(&error);
         }
     };
 
@@ -1645,22 +1638,28 @@ fn main() {
         if !cli.dry_run {
             match audit::finalize(&mut response, context, &exe_dir, cli.audit_verbose) {
                 Ok(cleanup_warnings) => {
-                    for warning in cleanup_warnings {
-                        let message = format!("[audit] warning: {warning}");
-                        let _ = writeln!(logger, "{message}");
-                        eprintln!("{message}");
+                    for warning in &cleanup_warnings {
+                        let _ = writeln!(logger, "[audit] warning: {warning}");
                     }
+                    response.extend_warnings(
+                        cleanup_warnings
+                            .into_iter()
+                            .map(|warning| format!("[audit] {warning}")),
+                    );
                     eprintln!("[audit] artifacts written to {}", context.log_dir.display());
                 }
                 Err(error) => {
                     let message = format!("audit finalization failed: {error}");
                     let _ = writeln!(logger, "[audit] {message}");
-                    eprintln!("error: {message}");
-                    response.exit_code = -1;
                     response.error_message = match response.error_message.is_empty() {
                         true => message,
                         false => format!("{}; {message}", response.error_message),
                     };
+                    // Derived rather than hard-coded so the status keeps
+                    // agreeing with the code the envelope reports: an
+                    // otherwise-clean run carries `backend_error`, and a run
+                    // the backend already refused stays a rejection.
+                    response.exit_code = response.failure_phase.failure_exit_code();
                 }
             }
         }
@@ -1685,11 +1684,11 @@ fn main() {
     // deny-by-default under --audit). The logger only records these rather than
     // writing them itself, so that `mxc_engine` embedders don't get unannounced
     // writes to a terminal they own. wxc-exec *does* own its terminal, so it
-    // opts in here. Messages carry their own banner; print them verbatim.
+    // opts in here. Warnings travel on the response so a programmatic caller
+    // reads them from one structured place rather than scraping stderr.
     // Emitted before the dry-run branch below, which exits the process.
-    for warning in logger.warnings() {
-        eprintln!("{warning}");
-    }
+    response.extend_warnings(logger.take_warnings());
+    emit_warning_envelopes(response.warnings());
 
     #[cfg(target_os = "windows")]
     if let Err(error) = mxc_sdk::mxc_engine::emit_verbose_telemetry(
@@ -1974,7 +1973,7 @@ mod tests {
 
     impl ResolveError {
         fn from_parse(e: ParseError) -> Self {
-            let envelope_routed = matches!(request_error_route(&e), RequestErrorRoute::Envelope(_));
+            let envelope_routed = matches!(request_error_route(&e), RequestErrorRoute::Stdout(_));
 
             let message = match e {
                 ParseError::Decode(err)
@@ -2064,28 +2063,33 @@ mod tests {
 
     #[test]
     fn request_error_route_matches_the_output_conventions() {
-        let decode = ParseError::Decode(WxcError::ConfigParse("decode".to_string()));
-        assert!(matches!(
-            request_error_route(&decode),
-            RequestErrorRoute::Diagnostic
-        ));
-
-        let version = ParseError::Version(WxcError::ConfigParse("version".to_string()));
-        assert!(matches!(
-            request_error_route(&version),
-            RequestErrorRoute::Diagnostic
-        ));
-
-        let oneshot = ParseError::OneShot(WxcError::ConfigParse("oneshot".to_string()));
-        assert!(matches!(
-            request_error_route(&oneshot),
-            RequestErrorRoute::Diagnostic
-        ));
+        // The stderr route still classifies: a one-shot parse failure blames
+        // the request, so it reports a code rather than an untyped exit.
+        for (case, error) in [
+            (
+                "decode",
+                ParseError::Decode(WxcError::ConfigParse("decode".to_string())),
+            ),
+            (
+                "version",
+                ParseError::Version(WxcError::ConfigParse("version".to_string())),
+            ),
+            (
+                "oneshot",
+                ParseError::OneShot(WxcError::ConfigParse("oneshot".to_string())),
+            ),
+        ] {
+            let RequestErrorRoute::Stderr(typed) = request_error_route(&error) else {
+                panic!("{case}: one-shot failures belong on stderr");
+            };
+            assert_eq!(typed.code, MxcErrorCode::MalformedRequest, "{case}");
+            assert_eq!(typed.code.exit_code(), 1, "{case}");
+        }
 
         let stateaware = ParseError::StateAware(MxcError::malformed_request("stateaware"));
         assert!(matches!(
             request_error_route(&stateaware),
-            RequestErrorRoute::Envelope(_)
+            RequestErrorRoute::Stdout(_)
         ));
     }
 
@@ -2310,7 +2314,7 @@ mod tests {
             )
             .unwrap_err();
             assert!(
-                matches!(request_error_route(&error), RequestErrorRoute::Diagnostic),
+                matches!(request_error_route(&error), RequestErrorRoute::Stderr(_)),
                 "{case}: pre-discrimination failures must remain stderr diagnostics"
             );
 
@@ -2349,7 +2353,7 @@ mod tests {
             &mut logger,
         )
         .unwrap_err();
-        let RequestErrorRoute::Envelope(error) = request_error_route(&error) else {
+        let RequestErrorRoute::Stdout(error) = request_error_route(&error) else {
             panic!("identified lifecycle requests must retain their JSON error envelope");
         };
         let envelope: serde_json::Value =
@@ -2370,7 +2374,7 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(
             request_error_route(&error),
-            RequestErrorRoute::Diagnostic
+            RequestErrorRoute::Stderr(_)
         ));
         assert!(logger.get_buffer().contains("duplicate field `telemetry`"));
     }
@@ -3155,11 +3159,12 @@ mod tests {
         let outcome: Result<DispatchOutcome, MxcError> =
             Err(MxcError::malformed_request("boom".to_string()));
         match finalize_state_aware_outcome(outcome, "provision", false) {
-            StateAwareExit::Error(json) => {
+            StateAwareExit::Error(json, exit_code) => {
                 // Must be a parseable envelope carrying the error code so consumers
                 // that key off `error.code` still work.
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 assert!(parsed["error"]["code"].is_string(), "{json}");
+                assert_eq!(exit_code, 1);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -3170,10 +3175,11 @@ mod tests {
         let outcome: Result<DispatchOutcome, MxcError> =
             Err(MxcError::backend_error("output was truncated".to_string()));
         match finalize_state_aware_outcome(outcome, "exec", false) {
-            StateAwareExit::ExecError(json) => {
+            StateAwareExit::ExecError(json, exit_code) => {
                 // Still a parseable envelope; only the stream it lands on changes.
                 let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
                 assert!(parsed["error"]["code"].is_string(), "{json}");
+                assert_eq!(exit_code, -1);
             }
             other => panic!("expected ExecError, got {other:?}"),
         }
@@ -3185,7 +3191,7 @@ mod tests {
             Err(MxcError::malformed_request("boom".to_string()));
         assert!(matches!(
             finalize_state_aware_outcome(outcome, "exec", true),
-            StateAwareExit::Error(_)
+            StateAwareExit::Error(_, 1)
         ));
     }
 }

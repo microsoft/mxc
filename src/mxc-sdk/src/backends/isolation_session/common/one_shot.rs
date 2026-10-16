@@ -9,8 +9,9 @@ use std::fmt::Write;
 use std::io::IsTerminal;
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use crate::mxc_common::script_runner::ScriptRunner;
+use crate::mxc_common::state_aware_backend::ExecOutcome;
 use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
@@ -34,13 +35,13 @@ use super::IsolationSessionRunner;
 ///   anything applied — so there is nothing to retain.
 fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if !request.lifecycle.destroy_on_exit {
-        return Err(ScriptResponse::error(
+        return Err(ScriptResponse::rejected(
             "lifecycle.destroyOnExit=false is not supported by the isolation session backend; \
              the session is always stopped and the agent user removed",
         ));
     }
     if request.lifecycle.preserve_policy {
-        return Err(ScriptResponse::error(
+        return Err(ScriptResponse::rejected(
             "lifecycle.preservePolicy=true is not supported by the isolation session backend; \
              it installs no persistent filesystem or network enforcement, so there is none \
              to preserve",
@@ -121,8 +122,8 @@ impl ScriptRunner for IsolationSessionRunner {
             return e.into();
         }
 
-        let exit_code = match manager.create_process(&options, Some(logger)) {
-            Ok(code) => code,
+        let exec_outcome = match manager.create_process(&options, Some(logger)) {
+            Ok(exec_outcome) => exec_outcome,
             Err(e) => {
                 let stopped = manager.stop_session().is_ok();
                 let deprovisioned = manager.deprovision_agent_user().is_ok();
@@ -158,13 +159,27 @@ impl ScriptRunner for IsolationSessionRunner {
         // Output already streamed live to wxc-exec's stdio via relay
         // threads in `create_process` — captured fields intentionally
         // empty (same pattern as AppContainer).
-        ScriptResponse {
-            exit_code,
-            standard_out: String::new(),
-            standard_err: String::new(),
-            error_message: String::new(),
+        completed_response(exec_outcome, options.timeout_ms)
+    }
+}
+
+/// The response for a completed run, so a workload that failed or timed out is
+/// told apart from the sandbox failing around it.
+fn completed_response(outcome: ExecOutcome, timeout_ms: u32) -> ScriptResponse {
+    match outcome {
+        ExecOutcome::Exited(0) => ScriptResponse {
+            exit_code: 0,
             ..Default::default()
-        }
+        },
+        ExecOutcome::Exited(exit_code) => ScriptResponse {
+            exit_code,
+            failure_phase: FailurePhase::ProcessExited,
+            ..Default::default()
+        },
+        ExecOutcome::TimedOut => ScriptResponse::failed(
+            FailurePhase::Timeout,
+            &format!("script timed out after {timeout_ms}ms"),
+        ),
     }
 }
 
@@ -174,6 +189,22 @@ mod tests {
     use crate::mxc_common::models::{
         ContainerPolicy, LifecycleConfig, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
     };
+
+    #[test]
+    fn completed_runs_distinguish_exit_from_timeout() {
+        let ok = completed_response(ExecOutcome::Exited(0), 5_000);
+        assert_eq!((ok.exit_code, ok.failure_phase), (0, FailurePhase::None));
+
+        let exited = completed_response(ExecOutcome::Exited(-1), 5_000);
+        assert_eq!(
+            (exited.exit_code, exited.failure_phase),
+            (-1, FailurePhase::ProcessExited)
+        );
+
+        let timed_out = completed_response(ExecOutcome::TimedOut, 5_000);
+        assert_eq!(timed_out.failure_phase, FailurePhase::Timeout);
+        assert_eq!(timed_out.error_message, "script timed out after 5000ms");
+    }
 
     #[test]
     fn validate_runner_one_shot_rejects_default_network() {
@@ -248,6 +279,29 @@ mod tests {
             "got {}",
             resp.error_message
         );
+    }
+
+    #[test]
+    fn validate_runner_one_shot_lifecycle_refusals_blame_the_request() {
+        let runner = IsolationSessionRunner::new();
+        for lifecycle in [
+            LifecycleConfig {
+                destroy_on_exit: false,
+                preserve_policy: false,
+            },
+            LifecycleConfig {
+                destroy_on_exit: true,
+                preserve_policy: true,
+            },
+        ] {
+            let req = ExecutionRequest {
+                lifecycle,
+                ..canonical_request()
+            };
+            let resp = runner.validate_runner(&req).unwrap_err();
+            assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+            assert_eq!(resp.exit_code, 1);
+        }
     }
 
     #[test]

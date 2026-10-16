@@ -85,6 +85,26 @@ const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 /// Proxy-related env var names to strip/override when building the child env block.
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
 
+const BFSCFG_MISSING_MSG: &str =
+    "Filesystem policy error: bfscfg.exe is not available on this Windows build, so the \
+     AppContainer + BFS filesystem tier cannot enforce your policy. Use an OS build that \
+     includes bfscfg.exe, or run on a host that supports the BaseContainer backend (which does \
+     not require bfscfg.exe).";
+
+/// A failure while bringing the sandbox up, before the child could run.
+fn launch_failed(message: &str) -> ScriptResponse {
+    ScriptResponse::failed(FailurePhase::LaunchFailed, message)
+}
+
+/// Attribute a BFS configuration failure: an absent `bfscfg.exe` is a host that
+/// cannot provide this tier at all, not a policy this run could restate.
+fn bfs_configure_failure(error: &WxcError) -> ScriptResponse {
+    match error {
+        WxcError::BfsNotAvailable => ScriptResponse::unavailable(BFSCFG_MISSING_MSG),
+        other => launch_failed(&other.to_string()),
+    }
+}
+
 fn create_process_failure(
     err: &windows_core::Error,
     command_line: &str,
@@ -1559,7 +1579,7 @@ impl AppContainerScriptRunner {
         }
 
         if let Err(e) = self.initialize(request) {
-            return Err(ScriptResponse::error(&e.to_string()));
+            return Err(launch_failed(&e.to_string()));
         }
 
         let principal_id = self.get_principal_id();
@@ -1570,7 +1590,9 @@ impl AppContainerScriptRunner {
         let bfscfg_path = if self.filesystem_mode == FilesystemMode::Bfs {
             match crate::process_container_common::fallback_detector::find_bfscfg_exe() {
                 Ok(p) => p,
-                Err(e) => return Err(ScriptResponse::error(&e.to_string())),
+                // The only failure is an OS that cannot report its own install
+                // directory, which no request can work around.
+                Err(e) => return Err(ScriptResponse::unavailable(&e.to_string())),
             }
         } else {
             None
@@ -1580,16 +1602,7 @@ impl AppContainerScriptRunner {
             FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
         if self.filesystem_mode == FilesystemMode::Bfs {
             if let Err(e) = bfs_manager.configure(&request.policy, logger) {
-                let msg = if matches!(&e, WxcError::BfsNotAvailable) {
-                    "Filesystem policy error: bfscfg.exe is not available on this Windows \
-                     build, so the AppContainer + BFS filesystem tier cannot enforce your \
-                     policy. Use an OS build that includes bfscfg.exe, or run on a host that \
-                     supports the BaseContainer backend (which does not require bfscfg.exe)."
-                        .to_string()
-                } else {
-                    e.to_string()
-                };
-                return Err(ScriptResponse::error(&msg));
+                return Err(bfs_configure_failure(&e));
             }
         }
 
@@ -1640,7 +1653,7 @@ impl AppContainerScriptRunner {
                 self.proxy_address = proxy_coordinator.address().cloned();
             }
             Err(err) => {
-                return Err(ScriptResponse::error(&err.to_string()));
+                return Err(launch_failed(&err.to_string()));
             }
         }
 
@@ -1779,10 +1792,9 @@ impl SandboxBackend for AppContainerScriptRunner {
             false,
         )?;
         if request.policy.capture_denials.is_some() && self.guarded_capture_factory.is_none() {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
-            });
+            return Err(ScriptResponse::unavailable(
+                CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
+            ));
         }
         if !request.policy.denied_paths.is_empty()
             && self.filesystem_mode != FilesystemMode::Dacl
@@ -1816,12 +1828,12 @@ impl SandboxBackend for AppContainerScriptRunner {
             Ok(c) => c,
             Err(e) => {
                 self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
-                return Err(ScriptResponse::error(&e.to_string()));
+                return Err(launch_failed(&e.to_string()));
             }
         };
         if let Err(e) = child.resume() {
             self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
-            return Err(ScriptResponse::error(&e.to_string()));
+            return Err(launch_failed(&e.to_string()));
         }
 
         Ok(Box::new(AppContainerSandboxProcess::new(
@@ -2270,6 +2282,23 @@ impl Drop for AppContainerSandboxProcess {
 #[cfg(test)]
 mod tests {
     use crate::mxc_common::audit::{TeardownSkipReason, TeardownStatus};
+
+    #[test]
+    fn a_missing_bfscfg_is_an_unavailable_host_not_a_rejected_policy() {
+        use super::*;
+
+        let unavailable = bfs_configure_failure(&WxcError::BfsNotAvailable);
+        assert_eq!(unavailable.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            unavailable.exit_code,
+            FailurePhase::BackendUnavailable.failure_exit_code()
+        );
+        assert!(unavailable.error_message.contains("bfscfg.exe"));
+
+        let launch = bfs_configure_failure(&WxcError::FilesystemPolicy("add failed".to_string()));
+        assert_eq!(launch.failure_phase, FailurePhase::LaunchFailed);
+        assert!(launch.error_message.contains("add failed"));
+    }
 
     #[test]
     fn appcontainer_network_audit_records_proxyless_proxy_and_start_failure() {

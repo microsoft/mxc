@@ -111,8 +111,9 @@ function Phase-FsEnumerate {
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
         $combined = "$($r.Stdout)`n$($r.Stderr)`n$(Read-Log $log)"
 
-        # wxc-exec exits 1 when it refuses a request; -1 means a launch API
-        # failed, which would mean the policy was never judged.
+        # enumeratePaths cannot degrade to an AppContainer tier, so the refusal
+        # names the field and exits 1; -1 would mean a launch API failed, which
+        # would mean the policy was never judged.
         Record-Result -Phase 'P4e' -Name 'unsupported host refuses the run (exit=1)' `
             -Pass (-not $r.TimedOut -and $r.ExitCode -eq 1) `
             -Detail "exit=$($r.ExitCode); timedOut=$($r.TimedOut)"

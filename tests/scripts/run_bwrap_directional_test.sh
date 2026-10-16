@@ -70,6 +70,11 @@ run_rejected() {
         echo "FAIL: $label (refused, but not for the expected reason: '$marker')"
         exit 1
     fi
+    if [ "$rc" != 1 ] || ! grep -qF '"code":"policy_validation"' <<<"$out"; then
+        echo "$out"
+        echo "FAIL: $label (expected exit 1 with a policy_validation envelope, got exit $rc)"
+        exit 1
+    fi
     echo "PASS: $label"
 }
 

@@ -938,18 +938,41 @@ function Test-WasRejected {
     if ($both -match '(?i)create_process_failed|CreateProcessSecurityEnvironment failed') {
         return $false
     }
-    # Validation failures surface as config_parse or policy_validation.
-    if ($both -match '"code"\s*:\s*"backend_error"') { return $false }
+    # A runtime fault and a host that cannot provide the backend are both
+    # failures of the run, not judgements of the policy.
+    if ($both -match '"code"\s*:\s*"(backend_error|backend_unavailable)"') { return $false }
     # No tier could be built on this host, so the policy was never judged.
     # Emitted as a ConfigRejected event, which the typed checks above miss.
     if ($both -match '"reason"\s*:\s*"runner_unavailable"') { return $false }
 
-    # Positive evidence. wxc-exec prints this banner for every request it
-    # refuses, at parse stage and at backend validate. Requiring it means an
-    # unexplained non-zero exit is NOT counted as a rejection.
+    # Positive evidence. Every code below blames the request, so each one is a
+    # refusal and exits 1 per MxcErrorCode::exit_code (lifecycle-state codes
+    # are omitted because one-shot runs cannot produce them). The two text
+    # banners cover the paths that still print prose. Requiring one of these
+    # means an unexplained non-zero exit is NOT counted as a rejection.
+    $rejectionCodes = 'policy_validation|malformed_request|' +
+                      'unsupported_containment|unsupported_phase|malformed_id'
     return [bool]($both -match '(?im)^\s*Request error\s*$' -or
                   $both -match '(?i)Configuration parse error' -or
-                  $both -match '"code"\s*:\s*"(config_parse|policy_validation)"')
+                  $both -match ('"code"\s*:\s*"(' + $rejectionCodes + ')"'))
+}
+
+# A run the host could not service at all, reported as a typed
+# `backend_unavailable` envelope on stderr.
+#
+# Host capability probes answer whether an API is present, which is not the
+# same question as whether it is implemented: an export can resolve and still
+# return E_NOTIMPL when called. Behavioural assertions that need a working
+# provider therefore gate on what a real run reported rather than on the probe
+# alone, so such a host skips instead of failing on absent output.
+function Test-BackendUnavailable {
+    param(
+        [Parameter(Mandatory)] [object]$Run,
+        [AllowEmptyString()] [string]$Log
+    )
+    $result = $(if ($Run.PSObject.Properties['Result']) { $Run.Result } else { $Run })
+    $err = "$(if ($result.PSObject.Properties['Stderr']) { $result.Stderr })"
+    return [bool]("$Log`n$err" -match '"code"\s*:\s*"backend_unavailable"')
 }
 
 # The non-network counterpart of Get-NetVerdict's NORUN state.

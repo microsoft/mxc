@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -44,6 +44,16 @@ use crate::bwrap_common::{
 };
 
 const DNS_PORT: u16 = 53;
+
+/// A host lookup failure is a launch fault, not a refusal of the policy.
+fn proxy_resolve_failure_response(error: proxy_network::ProxyResolveError) -> ScriptResponse {
+    match error {
+        proxy_network::ProxyResolveError::Rejected(message) => ScriptResponse::rejected(&message),
+        proxy_network::ProxyResolveError::Lookup(message) => {
+            ScriptResponse::failed(FailurePhase::LaunchFailed, &message)
+        }
+    }
+}
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -114,13 +124,13 @@ impl SandboxBackend for BubblewrapScriptRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(msg) => return Err(ScriptResponse::rejected(&msg)),
         };
         // Reject any policy path the invoking user cannot access, so the sandbox
         // never gains access the caller lacks. Runs after object normalization
         // so it sees the already-tightened intents.
         if let Err(msg) = crate::mxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
+            return Err(ScriptResponse::rejected(&msg));
         }
         // Resolve denied paths that traverse a symlink to their real host path
         // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
@@ -128,7 +138,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // none). See docs/backends/bwrap/bubblewrap-backend.md.
         let plan = match resolve_denied_paths(&request.policy, logger) {
             Ok(plan) => plan,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(msg) => return Err(ScriptResponse::rejected(&msg)),
         };
         let resolved;
         let request = match plan.paths {
@@ -146,7 +156,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // The masks are built from the list above, not from the one the caller
         // wrote, so the pin conflict has to be judged against it too.
         if let Err(msg) = check_pin_against_denied_hosts(request) {
-            return Err(ScriptResponse::error(&msg));
+            return Err(ScriptResponse::rejected(&msg));
         }
         warn_resolver_mount_hint(request, logger);
         warn_cwd_mount_hint(request, logger);
@@ -189,7 +199,7 @@ impl BubblewrapScriptRunner {
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
         if request.script_code.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "script_code is empty — nothing to execute.",
             ));
         }
@@ -217,7 +227,7 @@ impl BubblewrapScriptRunner {
             if crate::mxc_common::proxy_env::proxy_url_has_credentials(&url) {
                 // Built from the redacted form so the rejection cannot become
                 // the leak it is rejecting.
-                return Err(ScriptResponse::error(&format!(
+                return Err(ScriptResponse::rejected(&format!(
                     "Bubblewrap: runtimeConfig.networkProxy must not carry credentials ('{}'). \
                      Bubblewrap passes the proxy URL to bwrap as a --setenv command-line \
                      argument, and process arguments are world-readable through \
@@ -233,10 +243,10 @@ impl BubblewrapScriptRunner {
         // Programmatic requests also need the parser's proxy-only restriction:
         // direct egress must not be accepted and then discarded at launch.
         if let Some(reason) = bwrap_command::proxy_with_egress_rejection(request) {
-            return Err(ScriptResponse::error(reason));
+            return Err(ScriptResponse::rejected(reason));
         }
         if let Some(reason) = bwrap_command::directional_network_rejection(request) {
-            return Err(ScriptResponse::error(reason));
+            return Err(ScriptResponse::rejected(reason));
         }
 
         // Proxy-only networking derives the sandbox-visible endpoint from the
@@ -258,12 +268,12 @@ impl BubblewrapScriptRunner {
         if proxy_only {
             if let Some(address) = request.policy.network_proxy.address.as_ref() {
                 if let Err(error) = proxy_network::SandboxProxy::check_without_resolving(address) {
-                    return Err(ScriptResponse::error(&error));
+                    return Err(ScriptResponse::rejected(&error));
                 }
                 if let Err(error) =
                     proxy_network::check_hosts_pin_against_policy(address, &request.policy)
                 {
-                    return Err(ScriptResponse::error(&error));
+                    return Err(ScriptResponse::rejected(&error));
                 }
                 // Repeated in `spawn` against the normalized policy.
             }
@@ -277,7 +287,7 @@ impl BubblewrapScriptRunner {
         let egress_plan = if firewall_enforced {
             match network_rules::EgressPlan::for_request(request) {
                 Ok(plan) => Some(plan),
-                Err(error) => return Err(ScriptResponse::error(&error)),
+                Err(error) => return Err(ScriptResponse::rejected(&error)),
             }
         } else {
             None
@@ -287,7 +297,7 @@ impl BubblewrapScriptRunner {
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
         if let Err(err) = probe() {
-            return Err(ScriptResponse::error(&err.to_string()));
+            return Err(ScriptResponse::unavailable(&err.to_string()));
         }
         if proxy_only || firewall_enforced {
             // Proxy and firewall are mutually exclusive, so this names the one
@@ -298,7 +308,7 @@ impl BubblewrapScriptRunner {
                 proxy_network::PrivateNetworkUse::FirewallEnforcement
             };
             if let Err(error) = proxy_network::probe_dependencies(use_case) {
-                return Err(ScriptResponse::error(&error));
+                return Err(ScriptResponse::unavailable(&error));
             }
         }
 
@@ -457,7 +467,7 @@ impl BubblewrapScriptRunner {
             })?;
             Some(
                 proxy_network::SandboxProxy::resolve(address)
-                    .map_err(|error| ScriptResponse::error(&error))?,
+                    .map_err(proxy_resolve_failure_response)?,
             )
         } else {
             None
@@ -485,7 +495,9 @@ impl BubblewrapScriptRunner {
                     request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
-                    Err(error) => return Err(ScriptResponse::error(&error)),
+                    Err(error) => {
+                        return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error))
+                    }
                 }
             }
             // Direct directional egress uses the same private namespace.
@@ -498,7 +510,7 @@ impl BubblewrapScriptRunner {
                     Some(plan) => plan,
                     None => match network_rules::EgressPlan::for_request(request) {
                         Ok(plan) => plan,
-                        Err(error) => return Err(ScriptResponse::error(&error)),
+                        Err(error) => return Err(ScriptResponse::rejected(&error)),
                     },
                 };
                 let resolver = proxy_network::ResolverPin::for_host(&request.policy, logger);
@@ -514,7 +526,9 @@ impl BubblewrapScriptRunner {
                         warn_resolver_blocked_by_egress(&plan, network.resolver_pinned(), logger);
                         Some(network)
                     }
-                    Err(error) => return Err(ScriptResponse::error(&error)),
+                    Err(error) => {
+                        return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error))
+                    }
                 }
             }
             None => None,
@@ -534,7 +548,7 @@ impl BubblewrapScriptRunner {
                 Ok(startup) => Some(startup),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
-                    return Err(ScriptResponse::error(&error));
+                    return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error));
                 }
             },
             None => None,
@@ -578,9 +592,10 @@ impl BubblewrapScriptRunner {
                 Ok(pty) => Some(pty),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
-                    return Err(ScriptResponse::error(&format!(
-                        "Bubblewrap: failed to allocate PTY: {error}"
-                    )));
+                    return Err(ScriptResponse::failed(
+                        FailurePhase::LaunchFailed,
+                        &format!("Bubblewrap: failed to allocate PTY: {error}"),
+                    ));
                 }
             },
         };
@@ -600,10 +615,10 @@ impl BubblewrapScriptRunner {
             Ok(process) => process,
             Err(error) => {
                 stop_proxy_network(&mut proxy_network, logger);
-                return Err(ScriptResponse::error(&format!(
-                    "Bubblewrap: failed to spawn bwrap: {}",
-                    error
-                )));
+                return Err(ScriptResponse::failed(
+                    FailurePhase::LaunchFailed,
+                    &format!("Bubblewrap: failed to spawn bwrap: {}", error),
+                ));
             }
         };
 
@@ -626,7 +641,10 @@ impl BubblewrapScriptRunner {
                 let _ = child.kill();
                 let _ = child.wait();
                 stop_proxy_network(&mut proxy_network, logger);
-                return Err(ScriptResponse::error(&error));
+                return Err(ScriptResponse::failed(
+                    FailurePhase::PostLaunchFailed,
+                    &error,
+                ));
             }
         }
 
@@ -649,10 +667,13 @@ impl BubblewrapScriptRunner {
                     let _ = child.wait();
                     stop_proxy_network(&mut proxy_network, logger);
                     let error = out_result.err().or(err_result.err());
-                    return Err(ScriptResponse::error(&format!(
-                        "Bubblewrap: failed to wrap stdio pipes: {}",
-                        error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
-                    )));
+                    return Err(ScriptResponse::failed(
+                        FailurePhase::PostLaunchFailed,
+                        &format!(
+                            "Bubblewrap: failed to wrap stdio pipes: {}",
+                            error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
+                        ),
+                    ));
                 }
             };
         let timeout = if request.script_timeout == 0 {
@@ -2125,6 +2146,88 @@ mod tests {
                 .validate_prepared_with_probe(&request, || Err(failure))
                 .unwrap_err();
             assert_eq!(error.error_message, expected);
+        }
+    }
+
+    /// A host without a usable bwrap is not a request the caller can rewrite, so
+    /// it must not be reported as a policy problem.
+    #[test]
+    fn an_unusable_bwrap_is_blamed_on_the_host() {
+        let request = base_request();
+        let failures = [
+            bwrap_version::BwrapUnavailable::NotFound,
+            bwrap_version::BwrapUnavailable::ProbeFailed {
+                status: Some(126),
+                detail: "permission denied".to_string(),
+            },
+            bwrap_version::BwrapUnavailable::UnrecognizedVersion("junk".to_string()),
+            bwrap_version::BwrapUnavailable::TooOld(bwrap_version::BwrapVersion::new(0, 4, 1)),
+        ];
+
+        for failure in failures {
+            let detail = failure.to_string();
+            let error = BubblewrapScriptRunner::new()
+                .validate_prepared_with_probe(&request, || Err(failure))
+                .unwrap_err();
+
+            assert_eq!(
+                error.failure_phase,
+                FailurePhase::BackendUnavailable,
+                "input={detail}; output={error:?}"
+            );
+            assert_eq!(error.exit_code, -1, "input={detail}; output={error:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_proxy_lookup_is_a_launch_fault_not_a_refusal() {
+        use crate::mxc_common::mxc_error::MxcErrorCode;
+        use proxy_network::ProxyResolveError;
+
+        let lookup =
+            proxy_resolve_failure_response(ProxyResolveError::Lookup("dns down".to_string()));
+        assert_eq!(lookup.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(
+            lookup.failure_phase.error_code(),
+            MxcErrorCode::BackendError
+        );
+        assert_eq!(lookup.exit_code, -1);
+
+        let refused =
+            proxy_resolve_failure_response(ProxyResolveError::Rejected("ipv6".to_string()));
+        assert_eq!(refused.failure_phase, FailurePhase::Rejected);
+        assert_eq!(refused.exit_code, 1);
+    }
+
+    #[test]
+    fn a_policy_this_backend_will_not_run_is_blamed_on_the_request() {
+        let runner = BubblewrapScriptRunner::new();
+        let empty_script = ExecutionRequest {
+            script_code: String::new(),
+            ..base_request()
+        };
+
+        for (what, request) in [
+            ("empty script_code", empty_script),
+            (
+                "proxy credentials",
+                request_with_a_credential_bearing_proxy(),
+            ),
+        ] {
+            let refusal = runner
+                .validate(&request)
+                .err()
+                .unwrap_or_else(|| panic!("input={what}; expected a refusal"));
+
+            assert_eq!(
+                refusal.failure_phase,
+                FailurePhase::Rejected,
+                "input={what}; output={refusal:?}"
+            );
+            assert_eq!(
+                refusal.exit_code, 1,
+                "input={what}; a refusal exits 1; output={refusal:?}"
+            );
         }
     }
 
