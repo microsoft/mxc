@@ -281,16 +281,20 @@ fn apply_environment_overrides<K, V>(
 }
 
 /// PowerShell-specific policy: when `pwsh.exe` is found on `path_dirs`
-/// (Windows only), grant the system-drive root (`C:\`) read-only — `pwsh.exe`
-/// enumerates the drive root on startup — plus the PSReadLine history directory
-/// read-write so the module can persist command history.
+/// (Windows only), grant the PSReadLine history directory read-write so the
+/// module can persist command history. Add the synthetic system-drive root
+/// (`C:\`) read-only only when `allow_drive_root_read` is true.
 ///
 /// Mirrors the SDK's `getPowerShellPolicy`. The system drive is read from the
 /// supplied environment (`SystemDrive`, defaulting to `C:`), as does `USERPROFILE`.
 ///
 /// On non-Windows, or when `pwsh.exe` is not on `path_dirs`, returns an empty
 /// policy.
-fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> FilesystemPolicyResult {
+fn powershell_policy(
+    path_dirs: &[String],
+    env: &[(String, String)],
+    allow_drive_root_read: bool,
+) -> FilesystemPolicyResult {
     if !is_windows() {
         return FilesystemPolicyResult::default();
     }
@@ -302,10 +306,14 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
         return FilesystemPolicyResult::default();
     }
 
-    let system_drive = env_get(env, "SystemDrive")
-        .filter(|s| !s.is_empty())
-        .unwrap_or("C:");
-    let readonly_paths = vec![format!("{system_drive}\\")];
+    let readonly_paths = if allow_drive_root_read {
+        let system_drive = env_get(env, "SystemDrive")
+            .filter(|s| !s.is_empty())
+            .unwrap_or("C:");
+        vec![format!("{system_drive}\\")]
+    } else {
+        Vec::new()
+    };
 
     let mut readwrite_paths: Vec<String> = Vec::new();
     if let Some(user_profile) = env_get(env, "USERPROFILE") {
@@ -337,10 +345,36 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
 /// when `pwsh.exe` is on `PATH`. The Rust port of `getAvailableToolsPolicy`.
 /// ProcessContainer filtering excludes existing ALL APPLICATION PACKAGES
 /// grants on Windows. If ACL inspection fails, retain the directory and emit
-/// a diagnostic warning rather than assume it is already accessible.
+/// a diagnostic warning rather than assume it is already accessible. The
+/// synthetic system-drive root is omitted; a drive root explicitly present in
+/// the supplied environment remains a discovered tool path. Use
+/// [`available_tools_policy_with_powershell_drive_root_read`] only when the
+/// compatibility grant is required.
 pub fn available_tools_policy(
     environment: Option<&[(String, String)]>,
     options: ToolsPolicyOptions,
+) -> FilesystemPolicyResult {
+    available_tools_policy_impl(environment, options, false)
+}
+
+/// Discover tool and SDK directories while opting into the legacy PowerShell
+/// system-drive compatibility grant.
+///
+/// When `pwsh.exe` is discovered, this adds the system-drive root to
+/// `readonly_paths`. On BaseContainer that permits recursive whole-drive reads,
+/// including unrelated user files. Prefer [`available_tools_policy`] unless
+/// that broad access is explicitly acceptable.
+pub fn available_tools_policy_with_powershell_drive_root_read(
+    environment: Option<&[(String, String)]>,
+    options: ToolsPolicyOptions,
+) -> FilesystemPolicyResult {
+    available_tools_policy_impl(environment, options, true)
+}
+
+fn available_tools_policy_impl(
+    environment: Option<&[(String, String)]>,
+    options: ToolsPolicyOptions,
+    allow_powershell_drive_root_read: bool,
 ) -> FilesystemPolicyResult {
     let env = env_or_process(environment);
     let env: &[(String, String)] = &env;
@@ -372,7 +406,7 @@ pub fn available_tools_policy(
         })
         .collect();
 
-    let pwsh = powershell_policy(&path_dirs, env);
+    let pwsh = powershell_policy(&path_dirs, env, allow_powershell_drive_root_read);
 
     let mut readonly = filtered;
     readonly.extend(pwsh.readonly_paths);
@@ -1183,7 +1217,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn powershell_policy_grants_system_drive_root() {
+    fn powershell_policy_grants_system_drive_root_only_when_opted_in() {
         use super::powershell_policy;
         use std::fs;
         use std::path::PathBuf;
@@ -1203,31 +1237,31 @@ mod tests {
         let ps_home_str = ps_home.to_string_lossy().into_owned();
 
         let env = vec![("USERPROFILE".to_string(), "C:\\Users\\example".to_string())];
-        let result = powershell_policy(std::slice::from_ref(&ps_home_str), &env);
+        let default_result = powershell_policy(std::slice::from_ref(&ps_home_str), &env, false);
+        let opted_in_result = powershell_policy(std::slice::from_ref(&ps_home_str), &env, true);
 
         // Clean up before asserting so a failing assertion still leaves nothing.
         let _ = fs::remove_dir_all(&ps_home);
 
-        // The system-drive root (e.g. `C:\`) is granted read-only — pwsh
-        // enumerates the drive root on startup (mirrors `getPowerShellPolicy`).
-        // A bare drive root normalizes to a 2-char `X:` after trimming separators.
+        assert!(default_result.readonly_paths.is_empty());
         assert!(
-            result.readonly_paths.iter().any(|p| {
+            opted_in_result.readonly_paths.iter().any(|p| {
                 let trimmed = p.trim_end_matches(['\\', '/']);
                 trimmed.len() == 2 && trimmed.ends_with(':')
             }),
             "expected system-drive root in readonly paths: {:?}",
-            result.readonly_paths
+            opted_in_result.readonly_paths
         );
-        // PSReadLine command history stays read-write.
-        assert!(
-            result
-                .readwrite_paths
-                .iter()
-                .any(|p| p.contains("PSReadLine")),
-            "expected PSReadLine history in readwrite paths: {:?}",
-            result.readwrite_paths
-        );
+        for result in [default_result, opted_in_result] {
+            assert!(
+                result
+                    .readwrite_paths
+                    .iter()
+                    .any(|p| p.contains("PSReadLine")),
+                "expected PSReadLine history in readwrite paths: {:?}",
+                result.readwrite_paths
+            );
+        }
     }
 
     use super::{

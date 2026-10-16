@@ -5,7 +5,8 @@
 
 use mxc_sdk::v1::platform_support;
 use mxc_sdk::v1::policy::filesystem::{
-    available_tools_policy, temporary_files_policy, user_profile_policy,
+    available_tools_policy, available_tools_policy_with_powershell_drive_root_read,
+    temporary_files_policy, user_profile_policy,
 };
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use mxc_sdk::v1::ContainerRequest;
@@ -171,6 +172,7 @@ fn tool_options_filter_all_application_packages_without_changing_default() {
         Some(&environment),
         ToolsPolicyOptions {
             container_type: Some(ToolsPolicyContainerType::ProcessContainer),
+            ..Default::default()
         },
     );
     std::fs::remove_dir_all(&directory).unwrap();
@@ -178,6 +180,57 @@ fn tool_options_filter_all_application_packages_without_changing_default() {
         .readonly_paths
         .contains(&directory.to_string_lossy().into_owned()));
     assert!(filtered.readonly_paths.is_empty());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn powershell_drive_root_read_is_opt_in() {
+    let directory = std::env::temp_dir().join(format!("mxc-pwsh-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("pwsh.exe"), []).unwrap();
+    let environment = env_pairs(&[
+        ("PATH", &directory.to_string_lossy()),
+        ("SystemDrive", "D:"),
+        ("USERPROFILE", r"C:\Users\TestUser"),
+    ]);
+
+    let default_result = available_tools_policy(Some(&environment), Default::default());
+    let opted_in_result = available_tools_policy_with_powershell_drive_root_read(
+        Some(&environment),
+        Default::default(),
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+
+    let tool_directory = directory.to_string_lossy().into_owned();
+    assert_eq!(default_result.readonly_paths, [tool_directory.clone()]);
+    assert_eq!(
+        opted_in_result.readonly_paths,
+        [tool_directory, r"D:\".to_string()]
+    );
+    let history = r"C:\Users\TestUser\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine";
+    assert_eq!(default_result.readwrite_paths, [history.to_string()]);
+    assert_eq!(opted_in_result.readwrite_paths, [history.to_string()]);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn available_tools_policy_preserves_explicit_drive_root() {
+    let pwsh_directory =
+        std::env::temp_dir().join(format!("mxc-pwsh-explicit-{}", std::process::id()));
+    std::fs::create_dir_all(&pwsh_directory).unwrap();
+    std::fs::write(pwsh_directory.join("pwsh.exe"), []).unwrap();
+    let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    let drive_root = format!("{system_drive}\\");
+    let path = format!("{drive_root};{}", pwsh_directory.to_string_lossy());
+    let environment = env_pairs(&[("PATH", &path)]);
+
+    let result = available_tools_policy(Some(&environment), Default::default());
+    std::fs::remove_dir_all(&pwsh_directory).unwrap();
+
+    assert_eq!(
+        result.readonly_paths,
+        [drive_root, pwsh_directory.to_string_lossy().into_owned()]
+    );
 }
 
 #[cfg(target_os = "macos")]
