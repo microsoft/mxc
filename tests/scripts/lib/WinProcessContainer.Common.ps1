@@ -488,6 +488,16 @@ function Record-UiTelemetryResult {
 # Default schema version for generated configs.
 $Script:SchemaVersion = '1.0.0'
 
+function Write-WpcJsonFile {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] $Object
+    )
+    # Windows PowerShell's utf8 encoding adds a BOM, which MXC does not accept.
+    [System.IO.File]::WriteAllText($Path, ($Object | ConvertTo-Json -Depth 12),
+        [System.Text.UTF8Encoding]::new($false))
+}
+
 # Write a config object verbatim. Used by the rejection phase for shapes the
 # typed generator deliberately cannot produce (an explicitly empty `to: []`,
 # a hostname where a CIDR belongs), since the property being asserted is that
@@ -498,7 +508,7 @@ function New-RawConfig {
         [Parameter(Mandatory)] $Object
     )
     $path = Join-Path (Join-Path $ScratchRoot 'configs') "$Name.json"
-    ($Object | ConvertTo-Json -Depth 12) | Out-File -LiteralPath $path -Encoding utf8 -Force
+    Write-WpcJsonFile -Path $path -Object $Object
     return $path
 }
 
@@ -688,7 +698,7 @@ function New-Config {
     if ($pc.Count -gt 0) { $obj['processContainer'] = $pc }
 
     $path = Join-Path (Join-Path $ScratchRoot 'configs') "$Name.json"
-    ($obj | ConvertTo-Json -Depth 12) | Out-File -LiteralPath $path -Encoding utf8 -Force
+    Write-WpcJsonFile -Path $path -Object $obj
     return $path
 }
 
@@ -1010,18 +1020,14 @@ function Get-HostDnsServers {
     } catch { return @() }
 }
 
-# Host-side HTTP listener on 127.0.0.1, used as the host-loopback anchor.
-# Returned object carries Url/Port plus a Stop() closure.
-#
-# A raw TcpListener, not HttpListener: the latter goes through http.sys and
-# needs a URL ACL reservation an unelevated account lacks, so it fails to bind
-# on exactly the hosts this phase must run on. The accept loop sits on a
-# background runspace so the harness thread stays free.
+# Raw TCP avoids HTTP.sys URL ACL requirements; a runspace handles requests.
 function Start-LoopbackListener {
-    # Bind port 0 and read back what the OS assigned, rather than reserving a
-    # port up front and re-binding it: another process can take the port in
-    # between, and the anchor then answers on a socket nobody can reach.
-    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    param([System.Net.IPAddress]$BindAddress = [System.Net.IPAddress]::Loopback)
+
+    $listener = [System.Net.Sockets.TcpListener]::new($BindAddress, 0)
+    if ($BindAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+        $listener.Server.DualMode = $false
+    }
     try {
         $listener.Start()
     } catch {
@@ -1038,8 +1044,7 @@ function Start-LoopbackListener {
             try {
                 $client = $l.AcceptTcpClient()
                 $stream = $client.GetStream()
-                # Read whatever request line the client sent before replying;
-                # curl will not report success if the peer resets first.
+                # Read before replying so curl does not observe a connection reset.
                 $stream.ReadTimeout = 2000
                 $buf = New-Object byte[] 1024
                 try { [void]$stream.Read($buf, 0, $buf.Length) } catch {}
@@ -1052,7 +1057,7 @@ function Start-LoopbackListener {
     $handle = $ps.BeginInvoke()
     return [pscustomobject]@{
         Port = $port
-        Url  = "http://127.0.0.1:$port/"
+        Url = ([UriBuilder]::new('http', $BindAddress.ToString(), $port)).Uri.AbsoluteUri
         Stop = {
             try { $listener.Stop() } catch {}
             try { [void]$ps.EndInvoke($handle) } catch {}
@@ -1099,6 +1104,10 @@ function Invoke-NetRun {
     )
     $log = Join-Path $ScratchRoot "logs\$Name.log"
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $ConfigPath -LogPath $log -TimeoutSec $TimeoutSec
+    [System.IO.File]::WriteAllText((Join-Path $ScratchRoot "logs\$Name.stdout.txt"), $r.Stdout,
+        [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $ScratchRoot "logs\$Name.stderr.txt"), $r.Stderr,
+        [System.Text.UTF8Encoding]::new($false))
     $logContent = Read-Log $log
     return [pscustomobject]@{
         Result  = $r

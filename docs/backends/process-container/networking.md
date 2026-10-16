@@ -10,6 +10,13 @@ For the shared policy shape and defaults, see
 [directional networking](../../schema.md#directional-networking-supported-contracts).
 This guide covers how the Windows ProcessContainer backend enforces them.
 
+ProcessContainer is available on Windows 11 24H2 and later. The initial
+24H2 and 25H2 releases (builds 26100.9278 and 26200.9278, respectively) support
+connections to medium-integrity host listeners. Builds 26100.9550 and
+26200.9550 add support for hosting loopback servers inside the container and
+connecting to low-integrity listeners. See
+[Windows OS-version support](os-version-support.md) for supported releases.
+
 ## 1. What this backend targets at GA
 
 On ProcessContainer paths with OS-scoped enforcement, each container gets two enforcement primitives scoped to its
@@ -109,29 +116,6 @@ non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopbac
 development/testing compatibility deployment, not the shared policy's strict host-loopback-closure guarantee.
 The shared setting requests both host-loopback directions, while WFP restricts client-container egress to the
 configured proxy endpoint.
-For direct-egress policies, MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC 1.1 ingress table when
-`IsProcessSecurityEnvironmentVersionSupported` reports contract 1.1 or newer and
-`QueryProcessSecurityEnvironmentSupport` advertises ingress support. Proxy policies omit that native table because
-PSEC rejects it alongside a proxy. Their ingress default still selects `privateNetworkClientServer`, and their
-host-loopback setting selects both the `networkLoopback` capability and the `MXC-Loopback` peer rather than an
-identity-scoped proxy peer. The peer alone is insufficient: without the capability, the environment can be created
-but its client cannot reach the host proxy.
-Direct requests always use the same capability and peer when `hostLoopback` is `"allow"`,
-including when the native ingress table is present. This keeps capability-based host-loopback
-access available independently of native ingress support.
-
-The public ingress policy remains required. `hostLoopback: "allow"` supports
-connections to host listeners both with an identity-less runtime proxy and
-without a proxy.
-
-ProcessContainer is available on Windows 11 24H2 and later. The initial
-24H2 and 25H2 releases (builds 26100.9278 and 26200.9278, respectively) support
-connections to medium-integrity host listeners. Builds 26100.9550 and
-26200.9550 add support for hosting loopback servers inside the container and
-connecting to low-integrity listeners. See
-[Windows OS-version support](os-version-support.md) for supported releases.
-
-Requests that do not allow host loopback use the PSEC 1.0 capability mapping.
 Requests the PSEC contract cannot preserve continue to an AppContainer tier.
 
 #### Discovering identity-less loopback proxy support

@@ -29,6 +29,9 @@ pub enum BackendCapability {
   CaptureDenials,
   FilesystemDeniedPaths,
   FilesystemEnumeratePaths,
+  /// With explicit host-loopback allow, the baseline is policy-permitted stateful outbound
+  /// loopback. Native Windows ingress support adds bidirectional access, including
+  /// container-hosted loopback servers.
   IngressHostLoopbackAllow,
   ProxyEnforcement,
   IdentitylessLoopbackProxy,
@@ -535,6 +538,9 @@ pub struct ProbeFacts {
   pub bfs_compiled_in: bool,
   pub base_container_supports_deny_paths: bool,
   pub base_container_supports_enumerate_paths: bool,
+  /// With explicit host-loopback allow, the baseline is policy-permitted stateful outbound
+  /// loopback. Native Windows ingress support adds bidirectional access, including
+  /// container-hosted loopback servers.
   pub base_container_supports_ingress_host_loopback_allow: bool,
   pub base_container_supports_identityless_loopback_proxy: bool,
   pub isolation_session_available: bool,

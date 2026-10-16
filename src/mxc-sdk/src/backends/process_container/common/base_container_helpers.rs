@@ -10,10 +10,10 @@ use crate::mxc_common::models::{
 use crate::process_security_environment_spec::process_security_environment_layout::{
     finish_process_security_environment_buffer, DestinationRuleT as PsecDestinationRuleT,
     EndpointPolicyT as PsecEndpointPolicy, EndpointRuleT as PsecEndpointRuleT,
-    FilterAction as PsecFilterAction, IngressPolicyT as PsecIngressPolicy,
-    IpProtocol as PsecIpProtocol, IpSubnetT as PsecIpSubnetT, NetworkPolicyT as PsecNetworkPolicy,
-    PortRuleT as PsecPortRuleT, ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment,
-    ProxyInfoT as PsecProxyInfo, SchemaVersionT,
+    FilterAction as PsecFilterAction, IpProtocol as PsecIpProtocol, IpSubnetT as PsecIpSubnetT,
+    NetworkPolicyT as PsecNetworkPolicy, PortRuleT as PsecPortRuleT,
+    ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment, ProxyInfoT as PsecProxyInfo,
+    SchemaVersionT,
 };
 
 use crate::process_container_common::network_policy_helpers::{
@@ -30,7 +30,6 @@ pub(super) fn has_conflicting_proxy_identity(policy: &ContainerPolicy) -> bool {
 pub(super) fn build_psec_v1_security_environment_spec(
     request: &ExecutionRequest,
     version: SecurityEnvironmentVersion,
-    supports_network_ingress: bool,
     capture_network_decisions: bool,
 ) -> Vec<u8> {
     assert_eq!(
@@ -40,7 +39,6 @@ pub(super) fn build_psec_v1_security_environment_spec(
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
     let mut capabilities = effective_capabilities(request, capture_network_decisions);
     if unrestricted_host_loopback_allowed(&request.policy) {
-        // Keep capability-based loopback available independently of native ingress support.
         ensure_capability(&mut capabilities, "networkLoopback");
     }
     let ui_restrictions = crate::process_container_common::job_object::to_job_object_uilimit_mask(
@@ -62,10 +60,7 @@ pub(super) fn build_psec_v1_security_environment_spec(
         fs_read_only: non_empty_paths(&request.policy.readonly_paths),
         fs_deny: non_empty_paths(&request.policy.denied_paths),
         fs_enumerate: non_empty_paths(&request.policy.enumerate_paths),
-        network_policy: Some(Box::new(build_psec_v1_network_policy(
-            &request.policy,
-            supports_network_ingress,
-        ))),
+        network_policy: Some(Box::new(build_psec_v1_network_policy(&request.policy))),
     };
     let spec = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, spec);
@@ -101,10 +96,7 @@ fn non_empty_paths(paths: &[String]) -> Option<Vec<String>> {
     (!paths.is_empty()).then(|| paths.to_vec())
 }
 
-fn build_psec_v1_network_policy(
-    policy: &ContainerPolicy,
-    supports_network_ingress: bool,
-) -> PsecNetworkPolicy {
+fn build_psec_v1_network_policy(policy: &ContainerPolicy) -> PsecNetworkPolicy {
     let mut network = PsecNetworkPolicy::default();
     if policy.network_proxy.is_enabled() {
         // Proxy and direct egress are mutually exclusive PSEC policy forms.
@@ -131,28 +123,8 @@ fn build_psec_v1_network_policy(
         }
         network.egress = Some(Box::new(egress));
     }
-    // Proxy mode uses the private-network capability and peer for ingress.
-    // PSEC rejects a proxy combined with the native ingress table.
-    let ingress_policy = if supports_network_ingress && !policy.network_proxy.is_enabled() {
-        policy.network_ingress.as_ref()
-    } else {
-        None
-    };
     network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
-    if let Some(ingress_policy) = ingress_policy {
-        network.ingress = Some(Box::new(PsecIngressPolicy {
-            default_action: psec_filter_action(ingress_policy.default),
-            host_loopback: psec_filter_action(ingress_policy.host_loopback),
-        }));
-    }
     network
-}
-
-fn psec_filter_action(action: NetworkAction) -> PsecFilterAction {
-    match action {
-        NetworkAction::Allow => PsecFilterAction::allow,
-        NetworkAction::Deny => PsecFilterAction::deny,
-    }
 }
 
 fn effective_egress_default(policy: &ContainerPolicy) -> NetworkAction {

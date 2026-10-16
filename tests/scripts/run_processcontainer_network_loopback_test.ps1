@@ -90,27 +90,27 @@ function Phase-NetworkDirectHostLoopback {
             -Pass ($trapBlocked -and $denyBlocked) `
             -Detail "omittedExit=$($trap.Result.ExitCode); explicitExit=$($deny.Result.ExitCode)"
 
-        # hostLoopback=allow. `ingress.default: allow` accompanies it because
-        # the private-network capability is what the doc pairs with the
-        # loopback grant; the specific value overrides the default for the
-        # loopback path.
-        $cfgAllow = New-Config -Name 'net-loopback-allow' -CommandLine $cmd `
-            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-            -EgressDefault 'allow' -IngressDefault 'allow' -HostLoopback 'allow' -TimeoutMs 25000
-        $allow = Invoke-NetRun -Name 'net-loopback-allow' -ConfigPath $cfgAllow
+        # Loopback permission is independent of the private-network ingress default.
+        foreach ($ingressDefault in @('allow', 'deny')) {
+            $name = "net-loopback-allow-ingress-$ingressDefault"
+            $cfgAllow = New-Config -Name $name -CommandLine $cmd `
+                -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+                -EgressDefault 'allow' -IngressDefault $ingressDefault -HostLoopback 'allow' -TimeoutMs 25000
+            $allow = Invoke-NetRun -Name $name -ConfigPath $cfgAllow
 
-        if (Test-PsecEligible) {
-            Record-Result -Phase 'P8d' -Name 'hostLoopback=allow without a runtime proxy stays on BaseContainer' `
-                -Pass (Test-SelectedTier $allow.Log) `
-                -Detail "selectedTier=$(Get-SelectedTier $allow.Log); expected=base-container"
-            Record-Result -Phase 'P8d' -Name 'hostLoopback=allow without a runtime proxy reaches the host loopback anchor' `
-                -Pass (($allow.Result.Stdout.Trim() -eq 'MXC-LOOPBACK-ANCHOR') -and ($allow.Result.ExitCode -eq 0) -and -not $allow.Result.TimedOut) `
-                -Detail "exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); stderr=$(Format-Snippet $allow.Result.Stderr); rejection is a regression, not a skip"
-        } else {
-            $rejected = Test-WasRejected $allow
-            Record-Result -Phase 'P8d' -Name 'non-PSEC tier rejects hostLoopback=allow' `
-                -Pass $rejected `
-                -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); tier=$($Script:ExpectedTier)"
+            if (Test-PsecEligible) {
+                Record-Result -Phase 'P8d' -Name "hostLoopback=allow with ingress.default=$ingressDefault without a runtime proxy stays on BaseContainer" `
+                    -Pass (Test-SelectedTier $allow.Log) `
+                    -Detail "selectedTier=$(Get-SelectedTier $allow.Log); expected=base-container"
+                Record-Result -Phase 'P8d' -Name "hostLoopback=allow with ingress.default=$ingressDefault without a runtime proxy reaches the host loopback anchor" `
+                    -Pass (($allow.Result.Stdout.Trim() -eq 'MXC-LOOPBACK-ANCHOR') -and ($allow.Result.ExitCode -eq 0) -and -not $allow.Result.TimedOut) `
+                    -Detail "exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); stderr=$(Format-Snippet $allow.Result.Stderr); rejection is a regression, not a skip"
+            } else {
+                $rejected = Test-WasRejected $allow
+                Record-Result -Phase 'P8d' -Name "non-PSEC tier rejects hostLoopback=allow with ingress.default=$ingressDefault" `
+                    -Pass $rejected `
+                    -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); tier=$($Script:ExpectedTier)"
+            }
         }
     } finally {
         & $listener.Stop

@@ -55,33 +55,43 @@ function Phase-NetworkProxy {
             -Detail 'could not bind a listener on 127.0.0.1; cannot assert the proxy endpoint is reachable'
         return
     }
-    $directListener = $null
-    $directLoopbackUrl = ''
+    $directListeners = @()
+    $directLoopbackUrls = @()
     try {
         if ($psec) {
-            $directListener = Start-LoopbackListener
-            if (-not $directListener) {
-                Record-Result -Phase 'P8e' -Name 'direct loopback listener' -Pass $false `
-                    -Detail 'could not bind a second listener on 127.0.0.1; cannot assert proxy endpoint isolation'
-                return
+            foreach ($address in @('127.0.0.1', '::1')) {
+                $directListener = Start-LoopbackListener -BindAddress ([Net.IPAddress]::Parse($address))
+                if (-not $directListener) {
+                    Record-Result -Phase 'P8e' -Name "direct loopback listener on $address" -Pass $false `
+                        -Detail 'could not bind a second listener; cannot assert proxy endpoint isolation'
+                    return
+                }
+                $directListeners += $directListener
+                $directLoopbackUrls += $directListener.Url
+                $hostReach = $false
+                $hostError = ''
+                try {
+                    $response = Invoke-WebRequest -Uri $directListener.Url -TimeoutSec 5 -UseBasicParsing
+                    $hostReach = ($response.Content -match 'MXC-LOOPBACK-ANCHOR')
+                } catch {
+                    $hostError = $_.Exception.Message
+                }
+                Record-Result -Phase 'P8e' -Name "prerequisite: host reaches the second loopback endpoint on $address" `
+                    -Pass $hostReach `
+                    -Detail "endpoint=$($directListener.Url); error=$hostError"
+                if (-not $hostReach) { return }
             }
-            $directLoopbackUrl = $directListener.Url
-            $hostReach = $false
-            $hostError = ''
-            try {
-                $response = Invoke-WebRequest -Uri $directLoopbackUrl -TimeoutSec 5 -UseBasicParsing
-                $hostReach = ($response.Content -match 'MXC-LOOPBACK-ANCHOR')
-            } catch {
-                $hostError = $_.Exception.Message
-            }
-            Record-Result -Phase 'P8e' -Name 'prerequisite: host reaches the second loopback endpoint' `
-                -Pass $hostReach -Detail "endpoint=$directLoopbackUrl; error=$hostError"
-            if (-not $hostReach) { return }
         }
-        Invoke-NetworkProxyAssertions -ProxyPort $proxy.Port -DirectLoopbackUrl $directLoopbackUrl -Fs $fs -Psec $psec
+        Invoke-NetworkProxyAssertions -ProxyPort $proxy.Port -DirectLoopbackUrls $directLoopbackUrls -Fs $fs -Psec $psec
     } finally {
-        if ($directListener) { & $directListener.Stop }
-        & $proxy.Stop
+        foreach ($listener in ($directListeners + @($proxy))) {
+            try {
+                & $listener.Stop
+            } catch {
+                Record-Result -Phase 'P8e' -Name 'listener cleanup' -Pass $false `
+                    -Detail "endpoint=$($listener.Url); error=$($_.Exception.Message)"
+            }
+        }
     }
 }
 
@@ -89,7 +99,7 @@ function Phase-NetworkProxy {
 function Invoke-NetworkProxyAssertions {
     param(
         [Parameter(Mandatory)] [int]$ProxyPort,
-        [string]$DirectLoopbackUrl,
+        [string[]]$DirectLoopbackUrls = @(),
         [Parameter(Mandatory)] $Fs,
         [Parameter(Mandatory)] [bool]$Psec
     )
@@ -165,18 +175,24 @@ function Invoke-NetworkProxyAssertions {
         if (-not $ran) {
             Record-Result -Phase 'P8e' -Name 'direct egress blocked while runtime proxy is configured' -Status 'skip' `
                 -Detail 'the identity-less proxy shape does not start on this host; a NORUN cannot prove egress was blocked'
-            Record-Result -Phase 'P8e' -Name 'direct access to a second loopback endpoint is blocked' -Status 'skip' `
-                -Detail 'the identity-less proxy shape does not start on this host; a NORUN cannot prove endpoint isolation'
+            foreach ($url in $DirectLoopbackUrls) {
+                Record-Result -Phase 'P8e' -Name "direct access to a second loopback endpoint is blocked ($url)" -Status 'skip' `
+                    -Detail 'the identity-less proxy shape does not start on this host; a NORUN cannot prove endpoint isolation'
+            }
         } else {
-            $cfgLoopback = New-Config -Name 'net-proxy-direct-loopback-blocked' `
-                -CommandLine (Get-LoopbackFetchCommand -Url $DirectLoopbackUrl) `
-                -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-                -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
-                -NetworkProxy $proxyUrl -TimeoutMs 25000
-            $loopback = Invoke-NetRun -Name 'net-proxy-direct-loopback-blocked' -ConfigPath $cfgLoopback
-            Record-Result -Phase 'P8e' -Name 'direct access to a second loopback endpoint is blocked' `
-                -Pass ((-not $loopback.Result.TimedOut) -and ($loopback.Result.ExitCode -in @(7, 28)) -and ($loopback.Result.Stderr -match 'curl: \((7|28)\)')) `
-                -Detail "exit=$($loopback.Result.ExitCode); stderr=$(Format-Snippet $loopback.Result.Stderr); endpoint=$DirectLoopbackUrl; host reachability verified"
+            foreach ($url in $DirectLoopbackUrls) {
+                $family = if (([Uri]$url).Host -match ':') { 'ipv6' } else { 'ipv4' }
+                $name = "net-proxy-direct-loopback-blocked-$family"
+                $cfgLoopback = New-Config -Name $name `
+                    -CommandLine (Get-LoopbackFetchCommand -Url $url) `
+                    -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+                    -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
+                    -NetworkProxy $proxyUrl -TimeoutMs 25000
+                $loopback = Invoke-NetRun -Name $name -ConfigPath $cfgLoopback
+                Record-Result -Phase 'P8e' -Name "direct access to a second $family loopback endpoint is blocked" `
+                    -Pass ((-not $loopback.Result.TimedOut) -and ($loopback.Result.ExitCode -in @(7, 28)) -and ($loopback.Result.Stderr -match 'curl: \((7|28)\)')) `
+                    -Detail "exit=$($loopback.Result.ExitCode); stderr=$(Format-Snippet $loopback.Result.Stderr); endpoint=$url; host reachability verified"
+            }
 
             $cfgDirect = New-Config -Name 'net-proxy-direct-blocked' `
                 -CommandLine (Get-LoopbackFetchCommand -Url $ExternalAnchorUrl) `

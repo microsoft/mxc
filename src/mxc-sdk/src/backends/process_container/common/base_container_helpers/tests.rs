@@ -53,50 +53,46 @@ fn runtime_proxy_request(proxy: &TcpListener) -> ExecutionRequest {
 fn runtime_proxy_uses_peer_and_capability_without_native_ingress() {
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let request = runtime_proxy_request(&proxy);
-    let bytes = build_psec_v1_security_environment_spec(
-        &request,
-        SecurityEnvironmentVersion::V1_1,
-        true,
-        false,
-    );
-    let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
-    let network = spec.network_policy().expect("network policy");
     let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
 
-    assert_eq!(spec.version().minor(), 1);
-    assert_eq!(
-        spec.capabilities().unwrap().split(',').collect::<Vec<_>>(),
-        [PRIVATE_NETWORK_CAPABILITY, "networkLoopback"]
-    );
-    assert_eq!(
-        network.proxy().and_then(|proxy| proxy.url()),
-        Some(proxy_url.as_str())
-    );
-    assert_eq!(
-        network.allowed_appcontainer_peer(),
-        Some(LOOPBACK_NETWORK_PEER)
-    );
-    assert!(network.egress().is_none());
-    assert!(
-        network.ingress().is_none(),
-        "PSEC proxy mode must not include the incompatible native ingress table"
-    );
+    for (version, minor) in [
+        (SecurityEnvironmentVersion::V1_0, 0),
+        (SecurityEnvironmentVersion::V1_1, 1),
+    ] {
+        let bytes = build_psec_v1_security_environment_spec(&request, version, false);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let network = spec.network_policy().expect("network policy");
+
+        assert_eq!(spec.version().minor(), minor);
+        assert_eq!(
+            spec.capabilities().unwrap().split(',').collect::<Vec<_>>(),
+            [PRIVATE_NETWORK_CAPABILITY, "networkLoopback"]
+        );
+        assert_eq!(
+            network.proxy().and_then(|proxy| proxy.url()),
+            Some(proxy_url.as_str())
+        );
+        assert_eq!(
+            network.allowed_appcontainer_peer(),
+            Some(LOOPBACK_NETWORK_PEER)
+        );
+        assert!(network.egress().is_none());
+        assert!(network.ingress().is_none());
+    }
 }
 
 #[test]
 fn runtime_proxy_creates_native_security_environment() {
-    if !BaseContainerRunner::supports_ingress_host_loopback_allow() {
-        eprintln!("SKIPPED: native proxy regression requires usable PSEC 1.1 ingress support");
+    if !BaseContainerRunner::supports_identityless_loopback_proxy()
+        .expect("query identity-less loopback proxy support")
+    {
+        eprintln!("SKIPPED: native proxy regression requires PSEC 1.0 support");
         return;
     }
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let request = runtime_proxy_request(&proxy);
-    let bytes = build_psec_v1_security_environment_spec(
-        &request,
-        SecurityEnvironmentVersion::V1_1,
-        true,
-        false,
-    );
+    let bytes =
+        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_0, false);
     let environment =
         create(&bytes, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE).unwrap_or_else(|error| {
             panic!("valid runtime proxy policy failed to create PSEC: {error}")
@@ -115,12 +111,8 @@ fn identity_scoped_proxy_does_not_grant_host_loopback() {
         .unwrap()
         .host_loopback = NetworkAction::Deny;
     request.policy.allowed_proxy_peer = Some("Contoso.Proxy_12345".to_string());
-    let bytes = build_psec_v1_security_environment_spec(
-        &request,
-        SecurityEnvironmentVersion::V1_0,
-        false,
-        false,
-    );
+    let bytes =
+        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_0, false);
     let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
     let network = spec.network_policy().unwrap();
 
@@ -180,8 +172,10 @@ fn run_proxy_command_with_stdout(
 
 #[test]
 fn runtime_proxy_launches_child() {
-    if !BaseContainerRunner::supports_ingress_host_loopback_allow() {
-        eprintln!("SKIPPED: native proxy launch requires usable PSEC 1.1 ingress support");
+    if !BaseContainerRunner::supports_identityless_loopback_proxy()
+        .expect("query identity-less loopback proxy support")
+    {
+        eprintln!("SKIPPED: native proxy launch requires PSEC 1.0 support");
         return;
     }
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -192,10 +186,11 @@ fn runtime_proxy_launches_child() {
 #[test]
 fn runtime_proxy_captures_denials_and_launches_child() {
     let _guard = crate::process_container_common::test_env::lock();
-    if !BaseContainerRunner::supports_ingress_host_loopback_allow()
+    if !BaseContainerRunner::supports_identityless_loopback_proxy()
+        .expect("query identity-less loopback proxy support")
         || !BaseContainerRunner::is_native_capture_available()
     {
-        eprintln!("SKIPPED: native proxy capture requires PSEC 1.1 and Learning Mode APIs");
+        eprintln!("SKIPPED: native proxy capture requires PSEC 1.0 and Learning Mode APIs");
         return;
     }
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -239,8 +234,10 @@ fn runtime_proxy_captures_denials_and_launches_child() {
 
 #[test]
 fn runtime_proxy_allows_only_its_ipv4_loopback_endpoint() {
-    if !BaseContainerRunner::supports_ingress_host_loopback_allow() {
-        eprintln!("SKIPPED: native proxy networking requires usable PSEC 1.1 ingress support");
+    if !BaseContainerRunner::supports_identityless_loopback_proxy()
+        .expect("query identity-less loopback proxy support")
+    {
+        eprintln!("SKIPPED: native proxy networking requires PSEC 1.0 support");
         return;
     }
     assert_proxy_endpoint_only("127.0.0.1");
@@ -248,8 +245,10 @@ fn runtime_proxy_allows_only_its_ipv4_loopback_endpoint() {
 
 #[test]
 fn runtime_proxy_blocks_ipv6_loopback_bypass() {
-    if !BaseContainerRunner::supports_ingress_host_loopback_allow() {
-        eprintln!("SKIPPED: native proxy networking requires usable PSEC 1.1 ingress support");
+    if !BaseContainerRunner::supports_identityless_loopback_proxy()
+        .expect("query identity-less loopback proxy support")
+    {
+        eprintln!("SKIPPED: native proxy networking requires PSEC 1.0 support");
         return;
     }
     assert_proxy_endpoint_only("::1");

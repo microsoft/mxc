@@ -170,15 +170,6 @@ across the system drive on every run and again on teardown — acceptable on a
 disposable runner, which is why the switch is off by default and only CI opts
 in. Temporary until pwsh 7.7 leaves preview.
 
-`NetworkDirectHostLoopback` requires direct host-loopback access on BaseContainer
-without a runtime proxy, including older supported Windows hosts. Rejection
-or tier fallback fails the check; omitted and explicit deny are negative controls.
-
-The runtime proxy area verifies that the host can reach a second loopback
-listener, then requires direct container access to that listener to fail while
-the configured proxy remains reachable. The literal-IP check cannot pass on
-DNS-resolution failure.
-
 The suite's git workloads also restamp the ownership of the repo they build.
 The 1ES agent runs elevated, and an elevated token's *default owner* is
 `BUILTIN\Administrators`, so a fixture created there is Administrators-owned;
@@ -235,7 +226,7 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite, tier-gated to `base-container`. Includes supported directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface). Remaining failures are genuine MXC bugs or harness limitations. |
+| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite, tier-gated to `base-container`. Includes supported directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface). Host-loopback checks cover both ingress defaults; proxy checks verify IPv4 and IPv6 endpoint isolation without requiring native ingress support. Remaining failures are genuine MXC bugs or harness limitations. |
 | Process T3 | ✅ Good | Windows 23H2 only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd) on top of the T3 primitives. The directional networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |

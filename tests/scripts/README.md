@@ -60,21 +60,15 @@ built tree, which is the fastest way to iterate on one area:
 tests\scripts\run_processcontainer_network_proxy_test.ps1 -RequireTier base-container
 ```
 
-When the host probe reports
-`baseContainerSupportsIdentitylessLoopbackProxy` as `true`, the proxy test
-must start the workload and reach the configured proxy. Rejecting the request
-counts as a failure.
+When the host probe reports `baseContainerSupportsIdentitylessLoopbackProxy`,
+the proxy area requires workload launch and a successful proxied fetch on both
+PSEC 1.0-only hosts and PSEC 1.1 hosts, including those without ingress support.
+A clean policy rejection is a failure on these hosts.
 Older binaries that omit this probe fact do not enable the capability-specific
 assertions; the existing proxy assertions still apply.
-The area also verifies that the host can reach a second loopback endpoint and
-that the proxy-configured container cannot reach it directly. This literal-IP
-negative check requires a connection failure or curl timeout, not a DNS failure.
 
-The `NetworkDirectHostLoopback` area requires direct host-loopback access on
-BaseContainer with `hostLoopback: "allow"` and no runtime proxy, including
-older supported Windows hosts. Rejection or tier fallback fails the check;
-omitted and explicit `hostLoopback: "deny"` remain negative controls.
-The previous `NetworkHostLoopback` area selector remains an alias.
+The loopback area checks direct access with both ingress defaults. The proxy
+area checks that other IPv4 and IPv6 loopback endpoints remain blocked.
 
 Shared helpers live in `tests/scripts/lib/WinProcessContainer.Common.ps1`. It
 must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`

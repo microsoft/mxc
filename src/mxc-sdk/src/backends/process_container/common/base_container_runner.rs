@@ -57,7 +57,6 @@ use crate::mxc_common::string_util;
 use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 use crate::process_container_common::base_container_helpers::{
     build_psec_v1_security_environment_spec, has_conflicting_proxy_identity,
-    unrestricted_host_loopback_allowed,
 };
 use crate::process_container_common::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
@@ -310,7 +309,6 @@ impl BaseContainerRunner {
         &self,
         request: &ExecutionRequest,
         version: SecurityEnvironmentVersion,
-        supports_network_ingress: bool,
     ) -> Result<Vec<u8>, ScriptResponse> {
         let capture_network_decisions = match request.policy.capture_denials.as_ref() {
             Some(_) => self
@@ -327,7 +325,6 @@ impl BaseContainerRunner {
         Ok(build_psec_v1_security_environment_spec(
             request,
             version,
-            supports_network_ingress,
             capture_network_decisions,
         ))
     }
@@ -397,27 +394,13 @@ impl BaseContainerRunner {
         if !Self::is_base_container_api_present() {
             return Ok(false);
         }
-        Self::identityless_loopback_proxy_supported(
-            || secenv::try_query_support(SecurityEnvironmentSupport::NetworkIngress),
-            secenv::supports_version,
-        )
-    }
-
-    fn identityless_loopback_proxy_supported(
-        query_ingress_support: impl FnOnce() -> Result<bool, LearningModeError>,
-        supports_version: impl FnOnce(SecurityEnvironmentVersion) -> Result<bool, LearningModeError>,
-    ) -> Result<bool, LearningModeError> {
-        if query_ingress_support()? {
-            return Ok(true);
-        }
-        supports_version(SecurityEnvironmentVersion::V1_0)
+        secenv::supports_version(SecurityEnvironmentVersion::V1_0)
     }
 
     /// The single PSEC version-selection point: start at 1.0 and raise it to
     /// the highest version required by any requested native feature.
     fn choose_min_required_psec_version_for_request(
         request: &ExecutionRequest,
-        supports_network_ingress: bool,
     ) -> SecurityEnvironmentVersion {
         let mut version = SecurityEnvironmentVersion::V1_0;
         if !request.policy.denied_paths.is_empty() {
@@ -428,14 +411,6 @@ impl BaseContainerRunner {
                 version.max(SecurityEnvironmentSupport::FileSystemEnumerate.required_version());
         }
 
-        // PSEC 1.1 supports unrestricted host loopback, including hosting a loopback
-        // server in the base container and communicating with low IL listeners.
-        // PSEC 1.0 only supports host loopback access to medium IL listeners, so those
-        // requests can still be considered serviceable on PSEC 1.0. Only upgrade to PSEC 1.1
-        // when the host supports the network ingress flag.
-        if unrestricted_host_loopback_allowed(&request.policy) && supports_network_ingress {
-            version = version.max(SecurityEnvironmentSupport::NetworkIngress.required_version());
-        }
         version
     }
 
@@ -505,20 +480,7 @@ impl BaseContainerRunner {
             logger,
         );
 
-        let supports_network_ingress = if request.policy.network_ingress.is_some() {
-            secenv::try_query_support(SecurityEnvironmentSupport::NetworkIngress).map_err(
-                |error| ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(&format!(
-                        "failed to query Process Security Environment ingress support: {error}"
-                    ))
-                },
-            )?
-        } else {
-            false
-        };
-        let psec_version =
-            Self::choose_min_required_psec_version_for_request(request, supports_network_ingress);
+        let psec_version = Self::choose_min_required_psec_version_for_request(request);
         let version_supported =
             secenv::supports_version(psec_version).map_err(|error| ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -550,14 +512,8 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let supports_network_ingress =
-            psec_version >= SecurityEnvironmentVersion::V1_1 && supports_network_ingress;
-        let process_security_environment_spec = self
-            .build_capture_aware_security_environment_spec(
-                request,
-                psec_version,
-                supports_network_ingress,
-            )?;
+        let process_security_environment_spec =
+            self.build_capture_aware_security_environment_spec(request, psec_version)?;
         let _ = writeln!(
             logger,
             "process security environment spec built (PSEC {}.{}, {} bytes)",
@@ -2295,13 +2251,9 @@ mod tests {
 
     impl BaseContainerRunner {
         fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
-            let version = Self::choose_min_required_psec_version_for_request(request, true);
+            let version = Self::choose_min_required_psec_version_for_request(request);
             Self::with_capture_factory(fake_capture_factory())
-                .build_capture_aware_security_environment_spec(
-                    request,
-                    version,
-                    version >= SecurityEnvironmentVersion::V1_1,
-                )
+                .build_capture_aware_security_environment_spec(request, version)
                 .unwrap()
         }
     }
@@ -3007,7 +2959,6 @@ mod tests {
                 .build_capture_aware_security_environment_spec(
                     &request,
                     SecurityEnvironmentVersion::V1_0,
-                    false,
                 )
                 .unwrap();
             let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
@@ -3173,87 +3124,50 @@ mod tests {
     }
 
     #[test]
-    fn psec_1_1_encodes_host_loopback_ingress() {
-        let mut request = ExecutionRequest::default();
-        request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
-            default: NetworkAction::Deny,
-            host_loopback: NetworkAction::Allow,
-        });
-
-        let bytes = build_psec_v1_security_environment_spec(
-            &request,
-            SecurityEnvironmentVersion::V1_1,
-            true,
-            false,
-        );
-        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
-        let ingress = spec
-            .network_policy()
-            .and_then(|network| network.ingress())
-            .expect("PSEC 1.1 must carry host-loopback policy");
-
-        assert_eq!(spec.version().minor(), 1);
-        assert_eq!(spec.capabilities(), Some("networkLoopback"));
-        assert_eq!(ingress.default_action(), psec_layout::FilterAction::deny);
-        assert_eq!(ingress.host_loopback(), psec_layout::FilterAction::allow);
-        assert_eq!(
-            spec.network_policy()
-                .and_then(|network| network.allowed_appcontainer_peer()),
-            Some(crate::process_container_common::base_container_helpers::LOOPBACK_NETWORK_PEER)
-        );
-    }
-
-    #[test]
-    fn psec_direct_host_loopback_encodes_capability_and_peer_regardless_of_ingress_support() {
+    fn psec_direct_host_loopback_encodes_capability_and_peer() {
         let mut request = host_loopback_request();
         request.policy.network_egress = Some(crate::mxc_common::models::NetworkEgressPolicy {
             default: NetworkAction::Allow,
             ..Default::default()
         });
 
-        for (version, supports_network_ingress) in [
-            (SecurityEnvironmentVersion::V1_0, false),
-            (SecurityEnvironmentVersion::V1_1, false),
-            (SecurityEnvironmentVersion::V1_1, true),
+        for version in [
+            SecurityEnvironmentVersion::V1_0,
+            SecurityEnvironmentVersion::V1_1,
         ] {
-            request.policy.enumerate_paths = if version == SecurityEnvironmentVersion::V1_1 {
-                vec!["C:\\tools".to_string()]
-            } else {
-                Vec::new()
-            };
-            let bytes = build_psec_v1_security_environment_spec(
-                &request,
-                version,
-                supports_network_ingress,
-                false,
-            );
-            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
-            let network = spec.network_policy().unwrap();
+            for (default, capabilities) in [
+                (
+                    NetworkAction::Allow,
+                    "internetClient,privateNetworkClientServer,networkLoopback",
+                ),
+                (NetworkAction::Deny, "internetClient,networkLoopback"),
+            ] {
+                request.policy.network_ingress.as_mut().unwrap().default = default;
+                request.policy.enumerate_paths = if version == SecurityEnvironmentVersion::V1_1 {
+                    vec!["C:\\tools".to_string()]
+                } else {
+                    Vec::new()
+                };
+                let bytes = build_psec_v1_security_environment_spec(&request, version, false);
+                let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+                let network = spec.network_policy().unwrap();
 
-            assert_eq!(spec.version().minor(), version.minor);
-            assert_eq!(
-                spec.capabilities(),
-                Some("internetClient,privateNetworkClientServer,networkLoopback")
-            );
-            assert_eq!(
+                assert_eq!(spec.version().minor(), version.minor);
+                assert_eq!(spec.capabilities(), Some(capabilities));
+                assert_eq!(
                 network.allowed_appcontainer_peer(),
                 Some(
                     crate::process_container_common::base_container_helpers::LOOPBACK_NETWORK_PEER
                 )
             );
-            assert_eq!(spec.fs_enumerate().is_some(), version.minor == 1);
-            if supports_network_ingress {
-                let ingress = network.ingress().expect("native ingress policy");
-                assert_eq!(ingress.default_action(), psec_layout::FilterAction::allow);
-                assert_eq!(ingress.host_loopback(), psec_layout::FilterAction::allow);
-            } else {
+                assert_eq!(spec.fs_enumerate().is_some(), version.minor == 1);
                 assert!(network.ingress().is_none());
+                assert!(network.proxy().is_none());
+                assert_eq!(
+                    network.egress().unwrap().default_action(),
+                    psec_layout::FilterAction::allow
+                );
             }
-            assert!(network.proxy().is_none());
-            assert_eq!(
-                network.egress().unwrap().default_action(),
-                psec_layout::FilterAction::allow
-            );
         }
     }
 
@@ -3268,17 +3182,11 @@ mod tests {
         ] {
             let mut request = ExecutionRequest::default();
             request.policy.network_ingress = ingress;
-            for (version, supports_network_ingress) in [
-                (SecurityEnvironmentVersion::V1_0, false),
-                (SecurityEnvironmentVersion::V1_1, false),
-                (SecurityEnvironmentVersion::V1_1, true),
+            for version in [
+                SecurityEnvironmentVersion::V1_0,
+                SecurityEnvironmentVersion::V1_1,
             ] {
-                let bytes = build_psec_v1_security_environment_spec(
-                    &request,
-                    version,
-                    supports_network_ingress,
-                    false,
-                );
+                let bytes = build_psec_v1_security_environment_spec(&request, version, false);
                 let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
 
                 assert!(!spec
@@ -3297,53 +3205,26 @@ mod tests {
 
     #[test]
     fn required_psec_contract_uses_v1_1_for_enumeration() {
-        for supports_network_ingress in [false, true] {
-            let mut request = host_loopback_request();
+        for mut request in [host_loopback_request(), identityless_proxy_request()] {
             request.policy.enumerate_paths = enumerate_request().policy.enumerate_paths;
             assert_eq!(
-                BaseContainerRunner::choose_min_required_psec_version_for_request(
-                    &request,
-                    supports_network_ingress
-                ),
+                BaseContainerRunner::choose_min_required_psec_version_for_request(&request),
                 SecurityEnvironmentVersion::V1_1
             );
         }
     }
 
     #[test]
-    fn required_psec_contract_uses_available_base_container_ingress_support() {
+    fn loopback_and_proxy_do_not_raise_minimum_psec_version() {
         let _guard = crate::process_container_common::test_env::BcUsableGuard::set(true);
-        for request in [host_loopback_request(), psec_1_0_proxy_request()] {
+        for request in [host_loopback_request(), identityless_proxy_request()] {
             assert!(
                 BaseContainerRunner::can_backend_service_request(&request).can_service_request()
             );
-            for (supports_network_ingress, expected) in [
-                (false, SecurityEnvironmentVersion::V1_0),
-                (true, SecurityEnvironmentVersion::V1_1),
-            ] {
-                let version = BaseContainerRunner::choose_min_required_psec_version_for_request(
-                    &request,
-                    supports_network_ingress,
-                );
-                assert_eq!(version, expected);
-                let bytes = build_psec_v1_security_environment_spec(
-                    &request,
-                    version,
-                    supports_network_ingress,
-                    false,
-                );
-                let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
-                assert_eq!(spec.version().minor(), expected.minor);
-                assert!(spec
-                    .capabilities()
-                    .unwrap()
-                    .split(',')
-                    .any(|capability| capability == "networkLoopback"));
-                assert_eq!(
-                    spec.network_policy().unwrap().ingress().is_some(),
-                    supports_network_ingress && !request.policy.network_proxy.is_enabled()
-                );
-            }
+            assert_eq!(
+                BaseContainerRunner::choose_min_required_psec_version_for_request(&request),
+                SecurityEnvironmentVersion::V1_0
+            );
         }
     }
 
@@ -3352,13 +3233,12 @@ mod tests {
         assert_eq!(
             BaseContainerRunner::choose_min_required_psec_version_for_request(
                 &ExecutionRequest::default(),
-                true
             ),
             SecurityEnvironmentVersion::V1_0
         );
     }
 
-    fn psec_1_0_proxy_request() -> ExecutionRequest {
+    fn identityless_proxy_request() -> ExecutionRequest {
         let mut request = host_loopback_request();
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
@@ -3374,122 +3254,6 @@ mod tests {
     }
 
     #[test]
-    fn identityless_loopback_proxy_support_matches_required_psec_contract() {
-        for (supports_1_0, supports_1_1, ingress_supported, expected) in [
-            (true, false, false, true),
-            (true, true, true, true),
-            (true, true, false, true),
-            (false, true, true, true),
-            (false, true, false, false),
-            (false, false, false, false),
-        ] {
-            let supported = BaseContainerRunner::identityless_loopback_proxy_supported(
-                || Ok(ingress_supported),
-                |version| {
-                    assert_eq!(version, SecurityEnvironmentVersion::V1_0);
-                    Ok(supports_1_0)
-                },
-            )
-            .unwrap();
-            assert_eq!(
-                supported, expected,
-                "PSEC 1.0={supports_1_0}, PSEC 1.1={supports_1_1}, ingress={ingress_supported}"
-            );
-            let version = BaseContainerRunner::choose_min_required_psec_version_for_request(
-                &psec_1_0_proxy_request(),
-                ingress_supported,
-            );
-            assert_eq!(
-                supported,
-                if version == SecurityEnvironmentVersion::V1_1 {
-                    supports_1_1
-                } else {
-                    supports_1_0
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn identityless_loopback_proxy_with_ingress_does_not_need_compatibility_queries() {
-        assert!(BaseContainerRunner::identityless_loopback_proxy_supported(
-            || Ok(true),
-            |_| { panic!("ingress support is sufficient for an identity-less loopback proxy") }
-        )
-        .unwrap());
-    }
-
-    #[test]
-    fn identityless_loopback_proxy_propagates_version_query_errors() {
-        let result = BaseContainerRunner::identityless_loopback_proxy_supported(
-            || Ok(false),
-            |version| {
-                assert_eq!(version, SecurityEnvironmentVersion::V1_0);
-                Err(LearningModeError::HResultCall {
-                    function: "IsProcessSecurityEnvironmentVersionSupported",
-                    code: E_NOTIMPL.0,
-                })
-            },
-        );
-        assert!(matches!(result, Err(LearningModeError::HResultCall { .. })));
-    }
-
-    #[test]
-    fn identityless_loopback_proxy_propagates_ingress_query_errors() {
-        let result = BaseContainerRunner::identityless_loopback_proxy_supported(
-            || {
-                Err(LearningModeError::HResultCall {
-                    function: "QueryProcessSecurityEnvironmentSupport",
-                    code: E_NOTIMPL.0,
-                })
-            },
-            |_| panic!("an ingress query failure must not become a compatibility fallback"),
-        );
-        assert!(matches!(
-            result,
-            Err(LearningModeError::HResultCall {
-                function: "QueryProcessSecurityEnvironmentSupport",
-                code
-            }) if code == E_NOTIMPL.0
-        ));
-    }
-
-    #[test]
-    fn psec_1_0_proxy_encodes_existing_loopback_capability_and_peer() {
-        let request = psec_1_0_proxy_request();
-        let version = SecurityEnvironmentVersion::V1_0;
-        let bytes = build_psec_v1_security_environment_spec(&request, version, false, false);
-        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
-        let network = spec.network_policy().unwrap();
-        assert_eq!(spec.version().minor(), 0);
-        assert!(spec
-            .capabilities()
-            .unwrap()
-            .split(',')
-            .any(|capability| capability == "networkLoopback"));
-        assert_eq!(
-            network.allowed_appcontainer_peer(),
-            Some(crate::process_container_common::base_container_helpers::LOOPBACK_NETWORK_PEER)
-        );
-        assert_eq!(
-            network.proxy().unwrap().url(),
-            Some("http://127.0.0.1:8080")
-        );
-        assert!(network.ingress().is_none());
-        assert!(network.egress().is_none());
-    }
-
-    #[test]
-    fn psec_1_0_proxy_does_not_lower_enumeration_requirement() {
-        let mut request = psec_1_0_proxy_request();
-        request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
-        assert_eq!(
-            BaseContainerRunner::choose_min_required_psec_version_for_request(&request, false),
-            SecurityEnvironmentVersion::V1_1
-        );
-    }
-
-    #[test]
     #[should_panic(
         expected = "build_psec_v1_security_environment_spec only supports PSEC major version 1"
     )]
@@ -3498,17 +3262,15 @@ mod tests {
             &ExecutionRequest::default(),
             SecurityEnvironmentVersion { major: 2, minor: 0 },
             false,
-            false,
         );
     }
 
     #[test]
-    fn psec_enumeration_without_ingress_support_omits_ingress_table() {
+    fn psec_enumeration_omits_ingress_table() {
         let request = enumerate_request();
         let bytes = build_psec_v1_security_environment_spec(
             &request,
             SecurityEnvironmentVersion::V1_1,
-            false,
             false,
         );
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
@@ -3518,7 +3280,7 @@ mod tests {
     }
 
     #[test]
-    fn psec_1_0_uses_capability_for_ingress_default_allow() {
+    fn psec_ingress_default_allow_uses_private_network_capability() {
         let mut request = ExecutionRequest::default();
         request.policy.network_ingress = Some(crate::mxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
@@ -3526,24 +3288,24 @@ mod tests {
         });
         request.policy.allowed_proxy_peer = Some("S-1-15-2-1".into());
 
-        let bytes = build_psec_v1_security_environment_spec(
-            &request,
+        for version in [
             SecurityEnvironmentVersion::V1_0,
-            false,
-            false,
-        );
-        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
-        let network = spec.network_policy().expect("network policy");
+            SecurityEnvironmentVersion::V1_1,
+        ] {
+            let bytes = build_psec_v1_security_environment_spec(&request, version, false);
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+            let network = spec.network_policy().expect("network policy");
 
-        assert_eq!(spec.version().minor(), 0);
-        assert_eq!(
-            spec.capabilities(),
-            Some(
-                crate::process_container_common::network_policy_helpers::PRIVATE_NETWORK_CAPABILITY
-            )
-        );
-        assert_eq!(network.allowed_appcontainer_peer(), Some("S-1-15-2-1"));
-        assert!(network.ingress().is_none());
+            assert_eq!(spec.version().minor(), version.minor);
+            assert_eq!(
+                spec.capabilities(),
+                Some(
+                    crate::process_container_common::network_policy_helpers::PRIVATE_NETWORK_CAPABILITY
+                )
+            );
+            assert_eq!(network.allowed_appcontainer_peer(), Some("S-1-15-2-1"));
+            assert!(network.ingress().is_none());
+        }
     }
 
     #[test]

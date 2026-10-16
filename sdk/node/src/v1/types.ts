@@ -681,6 +681,11 @@ export type BackendCapability =
   | 'captureDenials'
   | 'filesystemDeniedPaths'
   | 'filesystemEnumeratePaths'
+  /**
+   * With explicit host-loopback allow, the baseline is policy-permitted stateful outbound
+   * loopback. Native Windows ingress support adds bidirectional access, including
+   * container-hosted loopback servers.
+   */
   | 'ingressHostLoopbackAllow'
   | 'proxyEnforcement'
   | 'identitylessLoopbackProxy'
@@ -756,6 +761,11 @@ export interface ProbeFacts {
   bfsCompiledIn: boolean;
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
+  /**
+   * With explicit host-loopback allow, the baseline is policy-permitted stateful outbound
+   * loopback. Native Windows ingress support adds bidirectional access, including
+   * container-hosted loopback servers.
+   */
   baseContainerSupportsIngressHostLoopbackAllow: boolean;
   /** Identity-less proxy support on loopback; requires explicit host-loopback allow. */
   baseContainerSupportsIdentitylessLoopbackProxy: boolean;
