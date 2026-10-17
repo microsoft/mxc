@@ -177,13 +177,19 @@ async function runOneShotJsonAsyncNative(
   request: OneShotRequest,
   experimental: boolean,
 ): Promise<BindingRunResult> {
+  return runRawOneShotJsonAsyncNative(JSON.stringify(request), experimental);
+}
+
+async function runRawOneShotJsonAsyncNative(
+  requestJson: string,
+  experimental: boolean,
+): Promise<BindingRunResult> {
   const native = loadMxcFfi();
   try {
     const { run, free } = bindRunFunctions(native);
     const result = {} as AbiRunResult;
     let filled = false;
     try {
-      const requestJson = JSON.stringify(request);
       const status = await new Promise<number>((resolve, reject) => {
         run.async(
           requestJson,
@@ -214,6 +220,7 @@ type AsyncRunImplementation = (
 ) => Promise<BindingRunResult>;
 
 let asyncRunImplementation = runOneShotJsonAsyncNative;
+let rawAsyncRunImplementation = runRawOneShotJsonAsyncNative;
 
 /** @internal Replaces the async native call for one process's unit tests. */
 export function _setBindingRunAsyncImplementation(
@@ -222,15 +229,31 @@ export function _setBindingRunAsyncImplementation(
   asyncRunImplementation = implementation ?? runOneShotJsonAsyncNative;
 }
 
+/** @internal Replaces the raw async native call for unit tests. */
+export function _setBindingRawRunAsyncImplementation(
+  implementation?: typeof runRawOneShotJsonAsyncNative,
+): void {
+  rawAsyncRunImplementation = implementation ?? runRawOneShotJsonAsyncNative;
+}
+
+function rethrowRunError(error: unknown): never {
+  if (error instanceof MxcError) throw error;
+  throw new MxcError(
+    'backend_error',
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
 export function runOneShotJsonAsync(
   request: OneShotRequest,
   experimental = false,
 ): Promise<BindingRunResult> {
-  return asyncRunImplementation(request, experimental).catch((error: unknown) => {
-    if (error instanceof MxcError) throw error;
-    throw new MxcError(
-      'backend_error',
-      error instanceof Error ? error.message : String(error),
-    );
-  });
+  return asyncRunImplementation(request, experimental).catch(rethrowRunError);
+}
+
+export function runRawOneShotJsonAsync(
+  requestJson: string,
+  experimental: boolean,
+): Promise<BindingRunResult> {
+  return rawAsyncRunImplementation(requestJson, experimental).catch(rethrowRunError);
 }

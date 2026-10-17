@@ -140,7 +140,7 @@ export function createNodePtyProcess(
 // Work around the in-process PTY binding's lack of ProcessContainer support by
 // launching the same exact one-shot request through wxc-exec under node-pty.
 async function spawnWithWxcExecutablePty(
-  request: OneShotRequest,
+  requestJson: string,
   experimental: boolean,
   rows: number,
   columns: number,
@@ -154,7 +154,6 @@ async function spawnWithWxcExecutablePty(
     });
   }
 
-  const requestJson = JSON.stringify(request);
   const args = [
     '--config-base64',
     Buffer.from(requestJson, 'utf8').toString('base64'),
@@ -190,9 +189,16 @@ async function spawnWithWxcExecutablePty(
   }
 }
 
-type SpawnExecutablePtyImplementation = typeof spawnWithWxcExecutablePty;
+type SpawnExecutablePtyImplementation = (
+  request: OneShotRequest,
+  experimental: boolean,
+  rows: number,
+  columns: number,
+) => Promise<MxcPtyProcess>;
 
-let implementation = spawnWithWxcExecutablePty;
+let implementation: SpawnExecutablePtyImplementation =
+  (request, experimental, rows, columns) =>
+    spawnWithWxcExecutablePty(JSON.stringify(request), experimental, rows, columns);
 
 /** @internal Replaces node-pty dependencies for unit tests. */
 export function _setProcessContainerPtyDependencies(
@@ -207,7 +213,8 @@ export function _setProcessContainerPtyDependencies(
 export function _setSpawnProcessContainerWithPtyImplementation(
   replacement?: SpawnExecutablePtyImplementation,
 ): void {
-  implementation = replacement ?? spawnWithWxcExecutablePty;
+  implementation = replacement ?? ((request, experimental, rows, columns) =>
+    spawnWithWxcExecutablePty(JSON.stringify(request), experimental, rows, columns));
 }
 
 export function spawnProcessContainerWithPty(
@@ -217,4 +224,13 @@ export function spawnProcessContainerWithPty(
   columns: number,
 ): Promise<MxcPtyProcess> {
   return implementation(request, experimental, rows, columns);
+}
+
+export function spawnProcessContainerWithPtyJson(
+  requestJson: string,
+  experimental: boolean,
+  rows: number,
+  columns: number,
+): Promise<MxcPtyProcess> {
+  return spawnWithWxcExecutablePty(requestJson, experimental, rows, columns);
 }

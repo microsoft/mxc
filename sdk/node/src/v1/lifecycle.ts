@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { Readable } from 'node:stream';
 import { diagLog } from '../diagnostic.js';
+import { captureProcessOutput } from './capture.js';
 import { MxcError } from './errors.js';
 import {
   runBindingStateAwareRequestAsync,
@@ -167,20 +167,6 @@ function assertStateAwareStreamingOptions(
   }
 }
 
-function collectStream(stream: Readable | null): Promise<string> {
-  if (stream === null) {
-    return Promise.resolve('');
-  }
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    stream.on('data', (chunk: Buffer | string) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    });
-    stream.once('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-    stream.once('error', reject);
-  });
-}
-
 /**
  * Provision a container from a closed backend-specific request.
  */
@@ -301,12 +287,10 @@ export async function runInContainer<C extends PipedExecuteBackend>(
   assertStateAwareStreamingOptions('runInContainer', options);
   assertPipedExecBackend('runInContainer', containerId);
   const proc = await spawnInContainer(containerId, request, options);
-  const stdoutPromise = collectStream(proc.standardOutput);
-  const stderrPromise = collectStream(proc.standardError);
-  const waitPromise = Promise.all([proc.wait(), stdoutPromise, stderrPromise]);
+  const waitPromise = captureProcessOutput(proc);
   let failed = false;
   try {
-    const [result, stdout, stderr] = await waitPromise;
+    const { result, stdout, stderr } = await waitPromise;
     return {
       stdout,
       stderr,
