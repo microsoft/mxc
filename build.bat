@@ -8,6 +8,7 @@ set "BUILD_ALL=0"
 set "WITH_NANVIX=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
+set "WITH_ISOLATION_SESSION_LIFTED=0"
 set "WITH_HYPERLIGHT=0"
 
 :: Parse arguments
@@ -21,6 +22,7 @@ if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_arg
 if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_args )
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
+if /i "%~1"=="--with-isolation-session-lifted" ( set "WITH_ISOLATION_SESSION=1" & set "WITH_ISOLATION_SESSION_LIFTED=1" & shift & goto :parse_args )
 if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
 if /i "%~1"=="--help"    ( goto :usage )
 if /i "%~1"=="-h"        ( goto :usage )
@@ -37,6 +39,17 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
     )
 )
 
+if "%WITH_ISOLATION_SESSION_LIFTED%"=="1" (
+    if "%BUILD_ALL%"=="1" (
+        echo ERROR: Lifted IsolationSession currently supports x64 only because the pinned SDK package contains one AMD64 IsoSessionApp.dll. Use --x64 instead of --all.
+        exit /b 1
+    )
+    if /i "%BUILD_ARCH%"=="aarch64-pc-windows-msvc" (
+        echo ERROR: Lifted IsolationSession currently supports x64 only because the pinned SDK package contains one AMD64 IsoSessionApp.dll.
+        exit /b 1
+    )
+)
+
 :: Build flags
 set "CARGO_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
@@ -46,12 +59,17 @@ set "PLM_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "PLM_FLAGS=--release --target"
 if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
-if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
+if "%WITH_ISOLATION_SESSION_LIFTED%"=="1" (
+    set "CARGO_FLAGS=--features isolation_session_lifted %CARGO_FLAGS%"
+) else if "%WITH_ISOLATION_SESSION%"=="1" (
+    set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
+)
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
 set "DOTNET_CONFIG=Release"
 if "%BUILD_CONFIG%"=="debug" set "DOTNET_CONFIG=Debug"
 set "DOTNET_BUILD_PROPERTIES="
 if "%WITH_ISOLATION_SESSION%"=="1" set "DOTNET_BUILD_PROPERTIES=!DOTNET_BUILD_PROPERTIES! -p:MxcWithIsolationSession=true"
+if "%WITH_ISOLATION_SESSION_LIFTED%"=="1" set "DOTNET_BUILD_PROPERTIES=!DOTNET_BUILD_PROPERTIES! -p:MxcIsolationSessionLifted=true"
 if "%WITH_WSLC%"=="1" set "DOTNET_BUILD_PROPERTIES=!DOTNET_BUILD_PROPERTIES! -p:MxcWithWslc=true"
 
 :: Build Rust
@@ -166,6 +184,22 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
                 if exist "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll" del /Q "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll"
             )
         )
+        if "!COPY_WSLC_RUNTIME!"=="1" (
+            if "%WITH_ISOLATION_SESSION_LIFTED%"=="1" (
+                for %%B in (IsoSessionApp.dll IsoSession.manifest) do (
+                    if not exist "!BIN_DIR!\%%B" (
+                        echo ERROR: Lifted IsolationSession Node runtime is missing !BIN_DIR!\%%B
+                        exit /b 1
+                    )
+                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
+                    echo   Copied !SDK_ARCH!\%%B
+                )
+            ) else (
+                for %%B in (IsoSessionApp.dll IsoSession.manifest) do (
+                    if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+                )
+            )
+        )
     )
 
     :: Copy the C# SDK's native library (mxc_ffi) into its runtime assets so a
@@ -174,6 +208,11 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     if "!COPY_WSLC_RUNTIME!"=="1" if not "%WITH_WSLC%"=="1" (
         if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe"
         if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wslcsdk.dll" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wslcsdk.dll"
+    )
+    if "!COPY_WSLC_RUNTIME!"=="1" if not "%WITH_ISOLATION_SESSION_LIFTED%"=="1" (
+        for %%B in (IsoSessionApp.dll IsoSession.manifest) do (
+            if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\%%B" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\%%B"
+        )
     )
     if exist "!BIN_DIR!\mxc_ffi.dll" (
         if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
@@ -193,8 +232,19 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
                 echo   Copied !RID!\native\%%B
             )
         )
+        if "%WITH_ISOLATION_SESSION_LIFTED%"=="1" if "!COPY_WSLC_RUNTIME!"=="1" (
+            for %%B in (IsoSessionApp.dll IsoSession.manifest) do (
+                if not exist "!BIN_DIR!\%%B" (
+                    echo ERROR: Lifted IsolationSession C# runtime unit is missing !BIN_DIR!\%%B
+                    exit /b 1
+                )
+                copy /Y "!BIN_DIR!\%%B" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
+                echo   Copied !RID!\native\%%B
+            )
+        )
         if "!COPY_WSLC_RUNTIME!"=="1" (
             >"sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\mxc-build-features.txt" echo isolation_session=%WITH_ISOLATION_SESSION%
+            >>"sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\mxc-build-features.txt" echo isolation_session_lifted=%WITH_ISOLATION_SESSION_LIFTED%
             >>"sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\mxc-build-features.txt" echo wslc=%WITH_WSLC%
         )
     )
@@ -235,6 +285,7 @@ popd
 
 echo.
 echo Building SDK integration tests...
+set "MXC_EXPECT_ISOLATION_SESSION_LIFTED=%WITH_ISOLATION_SESSION_LIFTED%"
 pushd sdk\node\tests\integration
 :: npm caches `file:` deps by package.json version. The local SDK version
 :: rarely bumps between builds, so a plain `npm install` keeps reusing the
@@ -242,6 +293,13 @@ pushd sdk\node\tests\integration
 :: type-checking sees the dist we just rebuilt above.
 if exist node_modules\@microsoft\mxc-sdk rmdir /s /q node_modules\@microsoft\mxc-sdk
 call npm install & call npm run build
+if "%WITH_ISOLATION_SESSION_LIFTED%"=="1" (
+    node --test --test-name-pattern="lifted IsolationSession|unexpected binaries" dist\package.test.js
+    if errorlevel 1 (
+        popd
+        goto :error_root
+    )
+)
 popd
 
 echo.
@@ -311,7 +369,8 @@ echo   --arm64     Build for ARM64 only
 echo   --all             Build both Windows architectures and create the .NET NuGet package
 echo   --with-microvm    Download and include NanVix micro-VM binaries
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
-echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)
+echo   --with-isolation-session   Build with IsolationSession backend (inbox OS API)
+echo   --with-isolation-session-lifted   Build with lifted IsolationSession (x64-only NuGet SDK + MSI runtime)
 echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)
 echo   -h, --help        Show this help
 echo.

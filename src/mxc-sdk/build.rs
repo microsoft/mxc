@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#[cfg(feature = "isolation_session")]
 #[path = "build/build_isolation_session_bindings.rs"]
 mod build_isolation_session_bindings;
 #[allow(dead_code)]
@@ -27,7 +28,13 @@ mod nanvix_build_common;
 mod nanvix_common;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "isolation_session")]
     build_isolation_session_bindings::run();
+    #[cfg(feature = "isolation_session_lifted")]
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        build_mxc_build_common::isolation_session_sdk::stage_runtime()
+            .unwrap_or_else(|error| panic!("IsolationSession SDK staging failed: {error}"));
+    }
     build_mxc_telemetry::run();
     if let Some((bin_dir, use_prefetched_binaries)) = build_nanvix_binaries::run() {
         nanvix_build_common::stage_artifacts_next_to_exe(&bin_dir, !use_prefetched_binaries);

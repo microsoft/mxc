@@ -41,6 +41,8 @@ jobs:
   windows:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.Windows.Job.yml
+    with:
+      run_isolation_session_lifted: true
 
   linux:
     needs: dependency-feed-check

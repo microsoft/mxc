@@ -41,6 +41,8 @@ mod process_options;
 mod sandbox;
 #[cfg(target_os = "windows")]
 pub use sandbox::{spawn_one_shot, spawn_one_shot_pty, OneShotSpawnFailure};
+#[cfg(all(target_os = "windows", feature = "isolation_session_lifted"))]
+mod regfree;
 #[cfg(target_os = "windows")]
 mod sandbox_id;
 #[cfg(target_os = "windows")]

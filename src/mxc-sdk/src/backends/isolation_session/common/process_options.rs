@@ -10,6 +10,8 @@ use crate::mxc_common::models::ExecutionRequest;
 use crate::isolation_session_bindings::bindings::IsoSessionProcessOptions;
 use windows_core::HSTRING;
 
+#[cfg(feature = "isolation_session_lifted")]
+use super::error::lifted_payload_missing;
 use super::error::{op, transport_err, IsolationSessionError};
 
 const REDIRECT_STDIN: u32 = 0x1;
@@ -167,8 +169,7 @@ pub(super) fn with_service_timeout_grace(mut options: ProcessOptions) -> Process
 pub(super) fn build_iso_process_options(
     options: &ProcessOptions,
 ) -> Result<IsoSessionProcessOptions, IsolationSessionError> {
-    let proc_options = IsoSessionProcessOptions::new()
-        .map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e))?;
+    let proc_options = new_iso_process_options()?;
 
     proc_options
         .SetTimeoutMilliseconds(options.timeout_ms)
@@ -213,6 +214,20 @@ pub(super) fn build_iso_process_options(
     }
 
     Ok(proc_options)
+}
+
+#[cfg(feature = "isolation_session_lifted")]
+fn new_iso_process_options() -> Result<IsoSessionProcessOptions, IsolationSessionError> {
+    match super::regfree::activate_from_adjacent_shim::<IsoSessionProcessOptions>() {
+        Some(result) => result.map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e)),
+        None => Err(lifted_payload_missing(op::OPTIONS_NEW)),
+    }
+}
+
+#[cfg(not(feature = "isolation_session_lifted"))]
+fn new_iso_process_options() -> Result<IsoSessionProcessOptions, IsolationSessionError> {
+    IsoSessionProcessOptions::new()
+        .map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e))
 }
 
 #[cfg(test)]

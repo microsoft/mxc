@@ -1,12 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wxc — embeds Windows VersionInfo.
+//! Build script for wxc - embeds Windows VersionInfo and stages runtime assets.
 
 #[path = "../../mxc-sdk/build/build_mxc_build_common.rs"]
 mod mxc_build_common;
 
 fn main() {
+    #[cfg(feature = "isolation_session")]
+    reconcile_isolation_session_runtime();
+
     mxc_build_common::embed_version_info("MXC sandbox executor", "wxc-exec.exe");
 
     #[cfg(windows)]
@@ -24,29 +27,60 @@ fn main() {
         }
     }
 
-    // Re-run prerequisite checks when PATH changes (e.g., after installing Python).
     #[cfg(windows)]
     println!("cargo:rerun-if-env-changed=PATH");
 }
 
-/// Emit build warnings when E2E test prerequisites are missing or
-/// misconfigured. These are non-blocking — the build succeeds regardless.
+#[cfg(feature = "isolation_session")]
+fn reconcile_isolation_session_runtime() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let target_dir = out_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .expect("could not determine target directory from OUT_DIR");
+
+    // Feature configurations share the final profile directory but have
+    // separate build-script fingerprints. Force this script to reconcile the
+    // shared payload whenever Cargo is invoked.
+    println!(
+        "cargo:rerun-if-changed={}",
+        target_dir.join(".isosession-payload-state").display()
+    );
+
+    #[cfg(feature = "isolation_session_lifted")]
+    mxc_build_common::isolation_session_sdk::stage_runtime()
+        .unwrap_or_else(|e| panic!("IsolationSession SDK staging failed: {e}"));
+
+    #[cfg(not(feature = "isolation_session_lifted"))]
+    for file_name in ["IsoSessionApp.dll", "IsoSession.manifest"] {
+        let path = target_dir.join(file_name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove stale lifted payload {}: {error}", path.display()),
+        }
+    }
+}
+
 #[cfg(windows)]
 fn check_test_prerequisites() {
     use std::process::Command;
 
-    // Check Python
     let python_ok = Command::new("where.exe")
         .arg("python.exe")
         .output()
         .ok()
-        .and_then(|o| {
-            if !o.status.success() {
+        .and_then(|output| {
+            if !output.status.success() {
                 return None;
             }
-            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-            let first = stdout.lines().next().unwrap_or("").to_string();
-            Some(first)
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            Some(stdout.lines().next().unwrap_or("").to_string())
         });
 
     match python_ok {
@@ -67,7 +101,6 @@ fn check_test_prerequisites() {
         _ => {}
     }
 
-    // Check pwsh at the expected install path (test configs use a hardcoded path)
     const PWSH_PATH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
     if !std::path::Path::new(PWSH_PATH).exists() {
         println!(
