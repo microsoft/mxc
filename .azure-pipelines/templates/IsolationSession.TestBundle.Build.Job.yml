@@ -300,6 +300,20 @@ jobs:
           Write-Host "  -> test_scripts/$s"
       }
 
+      # Helpers the suites dot-source from $PSScriptRoot\lib.
+      New-Item -ItemType Directory -Force -Path "$out/test_scripts/lib" | Out-Null
+      $libScripts = @(
+          'LoopbackAnchor.ps1'
+      )
+      foreach ($s in $libScripts) {
+          $src = "$(Build.SourcesDirectory)/tests/scripts/lib/$s"
+          if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+              throw "Required test script helper not found: $src"
+          }
+          Copy-Item $src "$out/test_scripts/lib/"
+          Write-Host "  -> test_scripts/lib/$s"
+      }
+
       # SDK integration tests (Node E2E suite)
       $sdkInteg = "$out/sdk-integration"
       $integSrc = "$(Build.SourcesDirectory)/sdk/node/tests/integration"
