@@ -1752,7 +1752,38 @@ fn base_container_teardown_status(
     }
 }
 
+fn duplicate_retained_query_process_handle(
+    process: HANDLE,
+) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::FromRawHandle;
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_HANDLE_OPTIONS};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    };
+    let mut duplicate = HANDLE::default();
+    // SAFETY: the caller keeps the source process handle valid throughout
+    // this call. The new handle is noninheritable and has no mutation rights.
+    unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            process,
+            GetCurrentProcess(),
+            &mut duplicate,
+            PROCESS_QUERY_LIMITED_INFORMATION.0 | PROCESS_SYNCHRONIZE.0,
+            false,
+            DUPLICATE_HANDLE_OPTIONS(0),
+        )
+    }
+    .map_err(|_| std::io::Error::other("duplicate retained native query process handle failed"))?;
+    // SAFETY: DuplicateHandle created a distinct owned kernel handle.
+    Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(duplicate.0) })
+}
+
 impl SandboxProcess for BaseContainerSandboxProcess {
+    fn duplicate_query_process_handle(&self) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        duplicate_retained_query_process_handle(self.process.get())
+    }
+
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.output_metadata.as_ref()
     }
@@ -2075,6 +2106,32 @@ mod tests {
     use crate::process_container_common::job_object::to_job_object_uilimit_mask;
     use crate::process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn native_query_process_duplicate_is_noninheritable_and_independently_owned() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::GetHandleInformation;
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetCurrentProcessId, GetProcessId,
+        };
+
+        // The current-process pseudo-handle is an inert source: no child,
+        // container, profile or host permission is created or changed.
+        let original = duplicate_retained_query_process_handle(unsafe { GetCurrentProcess() })
+            .expect("duplicate current process for query");
+        let survivor = duplicate_retained_query_process_handle(HANDLE(original.as_raw_handle()))
+            .expect("duplicate retained query handle");
+        assert_ne!(original.as_raw_handle(), survivor.as_raw_handle());
+        drop(original);
+        let handle = HANDLE(survivor.as_raw_handle());
+        assert_eq!(unsafe { GetProcessId(handle) }, unsafe {
+            GetCurrentProcessId()
+        });
+        let mut flags = 0;
+        unsafe { GetHandleInformation(handle, &mut flags) }.expect("query duplicate flags");
+        assert_eq!(flags & HANDLE_FLAG_INHERIT.0, 0);
+        assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, WAIT_TIMEOUT);
+    }
 
     #[test]
     fn native_capture_probe_requires_base_container_and_complete_learning_mode_abi() {

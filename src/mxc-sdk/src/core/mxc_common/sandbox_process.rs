@@ -147,6 +147,22 @@ pub fn duplicate_and_take_native_stdio<I, O, E>(
 ///   before touching the other can hang on output-heavy children. Taking only
 ///   one stream (leaving the other for `wait()` to drain) is always safe.
 pub trait SandboxProcess: Send {
+    /// Duplicate a retained Windows process handle with query and wait access.
+    ///
+    /// Supporting backends return a non-inheritable handle to the exact process
+    /// object they already own, with only `PROCESS_QUERY_LIMITED_INFORMATION`
+    /// and `SYNCHRONIZE`. Implementations must not reopen the numeric process ID.
+    /// The caller owns the duplicate; dropping it does not terminate the process
+    /// or change the sandbox's cleanup responsibility. Unsupported backends
+    /// return `ErrorKind::Unsupported`. Initially provided by BaseContainer.
+    #[cfg(windows)]
+    fn duplicate_query_process_handle(&self) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this backend does not expose an owned native query process handle",
+        ))
+    }
+
     /// Warnings associated with this sandbox, such as a policy that
     /// intentionally relaxes containment, an unavailable telemetry route, or a
     /// cleanup step that failed after the process exited.
@@ -867,6 +883,15 @@ mod runner_tests {
         fn wait(&mut self) -> std::io::Result<i32> {
             Ok(0)
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_query_process_handle_defaults_to_unsupported_without_os_calls() {
+        let error = CompletedProcess
+            .duplicate_query_process_handle()
+            .expect_err("unsupported process must not expose native authority");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
     }
 
     struct CountingBackend {

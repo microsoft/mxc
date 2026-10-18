@@ -748,6 +748,10 @@ struct DaclGuardedProcess {
 }
 
 impl SandboxProcess for DaclGuardedProcess {
+    fn duplicate_query_process_handle(&self) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        self.inner.duplicate_query_process_handle()
+    }
+
     fn warnings(&self) -> Vec<String> {
         self.inner.warnings()
     }
@@ -1439,6 +1443,12 @@ mod tests {
             output_metadata: crate::mxc_common::models::SandboxOutputMetadata,
         }
         impl SandboxProcess for FakeProcess {
+            fn duplicate_query_process_handle(
+                &self,
+            ) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+                Err(std::io::Error::from_raw_os_error(12345))
+            }
+
             fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
                 self.stdin_taken = true;
                 None
@@ -1491,6 +1501,13 @@ mod tests {
         };
 
         assert_eq!(guarded.id(), 4242, "id() must delegate");
+        assert_eq!(
+            guarded
+                .duplicate_query_process_handle()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(12345)
+        );
         assert!(
             matches!(guarded.try_wait(), Ok(Some(7))),
             "try_wait() must delegate"

@@ -273,6 +273,21 @@ enum StdioAccess {
 }
 
 impl MxcProcess {
+    /// Duplicate this process's retained Windows handle for identity queries
+    /// and waiting, without reopening a numeric process ID.
+    ///
+    /// The non-inheritable duplicate has only
+    /// `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` access. The caller owns
+    /// it independently of this object, but the sandbox still owns process
+    /// termination and cleanup. Initially supported by BaseContainer; other
+    /// backends may return `std::io::ErrorKind::Unsupported`.
+    #[cfg(windows)]
+    pub fn duplicate_query_process_handle(
+        &self,
+    ) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        self.inner.duplicate_query_process_handle()
+    }
+
     pub(crate) fn new(inner: Box<dyn SandboxProcess>) -> Self {
         Self {
             inner,
@@ -789,6 +804,13 @@ mod tests {
     struct NativeOnlyFake;
 
     impl SandboxProcess for NativeOnlyFake {
+        #[cfg(windows)]
+        fn duplicate_query_process_handle(
+            &self,
+        ) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+            Err(std::io::Error::from_raw_os_error(12345))
+        }
+
         fn warnings(&self) -> Vec<String> {
             Vec::new()
         }
@@ -828,6 +850,27 @@ mod tests {
         fn wait(&mut self) -> std::io::Result<i32> {
             Ok(0)
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_query_process_handle_is_independent_of_stdio_transfer() {
+        let mut process = MxcProcess::new(Box::new(NativeOnlyFake));
+        assert_eq!(
+            process
+                .duplicate_query_process_handle()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(12345)
+        );
+        let _stdio = process.take_native_stdio().expect("native stdio transfer");
+        assert_eq!(
+            process
+                .duplicate_query_process_handle()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(12345)
+        );
     }
 
     impl SandboxProcess for FakeProcess {

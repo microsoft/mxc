@@ -585,6 +585,11 @@ impl Drop for TelemetryProcess {
 }
 
 impl SandboxProcess for TelemetryProcess {
+    #[cfg(windows)]
+    fn duplicate_query_process_handle(&self) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        self.inner.duplicate_query_process_handle()
+    }
+
     /// Merged at the call rather than when this wrapper was built: the wrapped
     /// process can report a cleanup failure long after that.
     fn warnings(&self) -> Vec<String> {
@@ -747,6 +752,11 @@ impl ProcessWithWarnings {
 }
 
 impl SandboxProcess for ProcessWithWarnings {
+    #[cfg(windows)]
+    fn duplicate_query_process_handle(&self) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+        self.inner.duplicate_query_process_handle()
+    }
+
     /// Merged at the call rather than when this wrapper was built: the wrapped
     /// process can report a cleanup failure long after that.
     fn warnings(&self) -> Vec<String> {
@@ -877,6 +887,13 @@ mod telemetry_process_tests {
     }
 
     impl SandboxProcess for NativeStdioProbe {
+        #[cfg(windows)]
+        fn duplicate_query_process_handle(
+            &self,
+        ) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+            Err(std::io::Error::from_raw_os_error(12345))
+        }
+
         fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(None)
@@ -1042,6 +1059,14 @@ mod telemetry_process_tests {
             },
             std::time::Instant::now(),
         );
+        #[cfg(windows)]
+        assert_eq!(
+            telemetry
+                .duplicate_query_process_handle()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(12345)
+        );
         assert!(telemetry.take_native_stdio().unwrap().is_none());
         assert!(telemetry.stdin_closer().is_none());
         let (_, telemetry_pty_closer) = telemetry.pty_clone_reader_with_closer().unwrap();
@@ -1067,6 +1092,14 @@ mod telemetry_process_tests {
                 timeout_kill_calls: Arc::clone(&warning_timeout_calls),
             }),
             vec!["test warning".to_string()],
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            with_warnings
+                .duplicate_query_process_handle()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(12345)
         );
         assert!(with_warnings.take_native_stdio().unwrap().is_none());
         assert!(with_warnings.stdin_closer().is_none());
