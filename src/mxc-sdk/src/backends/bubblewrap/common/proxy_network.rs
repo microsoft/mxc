@@ -1675,10 +1675,14 @@ fn is_nameserver_line(line: &str) -> bool {
 fn resolver_target_of(start: &Path) -> Result<PathBuf, String> {
     let resolved = resolve_through_symlinks(start)
         .ok_or_else(|| format!("{} is not a resolvable path", start.display()))?;
+    if let Some(error) = resolved.error {
+        return Err(format!(
+            "{} could not be resolved ({error})",
+            start.display()
+        ));
+    }
+    let resolved = resolved.path;
 
-    // A chain that loops or dangles leaves canonicalization unfinished, so the
-    // walk hands back path text that is still a link. Binding there aborts the
-    // sandbox, which is worse than the broken DNS being fixed.
     let metadata = fs::symlink_metadata(&resolved)
         .map_err(|error| format!("{} could not be read ({error})", resolved.display()))?;
     if !metadata.file_type().is_file() {

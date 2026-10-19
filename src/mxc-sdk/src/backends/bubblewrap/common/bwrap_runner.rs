@@ -1162,7 +1162,14 @@ fn resolve_denied_paths(
     let mut files = HashSet::new();
     for p in &policy.denied_paths {
         if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
-            let resolved = resolved.to_str().ok_or_else(|| {
+            if let Some(error) = resolved.error {
+                logger.log_line(&format!(
+                    "Bubblewrap: deniedPaths entry '{p}' could not be fully resolved ({error}); \
+                     masking '{}' instead.",
+                    resolved.path.display()
+                ));
+            }
+            let resolved = resolved.path.to_str().ok_or_else(|| {
                 format!(
                     "Bubblewrap: deniedPaths entry '{p}' resolves to a non-UTF-8 host path that \
                      cannot be safely masked; refusing to start."

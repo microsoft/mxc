@@ -3,9 +3,9 @@
 
 //! `seatbelt_common` — shared library for the macOS sandbox backend.
 //!
-//! - [`profile_builder`] is platform-agnostic (pure string generation) so it
-//!   compiles and is fully unit-tested on every host. This lets reviewers
-//!   validate profile generation without a Mac.
+//! - [`profile_builder`] formats prepared inputs without host discovery, so it
+//!   is unit-tested on every host.
+//! - macOS-only preparation resolves paths and discovers host directories.
 //! - [`seatbelt_policy`] owns the backend's network invariants and effective-
 //!   policy helpers. Also platform-agnostic, so the rules are unit-tested
 //!   everywhere even though only macOS can execute them.
@@ -18,5 +18,7 @@ pub mod default_env;
 pub mod profile_builder;
 pub mod seatbelt_policy;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod profile_preparation;
 #[cfg(target_os = "macos")]
 pub mod seatbelt_runner;

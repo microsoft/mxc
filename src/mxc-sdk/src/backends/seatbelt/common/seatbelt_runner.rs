@@ -41,6 +41,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
+use crate::seatbelt_common::profile_preparation::{expand_tilde, prepare_profile};
 
 #[link(name = "proc")]
 unsafe extern "C" {
@@ -308,7 +309,9 @@ impl SandboxBackend for SeatbeltScriptRunner {
                 crate::mxc_common::proxy_env::redact_proxy_url(&address.to_url())
             ));
         }
-        let profile = build_profile_with_proxy(request, proxy_address).map_err(error_response)?;
+        let inputs = prepare_profile(request).map_err(error_response)?;
+        let profile =
+            build_profile_with_proxy(request, proxy_address, &inputs).map_err(error_response)?;
         log_generated_profile(&profile, logger);
 
         // Effective posture, not the raw flag: a `guiAccess` the UI policy
@@ -930,10 +933,7 @@ const UNRESOLVED_WORKING_DIRECTORY: &str = "/";
 /// The same value feeds the environment, so the default `HOME` cannot name a
 /// directory the child never entered.
 fn resolved_working_directory_opt(request: &ExecutionRequest) -> Option<String> {
-    let expand = |path: &str| {
-        crate::seatbelt_common::profile_builder::expand_tilde(path)
-            .unwrap_or_else(|_| path.to_string())
-    };
+    let expand = |path: &str| expand_tilde(path).unwrap_or_else(|_| path.to_string());
     request
         .resolved_working_directory_with(|path| Path::new(&expand(path)).is_dir())
         .map(|resolved| expand(resolved.path))
@@ -1127,7 +1127,8 @@ mod tests {
         // Guards the seam: a re-derived or stale profile must not be logged.
         let mut request = base_request();
         request.policy.readonly_paths = vec!["/tmp/mxc-profile-log-probe".into()];
-        let profile = build_profile_with_proxy(&request, None).expect("profile builds");
+        let inputs = prepare_profile(&request).expect("profile inputs resolve");
+        let profile = build_profile_with_proxy(&request, None, &inputs).expect("profile builds");
 
         assert_eq!(
             extract_profile(&logged_profile(&profile)),
