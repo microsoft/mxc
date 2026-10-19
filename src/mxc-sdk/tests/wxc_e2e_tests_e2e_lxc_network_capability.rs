@@ -111,7 +111,13 @@ fn workload_can_still_ping() {
         "containment": "lxc",
         "process": { "commandLine": "ping -c 1 127.0.0.1" },
         "lifecycle": { "destroyOnExit": true },
-        "lxc": { "distribution": "ubuntu", "release": "noble" }
+        "lxc": { "distribution": "ubuntu", "release": "noble" },
+        "network": {
+            "egress": {
+                "default": "deny",
+                "allow": [{ "to": [{ "cidr": "198.51.100.2/32" }] }]
+            }
+        }
     });
 
     let result = run_platform_config_value("lxc ping allowed", &config, &[], None);
@@ -140,7 +146,13 @@ fn workload_cannot_open_a_raw_or_packet_socket() {
         "containment": "lxc",
         "process": { "commandLine": RAW_AND_PACKET_PROBE },
         "lifecycle": { "destroyOnExit": true },
-        "lxc": { "distribution": "ubuntu", "release": "noble" }
+        "lxc": { "distribution": "ubuntu", "release": "noble" },
+        "network": {
+            "egress": {
+                "default": "deny",
+                "allow": [{ "to": [{ "cidr": "198.51.100.2/32" }] }]
+            }
+        }
     });
 
     let result = run_platform_config_value("lxc raw socket refusal", &config, &[], None);
