@@ -22,6 +22,7 @@ use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::lxc_common::signal_cleanup;
 use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::filesystem_symlink::{is_policy_path_error, resolve_through_symlinks};
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
@@ -698,6 +699,10 @@ impl BubblewrapScriptRunner {
         // 3. Spawn `bwrap`.
         let mut command = Command::new(&bwrap);
         command.args(&args);
+        // bwrap passes its signal mask on to the workload, so left as
+        // `lxc-exec`'s watchdog set it, the workload would ignore SIGTERM,
+        // SIGINT and SIGHUP in every stdio mode.
+        signal_cleanup::unblock_in_child(&mut command);
         let pty = match stdio {
             StdioMode::Pipes => {
                 command
