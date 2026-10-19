@@ -43,7 +43,13 @@ cp "$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_rootless_no_network.json" "$RUN_HOME
 
 echo "Running LXC rootless no-network test as $RUN_USER..."
 RC=0
-OUTPUT=$(sudo -u "$RUN_USER" -H "$RUN_HOME/lxc-exec" "$RUN_HOME/lxc_rootless_no_network.json" 2>&1) || RC=$?
+
+# Github's runner adds XDG_RUNTIME_DIR and LXC uses this directory for scratch files.
+# The directory is private and LXC cannot access it.
+# In this case LXC is unable to write a lock file to this location and the test fails.
+# Drop the EV here so the test does not see it.
+# Same is needed for a rootless process startted with sudo -u.
+OUTPUT=$(sudo -u "$RUN_USER" -H env -u XDG_RUNTIME_DIR "$RUN_HOME/lxc-exec" "$RUN_HOME/lxc_rootless_no_network.json" 2>&1) || RC=$?
 echo "$OUTPUT"
 
 if [ "$RC" -ne 0 ]; then

@@ -136,15 +136,17 @@ fn workload_cannot_open_a_raw_or_packet_socket() {
         return;
     }
 
-    // Bash does not have the ability to make RAW and PACKET sockets.  Use perl instead.
-    const RAW_AND_PACKET_PROBE: &str = r#"perl -e 'use Socket; my $raw = socket(RAW, PF_INET, SOCK_RAW, 1) ? "RAW_OPENED" : "RAW_REFUSED: $!"; my $pkt = socket(PKT, 17, SOCK_RAW, 0) ? "PACKET_OPENED" : "PACKET_REFUSED: $!"; print "$raw\n$pkt\n";'"#;
+    let probe = format!(
+        "python3 -c '{}'",
+        include_str!("support/raw_socket_probe.py")
+    );
 
-    // Use Ubuntu for perl.
+    // Use Ubuntu for python3.
     let config = json!({
         "version": "0.9.0-alpha",
         "containerId": "lxc-raw-socket-refusal",
         "containment": "lxc",
-        "process": { "commandLine": RAW_AND_PACKET_PROBE },
+        "process": { "commandLine": probe },
         "lifecycle": { "destroyOnExit": true },
         "lxc": { "distribution": "ubuntu", "release": "noble" },
         "network": {
@@ -158,20 +160,43 @@ fn workload_cannot_open_a_raw_or_packet_socket() {
     let result = run_platform_config_value("lxc raw socket refusal", &config, &[], None);
     let output = result.combined_output();
 
-    assert_eq!(
-        result.code,
-        Some(0),
-        "lxc-exec did not run the probe\n--- stderr ---\n{}",
-        result.stderr
+    assert!(
+        output.contains("raw EPERM\npacket EPERM"),
+        "the workload opened a raw or packet socket the capability drop must refuse\n{output}"
+    );
+}
+
+#[test]
+fn workload_cannot_open_a_raw_or_packet_socket_through_io_uring() {
+    if !ready() {
+        return;
+    }
+
+    let probe = format!(
+        "python3 -c '{}'",
+        include_str!("support/io_uring_socket_probe.py")
     );
 
-    assert!(
-        output.contains("RAW_REFUSED"),
-        "the workload opened a raw socket the capability drop must refuse\n{output}"
-    );
+    let config = json!({
+        "version": "0.9.0-alpha",
+        "containerId": "lxc-io-uring-socket-refusal",
+        "containment": "lxc",
+        "process": { "commandLine": probe },
+        "lifecycle": { "destroyOnExit": true },
+        "lxc": { "distribution": "ubuntu", "release": "noble" },
+        "network": {
+            "egress": {
+                "default": "deny",
+                "allow": [{ "to": [{ "cidr": "198.51.100.2/32" }] }]
+            }
+        }
+    });
+
+    let result = run_platform_config_value("lxc io_uring socket refusal", &config, &[], None);
+    let output = result.combined_output();
 
     assert!(
-        output.contains("PACKET_REFUSED"),
-        "the workload opened a packet socket the capability drop must refuse\n{output}"
+        output.contains("raw EPERM\npacket EPERM"),
+        "io_uring opened a raw or packet socket the capability drop must refuse\n{output}"
     );
 }
