@@ -66,6 +66,27 @@ directional policy. For existing-container execution, `ExecutionRequest.network`
 is a runtime-only `ProcessNetworkPolicy`; it cannot change provision-time
 policy.
 
+### Windows retained process queries
+
+On Windows, `MxcProcess` exposes this Rust-only operation:
+
+```rust,ignore
+pub fn duplicate_query_process_handle(
+    &self,
+) -> std::io::Result<std::os::windows::io::OwnedHandle>;
+```
+
+The operation duplicates the retained process handle without reopening a numeric
+process ID. The duplicate is non-inheritable and has exactly
+`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` access for identity queries and
+waiting. BaseContainer currently supports it; other Windows backends return
+`std::io::ErrorKind::Unsupported`. The method is unavailable on non-Windows
+targets and is intentionally not exposed by the .NET or Node bindings.
+
+The caller owns the returned `OwnedHandle` independently and closes it by
+dropping it. Keeping this query handle does not transfer process termination or
+sandbox cleanup responsibility from MXC to the caller.
+
 ## Lifecycle API
 
 Typed lifecycle operations are available under `v1`. `ProvisionRequest`

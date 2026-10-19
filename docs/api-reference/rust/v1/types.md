@@ -311,6 +311,10 @@ pub struct MxcProcess {
 }
 
 impl MxcProcess {
+  #[cfg(windows)]
+  pub fn duplicate_query_process_handle(
+    &self,
+  ) -> std::io::Result<std::os::windows::io::OwnedHandle>;
   pub fn warnings(&self) -> Vec<String>;
   pub fn output_metadata(&self) -> Option<&ExecutionMetadata>;
   pub fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
@@ -328,6 +332,16 @@ impl MxcProcess {
 }
 ```
 
+
+`duplicate_query_process_handle` is Windows-only and currently supported by
+BaseContainer. Other Windows backends return
+`std::io::ErrorKind::Unsupported`. It duplicates the retained process handle
+without reopening a numeric process ID, with exactly
+`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` access. The returned
+`OwnedHandle` is non-inheritable and independently owned by the caller, who
+closes it by dropping it. Process termination and sandbox cleanup remain MXC's
+responsibility. This API is intentionally Rust-only; the .NET and Node bindings
+do not expose it.
 
 ## `mxc_sdk::v1::MxcPtyProcess`
 
