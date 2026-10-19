@@ -3487,8 +3487,7 @@ mod tests {
         assert!(resolver_target_of(&dangling).is_err());
     }
 
-    /// A link loop leaves canonicalization unfinished, so the walk hands back a
-    /// path that is still a link; binding there would abort the sandbox.
+    /// Reject a link loop before attempting to mount the resolver file.
     #[test]
     fn the_resolver_target_gives_up_on_a_link_loop() {
         let dir = tempfile::tempdir().unwrap();
@@ -3499,7 +3498,7 @@ mod tests {
         std::os::unix::fs::symlink(&first, &second).unwrap();
 
         let error = resolver_target_of(&first).expect_err("a loop has no target");
-        assert!(error.contains("regular file"), "got: {error}");
+        assert!(error.contains("could not be resolved"), "got: {error}");
     }
 
     /// A directory would be mounted over as if it were the resolver file.
