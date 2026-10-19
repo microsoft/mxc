@@ -107,7 +107,7 @@ jobs:
 
       # Run a seperate test for non-privlaged LXC container test.
       # LXC containers can run rootless, but with setup.
-      # To prevent tests runing state this test only runs during CI.
+      # To prevent tests messing with state this test only runs during CI.
       - name: Run LXC rootless no-network test
         run: |
           # The runner's default ACL on /home leaves the rootless container directory without group write.

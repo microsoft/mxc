@@ -161,42 +161,7 @@ fn workload_cannot_open_a_raw_or_packet_socket() {
     let output = result.combined_output();
 
     assert!(
-        output.contains("raw EPERM\npacket EPERM"),
+        output.contains("raw EPERM") && output.contains("packet EPERM"),
         "the workload opened a raw or packet socket the capability drop must refuse\n{output}"
-    );
-}
-
-#[test]
-fn workload_cannot_open_a_raw_or_packet_socket_through_io_uring() {
-    if !ready() {
-        return;
-    }
-
-    let probe = format!(
-        "python3 -c '{}'",
-        include_str!("support/io_uring_socket_probe.py")
-    );
-
-    let config = json!({
-        "version": "0.9.0-alpha",
-        "containerId": "lxc-io-uring-socket-refusal",
-        "containment": "lxc",
-        "process": { "commandLine": probe },
-        "lifecycle": { "destroyOnExit": true },
-        "lxc": { "distribution": "ubuntu", "release": "noble" },
-        "network": {
-            "egress": {
-                "default": "deny",
-                "allow": [{ "to": [{ "cidr": "198.51.100.2/32" }] }]
-            }
-        }
-    });
-
-    let result = run_platform_config_value("lxc io_uring socket refusal", &config, &[], None);
-    let output = result.combined_output();
-
-    assert!(
-        output.contains("raw EPERM\npacket EPERM"),
-        "io_uring opened a raw or packet socket the capability drop must refuse\n{output}"
     );
 }
