@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
+            lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils acl
 
       # GitHub-hosted runners ship Docker, and Docker sets the IPv4 FORWARD
       # policy to DROP. That breaks these tests twice over.
@@ -109,7 +109,10 @@ jobs:
       # LXC containers can run rootless, but with setup.
       # To prevent tests runing state this test only runs during CI.
       - name: Run LXC rootless no-network test
-        run: sudo bash tests/scripts/run_lxc_rootless_no_network_test.sh
+        run: |
+          # The runner's default ACL on /home leaves the rootless container directory without group write.
+          sudo setfacl -k /home
+          sudo bash tests/scripts/run_lxc_rootless_no_network_test.sh
 
       # The shell suite above does not cover the capability confinement, and the
       # Linux build lane runs this crate without LXC installed, so these tests
