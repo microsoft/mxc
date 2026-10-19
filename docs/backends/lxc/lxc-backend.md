@@ -310,6 +310,12 @@ sudo lxc-checkconfig
 - **The workload can send only ICMP Echo.** A `protocol: "icmp"` rule lets every
   ICMP type through the firewall, but the command MXC runs can originate only Echo
   requests, the ones `ping` sends.
+- **The network restrictions bind only the command MXC runs and its children.**
+  MXC takes away that command's ability to change the firewall or send raw
+  packets, but the container's init process (PID 1) keeps both.  The command
+  runs as root inside the container, so it can ask init to start a new process,
+  for example with `systemd-run` on Ubuntu.  That process is not a child of the
+  command, and it can change the firewall and send raw packets.
 - **Network access stops after about an hour.** The stock `lxcbr0` hands out
   DHCP leases that last one hour, and MXC's firewall blocks the DHCP request the
   container sends to renew one.  When the lease expires the container loses its
