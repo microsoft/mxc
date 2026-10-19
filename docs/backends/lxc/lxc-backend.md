@@ -307,50 +307,14 @@ sudo lxc-checkconfig
 
 ## Limitations
 
-- **Default-deny is not a containment boundary against the workload.** Both the
-  inbound and outbound chains live in the container's own network namespace, and
-  container init keeps `CAP_NET_ADMIN` there, so a process running as root inside
-  the container can flush or delete them. The command MXC runs is attached with
-  `CAP_NET_ADMIN` dropped from its bounding set whenever chains are installed, so
-  it cannot. That same attach drops `CAP_NET_RAW`, the capability the kernel tests
-  when any packet-capable socket is created: `AF_PACKET` whatever the socket type,
-  `AF_XDP`, raw IP, and the legacy `SOCK_PACKET` the kernel rewrites into
-  `AF_PACKET`. The test sits in the kernel's socket-creation path, which both
-  `socket` and io_uring reach; the socket comes back `EPERM` by either route.
-  Without the drop a workload holding `CAP_NET_RAW` could put frames on the wire
-  beneath the chains, which filter at the IP layer. The drop also ends raw ICMP,
-  and MXC reopens unprivileged ping by widening `net.ipv4.ping_group_range` inside
-  the container.  The workload can then send ICMP Echo requests through a
-  `SOCK_DGRAM` `IPPROTO_ICMP` socket, and the kernel refuses every other ICMP type
-  on that socket.  A `protocol: "icmp"` policy rule is broader: it matches every
-  ICMP type at the firewall.  The rule decides which ICMP may pass; the workload
-  can only originate Echo. Default-deny
-  closes external reachability for a container that does not deliberately tear it
-  down, including services the workload itself starts.
-- **The drop covers the command MXC runs, not container init.** Init keeps
-  `CAP_NET_RAW` just as it keeps `CAP_NET_ADMIN`. A privileged process inside the
-  container can still open a packet socket. The kernel checks the capability at
-  creation, never at transmit, and an already-open descriptor handed to the
-  workload keeps sending.  An io_uring ring handed down the same way is the same
-  case: an operation submitted under a personality init registered runs with
-  init's credentials.  A ring the workload creates itself carries the workload's
-  credentials. Nothing in a stock container image opens either; closing the
-  gap entirely needs a gate below the socket layer, which this backend does not add
-  today.
-- **Policy is not in force while the container starts.** The chains are installed
-  after the container has started and its address has settled, so container init
-  and anything it starts run unfiltered in both directions for that interval. The
-  requested command is attached afterwards. A connection opened during that window
-  keeps working once the rules land, because the chains accept established flows.
-- **A filtered container cannot renew a DHCP lease.** The chains permit loopback
-  and established flows, with no implicit carve-out for DHCP or DNS. A container that
-  outlives its lease loses its address; one that finishes within the lease period
-  is unaffected.
-- **A container that needs a network waits for an IPv4 address.** A dual-stack
-  `lxcbr0` answers router solicitation seconds before its DHCP lease arrives, and
-  the bridge NATs IPv4 only, so an IPv6 address alone does not mean the container
-  can reach the destinations its policy names. A bridge that never provides an
-  IPv4 address fails the run rather than starting a workload that reaches nothing.
+- **The workload can send only ICMP Echo.** A `protocol: "icmp"` rule lets every
+  ICMP type through the firewall, but the command MXC runs can originate only Echo
+  requests, the ones `ping` sends.
+- **Network access stops after about an hour.** The stock `lxcbr0` hands out
+  DHCP leases that last one hour, and MXC's firewall blocks the DHCP request the
+  container sends to renew one.  When the lease expires the container loses its
+  address and the workload can no longer reach the network.  A run that finishes
+  within the hour is unaffected.
 - **IPv6 egress is not supported.** An `egress` rule naming an IPv6 destination
   installs and reports success, but no IPv6 traffic reaches that destination.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
