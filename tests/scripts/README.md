@@ -94,6 +94,11 @@ one raises MXC-FATAL and stops the whole suite (child exit code 78).
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
 run focused backend suites.
 
+`run_lxc_rootless_no_network_test.sh` checks that `lxc-exec` runs a config
+with no network section without root.  Neither `run_lxc_all_tests.sh` nor CI
+runs it, because it adds a temporary user account to the machine.  Run it
+manually with `sudo bash tests/scripts/run_lxc_rootless_no_network_test.sh`.
+
 ### Manual smoke tests
 
 Manual smokes are visual-inspection scripts for rendering and event-propagation
