@@ -25,7 +25,7 @@ def io_uring_socket(family, kind, protocol):
     params = ctypes.create_string_buffer(120)
     ring = libc.syscall(425, 1, params)
     if ring < 0:
-        return None
+        raise SystemExit("MXC_IO_URING_SETUP_FAILED errno=%d" % ctypes.get_errno())
     _, sq_tail, _, _, _, _, sq_array = struct.unpack_from("7I", params, 40)
     sq = mmap.mmap(ring, sq_array + 4, offset=0)
     sqes = mmap.mmap(ring, 64, offset=0x10000000)
@@ -36,7 +36,8 @@ def io_uring_socket(family, kind, protocol):
     # The kernel installs the new socket at the lowest free descriptor.
     fd = os.open("/dev/null", os.O_RDONLY)
     os.close(fd)
-    libc.syscall(426, ring, 1, 1, 1, None, 0)
+    if libc.syscall(426, ring, 1, 1, 1, None, 0) < 0:
+        raise SystemExit("MXC_IO_URING_ENTER_FAILED errno=%d" % ctypes.get_errno())
     try:
         return socket.socket(fileno=fd)
     except OSError:
