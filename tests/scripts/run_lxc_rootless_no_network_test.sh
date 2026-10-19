@@ -38,16 +38,21 @@ lxc.idmap = g 0 $SUBGID_START 65536
 EOF
 chown -R "$RUN_USER:" "$RUN_HOME/.config"
 
+# The repo sits under a home directory the run user cannot enter.
+cp "$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_rootless_no_network.json" "$RUN_HOME/"
+
 echo "Running LXC rootless no-network test as $RUN_USER..."
-OUTPUT=$(sudo -u "$RUN_USER" -H "$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_rootless_no_network.json" 2>&1) || {
+RC=0
+OUTPUT=$(sudo -u "$RUN_USER" -H "$RUN_HOME/lxc-exec" "$RUN_HOME/lxc_rootless_no_network.json" 2>&1) || RC=$?
+echo "$OUTPUT"
+
+if [ "$RC" -ne 0 ]; then
     echo "FAIL: lxc-exec without root could not run a config that has no network section."
-    echo "$OUTPUT"
     exit 1
-}
+fi
 
 if ! grep -q "MXC_ROOTLESS_OK" <<< "$OUTPUT"; then
     echo "FAIL: the container ran without root but the command printed nothing."
-    echo "$OUTPUT"
     exit 1
 fi
 

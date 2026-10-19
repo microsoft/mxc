@@ -40,9 +40,8 @@ sudo apt install lxc lxc-utils liblxc-dev
 ```bash
 sudo dnf install lxc lxc-templates dnsmasq lxc-devel
 ```
-RHEL needs EPEL enabled first, and a few more steps besides — see
-[Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup) for the whole
-process.
+RHEL needs EPEL enabled first — see
+[Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup).
 
 **Arch Linux:**
 ```bash
@@ -54,44 +53,16 @@ sudo pacman -S lxc
 A config with no `network` section can run without sudo once the host is set up
 for unprivileged LXC.  Everything else needs root.
 
-1. Install `newuidmap` and `newgidmap` (`sudo apt install uidmap` on
-   Debian/Ubuntu).
-2. Make sure your account has a subordinate ID range.  On Ubuntu 24.04,
-   `useradd` creates one.  To check:
-   ```bash
-   grep "^$USER:" /etc/subuid /etc/subgid
-   ```
-   If nothing prints, an admin adds a range:
-   ```bash
-   sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
-   ```
-3. Map the container's IDs onto that range in `~/.config/lxc/default.conf`,
-   using the start and count from step 2:
-   ```
-   lxc.include = /etc/lxc/default.conf
-   lxc.idmap = u 0 100000 65536
-   lxc.idmap = g 0 100000 65536
-   ```
-4. Let the container's root user reach its files under your home directory:
+1. Follow LXC's
+   [Create Unprivileged Containers as a User](https://linuxcontainers.org/lxc/getting-started/#create-unprivileged-containers-as-a-user).
+2. Let the container's root user reach its files under your home directory:
    `chmod o+x ~`.
 
-`tests/scripts/run_lxc_rootless_no_network_test.sh` checks this with a temporary
-user.  CI runs it, and `run_lxc_all_tests.sh` leaves it out because it adds that
-user to the host.  Run it by hand with `sudo` when you need it locally.
 
 ### Container networking
 
-A policy that permits any network needs `lxcbr0` to hand the container an IPv4
-lease, so the bridge has to be up before a run: `sudo systemctl start lxc-net`.
-
-On a host running firewalld, which is the default on Fedora and RHEL, the bridge
-also has to sit in a zone that permits the traffic. The default zone rejects
-IPv4 DHCP while permitting router advertisement, so the container configures
-itself an IPv6 address, never receives a lease, and the run fails:
-
-```bash
-sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
-```
+Refer to your distribution's manual to configure networking for LXC
+containers.  A config with a `network` section fails without it.
 
 ## Configuration
 
@@ -325,37 +296,14 @@ streaming in a long-lived service.
    Add `lxc-devel` as well if you are building MXC against liblxc rather than
    running a released binary.
 
-3. **Start the bridge.**
-
-   ```bash
-   sudo systemctl enable --now lxc-net
-   ip -4 addr show lxcbr0
-   ```
-
-4. **Move the bridge into a firewalld zone that permits its traffic.**
-   firewalld is running by default on RHEL, and its default `public` zone
-   admits `ssh`, `cockpit` and `dhcpv6-client` but not IPv4 DHCP. Containers
-   therefore configure an IPv6 address from the router advertisement, never
-   receive a lease, and every run that asks for network fails:
-
-   ```bash
-   sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
-   ```
-
-   `<ZONE>` has to admit DHCP and DNS from the bridge, since dnsmasq answers
-   both on the bridge address.
-
-   Add `--permanent` and reload to keep the assignment across reboots. 
+3. **Configure container networking.**  See
+   [Container networking](#container-networking).
 
 ### Verifying the host
 
 ```bash
 sudo lxc-checkconfig
-ip -4 addr show lxcbr0
-sudo firewall-cmd --get-zone-of-interface=lxcbr0
 ```
-
-The zone query should answer the zone you assigned.
 
 ## Limitations
 
