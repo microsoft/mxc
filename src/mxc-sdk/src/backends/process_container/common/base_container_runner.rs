@@ -1774,7 +1774,17 @@ fn duplicate_retained_query_process_handle(
             DUPLICATE_HANDLE_OPTIONS(0),
         )
     }
-    .map_err(|_| std::io::Error::other("duplicate retained native query process handle failed"))?;
+    .map_err(|error| {
+        // Only FACILITY_WIN32 HRESULTs embed a Win32 error in the low word.
+        // Preserve other facilities as HRESULT diagnostics instead of
+        // misreporting their low word as an unrelated OS error.
+        let hr = error.code().0 as u32;
+        if (hr & 0xFFFF_0000) == 0x8007_0000 {
+            std::io::Error::from_raw_os_error((hr & 0xFFFF) as i32)
+        } else {
+            std::io::Error::other(error.to_string())
+        }
+    })?;
     // SAFETY: DuplicateHandle created a distinct owned kernel handle.
     Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(duplicate.0) })
 }
@@ -2110,10 +2120,27 @@ mod tests {
     #[test]
     fn native_query_process_duplicate_is_noninheritable_and_independently_owned() {
         use std::os::windows::io::AsRawHandle;
-        use windows::Win32::Foundation::GetHandleInformation;
+        use windows::Win32::Foundation::{GetHandleInformation, NTSTATUS};
+        use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
         use windows::Win32::System::Threading::{
             GetCurrentProcess, GetCurrentProcessId, GetProcessId,
+            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
+
+        // NtQueryObject(ObjectBasicInformation) is a read-only query of the
+        // duplicate's granted mask. It avoids attempting a mutating operation
+        // against the test process to prove the absence of broader rights.
+        #[repr(C)]
+        #[derive(Default)]
+        struct PublicObjectBasicInformation {
+            _attributes: u32,
+            granted_access: u32,
+            _handle_count: u32,
+            _pointer_count: u32,
+            _reserved: [u32; 10],
+        }
+        type NtQueryObjectFn =
+            unsafe extern "system" fn(HANDLE, u32, *mut c_void, u32, *mut u32) -> NTSTATUS;
 
         // The current-process pseudo-handle is an inert source: no child,
         // container, profile or host permission is created or changed.
@@ -2130,6 +2157,34 @@ mod tests {
         let mut flags = 0;
         unsafe { GetHandleInformation(handle, &mut flags) }.expect("query duplicate flags");
         assert_eq!(flags & HANDLE_FLAG_INHERIT.0, 0);
+        // SAFETY: ntdll is already loaded; the export has the documented
+        // NtQueryObject signature and the stack output buffer is fully sized.
+        let module =
+            unsafe { GetModuleHandleW(windows::core::w!("ntdll.dll")) }.expect("loaded ntdll");
+        let export = unsafe { GetProcAddress(module, windows::core::s!("NtQueryObject")) }
+            .expect("NtQueryObject export");
+        let query: NtQueryObjectFn = unsafe { std::mem::transmute(export) };
+        assert_eq!(std::mem::size_of::<PublicObjectBasicInformation>(), 56);
+        let mut basic = PublicObjectBasicInformation::default();
+        let mut returned = 0u32;
+        let status = unsafe {
+            query(
+                handle,
+                0, // ObjectBasicInformation
+                (&mut basic as *mut PublicObjectBasicInformation).cast(),
+                std::mem::size_of::<PublicObjectBasicInformation>() as u32,
+                &mut returned,
+            )
+        };
+        assert_eq!(status.0, 0, "query duplicate granted access");
+        assert_eq!(
+            returned as usize,
+            std::mem::size_of::<PublicObjectBasicInformation>()
+        );
+        assert_eq!(
+            basic.granted_access,
+            PROCESS_QUERY_LIMITED_INFORMATION.0 | PROCESS_SYNCHRONIZE.0
+        );
         assert_eq!(unsafe { WaitForSingleObject(handle, 0) }, WAIT_TIMEOUT);
     }
 
