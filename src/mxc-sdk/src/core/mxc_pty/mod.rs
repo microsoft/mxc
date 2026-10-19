@@ -110,6 +110,8 @@ pub struct PtySize {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct LivePty {
     primary: std::fs::File,
+    #[cfg(target_os = "macos")]
+    secondary_path: std::path::PathBuf,
     access: Mutex<PtyAccess>,
     size: Mutex<PtySize>,
     eof: PtyEof,
@@ -357,6 +359,8 @@ impl LivePty {
             ws_ypixel: size.pixel_height,
         });
         let (master, slave) = open_pty(winsize.as_ref())?;
+        #[cfg(target_os = "macos")]
+        let secondary_path = nix::unistd::ttyname(&slave).map_err(std::io::Error::from)?;
         let eof = if forward_eof {
             PtyEof::Forwarded(terminal_discipline(&slave)?)
         } else {
@@ -393,6 +397,8 @@ impl LivePty {
         let writer = primary.try_clone()?;
         Ok(Self {
             primary,
+            #[cfg(target_os = "macos")]
+            secondary_path,
             access: Mutex::new(PtyAccess {
                 writer: Some(writer),
                 reader_claimed: false,
@@ -401,6 +407,11 @@ impl LivePty {
             size: Mutex::new(size),
             eof,
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn secondary_path(&self) -> &std::path::Path {
+        &self.secondary_path
     }
 
     /// Clone the merged terminal output reader.

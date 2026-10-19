@@ -18,6 +18,7 @@
 
 use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
+use std::io::IsTerminal;
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -40,7 +41,9 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 #[cfg(test)]
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
+#[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
+use crate::seatbelt_common::profile_builder::build_profile_with_terminals;
 
 #[link(name = "proc")]
 unsafe extern "C" {
@@ -308,15 +311,12 @@ impl SandboxBackend for SeatbeltScriptRunner {
                 crate::mxc_common::proxy_env::redact_proxy_url(&address.to_url())
             ));
         }
-        let profile = build_profile_with_proxy(request, proxy_address).map_err(error_response)?;
-        log_generated_profile(&profile, logger);
-
         // Effective posture, not the raw flag: a `guiAccess` the UI policy
         // suppressed emits no GUI rules, so it must not cost the caller
         // streaming either.
         let gui_access = crate::seatbelt_common::seatbelt_policy::gui_access_effective(request);
 
-        spawn_exec(&profile, request, gui_access, stdio, logger, proxy_address)
+        spawn_exec(request, gui_access, stdio, logger, proxy_address)
     }
 }
 
@@ -328,7 +328,6 @@ impl SandboxBackend for SeatbeltScriptRunner {
 /// it gets a caller-owned terminal and leads its own session. `gui_access`
 /// apps require inherited stdio.
 fn spawn_exec(
-    profile: &str,
     request: &ExecutionRequest,
     gui_access: bool,
     stdio: StdioMode,
@@ -358,8 +357,8 @@ fn spawn_exec(
     // non-interactive.
     let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
     let (mut command, pty) = build_sandbox_command(
-        profile,
-        &request.script_code,
+        request,
+        proxy_address,
         new_session,
         new_group,
         match stdio {
@@ -781,20 +780,15 @@ impl Drop for SeatbeltSandboxProcess {
 /// `sandbox_init` is not formally async-signal-safe but is used in this
 /// pattern by Chromium and other production macOS sandboxes.
 fn build_sandbox_command(
-    profile: &str,
-    script_code: &str,
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
     new_session: bool,
     new_group: bool,
     pty_size: Option<PtySize>,
     logger: &mut Logger,
 ) -> Result<(Command, Option<LivePty>), ScriptResponse> {
-    let profile_cstr = CString::new(profile)
-        .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
-
-    let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
-
     let mut command = Command::new(DEFAULT_SHELL);
-    command.arg("-c").arg(script_code);
+    command.arg("-c").arg(&request.script_code);
 
     // When requested (streaming path), put the child in its own session /
     // process group via `setsid()` so a caller can tree-kill it with a single
@@ -844,6 +838,22 @@ fn build_sandbox_command(
         })
         .transpose()?;
 
+    let terminal_paths = match &pty {
+        Some(pty) => vec![pty.secondary_path().to_path_buf()],
+        None if !new_session => inherited_terminal_paths().map_err(|error| {
+            error_response(format!(
+                "Seatbelt: failed to resolve inherited terminals: {error}"
+            ))
+        })?,
+        None => Vec::new(),
+    };
+    let profile = build_profile_with_terminals(request, proxy_address, &terminal_paths)
+        .map_err(error_response)?;
+    log_generated_profile(&profile, logger);
+    let profile_cstr = CString::new(profile)
+        .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
+    let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
+
     // SAFETY: The closure runs after fork(), before exec(). We only call
     // sandbox_init with a pre-allocated CString — no Rust allocations
     // happen inside the closure. sandbox_init is used in this fork+exec
@@ -871,6 +881,20 @@ fn build_sandbox_command(
     }
 
     Ok((command, pty))
+}
+
+fn inherited_terminal_paths() -> std::io::Result<Vec<PathBuf>> {
+    let (stdin, stdout, stderr) = (std::io::stdin(), std::io::stdout(), std::io::stderr());
+    let mut paths = Vec::new();
+    for fd in [stdin.as_fd(), stdout.as_fd(), stderr.as_fd()] {
+        if fd.is_terminal() {
+            let path = nix::unistd::ttyname(fd).map_err(std::io::Error::from)?;
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    Ok(paths)
 }
 
 /// Emit the generated profile to `logger` for `--debug` / `--log-file`.
@@ -1025,11 +1049,167 @@ mod tests {
         request
     }
 
+    fn terminal_probe(
+        request: &ExecutionRequest,
+        code: &str,
+        args: &[&str],
+        with_pty: bool,
+    ) -> std::process::Output {
+        let mut request = request.clone();
+        request.script_code = r#"exec /usr/bin/python3 -I -c "$@""#.to_string();
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let (mut command, _pty) = build_sandbox_command(
+            &request,
+            None,
+            !with_pty,
+            false,
+            with_pty.then_some(PtySize::default()),
+            &mut logger,
+        )
+        .expect("build probe command");
+        command
+            .arg("terminal-probe")
+            .arg(code)
+            .args(args)
+            .current_dir("/")
+            .env_clear()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if !with_pty {
+            command.stdin(Stdio::null());
+        }
+        let mut child = command.spawn().expect("spawn terminal probe");
+        if let Err(error) = wait_with_timeout(&mut child, Some(Duration::from_secs(20))) {
+            let _ = child.kill();
+            let _ = child.wait();
+            match error {
+                WaitError::Timeout => panic!("terminal probe timed out"),
+                WaitError::Io(error) => panic!("terminal probe wait failed: {error}"),
+            }
+        }
+        child.wait_with_output().expect("collect terminal probe")
+    }
+
+    fn assert_unrelated_terminal_denied(nested_pty: bool, gui_access: bool, with_pty: bool) {
+        use std::os::fd::AsRawFd;
+
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+
+        let terminal = nix::pty::openpty(None, None).expect("allocate disposable host PTY");
+        for fd in [&terminal.master, &terminal.slave] {
+            fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+                .expect("do not inherit the host PTY");
+        }
+        let path = nix::unistd::ttyname(&terminal.slave).expect("host PTY path");
+        for (read, write) in [(true, false), (false, true), (true, true)] {
+            std::fs::OpenOptions::new()
+                .read(read)
+                .write(write)
+                .open(&path)
+                .expect("host can open the disposable terminal");
+        }
+        let mut request = base_request();
+        request.seatbelt = Some(SeatbeltConfig {
+            nested_pty,
+            gui_access,
+            ..Default::default()
+        });
+        request.policy.ui.disable = !gui_access;
+        let output = terminal_probe(
+            &request,
+            r#"
+import errno, fcntl, os, sys, termios
+for mode in (os.O_RDONLY, os.O_WRONLY, os.O_RDWR):
+    try:
+        fd = os.open(sys.argv[1], mode | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError as error:
+        assert error.errno in (errno.EPERM, errno.EACCES), error
+    else:
+        os.close(fd)
+        raise AssertionError("unrelated terminal opened")
+if sys.argv[2] == "allow":
+    master, slave = os.openpty()
+    try:
+        assert os.isatty(slave)
+        termios.tcgetattr(slave)
+        fcntl.ioctl(slave, termios.TIOCGETD, bytes(4))
+    finally:
+        os.close(slave)
+        os.close(master)
+else:
+    try:
+        master, slave = os.openpty()
+    except OSError as error:
+        assert error.errno in (errno.EPERM, errno.EACCES), error
+    else:
+        os.close(slave)
+        os.close(master)
+        raise AssertionError("nested PTY allocation allowed")
+"#,
+            &[
+                path.to_str().expect("UTF-8 terminal path"),
+                if nested_pty || gui_access {
+                    "allow"
+                } else {
+                    "deny"
+                },
+            ],
+            with_pty,
+        );
+        assert!(
+            output.status.success(),
+            "terminal isolation probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn nested_pty_cannot_open_unrelated_host_terminals() {
+        assert_unrelated_terminal_denied(true, false, false);
+    }
+
+    #[test]
+    fn nested_pty_disabled_cannot_open_unrelated_host_terminals() {
+        assert_unrelated_terminal_denied(false, false, false);
+    }
+
+    #[test]
+    fn gui_access_cannot_open_unrelated_host_terminals() {
+        assert_unrelated_terminal_denied(false, true, false);
+    }
+
+    #[test]
+    fn caller_owned_pty_cannot_open_unrelated_host_terminals() {
+        assert_unrelated_terminal_denied(true, false, true);
+    }
+
+    #[test]
+    fn preopened_terminal_keeps_stdio_and_controlling_tty() {
+        let output = terminal_probe(
+            &base_request(),
+            r#"
+import fcntl, os, termios
+assert os.isatty(0)
+termios.tcgetattr(0)
+fcntl.ioctl(0, termios.TIOCGETD, bytes(4))
+fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+termios.tcgetattr(fd)
+os.close(fd)
+"#,
+            &[],
+            true,
+        );
+        assert!(
+            output.status.success(),
+            "assigned terminal probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn gui_access_rejects_caller_owned_pty() {
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let error = spawn_exec(
-            "(version 1)\n(allow default)",
             &base_request(),
             true,
             StdioMode::Pty(PtySize::default()),

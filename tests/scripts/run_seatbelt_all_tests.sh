@@ -79,6 +79,7 @@ run_test "Seatbelt Environment" "$SCRIPT_DIR/run_seatbelt_environment_test.sh"
 run_test "Seatbelt UI" "$SCRIPT_DIR/run_seatbelt_ui_test.sh"
 run_test "Seatbelt guiAccess" "$SCRIPT_DIR/run_seatbelt_gui_access_test.sh"
 run_test "Seatbelt Options" "$SCRIPT_DIR/run_seatbelt_options_test.sh"
+run_test "Seatbelt Terminal Isolation" "$SCRIPT_DIR/run_seatbelt_tty_test.sh"
 run_test "Seatbelt Profile Output" "$SCRIPT_DIR/run_seatbelt_profile_test.sh"
 run_test "Seatbelt Examples" "$SCRIPT_DIR/run_seatbelt_examples_test.sh"
 
