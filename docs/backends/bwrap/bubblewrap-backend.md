@@ -24,6 +24,10 @@ requiring root privileges or a container runtime.
 ## Prerequisites
 
 - **Linux** host with kernel 3.8+ (user namespace support)
+- **x86-64 or AArch64** host. The filter also preserves x32 and i386
+  compatibility on x86-64, and AArch32 compatibility on AArch64. Platform
+  detection reports Bubblewrap as unavailable on architectures for which MXC
+  cannot generate the required seccomp program.
 - **Bubblewrap** installed and on PATH:
   ```bash
   # Debian/Ubuntu
@@ -37,17 +41,19 @@ requiring root privileges or a container runtime.
   ```
   The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
   read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
-  environment is built with `--clearenv` (bwrap 0.5.0+), so **bwrap 0.5.0 or
-  newer** is required. Platform detection probes `bwrap --version` and reports
-  the backend as unavailable — with the detected version — when the host is
-  below that floor. The probe has a 5-second deadline and retains at most 64 KB
-  from each output stream. On timeout, its process group is terminated with
-  `SIGKILL` so wrappers and descendants cannot keep the probe alive. Successful
-  Rust-executor advisory results are cached for the process lifetime; Rust
-  failures are not cached, and execution validation probes again before launch
-  so a changed PATH target cannot reuse an advisory result. The Node SDK caches
-  the complete `getPlatformSupport()` result, including failures, for the module
-  lifetime; restart the Node process after remediating the host.
+  environment is built with `--clearenv` (bwrap 0.5.0+). The address-family
+  filter uses `--seccomp FD`, which predates that release, so **bwrap 0.5.0 or
+  newer** remains the requirement. Platform detection probes `bwrap --version`
+  and reports the backend as unavailable — with the detected version — when
+  the host is below that floor. The probe has a 5-second deadline and retains
+  at most 64 KB from each output stream. On timeout, its process group is
+  terminated with `SIGKILL` so wrappers and descendants cannot keep the probe
+  alive. Successful Rust-executor advisory results are cached for the process
+  lifetime; Rust failures are not cached, and execution validation probes again
+  before launch so a changed PATH target cannot reuse an advisory result. The
+  Node SDK caches the complete `getPlatformSupport()` result, including
+  failures, for the module lifetime; restart the Node process after remediating
+  the host.
 - **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed
   and on PATH, plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
   `--keep-caps`), `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
@@ -141,11 +147,36 @@ Bubblewrap creates a namespace-isolated process by:
    invisible inside the sandbox.
 3. Layering filesystem policy overrides (read-write, read-only, denied paths)
 4. Setting up minimal `/dev`, `/proc`, and `/tmp`
-5. Clearing the environment and applying only requested variables
-6. Executing the command via `sh -c`
+5. Installing a seccomp filter that permits `socket()` and `socketpair()` only
+   for Unix-domain, IPv4, IPv6, and netlink address families, and disables
+   io_uring
+6. Clearing the environment and applying only requested variables
+7. Executing the command via `sh -c`
 
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
+
+The address-family filter is always active. Attempts to create VSOCK, packet,
+or other unlisted socket families fail with `EPERM`. Because io_uring can
+create sockets from submission-queue entries that seccomp cannot inspect, the
+filter also makes `io_uring_setup`, `io_uring_enter`, and `io_uring_register`
+fail with `ENOSYS`; runtimes that probe for io_uring fall back to their
+non-io_uring paths. Other system calls are not restricted by this filter.
+Filter construction, writing, or descriptor inheritance failures abort the
+launch instead of running without the filter.
+
+On x86-64 hosts, native and x32 workloads retain their normal syscall ABI, and
+i386 workloads using the direct `socket` and `socketpair` syscalls receive the
+same family filtering. The legacy i386 `socketcall` interface passes the socket
+arguments through a pointer that seccomp cannot inspect, so its socket-creation
+and socket-pair subcalls fail with `EPERM`; its other subcalls remain available.
+On AArch64 hosts, native and AArch32 direct socket syscalls receive the same
+family filtering.
+
+MXC supplies one generated program through the legacy `--seccomp FD` option.
+Bubblewrap rejects combining that option with `--add-seccomp-fd`, so any future
+Bubblewrap syscall policy must be composed into this generated program rather
+than passed as a second filter descriptor.
 
 ### Terminal isolation
 

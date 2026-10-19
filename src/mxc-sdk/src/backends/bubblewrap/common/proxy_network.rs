@@ -2327,7 +2327,7 @@ fn wait_for_file(
 /// receives it in argv (`--info-fd N`) and parses it as an integer. A child
 /// that must *redirect* to the descriptor from a shell needs
 /// [`remap_descriptors`] instead.
-fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
+pub(crate) fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
     // SAFETY: `pre_exec` runs between fork and exec, where only
     // async-signal-safe work is permitted. `fcntl` is async-signal-safe and
     // this closure allocates nothing -- `fds` is captured by move and holds

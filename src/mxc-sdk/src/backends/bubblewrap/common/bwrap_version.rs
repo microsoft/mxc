@@ -32,6 +32,7 @@ use crate::bwrap_common::probe_exec::{self, CapturedOutput};
 /// | Flag         | First `bwrap` release |
 /// |--------------|-----------------------|
 /// | `--bind`, `--ro-bind`, `--dev`, `--proc`, `--tmpfs`, `--symlink`, `--chdir`, `--setenv`, `--unshare-*` | 0.1.0 |
+/// | `--seccomp` (address-family filter descriptor) | 0.2.1 |
 /// | `--ro-bind-try` (deny-by-default baseline mounts) | 0.3.1 |
 /// | `--die-with-parent` (descendants die with the sandbox) | 0.4.0 |
 /// | `--clearenv` (minimal sandbox environment) | **0.5.0** |
@@ -153,6 +154,8 @@ impl fmt::Display for BwrapVersion {
 /// `validate` and the engine's platform probe) share one message source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BwrapUnavailable {
+    /// This build cannot generate a seccomp program for the host architecture.
+    UnsupportedArchitecture(String),
     /// No `bwrap` executable was found on `PATH`.
     NotFound,
     /// The `bwrap --version` probe failed to start or did not complete
@@ -176,6 +179,11 @@ pub enum BwrapUnavailable {
 impl fmt::Display for BwrapUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedArchitecture(architecture) => write!(
+                f,
+                "Bubblewrap is unavailable on {architecture}: MXC cannot generate its required \
+                 seccomp address-family filter for this architecture."
+            ),
             Self::NotFound => write!(
                 f,
                 "Bubblewrap (bwrap) is not installed or not on PATH. \
@@ -225,6 +233,7 @@ impl std::error::Error for BwrapUnavailable {}
 /// Runs `bwrap --version` and validates the reported version against
 /// [`MIN_BWRAP_VERSION`]. Successful advisory probes are cached.
 pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
+    ensure_filter_architecture()?;
     probe_bwrap_cached(
         &CACHED_BWRAP_VERSION,
         cached_probe_gate(),
@@ -265,10 +274,23 @@ where
 /// approve a different executable after `PATH` or its contents change.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn probe_bwrap_uncached() -> Result<BwrapVersion, BwrapUnavailable> {
+    ensure_filter_architecture()?;
     probe_bwrap_uncached_until(
         Instant::now() + BWRAP_VERSION_TIMEOUT,
         BWRAP_VERSION_TIMEOUT,
     )
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_filter_architecture() -> Result<(), BwrapUnavailable> {
+    crate::bwrap_common::seccomp_filter::unsupported_architecture(std::env::consts::ARCH)
+        .map(BwrapUnavailable::UnsupportedArchitecture)
+        .map_or(Ok(()), Err)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_filter_architecture() -> Result<(), BwrapUnavailable> {
+    Ok(())
 }
 
 fn probe_bwrap_uncached_until(
@@ -722,6 +744,13 @@ mod tests {
                 "message should name the minimum version: {message}"
             );
         }
+    }
+
+    #[test]
+    fn unsupported_architecture_message_names_the_filter_requirement() {
+        let message = BwrapUnavailable::UnsupportedArchitecture("riscv64".to_string()).to_string();
+        assert!(message.contains("riscv64"));
+        assert!(message.contains("seccomp address-family filter"));
     }
 
     #[test]

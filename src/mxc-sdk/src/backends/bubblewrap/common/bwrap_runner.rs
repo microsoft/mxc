@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -40,7 +40,7 @@ use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
     bwrap_version, network_rules,
     provider_monitor::ProviderMonitor,
-    proxy_network,
+    proxy_network, seccomp_filter,
 };
 
 const DNS_PORT: u16 = 53;
@@ -534,6 +534,17 @@ impl BubblewrapScriptRunner {
             args.insert(0, "--new-session".into());
         }
 
+        let seccomp_filter = match seccomp_filter::create_file() {
+            Ok(file) => file,
+            Err(error) => {
+                stop_proxy_network(&mut proxy_network, logger);
+                return Err(ScriptResponse::error(&error));
+            }
+        };
+        if let Err(error) = seccomp_filter::add_bwrap_args(&mut args, seccomp_filter.as_raw_fd()) {
+            stop_proxy_network(&mut proxy_network, logger);
+            return Err(ScriptResponse::error(&error));
+        }
         let mut network_startup = match proxy_network.as_ref() {
             Some(network) => match network.configure_bwrap(&mut args, logger) {
                 Ok(startup) => Some(startup),
@@ -606,6 +617,7 @@ impl BubblewrapScriptRunner {
         if let Some(startup) = network_startup.as_ref() {
             startup.prepare_command(&mut command);
         }
+        proxy_network::inherit_descriptors(&mut command, vec![seccomp_filter.as_raw_fd()]);
 
         let mut child = match command.spawn() {
             Ok(process) => process,
@@ -2121,6 +2133,7 @@ mod tests {
     fn validate_surfaces_every_environment_probe_failure() {
         let request = base_request();
         let failures = [
+            bwrap_version::BwrapUnavailable::UnsupportedArchitecture("riscv64".to_string()),
             bwrap_version::BwrapUnavailable::NotFound,
             bwrap_version::BwrapUnavailable::ProbeFailed {
                 status: Some(126),

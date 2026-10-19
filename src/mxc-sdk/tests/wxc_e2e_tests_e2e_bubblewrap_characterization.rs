@@ -21,6 +21,7 @@ mod wxc_e2e_tests;
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 use wxc_e2e_tests::{
     has_bwrap, has_platform_exec, run_platform_config_value,
@@ -28,6 +29,9 @@ use wxc_e2e_tests::{
 };
 
 const SCHEMA_VERSION: &str = "0.9.0-alpha";
+const AF_VSOCK: libc::c_int = 40;
+const UNASSIGNED_FAMILY: libc::c_int = 255;
+const IO_URING_PARAMS_SIZE: usize = 120;
 
 /// The schema that introduced the default environment block and start-directory
 /// normalization, so cases asserting either must name it explicitly.
@@ -319,5 +323,203 @@ fn bubblewrap_timeout_is_enforced() {
         elapsed < MAX_ELAPSED,
         "a {TIMEOUT_MS}ms timeout should not wait out the {DESCENDANT_SLEEP_SECS}s \
          descendant; took {elapsed:?}"
+    );
+}
+
+#[test]
+fn bubblewrap_allows_common_socket_families() {
+    if !ready() {
+        return;
+    }
+    if Command::new("python3").arg("--version").output().is_err() {
+        println!("SKIPPED: python3 is required for the Bubblewrap socket-family seccomp test");
+        return;
+    }
+
+    let command = r#"python3 -c 'import socket
+for family in (socket.AF_UNIX, socket.AF_INET):
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.close()
+print("ALLOWED_FAMILIES_OK")'"#;
+    let result = run_platform_config_value(
+        "bwrap allowed socket families",
+        &config("allowed-socket-families", command),
+        &[],
+        None,
+    );
+    let output = result.combined_output();
+    assert_eq!(
+        result.code,
+        Some(0),
+        "allowed socket family creation failed:\n{output}"
+    );
+    assert!(
+        output.contains("ALLOWED_FAMILIES_OK"),
+        "allowed socket family probe did not finish:\n{output}"
+    );
+}
+
+#[test]
+fn bubblewrap_denies_unlisted_families_with_eperm() {
+    if !ready() {
+        return;
+    }
+    if Command::new("python3").arg("--version").output().is_err() {
+        println!("SKIPPED: python3 is required for the Bubblewrap socket-family seccomp test");
+        return;
+    }
+
+    // SAFETY: The call passes constant Linux socket arguments and checks the
+    // returned descriptor.
+    let control = unsafe { libc::socket(UNASSIGNED_FAMILY, libc::SOCK_STREAM, 0) };
+    let control_errno = std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or_default();
+    if control >= 0 {
+        // SAFETY: The descriptor was returned by the successful socket call above.
+        unsafe { libc::close(control) };
+    }
+    assert!(
+        control < 0 && control_errno != libc::EPERM,
+        "unfiltered socket({UNASSIGNED_FAMILY}) must fail with something other than EPERM \
+         so EPERM inside the sandbox proves the filter; got fd {control}, errno {control_errno}"
+    );
+
+    let command = format!(
+        r#"python3 -c 'import errno, socket, sys
+results = []
+for name, create in (("SOCKET", socket.socket), ("SOCKETPAIR", socket.socketpair)):
+    try:
+        created = create({UNASSIGNED_FAMILY}, socket.SOCK_STREAM)
+    except OSError as error:
+        print(f"{{name}}_ERRNO={{error.errno}}")
+        results.append(error.errno == errno.EPERM)
+    else:
+        print(f"{{name}}_ALLOWED")
+        results.append(False)
+sys.exit(0 if all(results) else 2)'"#
+    );
+    let result = run_platform_config_value(
+        "bwrap unlisted family seccomp",
+        &config("unlisted-family-seccomp", &command),
+        &[],
+        None,
+    );
+    let output = result.combined_output();
+    assert_eq!(
+        result.code,
+        Some(0),
+        "unlisted family was not denied with EPERM:\n{output}"
+    );
+    for call in ["SOCKET", "SOCKETPAIR"] {
+        assert!(
+            output.contains(&format!("{call}_ERRNO={}", libc::EPERM)),
+            "expected exact EPERM from {call}:\n{output}"
+        );
+    }
+}
+
+#[test]
+fn bubblewrap_denies_vsock_with_eperm() {
+    if !ready() {
+        return;
+    }
+    if Command::new("python3").arg("--version").output().is_err() {
+        println!("SKIPPED: python3 is required for the Bubblewrap VSOCK seccomp test");
+        return;
+    }
+
+    // SAFETY: The call passes constant Linux socket arguments and checks the
+    // returned descriptor.
+    let control = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
+    if control < 0 {
+        println!(
+            "SKIPPED: unfiltered AF_VSOCK control failed with errno {}; the host cannot prove the filter caused EPERM",
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default()
+        );
+        return;
+    }
+
+    // SAFETY: The descriptor was returned by the successful socket call above.
+    unsafe { libc::close(control) };
+
+    let command = r#"python3 -c 'import errno, socket, sys
+try:
+    socket.socket(40, socket.SOCK_STREAM)
+except OSError as error:
+    print(f"AF_VSOCK_ERRNO={error.errno}")
+    sys.exit(0 if error.errno == errno.EPERM else 2)
+else:
+    print("AF_VSOCK_ALLOWED")
+    sys.exit(3)'"#;
+    let result = run_platform_config_value(
+        "bwrap vsock seccomp",
+        &config("vsock-seccomp", command),
+        &[],
+        None,
+    );
+    let output = result.combined_output();
+    assert_eq!(result.code, Some(0), "VSOCK filter failed:\n{output}");
+    assert!(
+        output.contains("AF_VSOCK_ERRNO=1"),
+        "expected exact EPERM from AF_VSOCK:\n{output}"
+    );
+}
+
+#[test]
+fn bubblewrap_denies_io_uring_with_enosys() {
+    if !ready() {
+        return;
+    }
+    if Command::new("python3").arg("--version").output().is_err() {
+        println!("SKIPPED: python3 is required for the Bubblewrap io_uring seccomp test");
+        return;
+    }
+
+    let mut params = [0_u8; IO_URING_PARAMS_SIZE];
+    // SAFETY: `params` is a zeroed buffer the size of `struct io_uring_params`,
+    // and the returned descriptor is checked before use.
+    let control =
+        unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, params.as_mut_ptr()) } as libc::c_int;
+    if control < 0 {
+        println!(
+            "SKIPPED: unfiltered io_uring_setup control failed with errno {}; the host cannot prove the filter caused ENOSYS",
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or_default()
+        );
+        return;
+    }
+
+    // SAFETY: The descriptor was returned by the successful io_uring_setup call above.
+    unsafe { libc::close(control) };
+
+    let command = format!(
+        r#"python3 -c 'import ctypes, errno, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+params = ctypes.create_string_buffer({IO_URING_PARAMS_SIZE})
+ring = libc.syscall({}, 1, params)
+if ring >= 0:
+    os.close(ring)
+    print("IO_URING_ALLOWED")
+    sys.exit(3)
+error = ctypes.get_errno()
+print(f"IO_URING_ERRNO={{error}}")
+sys.exit(0 if error == errno.ENOSYS else 2)'"#,
+        libc::SYS_io_uring_setup
+    );
+    let result = run_platform_config_value(
+        "bwrap io_uring seccomp",
+        &config("io-uring-seccomp", &command),
+        &[],
+        None,
+    );
+    let output = result.combined_output();
+    assert_eq!(result.code, Some(0), "io_uring filter failed:\n{output}");
+    assert!(
+        output.contains(&format!("IO_URING_ERRNO={}", libc::ENOSYS)),
+        "expected exact ENOSYS from io_uring_setup:\n{output}"
     );
 }
