@@ -91,7 +91,7 @@ one raises MXC-FATAL and stops the whole suite (child exit code 78).
 
 | Script | Description | Extra prerequisites |
 |--------|-------------|---------------------|
-| `run_bwrap_all_tests.sh` | All Bubblewrap tests | `lxc-exec`, `bwrap` |
+| `run_bwrap_all_tests.sh` | All Bubblewrap tests | `lxc-exec`, `bwrap`, Python 3 for terminal isolation |
 | `run_lxc_all_tests.sh` | All LXC tests | `lxc-exec`, LXC stack, root |
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 

@@ -147,6 +147,24 @@ Bubblewrap creates a namespace-isolated process by:
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
 
+### Terminal isolation
+
+CLI execution and SDK execution with pipes do not share the caller's
+controlling terminal. This prevents `TIOCSTI` input injection into the host
+terminal even on hosts that permit that ioctl. Redirecting standard input
+and output alone does not separate the controlling terminal.
+
+SDK execution with pipes creates a new session before starting Bubblewrap,
+keeping its monitor and namespace init in the same process group.
+Cancellation can therefore terminate that group even before Bubblewrap
+enables its parent-death cleanup. CLI execution uses `--new-session` instead.
+
+CLI execution still inherits its standard input, output, and error
+descriptors, but the workload cannot reopen the host terminal through
+`/dev/tty` or use it for terminal job control. For programs that need a
+controlling terminal, use the SDK's PTY execution API, which allocates a
+separate terminal and supports resizing and merged output.
+
 ### Deny-by-default filesystem
 
 The baseline mirrors the macOS Seatbelt backend's `(deny default)` posture:
@@ -920,11 +938,27 @@ Contract `0.9.0-alpha` provides no MXC-managed host-list policy for that proxy.
 # Single basic test
 tests/scripts/run_bwrap_basic_test.sh
 
+# Controlling-terminal isolation (requires Python 3)
+bash tests/scripts/run_bwrap_terminal_isolation_test.sh
+
 # All Bubblewrap tests
 tests/scripts/run_bwrap_all_tests.sh
 ```
 
 Test configs are in `tests/configs/bubblewrap_*.json`.
+
+The terminal test creates private PTY fixtures and checks CLI execution with
+terminal stdin and redirected streams. Its host positive controls must have
+a controlling terminal, while each sandbox must have none. It does not
+inject shell commands or change the host's TIOCSTI settings. The
+`streaming_bubblewrap` Rust integration suite covers SDK pipes under a
+controlling terminal and verifies that SDK PTY execution retains its
+private controlling terminal, input/output, and resize behavior.
+
+The streaming suite also runs the real Bubblewrap binary through an
+isolated wrapper that removes `--die-with-parent`, then checks explicit
+kill, timeout, and handle-drop cleanup. This reproduces the absence of
+parent-death protection during startup without relying on a scheduling race.
 
 ## Limitations
 

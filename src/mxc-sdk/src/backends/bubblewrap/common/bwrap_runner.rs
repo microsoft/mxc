@@ -529,6 +529,11 @@ impl BubblewrapScriptRunner {
             denied_files,
             network_mode,
         );
+
+        if stdio == StdioMode::Inherit {
+            args.insert(0, "--new-session".into());
+        }
+
         let mut network_startup = match proxy_network.as_ref() {
             Some(network) => match network.configure_bwrap(&mut args, logger) {
                 Ok(startup) => Some(startup),
@@ -584,13 +589,19 @@ impl BubblewrapScriptRunner {
                 }
             },
         };
-        // Pipes and PTY modes put bwrap in its own process group so a timeout
-        // or `kill()` can tree-kill it without touching the host's group.
-        // Inherit mode keeps bwrap in the executor's group (so it retains the
-        // controlling terminal); `--die-with-parent` takes its sandbox down.
+
         let group = stdio != StdioMode::Inherit;
+
+        // Keep namespace init in the killable group before parent-death cleanup is armed.
+        // SAFETY: setsid is async-signal-safe and runs only in the forked child.
         if stdio == StdioMode::Pipes {
-            command.process_group(0);
+            unsafe {
+                command.pre_exec(|| {
+                    nix::unistd::setsid()
+                        .map(|_| ())
+                        .map_err(std::io::Error::from)
+                });
+            }
         }
         if let Some(startup) = network_startup.as_ref() {
             startup.prepare_command(&mut command);
