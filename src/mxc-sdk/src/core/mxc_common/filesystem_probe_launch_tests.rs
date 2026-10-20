@@ -8,6 +8,18 @@ use std::sync::OnceLock;
 static INJECTION: OnceLock<(String, PathBuf)> = OnceLock::new();
 static STALLED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(windows)]
+pub(crate) fn inject_stall(stage: &str, path: &Path) {
+    assert!(INJECTION
+        .set((stage.to_string(), path.to_path_buf()))
+        .is_ok());
+}
+
+#[cfg(windows)]
+pub(crate) fn has_stalled() -> bool {
+    STALLED.load(Ordering::Acquire)
+}
+
 pub(crate) fn stall(stage: &str, path: impl AsRef<Path>) {
     if INJECTION
         .get()

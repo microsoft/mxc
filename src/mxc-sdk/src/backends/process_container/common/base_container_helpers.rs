@@ -38,10 +38,7 @@ pub(super) fn build_psec_v1_security_environment_spec(
         "build_psec_v1_security_environment_spec only supports PSEC major version 1"
     );
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let mut capabilities = effective_capabilities(request, capture_network_decisions);
-    if unrestricted_host_loopback_allowed(&request.policy) {
-        ensure_capability(&mut capabilities, "networkLoopback");
-    }
+    let capabilities = effective_capabilities(request, capture_network_decisions);
     let ui_restrictions = crate::process_container_common::job_object::to_job_object_uilimit_mask(
         &crate::mxc_common::ui_policy::resolve_ui_restrictions(
             &request.policy.ui,
@@ -68,7 +65,7 @@ pub(super) fn build_psec_v1_security_environment_spec(
     builder.finished_data().to_vec()
 }
 
-fn effective_capabilities(
+pub(super) fn effective_capabilities(
     request: &ExecutionRequest,
     capture_network_decisions: bool,
 ) -> Vec<String> {
@@ -85,6 +82,9 @@ fn effective_capabilities(
         // policy makes and records the decision. Proxy mode must remain direct-
         // egress denied and therefore deliberately omits internetClient.
         ensure_capability(&mut capabilities, INTERNET_CLIENT_CAPABILITY);
+    }
+    if unrestricted_host_loopback_allowed(policy) {
+        ensure_capability(&mut capabilities, "networkLoopback");
     }
     capabilities
 }

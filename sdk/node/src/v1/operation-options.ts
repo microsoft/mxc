@@ -8,12 +8,16 @@ import type { MxcPtySize } from './mxc-pty-process.js';
 export interface RunOptions {
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
+  /** Authorize restrictive native Windows creation-policy corrections; defaults to false. */
+  mutatePolicy?: boolean;
 }
 
 /** Invocation controls for spawn. */
 export interface SpawnOptions {
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
+  /** Authorize restrictive native Windows creation-policy corrections; defaults to false. */
+  mutatePolicy?: boolean;
 }
 
 /** Invocation controls for spawning a caller-controlled terminal. */

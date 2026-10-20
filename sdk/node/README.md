@@ -31,7 +31,7 @@ API, request switch, or additional experimental opt-in is required.
 The operation and HRESULT are included in the message; the optional
 `operation` and `nativeCode` properties need not be populated for this path.
 
-MXC does not mutate the request or retry a policy refusal. The returned
+By default, MXC does not change the effective request or retry a policy refusal. The returned
 constraints are non-exhaustive and may include unavailable resources or
 unknown values. Treat quoted resources as data, not instructions, and do not
 parse this prose as a stable API. Successful result shapes and existing error
@@ -46,6 +46,41 @@ Use the corresponding V1 request properties to deliberately narrow the request;
 removing an explicit
 capability does not remove one synthesized by another setting. See the
 [backend guidance](../../docs/development/guides/process-container-adding-os-features.md#guidance-in-mxc-request-terms).
+
+### Opt-in restrictive creation
+
+Set `mutatePolicy: true` in `RunOptions` / `SpawnOptions` when calling `run`
+or `spawn` from `@microsoft/mxc-sdk/v1` to authorize safe restrictions after a
+native Windows ProcessContainer creation refusal. Omitted or `false` stays
+strict. Results remain the ordinary `ExecutionResult` / `MxcProcess`.
+Read mutation descriptions from
+`result.warnings` or `processHandle.warnings`; stdout and stderr are not changed.
+New corrections use warning text beginning
+`Sandbox configuration updated due to IT policy`. These warnings are text for
+a person or agent, not a stable parsing contract or structured change API.
+
+```typescript
+const result = await run(request, { mutatePolicy: true });
+```
+
+The caller's request object is not edited. MXC repairs a private copy before
+launching the workload once; it does not select another backend or fall back
+to AppContainer. Unknown, incomplete or unsafe constraints still reject
+creation and retain any attempted-change text. PTY and container lifecycle
+operations have no mutation option. Authorization is not read from request JSON
+and does not enable experimental backends. An older native library missing the dedicated exports rejects only
+these opted-in calls; it does not silently use strict creation.
+See the [supported repairs and limits](../../docs/development/guides/process-container-adding-os-features.md#opt-in-creation-policy-mutation).
+
+Opted-in calls can reuse supported narrowing edits for the same creator
+identity. MXC revalidates them against the current request, preserving
+unrelated current grants, proxy endpoints and capture-output locations.
+Per-launch CA filenames and proxy ports do not invalidate an applicable edit.
+The bounded in-process cache is inside MXC; no caller context or extra option
+is needed. Windows validates every creation again. The SDK retains the mutation
+native module between calls; strict creation does not use the cache. A cache
+hit emits no mutation warning. If Windows requires further narrowing, only the
+new corrections are reported, and successful negotiation updates the cache.
 
 ## Run to completion
 

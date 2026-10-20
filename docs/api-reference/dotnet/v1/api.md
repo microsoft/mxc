@@ -34,6 +34,24 @@ Read the terminal output concurrently rather than only after waiting. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller
 that waits first without reading can block indefinitely.
 
+For explicit restrictive creation-policy correction on native Windows
+ProcessContainer, set `MutatePolicy = true` in `RunOptions` or `SpawnOptions`
+when calling `Run[Async]` or `Spawn[Async]`. The field defaults to `false`.
+Results retain their ordinary types, with change descriptions in existing
+`Warnings`. Opted-in creation never changes backend/tier, edits the caller's
+object or file, or replays a workload. Unsupported or unsafe corrections remain
+errors. PTY and container lifecycle options have no mutation control. See
+[supported corrections and limits](../../../development/guides/process-container-adding-os-features.md#opt-in-creation-policy-mutation).
+
+Opted-in creation revalidates remembered narrowing edits against the current
+request for the same creator identity. Unrelated grants and proxy endpoints
+remain current and do not invalidate an applicable edit. Every creation is
+validated again. Strict creation does not apply cached restrictions. A cache
+hit emits no mutation warning unless Windows requires another correction.
+New corrections use warning text beginning
+`Sandbox configuration updated due to IT policy`; successful negotiation
+updates the cache. Warnings are diagnostic text, not a stable parsing contract.
+
 ## Discovery and validation
 
 | Operation | Use it to |
@@ -106,6 +124,9 @@ public static ProbeOutput Probe(ContainerRequest? request = null);
 ## `Microsoft.Mxc.Sdk.V1.MxcContainer` — Run
 
 Run a container request to completion.
+With `options.MutatePolicy` enabled, `ExecutionResult.Warnings` also describes
+restrictive corrections; stdout and stderr remain workload output. Missing
+native mutation exports reject only opted-in calls, with no silent fallback.
 
 ```csharp
 public static ExecutionResult Run(ContainerRequest request, RunOptions? options = null);
@@ -126,11 +147,13 @@ public static Task<ExecutionResult> RunAsync(
     CancellationToken cancellationToken = default);
 ```
 
-
 ## `Microsoft.Mxc.Sdk.V1.MxcContainer` — Spawn
 
 Spawn a container request and return its live process handle. A WSLC command
 reads end-of-file on stdin.
+With `options.MutatePolicy` enabled, read correction descriptions through
+`MxcProcess.Warnings`. Creation retries precede workload launch and retain
+ordinary process ownership and cancellation behavior.
 
 ```csharp
 public static MxcProcess Spawn(ContainerRequest request, SpawnOptions? options = null);
@@ -155,6 +178,8 @@ Spawn a container request and return its live process handle, including a
 writable `StandardInput`. Disposing it gives the command end-of-file, as does
 `Wait`, `WaitAsync`, or `WaitForExitWithOutputAsync` if `StandardInput` was never
 taken.
+`options.MutatePolicy` has the same restrictive Windows creation behavior as
+`Spawn`.
 
 ```csharp
 public static MxcProcess SpawnWithStdin(ContainerRequest request, SpawnOptions? options = null);

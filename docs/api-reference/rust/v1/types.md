@@ -238,6 +238,10 @@ impl From<MxcErrorCode> for ErrorCode {
 ## `mxc_sdk::v1::ExecutionResult`
 
 The captured result of running a [MxcProcess] to completion via wait_with_output.
+The scoped `mxc_sdk::v1_1::run` operation uses this same result type. With its
+`mutate_policy` option enabled, `warnings` also contains plain-text descriptions
+of creation-policy restrictions MXC applied. The text is not a stable parsing
+contract.
 
 ```rust
 pub struct ExecutionResult {

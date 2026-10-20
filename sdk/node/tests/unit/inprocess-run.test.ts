@@ -53,11 +53,14 @@ describe('public SDK namespace exports', () => {
       'spawnSandbox',
       'spawnSandboxAsync',
       'spawnSandboxFromConfig',
+      'runWithPolicyMutation',
+      'spawnWithPolicyMutation',
     ] as const) {
       assert.strictEqual(Object.hasOwn(rootSdk, name), false, name);
       assert.strictEqual(Object.hasOwn(v1Sdk, name), false, name);
     }
     assert.strictEqual(Object.hasOwn(v1Sdk, 'MxcSandboxProcess'), false);
+    assert.strictEqual(Object.hasOwn(v1Sdk.MxcProcess.prototype, 'policyChanges'), false);
     assert.strictEqual(typeof v1Sdk.MxcProcess.prototype.wait, 'function');
     assert.strictEqual(Object.hasOwn(v1Sdk.MxcProcess.prototype, 'waitAsync'), false);
 
@@ -81,6 +84,110 @@ describe('public SDK namespace exports', () => {
 });
 
 describe('in-process asynchronous run routing', () => {
+  it('opts into mutation only through creation options without changing request JSON', async () => {
+    const modes: boolean[] = [];
+    const requests: OneShotRequest[] = [];
+    _setBindingRunAsyncImplementation(async (request, experimental, mutatePolicy) => {
+      assert.strictEqual(experimental, false);
+      modes.push(mutatePolicy);
+      requests.push(request);
+      return {
+        stdout: 'workload', stderr: '', exitCode: 0, timedOut: false,
+        warnings: mutatePolicy ? ['Policy mutation: network.egress was restricted'] : [],
+      };
+    });
+    const request = {
+      command: 'echo mutation',
+      containerName: 'mutation-routing',
+      network: { egress: { default: 'allow' as const } },
+    };
+    const before = JSON.stringify(request);
+    const strict = await run(request);
+    await run(request, {});
+    await run(request, { mutatePolicy: false });
+    await run(request, { mutatePolicy: undefined });
+    const options = Object.freeze({ mutatePolicy: true });
+    const mutated = await run(request, options);
+    assert.deepStrictEqual(modes, [false, false, false, false, true]);
+    for (const submitted of requests) {
+      assert.deepStrictEqual(submitted, requests[0]);
+      assert.strictEqual('mutatePolicy' in submitted, false);
+      assert.strictEqual('policyMutation' in submitted, false);
+    }
+    assert.strictEqual(JSON.stringify(request), before);
+    assert.deepStrictEqual(options, { mutatePolicy: true });
+    assert.deepStrictEqual(strict.warnings, []);
+    assert.deepStrictEqual(mutated.warnings, ['Policy mutation: network.egress was restricted']);
+    assert.strictEqual(mutated.stdout, 'workload');
+    assert.strictEqual(mutated.stderr, '');
+    await assert.rejects(
+      run(request, { mutatePolicy: true, dryRun: false } as never), /does not support dryRun/,
+    );
+  });
+
+  it('routes spawn mutation options and returns ordinary process warnings', async () => {
+    const modes: boolean[] = [];
+    const inputs: boolean[] = [];
+    _setBindingSandboxProcessFactories(undefined, async (_request, experimental, stdin, mutatePolicy) => {
+      assert.strictEqual(experimental, false);
+      inputs.push(stdin);
+      modes.push(mutatePolicy);
+      return new MxcProcess({
+        id: 17, standardInput: null, standardOutput: null, standardError: null,
+        poll: () => ({ exitCode: 0, running: false, timedOut: false }),
+        wait: async () => ({ exitCode: 0, timedOut: false }),
+        warnings: () => mutatePolicy ? ['Policy mutation: capability removed'] : [],
+        outputMetadata: () => undefined,
+        kill: () => {}, killForTimeout: () => {}, free: async () => {},
+      });
+    });
+    const strict = await spawn({ command: 'echo strict' });
+    const explicitStrict = await spawn(
+      { command: 'echo strict' },
+      { mutatePolicy: false },
+    );
+    const mutated = await spawn({ command: 'echo mutated' }, { mutatePolicy: true });
+    const withStdin = await v1Sdk.spawnWithStdin({ command: 'echo strict stdin' });
+    const mutatedWithStdin = await v1Sdk.spawnWithStdin(
+      { command: 'echo mutated stdin' },
+      { mutatePolicy: true },
+    );
+    assert.deepStrictEqual(modes, [false, false, true, false, true]);
+    assert.deepStrictEqual(inputs, [false, false, false, true, true]);
+    assert.deepStrictEqual(strict.warnings, []);
+    assert.deepStrictEqual(mutated.warnings, ['Policy mutation: capability removed']);
+    assert.deepStrictEqual(withStdin.warnings, []);
+    assert.deepStrictEqual(mutatedWithStdin.warnings, ['Policy mutation: capability removed']);
+    await strict.wait();
+    await explicitStrict.wait();
+    await mutated.wait();
+    await withStdin.wait();
+    await mutatedWithStdin.wait();
+  });
+
+  it('rejects malformed mutation authorization before native execution', async () => {
+    for (const mutatePolicy of [null, 1, 'true', {}, []]) {
+      const options = { mutatePolicy } as never;
+      await assert.rejects(run({ command: 'echo hello' }, options), /mutatePolicy.*must be a boolean/);
+      await assert.rejects(spawn({ command: 'echo hello' }, options), /mutatePolicy.*must be a boolean/);
+    }
+  });
+
+  it('keeps mutation authorization out of requests and terminal options', async () => {
+    for (const mutatePolicy of [true, false, undefined]) {
+      const request = { command: 'echo hello', mutatePolicy } as never;
+      await assert.rejects(run(request), /ContainerRequest.mutatePolicy/);
+      await assert.rejects(spawn(request), /ContainerRequest.mutatePolicy/);
+      await assert.rejects(
+        v1Sdk.spawnWithPty(
+          { command: 'echo hello' },
+          { mutatePolicy } as never,
+        ),
+        /does not support option 'mutatePolicy'/,
+      );
+    }
+  });
+
   it('rejects any supplied dryRun option before native execution', async () => {
     for (const dryRun of [true, false, undefined]) {
       const options = { dryRun } as never;

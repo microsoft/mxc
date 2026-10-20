@@ -8,12 +8,16 @@ use crate::process_container_common::base_container_runner::{
     CaptureSessionFactory, CaptureSessionOps,
 };
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
 use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG, E_NOTIMPL, E_UNEXPECTED, S_OK};
 use windows::Win32::System::Com::CoTaskMemAlloc;
+
+#[path = "secenv_policy_runner_tests.rs"]
+mod mutation_runner_tests;
 
 const POLICY_DENIED: HRESULT = HRESULT(0x800704ec_u32 as i32);
 const NO_SNAPSHOT: HRESULT = HRESULT(0x80070490_u32 as i32);
@@ -22,10 +26,12 @@ const SHORT_BUFFER: HRESULT = HRESULT(0x8007007a_u32 as i32);
 struct FakeState {
     creation_result: HRESULT,
     creation_handle: bool,
+    creation_plan: VecDeque<(HRESULT, bool, Option<String>)>,
     retrieval_result: HRESULT,
     outcome: u32,
     details_count: u32,
     capability: Option<String>,
+    policy_details: Option<Vec<layout::PolicyDetailT>>,
     snapshot: Option<(u32, u32)>,
     capture_snapshot: bool,
     invalid_header: bool,
@@ -42,6 +48,7 @@ struct FakeState {
     output_size: Option<u32>,
     null_output: bool,
     closes: usize,
+    closed_handles: Vec<usize>,
 }
 
 impl Default for FakeState {
@@ -49,10 +56,12 @@ impl Default for FakeState {
         Self {
             creation_result: POLICY_DENIED,
             creation_handle: false,
+            creation_plan: VecDeque::new(),
             retrieval_result: S_OK,
             outcome: 1,
             details_count: 2,
             capability: None,
+            policy_details: None,
             snapshot: None,
             capture_snapshot: true,
             invalid_header: false,
@@ -69,6 +78,7 @@ impl Default for FakeState {
             output_size: None,
             null_output: false,
             closes: 0,
+            closed_handles: Vec::new(),
         }
     }
 }
@@ -82,25 +92,59 @@ pub(super) fn injected_api() -> Option<SecurityEnvironmentApi> {
     INJECTED_API.with(Cell::get)
 }
 
-struct ApiScope(Option<SecurityEnvironmentApi>);
+struct FixtureApi {
+    api: SecurityEnvironmentApi,
+    cache: crate::process_container_common::policy_mutation::TestCacheScope,
+}
+
+impl std::fmt::Debug for FixtureApi {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.api, formatter)
+    }
+}
+
+impl std::ops::Deref for FixtureApi {
+    type Target = SecurityEnvironmentApi;
+
+    fn deref(&self) -> &Self::Target {
+        &self.api
+    }
+}
+
+impl std::ops::DerefMut for FixtureApi {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.api
+    }
+}
+
+struct ApiScope {
+    previous: Option<SecurityEnvironmentApi>,
+    _cache: crate::process_container_common::policy_mutation::TestCacheScope,
+}
 
 impl ApiScope {
-    fn new(api: SecurityEnvironmentApi) -> Self {
-        Self(INJECTED_API.with(|slot| slot.replace(Some(api))))
+    fn new(fixture: FixtureApi) -> Self {
+        Self {
+            previous: INJECTED_API.with(|slot| slot.replace(Some(fixture.api))),
+            _cache: fixture.cache,
+        }
     }
 }
 
 impl Drop for ApiScope {
     fn drop(&mut self) {
-        INJECTED_API.with(|slot| slot.set(self.0));
+        INJECTED_API.with(|slot| slot.set(self.previous));
     }
 }
 
-fn reset() -> SecurityEnvironmentApi {
+fn reset() -> FixtureApi {
     STATE.with(|state| *state.borrow_mut() = FakeState::default());
     let mut api = SecurityEnvironmentApi::from_raw_parts(create, query, close);
     api.get_last_policy_result = Some(get_policy_result);
-    api
+    FixtureApi {
+        api,
+        cache: crate::process_container_common::policy_mutation::isolated_test_cache(),
+    }
 }
 
 fn calls() -> Vec<&'static str> {
@@ -159,13 +203,19 @@ unsafe extern "system" fn create(
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.snapshot = None;
+        if let Some((result, handle, capability)) = state.creation_plan.pop_front() {
+            state.creation_result = result;
+            state.creation_handle = handle;
+            state.capability = capability;
+            state.details_count = 1;
+        }
         state.calls.push("create");
         state.threads.push(std::thread::current().id());
         let specification =
             unsafe { std::slice::from_raw_parts(specification.cast(), size as usize) };
         state.inputs.push((specification.to_vec(), flags));
         if state.creation_handle {
-            unsafe { *out = HANDLE(std::ptr::dangling_mut()) };
+            unsafe { *out = HANDLE((state.inputs.len() * 16) as *mut c_void) };
         }
         if state.capture_snapshot
             && flags & 0x2 != 0
@@ -208,7 +258,9 @@ unsafe extern "system" fn get_policy_result(
         if state.retrieval_result.is_err() && !state.allocate_on_failure {
             return state.retrieval_result;
         }
-        let details = if let Some(capability) = &state.capability {
+        let details = if let Some(details) = &state.policy_details {
+            details.clone()
+        } else if let Some(capability) = &state.capability {
             vec![layout::PolicyDetailT {
                 failure_class: layout::FailureClass::Network,
                 failure_reason: layout::FailureReason::CapabilityNotAllowed,
@@ -263,11 +315,12 @@ unsafe extern "system" fn get_policy_result(
     })
 }
 
-unsafe extern "system" fn close(_: HANDLE) {
+unsafe extern "system" fn close(handle: HANDLE) {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.calls.push("close");
         state.closes += 1;
+        state.closed_handles.push(handle.0 as usize);
         // Detect retrieval deferred past native cleanup that could reenter CPSE.
         state.snapshot = None;
     });
@@ -333,6 +386,7 @@ fn policy_result_capture_requires_advertised_support() {
             .create_with_diagnostics(b"spec", 1, None, false)
             .unwrap_err();
         let captured = support & 0x10 != 0;
+        assert_eq!(error.mutation_hints().is_some(), captured);
         assert_eq!(
             error
                 .message(false)
@@ -353,6 +407,49 @@ fn policy_result_capture_requires_advertised_support() {
                 [(b"spec".to_vec(), if captured { 0x3 } else { 0x1 })]
             );
         });
+    }
+}
+
+#[test]
+fn support_query_failure_cannot_mask_creation_or_authorize_a_repair() {
+    for support_result in [E_FAIL, E_NOTIMPL] {
+        for creation_result in [POLICY_DENIED, E_FAIL, S_OK] {
+            let api = reset();
+            STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                state.support_result = support_result;
+                state.creation_result = creation_result;
+                state.creation_handle = creation_result.is_ok();
+            });
+            let result = api.create_with_diagnostics(b"spec", 0, None, false);
+            if creation_result.is_ok() {
+                drop(result.unwrap());
+                assert_eq!(calls(), ["support", "create", "close"]);
+            } else {
+                let error = result.unwrap_err();
+                assert!(matches!(error.cause,
+                    LearningModeError::HResultCall {
+                        function: "CreateProcessSecurityEnvironment", code,
+                    } if code == creation_result.0
+                ));
+                assert!(error.mutation_hints().is_none());
+                if creation_result == POLICY_DENIED {
+                    let message = error.message(false);
+                    assert!(message.contains("Creation-policy diagnostics unavailable"));
+                    assert!(message.contains("QueryProcessSecurityEnvironmentSupport failed"));
+                    assert!(message.contains("0x800704EC"));
+                } else {
+                    assert!(error.diagnostic.is_none());
+                }
+                assert_eq!(calls(), ["support", "create"]);
+            }
+            STATE.with(|state| {
+                let state = state.borrow();
+                assert_eq!(state.inputs, [(b"spec".to_vec(), 0)]);
+                assert!(state.allocations.is_empty());
+                assert!(state.snapshot.is_none());
+            });
+        }
     }
 }
 
@@ -396,6 +493,7 @@ fn returned_allocations_are_freed_on_hresult_decode_and_size_failures() {
             .unwrap_err();
         assert!(error.message(false).contains("diagnostics unavailable"));
         assert!(error.message(false).contains("0x800704EC"));
+        assert!(error.mutation_hints().is_none());
         assert_eq!(calls(), ["support", "create", "get_policy_result"]);
         STATE.with(|state| {
             let state = state.borrow();
@@ -691,6 +789,7 @@ fn snapshots_are_thread_local_and_retrieval_does_not_consume_them() {
     api.create(b"main refusal", 0x2).unwrap_err();
     std::thread::spawn(move || {
         assert!(policy_failure_diagnostic(get_policy_result, None, false)
+            .0
             .contains("No cached policy diagnostic"));
         let api = reset();
         STATE.with(|state| state.borrow_mut().outcome = 2);
@@ -708,11 +807,41 @@ fn snapshots_are_thread_local_and_retrieval_does_not_consume_them() {
     let first = policy_failure_diagnostic(get_policy_result, None, false);
     let second = policy_failure_diagnostic(get_policy_result, None, false);
     assert_eq!(first, second);
-    assert!(first.starts_with("Sandbox creation failed: blocked by IT policy."));
+    assert!(first
+        .0
+        .starts_with("Sandbox creation failed: blocked by IT policy."));
     assert_eq!(
         calls(),
         ["create", "get_policy_result", "get_policy_result"]
     );
+}
+
+#[test]
+fn unflagged_creation_skips_capture_and_clears_an_earlier_snapshot() {
+    let api = reset();
+    api.create(b"captured refusal", 0x2).unwrap_err();
+    assert!(policy_failure_diagnostic(get_policy_result, None, false)
+        .0
+        .starts_with("Sandbox creation failed: blocked by IT policy."));
+    api.create(b"unflagged refusal", 0).unwrap_err();
+    assert!(policy_failure_diagnostic(get_policy_result, None, false)
+        .0
+        .contains("No cached policy diagnostic is available."));
+    assert_eq!(
+        calls(),
+        ["create", "get_policy_result", "create", "get_policy_result"]
+    );
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_eq!(
+            state.inputs,
+            [
+                (b"captured refusal".to_vec(), 0x2),
+                (b"unflagged refusal".to_vec(), 0)
+            ]
+        );
+        assert_eq!(state.frees, state.allocations);
+    });
 }
 
 #[test]
@@ -813,6 +942,252 @@ fn real_runner_propagates_policy_refusal_snapshots_with_and_without_capture() {
     }
 }
 
+unsafe extern "system" fn loopback_test_version(
+    major: u32,
+    available: *mut u8,
+    minor: *mut u32,
+) -> HRESULT {
+    unsafe {
+        *available = u8::from(major == 1);
+        if !minor.is_null() {
+            *minor = 1;
+        }
+    }
+    S_OK
+}
+
+fn mutation_request(capabilities: &[&str]) -> crate::mxc_common::models::ExecutionRequest {
+    crate::mxc_common::models::ExecutionRequest {
+        script_code: "cmd /c exit 0".into(),
+        policy_mutation_enabled: true,
+        policy: ContainerPolicy {
+            capabilities: capabilities
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn prepare_mutation(
+    request: &crate::mxc_common::models::ExecutionRequest,
+) -> Result<
+    crate::process_container_common::policy_mutation::PreparedPolicy,
+    crate::mxc_common::models::ScriptResponse,
+> {
+    Ok(crate::process_container_common::policy_mutation::PreparedPolicy {
+                    specification: crate::process_container_common::base_container_helpers::build_psec_v1_security_environment_spec(
+                        request, SecurityEnvironmentVersion::V1_0, false,
+                    ),
+                    capture_network_decisions: false,
+                    version: SecurityEnvironmentVersion::V1_0,
+                })
+}
+
+#[test]
+fn mutation_native_loop_copies_hints_before_cleanup_and_reuses_the_successful_owner() {
+    let api = reset();
+    STATE.with(|state| {
+        state.borrow_mut().creation_plan = VecDeque::from([
+            (POLICY_DENIED, true, Some("registryRead".into())),
+            (S_OK, true, None),
+        ])
+    });
+    let original = mutation_request(&["registryRead", "registryWrite"]);
+    let result = crate::process_container_common::policy_mutation::negotiate(
+        &original,
+        prepare_mutation,
+        |prepared, policy| {
+            api.create_with_diagnostics(&prepared.specification, 0, Some(policy), false)
+        },
+        |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        calls(),
+        [
+            "support",
+            "create",
+            "get_policy_result",
+            "close",
+            "support",
+            "create"
+        ]
+    );
+    assert_eq!(closes(), 1);
+    assert_eq!(result.request.policy.capabilities, ["registryWrite"]);
+    assert_eq!(
+        original.policy.capabilities,
+        ["registryRead", "registryWrite"]
+    );
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].starts_with("Sandbox configuration updated due to IT policy: "));
+    STATE.with(|state| {
+        let state = state.borrow();
+        assert_ne!(state.inputs[0].0, state.inputs[1].0);
+        assert!(state.inputs.iter().all(|(_, flags)| *flags == 0x2));
+        assert_eq!(state.threads, vec![std::thread::current().id(); 3]);
+    });
+    drop(result.environment);
+    assert_eq!(closes(), 2);
+}
+
+#[test]
+fn mutation_native_loop_preserves_nonpolicy_failure_and_prior_change_text() {
+    let api = reset();
+    STATE.with(|state| {
+        state.borrow_mut().creation_plan = VecDeque::from([
+            (POLICY_DENIED, false, Some("registryRead".into())),
+            (E_FAIL, false, None),
+        ])
+    });
+    let response = crate::process_container_common::policy_mutation::negotiate(
+        &mutation_request(&["registryRead"]),
+        prepare_mutation,
+        |prepared, policy| {
+            api.create_with_diagnostics(&prepared.specification, 0, Some(policy), false)
+        },
+        |_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(response.error_message.contains("0x80004005"));
+    assert!(response
+        .error_message
+        .contains("Attempted creation-policy changes"));
+    assert!(response.error_message.contains("registryRead"));
+    assert!(response.standard_err.is_empty());
+    assert_eq!(
+        calls(),
+        [
+            "support",
+            "create",
+            "get_policy_result",
+            "support",
+            "create"
+        ]
+    );
+}
+
+#[test]
+fn mutation_native_loop_never_retries_unusable_snapshots() {
+    for (outcome, header, pool, getter, support, support_result) in [
+        (2, false, false, true, 0x10, S_OK),
+        (1, true, false, true, 0x10, S_OK),
+        (1, false, true, true, 0x10, S_OK),
+        (1, false, false, false, 0x10, S_OK),
+        (1, false, false, true, 0x0f, S_OK),
+        (1, false, false, true, 0x10, E_FAIL),
+    ] {
+        let mut api = reset();
+        if !getter {
+            api.get_last_policy_result = None;
+        }
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.outcome = outcome;
+            state.invalid_header = header;
+            state.invalid_pool = pool;
+            state.capability = Some("registryRead".into());
+            state.details_count = 1;
+            state.support = support;
+            state.support_result = support_result;
+        });
+        let response = crate::process_container_common::policy_mutation::negotiate(
+            &mutation_request(&["registryRead"]),
+            prepare_mutation,
+            |prepared, policy| {
+                api.create_with_diagnostics(&prepared.specification, 0, Some(policy), false)
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(response.error_message.contains("0x800704EC"));
+        STATE.with(|state| assert_eq!(state.borrow().inputs.len(), 1));
+    }
+}
+
+#[test]
+fn mutation_native_loop_bounds_attempts_and_repeated_refusals_or_specifications() {
+    let api = reset();
+    STATE.with(|state| {
+        state.borrow_mut().creation_plan = (0..8)
+            .map(|index| (POLICY_DENIED, false, Some(format!("cap{index}"))))
+            .collect();
+    });
+    let names: Vec<_> = (0..9).map(|index| format!("cap{index}")).collect();
+    let names: Vec<_> = names.iter().map(String::as_str).collect();
+    let response = crate::process_container_common::policy_mutation::negotiate(
+        &mutation_request(&names),
+        prepare_mutation,
+        |prepared, policy| {
+            api.create_with_diagnostics(&prepared.specification, 0, Some(policy), false)
+        },
+        |_| Ok(()),
+    )
+    .unwrap_err();
+    assert!(response.error_message.contains("eight-attempt limit"));
+    STATE.with(|state| assert_eq!(state.borrow().inputs.len(), 8));
+
+    for repeat_spec in [false, true] {
+        let api = reset();
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.capability = Some("cap".into());
+            state.details_count = 1;
+        });
+        let original = mutation_request(&["cap"]);
+        let response = crate::process_container_common::policy_mutation::negotiate(
+            &original,
+            |request| prepare_mutation(if repeat_spec { &original } else { request }),
+            |prepared, policy| {
+                api.create_with_diagnostics(&prepared.specification, 0, Some(policy), false)
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(response.error_message.contains(if repeat_spec {
+            "native specification did not change"
+        } else {
+            "native refusal repeated"
+        }));
+        STATE
+            .with(|state| assert_eq!(state.borrow().inputs.len(), if repeat_spec { 1 } else { 2 }));
+    }
+}
+
+#[test]
+fn mutation_native_loop_revalidates_without_retrying_an_unsupported_candidate() {
+    let api = reset();
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.capability = Some("registryRead".into());
+        state.details_count = 1;
+    });
+    let response = crate::process_container_common::policy_mutation::negotiate(
+        &mutation_request(&["registryRead"]),
+        prepare_mutation,
+        |prepared, policy| {
+            api.create_with_diagnostics(&prepared.specification, 0, Some(policy), false)
+        },
+        |_| {
+            Err(crate::mxc_common::models::ScriptResponse::rejected(
+                "fake tier cannot enforce it",
+            ))
+        },
+    )
+    .unwrap_err();
+    assert!(response.error_message.contains("0x800704EC"));
+    assert!(response
+        .error_message
+        .contains("fake tier cannot enforce it"));
+    assert!(!response
+        .error_message
+        .contains("Sandbox configuration updated due to IT policy"));
+    assert_eq!(calls(), ["support", "create", "get_policy_result"]);
+}
+
 #[test]
 fn real_runner_maps_effective_loopback_with_and_without_capture() {
     use crate::mxc_common::logger::{Logger, Mode};
@@ -822,22 +1197,12 @@ fn real_runner_maps_effective_loopback_with_and_without_capture() {
     use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
     use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-    unsafe extern "system" fn version(major: u32, available: *mut u8, minor: *mut u32) -> HRESULT {
-        unsafe {
-            *available = u8::from(major == 1);
-            if !minor.is_null() {
-                *minor = 1;
-            }
-        }
-        S_OK
-    }
-
     let _capabilities =
         crate::process_container_common::test_env::CaptureCapabilityGuard::set(true, true);
     let directory = tempfile::tempdir().unwrap();
     for capture in [false, true] {
         let mut api = reset();
-        api.version_support = Some(version);
+        api.version_support = Some(loopback_test_version);
         let _scope = ApiScope::new(api);
         STATE.with(|state| {
             let mut state = state.borrow_mut();
@@ -906,72 +1271,4 @@ fn real_runner_maps_effective_loopback_with_and_without_capture() {
             .iter()
             .any(|capability| capability.eq_ignore_ascii_case("networkLoopback")));
     }
-}
-
-#[test]
-fn support_query_failure_cannot_mask_creation_or_authorize_a_repair() {
-    for support_result in [E_FAIL, E_NOTIMPL] {
-        for creation_result in [POLICY_DENIED, E_FAIL, S_OK] {
-            let api = reset();
-            STATE.with(|state| {
-                let mut state = state.borrow_mut();
-                state.support_result = support_result;
-                state.creation_result = creation_result;
-                state.creation_handle = creation_result.is_ok();
-            });
-            let result = api.create_with_diagnostics(b"spec", 0, None, false);
-            if creation_result.is_ok() {
-                drop(result.unwrap());
-                assert_eq!(calls(), ["support", "create", "close"]);
-            } else {
-                let error = result.unwrap_err();
-                assert!(matches!(error.cause,
-                    LearningModeError::HResultCall {
-                        function: "CreateProcessSecurityEnvironment", code,
-                    } if code == creation_result.0
-                ));
-                if creation_result == POLICY_DENIED {
-                    let message = error.message(false);
-                    assert!(message.contains("Creation-policy diagnostics unavailable"));
-                    assert!(message.contains("QueryProcessSecurityEnvironmentSupport failed"));
-                    assert!(message.contains("0x800704EC"));
-                } else {
-                    assert!(error.diagnostic.is_none());
-                }
-                assert_eq!(calls(), ["support", "create"]);
-            }
-            STATE.with(|state| {
-                let state = state.borrow();
-                assert_eq!(state.inputs, [(b"spec".to_vec(), 0)]);
-                assert!(state.allocations.is_empty());
-                assert!(state.snapshot.is_none());
-            });
-        }
-    }
-}
-
-#[test]
-fn unflagged_creation_skips_capture_and_clears_an_earlier_snapshot() {
-    let api = reset();
-    api.create(b"captured refusal", 0x2).unwrap_err();
-    assert!(policy_failure_diagnostic(get_policy_result, None, false)
-        .starts_with("Sandbox creation failed: blocked by IT policy."));
-    api.create(b"unflagged refusal", 0).unwrap_err();
-    assert!(policy_failure_diagnostic(get_policy_result, None, false)
-        .contains("No cached policy diagnostic is available."));
-    assert_eq!(
-        calls(),
-        ["create", "get_policy_result", "create", "get_policy_result"]
-    );
-    STATE.with(|state| {
-        let state = state.borrow();
-        assert_eq!(
-            state.inputs,
-            [
-                (b"captured refusal".to_vec(), 0x2),
-                (b"unflagged refusal".to_vec(), 0)
-            ]
-        );
-        assert_eq!(state.frees, state.allocations);
-    });
 }

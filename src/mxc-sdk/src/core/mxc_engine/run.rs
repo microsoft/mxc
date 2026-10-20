@@ -27,6 +27,7 @@ use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::ContainmentBackend;
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
 use crate::mxc_common::mxc_error::MxcError;
+pub use crate::mxc_common::policy_identity::log_policy_hash;
 use crate::mxc_common::script_runner::ScriptRunner;
 
 use crate::mxc_engine::error::Error;
@@ -60,6 +61,7 @@ pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
+    crate::mxc_engine::validate_creation_policy_mutation(request)?;
     log_policy_hash(request, logger);
     crate::mxc_engine::experimental::require_experimental_optin(
         &request.containment,
@@ -73,50 +75,11 @@ pub fn resolve_runner(
     resolve_runner_inner(request, logger).map_err(Error::from)
 }
 
-/// Record `mxc.PolicyHash`: the canonical identity of the effective policy this
-/// run is about to be launched under, plus the config schema version.
-pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut Logger) {
-    use crate::mxc_common::audit::{AuditEvent, AuditEventName};
-
-    if !logger.has_diagnostic_sink() && !crate::mxc_common::telemetry::is_active() {
-        return;
-    }
-
-    let policy_hash = crate::mxc_common::policy_identity::policy_hash(request);
-    let config_schema_version = config_schema_version(request);
-    if crate::mxc_common::telemetry::is_active() {
-        let identity = policy_hash_identity(&request.container_id);
-        crate::mxc_common::telemetry::log_policy_hash(
-            &identity,
-            &policy_hash,
-            config_schema_version,
-        );
-    }
-    let record = AuditEvent::new(AuditEventName::PolicyHash)
-        .str("backend", request.containment.wire_name())
-        .str("policy_hash", &policy_hash)
-        .str("config_schema_version", config_schema_version);
-    logger.log_audit_event(&record);
-}
-
-fn config_schema_version(request: &ExecutionRequest) -> &'static str {
-    request.source_contract_version()
-}
-
-fn policy_hash_identity(container_id: &str) -> String {
-    let identity = if container_id.is_empty() {
-        "CLI"
-    } else {
-        container_id
-    };
-    crate::mxc_common::policy_identity::redact_identity(identity)
-}
-
 #[cfg(test)]
 mod attribution_tests {
-    use super::config_schema_version;
     use crate::mxc_common::logger::{Logger, Mode};
     use crate::mxc_common::models::ExecutionRequest;
+    use crate::mxc_common::policy_identity::config_schema_version;
     use crate::mxc_common::state_aware_request::MxcRequest;
 
     #[test]
@@ -444,6 +407,7 @@ mod tests {
     use super::*;
     use crate::mxc_common::logger::Mode;
     use crate::mxc_common::models::WindowsSandboxConfig;
+    use crate::mxc_common::policy_identity::policy_hash_identity;
 
     fn windows_sandbox_request(config: Option<WindowsSandboxConfig>) -> ExecutionRequest {
         ExecutionRequest {

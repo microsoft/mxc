@@ -2,11 +2,17 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert';
-import { describe, it } from 'node:test';
-import { _errorCodeForNativeStatus } from '../../src/bindings/run.js';
+import { afterEach, describe, it } from 'node:test';
+import {
+  _errorCodeForNativeStatus,
+  _setBindingRunLibraryLoader,
+  runOneShotJsonAsync,
+} from '../../src/bindings/run.js';
 import { nativeStatusError, parseExecutionMetadata } from '../../src/bindings/native-error.js';
 import { MxcError } from '../../src/v1/errors.js';
 import type { CaptureDenialsResult, CaptureDenialsError, ExecutionMetadata } from '../../src/v1/index.js';
+
+afterEach(() => _setBindingRunLibraryLoader());
 
 describe('native execution metadata decoding', () => {
   const captureDenials: CaptureDenialsResult = {
@@ -57,6 +63,95 @@ describe('native execution metadata decoding', () => {
 });
 
 describe('native run binding', () => {
+  function installLibrary(events: string[], supportsMutation: boolean): void {
+    _setBindingRunLibraryLoader((() => ({
+      path: 'fake-mxc',
+      version: () => 'test',
+      handle: {
+        unload: () => events.push('unload'),
+        func: (symbol: string) => {
+          events.push(`bind:${symbol}`);
+          if (symbol === 'mxc_run_result_free') {
+            return () => events.push('free-result');
+          }
+          if (symbol === 'mxc_run_with_policy_mutation_json' && !supportsMutation) {
+            throw new Error(`Cannot find function '${symbol}'`);
+          }
+          const invoke = (_request: string, experimental: number, result: object) => {
+            assert.strictEqual(experimental, 0);
+            events.push(`call:${symbol}`);
+            Object.assign(result, {
+              status: 0, exitCode: 0, timedOut: 0, error: {},
+              stdout: Buffer.from('workload\0'), stderr: null, outputMetadata: null,
+              warnings: symbol === 'mxc_run_with_policy_mutation_json'
+                ? Buffer.from('["Policy mutation: restricted egress"]\0') : null,
+            });
+            return 0;
+          };
+          return Object.assign(invoke, {
+            async: (
+              request: string,
+              experimental: number,
+              result: object,
+              complete: (error: Error | null, status: number) => void,
+            ) => queueMicrotask(() => complete(null, invoke(request, experimental, result))),
+          });
+        },
+      },
+    })) as never);
+  }
+
+  it('uses dedicated mutation exports and the existing warnings/result ownership', async () => {
+    const events: string[] = [];
+    installLibrary(events, true);
+    const request = {
+      version: '1.0.0' as const,
+      process: { commandLine: 'not executed by this fake' },
+    };
+    const strict = await runOneShotJsonAsync(request);
+    const mutated = await runOneShotJsonAsync(request, false, true);
+    assert.deepStrictEqual(strict.warnings, []);
+    assert.deepStrictEqual(mutated.warnings, ['Policy mutation: restricted egress']);
+    assert.strictEqual(mutated.stdout, 'workload');
+    assert.strictEqual(mutated.stderr, '');
+    assert.deepStrictEqual(events, [
+      'bind:mxc_run_json', 'bind:mxc_run_result_free', 'call:mxc_run_json',
+      'free-result', 'unload',
+      'bind:mxc_run_with_policy_mutation_json', 'bind:mxc_run_result_free',
+      'call:mxc_run_with_policy_mutation_json', 'free-result',
+    ]);
+  });
+
+  it('retains the native mutation module across calls without retaining policy in JavaScript', async () => {
+    const events: string[] = [];
+    installLibrary(events, true);
+    const request = {
+      version: '1.0.0' as const,
+      process: { commandLine: 'not executed by this fake' },
+    };
+    await runOneShotJsonAsync(request, false, true);
+    await runOneShotJsonAsync(request);
+    await runOneShotJsonAsync(request, false, true);
+    assert.strictEqual(events.filter((event) => event === 'bind:mxc_run_with_policy_mutation_json').length, 1);
+    assert.strictEqual(events.filter((event) => event === 'call:mxc_run_with_policy_mutation_json').length, 2);
+    assert.strictEqual(events.filter((event) => event === 'free-result').length, 3);
+    assert.strictEqual(events.filter((event) => event === 'unload').length, 1);
+  });
+  it('leaves strict calls usable on old libraries and never silently falls back', async () => {
+    const events: string[] = [];
+    installLibrary(events, false);
+    const request = {
+      version: '1.0.0' as const,
+      process: { commandLine: 'not executed by this fake' },
+    };
+    await runOneShotJsonAsync(request);
+    events.length = 0;
+    await assert.rejects(runOneShotJsonAsync(request, false, true), (error: unknown) =>
+      error instanceof MxcError && error.code === 'backend_unavailable'
+        && error.message.includes('mxc_run_with_policy_mutation_json'));
+    assert.deepStrictEqual(events, ['bind:mxc_run_with_policy_mutation_json', 'unload']);
+  });
+
   it('preserves creation-policy text after native message storage is released', () => {
     const message = [
       'CreateProcessSecurityEnvironment failed (HRESULT = 0x800704EC)',

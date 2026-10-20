@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Bounded decoding of owned PSEP refusal diagnostics.
+//! Bounded decoding of owned PSEP refusal diagnostics and private restrictive repairs.
 
 use std::fmt::Write;
 
@@ -23,6 +23,20 @@ const ACTIONABLE: u32 = layout::PolicyResultFlags::HasActionableDetails.0;
 const RESOURCE_COMPLETE: u32 = layout::PolicyResultFlags::ResourceComplete.0;
 const RESOURCE_UNAVAILABLE: u32 = layout::PolicyResultFlags::ResourceUnavailable.0;
 const KNOWN_FLAGS: u32 = ACTIONABLE | RESOURCE_COMPLETE | RESOURCE_UNAVAILABLE;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum MutationHint {
+    RemoveCapability(String),
+    RestrictPath {
+        path: String,
+        requested: u64,
+        maximum: u64,
+    },
+    ReducePathCount {
+        requested: u64,
+        maximum: u64,
+    },
+}
 
 impl PolicyResult {
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
@@ -69,6 +83,61 @@ impl PolicyResult {
             }
         }
         Ok(result.unpack())
+    }
+
+    pub(crate) fn mutation_hints(&self) -> Option<Vec<MutationHint>> {
+        let details = self.details.as_deref().unwrap_or_default();
+        if self.outcome.0 != 1 || details.is_empty() {
+            return None;
+        }
+        details
+            .iter()
+            .map(|detail| {
+                if detail.flags & ACTIONABLE == 0 || detail.flags & !KNOWN_FLAGS != 0 {
+                    return None;
+                }
+                match (
+                    detail.failure_class.0,
+                    detail.failure_reason.0,
+                    detail.required_action.0,
+                    detail.resource_kind.0,
+                    detail.value_kind.0,
+                ) {
+                    (1..=3, 1, 1, 2, 0)
+                        if detail.flags == ACTIONABLE | RESOURCE_COMPLETE
+                            && detail.requested_value == 0
+                            && detail.required_value == 0 =>
+                    {
+                        Some(MutationHint::RemoveCapability(
+                            detail.resource_text().ok()??,
+                        ))
+                    }
+                    (2, 2 | 3, 2, 1, 1)
+                        if detail.flags == ACTIONABLE | RESOURCE_COMPLETE
+                            && detail.requested_value <= 2
+                            && detail.required_value < detail.requested_value
+                            && (detail.failure_reason.0 != 3 || detail.required_value == 0) =>
+                    {
+                        Some(MutationHint::RestrictPath {
+                            path: detail.resource_text().ok()??,
+                            requested: detail.requested_value,
+                            maximum: detail.required_value,
+                        })
+                    }
+                    (2, 4, 3, 0, 2)
+                        if detail.flags == ACTIONABLE
+                            && detail.requested_value > detail.required_value
+                            && detail.resource.is_none() =>
+                    {
+                        Some(MutationHint::ReducePathCount {
+                            requested: detail.requested_value,
+                            maximum: detail.required_value,
+                        })
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn diagnostic(
@@ -302,6 +371,14 @@ mod tests {
         assert!(message.contains("Resource 1: \"C:\\\\work\""));
         assert!(message.contains("MXC request: review filesystem.readwritePaths"));
         assert!(!message.contains("flags="));
+        assert_eq!(
+            decoded.mutation_hints(),
+            Some(vec![MutationHint::RestrictPath {
+                path: r"C:\work".into(),
+                requested: 2,
+                maximum: 0,
+            }])
+        );
         assert_eq!(decoded, original);
     }
 
@@ -349,14 +426,16 @@ mod tests {
         assert!(decoded
             .diagnostic(None, false)
             .contains("No caller-action details"));
+        assert!(decoded.mutation_hints().is_none());
     }
 
     #[test]
-    fn incomplete_nul_and_unpaired_utf16_resources_are_unavailable() {
+    fn incomplete_nul_and_unpaired_utf16_resources_never_authorize_mutation() {
         for resource in [None, Some(vec![]), Some(vec![65, 0]), Some(vec![0xd800])] {
             let mut original = result(vec![detail()]);
             original.details.as_mut().unwrap()[0].resource = resource;
             let decoded = PolicyResult::decode(&encode(&original)).unwrap();
+            assert!(decoded.mutation_hints().is_none());
             assert!(decoded.diagnostic(None, false).contains("<unavailable:"));
         }
         for flags in [
@@ -375,6 +454,7 @@ mod tests {
         assert!(decoded
             .diagnostic(None, false)
             .contains("<unavailable from the OS>"));
+        assert!(decoded.mutation_hints().is_none());
     }
 
     #[test]
@@ -403,6 +483,32 @@ mod tests {
         ] {
             assert!(message.contains(expected), "{expected}: {message}");
         }
+        assert!(decoded.mutation_hints().is_none());
+    }
+
+    #[test]
+    fn only_a_whole_recognized_blocked_batch_supplies_owned_hints() {
+        let mut original = result(vec![detail()]);
+        for outcome in [0, 2, 99] {
+            original.outcome = layout::PolicyOutcome(outcome);
+            let decoded = PolicyResult::decode(&encode(&original)).unwrap();
+            assert!(decoded.mutation_hints().is_none());
+        }
+        original.outcome = layout::PolicyOutcome::Blocked;
+        for flags in [0, RESOURCE_COMPLETE, ACTIONABLE | RESOURCE_COMPLETE | 0x80] {
+            original.details.as_mut().unwrap()[0].flags = flags;
+            original.details.as_mut().unwrap()[0].resource =
+                (flags & RESOURCE_COMPLETE != 0).then(|| r"C:\work".encode_utf16().collect());
+            assert!(PolicyResult::decode(&encode(&original))
+                .unwrap()
+                .mutation_hints()
+                .is_none());
+        }
+        original.details = Some(vec![detail(), PolicyDetail::default()]);
+        assert!(PolicyResult::decode(&encode(&original))
+            .unwrap()
+            .mutation_hints()
+            .is_none());
     }
 
     #[test]
@@ -418,6 +524,13 @@ mod tests {
             ..Default::default()
         };
         let decoded = PolicyResult::decode(&encode(&result(vec![detail]))).unwrap();
+        assert_eq!(
+            decoded.mutation_hints(),
+            Some(vec![MutationHint::ReducePathCount {
+                requested: 9,
+                maximum: 7
+            }])
+        );
         assert!(decoded
             .diagnostic(None, false)
             .contains("requested=9; required=7"));
@@ -431,6 +544,7 @@ mod tests {
             assert!(decoded
                 .diagnostic(None, false)
                 .contains("No caller-action details"));
+            assert!(decoded.mutation_hints().is_none());
         }
     }
 

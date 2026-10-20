@@ -339,8 +339,8 @@ const managedOptions = read(
   "sdk", "dotnet", "Microsoft.Mxc.Sdk", "V1", "ExecutionOptions.cs"
 );
 for (const [name, fields] of [
-  ["RunOptions", ["telemetry"]],
-  ["SpawnOptions", ["telemetry"]],
+  ["RunOptions", ["telemetry", "mutatePolicy"]],
+  ["SpawnOptions", ["telemetry", "mutatePolicy"]],
   ["SpawnWithPtyOptions", ["telemetry", "size"]],
 ]) {
   compare(`${name} invocation fields`, managedJsonFields(managedOptions, name), fields);

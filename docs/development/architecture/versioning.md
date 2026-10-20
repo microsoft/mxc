@@ -119,6 +119,17 @@ Version-independent operations and types, including errors, process handles,
 output/wait types, discovery, and telemetry consent, use supported V*
 entrypoints.
 
+An SDK can also expose a scoped API revision within an existing contract-major
+line. Rust's `mxc_sdk::v1_1` revises only creation options while preserving the
+published `v1` option structs and operations. It uses the same V1 request types
+and the same `sdkMajorTargets["1"]` contract, not a new configuration version.
+The scoped API revision does not bump SDK package versions. Its new option
+structs are non-exhaustive so that future invocation fields do not require
+another exhaustive-struct replacement. Node and .NET add the corresponding
+optional creation control to their V1 options without changing their published
+operation signatures.
+
+
 ### Versioning follows Semver
 
 SDK releases follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html):
