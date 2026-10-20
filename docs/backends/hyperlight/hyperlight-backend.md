@@ -14,7 +14,7 @@ crate. One code path serves Linux (KVM) and Windows (WHP).
 | **Binary** | `lxc-exec` (Linux), `wxc-exec.exe` (Windows) |
 | **Config value** | `"containment": "hyperlight"` |
 | **Schema** | `1.1.0-alpha`, with `--experimental` |
-| **Requires** | x86_64; `/dev/kvm` readable and writable, or WHP enabled; a build with `--with-hyperlight` |
+| **Requires** | x86_64; `/dev/kvm` readable and writable, or WHP enabled; a build with `--with-hyperlight`; on Linux, OpenSSL (headers and `pkg-config` to build, the shared library to run) |
 | **Isolation** | Hardware virtualization; the guest is a unikernel with its own filesystem |
 | **Guest** | One of the runtimes below, restored from a warm snapshot on every run |
 
