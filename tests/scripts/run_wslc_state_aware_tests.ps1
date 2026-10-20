@@ -24,7 +24,8 @@
     exits on its own.
 
     Explicit-session tests cover shared sandboxes and independent lifetimes
-    for identically sized VMs.
+    for identically sized VMs, plus guest CPU and memory for different sizing.
+    GPU passthrough enforcement is not verified by this suite.
     The cold-store regression warms one private store and requires registry access.
 
     Requires: Windows 11, WSL2, the WSLC SDK runtime (wslcsdk.dll staged next
@@ -728,6 +729,37 @@ function Get-SandboxBootId {
     Assert-True $valid "$What reads a valid VM boot ID"
     if ($valid) { return $bootId }
     return $null
+}
+
+function Assert-SandboxSizing {
+    param([string]$SandboxId, [int]$CpuCount, [int]$MemoryMb, [string]$What)
+
+    $r = Invoke-StateAware -Request @{
+        version = '1.1.0-alpha'
+        phase = 'exec'
+        sandboxId = $SandboxId
+        process = @{
+            commandLine = 'nproc; awk ''/^MemTotal:/ { print $2 }'' /proc/meminfo'
+            timeout = 30000
+        }
+    }
+    $values = $r.Stdout.Trim() -split '\s+'
+    $valid = $r.ExitCode -eq 0 -and $values.Count -eq 2 -and
+        $values[0] -match '^\d+$' -and $values[1] -match '^\d+$'
+    Assert-True $valid "$What reports guest CPU count and memory"
+    if (-not $valid) {
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+        return
+    }
+    Assert-True ([int]$values[0] -eq $CpuCount) `
+        "$What has $CpuCount CPUs (reported $($values[0]))"
+    $expectedKiB = [long]$MemoryMb * 1024
+
+    # Allow up to 10% for guest-kernel reservations excluded from MemTotal.
+    $minimumKiB = [math]::Ceiling($expectedKiB * 0.9)
+    Assert-True ([long]$values[1] -ge $minimumKiB -and [long]$values[1] -le $expectedKiB) `
+        "$What guest memory is within 10% below $MemoryMb MB (reported $($values[1]) KiB)"
 }
 
 # Provision a throwaway sandbox and return its sandbox_id (or $null).
@@ -1945,12 +1977,22 @@ $sharedSandboxes = @(
 $independentSandbox = @{
     Name = 'B'; Id = $null; Started = $false; Released = $false; BootId = $null
 }
+$resizedSandbox = @{
+    Name = 'C'; Id = $null; Started = $false; Released = $false
+}
+$resizedSession = @{
+    Name = 'C'; Id = $null; Released = $false; Sandboxes = @($resizedSandbox)
+}
 $explicitSessions = @(
     @{ Name = 'A'; Id = $null; Released = $false; Sandboxes = $sharedSandboxes },
-    @{ Name = 'B'; Id = $null; Released = $false; Sandboxes = @($independentSandbox) }
+    @{ Name = 'B'; Id = $null; Released = $false; Sandboxes = @($independentSandbox) },
+    $resizedSession
 )
 $sharedSession = $explicitSessions[0]
 $independentSession = $explicitSessions[1]
+$sessionFixture = Get-Content (Join-Path $ConfigDir 'wslc_state_aware_provision_session.json') -Raw |
+    ConvertFrom-Json
+$sessionSizing = $sessionFixture.wslc.provisionSession
 try {
     Run-StateAwareTest "K: dry-run provision-session mints nothing" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_session.json' -DryRun
@@ -1961,7 +2003,7 @@ try {
         }
     } | Out-Null
 
-    foreach ($session in $explicitSessions) {
+    foreach ($session in @($sharedSession, $independentSession)) {
         $provisioned = Run-StateAwareTest "K: provision-session $($session.Name) with identical sizing" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_session.json'
             $envObj = Assert-ResultEnvelope $r "provision-session $($session.Name)"
@@ -2002,6 +2044,12 @@ try {
         Assert-True (-not [string]::IsNullOrEmpty($sharedSandboxes[0].BootId) -and
             $sharedSandboxes[0].BootId -ceq $sharedSandboxes[1].BootId) `
             "two sandboxes in the same session have the same VM boot ID"
+        foreach ($sandbox in $sharedSandboxes) {
+            if ($sandbox.Started) {
+                Assert-SandboxSizing -SandboxId $sandbox.Id -What $sandbox.Name `
+                    -CpuCount $sessionSizing.cpuCount -MemoryMb $sessionSizing.memoryMb
+            }
+        }
     } | Out-Null
 
     Run-StateAwareTest "K: identical sizing creates two distinct sessions and VMs" {
@@ -2062,6 +2110,49 @@ try {
             "releasing session A leaves session B's original VM usable"
     } | Out-Null
 
+    Run-StateAwareTest "K: different CPU and memory sizing reaches each session's guest" {
+        Assert-True ($sharedSession.Released -and $independentSandbox.Started) `
+            "session A returned its warm store while session B remains live"
+        if (-not $sharedSession.Released -or -not $independentSandbox.Started) { return }
+        Assert-SandboxSizing -SandboxId $independentSandbox.Id -What 'session B' `
+            -CpuCount $sessionSizing.cpuCount -MemoryMb $sessionSizing.memoryMb
+
+        $r = Invoke-StateAware -Request @{
+            version = '1.1.0-alpha'
+            phase = 'provision-session'
+            containment = 'wslc'
+            wslc = @{ provisionSession = @{ cpuCount = 2; memoryMb = 4096 } }
+        }
+        $envObj = Assert-ResultEnvelope $r "provision differently sized session C"
+        if ($null -eq $envObj) { return }
+        $resizedSession.Id = [string]$envObj.result.sessionId
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_in_session.json' `
+            -SessionId $resizedSession.Id
+        $envObj = Assert-ResultEnvelope $r "provision sandbox C"
+        if ($null -eq $envObj) { return }
+        $resizedSandbox.Id = [string]$envObj.result.sandboxId
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' `
+            -SandboxId $resizedSandbox.Id
+        $envObj = Assert-ResultEnvelope $r "start sandbox C"
+        $resizedSandbox.Started = $null -ne $envObj -and $r.ExitCode -eq 0
+        if (-not $resizedSandbox.Started) { return }
+        Assert-SandboxSizing -SandboxId $resizedSandbox.Id -What 'session C' `
+            -CpuCount 2 -MemoryMb 4096
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' `
+            -SandboxId $resizedSandbox.Id
+        $null = Assert-ResultEnvelope $r "stop sandbox C"
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' `
+            -SandboxId $resizedSandbox.Id
+        $envObj = Assert-ResultEnvelope $r "deprovision sandbox C"
+        $resizedSandbox.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+            -SessionId $resizedSession.Id
+        $envObj = Assert-ResultEnvelope $r "release session C"
+        $resizedSession.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+    } | Out-Null
+
     Run-StateAwareTest "K: a released session is no longer addressable" {
         Assert-True $sharedSession.Released "session A was released"
         if (-not $sharedSession.Released) { return }
@@ -2100,15 +2191,23 @@ try {
             "a refused provision mints no sandbox"
     } | Out-Null
 
-    Run-StateAwareTest "K: a malformed placement session id is refused as malformed_id" {
-        $req = @{
-            version = '1.1.0-alpha'
-            phase = 'provision'
-            containment = 'wslc'
-            wslc = @{ provision = @{ sessionId = 'wslcsess:not-hex' } }
+    Run-StateAwareTest "K: malformed placement and release IDs return malformed_id" {
+        foreach ($dryRun in @($false, $true)) {
+            foreach ($phase in @('provision', 'deprovision-session')) {
+                $req = @{
+                    version = '1.1.0-alpha'
+                    phase = $phase
+                    containment = 'wslc'
+                }
+                if ($phase -eq 'provision') {
+                    $req.wslc = @{ provision = @{ sessionId = 'wslcsess:not-hex' } }
+                } else {
+                    $req.sessionId = 'wslcsess:not-hex'
+                }
+                $r = Invoke-StateAware -Request $req -DryRun:$dryRun
+                $null = Assert-ErrorEnvelope $r 'malformed_id' "$phase with a malformed session id"
+            }
         }
-        $r = Invoke-StateAware -Request $req
-        $null = Assert-ErrorEnvelope $r 'malformed_id' "placement with a malformed session id"
     } | Out-Null
 } finally {
     foreach ($session in $explicitSessions) {

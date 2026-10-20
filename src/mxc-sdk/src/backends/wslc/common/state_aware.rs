@@ -30,6 +30,7 @@ use crate::mxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
     ProvisionSessionResult, StartResult, StatefulSandboxBackend, StopResult,
 };
+use crate::mxc_common::state_aware_operation::validate_wslc_session_id;
 use crate::mxc_common::validator::validate_state_aware_network_policy_support;
 
 use crate::wslc_common::container_steps::OutStream;
@@ -52,8 +53,6 @@ use crate::wslc_common::stream_buffer::bounded_stream_pair;
 
 /// Default image when a provision request omits `wslc.provision.image`.
 const DEFAULT_IMAGE: &str = "alpine:latest";
-
-const SESSION_ID_PREFIX: &str = "wslcsess";
 
 /// Per-stream ceiling between daemon frames and the synthesized native pipe.
 ///
@@ -171,6 +170,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         session_id: &str,
         _request: &ExecutionRequest,
     ) -> Result<(), MxcError> {
+        validate_wslc_session_id(session_id)?;
         let client = connect_daemon()?;
         client
             .deprovision_session(DeprovisionSessionConfig {
@@ -206,7 +206,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         config: Option<&WslcProvisionConfig>,
     ) -> Result<(), MxcError> {
         if let Some(session_id) = config.and_then(|config| config.session_id.as_deref()) {
-            validate_session_id(session_id)?;
+            validate_wslc_session_id(session_id)?;
         }
         validate_state_aware_network_policy_support(
             request,
@@ -235,7 +235,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         session_id: &str,
         request: &ExecutionRequest,
     ) -> Result<(), MxcError> {
-        validate_session_id(session_id)?;
+        validate_wslc_session_id(session_id)?;
         validate_state_aware_network_policy_support(
             request,
             crate::wslc_common::policy::network_policy_support(),
@@ -536,24 +536,6 @@ fn truncated_run_error(exit_code: i32) -> MxcError {
     .with_details(serde_json::json!({ "exitCode": exit_code }))
 }
 
-fn validate_session_id(session_id: &str) -> Result<(), MxcError> {
-    let malformed = || {
-        MxcError::malformed_id(format!(
-            "expected wslcsess:<32 lowercase hex>, got {session_id:?}"
-        ))
-    };
-    let (prefix, rest) = session_id.split_once(':').ok_or_else(malformed)?;
-    let is_lower_hex = rest.len() == 32
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    if prefix == SESSION_ID_PREFIX && is_lower_hex {
-        Ok(())
-    } else {
-        Err(malformed())
-    }
-}
-
 fn build_provision_session_config(
     config: Option<WslcProvisionSessionConfig>,
 ) -> DaemonProvisionSessionConfig {
@@ -657,7 +639,7 @@ fn build_provision_config(
     let image_tar_path = config.as_ref().and_then(|c| c.image_tar_path.clone());
     let session_id = config.and_then(|c| c.session_id);
     if let Some(session_id) = session_id.as_deref() {
-        validate_session_id(session_id)?;
+        validate_wslc_session_id(session_id)?;
     }
 
     // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -766,11 +748,12 @@ mod session_tests {
 
     #[test]
     fn validate_session_id_accepts_a_daemon_minted_id() {
-        assert!(validate_session_id(VALID_SESSION_ID).is_ok());
+        assert!(validate_wslc_session_id(VALID_SESSION_ID).is_ok());
     }
 
     #[test]
     fn validate_session_id_rejects_everything_else() {
+        let mut runner = WslcStateAwareRunner::new();
         for session_id in [
             "",
             "wslcsess",
@@ -783,8 +766,12 @@ mod session_tests {
             "wslcsess:0123456789ABCDEF0123456789ABCDEF",
             "wslcsess:0123456789abcdef0123456789abcdeg",
         ] {
-            let error = validate_session_id(session_id)
+            let error = validate_wslc_session_id(session_id)
                 .expect_err("malformed session IDs must not be accepted");
+            assert_eq!(error.code, MxcErrorCode::MalformedId);
+            let error = runner
+                .deprovision_session(session_id, &ExecutionRequest::default())
+                .expect_err("direct session release must reject a malformed ID before connecting");
             assert_eq!(error.code, MxcErrorCode::MalformedId);
         }
     }

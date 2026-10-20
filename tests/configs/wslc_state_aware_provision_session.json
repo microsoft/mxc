@@ -5,8 +5,8 @@
     "containment": "wslc",
     "wslc": {
         "provisionSession": {
-            "cpuCount": 2,
-            "memoryMb": 2048
+            "cpuCount": 1,
+            "memoryMb": 3072
         }
     }
 }

@@ -457,6 +457,37 @@ State-aware-only fields:
 | `phase` | `Phase` member | Yes | Discriminator. Absence means a one-shot request. |
 | `process` | `ProcessConfig` | Required for `exec`; absent otherwise. | Cross-backend execution fields. |
 
+#### Raw JSON entry points
+
+Rust's `mxc_sdk::__ffi::run_lifecycle_json` returns the response-envelope JSON
+as a string. The C function `mxc_run_state_aware_json` accepts NUL-terminated
+UTF-8 request JSON and writes its response to `MxcStateAwareResult`.
+Both accept the routing fields shown above and use the declared contract.
+
+| Phase | Successful response |
+|---|---|
+| `provision` | `result.sandboxId` and any backend metadata |
+| `start`, `stop`, `deprovision` | `{"result":{}}` |
+| `provision-session` | `result.sessionId`; WSLc contract `1.1.0-alpha` only |
+| `deprovision-session` | `{"result":{}}`; WSLc contract `1.1.0-alpha` only |
+
+Session operations are not exposed by typed SDK V1. Their sizing, placement,
+and cleanup rules are described in the
+[development policy reference](../../containment-policy/dev/policy.md#wslc-sessions).
+With `dry_run` enabled, either entry point validates without allocating
+resources or minting IDs and returns `{"result":{}}`. A non-dry-run `exec`
+uses Rust's `execute_lifecycle_json` or a C exec entry point instead.
+
+The separate `experimental` argument authorizes experimental backends; without
+it they fail as `backend_unavailable` before execution. Production backends
+ignore this argument. Rust failures return `Error` with the matching
+`ErrorCode`; C failures populate the status and error fields, leaving the
+response JSON absent.
+
+The C status is both returned and stored in `out->status`. A null `out` returns
+`MXC_STATUS_NULL_ARGUMENT` before dispatch. Release every populated result with
+`mxc_state_aware_result_free`, including failures.
+
 #### `wxc-exec` lifecycle transport
 
 "MXC request JSON" retains `phase`, `sandboxId`, and `sessionId`. Direct
@@ -470,8 +501,11 @@ wxc-exec.exe policy.json --operation start --container-id iso:abc
 wxc-exec.exe policy.json --operation exec --container-id iso:abc -- command arg
 wxc-exec.exe policy.json --operation stop --container-id iso:abc
 wxc-exec.exe policy.json --operation deprovision --container-id iso:abc
-wxc-exec.exe policy.json --operation deprovision-session --session-id wslcsess:abc
+wxc-exec.exe policy.json --operation deprovision-session --session-id wslcsess:0123456789abcdef0123456789abcdef
 ```
+
+Replace the illustrative session ID with `result.sessionId` from a prior
+`provision-session` response; a correctly formatted ID must also name a live session.
 
 Provision and session JSON still contains `containment`; sandbox-addressed operations route from the
 `--container-id` prefix. Supplying `phase`, `sandboxId`, or `sessionId` in CLI JSON is rejected rather

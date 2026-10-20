@@ -582,7 +582,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
     let phase = crate::mxc_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
     let request = deserialize_development_request(json, phase)?;
     let adapted = crate::mxc_common::config_contract_adapters::dev::adapt_request(request)
-        .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
+        .map_err(|error| ParseError::StateAware(error.into_state_aware()))?;
 
     match adapted {
         crate::mxc_common::config_contract_adapters::dev::AdaptedConfigRequest::OneShot(config) => {
@@ -594,9 +594,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
             input,
         ) => normalize_state_aware(input, logger, true)
             .map(MxcRequest::StateAware)
-            .map_err(|error| {
-                ParseError::StateAware(MxcError::malformed_request(error.to_string()))
-            }),
+            .map_err(|error| ParseError::StateAware(error.into_state_aware())),
     }
 }
 
@@ -4789,6 +4787,28 @@ mod tests {
             Some("wslcsess:0123456789abcdef0123456789abcdef")
         );
         assert!(released.sandbox_id().is_none());
+    }
+
+    #[test]
+    fn malformed_session_ids_keep_their_error_code_in_cli_requests() {
+        for session_id in [
+            "wslcsess:short",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "wslcsess:0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            let error = load_state_aware_request_from_json_with_options(
+                r#"{"version":"1.1.0-alpha","containment":"wslc"}"#,
+                &mut test_logger(),
+                Phase::DeprovisionSession,
+                Some(session_flag(session_id)),
+                &[],
+            )
+            .unwrap_err();
+            let ParseError::StateAware(error) = error else {
+                panic!("a session release must return a lifecycle error");
+            };
+            assert_eq!(error.code, MxcErrorCode::MalformedId);
+        }
     }
 
     #[test]

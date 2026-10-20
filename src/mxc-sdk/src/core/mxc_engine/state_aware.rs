@@ -462,7 +462,7 @@ fn normalize_sdk_state_aware(
 ) -> Result<ParsedStateAwareRequest, Error> {
     let mut parsed =
         crate::mxc_common::config_parser::normalize_sdk_state_aware_request(input, logger)
-            .map_err(|error| Error::from(MxcError::malformed_request(error.to_string())))?;
+            .map_err(|error| Error::from(error.into_state_aware()))?;
     parsed.set_experimental_enabled(experimental);
     Ok(parsed)
 }
@@ -1760,6 +1760,51 @@ mod tests {
                 assert_eq!(error.code, MxcErrorCode::MalformedId, "dry_run={dry_run}");
             }
         }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "wslc"))]
+    #[test]
+    fn malformed_session_ids_have_the_same_error_on_join_and_release() {
+        for session_id in [
+            "",
+            "wslcsess:short",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "wslcsess:0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            for request in [
+                serde_json::json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "provision",
+                    "containment": "wslc",
+                    "wslc": { "provision": { "sessionId": session_id } }
+                }),
+                serde_json::json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "deprovision-session",
+                    "containment": "wslc",
+                    "sessionId": session_id
+                }),
+            ] {
+                for dry_run in [false, true] {
+                    let error = run_state_aware_json(&request.to_string(), dry_run, false)
+                        .expect_err("a malformed session ID must be refused");
+                    assert_eq!(error.code, crate::ErrorCode::MalformedId);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_session_release_preserves_the_malformed_id_error() {
+        let error = SdkStateAwareInput::new(
+            ContractVersion::V1_1_0Alpha,
+            StateAwareOperation::DeprovisionSession {
+                session_id: "wslcsess:short".to_string(),
+            },
+        )
+        .unwrap_err()
+        .into_state_aware();
+        assert_eq!(error.code, MxcErrorCode::MalformedId);
     }
 
     #[test]

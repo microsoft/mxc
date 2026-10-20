@@ -13,6 +13,7 @@ use crate::mxc_common::models::{
     ContainmentBackend, IsolationSessionProvisionConfig, WslcProvisionConfig,
     WslcProvisionSessionConfig,
 };
+use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_request::Phase;
 
 /// Backend-specific provision input, before backend-owned validation/defaulting.
@@ -128,7 +129,9 @@ impl StateAwareOperation {
                     None => Ok(()),
                 }
             }
-            Self::DeprovisionSession { session_id } => validate_session_id(session_id),
+            Self::DeprovisionSession { session_id } => {
+                validate_wslc_session_id(session_id).map_err(Into::into)
+            }
 
             // Session sizing carries no cross-backend constraint; the WSLc
             // backend decides what it can honor.
@@ -145,7 +148,7 @@ impl StateAwareOperation {
 const SESSION_ID_TAG: &str = "wslcsess:";
 const SESSION_ID_HEX_DIGITS: usize = 32;
 
-fn validate_session_id(session_id: &str) -> Result<(), crate::mxc_common::error::WxcError> {
+pub(crate) fn validate_wslc_session_id(session_id: &str) -> Result<(), MxcError> {
     let well_formed = session_id
         .strip_prefix(SESSION_ID_TAG)
         .is_some_and(|token| {
@@ -157,7 +160,7 @@ fn validate_session_id(session_id: &str) -> Result<(), crate::mxc_common::error:
     if well_formed {
         Ok(())
     } else {
-        Err(crate::mxc_common::error::WxcError::ConfigParse(format!(
+        Err(MxcError::malformed_id(format!(
             "a session id must be `{SESSION_ID_TAG}` followed by {SESSION_ID_HEX_DIGITS} \
              lowercase hex digits"
         )))

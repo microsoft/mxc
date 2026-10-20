@@ -142,8 +142,9 @@ owns a session, so a session phase naming any other containment is refused with
 
 Both phases require contract `1.1.0-alpha`. No v1 SDK can reach them: the Rust,
 Node, and .NET v1 surfaces all emit published contract `1.0.0`, which declares
-no session fields, so "MXC request JSON" through the FFI or `wxc-exec` is the
-only way to reach them until a new stable contract publishes.
+no session fields. Use MXC request JSON through
+`mxc_sdk::__ffi::run_lifecycle_json`, the FFI, or `wxc-exec` until a new
+stable contract publishes.
 
 A `provision` that names no session joins the daemon's **implicit** session,
 which is booted on first use and shared by every request that names none. That
@@ -155,6 +156,8 @@ gets a random id like any other and it is never handed back, so one caller
 cannot name the session everyone else is sharing and release it from under them.
 Releasing the implicit session by id is refused for the same reason; it goes
 when nothing is using it, or when the daemon does.
+
+Malformed IDs return `malformed_id` for both session placement and release.
 
 > **A session ID is a bearer capability.** The daemon's pipe is owner-only, so
 > any same-user process holding one can place sandboxes in that session and
@@ -169,9 +172,10 @@ SDK failure mode, which is why the name is not fixed.
 
 ### A sandbox's policy identity does not cover its session's sizing
 
-`MXC.PolicyHash` is computed from the request **before** dispatch. A
-`provision-session` hashes the sizing it declares, which is correct. A sandbox
-joining an existing session declares none, so two otherwise identical
+When telemetry or diagnostic logging is active, `wxc-exec` computes
+`MXC.PolicyHash` from the request **before** dispatch. In-process lifecycle
+entry points do not emit this record. A `provision-session` hashes the sizing
+it declares. A sandbox joining an existing session declares none, so two otherwise identical
 `provision` requests hash identically whether they land in a two-CPU VM or an
 eight-CPU VM with GPU passthrough — and `gpu` is a capability grant.
 
@@ -761,8 +765,9 @@ configuration rather than routing. Exercise these fixtures **through the harness
   .NET v1 SDKs all use published stable contract `1.0.0`, which declares
   neither `wslc.provision.portMappings` nor any session field, and released
   schemas are immutable. "MXC request JSON" using contract `1.1.0-alpha` through the
-  FFI or `wxc-exec` is the only way to reach them today. Promoting `1.1.0-alpha`
-  to a stable release is what lets the three SDKs expose them together.
+  raw Rust entry point `mxc_sdk::__ffi::run_lifecycle_json`, FFI, or `wxc-exec`
+  reaches them today. Promoting `1.1.0-alpha` to a stable release is what lets
+  the three typed SDKs expose them together.
 
 - **A sandbox's policy identity does not cover its session's sizing.** See
   [the section above](#a-sandboxs-policy-identity-does-not-cover-its-sessions-sizing).
