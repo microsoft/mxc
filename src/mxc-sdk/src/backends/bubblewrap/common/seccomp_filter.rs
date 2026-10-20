@@ -4,7 +4,14 @@
 //! Builds Bubblewrap's always-on address-family seccomp filter.
 
 #[cfg(target_os = "linux")]
+use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::io::{Seek, SeekFrom, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd};
+
+#[cfg(target_os = "linux")]
+use nix::fcntl::{fcntl, FcntlArg};
 
 use crate::bwrap_common::bwrap_command::COMMAND_TAIL;
 
@@ -22,7 +29,9 @@ const ENOSYS: u32 = 38;
 const SECCOMP_DATA_NR_OFFSET: u32 = 0;
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 const SECCOMP_DATA_ARG0_LOW_OFFSET: u32 = 16;
-const SECCOMP_DATA_ARG0_HIGH_OFFSET: u32 = 20;
+
+#[cfg(target_os = "linux")]
+const FIRST_NON_STDIO_FD: i32 = 3;
 
 #[cfg(any(target_arch = "x86_64", test))]
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
@@ -113,7 +122,7 @@ enum NativeArchitecture {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn create_file() -> Result<std::fs::File, String> {
+pub(crate) fn create_file() -> Result<File, String> {
     let program = native_program()?;
     let mut bytes = Vec::with_capacity(program.len() * 8);
     for instruction in program {
@@ -126,7 +135,21 @@ pub(crate) fn create_file() -> Result<std::fs::File, String> {
         .map_err(|error| format!("Bubblewrap: failed to write seccomp filter: {error}"))?;
     file.seek(SeekFrom::Start(0))
         .map_err(|error| format!("Bubblewrap: failed to rewind seccomp filter: {error}"))?;
-    Ok(file)
+    above_stdio(file)
+}
+
+// The child's stdio is mapped onto descriptors 0-2 before `pre_exec` runs, so
+// a filter left on one of those numbers is replaced before bwrap reads it.
+#[cfg(target_os = "linux")]
+fn above_stdio(file: File) -> Result<File, String> {
+    let fd = fcntl(
+        file.as_raw_fd(),
+        FcntlArg::F_DUPFD_CLOEXEC(FIRST_NON_STDIO_FD),
+    )
+    .map_err(|error| format!("Bubblewrap: failed to move seccomp filter descriptor: {error}"))?;
+
+    // SAFETY: `fcntl` returned a new descriptor that nothing else owns.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 pub(crate) fn add_bwrap_args(args: &mut Vec<String>, fd: i32) -> Result<(), String> {
@@ -358,15 +381,9 @@ fn append_io_uring_denial(program: &mut Vec<Instruction>, checks: &[usize]) {
 
 fn append_family_filter(program: &mut Vec<Instruction>) -> usize {
     let family_check = program.len();
-    program.push(Instruction::statement(
-        BPF_LD_W_ABS,
-        SECCOMP_DATA_ARG0_HIGH_OFFSET,
-    ));
-    program.push(Instruction::jump(BPF_JMP_JEQ_K, 0));
-    program.push(Instruction::statement(BPF_RET_K, errno(EPERM)));
-    let high_word_check = program.len() - 2;
-    program[high_word_check].jump_if_true = 1;
 
+    // The kernel reads the family as a 32-bit int and ignores the upper half
+    // of the argument register.
     program.push(Instruction::statement(
         BPF_LD_W_ABS,
         SECCOMP_DATA_ARG0_LOW_OFFSET,
@@ -447,7 +464,6 @@ mod tests {
             SECCOMP_DATA_NR_OFFSET => data.number,
             SECCOMP_DATA_ARCH_OFFSET => data.architecture,
             SECCOMP_DATA_ARG0_LOW_OFFSET => data.args[0] as u32,
-            SECCOMP_DATA_ARG0_HIGH_OFFSET => (data.args[0] >> 32) as u32,
             _ => panic!("unsupported seccomp_data offset {offset}"),
         }
     }
@@ -689,8 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nonzero_family_upper_word() {
-        let family = (1_u64 << 32) | u64::from(AF_UNIX);
+    fn ignores_the_family_upper_word() {
         for (native, audit, socket) in [
             (NativeArchitecture::X86_64, AUDIT_ARCH_X86_64, X86_64_SOCKET),
             (
@@ -706,7 +721,62 @@ mod tests {
             ),
             (NativeArchitecture::Aarch64, AUDIT_ARCH_ARM, ARM_SOCKET),
         ] {
-            assert_eq!(result(native, audit, socket, family), errno(EPERM));
+            for family in [u64::from(AF_UNIX), u64::from(AF_INET6), AF_VSOCK, AF_PACKET] {
+                let expected = result(native, audit, socket, family);
+                for upper in [1_u64, 0xffff_ffff] {
+                    assert_eq!(
+                        result(native, audit, socket, (upper << 32) | family),
+                        expected,
+                        "upper word {upper:#x} changed the verdict for family {family} on arch {audit:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn moves_the_filter_descriptor_above_stdio() {
+        const NO_LOW_DESCRIPTOR: i32 = 2;
+
+        // SAFETY: The child makes only async-signal-safe calls before `_exit`,
+        // so it takes no lock another test thread held across the fork.
+        let child = unsafe { libc::fork() };
+        assert!(
+            child >= 0,
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if child == 0 {
+            // SAFETY: The child owns its copy of descriptor 0.
+            let code = unsafe {
+                libc::close(0);
+                let low = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+                if low == 0 {
+                    match above_stdio(File::from_raw_fd(low)) {
+                        Ok(moved) if moved.as_raw_fd() >= FIRST_NON_STDIO_FD => 0,
+                        _ => 1,
+                    }
+                } else {
+                    NO_LOW_DESCRIPTOR
+                }
+            };
+
+            // SAFETY: The forked child exits here without returning into the
+            // test harness.
+            unsafe { libc::_exit(code) };
+        }
+
+        let mut status = 0;
+
+        // SAFETY: `child` is this test's own forked process.
+        let waited = unsafe { libc::waitpid(child, &mut status, 0) };
+        assert_eq!(waited, child, "waitpid failed");
+        assert!(libc::WIFEXITED(status), "child did not exit: {status:#x}");
+        match libc::WEXITSTATUS(status) {
+            0 => {}
+            NO_LOW_DESCRIPTOR => panic!("the child could not place a file on descriptor 0"),
+            code => panic!("the filter stayed on a stdio descriptor (child exit {code})"),
         }
     }
 
