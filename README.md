@@ -118,6 +118,27 @@ wxc-exec.exe --debug config.json
 See [MXC diagnostics](docs/development/guides/diagnostics.md) for the complete
 developer reference.
 
+### Opt-in creation-policy corrections
+
+On native Windows ProcessContainer hosts, callers can authorize MXC to apply
+safe restrictions when IT policy refuses sandbox creation:
+
+```powershell
+wxc-exec.exe --mutate-policy config.json
+```
+
+The original file is not changed. MXC narrows a private effective request,
+creates the sandbox, launches the workload once, and prints mutation
+descriptions to stderr. Without the flag, policy refusals remain errors with
+the current diagnostic text. SDK creation options expose the same authorization
+and return descriptions in existing warnings: `mutate_policy` in the scoped
+Rust `v1_1` API revision, `mutatePolicy` in Node V1, and `MutatePolicy` in .NET V1.
+
+Mutation never falls back to AppContainer or another backend and is not
+available for audit, probe, dry-run, PTY or container lifecycle operations.
+Not every refusal has a safe automatic correction. See
+[supported changes and bounds](docs/development/guides/process-container-adding-os-features.md#opt-in-creation-policy-mutation).
+
 ### Audit mode
 
 > **Warning:** `--audit` turns off all sandbox security for the workload being

@@ -51,6 +51,31 @@ struct Cli {
     #[arg(long)]
     experimental: bool,
 
+    /// Authorize restrictive corrections after a native ProcessContainer creation refusal
+    #[arg(
+        long = "mutate-policy",
+        conflicts_with_all = [
+            "dry_run",
+            "operation",
+            "container_id",
+            "session_id",
+            "setup_hyperlight",
+            "force",
+            "setup_wslc",
+            "image",
+            "storage_path",
+            "wslc_daemon_slots",
+            "probe",
+            "force_reclaim",
+            "telemetry_consent"
+        ]
+    )]
+    #[cfg_attr(
+        target_os = "windows",
+        arg(conflicts_with_all = ["audit", "audit_verbose"])
+    )]
+    mutate_policy: bool,
+
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
     dry_run: bool,
@@ -1246,6 +1271,7 @@ fn main() {
 
     let mut request = request;
     request.experimental_enabled = cli.experimental;
+    request.policy_mutation_enabled = cli.mutate_policy;
     request.dry_run = cli.dry_run;
 
     // ── Telemetry init ──────────────────────────────────────────────
@@ -2535,6 +2561,34 @@ mod tests {
                     .err()
                     .unwrap();
 
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn mutation_cli_is_explicit_and_conflicts_with_noncreation_modes() {
+        assert!(!parse_cli(&["wxc-exec", "policy.json"]).mutate_policy);
+        assert!(parse_cli(&["wxc-exec", "policy.json", "--mutate-policy"]).mutate_policy);
+        for flags in [
+            vec!["--dry-run"],
+            vec!["--probe"],
+            vec!["--audit"],
+            vec!["--audit-verbose"],
+            vec!["--operation", "exec", "--container-id", "sandbox"],
+            vec![
+                "--operation",
+                "deprovision-session",
+                "--session-id",
+                "session",
+            ],
+            vec!["--setup-hyperlight"],
+            vec!["--setup-wslc", "--image", "alpine:latest"],
+            vec!["--force-reclaim"],
+            vec!["--telemetry-consent", "status"],
+        ] {
+            let mut args = vec!["wxc-exec", "--mutate-policy"];
+            args.extend(flags);
+            let error = Cli::try_parse_from(args).err().unwrap();
             assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
         }
     }

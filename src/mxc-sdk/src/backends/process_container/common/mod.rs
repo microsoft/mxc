@@ -25,6 +25,8 @@ mod native_capture;
 #[cfg(target_os = "windows")]
 mod network_policy_helpers;
 #[cfg(target_os = "windows")]
+mod policy_mutation;
+#[cfg(target_os = "windows")]
 pub mod probe;
 #[cfg(target_os = "windows")]
 pub mod process_mitigation;

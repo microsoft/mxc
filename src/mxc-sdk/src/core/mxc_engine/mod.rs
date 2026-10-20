@@ -83,6 +83,24 @@ pub(crate) enum OneShotExecution {
     Streaming(Box<dyn SandboxProcess>),
 }
 
+fn validate_creation_policy_mutation(request: &ExecutionRequest) -> Result<(), MxcError> {
+    if !request.policy_mutation_enabled {
+        return Ok(());
+    }
+    if request.dry_run {
+        return Err(MxcError::policy_validation(
+            "creation-policy mutation is not supported for dry runs",
+        ));
+    }
+    if !cfg!(target_os = "windows") || request.containment != ContainmentBackend::ProcessContainer {
+        return Err(MxcError::unsupported_containment(
+            "creation-policy mutation requires native Windows ProcessContainer creation; \
+             it does not permit backend fallback",
+        ));
+    }
+    Ok(())
+}
+
 /// Spawn a streaming [`SandboxProcess`] handle for a normalized
 /// [`ExecutionRequest`].
 ///
@@ -168,6 +186,17 @@ pub(crate) fn execute_one_shot_json(
     }
 
     spawn_execution_request_with_logger(&request, logger, false).map(OneShotExecution::Streaming)
+}
+
+/// Parse and spawn a container request with caller-only mutation authorization.
+pub fn spawn_one_shot_json_with_policy_mutation(
+    request_json: &str,
+    experimental: bool,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let mut request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+    request.policy_mutation_enabled = true;
+    spawn_execution_request_with_logger(&request, logger, false)
 }
 
 fn parse_one_shot_json(
@@ -916,6 +945,69 @@ impl SandboxProcess for ProcessWithWarnings {
 
     fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
         self.inner.stderr_closer()
+    }
+}
+
+#[cfg(test)]
+mod policy_mutation_tests {
+    use super::*;
+
+    #[test]
+    fn mutation_authorization_is_caller_only_and_not_part_of_request_serialization() {
+        let request = ExecutionRequest::default();
+        let strict = serde_json::to_value(&request).unwrap();
+        let mut opted_in = request.clone();
+        opted_in.policy_mutation_enabled = true;
+        assert_eq!(serde_json::to_value(&opted_in).unwrap(), strict);
+        assert_eq!(
+            crate::mxc_common::policy_identity::policy_hash(&request),
+            crate::mxc_common::policy_identity::policy_hash(&opted_in),
+        );
+        let mut logger = Logger::new(Mode::Buffer);
+        assert!(parse_one_shot_json(
+            r#"{"version":"1.0.0","process":{"commandLine":"echo hi"},"policyMutation":true}"#,
+            false,
+            &mut logger,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mutation_rejects_other_backends_dry_runs_and_pty_before_dispatch() {
+        let mut request = ExecutionRequest {
+            policy_mutation_enabled: true,
+            ..Default::default()
+        };
+        for containment in [
+            ContainmentBackend::Bubblewrap,
+            ContainmentBackend::Seatbelt,
+            ContainmentBackend::Wslc,
+            ContainmentBackend::IsolationSession,
+        ] {
+            request.containment = containment;
+            let error = validate_creation_policy_mutation(&request).unwrap_err();
+            assert!(error
+                .message
+                .contains("creation-policy mutation requires native Windows"));
+        }
+        request.containment = ContainmentBackend::ProcessContainer;
+        request.dry_run = true;
+        assert!(validate_creation_policy_mutation(&request)
+            .unwrap_err()
+            .message
+            .contains("dry runs"));
+        request.dry_run = false;
+        assert!(dispatch::spawn_pty_runner(
+            &request,
+            &mut Logger::new(Mode::Buffer),
+            PtySize::default(),
+        )
+        .err()
+        .unwrap()
+        .message
+        .contains("PTY"));
+        request.policy_mutation_enabled = false;
+        assert!(validate_creation_policy_mutation(&request).is_ok());
     }
 }
 

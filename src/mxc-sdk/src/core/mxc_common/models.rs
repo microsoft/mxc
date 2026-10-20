@@ -989,6 +989,9 @@ pub struct ExecutionRequest {
     pub microvm_memory_mib: Option<u32>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
+    /// Caller-only authorization to narrow creation policy after a native refusal.
+    #[serde(skip)]
+    pub policy_mutation_enabled: bool,
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,

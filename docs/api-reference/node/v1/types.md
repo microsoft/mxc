@@ -306,6 +306,10 @@ export interface ValidationResult {
 
 ## `@microsoft/mxc-sdk/v1::ExecutionResult`
 
+With `RunOptions.mutatePolicy` enabled, `run` adds plain-text descriptions
+of applied creation-policy restrictions to `warnings`, not stdout or stderr.
+Those descriptions are not a stable parsing contract.
+
 Captured output and terminal outcome of a completed workload.
 
 ```typescript
@@ -739,10 +743,13 @@ export interface RunInContainerOptions {
 ## `@microsoft/mxc-sdk/v1::RunOptions`
 
 Invocation controls for run.
+`mutatePolicy` defaults to `false` and authorizes restrictive native Windows
+creation-policy corrections for this call, not through request JSON.
 
 ```typescript
 export interface RunOptions {
   telemetry?: TelemetryConfig;
+  mutatePolicy?: boolean;
 }
 ```
 
@@ -808,10 +815,13 @@ export interface SpawnInContainerWithPtyOptions {
 ## `@microsoft/mxc-sdk/v1::SpawnOptions`
 
 Invocation controls for spawn.
+`mutatePolicy` defaults to `false`; correction descriptions use the returned
+process's `warnings`.
 
 ```typescript
 export interface SpawnOptions {
   telemetry?: TelemetryConfig;
+  mutatePolicy?: boolean;
 }
 ```
 

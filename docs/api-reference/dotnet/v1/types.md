@@ -367,6 +367,9 @@ public enum ErrorCode
 ## `Microsoft.Mxc.Sdk.V1.ExecutionResult`
 
 The result of running a container to completion via MxcContainer.Run(ContainerRequest).
+With `RunOptions.MutatePolicy` enabled, `Run[Async]` adds plain-text
+descriptions of applied creation-policy restrictions to `Warnings`, not stdout
+or stderr. The descriptions are not a stable parsing contract.
 
 ```csharp
 public sealed class ExecutionResult
@@ -1210,6 +1213,8 @@ public sealed class RunInContainerOptions
 ## `Microsoft.Mxc.Sdk.V1.RunOptions`
 
 Invocation controls for Run and RunAsync.
+`MutatePolicy` defaults to `false` and authorizes restrictive native Windows
+creation-policy corrections for this call, not through request JSON.
 
 ```csharp
 public sealed class RunOptions
@@ -1217,6 +1222,7 @@ public sealed class RunOptions
     public RunOptions();
 
     public TelemetryConfig? Telemetry { get; set; }
+    public bool MutatePolicy { get; set; }
 }
 ```
 
@@ -1282,6 +1288,8 @@ public sealed class SpawnInContainerWithPtyOptions
 ## `Microsoft.Mxc.Sdk.V1.SpawnOptions`
 
 Invocation controls for Spawn and SpawnAsync.
+`MutatePolicy` defaults to `false`; correction descriptions use the returned
+process's `Warnings`.
 
 ```csharp
 public sealed class SpawnOptions
@@ -1289,6 +1297,7 @@ public sealed class SpawnOptions
     public SpawnOptions();
 
     public TelemetryConfig? Telemetry { get; set; }
+    public bool MutatePolicy { get; set; }
 }
 ```
 

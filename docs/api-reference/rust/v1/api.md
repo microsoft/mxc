@@ -32,6 +32,11 @@ Read the terminal output concurrently rather than only after `wait`. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller
 that waits first without reading can block indefinitely.
 
+Published V1 creation operations stay strict. For caller-authorized restrictive
+creation-policy corrections, use the scoped [V1.1 creation API revision](../v1_1/README.md)
+and its `mutate_policy` option. It retains V1 request/result types and the same
+SDK-owned request contract.
+
 ## Discovery and validation
 
 | Operation | Use it to |
@@ -214,7 +219,6 @@ Run a [ContainerRequest] to completion and capture its output.
 ```rust
 pub fn run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionResult, Error>;
 ```
-
 
 ## `mxc_sdk::v1::container::run_in_container`
 

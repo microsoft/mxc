@@ -115,8 +115,9 @@ export interface StreamingNativeFacade extends LifecycleNativeFacade {
   ): void;
 }
 
-function bindStreamingNativeFacade(
+export function bindStreamingNativeFacade(
   handle: NativeLibraryHandle,
+  mutatePolicy = false,
 ): StreamingNativeFacade {
   const sandboxPointer = koffi.pointer(AbiSandbox);
 
@@ -142,7 +143,7 @@ function bindStreamingNativeFacade(
     outHandle: Pointer[],
     error: AbiErrorDetail,
   ) => number>>(handle, {
-    symbol: 'mxc_spawn_json',
+    symbol: mutatePolicy ? 'mxc_spawn_with_policy_mutation_json' : 'mxc_spawn_json',
     result: 'int32_t',
     parameters: [
       'const char *',
@@ -158,7 +159,7 @@ function bindStreamingNativeFacade(
     outHandle: Pointer[],
     error: AbiErrorDetail,
   ) => number>>(handle, {
-    symbol: 'mxc_spawn_with_stdin_json',
+    symbol: mutatePolicy ? 'mxc_spawn_with_policy_mutation_json' : 'mxc_spawn_with_stdin_json',
     result: 'int32_t',
     parameters: [
       'const char *',
@@ -323,6 +324,7 @@ function bindStreamingNativeFacade(
 }
 
 let sharedNative: StreamingNativeFacade | undefined;
+let sharedMutationNative: StreamingNativeFacade | undefined;
 let stateAwareSandboxProcessFactory:
   | ((
       requestJson: string,
@@ -339,11 +341,29 @@ let oneShotAsyncProcessFactory:
       request: OneShotRequest,
       experimental: boolean,
       stdin: boolean,
+      mutatePolicy: boolean,
     ) => Promise<MxcProcess>)
   | undefined;
 
-export function getStreamingNative(): StreamingNativeFacade {
-  return sharedNative ??= bindStreamingNativeFacade(loadMxcFfi().handle);
+export function getStreamingNative(mutatePolicy = false): StreamingNativeFacade {
+  const cached = mutatePolicy ? sharedMutationNative : sharedNative;
+  if (cached !== undefined) return cached;
+  const library = loadMxcFfi();
+  let native: StreamingNativeFacade;
+  try {
+    native = bindStreamingNativeFacade(library.handle, mutatePolicy);
+  } catch (error) {
+    library.handle.unload();
+    if (!mutatePolicy) throw error;
+    throw new MxcError(
+      'backend_unavailable',
+      `policy mutation requires native export 'mxc_spawn_with_policy_mutation_json'; ` +
+        `update mxc_ffi: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (mutatePolicy) sharedMutationNative = native;
+  else sharedNative = native;
+  return native;
 }
 
 function throwIfFailed(status: number, message: string): void {
@@ -621,11 +641,12 @@ function spawnDriver(
   request: OneShotRequest,
   experimental: boolean,
   stdin: boolean,
+  mutatePolicy: boolean,
 ): Promise<NativeLifecycleDriver> {
   ensureSupportedNodeVersion();
   return createStreamingDriver(
     request,
-    getStreamingNative(),
+    getStreamingNative(mutatePolicy),
     nodeStreamFactory,
     experimental,
     stdin,
@@ -636,11 +657,12 @@ export async function spawnBindingSandboxProcess(
   request: OneShotRequest,
   experimental = false,
   stdin = false,
+  mutatePolicy = false,
 ): Promise<MxcProcess> {
   if (oneShotAsyncProcessFactory !== undefined) {
-    return oneShotAsyncProcessFactory(request, experimental, stdin);
+    return oneShotAsyncProcessFactory(request, experimental, stdin, mutatePolicy);
   }
-  const driver = await spawnDriver(request, experimental, stdin);
+  const driver = await spawnDriver(request, experimental, stdin, mutatePolicy);
   return createSandboxProcess(driver, request.process.timeout);
 }
 
@@ -700,6 +722,7 @@ export function _setBindingSandboxProcessFactories(
     request: OneShotRequest,
     experimental: boolean,
     stdin: boolean,
+    mutatePolicy: boolean,
   ) => Promise<MxcProcess>,
 ): void {
   oneShotSyncProcessFactory = syncFactory;

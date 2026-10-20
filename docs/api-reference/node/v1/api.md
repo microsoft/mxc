@@ -38,6 +38,24 @@ Read the terminal output concurrently rather than only after waiting. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller
 that waits first without reading can block indefinitely.
 
+For explicit restrictive creation-policy correction on native Windows
+ProcessContainer, set `mutatePolicy: true` in `RunOptions` or `SpawnOptions`
+when calling `run` or `spawn`. Omitted or `false` stays strict. Results retain
+their ordinary types, with descriptions in existing warnings. Opted-in creation
+never switches backend/tier, edits the caller's object or file, or replays a
+workload. Unknown or unsafe corrections remain errors. PTY and container
+lifecycle options have no mutation control. See
+[supported corrections and limits](../../../development/guides/process-container-adding-os-features.md#opt-in-creation-policy-mutation).
+
+Opted-in creation revalidates remembered narrowing edits against the current
+request for the same creator identity. Unrelated grants and proxy endpoints
+remain current and do not invalidate an applicable edit. Every creation is
+checked again. Strict creation does not apply cached restrictions. A cache
+hit emits no mutation warning unless Windows requires another correction.
+New corrections use warning text beginning
+`Sandbox configuration updated due to IT policy`; successful negotiation
+updates the cache. Warnings are diagnostic text, not a stable parsing contract.
+
 ## Discovery and validation
 
 | Operation | Use it to |
@@ -174,11 +192,14 @@ export async function requestTelemetryConsent(presenter: TelemetryConsentPresent
 ## `@microsoft/mxc-sdk/v1::run`
 
 Run a container request asynchronously and capture its output.
+With `options.mutatePolicy` enabled, `ExecutionResult.warnings` also describes
+restrictive creation-policy corrections; stdout and stderr remain workload
+output. An older native library without mutation support rejects opted-in
+calls rather than silently using strict creation.
 
 ```typescript
 export async function run(request: ContainerRequest, options: RunOptions = {}): Promise<ExecutionResult>;
 ```
-
 
 ## `@microsoft/mxc-sdk/v1::runInContainer`
 
@@ -195,6 +216,9 @@ export async function runInContainer<C extends PipedExecuteBackend>(containerId:
 
 Create a container request and asynchronously return its live process. A WSLC
 command reads end-of-file on stdin.
+With `options.mutatePolicy` enabled, read restrictive correction descriptions
+through `MxcProcess.warnings`. Unsupported backends or unsafe corrections
+remain errors, and the workload is launched once.
 
 ```typescript
 export async function spawn(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;
@@ -204,6 +228,8 @@ export async function spawn(request: ContainerRequest, options: SpawnOptions = {
 ## `@microsoft/mxc-sdk/v1::spawnWithStdin`
 
 `spawn` with a writable `standardInput` whose end gives the command end-of-file.
+`options.mutatePolicy` has the same restrictive Windows creation behavior as
+`spawn`.
 
 ```typescript
 export async function spawnWithStdin(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;

@@ -8,6 +8,12 @@ public sealed class RunOptions
 {
     /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
     public TelemetryConfig? Telemetry { get; set; }
+
+    /// <summary>
+    /// Authorize restrictive native Windows creation-policy corrections.
+    /// Defaults to false; descriptions use <see cref="ExecutionResult.Warnings"/>.
+    /// </summary>
+    public bool MutatePolicy { get; set; }
 }
 
 /// <summary>Invocation controls for Spawn and SpawnAsync.</summary>
@@ -15,6 +21,12 @@ public sealed class SpawnOptions
 {
     /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
     public TelemetryConfig? Telemetry { get; set; }
+
+    /// <summary>
+    /// Authorize restrictive native Windows creation-policy corrections.
+    /// Defaults to false; descriptions use <see cref="MxcProcess.Warnings"/>.
+    /// </summary>
+    public bool MutatePolicy { get; set; }
 }
 
 /// <summary>Invocation controls for spawning a caller-controlled terminal.</summary>
