@@ -50,7 +50,7 @@ use windows_core::{HRESULT, PCSTR, PCWSTR};
 
 use crate::learning_mode_windows::LearningModeError;
 use crate::process_container_common::secenv_policy::{
-    RawPolicyDetail, RawPolicyResult, MAX_DETAILS, MAX_RESOURCE_CHARS,
+    MutationHint, RawPolicyDetail, RawPolicyResult, MAX_DETAILS, MAX_RESOURCE_CHARS,
 };
 
 /// System DLL that hosts the flat process security-environment exports.
@@ -122,6 +122,7 @@ type PfnQueryProcessSecurityEnvironmentSupport =
 pub(crate) struct CreationError {
     cause: LearningModeError,
     diagnostic: Option<String>,
+    mutation_hints: Option<Vec<MutationHint>>,
 }
 
 impl From<LearningModeError> for CreationError {
@@ -129,11 +130,28 @@ impl From<LearningModeError> for CreationError {
         Self {
             cause,
             diagnostic: None,
+            mutation_hints: None,
         }
     }
 }
 
 impl CreationError {
+    #[cfg(test)]
+    pub(crate) fn test_policy_refusal(hints: Vec<MutationHint>) -> Self {
+        Self {
+            cause: LearningModeError::HResultCall {
+                function: "CreateProcessSecurityEnvironment",
+                code: 0x800704ecu32 as i32,
+            },
+            diagnostic: None,
+            mutation_hints: Some(hints),
+        }
+    }
+
+    pub(crate) fn mutation_hints(&self) -> Option<&[MutationHint]> {
+        self.mutation_hints.as_deref()
+    }
+
     pub(crate) fn is_api_unavailable(&self) -> bool {
         self.cause.is_api_unavailable()
     }
@@ -351,6 +369,11 @@ impl SecurityEnvironmentStartupInfo {
     #[must_use]
     pub fn startup_info(&self) -> &STARTUPINFOEXW {
         &self.startup_info
+    }
+
+    #[cfg(test)]
+    pub(crate) fn environment_for_test(&self) -> HANDLE {
+        *self.environment_value
     }
 }
 
@@ -694,11 +717,10 @@ impl SecurityEnvironmentApi {
                 if let Some(get_result) = get_last_policy_result {
                     // The snapshot belongs to this native thread. Retrieve it before
                     // logging, callbacks, another CPSE call, or environment cleanup.
-                    error.diagnostic = Some(policy_failure_diagnostic(
-                        get_result,
-                        policy,
-                        capture_network_decisions,
-                    ));
+                    let (diagnostic, hints) =
+                        policy_failure_diagnostic(get_result, policy, capture_network_decisions);
+                    error.diagnostic = Some(diagnostic);
+                    error.mutation_hints = hints;
                 }
             }
             return Err(error);
@@ -716,7 +738,7 @@ fn policy_failure_diagnostic(
     get_result: PfnGetLastProcessSecurityEnvironmentPolicyResult,
     policy: Option<&ContainerPolicy>,
     capture_network_decisions: bool,
-) -> String {
+) -> (String, Option<Vec<MutationHint>>) {
     let mut details = vec![RawPolicyDetail::default(); MAX_DETAILS];
     let mut storage = vec![0u16; MAX_RESOURCE_CHARS];
     let mut result = RawPolicyResult::new(&mut details, &mut storage);
@@ -735,9 +757,15 @@ fn policy_failure_diagnostic(
         } else {
             ""
         };
-        return format!("Creation-policy diagnostics unavailable: {reason}{error}.");
+        return (
+            format!("Creation-policy diagnostics unavailable: {reason}{error}."),
+            None,
+        );
     }
-    result.diagnostic(&details, &storage, policy, capture_network_decisions)
+    (
+        result.diagnostic(&details, &storage, policy, capture_network_decisions),
+        result.mutation_hints(&details, &storage),
+    )
 }
 
 /// Whether the process security-environment API supports `capability`.

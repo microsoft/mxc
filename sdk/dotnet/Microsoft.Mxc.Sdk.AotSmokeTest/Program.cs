@@ -39,15 +39,24 @@ CheckRoundTrip(new TelemetryConfig { Enabled = false }, x => x.Enabled == false,
 foreach (var enabled in new bool?[] { null, true, false })
 {
     var telemetry = enabled.HasValue ? new TelemetryConfig { Enabled = enabled.Value } : null;
-    CheckRoundTrip(new RunOptions { Telemetry = telemetry },
-        x => x.Telemetry?.Enabled == enabled, "run options");
-    CheckRoundTrip(new SpawnOptions { Telemetry = telemetry },
-        x => x.Telemetry?.Enabled == enabled, "spawn options");
+    foreach (var mutatePolicy in new[] { false, true })
+    {
+        CheckRoundTrip(new RunOptions { Telemetry = telemetry, MutatePolicy = mutatePolicy },
+            x => x.Telemetry?.Enabled == enabled && x.MutatePolicy == mutatePolicy,
+            "run options and mutation authorization");
+        CheckRoundTrip(new SpawnOptions { Telemetry = telemetry, MutatePolicy = mutatePolicy },
+            x => x.Telemetry?.Enabled == enabled && x.MutatePolicy == mutatePolicy,
+            "spawn options and mutation authorization");
+    }
     CheckRoundTrip(
         new SpawnWithPtyOptions { Size = initialPtySize, Telemetry = telemetry },
         x => x.Size == initialPtySize && x.Telemetry?.Enabled == enabled,
         "PTY options, telemetry, and initial dimensions");
 }
+Check(MxcJson.Deserialize<RunOptions>("{}") is { MutatePolicy: false },
+    "omitted run mutation authorization stays strict");
+Check(MxcJson.Deserialize<SpawnOptions>("{}") is { MutatePolicy: false },
+    "omitted spawn mutation authorization stays strict");
 CheckRoundTrip(new ProvisionOptions(), x => x.Telemetry is null, "provision options");
 CheckRoundTrip(new StartOptions(), x => x.Telemetry is null, "start options");
 CheckRoundTrip(new StopOptions(), x => x.Telemetry is null, "stop options");

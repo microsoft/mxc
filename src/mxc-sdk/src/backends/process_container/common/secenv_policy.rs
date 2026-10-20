@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Bounded thread-local policy-result decoding for ordinary creation-error messages.
+//! Bounded thread-local policy-result decoding for creation errors and private repairs.
 
 use std::fmt::Write;
 
@@ -18,6 +18,20 @@ const ACTIONABLE: u32 = 0x1;
 const RESOURCE_COMPLETE: u32 = 0x2;
 const RESOURCE_UNAVAILABLE: u32 = 0x4;
 const KNOWN_FLAGS: u32 = 0x7;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum MutationHint {
+    RemoveCapability(String),
+    RestrictPath {
+        path: String,
+        requested: u64,
+        maximum: u64,
+    },
+    ReducePathCount {
+        requested: u64,
+        maximum: u64,
+    },
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -95,6 +109,68 @@ impl RawPolicyResult {
             return Err("native result has out-of-range resource counts");
         }
         Ok(())
+    }
+
+    pub(crate) fn mutation_hints(
+        &self,
+        details: &[RawPolicyDetail],
+        storage: &[u16],
+    ) -> Option<Vec<MutationHint>> {
+        self.validate_details(details).ok()?;
+        self.validate_pool(storage).ok()?;
+        if self.outcome != 1 || self.details_count == 0 {
+            return None;
+        }
+        let storage = &storage[..self.resource_chars_written as usize];
+        details[..self.details_count as usize]
+            .iter()
+            .map(|detail| {
+                if detail.flags & ACTIONABLE == 0 || detail.flags & !KNOWN_FLAGS != 0 {
+                    return None;
+                }
+                match (
+                    detail.failure_class,
+                    detail.failure_reason,
+                    detail.required_action,
+                    detail.resource_kind,
+                    detail.value_kind,
+                ) {
+                    (1..=3, 1, 1, 2, 0)
+                        if detail.flags == ACTIONABLE | RESOURCE_COMPLETE
+                            && detail.requested_value == 0
+                            && detail.required_value == 0 =>
+                    {
+                        Some(MutationHint::RemoveCapability(
+                            detail.resource_text(storage).ok()??,
+                        ))
+                    }
+                    (2, 2 | 3, 2, 1, 1)
+                        if detail.flags == ACTIONABLE | RESOURCE_COMPLETE
+                            && detail.requested_value <= 2
+                            && detail.required_value < detail.requested_value
+                            && (detail.failure_reason != 3 || detail.required_value == 0) =>
+                    {
+                        Some(MutationHint::RestrictPath {
+                            path: detail.resource_text(storage).ok()??,
+                            requested: detail.requested_value,
+                            maximum: detail.required_value,
+                        })
+                    }
+                    (2, 4, 3, 0, 2)
+                        if detail.flags == ACTIONABLE
+                            && detail.requested_value > detail.required_value
+                            && detail.resource_offset_chars == 0
+                            && detail.resource_chars_written == 0 =>
+                    {
+                        Some(MutationHint::ReducePathCount {
+                            requested: detail.requested_value,
+                            maximum: detail.required_value,
+                        })
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     pub fn diagnostic(
@@ -310,6 +386,92 @@ mod tests {
             required_value: 1,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn mutation_hints_are_owned_and_require_an_entire_recognized_blocked_batch() {
+        let mut storage: Vec<u16> = "C:\\work\0".encode_utf16().collect();
+        let mut details = [
+            RawPolicyDetail {
+                resource_chars_written: storage.len() as u32,
+                ..detail()
+            },
+            RawPolicyDetail::default(),
+        ];
+        let mut result = RawPolicyResult::new(&mut details, &mut storage);
+        result.outcome = 1;
+        result.details_count = 1;
+        result.resource_chars_written = storage.len() as u32;
+        result.resource_chars_required = storage.len() as u32;
+        let hints = result.mutation_hints(&details, &storage).unwrap();
+        assert_eq!(
+            hints,
+            [MutationHint::RestrictPath {
+                path: r"C:\work".into(),
+                requested: 2,
+                maximum: 1,
+            }]
+        );
+        for outcome in [0, 2, 99] {
+            result.outcome = outcome;
+            assert!(result.mutation_hints(&details, &storage).is_none());
+        }
+        result.outcome = 1;
+        result.details_count = 2;
+        assert!(result.mutation_hints(&details, &storage).is_none());
+        result.details_count = 1;
+        for flags in [0, ACTIONABLE, RESOURCE_COMPLETE, 7, 0x83] {
+            details[0].flags = flags;
+            assert!(
+                result.mutation_hints(&details, &storage).is_none(),
+                "{flags}"
+            );
+        }
+        details[0].flags = ACTIONABLE | RESOURCE_COMPLETE;
+        result.resource_chars_required += 1;
+        assert!(result.mutation_hints(&details, &storage).is_none());
+        result.resource_chars_required -= 1;
+        storage[0] = 0xd800;
+        assert!(result.mutation_hints(&details, &storage).is_none());
+        assert_eq!(
+            hints,
+            [MutationHint::RestrictPath {
+                path: r"C:\work".into(),
+                requested: 2,
+                maximum: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn mutation_path_count_uses_the_resource_free_current_discriminators() {
+        let mut details = [RawPolicyDetail {
+            failure_class: 2,
+            failure_reason: 4,
+            required_action: 3,
+            resource_kind: 0,
+            value_kind: 2,
+            flags: ACTIONABLE,
+            requested_value: 9,
+            required_value: 7,
+            ..Default::default()
+        }];
+        let mut storage = [];
+        let mut result = RawPolicyResult::new(&mut details, &mut storage);
+        result.outcome = 1;
+        result.details_count = 1;
+        assert_eq!(
+            result.mutation_hints(&details, &storage),
+            Some(vec![MutationHint::ReducePathCount {
+                requested: 9,
+                maximum: 7
+            }]),
+        );
+        details[0].flags |= RESOURCE_COMPLETE;
+        assert!(result.mutation_hints(&details, &storage).is_none());
+        details[0].flags = ACTIONABLE;
+        details[0].required_action = 8;
+        assert!(result.mutation_hints(&details, &storage).is_none());
     }
 
     #[test]

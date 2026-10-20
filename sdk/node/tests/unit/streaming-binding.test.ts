@@ -10,6 +10,7 @@ import {
   createStateAwareStreamingDriver,
   createStateAwareStreamingDriverAsync,
   createStreamingDriver,
+  bindStreamingNativeFacade,
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
 import {
@@ -253,6 +254,28 @@ class FakeStreams implements NativeStreamFactory {
 }
 
 describe('native streaming binding ownership', () => {
+  it('binds the new creation export only for opted-in calls without a strict fallback', () => {
+    const bindings: string[] = [];
+    const handle = {
+      func: (symbol: string) => {
+        bindings.push(symbol);
+        if (symbol === 'mxc_spawn_with_policy_mutation_json') {
+          throw new Error(`Cannot find function '${symbol}'`);
+        }
+        return () => 0;
+      },
+    };
+    assert.strictEqual(typeof bindStreamingNativeFacade(handle as never).spawn, 'function');
+    assert.ok(bindings.includes('mxc_spawn_json'));
+    assert.ok(!bindings.includes('mxc_spawn_with_policy_mutation_json'));
+    bindings.length = 0;
+    assert.throws(
+      () => bindStreamingNativeFacade(handle as never, true),
+      /mxc_spawn_with_policy_mutation_json/,
+    );
+    assert.ok(!bindings.includes('mxc_spawn_json'));
+  });
+
   it('awaits native state-aware spawn without using synchronous dispatch', async () => {
     const native = new FakeNative();
     native.deferSpawn = true;

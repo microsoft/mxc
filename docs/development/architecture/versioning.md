@@ -105,6 +105,16 @@ contract target (currently `1.0.0`) and callers do not supply a schema version.
 A future breaking schema line adds a side-by-side V2 namespace rather than
 replacing V1.
 
+An SDK can also expose a scoped API revision within an existing contract-major
+line. Rust's `mxc_sdk::v1_1` revises only creation options while preserving the
+published `v1` option structs and operations. It uses the same V1 request types
+and the same `sdkMajorTargets["1"]` contract, not a new configuration version.
+The scoped API revision does not bump SDK package versions. Its new option
+structs are non-exhaustive so that future invocation fields do not require
+another exhaustive-struct replacement. Node and .NET add the corresponding
+optional creation control to their V1 options without changing their published
+operation signatures.
+
 Version-independent APIs stay at the package root: errors and error codes,
 running-sandbox handles and output/wait types, platform/backend discovery,
 telemetry consent, schema-version constants, raw exact-JSON APIs that take

@@ -36,8 +36,9 @@ SandboxPolicy
 ```
 
 The PSEC FlatBuffer is the contract between MXC and the OS process security
-environment. New features must flow from the versioned config contract into the
-runtime model and then into that FlatBuffer.
+environment. New policy fields must flow from the versioned config contract into
+the runtime model and then into that FlatBuffer. Invocation-only authorization,
+such as creation-policy mutation, is supplied by the caller outside request JSON.
 
 ## Policy-denied creation diagnostics
 
@@ -46,7 +47,8 @@ If security-environment creation returns `ERROR_ACCESS_DISABLED_BY_POLICY`
 policy blocked the requested sandbox and recommends reviewing its requested
 permissions or contacting the system administrator. This guidance is automatic
 for ordinary creation and creation used by denial capture. It does not require
-experimental authorization, alter the request, or retry creation.
+experimental authorization. Default creation neither changes the effective
+request nor retries creation; explicit mutation APIs are described below.
 
 The native operation/status and existing failure category are preserved.
 Ordinary access-denied errors (`0x80070005`) and failures from capture-trace
@@ -55,14 +57,14 @@ process-launch policy guidance remains applicable if the later launch fails.
 
 ### Detailed policy errors
 
-On a selected BaseContainer path, MXC calls
+On a selected BaseContainer path, default creation calls
 `CreateProcessSecurityEnvironment` (CPSE) once. Only if it returns
 `HRESULT 0x800704EC`, MXC calls the optional
 `GetLastProcessSecurityEnvironmentPolicyResult` export from the same System32
 `processmodel.dll`. Retrieval happens synchronously on the failing native thread,
 before cleanup, logging, callbacks or another creation attempt can replace that
 thread's snapshot. No new configuration field or experimental authorization is
-needed; tier selection, request validation and preparation order are unchanged.
+needed; default tier selection, request validation and preparation order are unchanged.
 
 A policy refusal can include a bounded batch of constraints in the existing
 error message. A recognized outcome starts with
@@ -131,8 +133,8 @@ Never use a displayed resource marked truncated as a configuration path.
 The suggested revision is not a replacement policy or a promise that the next
 call will succeed.
 
-MXC never applies these actions, changes the submitted policy, or retries a
-policy refusal. A caller may feed the message to an LLM or present it to a user,
+Default creation never applies these actions or retries a policy refusal.
+A caller may feed the message to an LLM or present it to a user,
 then deliberately submit another acceptable request. Another request can expose
 further conflicts. A path is a diagnostic witness, not a pinned filesystem
 object or a complete administrative ceiling. Unknown or incomplete details are
@@ -159,7 +161,157 @@ blindly retry later launch/wait failures. Resource values can be sensitive;
 forward them only to an appropriate recipient. Mixed CLI guest output is not
 an authenticated source for automated decisions.
 
-#### Validation scope
+### Opt-in creation-policy mutation
+
+Callers can explicitly authorize MXC to apply restrictive corrections before
+launching a workload. Creation stays strict unless its invocation opts in.
+Authorization is per invocation, never read from request JSON or granted by an
+administrative policy, and does not imply experimental-backend authorization.
+
+| Caller | Opt-in creation operation | Mutation text |
+|---|---|---|
+| Rust V1.1 revision | `v1_1::run` / `spawn` with `RunOptions.mutate_policy` / `SpawnOptions.mutate_policy` | `ExecutionResult.warnings`, `MxcProcess::warnings()` |
+| Node V1 | `run` / `spawn` with `options.mutatePolicy` | `ExecutionResult.warnings`, `MxcProcess.warnings` |
+| .NET V1 | `MxcContainer.Run[Async]` / `Spawn[Async]` with `options.MutatePolicy` | `ExecutionResult.Warnings`, `MxcProcess.Warnings` |
+| Windows CLI | `wxc-exec --mutate-policy config.json` | stderr warnings |
+| Internal C adapter | `mxc_run_with_policy_mutation_json`, `mxc_spawn_with_policy_mutation_json` | Existing run-result warnings / process warning getter |
+
+All mutation options default to `false`. Rust's scoped `v1_1` revision preserves
+published V1 option literals and reuses V1 request/result types and the `1.0.0`
+request contract. It does not bump SDK package versions or introduce a new
+configuration schema. Node and .NET retain their V1 entry points and add the
+control to creation options. .NET cancellation behavior is unchanged.
+
+The CLI keeps `--mutate-policy` separate from `config.json`: the file states the
+requested permissions, while the caller separately authorizes MXC to revise
+them for this invocation. SDK operation options express the same distinction.
+
+The dedicated C exports retain existing argument and result layouts;
+`experimental` remains only experimental-backend authorization. Older native
+libraries without those exports reject opted-in calls, not strict calls; there
+is no silent strict fallback. No structured creation-change API is exposed.
+
+Only a serviceable native Windows ProcessContainer/BaseContainer path supports
+mutation. Missing backend support or an unsupported request is not repaired by
+switching tiers or weakening validation. PTY and container lifecycle operations
+have no mutation option. The CLI rejects combining `--mutate-policy` with audit,
+probe, dry-run, lifecycle or setup/management modes.
+
+After a refusal, the same synchronous getter supplies ordinary diagnostic text
+and private owned hints. A repair batch requires `blocked` outcome 1, valid
+header/storage/counts, and only understood, actionable details with complete
+resources where required. Evaluation failure, unknown codes/flags, malformed or
+incomplete resources, contradictory constraints, or an unmatched request source
+cannot authorize a guessed correction. MXC never parses diagnostic prose to
+decide a repair.
+
+Supported corrections are deliberately narrower than the advisory guidance:
+
+| Constraint | Automatic restrictive change |
+|---|---|
+| Forbidden capability | Remove matching effective entries and all understood enabling network/capture settings. Deny egress and remove allow rules for `internetClient`; omit network-decision capture when it still needs that capability. Deny private ingress or host loopback as appropriate. When a proxy must be disabled, deny direct egress, private ingress and host loopback before leaving proxy mode; retain deny rules and omit capture if it would introduce direct-egress capability. |
+| Forbidden permissive learning | Change capture from `allow` to `block`, or disable the corresponding learning behavior. If logging itself is forbidden, omit capture/logging. |
+| Read-only ceiling | Lower only an existing exact writable path spelling to read-only. Do not introduce a new grant from a native witness or downgrade an unrelated ancestor. |
+| No-access ceiling | Add a deny exception and remove only coincident grant entries, preserving existing restrictive exceptions and checking that effective access never increases. Further conflicts may appear on reevaluation. |
+| Path-count ceiling | Remove exact duplicate entries within RW, RO and deny lists. Never discard distinct grants/deny exceptions or combine them into broader grants to meet the limit. Enumeration-only paths are not counted. |
+
+Filesystem repairs require absolute literal DOS/UNC names and successful,
+unaliased canonical resolution of every relevant path, including absent tails.
+Ambiguous/device/wildcard paths, unresolved aliases and writable volume/share
+roots are rejected. Enumeration-only paths are preserved verbatim and do not
+gate filesystem repairs: they are neither data-access comparison points nor
+entries in the native path-count budget. Normal backend validation still
+checks that the requested enumeration policy can be enforced. Access is checked
+at old/new grant and deny boundaries so removing an exception cannot reopen
+access. These checks do not pin filesystem objects or disclose the complete ceiling.
+
+Proxy and direct networking use different PSEC policy forms, so capability-set
+inclusion alone is not a monotonicity proof. Opted-in normalized requests must
+satisfy the same proxy/posture compatibility rules as parsed creation requests
+before CPSE is called. Removing a proxy never activates previously ineffective
+direct-network allowances. Selected-tier checks also apply to explicitly forced
+test tiers; forcing AppContainer does not override mutation's native-only rule.
+
+MXC applies a whole batch atomically to a private request clone and revalidates
+it for the selected native tier. It makes at most eight CPSE attempts including
+the first, stops on repeated specifications/refusals or no supported progress,
+and bounds mutation notes to 1 MiB. Only creation is retried, before any workload
+launch. Dependent capture paths, environment and stdio are prepared from the
+effective request. The successful security-environment owner is reused for
+optional trace start and process creation; it is not created again. RAII closes
+unsuccessful or abandoned owners.
+
+Successful calls return ordinary output/handles plus mutation descriptions,
+not a replacement policy. New corrections use warning text beginning
+`Sandbox configuration updated due to IT policy`, for example:
+
+```text
+Sandbox configuration updated due to IT policy: filesystem.deniedPaths: [] -> ["C:\\Users\\AdminUser\\Desktop\\denied"]
+```
+
+Descriptions contain JSON-serialized before/after field values. Only newly
+negotiated corrections are reported; applying remembered restrictions alone
+emits no mutation warning. Other policy or operational warnings remain
+independent of mutation notifications.
+
+A later workload failure is not a repair instruction
+and never causes replay. Failed negotiation preserves the authoritative native
+error and appends why mutation stopped and any earlier attempted corrections.
+Caller objects and policy files are never rewritten. Mutation notes quote
+configuration values as data; they and diagnostic errors are text for a person
+or agent, not a stable structured parsing contract. A valid revision may expose
+another constraint or still leave the workload unable to run.
+
+#### In-process reuse
+
+The native retry loop automatically remembers successful restrictive
+corrections for opted-in creation. No caller-owned context, extra SDK option,
+C handle or request field is required. Strict creation does not read or apply
+this cache.
+
+Entries are partitioned by the creator's process/effective token identities
+and modification identifiers. They retain supported narrowing hints, not whole
+permission-policy snapshots. Before reuse, the ordinary repair logic checks
+the hint's relevant current inputs and reapplies the narrowing to a fresh
+request clone. Already-satisfied restrictions need no edit. Unsupported or
+inapplicable hints are not guessed.
+
+Unrelated current fields are neither replayed from old state nor compared as
+whole-policy cache identity. A new credential-CA filename, proxy endpoint,
+unrelated grant, command, environment, container identity, timeout or diagnostic
+output path does not invalidate an otherwise applicable narrowing edit. Those
+values remain the current request's values unless the supported repair itself
+must restrict them. No proxy credentials or unrelated permissions are retained.
+
+A hit supplies validated narrowing edits, not an approval. Backend validation
+and Windows creation run again every time. Further refusals can tighten that
+entry; failed negotiation leaves its successful contents intact. Learning
+commits when native environment creation succeeds, even if later trace startup
+or workload execution fails. Cache access and negotiation are serialized in
+the loaded native module; the lock is released before workload launch/wait.
+
+The cache retains at most 16 entries and 4 MiB of owned narrowing-hint
+state, with the ordinary per-creation attempt and text limits. Eviction,
+process exit, native-library unload or a different key causes fresh negotiation
+from the caller's request. It is an optimization, not durable policy storage.
+Node keeps the mutation native module loaded between opted-in calls; policy
+state itself remains entirely in MXC.
+
+If Windows accepts the remembered restrictions, the cache hit is silent. If it
+requires further narrowing, MXC reports only the newly negotiated corrections
+and retains the combined hints after successful environment creation. A failed
+negotiation does not replace a successful entry. Cache identity/retention
+failures are reported without bypassing ordinary negotiation. An interrupted
+cache is cleared before reuse. No disk persistence is used; invocation options
+and ordinary results are unchanged by reuse.
+Effective-policy audit identity is recorded independently of mutation warnings,
+including when remembered restrictions are applied silently.
+
+Typed notifications are recorded separately in the
+[deferred policy-changes API proposal](../plans/policy-changes-api-proposal.md).
+That proposal is not part of the supported SDK or native adapter surface.
+
+#### Prior diagnostics-only validation (October 15, 2026)
 
 After rebasing onto upstream `525d0f25`, validation on October 15, 2026 passed
 70 CLI, Node and .NET cases plus 11 direct native snapshot checks on

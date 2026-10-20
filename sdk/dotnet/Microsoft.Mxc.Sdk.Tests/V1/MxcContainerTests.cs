@@ -581,6 +581,114 @@ public class MxcContainerTests
     }
 
     [Fact]
+    public void CreationMutation_RemainsTextOnly()
+    {
+        Assert.Null(typeof(MxcProcess).GetProperty("PolicyChanges"));
+        Assert.Null(typeof(IMxcProcess).GetProperty("PolicyChanges"));
+        Assert.Null(typeof(MxcProcess).Assembly.GetType("Microsoft.Mxc.Sdk.V1.PolicyChange"));
+    }
+
+    [Fact]
+    public async Task MutationCreation_NullRequest_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(
+            () => MxcContainer.Run(null!, new RunOptions { MutatePolicy = true }));
+        Assert.Throws<ArgumentNullException>(
+            () => MxcContainer.Spawn(null!, new SpawnOptions { MutatePolicy = true }));
+        await Assert.ThrowsAsync<ArgumentNullException>(() =>
+            MxcContainer.RunAsync(
+                null!, new RunOptions { MutatePolicy = true },
+                cancellationToken: TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ArgumentNullException>(() =>
+            MxcContainer.SpawnAsync(
+                null!, new SpawnOptions { MutatePolicy = true },
+                cancellationToken: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task MutationCreation_UsesDedicatedExportsAndRejectsOtherBackends()
+    {
+        var request = new ContainerRequest("echo must not execute")
+        {
+            ContainerName = "mutation-unsupported-backend",
+            Containment = new Containment.Bubblewrap(),
+            Filesystem = new FilesystemPolicy { ReadwritePaths = { "unchanged" } },
+        };
+        var before = MxcContainer.SerializeRequest(request);
+        var errors = new[]
+        {
+            Assert.Throws<MxcException>(() =>
+                MxcContainer.Run(request, new RunOptions { MutatePolicy = true })),
+            Assert.Throws<MxcException>(() =>
+                MxcContainer.Spawn(request, new SpawnOptions { MutatePolicy = true })),
+            await Assert.ThrowsAsync<MxcException>(() => MxcContainer.RunAsync(
+                request, new RunOptions { MutatePolicy = true },
+                cancellationToken: TestContext.Current.CancellationToken)),
+            await Assert.ThrowsAsync<MxcException>(() => MxcContainer.SpawnAsync(
+                request, new SpawnOptions { MutatePolicy = true },
+                cancellationToken: TestContext.Current.CancellationToken)),
+        };
+        Assert.All(errors, error =>
+        {
+            Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
+            Assert.Contains("creation-policy mutation requires native Windows ProcessContainer", error.Message);
+        });
+        Assert.Equal(before, MxcContainer.SerializeRequest(request));
+        Assert.DoesNotContain("mutatePolicy", before);
+        Assert.DoesNotContain("policyMutation", before);
+    }
+
+    [Fact]
+    public void MutationOptions_DefaultToStrictAndRoundTripWithoutReflection()
+    {
+        Assert.False(new RunOptions().MutatePolicy);
+        Assert.False(new SpawnOptions().MutatePolicy);
+        Assert.False(MxcJson.Deserialize<RunOptions>("{}")!.MutatePolicy);
+        Assert.False(MxcJson.Deserialize<SpawnOptions>("{}")!.MutatePolicy);
+        foreach (var mutatePolicy in new[] { false, true })
+        {
+            var run = new RunOptions { MutatePolicy = mutatePolicy };
+            var spawn = new SpawnOptions { MutatePolicy = mutatePolicy };
+            Assert.Equal(mutatePolicy,
+                MxcJson.Deserialize<RunOptions>(MxcJson.Serialize(run, MxcJson.Options))!.MutatePolicy);
+            Assert.Equal(mutatePolicy,
+                MxcJson.Deserialize<SpawnOptions>(MxcJson.Serialize(spawn, MxcJson.Options))!.MutatePolicy);
+        }
+        Assert.Throws<JsonException>(() =>
+            MxcJson.Deserialize<RunOptions>("""{"mutatePolicy":"true"}"""));
+        Assert.Throws<JsonException>(() =>
+            MxcJson.Deserialize<SpawnOptions>("""{"mutatePolicy":1}"""));
+    }
+
+    [Fact]
+    public async Task MutationOptions_OmittedAndFalseKeepStrictCreation()
+    {
+        var request = new ContainerRequest("echo must not execute")
+        {
+            ContainerName = "strict-unsupported-backend",
+            Containment = OperatingSystem.IsLinux()
+                ? new Containment.Seatbelt()
+                : new Containment.Bubblewrap(),
+        };
+        var errors = new[]
+        {
+            Assert.Throws<MxcException>(() => MxcContainer.Run(request)),
+            Assert.Throws<MxcException>(() =>
+                MxcContainer.Run(request, new RunOptions { MutatePolicy = false })),
+            Assert.Throws<MxcException>(() => MxcContainer.Spawn(request)),
+            Assert.Throws<MxcException>(() =>
+                MxcContainer.Spawn(request, new SpawnOptions { MutatePolicy = false })),
+            await Assert.ThrowsAsync<MxcException>(() => MxcContainer.RunAsync(
+                request, cancellationToken: TestContext.Current.CancellationToken)),
+            await Assert.ThrowsAsync<MxcException>(() => MxcContainer.SpawnAsync(
+                request, new SpawnOptions { MutatePolicy = false },
+                cancellationToken: TestContext.Current.CancellationToken)),
+        };
+        Assert.All(errors, error =>
+            Assert.DoesNotContain("creation-policy mutation requires", error.Message));
+    }
+
+    [Fact]
     public void ContainerRequest_NullCommand_Throws()
     {
         Assert.Throws<ArgumentNullException>(() => new ContainerRequest(null!));

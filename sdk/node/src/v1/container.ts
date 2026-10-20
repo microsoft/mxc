@@ -67,6 +67,13 @@ function validateV1Request(
             + 'use the operation options instead.',
         );
     }
+    if ('mutatePolicy' in request) {
+        throw new MxcError(
+            'malformed_request',
+            'ContainerRequest.mutatePolicy is not part of the V1 authoring API; '
+            + 'use the operation options instead.',
+        );
+    }
     if (!V1_CONTAINMENTS.has(containment)) {
         throw new MxcError(
             'unsupported_containment',
@@ -389,6 +396,17 @@ function validateOperationOptions(
       continue;
     }
     if (
+      key === 'mutatePolicy' &&
+      additionalOptionKeys.includes(key) &&
+      value !== undefined &&
+      typeof value !== 'boolean'
+    ) {
+      throw new MxcError(
+        'malformed_request',
+        `${apiName} option 'mutatePolicy' must be a boolean`,
+      );
+    }
+    if (
       key !== 'dryRun' &&
       !additionalOptionKeys.includes(key)
     ) {
@@ -421,15 +439,20 @@ function toExecutionResult(result: BindingRunResult): ExecutionResult {
   return output;
 }
 
-/** Create a container request and asynchronously return its live process. */
+/**
+ * Create a container request and asynchronously return its live process.
+ * Set options.mutatePolicy to authorize restrictive native Windows repairs.
+ * Correction descriptions use the returned process's warnings.
+ */
 export async function spawn(
   request: ContainerRequest,
   options: SpawnOptions = {},
 ): Promise<MxcProcess> {
-  validateOperationOptions('spawn', options, false);
+  validateOperationOptions('spawn', options, false, ['mutatePolicy']);
   return spawnBindingSandboxProcess(
     prepareContainerRequest(request, options.telemetry),
     false,
+    options.mutatePolicy === true,
   );
 }
 
@@ -466,14 +489,19 @@ export async function spawnWithPty(
   );
 }
 
-/** Run a container request asynchronously and capture its output. */
+/**
+ * Run a container request asynchronously and capture its output.
+ * Set options.mutatePolicy to authorize restrictive native Windows repairs.
+ * Correction descriptions use result.warnings, not workload output.
+ */
 export async function run(
   request: ContainerRequest,
   options: RunOptions = {},
 ): Promise<ExecutionResult> {
-  validateOperationOptions('run', options, false);
+  validateOperationOptions('run', options, false, ['mutatePolicy']);
   return toExecutionResult(await runOneShotJsonAsync(
     prepareContainerRequest(request, options.telemetry),
     false,
+    options.mutatePolicy === true,
   ));
 }

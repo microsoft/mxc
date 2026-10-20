@@ -65,7 +65,7 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::__ffi::spawn_container_json;
+use mxc_sdk::__ffi::{spawn_container_json, spawn_container_with_policy_mutation_json};
 use mxc_sdk::mxc_common::models::SandboxOutputMetadata;
 use mxc_sdk::mxc_common::sandbox_process::NativeStdio;
 use mxc_sdk::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult};
@@ -368,6 +368,42 @@ pub unsafe extern "C" fn mxc_spawn_json(
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
+    unsafe {
+        spawn_json_ffi(
+            request_json_utf8,
+            experimental,
+            out_handle,
+            out_error,
+            false,
+        )
+    }
+}
+
+/// Create with explicitly authorized restrictive policy corrections.
+///
+/// Native Windows ProcessContainer only; no backend/tier fallback. Changes are
+/// described by the existing [`mxc_sandbox_warnings_json`] getter.
+/// The request JSON and `experimental` meaning are unchanged.
+///
+/// # Safety
+/// Pointer and ownership requirements are identical to [`mxc_spawn_json`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_spawn_with_policy_mutation_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    unsafe { spawn_json_ffi(request_json_utf8, experimental, out_handle, out_error, true) }
+}
+
+unsafe fn spawn_json_ffi(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+    mutate_policy: bool,
+) -> i32 {
     if !out_handle.is_null() {
         // SAFETY: caller-guaranteed writable pointer-sized storage.
         unsafe { *out_handle = ptr::null_mut() };
@@ -380,10 +416,17 @@ pub unsafe extern "C" fn mxc_spawn_json(
         return MXC_STATUS_NULL_ARGUMENT;
     }
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        spawn_json_inner(request_json_utf8, experimental != 0)
+        spawn_json_inner(request_json_utf8, experimental != 0, mutate_policy)
     }))
     .unwrap_or_else(|panic| {
-        crate::report_panic("mxc_spawn_json", &*panic);
+        crate::report_panic(
+            if mutate_policy {
+                "mxc_spawn_with_policy_mutation_json"
+            } else {
+                "mxc_spawn_json"
+            },
+            &*panic,
+        );
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),
@@ -397,6 +440,7 @@ pub unsafe extern "C" fn mxc_spawn_json(
 fn spawn_json_inner(
     request_json_utf8: *const c_char,
     experimental: bool,
+    mutate_policy: bool,
 ) -> Result<MxcProcess, (i32, MxcErrorDetail)> {
     // SAFETY: caller contract on `mxc_spawn_json`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
@@ -414,7 +458,12 @@ fn spawn_json_inner(
             ))
         }
     };
-    spawn_container_json(request_json, experimental).map_err(sdk_error_detail)
+    if mutate_policy {
+        spawn_container_with_policy_mutation_json(request_json, experimental)
+    } else {
+        spawn_container_json(request_json, experimental)
+    }
+    .map_err(sdk_error_detail)
 }
 
 /// Shared tail of the handle-returning spawn entry points
