@@ -15,7 +15,7 @@ npm install @microsoft/mxc-sdk
 
 Node.js 24 or later is required. On Windows, native stdio transfer requires
 Node.js 24.21.0 or later within the Node.js 24 release line, or Node.js 26.8.0
-or later. On Linux x64, OpenSSL 3 (`libssl.so.3`) is also required.
+or later.
 
 ## Run to completion
 
