@@ -5,9 +5,9 @@
 The LXC backend provides Linux container isolation using [LXC (Linux Containers)](https://linuxcontainers.org/lxc/).
 
 For every supported contract from `0.9.0-alpha` onward, networking is
-directional-only: use `network.egress` and `network.ingress`. LXC rejects
-`runtimeConfig.networkProxy`, so a supported LXC request has no proxy surface
-at all — see [Proxy](#proxy) below.
+directional-only: use `network.egress` and `network.ingress`, or route egress
+through a host loopback proxy with `runtimeConfig.networkProxy` — see
+[Proxy](#proxy) below.
 Legacy host lists and enforcement-mode fields in older examples are not
 accepted. Do not relabel an old request as v0.9 without migrating its policy.
 See [the schema migration reference](../../schema.md).
@@ -159,23 +159,36 @@ partially installed chain from a failed run is torn down regardless.
 
 ### Proxy
 
-**LXC does not support proxied egress (`runtimeConfig.networkProxy`) today.**
-A request carrying that field is rejected at validation, before any container is
-created, with an error naming the field and the backend.
+`runtimeConfig.networkProxy` names a proxy listening on the host's loopback.
+The workload reaches it at the same address and port from inside the container.
+`127.0.0.1` in the container is the container's own loopback, so MXC listens
+there for the length of the run and carries each connection to the proxy on
+the host.  Nothing else on the host becomes reachable through it.
 
-The field must name a loopback endpoint, and an LXC container has its own
-network namespace, so `127.0.0.1` there is the container rather than the host.
-MXC ships no component that relays a host loopback proxy into that namespace.
+The workload is handed `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+`FTP_PROXY` (and their lower-case forms) set to the proxy URL, with `NO_PROXY`
+empty.  Any proxy variables the caller put in `process.env` are replaced.
 
-The legacy `network.proxy` fields are also absent from every supported contract.
-Choose a backend that supports a loopback proxy if the workload needs one;
-relabeling a retired LXC proxy request as v0.9 cannot make its policy enforceable.
+The proxy is the container's only way out:
+
+- The host must be `localhost`, `127.0.0.1`, or `::1`.  A wildcard such as
+  `0.0.0.0` or `::` is rejected.
+- The URL must not carry credentials.  MXC hands the environment to
+  `lxc-attach` on its command line, which other users of the host can read.
+- `network.egress` must be omitted or `default: deny` with no rules.  The
+  container gets no network interface unless `network.ingress` permits
+  something, and then only the filtered interface ingress needs.
+- `preservePolicy: true` with `destroyOnExit: false` is rejected.  The relay
+  ends when MXC does, and a container kept running afterwards would have no
+  path to the proxy.
+
+`HTTP_PROXY` reaches only clients that honor it.  A client that ignores it gets
+no network rather than a direct one.
 
 The retired host-list, enforcement-mode, local-network, and `network.proxy`
-fields are no longer representable in typed Rust requests. LXC still rejects
-the supported `runtimeConfig.networkProxy` field before creating a container.
-Omitting `network.egress` or `network.ingress` means default deny for that
-direction; retired fields never supply a fallback.
+fields are no longer representable in typed Rust requests.  Omitting
+`network.egress` or `network.ingress` means default deny for that direction;
+retired fields never supply a fallback.
 
 ### No network at all
 
@@ -357,7 +370,7 @@ The zone query should answer the zone you assigned.
   installs and reports success, but no IPv6 traffic reaches that destination.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
   host that provides one.
-- **No proxied egress.** See [Proxy](#proxy).
+- **A proxied container cannot be kept running past the run.** See [Proxy](#proxy).
 - **No container lifecycle operations.** LXC implements `ScriptRunner` (create-and-run execution) and
   `SandboxBackend` (streaming over pipes or a caller-controlled PTY), not
   `StatefulSandboxBackend`. A

@@ -1,5 +1,5 @@
 #!/bin/bash
-# LXC has no proxy transport in the supported directional contracts.
+# LXC relays only a proxy on the host's loopback, and a proxy named by hostname is refused.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,7 +40,5 @@ PY
     echo "PASS: $(basename "$config") rejected before LXC execution."
 }
 
-check_proxy "$REPO_DIR/tests/configs/lxc_network_proxy.json" \
-    "http://127.0.0.1:3128" "runtimeConfig.networkProxy"
 check_proxy "$REPO_DIR/tests/configs/lxc_network_proxy_hostname.json" \
     "http://proxy.mxc.test:3128" "runtimeConfig.networkProxy must use localhost"
