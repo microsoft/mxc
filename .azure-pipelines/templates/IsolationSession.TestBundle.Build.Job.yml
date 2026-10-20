@@ -72,6 +72,10 @@ jobs:
   - checkout: ${{ parameters.checkoutRepo }}
     path: s
 
+  - powershell: |
+      & "$(Pipeline.Workspace)/lock-check/scripts/ci/test-isolation-session-test-helpers.ps1"
+    displayName: 'Validate test script helper staging'
+
   - task: UseNode@1
     displayName: Use Node.js 24.21
     inputs:
@@ -300,19 +304,11 @@ jobs:
           Write-Host "  -> test_scripts/$s"
       }
 
-      # Helpers the suites dot-source from $PSScriptRoot\lib.
-      New-Item -ItemType Directory -Force -Path "$out/test_scripts/lib" | Out-Null
-      $libScripts = @(
-          'LoopbackAnchor.ps1'
-      )
-      foreach ($s in $libScripts) {
-          $src = "$(Build.SourcesDirectory)/tests/scripts/lib/$s"
-          if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
-              throw "Required test script helper not found: $src"
-          }
-          Copy-Item $src "$out/test_scripts/lib/"
-          Write-Host "  -> test_scripts/lib/$s"
-      }
+      # Use self's staging logic even when the selected source branch predates the helper.
+      & "$(Pipeline.Workspace)/lock-check/scripts/ci/stage-isolation-session-test-helpers.ps1" `
+          -SourceDirectory "$(Build.SourcesDirectory)/tests/scripts" `
+          -ScriptsDirectory "$out/test_scripts" |
+          ForEach-Object { Write-Host "  -> test_scripts/$_" }
 
       # SDK integration tests (Node E2E suite)
       $sdkInteg = "$out/sdk-integration"
