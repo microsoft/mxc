@@ -20,6 +20,17 @@ import {
   type AbiErrorDetail,
 } from './native-error.js';
 
+let loadRunLibrary = loadMxcFfi;
+let sharedMutationRun:
+  | { native: ReturnType<typeof loadMxcFfi>; functions: ReturnType<typeof bindRunFunctions> }
+  | undefined;
+
+/** @internal Replaces the native-library loader for ownership and export tests. */
+export function _setBindingRunLibraryLoader(load = loadMxcFfi): void {
+  loadRunLibrary = load;
+  sharedMutationRun = undefined;
+}
+
 export { _errorCodeForNativeStatus } from './native-error.js';
 
 interface AbiRunResult {
@@ -60,7 +71,7 @@ const AbiRunResultType = koffi.struct('MxcNodeJsonRunResult', {
   warnings: 'void *',
 });
 
-function bindRunFunctions(
+export function bindRunFunctions(
   native: ReturnType<typeof loadMxcFfi>,
   symbol = 'mxc_run_json',
 ): {
@@ -83,6 +94,24 @@ function bindRunFunctions(
       parameters: [koffi.pointer(AbiRunResultType)],
     }),
   };
+}
+
+function mutationRun() {
+  if (sharedMutationRun !== undefined) return sharedMutationRun;
+  const native = loadRunLibrary();
+  try {
+    const functions = bindRunFunctions(native, 'mxc_run_with_policy_mutation_json');
+    // Native retry memory belongs to this loaded module, not to a JS API object.
+    sharedMutationRun = { native, functions };
+    return sharedMutationRun;
+  } catch (error) {
+    native.handle.unload();
+    throw new MxcError(
+      'backend_unavailable',
+      `policy mutation requires native export 'mxc_run_with_policy_mutation_json'; ` +
+      `update mxc_ffi: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function decodeRunResult(status: number, result: AbiRunResult): BindingRunResult {
@@ -111,7 +140,7 @@ function runJsonNative(
   experimental: boolean,
   symbol: string,
 ): BindingRunResult {
-  const native = loadMxcFfi();
+  const native = loadRunLibrary();
   try {
     const { run, free } = bindRunFunctions(native, symbol);
     const result = {} as AbiRunResult;
@@ -176,10 +205,13 @@ export function runOneShotJson(
 async function runOneShotJsonAsyncNative(
   request: OneShotRequest,
   experimental: boolean,
+  mutatePolicy: boolean,
 ): Promise<BindingRunResult> {
-  const native = loadMxcFfi();
+  const shared = mutatePolicy ? mutationRun() : undefined;
+  const native = shared?.native ?? loadRunLibrary();
   try {
-    const { run, free } = bindRunFunctions(native);
+    const functions = shared?.functions ?? bindRunFunctions(native);
+    const { run, free } = functions;
     const result = {} as AbiRunResult;
     let filled = false;
     try {
@@ -204,13 +236,14 @@ async function runOneShotJsonAsyncNative(
       if (filled) free(result);
     }
   } finally {
-    native.handle.unload();
+    if (!mutatePolicy) native.handle.unload();
   }
 }
 
 type AsyncRunImplementation = (
   request: OneShotRequest,
   experimental: boolean,
+  mutatePolicy: boolean,
 ) => Promise<BindingRunResult>;
 
 let asyncRunImplementation = runOneShotJsonAsyncNative;
@@ -225,8 +258,9 @@ export function _setBindingRunAsyncImplementation(
 export function runOneShotJsonAsync(
   request: OneShotRequest,
   experimental = false,
+  mutatePolicy = false,
 ): Promise<BindingRunResult> {
-  return asyncRunImplementation(request, experimental).catch((error: unknown) => {
+  return asyncRunImplementation(request, experimental, mutatePolicy).catch((error: unknown) => {
     if (error instanceof MxcError) throw error;
     throw new MxcError(
       'backend_error',

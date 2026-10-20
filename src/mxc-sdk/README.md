@@ -4,7 +4,8 @@
 
 `mxc-sdk` is the Rust library for authoring MXC container requests and executing
 them in-process through the native engine. The versioned public API is under
-`mxc_sdk::v1`. `ContainerRequest` owns the command and shared filesystem,
+`mxc_sdk::v1`, with revised creation options under `mxc_sdk::v1_1`.
+`ContainerRequest` owns the command and shared filesystem,
 network, and UI restrictions; its typed containment value selects and
 configures the backend.
 
@@ -22,8 +23,8 @@ non-policy failures are not queried.
 
 Always log the message or the error's `Display` representation. The operation
 and HRESULT are included in the message, while optional `operation` and
-`native_code` fields need not be populated. MXC neither mutates the request nor
-retries a policy refusal. Returned constraints are non-exhaustive; unknown or
+`native_code` fields need not be populated. By default, MXC neither changes the
+effective request nor retries a policy refusal. Returned constraints are non-exhaustive; unknown or
 incomplete data is not an instruction to guess a repair. Diagnostic prose is
 not a stable parsing API. See the
 [backend guide](../../docs/development/guides/process-container-adding-os-features.md#detailed-policy-errors).
@@ -36,6 +37,54 @@ deny-default egress and capture mode `block`.
 Unknown/incomplete details do not become guessed edits; filesystem suggestions
 preserve deny/read-only exceptions. See
 [request guidance](../../docs/development/guides/process-container-adding-os-features.md#guidance-in-mxc-request-terms).
+
+### Opt-in restrictive creation
+
+Set `mutate_policy = true` on `v1_1::RunOptions` or `v1_1::SpawnOptions` and call
+`v1_1::run` or `v1_1::spawn` to authorize safe restrictions after a native
+Windows ProcessContainer creation refusal. The field defaults to `false`.
+This scoped API revision preserves the published `v1` options and reuses V1
+requests and ordinary result/process types; it does not change the SDK package
+version or the SDK-owned `1.0.0` request contract.
+Mutation descriptions are plain text in `ExecutionResult.warnings` or
+`MxcProcess::warnings()`; stdout and stderr remain workload output.
+New corrections use warning text beginning
+`Sandbox configuration updated due to IT policy`. These warnings are text for
+a person or agent, not a stable parsing contract or structured change API.
+
+```rust,no_run
+use mxc_sdk::v1_1::{self, ContainerRequest, RunOptions};
+
+let request = ContainerRequest::new("cmd /c echo hello");
+let mut options = RunOptions::default();
+options.mutate_policy = true;
+let result = v1_1::run(request, options)?;
+for warning in &result.warnings {
+    eprintln!("{warning}");
+}
+# Ok::<(), mxc_sdk::v1_1::Error>(())
+```
+
+The revised option structs are non-exhaustive: construct them with `Default`
+and assign the desired fields. See the [scoped creation API reference](../../docs/api-reference/rust/v1_1/README.md).
+
+MXC changes only a private request copy, never the caller's policy file. It
+does not select another backend or fall back to AppContainer. Repairs and
+retries happen before launching the workload, which is launched once.
+Unknown, incomplete or unsafe constraints still fail with the creation error
+and any attempted-change text. PTY execution and container lifecycle operations
+have no mutation option. Authorization is never read from request JSON and
+does not enable experimental backends. See the [repair limits and supported changes](../../docs/development/guides/process-container-adding-os-features.md#opt-in-creation-policy-mutation).
+
+The native retry loop remembers supported narrowing edits for the same creator
+identity. It revalidates those edits against the current request and preserves
+unrelated current grants, proxy endpoints and capture-output locations.
+Per-launch CA filenames or proxy ports do not invalidate an otherwise applicable
+edit. Continue using opted-in creation; no context object or extra option is
+needed. Windows validates every creation again. Reuse is bounded and in-memory
+only; strict calls do not use the cache. A cache hit emits no mutation warning.
+If Windows requires further narrowing, only the new corrections are reported,
+and successful negotiation updates the cache.
 
 ## Run to completion and spawn
 

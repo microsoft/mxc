@@ -3,6 +3,32 @@
 
 //! Public API exclusion checks.
 //!
+//! The typed creation-change notification API is a deferred proposal.
+//!
+//! ```compile_fail
+//! use mxc_sdk::v1::{DenialCaptureMode, FilesystemAccess, NetworkScope, PolicyChange};
+//! ```
+//!
+//! ```compile_fail
+//! fn proposed_changes(process: &mxc_sdk::v1::MxcProcess) {
+//!     let _ = process.policy_changes();
+//! }
+//! ```
+//!
+//! Published V1 option literals remain valid.
+//!
+//! ```
+//! use mxc_sdk::v1::{RunOptions, SpawnOptions};
+//! let _ = RunOptions { telemetry: None };
+//! let _ = SpawnOptions { telemetry: None };
+//! ```
+//!
+//! Creation mutation is selected through the revised options, not new V1 methods.
+//!
+//! ```compile_fail
+//! use mxc_sdk::v1::{run_with_policy_mutation, spawn_with_policy_mutation};
+//! ```
+//!
 //! ```compile_fail
 //! use mxc_sdk::v1::{
 //!     available_tools_policy, temporary_files_policy, user_profile_policy,

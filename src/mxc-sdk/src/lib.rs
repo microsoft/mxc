@@ -209,6 +209,8 @@ mod state_aware_sdk;
 
 mod telemetry;
 
+pub mod v1_1;
+
 #[cfg(doctest)]
 mod api_tests;
 
@@ -368,6 +370,14 @@ pub mod v1 {
         use super::*;
 
         #[test]
+        fn published_creation_options_and_signatures_remain_compatible() {
+            let _: fn(ContainerRequest, SpawnOptions) -> Result<MxcProcess, Error> = spawn;
+            let _: fn(ContainerRequest, RunOptions) -> Result<ExecutionResult, Error> = run;
+            let _ = RunOptions { telemetry: None };
+            let _ = SpawnOptions { telemetry: None };
+        }
+
+        #[test]
         fn public_request_probe_uses_sdk_request_model() {
             let request = ContainerRequest::new("cmd /c exit 0");
             let output = probe(Some(&request)).expect("default request probes");
@@ -397,6 +407,15 @@ pub mod __ffi {
         crate::mxc_engine::spawn_one_shot_json(request_json, experimental).map(MxcProcess::new)
     }
 
+    /// Internal JSON adapter for explicitly opted-in mutation creation.
+    pub fn spawn_container_with_policy_mutation_json(
+        request_json: &str,
+        experimental: bool,
+    ) -> Result<MxcProcess, Error> {
+        crate::mxc_engine::spawn_one_shot_json_with_policy_mutation(request_json, experimental)
+            .map(MxcProcess::new)
+    }
+
     /// Spawn an exact-version JSON request attached to a caller-controlled PTY.
     #[doc(hidden)]
     pub fn spawn_with_pty_json(
@@ -413,6 +432,17 @@ pub mod __ffi {
     /// its output. The JSON and `experimental` rules match [`spawn_container_json`].
     pub fn run_json(request_json: &str, experimental: bool) -> Result<ExecutionResult, Error> {
         wait_with_output(spawn_container_json(request_json, experimental)?)
+    }
+
+    /// Internal captured JSON adapter for explicitly opted-in mutation creation.
+    pub fn run_with_policy_mutation_json(
+        request_json: &str,
+        experimental: bool,
+    ) -> Result<ExecutionResult, Error> {
+        wait_with_output(spawn_container_with_policy_mutation_json(
+            request_json,
+            experimental,
+        )?)
     }
 
     /// Run an [MXC lifecycle JSON request](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/container-lifecycle.md#raw-json-entry-points) and return its JSON response envelope.

@@ -2,7 +2,7 @@
 
 > **Audience:** MXC consumers
 
-These references describe the supported V1 SDK APIs: operation
+These references describe the supported versioned SDK APIs: operation
 signatures, public types, fields, and containment choices. They complement the
 SDK READMEs and backend guides; they do not replace native policy validation or
 certify backend availability.
@@ -12,6 +12,7 @@ See the [consumer glossary](../glossary.md) for terminology.
 | SDK | Reference | Public entrypoint |
 |---|---|---|
 | Rust | [V1](rust/v1/README.md) | `mxc_sdk::v1` |
+| Rust creation options | [V1.1 revision](rust/v1_1/README.md) | `mxc_sdk::v1_1` |
 | .NET | [V1](dotnet/v1/README.md) | `Microsoft.Mxc.Sdk.V1` |
 | Node | [V1](node/v1/README.md) | `@microsoft/mxc-sdk/v1` |
 
@@ -48,6 +49,12 @@ enforce.
 
 Invocation telemetry belongs to operation options and is always subject to
 persisted MXC consent and administrative restrictions.
+
+Creation-policy mutation is also an invocation option, disabled by default.
+Use `mutate_policy` in Rust V1.1 creation options, `MutatePolicy` in .NET V1,
+or `mutatePolicy` in Node V1. The Rust revision preserves published V1 struct
+literals; it uses the same V1 request and result types and the same `1.0.0`
+request contract. The revision does not change SDK package versions.
 
 ## Language conventions
 

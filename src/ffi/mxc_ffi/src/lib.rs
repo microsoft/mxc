@@ -73,7 +73,7 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::__ffi::run_json;
+use mxc_sdk::__ffi::{run_json, run_with_policy_mutation_json};
 #[cfg(any(target_os = "windows", test))]
 use mxc_sdk::mxc_common;
 #[cfg(target_os = "windows")]
@@ -380,15 +380,49 @@ pub unsafe extern "C" fn mxc_run_json(
     experimental: i32,
     out: *mut MxcRunResult,
 ) -> i32 {
+    unsafe { run_json_ffi(request_json_utf8, experimental, out, false) }
+}
+
+/// Run with explicitly authorized restrictive creation-policy corrections.
+///
+/// Native Windows ProcessContainer only; no backend/tier fallback. Mutation
+/// descriptions use the existing warnings JSON string array in [`MxcRunResult`].
+/// The request JSON and `experimental` meaning are unchanged.
+///
+/// # Safety
+/// The pointer and result ownership requirements are identical to [`mxc_run_json`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_run_with_policy_mutation_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out: *mut MxcRunResult,
+) -> i32 {
+    unsafe { run_json_ffi(request_json_utf8, experimental, out, true) }
+}
+
+unsafe fn run_json_ffi(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out: *mut MxcRunResult,
+    mutate_policy: bool,
+) -> i32 {
     if out.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
 
-    let result = catch_unwind(|| run_json_inner(request_json_utf8, experimental != 0))
-        .unwrap_or_else(|panic| {
-            report_panic("mxc_run_json", &*panic);
-            MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
-        });
+    let result =
+        catch_unwind(|| run_json_inner(request_json_utf8, experimental != 0, mutate_policy))
+            .unwrap_or_else(|panic| {
+                report_panic(
+                    if mutate_policy {
+                        "mxc_run_with_policy_mutation_json"
+                    } else {
+                        "mxc_run_json"
+                    },
+                    &*panic,
+                );
+                MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+            });
 
     let status = result.status;
     // SAFETY: `out` is non-null and caller-guaranteed writable.
@@ -396,7 +430,11 @@ pub unsafe extern "C" fn mxc_run_json(
     status
 }
 
-fn run_json_inner(request_json_utf8: *const c_char, experimental: bool) -> MxcRunResult {
+fn run_json_inner(
+    request_json_utf8: *const c_char,
+    experimental: bool,
+    mutate_policy: bool,
+) -> MxcRunResult {
     // SAFETY: caller contract on `mxc_run_json`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
         Some(value) => value,
@@ -405,7 +443,11 @@ fn run_json_inner(request_json_utf8: *const c_char, experimental: bool) -> MxcRu
         }
         None => return MxcRunResult::error(MXC_STATUS_INVALID_UTF8, "request JSON is not UTF-8"),
     };
-    execute_output(run_json(request_json, experimental))
+    execute_output(if mutate_policy {
+        run_with_policy_mutation_json(request_json, experimental)
+    } else {
+        run_json(request_json, experimental)
+    })
 }
 
 fn execute_output(output: Result<ExecutionResult, Error>) -> MxcRunResult {
@@ -1082,6 +1124,91 @@ pub unsafe extern "C" fn mxc_telemetry_get_policy(out_utf8: *mut *mut c_char) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutation_exports_reuse_existing_results_errors_and_ownership() {
+        let request = CString::new(
+            r#"{"version":"1.0.0","containment":"bubblewrap","process":{"commandLine":"must not execute"}}"#,
+        ).unwrap();
+        let mut result = MxcRunResult::empty();
+        // SAFETY: the string and both writable result buffers live through each call.
+        let status = unsafe { mxc_run_with_policy_mutation_json(request.as_ptr(), 0, &mut result) };
+        assert_eq!(status, MXC_STATUS_UNSUPPORTED_CONTAINMENT);
+        assert_eq!(result.status, status);
+        let message = unsafe { CStr::from_ptr(result.error.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert!(
+            message.contains("creation-policy mutation requires native Windows ProcessContainer")
+        );
+        assert!(result.stdout_utf8.is_null());
+        assert!(result.warnings_json_utf8.is_null());
+        // SAFETY: the existing free releases all strings from the new export.
+        unsafe { mxc_run_result_free(&mut result) };
+        assert!(result.error.message_utf8.is_null());
+
+        let mut handle = std::ptr::dangling_mut();
+        let mut error = MxcErrorDetail::none();
+        // SAFETY: the fresh output locations and request are valid for the call.
+        let status = unsafe {
+            mxc_spawn_with_policy_mutation_json(request.as_ptr(), 0, &mut handle, &mut error)
+        };
+        assert_eq!(status, MXC_STATUS_UNSUPPORTED_CONTAINMENT);
+        assert!(handle.is_null());
+        let message = unsafe { CStr::from_ptr(error.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert!(
+            message.contains("creation-policy mutation requires native Windows ProcessContainer")
+        );
+        // SAFETY: the new export filled this owned detail exactly once.
+        unsafe { mxc_error_detail_free(&mut error) };
+        assert!(error.message_utf8.is_null());
+    }
+
+    #[test]
+    fn mutation_exports_validate_null_and_utf8_without_launching() {
+        let mut result = MxcRunResult::empty();
+        let mut handle = ptr::null_mut();
+        let mut error = MxcErrorDetail::none();
+        // SAFETY: null arguments are explicitly accepted and outputs are writable.
+        unsafe {
+            assert_eq!(
+                mxc_run_with_policy_mutation_json(ptr::null(), 0, ptr::null_mut()),
+                MXC_STATUS_NULL_ARGUMENT,
+            );
+            assert_eq!(
+                mxc_run_with_policy_mutation_json(ptr::null(), 0, &mut result),
+                MXC_STATUS_NULL_ARGUMENT,
+            );
+            mxc_run_result_free(&mut result);
+            assert_eq!(
+                mxc_spawn_with_policy_mutation_json(ptr::null(), 0, &mut handle, &mut error),
+                MXC_STATUS_NULL_ARGUMENT,
+            );
+            mxc_error_detail_free(&mut error);
+        }
+        let invalid = [0xff_u8, 0];
+        // SAFETY: invalid is a NUL-terminated buffer; the exports reject non-UTF-8.
+        unsafe {
+            assert_eq!(
+                mxc_run_with_policy_mutation_json(invalid.as_ptr().cast(), 0, &mut result),
+                MXC_STATUS_INVALID_UTF8,
+            );
+            mxc_run_result_free(&mut result);
+            assert_eq!(
+                mxc_spawn_with_policy_mutation_json(
+                    invalid.as_ptr().cast(),
+                    0,
+                    &mut handle,
+                    &mut error
+                ),
+                MXC_STATUS_INVALID_UTF8,
+            );
+            assert!(handle.is_null());
+            mxc_error_detail_free(&mut error);
+        }
+    }
 
     fn run_with(request_json: &str) -> MxcRunResult {
         let request = CString::new(request_json).unwrap();

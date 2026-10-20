@@ -58,6 +58,7 @@ pub fn spawn_runner(
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     ensure_host_supported()?;
+    crate::mxc_engine::validate_creation_policy_mutation(request)?;
     // `dry_run` means "validate, don't execute" — there is no process to
     // stream, so reject it rather than silently ignoring it.
     if request.dry_run {
@@ -92,6 +93,11 @@ pub fn spawn_pty_runner(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     size.validate()?;
     ensure_host_supported()?;
+    if request.policy_mutation_enabled {
+        return Err(MxcError::policy_validation(
+            "creation-policy mutation is not supported for PTY spawning",
+        ));
+    }
     if request.dry_run {
         return Err(MxcError::malformed_request(
             "dry_run is not supported for PTY spawns",

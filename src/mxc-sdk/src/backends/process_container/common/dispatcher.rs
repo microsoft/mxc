@@ -236,6 +236,8 @@ pub enum DispatchError {
     /// The selected AppContainer fallback requires guarded capture, but its
     /// prerequisites are not available.
     CaptureDenialsUnavailable { tier: IsolationTier, reason: String },
+    /// Explicit mutation creation must not engage a less capable isolation tier.
+    PolicyMutationUnsupported,
 }
 
 impl std::fmt::Display for DispatchError {
@@ -277,6 +279,10 @@ impl std::fmt::Display for DispatchError {
                 "the guarded WPR captureDenials fallback required by isolation tier '{}' \
                  is unavailable: {reason}",
                 tier.as_str()
+            ),
+            DispatchError::PolicyMutationUnsupported => f.write_str(
+                "creation-policy mutation requires a serviceable native BaseContainer backend; \
+                 it does not permit isolation-tier fallback",
             ),
         }
     }
@@ -458,10 +464,18 @@ fn select_backend_with_fallback(
     request: &ExecutionRequest,
     capture_factory: Option<&Arc<dyn GuardedCaptureFactory>>,
 ) -> Result<BackendPlan, DispatchError> {
+    if request.policy_mutation_enabled
+        && !BaseContainerRunner::can_backend_service_request(request).can_service_request()
+    {
+        return Err(DispatchError::PolicyMutationUnsupported);
+    }
     // Keep the established tier fallback behavior for every schema version.
     // BaseContainerRunner uses PSEC whenever it is available and compatible.
     // Otherwise detection continues to the AppContainer tiers.
     let decision = fallback_detector::choose_backend_tier(request)?;
+    if request.policy_mutation_enabled && decision.tier != IsolationTier::BaseContainer {
+        return Err(DispatchError::PolicyMutationUnsupported);
+    }
     let guarded_capture_required =
         request.policy.capture_denials.is_some() && decision.tier != IsolationTier::BaseContainer;
     if guarded_capture_required && capture_factory.is_none() {
@@ -830,6 +844,32 @@ mod tests {
 
     fn empty_policy() -> ContainerPolicy {
         ContainerPolicy::default()
+    }
+
+    #[test]
+    fn mutation_rejects_a_forced_nonnative_tier_before_backend_construction() {
+        let _capabilities = CaptureCapabilityGuard::set(true, true);
+        struct ClearForcedTier;
+        impl Drop for ClearForcedTier {
+            fn drop(&mut self) {
+                // SAFETY: the enclosing capability guard still owns ENV_LOCK.
+                unsafe { std::env::remove_var("MXC_FORCE_TIER") };
+            }
+        }
+        let _forced_tier = ClearForcedTier;
+        let mut request = test_request(empty_policy());
+        request.policy_mutation_enabled = true;
+        for tier in [
+            IsolationTier::AppContainerBfs,
+            IsolationTier::AppContainerDacl,
+        ] {
+            // SAFETY: the capability guard serializes environment mutation.
+            unsafe { std::env::set_var("MXC_FORCE_TIER", tier.as_str()) };
+            assert!(matches!(
+                select_backend_with_fallback(&request, None),
+                Err(DispatchError::PolicyMutationUnsupported),
+            ));
+        }
     }
 
     #[test]

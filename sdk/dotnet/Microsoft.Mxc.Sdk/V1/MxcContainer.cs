@@ -199,10 +199,17 @@ public static class MxcContainer
     }
 
     /// <summary>Run a container request to completion.</summary>
-    public static ExecutionResult Run(ContainerRequest request, RunOptions? options = null)
+    /// <remarks>
+    /// Set <see cref="RunOptions.MutatePolicy"/> to authorize restrictive native
+    /// Windows corrections. Descriptions use <see cref="ExecutionResult.Warnings"/>.
+    /// </remarks>
+    public static ExecutionResult Run(
+        ContainerRequest request,
+        RunOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        var mutatePolicy = options?.MutatePolicy == true;
         var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request, options?.Telemetry));
 
         unsafe
@@ -210,10 +217,21 @@ public static class MxcContainer
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcRunResult result = default;
-                var status = NativeMethods.mxc_run_json(
-                    requestPtr,
-                    0,
-                    &result);
+                int status;
+                try
+                {
+                    status = mutatePolicy
+                        ? NativeMethods.mxc_run_with_policy_mutation_json(requestPtr, 0, &result)
+                        : NativeMethods.mxc_run_json(requestPtr, 0, &result);
+                }
+                catch (EntryPointNotFoundException error) when (mutatePolicy)
+                {
+                    throw new MxcException(
+                        ErrorCode.BackendUnavailable,
+                        "policy mutation requires native export " +
+                        "'mxc_run_with_policy_mutation_json'; update mxc_ffi",
+                        error);
+                }
                 try
                 {
                     if (status != (int)ErrorCode.Success)
@@ -259,10 +277,17 @@ public static class MxcContainer
     }
 
     /// <summary>Spawn a container request and return its live process handle.</summary>
-    public static MxcProcess Spawn(ContainerRequest request, SpawnOptions? options = null)
+    /// <remarks>
+    /// Set <see cref="SpawnOptions.MutatePolicy"/> to authorize restrictive native
+    /// Windows corrections. Descriptions use <see cref="MxcProcess.Warnings"/>.
+    /// </remarks>
+    public static MxcProcess Spawn(
+        ContainerRequest request,
+        SpawnOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        var mutatePolicy = options?.MutatePolicy == true;
         var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request, options?.Telemetry));
 
         unsafe
@@ -271,11 +296,21 @@ public static class MxcContainer
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_json(
-                    requestPtr,
-                    0,
-                    &handle,
-                    &error);
+                int status;
+                try
+                {
+                    status = mutatePolicy
+                        ? NativeMethods.mxc_spawn_with_policy_mutation_json(requestPtr, 0, &handle, &error)
+                        : NativeMethods.mxc_spawn_json(requestPtr, 0, &handle, &error);
+                }
+                catch (EntryPointNotFoundException missingExport) when (mutatePolicy)
+                {
+                    throw new MxcException(
+                        ErrorCode.BackendUnavailable,
+                        "policy mutation requires native export " +
+                        "'mxc_spawn_with_policy_mutation_json'; update mxc_ffi",
+                        missingExport);
+                }
                 if (status != (int)ErrorCode.Success)
                 {
                     // `finally`, not a straight-line free: marshalling the strings or
