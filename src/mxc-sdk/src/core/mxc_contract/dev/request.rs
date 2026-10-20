@@ -73,6 +73,9 @@ fn parse_provision(json: &str) -> Result<ProvisionRequest, RequestParseError> {
         Containment::IsolationSession => {
             deserialize(json, "IsolationSession provision").map(ProvisionRequest::IsolationSession)
         }
+        Containment::MicroVm => {
+            deserialize(json, "MicroVM provision").map(ProvisionRequest::MicroVm)
+        }
         Containment::Wslc => deserialize(json, "WSLC provision").map(ProvisionRequest::Wslc),
     }
 }

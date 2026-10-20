@@ -244,6 +244,15 @@ pub struct IsolationSessionProvisionConfig {
     pub app_id: Option<String>,
 }
 
+/// Runtime-owned state-aware provision config for the MicroVM backend.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MicroVmProvisionConfig {
+    /// Registry image fixed at creation.
+    pub image: String,
+    /// Guest memory in MiB. The backend chooses its default when absent.
+    pub memory_mib: Option<u32>,
+}
+
 /// Runtime-owned state-aware provision config for the WSLc backend.
 ///
 /// Image selection and defaulting remain backend responsibilities. Conversion
@@ -982,7 +991,7 @@ pub struct ExecutionRequest {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// Hyperlight backend configuration (used when containment == Hyperlight).
     pub hyperlight: Option<HyperlightConfig>,
-    /// Caller-selected registry image for MicroVM creation.
+    /// Registry image for MicroVM creation; never supplied for existing-container execution.
     pub microvm_image: Option<String>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,

@@ -80,6 +80,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc -- --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_phase3_e2e --target x86_64-pc-windows-msvc -- --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ../tests/scripts/run_microvm_state_aware_tests.ps1 -WxcExePath ./target/x86_64-pc-windows-msvc/debug/wxc-exec.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload logs on failure
         if: failure() || cancelled()

@@ -8,6 +8,32 @@ MXC uses a JSON configuration file. The current stable schema is at
 For development, the schema for version `1.1.0-alpha` at
 [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
+Development MicroVM creation requires an explicit registry image reference in
+`microvm.image` for both create-and-run and provision requests. For example:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "microvm",
+  "microvm": {
+    "image": "python:3.12-alpine",
+    "provision": { "memoryMib": 512 }
+  }
+}
+```
+
+Create-and-run requests use the same `microvm.image` field, omit `phase`, and
+include `process.commandLine`; `microvm.provision` is provision-only. There is
+no default image. Missing, empty, whitespace-containing or control-character
+image input is rejected before backend setup. Registry-reference syntax and
+materialization are owned by the signed NVX runtime; host image files and
+registry credentials have no separate MXC input fields. Provision fixes the
+image for that container, and later lifecycle operations reject image settings.
+Host-side image acquisition does not grant workload network access. The
+runtime caches a reference by its text, so tags can retain the first pulled
+content; use a digest reference when content identity is required.
+
 For self-contained references to what each supported version accepts, see
 [containment policy language](containment-policy/README.md).
 
@@ -117,13 +143,14 @@ identity-less host proxies omit `allowedProxyPeer` and require
 deployment: it opens both host-loopback directions without restricting access
 to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
 
-The experimental Windows x64 NVX MicroVM backend maps directional network policy
-and `runtimeConfig.networkProxy` to its runtime, rejecting capabilities the
-runtime cannot enforce before creating a sandbox. MicroVM creation requires
-`"microvm": {"image": "python:3.12-alpine"}` alongside
-`"containment": "microvm"` in the development contract. The image is a caller
-supplied registry reference, not a local file path; no default image is selected.
-Native execution still requires `--experimental` and a `microvm` feature build.
+The development Windows x64 NVX signed-agent MicroVM backend maps supported
+egress defaults and CIDR/protocol/port rules. Ingress deny and host-loopback
+deny are supported; allow postures fail closed when the runtime does not
+advertise them. `runtimeConfig.networkProxy` is accepted only during provision
+or create-and-run because networking is immutable after the VM starts.
+MicroVM `exec` requests must omit `network`, including an empty object or a
+policy identical to the provisioned policy; supplying it returns
+`PolicyValidation` before backend setup.
 
 ```json
 {
@@ -391,10 +418,10 @@ The `filesystem` section defines path access policy shared across backends:
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
 
-The initial development Windows x64 NVX MicroVM backend rejects
-`readwritePaths`, `readonlyPaths`, and `deniedPaths`. The
+The development Windows x64 NVX signed-agent MicroVM backend maps
+`readwritePaths`, `readonlyPaths`, and `deniedPaths` at provision time. The
 `processContainer.filesystem.enumeratePaths` field is ProcessContainer-only
-and also cannot be combined with `containment: "microvm"`.
+and cannot be combined with `containment: "microvm"`.
 
 The ProcessContainer-only `processContainer.filesystem` section contains:
 

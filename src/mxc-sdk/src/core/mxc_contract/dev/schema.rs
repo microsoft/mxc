@@ -7,8 +7,9 @@ use schemars::{gen::SchemaGenerator, JsonSchema};
 use serde_json::{json, Value};
 
 use super::{
-    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcProvisionRequest,
+    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, MicroVmProvisionRequest,
+    OneShotRequest, StartRequest, StopRequest, WindowsSandboxProvisionRequest,
+    WslcProvisionRequest,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -34,7 +35,12 @@ fn branch(condition: Value, selected: Value, otherwise: Value) -> Value {
     })
 }
 
-fn provision_dispatch(windows_sandbox: Value, isolation_session: Value, wslc: Value) -> Value {
+fn provision_dispatch(
+    windows_sandbox: Value,
+    isolation_session: Value,
+    microvm: Value,
+    wslc: Value,
+) -> Value {
     branch(
         discriminator("containment", "windows_sandbox"),
         windows_sandbox,
@@ -42,9 +48,13 @@ fn provision_dispatch(windows_sandbox: Value, isolation_session: Value, wslc: Va
             discriminator("containment", "isolation_session"),
             isolation_session,
             branch(
-                discriminator("containment", "wslc"),
-                wslc,
-                Value::Bool(false),
+                discriminator("containment", "microvm"),
+                microvm,
+                branch(
+                    discriminator("containment", "wslc"),
+                    wslc,
+                    Value::Bool(false),
+                ),
             ),
         ),
     )
@@ -135,7 +145,7 @@ fn phase_dispatch(
 /// Generates the unrendered JSON Schema for the mutable `1.1.0-alpha`
 /// development contract.
 ///
-/// The document selects one of eight closed request roots through nested
+/// The document selects one of nine closed request roots through nested
 /// `if`/`then` discriminators. This avoids reporting validation failures from
 /// unrelated lifecycle phases while retaining a shared definitions table.
 pub fn development_schema() -> Value {
@@ -144,13 +154,14 @@ pub fn development_schema() -> Value {
     let one_shot = subschema::<OneShotRequest>(&mut generator);
     let windows_sandbox = subschema::<WindowsSandboxProvisionRequest>(&mut generator);
     let isolation_session = subschema::<IsolationSessionProvisionRequest>(&mut generator);
+    let microvm = subschema::<MicroVmProvisionRequest>(&mut generator);
     let wslc = subschema::<WslcProvisionRequest>(&mut generator);
     let start = subschema::<StartRequest>(&mut generator);
     let exec = subschema::<ExecRequest>(&mut generator);
     let stop = subschema::<StopRequest>(&mut generator);
     let deprovision = subschema::<DeprovisionRequest>(&mut generator);
 
-    let provision = provision_dispatch(windows_sandbox, isolation_session, wslc);
+    let provision = provision_dispatch(windows_sandbox, isolation_session, microvm, wslc);
     let state_aware = phase_dispatch(provision, start, exec, stop, deprovision);
     let dispatch = branch(
         json!({ "required": ["phase"] }),
@@ -179,6 +190,7 @@ mod tests {
         "OneShotRequest",
         "WindowsSandboxProvisionRequest",
         "IsolationSessionProvisionRequest",
+        "MicroVmProvisionRequest",
         "WslcProvisionRequest",
         "StartRequest",
         "ExecRequest",
@@ -196,6 +208,7 @@ mod tests {
             phase_markers: &[
                 ("WindowsSandboxProvisionRequest", "provision"),
                 ("IsolationSessionProvisionRequest", "provision"),
+                ("MicroVmProvisionRequest", "provision"),
                 ("WslcProvisionRequest", "provision"),
                 ("StartRequest", "start"),
                 ("ExecRequest", "exec"),
@@ -205,6 +218,7 @@ mod tests {
             containment_markers: &[
                 ("WindowsSandboxProvisionRequest", "windows_sandbox"),
                 ("IsolationSessionProvisionRequest", "isolation_session"),
+                ("MicroVmProvisionRequest", "microvm"),
                 ("WslcProvisionRequest", "wslc"),
             ],
             compatibility_aliases: false,

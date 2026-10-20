@@ -15,7 +15,8 @@ Experimental Windows x64 MicroVM captured execution uses
 `v1::experimental::run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionResult, Error>`.
 It requires the `microvm` build feature and
 `Containment::MicroVm { image: String }`. Stable operations do not authorize
-MicroVM. There is no experimental streaming or MicroVM lifecycle API.
+MicroVM. Live execution uses `v1::experimental::spawn`, and container lifecycle
+operations use `v1::experimental::container`, as described below.
 
 | Output | Create and run a container | Run in an existing container | Result |
 |---|---|---|---|
@@ -34,6 +35,35 @@ attaching the workload to the host process's global console streams.
 Read the terminal output concurrently rather than only after `wait`. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller
 that waits first without reading can block indefinitely.
+
+## Experimental MicroVM operations
+
+NVX MicroVM uses the ordinary V1 request, process, result, and options types
+through explicit experimental entry points:
+Creation selects `Containment::MicroVm { image: String }`; provision uses
+`ProvisionRequest::microvm(image, memory_mib)`. Both require a registry image
+reference. Provision fixes the image for the container, and execution in an
+existing container cannot select another image.
+
+```rust
+pub fn mxc_sdk::v1::experimental::spawn(
+    request: ContainerRequest,
+    options: SpawnOptions,
+) -> Result<MxcProcess, Error>;
+
+pub fn mxc_sdk::v1::experimental::run(
+    request: ContainerRequest,
+    options: RunOptions,
+) -> Result<ExecutionResult, Error>;
+```
+
+`mxc_sdk::v1::experimental::container` exposes `provision_container`,
+`validate_provision`, `start_container`, `validate_start`,
+`spawn_in_container`, `run_in_container`, `validate_process`,
+`stop_container`, `validate_stop`, `deprovision_container`, and
+`validate_deprovision` with the same signatures as `v1::container`.
+`spawn_in_container_with_pty` is present for API consistency but NVX rejects it
+before workload launch.
 
 ## Discovery and validation
 

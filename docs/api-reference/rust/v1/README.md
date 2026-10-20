@@ -6,10 +6,10 @@ All public SDK operations and types are available through `mxc_sdk::v1`.
 Filesystem discovery helpers and their result/options types use `v1::policy::filesystem`.
 Discovery, probes, telemetry, and policy helpers use the same versioned boundary.
 
-Experimental Windows x64 MicroVM captured execution uses
-`v1::experimental::run` with `Containment::MicroVm { image }` and the `microvm`
-build feature. This does not authorize MicroVM through stable launch operations
-or change the published V1 contract target.
+Experimental backends use the same V1 typed requests and results through
+`mxc_sdk::v1::experimental`. The `microvm` Cargo feature plus an experimental
+operation is required for NVX MicroVM authoring; ordinary `v1::run`,
+`v1::spawn`, and `v1::container::*` do not authorize it.
 
 - [Operation signatures](api.md)
 - [Types and fields](types.md)

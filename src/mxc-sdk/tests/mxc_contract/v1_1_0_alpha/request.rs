@@ -7,6 +7,41 @@ use mxc_sdk::mxc_contract::dev::{
 };
 
 #[test]
+fn microvm_creation_requires_an_image_on_both_paths() {
+    for operation in [
+        r#""process":{"commandLine":"echo"}"#,
+        r#""phase":"provision""#,
+    ] {
+        for settings in [
+            "", r#","microvm":{}"#, r#","microvm":{"image":""}"#,
+            r#","microvm":{"image":" "}"#, r#","microvm":{"image":"python:\n3.12"}"#,
+            r#","microvm":{"image":"python:\u00003.12"}"#, r#","microvm":{"image":null}"#,
+        ] {
+            let json = format!(
+                r#"{{"version":"1.1.0-alpha","containment":"microvm",{operation}{settings}}}"#
+            );
+            assert!(parse_request(&json).is_err(), "accepted {json}");
+        }
+        let json = format!(
+            r#"{{"version":"1.1.0-alpha","containment":"microvm",{operation},"microvm":{{"image":"python:3.12-alpine"}}}}"#
+        );
+        assert!(parse_request(&json).is_ok(), "rejected {json}");
+    }
+}
+
+#[test]
+fn existing_microvm_execution_cannot_select_an_image() {
+    let json = r#"{
+        "version":"1.1.0-alpha",
+        "phase":"exec",
+        "sandboxId":"microvm:0123456789abcdef0123456789abcdef",
+        "process":{"commandLine":"echo"},
+        "microvm":{"image":"python:3.12-alpine"}
+    }"#;
+    assert!(parse_request(json).is_err());
+}
+
+#[test]
 fn no_phase_selects_one_shot_request() {
     let json = r#"{
         "version": "1.1.0-alpha",

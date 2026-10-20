@@ -254,7 +254,8 @@ pub use state_aware::{ExecPhase, ExecRequest};
 pub use state_aware::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, MicroVmContainment, MicroVmProvision,
+    MicroVmProvisionRequest, StateAwareIsolationSession, StateAwareMicroVm,
 };
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
 pub use state_aware::{StartPhase, StartRequest};

@@ -85,12 +85,12 @@ use windows::Win32::Security::Authorization::{
 use windows::Win32::Security::Authorization::DENY_ACCESS;
 use windows::Win32::Security::{
     AclSizeInformation, AddAccessAllowedAceEx, AddAccessDeniedAceEx, AddAce, EqualSid, GetAce,
-    GetAclInformation, GetLengthSid, GetTokenInformation, InitializeAcl, IsValidSid, TokenOwner,
-    TokenUser, ACCESS_ALLOWED_ACE, ACCESS_DENIED_ACE, ACE_FLAGS, ACE_HEADER, ACL, ACL_REVISION,
-    ACL_SIZE_INFORMATION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, INHERITED_ACE,
-    OBJECT_INHERIT_ACE, OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_INFORMATION_CLASS,
-    TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+    GetAclInformation, GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation,
+    InitializeAcl, IsValidSid, TokenOwner, TokenUser, ACCESS_ALLOWED_ACE, ACCESS_DENIED_ACE,
+    ACE_FLAGS, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, CONTAINER_INHERIT_ACE,
+    DACL_SECURITY_INFORMATION, INHERITED_ACE, OBJECT_INHERIT_ACE, OBJECT_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SE_DACL_PROTECTED, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     DELETE, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
@@ -1290,6 +1290,16 @@ fn self_owner_sids() -> Result<Vec<OwnedSid>, DaclError> {
     Ok(sids)
 }
 
+fn owner_sid_matches_any(owner: PSID, allowed: &[OwnedSid]) -> bool {
+    if owner.0.is_null() {
+        return false;
+    }
+    allowed
+        .iter()
+        // SAFETY: `owner` is supplied by Win32 and each `OwnedSid` is valid.
+        .any(|sid| unsafe { EqualSid(owner, sid.as_psid()).is_ok() })
+}
+
 /// Whether `path`'s owner is THIS process's own identity (its token user, or —
 /// when elevated — its token owner / Administrators).
 ///
@@ -1327,23 +1337,148 @@ pub fn owner_is_self(path: &Path) -> Result<bool, DaclError> {
     if rc != ERROR_SUCCESS {
         return Err(win32_err(path, "GetNamedSecurityInfoW(owner)", rc));
     }
-    let mut is_self = false;
-    if !owner_psid.0.is_null() {
-        for sid in &mine {
-            // SAFETY: `owner_psid` points into the security descriptor returned
-            // above, and `sid` is an owned valid SID.
-            if unsafe { EqualSid(owner_psid, sid.as_psid()).is_ok() } {
-                is_self = true;
-                break;
-            }
-        }
-    }
+    let is_self = owner_sid_matches_any(owner_psid, &mine);
     // SAFETY: GetNamedSecurityInfoW allocated `sd` with LocalAlloc.
     unsafe {
         let _ = LocalFree(Some(HLOCAL(sd.0)));
     }
     Ok(is_self)
 }
+
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
+mod owner_only_directory_creation {
+    use std::ffi::c_void;
+    use std::path::Path;
+
+    use windows::core::{HRESULT, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    use super::{current_user_sid, wide, win32_err_str, DaclError, OwnedSid};
+
+    /// Outcome of [`create_owner_only_directory`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum CreateDirectoryDisposition {
+        /// The directory was created by this call.
+        Created,
+        /// A node with this path already exists.
+        AlreadyExists,
+    }
+
+    struct OwnedSecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+    impl OwnedSecurityDescriptor {
+        fn from_sddl(path: &Path, sddl: &str) -> Result<Self, DaclError> {
+            let mut sddl_w: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
+            // SAFETY: `sddl_w` is NUL-terminated UTF-16 and `descriptor` is a valid out-param.
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    PCWSTR(sddl_w.as_mut_ptr()),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    None,
+                )
+            }
+            .map_err(|error| {
+                win32_err_str(
+                    path,
+                    &format!("ConvertStringSecurityDescriptorToSecurityDescriptorW: {error}"),
+                )
+            })?;
+            if descriptor.0.is_null() {
+                return Err(win32_err_str(
+                    path,
+                    "ConvertStringSecurityDescriptorToSecurityDescriptorW returned null descriptor",
+                ));
+            }
+            Ok(Self(descriptor))
+        }
+
+        fn attributes(&self) -> SECURITY_ATTRIBUTES {
+            SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: self.0 .0,
+                bInheritHandle: false.into(),
+            }
+        }
+    }
+
+    impl Drop for OwnedSecurityDescriptor {
+        fn drop(&mut self) {
+            if !self.0 .0.is_null() {
+                // SAFETY: Win32 allocated this descriptor; LocalFree is its paired free.
+                unsafe {
+                    let _ = LocalFree(Some(HLOCAL(self.0 .0)));
+                }
+            }
+        }
+    }
+
+    fn sid_to_string(sid: &OwnedSid, path: &Path, context: &str) -> Result<String, DaclError> {
+        let mut string_sid = PWSTR::null();
+        // SAFETY: `sid` is valid for the duration of the call.
+        unsafe {
+            ConvertSidToStringSidW(sid.as_psid(), &mut string_sid).map_err(|error| {
+                win32_err_str(path, &format!("ConvertSidToStringSidW({context}): {error}"))
+            })?;
+        }
+        // SAFETY: Win32 returned a valid NUL-terminated UTF-16 pointer.
+        let sid_string = unsafe { string_sid.to_string() }.map_err(|error| {
+            DaclError::InvalidSid(format!("{context} SID string not UTF-16: {error}"))
+        });
+        if !string_sid.is_null() {
+            // SAFETY: ConvertSidToStringSidW allocates with LocalAlloc.
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(string_sid.0 as *mut c_void)));
+            }
+        }
+        sid_string
+    }
+
+    fn owner_only_directory_sddl(path: &Path, inheritable: bool) -> Result<String, DaclError> {
+        let user = current_user_sid()?;
+        let user_sid = sid_to_string(&user, path, "TokenUser")?;
+        let inherit = if inheritable { "OICI" } else { "" };
+        // Protected DACL with exactly two allow ACEs: TokenUser + Local SYSTEM.
+        Ok(format!(
+            "D:P(A;{inherit};FA;;;{user_sid})(A;{inherit};FA;;;SY)"
+        ))
+    }
+
+    /// Atomically create `path` as an owner-only directory with MXC's final
+    /// protected DACL (`TokenUser` + `SYSTEM`, both full-control).
+    pub(crate) fn create_owner_only_directory(
+        path: &Path,
+        inheritable: bool,
+    ) -> Result<CreateDirectoryDisposition, DaclError> {
+        let sddl = owner_only_directory_sddl(path, inheritable)?;
+        let descriptor = OwnedSecurityDescriptor::from_sddl(path, &sddl)?;
+        let attrs = descriptor.attributes();
+        let path_w = wide(path);
+        // SAFETY: `path_w` is NUL-terminated and `attrs` references a live descriptor.
+        match unsafe { CreateDirectoryW(PCWSTR(path_w.as_ptr()), Some(&attrs)) } {
+            Ok(()) => Ok(CreateDirectoryDisposition::Created),
+            Err(error)
+                if error.code() == HRESULT::from_win32(ERROR_ALREADY_EXISTS.0)
+                    || error.code() == HRESULT::from_win32(ERROR_FILE_EXISTS.0) =>
+            {
+                Ok(CreateDirectoryDisposition::AlreadyExists)
+            }
+            Err(error) => Err(win32_err_str(path, &format!("CreateDirectoryW: {error}"))),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "microvm"))]
+pub(crate) use owner_only_directory_creation::{
+    create_owner_only_directory, CreateDirectoryDisposition,
+};
 
 /// Stamp a protected DACL that grants only the current user and Local SYSTEM.
 ///
@@ -1419,6 +1554,118 @@ pub fn set_owner_only_dacl(path: &Path, inheritable: bool) -> Result<(), DaclErr
         return Err(win32_err(path, "SetNamedSecurityInfoW", rc));
     }
     Ok(())
+}
+
+/// Verifies that a directory is owned by this process identity (TokenUser or,
+/// when elevated, TokenOwner) and has the exact protected DACL installed by
+/// [`set_owner_only_dacl`].
+pub fn validate_owner_only_directory(path: &Path) -> Result<bool, DaclError> {
+    let allowed_owners = self_owner_sids()?;
+    let user = current_user_sid()?;
+    let system = OwnedSid::parse("S-1-5-18")?;
+    let path_w = wide(path);
+    let mut owner = PSID::default();
+    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let info =
+        OBJECT_SECURITY_INFORMATION(OWNER_SECURITY_INFORMATION.0 | DACL_SECURITY_INFORMATION.0);
+    // SAFETY: `path_w` is NUL-terminated and the returned descriptor is freed below.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            PCWSTR(path_w.as_ptr()),
+            SE_FILE_OBJECT,
+            info,
+            Some(&mut owner),
+            None,
+            Some(&mut dacl),
+            None,
+            &mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(win32_err(path, "GetNamedSecurityInfoW(owner/dacl)", rc));
+    }
+
+    let result = (|| {
+        if !owner_sid_matches_any(owner, &allowed_owners) || dacl.is_null() {
+            return Ok(false);
+        }
+
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        // SAFETY: `sd` is the valid descriptor returned above.
+        unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) }.map_err(
+            |error| win32_err_str(path, &format!("GetSecurityDescriptorControl: {error}")),
+        )?;
+        if control & SE_DACL_PROTECTED.0 == 0 {
+            return Ok(false);
+        }
+
+        let mut acl_info = ACL_SIZE_INFORMATION::default();
+        // SAFETY: `dacl` points into `sd` and `acl_info` is a valid out-param.
+        unsafe {
+            GetAclInformation(
+                dacl,
+                &mut acl_info as *mut _ as *mut c_void,
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        }
+        .map_err(|error| win32_err_str(path, &format!("GetAclInformation: {error}")))?;
+        if acl_info.AceCount != 2 {
+            return Ok(false);
+        }
+
+        let required_flags = (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE).0 as u8;
+        let mut user_grant = false;
+        let mut system_grant = false;
+        for index in 0..acl_info.AceCount {
+            let mut ace_ptr: *mut c_void = ptr::null_mut();
+            // SAFETY: `dacl` is valid and `index` is within the reported ACE count.
+            unsafe { GetAce(dacl, index, &mut ace_ptr) }
+                .map_err(|error| win32_err_str(path, &format!("GetAce: {error}")))?;
+            let Some(ace_ptr) = NonNull::new(ace_ptr) else {
+                return Ok(false);
+            };
+            // SAFETY: GetAce returned a valid ACE pointer.
+            let header = unsafe { ace_ptr.cast::<ACE_HEADER>().as_ref() };
+            if header.AceType != 0x00 || header.AceFlags != required_flags {
+                return Ok(false);
+            }
+            // SAFETY: ACCESS_ALLOWED_ACE is guaranteed by the checked ACE type.
+            let ace = unsafe { ace_ptr.cast::<ACCESS_ALLOWED_ACE>().as_ref() };
+            if ace.Mask != FILE_ALL_ACCESS.0 {
+                return Ok(false);
+            }
+            let sid = PSID(&ace.SidStart as *const _ as *mut c_void);
+            let Some((matches_user, matches_system)) =
+                owner_only_trustee_matches(sid, &user, &system)
+            else {
+                return Ok(false);
+            };
+            user_grant |= matches_user;
+            system_grant |= matches_system;
+        }
+        Ok(user_grant && system_grant)
+    })();
+
+    // SAFETY: GetNamedSecurityInfoW allocated `sd` with LocalAlloc.
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+    }
+    result
+}
+
+fn owner_only_trustee_matches(
+    trustee: PSID,
+    user: &OwnedSid,
+    system: &OwnedSid,
+) -> Option<(bool, bool)> {
+    // SAFETY: The caller supplies a SID from a validated ACE; `user` and
+    // `system` own valid SID buffers for the duration of these calls.
+    let matches_user = unsafe { EqualSid(trustee, user.as_psid()).is_ok() };
+    let matches_system = unsafe { EqualSid(trustee, system.as_psid()).is_ok() };
+    (matches_user || matches_system).then_some((matches_user, matches_system))
 }
 /// Mirrors [`apply_explicit_ace`] in reverse: any non-matching
 /// explicit ACE for the same SID — including those authored by other
@@ -2310,6 +2557,44 @@ mod tests {
             "owner must be unchanged by stamping an owner-only DACL"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owner_sid_match_accepts_distinct_allowed_sid() {
+        let token_user = OwnedSid::parse("S-1-5-21-1-2-3-1001").expect("parse token user SID");
+        let token_owner =
+            OwnedSid::parse("S-1-5-21-1-2-3-1002").expect("parse distinct token owner SID");
+
+        assert!(
+            !unsafe { EqualSid(token_user.as_psid(), token_owner.as_psid()).is_ok() },
+            "test precondition: token owner SID must differ from token user SID"
+        );
+        assert!(
+            !owner_sid_matches_any(token_owner.as_psid(), std::slice::from_ref(&token_user)),
+            "owner SID should not match when the allowed set omits it"
+        );
+        let allowed = vec![token_user, token_owner];
+        assert!(
+            owner_sid_matches_any(allowed[1].as_psid(), &allowed),
+            "owner SID must match any allowed self-owner identity, including a distinct TokenOwner"
+        );
+    }
+
+    #[test]
+    fn owner_only_trustee_match_marks_coincident_user_and_system_grants() {
+        let system = OwnedSid::parse("S-1-5-18").expect("parse SYSTEM SID");
+        let coincident_user = OwnedSid::parse("S-1-5-18").expect("parse coincident user SID");
+
+        assert_eq!(
+            owner_only_trustee_matches(system.as_psid(), &coincident_user, &system),
+            Some((true, true))
+        );
+
+        let unknown = OwnedSid::parse("S-1-5-19").expect("parse unknown trustee SID");
+        assert_eq!(
+            owner_only_trustee_matches(unknown.as_psid(), &coincident_user, &system),
+            None
+        );
     }
 
     // block at module level (above) covers RW_MASK/RO_MASK shape

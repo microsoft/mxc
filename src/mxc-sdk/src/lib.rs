@@ -159,6 +159,9 @@ pub use backend_modules::isolation_session::common as isolation_session_common;
 pub use backend_modules::lxc::common as lxc_common;
 #[doc(hidden)]
 #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+pub use backend_modules::nvx;
+#[doc(hidden)]
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
 pub use backend_modules::nvx::runner as nvx_runner;
 #[doc(hidden)]
 #[cfg(target_os = "windows")]
@@ -262,35 +265,6 @@ pub mod v1 {
         };
     }
 
-    /// Experimental V1 create-and-run execution.
-    pub mod experimental {
-        use super::{ContainerRequest, Error, ExecutionResult, RunOptions};
-
-        /// Run a typed request to completion with experimental backend authorization.
-        ///
-        /// MicroVM captures output; streaming and manual lifecycle operations are
-        /// not available through this entry point.
-        pub fn run(
-            request: ContainerRequest,
-            options: RunOptions,
-        ) -> Result<ExecutionResult, Error> {
-            let mut prepared =
-                crate::policy::prepare_creation_request(&request, options.telemetry)?;
-            prepared.inner.experimental_enabled = true;
-            let logger =
-                crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-            match crate::mxc_engine::execute_one_shot_request(&prepared.inner, logger)? {
-                #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
-                crate::mxc_engine::OneShotExecution::Captured(result) => {
-                    Ok(crate::captured_execution_result(result))
-                }
-                crate::mxc_engine::OneShotExecution::Streaming(process) => {
-                    crate::wait_with_output(crate::sandbox::MxcProcess::new(process))
-                }
-            }
-        }
-    }
-
     /// V1 typed lifecycle entry points.
     pub mod container {
         use super::{
@@ -318,6 +292,243 @@ pub mod v1 {
                     telemetry: options.telemetry,
                 },
             )?)
+        }
+    }
+
+    /// Experimental V1 operations.
+    ///
+    /// Requests and result types are the ordinary V1 typed models, but these
+    /// entry points authorize development backends such as MicroVM.
+    pub mod experimental {
+        use super::{
+            ContainerRequest, Error, ExecutionResult, MxcProcess, RunOptions, SpawnOptions,
+        };
+
+        /// Spawn an experimental typed request as a live process.
+        pub fn spawn(
+            request: ContainerRequest,
+            options: SpawnOptions,
+        ) -> Result<MxcProcess, Error> {
+            let mut prepared =
+                crate::policy::prepare_creation_request(&request, options.telemetry)?;
+            prepared.inner.experimental_enabled = true;
+            crate::mxc_engine::spawn_execution_request(&prepared.inner).map(MxcProcess::new)
+        }
+
+        /// Run an experimental typed request to completion.
+        pub fn run(
+            request: ContainerRequest,
+            options: RunOptions,
+        ) -> Result<ExecutionResult, Error> {
+            let mut prepared =
+                crate::policy::prepare_creation_request(&request, options.telemetry)?;
+            prepared.inner.experimental_enabled = true;
+            let logger =
+                crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            match crate::mxc_engine::execute_one_shot_request(&prepared.inner, logger)? {
+                #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+                crate::mxc_engine::OneShotExecution::Captured(result) => {
+                    Ok(crate::captured_execution_result(result))
+                }
+                crate::mxc_engine::OneShotExecution::Streaming(process) => {
+                    crate::wait_with_output(crate::sandbox::MxcProcess::new(process))
+                }
+            }
+        }
+
+        /// Experimental typed container lifecycle operations.
+        pub mod container {
+            use super::super::{
+                ContainerId, DeprovisionOptions, Error, ExecutionRequest, ExecutionResult,
+                LifecycleResult, MxcProcess, MxcPtyProcess, ProvisionOptions, ProvisionRequest,
+                ProvisionResult, RunInContainerOptions, SpawnInContainerOptions,
+                SpawnInContainerWithPtyOptions, StartOptions, StopOptions, ValidationResult,
+            };
+            use crate::mxc_common::state_aware_operation::StateAwareOperation;
+            use crate::state_aware_sdk::StateAwareResult;
+
+            fn run_input(
+                input: crate::mxc_common::sdk_input::SdkStateAwareInput,
+                dry_run: bool,
+            ) -> Result<StateAwareResult, Error> {
+                crate::mxc_engine::run_typed_state_aware_request(input, true, dry_run)
+                    .map(StateAwareResult::from_engine)
+            }
+
+            pub fn provision_container(
+                request: ProvisionRequest,
+                options: ProvisionOptions,
+            ) -> Result<ProvisionResult, Error> {
+                let input = request
+                    .into_sdk_input(options.telemetry)
+                    .map_err(Error::from)?;
+                run_input(input, false)?
+                    .into_provision()
+                    .map_err(Error::from)
+            }
+
+            pub fn validate_provision(
+                request: ProvisionRequest,
+                options: ProvisionOptions,
+            ) -> Result<ValidationResult, Error> {
+                let input = request
+                    .into_sdk_input(options.telemetry)
+                    .map_err(Error::from)?;
+                run_input(input, true)?
+                    .into_validation()
+                    .map_err(Error::from)
+            }
+
+            pub fn start_container(
+                container_id: &ContainerId,
+                options: StartOptions,
+            ) -> Result<LifecycleResult, Error> {
+                lifecycle(
+                    container_id,
+                    options.telemetry,
+                    |sandbox_id| StateAwareOperation::Start { sandbox_id },
+                    false,
+                )?
+                .into_lifecycle()
+                .map_err(Error::from)
+            }
+
+            pub fn validate_start(
+                container_id: &ContainerId,
+                options: StartOptions,
+            ) -> Result<ValidationResult, Error> {
+                lifecycle(
+                    container_id,
+                    options.telemetry,
+                    |sandbox_id| StateAwareOperation::Start { sandbox_id },
+                    true,
+                )?
+                .into_validation()
+                .map_err(Error::from)
+            }
+
+            pub fn stop_container(
+                container_id: &ContainerId,
+                options: StopOptions,
+            ) -> Result<LifecycleResult, Error> {
+                lifecycle(
+                    container_id,
+                    options.telemetry,
+                    |sandbox_id| StateAwareOperation::Stop { sandbox_id },
+                    false,
+                )?
+                .into_lifecycle()
+                .map_err(Error::from)
+            }
+
+            pub fn validate_stop(
+                container_id: &ContainerId,
+                options: StopOptions,
+            ) -> Result<ValidationResult, Error> {
+                lifecycle(
+                    container_id,
+                    options.telemetry,
+                    |sandbox_id| StateAwareOperation::Stop { sandbox_id },
+                    true,
+                )?
+                .into_validation()
+                .map_err(Error::from)
+            }
+
+            pub fn deprovision_container(
+                container_id: &ContainerId,
+                options: DeprovisionOptions,
+            ) -> Result<LifecycleResult, Error> {
+                lifecycle(
+                    container_id,
+                    options.telemetry,
+                    |sandbox_id| StateAwareOperation::Deprovision { sandbox_id },
+                    false,
+                )?
+                .into_lifecycle()
+                .map_err(Error::from)
+            }
+
+            pub fn validate_deprovision(
+                container_id: &ContainerId,
+                options: DeprovisionOptions,
+            ) -> Result<ValidationResult, Error> {
+                lifecycle(
+                    container_id,
+                    options.telemetry,
+                    |sandbox_id| StateAwareOperation::Deprovision { sandbox_id },
+                    true,
+                )?
+                .into_validation()
+                .map_err(Error::from)
+            }
+
+            pub fn spawn_in_container(
+                container_id: &ContainerId,
+                request: ExecutionRequest,
+                options: SpawnInContainerOptions,
+            ) -> Result<MxcProcess, Error> {
+                let input = request
+                    .into_sdk_input(container_id, options.telemetry)
+                    .map_err(Error::from)?;
+                crate::mxc_engine::exec_typed_state_aware_request(input, true).map(MxcProcess::new)
+            }
+
+            pub fn run_in_container(
+                container_id: &ContainerId,
+                request: ExecutionRequest,
+                options: RunInContainerOptions,
+            ) -> Result<ExecutionResult, Error> {
+                crate::wait_with_output(spawn_in_container(
+                    container_id,
+                    request,
+                    SpawnInContainerOptions {
+                        telemetry: options.telemetry,
+                    },
+                )?)
+            }
+
+            pub fn spawn_in_container_with_pty(
+                container_id: &ContainerId,
+                request: ExecutionRequest,
+                options: SpawnInContainerWithPtyOptions,
+            ) -> Result<MxcPtyProcess, Error> {
+                options.size.validate()?;
+                let input = request
+                    .into_sdk_input(container_id, options.telemetry)
+                    .map_err(Error::from)?;
+                crate::mxc_engine::exec_typed_state_aware_pty_request(
+                    input,
+                    true,
+                    options.size.into(),
+                )
+                .and_then(MxcPtyProcess::new)
+            }
+
+            pub fn validate_process(
+                container_id: &ContainerId,
+                request: ExecutionRequest,
+                options: SpawnInContainerOptions,
+            ) -> Result<ValidationResult, Error> {
+                let input = request
+                    .into_sdk_input(container_id, options.telemetry)
+                    .map_err(Error::from)?;
+                run_input(input, true)?
+                    .into_validation()
+                    .map_err(Error::from)
+            }
+
+            fn lifecycle(
+                container_id: &ContainerId,
+                telemetry: Option<crate::options::TelemetryConfig>,
+                operation: fn(String) -> StateAwareOperation,
+                dry_run: bool,
+            ) -> Result<StateAwareResult, Error> {
+                let input =
+                    crate::state_aware_sdk::lifecycle_sdk_input(container_id, telemetry, operation)
+                        .map_err(Error::from)?;
+                run_input(input, dry_run)
+            }
         }
     }
 

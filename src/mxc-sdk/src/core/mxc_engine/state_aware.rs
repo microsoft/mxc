@@ -143,6 +143,16 @@ pub fn run_state_aware(
                 dry_run,
             )
         }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        crate::mxc_common::models::ContainmentBackend::MicroVm => {
+            let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
+            let mut runner = crate::nvx::state_aware::NvxStateAwareRunner::new()?;
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
+                &mut runner,
+                bound,
+                dry_run,
+            )
+        }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
@@ -162,6 +172,8 @@ pub enum EngineProvisionMetadata {
         agent_user_sid: String,
         ephemeral_workspace_path: String,
     },
+    /// MicroVM backend metadata.
+    MicroVm(serde_json::Value),
 }
 
 /// Neutral result returned by typed engine lifecycle dispatch.
@@ -305,6 +317,19 @@ fn run_state_aware_typed(
             )?;
             typed_dispatch_result(outcome, no_provision_metadata)
         }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        crate::mxc_common::models::ContainmentBackend::MicroVm => {
+            let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
+            let mut runner = crate::nvx::state_aware::NvxStateAwareRunner::new()?;
+            let outcome = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_typed(
+                &mut runner,
+                bound,
+                dry_run,
+            )?;
+            typed_dispatch_result(outcome, |metadata| {
+                Ok(EngineProvisionMetadata::MicroVm(metadata))
+            })
+        }
         #[cfg(not(all(target_os = "windows", feature = "wslc")))]
         crate::mxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
@@ -365,6 +390,18 @@ pub fn exec_state_aware(
         crate::mxc_common::models::ContainmentBackend::Wslc => {
             let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
             let mut runner = crate::wslc_common::WslcStateAwareRunner::new();
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+                &mut runner,
+                bound,
+            )?;
+            Ok(Box::new(
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        crate::mxc_common::models::ContainmentBackend::MicroVm => {
+            let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
+            let mut runner = crate::nvx::state_aware::NvxStateAwareRunner::new()?;
             let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
                 &mut runner,
                 bound,

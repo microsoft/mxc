@@ -69,6 +69,10 @@ pub fn spawn_runner(
             "dry_run is not supported for streaming spawns",
         ));
     }
+    crate::mxc_engine::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
 
     // Anchor the run to its policy identity before any backend is engaged, so
     // the streaming surface produces the same `mxc.PolicyHash` record as the
@@ -81,6 +85,18 @@ pub fn spawn_runner(
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         ContainmentBackend::Wslc => spawn_wslc(request, logger),
         ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
+        ContainmentBackend::MicroVm => {
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+            {
+                crate::nvx_runner::NvxRunner::spawn_streaming(request)
+            }
+            #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+            {
+                Err(MxcError::backend_unavailable(
+                    "MicroVM requires Windows x64 and a build with the microvm feature",
+                ))
+            }
+        }
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
             other.wire_name()
@@ -101,6 +117,10 @@ pub fn spawn_pty_runner(
             "dry_run is not supported for PTY spawns",
         ));
     }
+    crate::mxc_engine::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
     crate::mxc_engine::run::log_policy_hash(request, logger);
     match &request.containment {
         ContainmentBackend::IsolationSession => spawn_isolation_session_pty(request, logger, size),

@@ -78,7 +78,7 @@ use serde_json::{Map, Value};
 
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{
-    ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    ExecutionRequest, IsolationSessionProvisionConfig, MicroVmProvisionConfig, WslcProvisionConfig,
 };
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 
@@ -166,9 +166,20 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             Value::Object(config)
         }
+        StateAwareOperation::Provision(StateAwareProvision::MicroVm(Some(
+            MicroVmProvisionConfig { image, memory_mib },
+        ))) => {
+            let mut config = Map::new();
+            config.insert("image".into(), Value::String(image.clone()));
+            if let Some(memory_mib) = memory_mib {
+                config.insert("memoryMib".into(), Value::from(*memory_mib));
+            }
+            Value::Object(config)
+        }
         StateAwareOperation::Provision(
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
+            | StateAwareProvision::MicroVm(None)
             | StateAwareProvision::Wslc(None),
         ) => Value::Null,
         // Sandbox IDs are not policy and can contain account identities.

@@ -8,7 +8,8 @@
 //! an ID, whose contents are validated at the existing dispatch boundary.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    ContainmentBackend, IsolationSessionProvisionConfig, MicroVmProvisionConfig,
+    WslcProvisionConfig,
 };
 use crate::mxc_common::state_aware_request::Phase;
 
@@ -19,6 +20,8 @@ pub enum StateAwareProvision {
     IsolationSession(Option<IsolationSessionProvisionConfig>),
     /// Windows Sandbox has no backend-specific provision configuration.
     WindowsSandbox,
+    /// MicroVM provision configuration.
+    MicroVm(Option<MicroVmProvisionConfig>),
     /// An omitted image remains absent until the WSLC backend chooses a default.
     Wslc(Option<WslcProvisionConfig>),
 }
@@ -29,6 +32,7 @@ impl StateAwareProvision {
         match self {
             Self::IsolationSession(_) => ContainmentBackend::IsolationSession,
             Self::WindowsSandbox => ContainmentBackend::WindowsSandbox,
+            Self::MicroVm(_) => ContainmentBackend::MicroVm,
             Self::Wslc(_) => ContainmentBackend::Wslc,
         }
     }
@@ -87,6 +91,15 @@ impl StateAwareOperation {
     /// Both the JSON and typed-SDK entry points call this, so neither surface
     /// can accept a payload the other rejects.
     pub(crate) fn validate(&self) -> Result<(), crate::mxc_common::error::WxcError> {
+        if let Self::Provision(StateAwareProvision::MicroVm(config)) = self {
+            let config = config.as_ref().ok_or_else(|| {
+                crate::mxc_common::error::WxcError::Validation(
+                    "microvm.image is required".to_owned(),
+                )
+            })?;
+            crate::mxc_contract::dev::ImageReference::validate(&config.image)
+                .map_err(crate::mxc_common::error::WxcError::Validation)?;
+        }
         match self {
             Self::Provision(StateAwareProvision::Wslc(Some(config))) => {
                 match config.port_mappings.as_deref() {
@@ -96,6 +109,13 @@ impl StateAwareOperation {
                     ),
                     None => Ok(()),
                 }
+            }
+            Self::Provision(StateAwareProvision::MicroVm(Some(config)))
+                if config.memory_mib == Some(0) =>
+            {
+                Err(crate::mxc_common::error::WxcError::Validation(
+                    "microvm.provision.memoryMib must be greater than zero".to_owned(),
+                ))
             }
             Self::Provision(_)
             | Self::Start { .. }
@@ -120,6 +140,10 @@ mod tests {
             (
                 StateAwareProvision::WindowsSandbox,
                 ContainmentBackend::WindowsSandbox,
+            ),
+            (
+                StateAwareProvision::MicroVm(None),
+                ContainmentBackend::MicroVm,
             ),
             (StateAwareProvision::Wslc(None), ContainmentBackend::Wslc),
         ] {
@@ -180,6 +204,10 @@ mod tests {
         assert_ne!(
             StateAwareProvision::Wslc(None),
             StateAwareProvision::Wslc(Some(WslcProvisionConfig::default()))
+        );
+        assert_ne!(
+            StateAwareProvision::MicroVm(None),
+            StateAwareProvision::MicroVm(Some(MicroVmProvisionConfig::default()))
         );
     }
 }

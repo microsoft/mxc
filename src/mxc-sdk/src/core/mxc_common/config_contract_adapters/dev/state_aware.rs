@@ -5,7 +5,9 @@ use crate::mxc_common::config_contract_adapters::dev::common::{
     convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
 use crate::mxc_common::error::WxcError;
-use crate::mxc_common::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
+use crate::mxc_common::models::{
+    IsolationSessionProvisionConfig, MicroVmProvisionConfig, WslcProvisionConfig,
+};
 use crate::mxc_common::state_aware_input::StateAwareInput;
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::mxc_common::wire;
@@ -91,6 +93,16 @@ fn convert_state_aware_wslc(value: contract::StateAwareWslc) -> Option<WslcProvi
     provision.into_option().map(convert_wslc_provision)
 }
 
+fn convert_state_aware_microvm(value: contract::StateAwareMicroVm) -> MicroVmProvisionConfig {
+    let contract::StateAwareMicroVm { image, provision } = value;
+    MicroVmProvisionConfig {
+        image: image.into_inner(),
+        memory_mib: provision
+            .into_option()
+            .and_then(|config| config.memory_mib.into_option()),
+    }
+}
+
 fn state_aware_common(
     schema: contract::OptionalField<String>,
     comment: contract::OptionalField<serde_json::Value>,
@@ -134,8 +146,35 @@ pub(super) fn provision_into_input(
         contract::ProvisionRequest::WindowsSandbox(request) => {
             windows_sandbox_provision_into_input(request)
         }
+        contract::ProvisionRequest::MicroVm(request) => microvm_provision_into_input(request),
         contract::ProvisionRequest::Wslc(request) => wslc_provision_into_input(request),
     }
+}
+
+fn microvm_provision_into_input(
+    request: contract::MicroVmProvisionRequest,
+) -> Result<StateAwareInput, WxcError> {
+    let contract::MicroVmProvisionRequest {
+        schema,
+        comment,
+        version,
+        phase: contract::ProvisionPhase,
+        containment: contract::MicroVmContainment,
+        filesystem,
+        network,
+        runtime_config,
+        telemetry,
+        microvm,
+    } = request;
+    let provision = Some(convert_state_aware_microvm(microvm));
+    let mut common = state_aware_common(schema, comment, version, telemetry);
+    common.filesystem = filesystem.into_option().map(convert_filesystem);
+    common.network = network.into_option().map(convert_network);
+    common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Provision(StateAwareProvision::MicroVm(provision)),
+    )
 }
 
 fn isolation_session_provision_into_input(

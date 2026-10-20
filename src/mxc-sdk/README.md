@@ -185,23 +185,30 @@ immutable Git revision `0430ce79d125203c20f0aa69243480513a774296`; it does not
 enable the standalone OpenVMM feature. This development crate has
 `publish = false`.
 
-`mxc_sdk::v1::experimental::run(request, options)` supports typed MicroVM
-create-and-run requests with captured stdout/stderr, exit status and timeout.
-Select `Containment::MicroVm { image: String }` with a required registry image
-reference. The hidden JSON facade `mxc_sdk::__ffi::run_json(json, true)` accepts
-the development `1.1.0-alpha` contract with root `"microvm": {"image": "..."}`.
-Stable `run` and `spawn` do not authorize this backend. Streaming, PTY and
-public Rust MicroVM container lifecycle operations are not available.
-Distribute the complete `aci-edge-sandboxes/` directory beside the consuming
-executable. The native agent resolves the caller's image reference on the host;
-there is no default image or local image-file input.
+The `mxc_sdk::v1::experimental` entry points support captured and streaming
+create-and-run requests, and `experimental::container` supports container
+lifecycle operations. Creation requires an explicit registry image:
 
+```rust,no_run
+use mxc_sdk::v1::{Containment, ContainerRequest, ProvisionRequest};
+
+let mut request = ContainerRequest::new("python --version");
+request.containment = Containment::MicroVm { image: "python:3.12-alpine".to_owned() };
+let provision = ProvisionRequest::microvm("python:3.12-alpine", Some(512));
+```
+
+The development `1.1.0-alpha` JSON creation paths require `microvm.image`;
+provision also accepts optional `microvm.provision.memoryMib`. Image selection
+is fixed at creation, not accepted by later executions. Blank or
+whitespace/control-containing image input fails before backend setup, and
+unsupported image-reference capabilities fail explicitly. Registry syntax and
+resolution errors come from NVX; MXC does not implement a second image parser.
+Distribute the complete `aci-edge-sandboxes/` directory beside the consuming
+executable. The native agent materializes the caller-selected image on the host;
+this does not grant guest network access. There is no Azure Linux fallback.
+References are cached by text; prefer a digest when immutable content matters.
 The host requires Windows Hypervisor Platform and hardware virtualization.
-Filesystem read-only, read-write and denied paths, directional network policy
-and `runtimeConfig.networkProxy` are mapped to the NVX runtime and checked
-against its advertised capabilities before sandbox creation. Unsupported policy
-fails closed. UI policy and capture-denials are unsupported. Containers must be
-destroyed after execution without preserving policy.
+The complete signed bundle must match the pinned runtime's manifests and assets.
 
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes

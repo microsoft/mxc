@@ -33,6 +33,11 @@ enum ProvisionContainment {
         image: Option<String>,
         image_tar_path: Option<String>,
     },
+    /// Experimental NVX MicroVM.
+    MicroVm {
+        image: String,
+        memory_mib: Option<u32>,
+    },
 }
 
 impl ProvisionContainment {
@@ -59,6 +64,12 @@ impl ProvisionContainment {
                     })
                 };
                 RuntimeProvision::Wslc(config)
+            }
+            Self::MicroVm { image, memory_mib } => {
+                RuntimeProvision::MicroVm(Some(crate::mxc_common::models::MicroVmProvisionConfig {
+                    image: image.clone(),
+                    memory_mib: *memory_mib,
+                }))
             }
         })
     }
@@ -159,6 +170,19 @@ impl ProvisionRequest {
         }
     }
 
+    /// Create an experimental NVX MicroVM provision request.
+    pub fn microvm(image: impl Into<String>, memory_mib: Option<u32>) -> Self {
+        Self {
+            provision: ProvisionContainment::MicroVm {
+                image: image.into(),
+                memory_mib,
+            },
+            filesystem: None,
+            network: None,
+            telemetry: None,
+        }
+    }
+
     /// Set provision-time filesystem policy.
     pub fn set_filesystem(&mut self, filesystem: FilesystemPolicy) -> &mut Self {
         self.filesystem = Some(filesystem);
@@ -181,7 +205,11 @@ impl ProvisionRequest {
         self,
         telemetry: Option<crate::options::TelemetryConfig>,
     ) -> Result<SdkStateAwareInput, MxcError> {
-        let version = ContractVersion::V1_0_0;
+        let version = if matches!(&self.provision, ProvisionContainment::MicroVm { .. }) {
+            ContractVersion::V1_1_0Alpha
+        } else {
+            ContractVersion::V1_0_0
+        };
         match &self.provision {
             ProvisionContainment::IsolationSession { .. } if self.filesystem.is_some() => {
                 return Err(MxcError::malformed_request(
@@ -312,6 +340,7 @@ pub struct IsolationSessionProvisionMetadata {
 #[non_exhaustive]
 pub enum ProvisionMetadata {
     IsolationSessionProvision(IsolationSessionProvisionMetadata),
+    MicroVmProvision(serde_json::Value),
 }
 
 /// Result of successfully provisioning a container.
@@ -357,6 +386,9 @@ impl StateAwareResult {
                 agent_user_sid,
                 ephemeral_workspace_path,
             }),
+            crate::mxc_engine::EngineProvisionMetadata::MicroVm(metadata) => {
+                ProvisionMetadata::MicroVmProvision(metadata)
+            }
         });
         Self {
             sandbox_id: result.sandbox_id,
@@ -577,6 +609,32 @@ mod tests {
                 )
                 .unwrap(),
         );
+    }
+
+    #[test]
+    fn microvm_provision_image_matches_exact_binding() {
+        for memory in [None, Some(512)] {
+            let mut json = serde_json::json!({
+                "version":"1.1.0-alpha",
+                "phase":"provision",
+                "containment":"microvm",
+                "microvm":{"image":"python:3.12-alpine"}
+            });
+            if let Some(memory) = memory {
+                json["microvm"]["provision"] = serde_json::json!({"memoryMib": memory});
+            }
+            assert_provision_matches_exact(
+                &json.to_string(),
+                ProvisionRequest::microvm("python:3.12-alpine", memory),
+                None,
+            );
+        }
+        for image in ["", " ", "python:\n3.12", "python:\u{0}3.12"] {
+            let error = ProvisionRequest::microvm(image, None)
+                .into_sdk_input(None)
+                .unwrap_err();
+            assert!(error.message.contains("microvm.image"));
+        }
     }
 
     fn assert_lifecycle_matches_exact(

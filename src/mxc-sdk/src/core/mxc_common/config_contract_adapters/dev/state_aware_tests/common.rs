@@ -31,6 +31,7 @@ pub(super) fn assert_clean_common(common: &crate::mxc_common::common_request_ir:
     assert!(common.process_container.is_none());
     assert!(common.lxc.is_none());
     assert!(common.wslc.is_none());
+    assert!(common.microvm_image.is_none());
     assert!(common.seatbelt.is_none());
     assert!(common.fallback.is_none());
     assert!(common.ui.is_none());
@@ -50,6 +51,7 @@ fn controlled_input_rejects_every_routing_and_one_shot_field() {
         "processContainer",
         "lxc",
         "wslc",
+        "microvm",
         "lifecycle",
     ] {
         let (mut common, _) =
@@ -68,6 +70,7 @@ fn controlled_input_rejects_every_routing_and_one_shot_field() {
             }
             "lxc" => common.lxc = Some(wire::Lxc::default()),
             "wslc" => common.wslc = Some(wire::Wslc::default()),
+            "microvm" => common.microvm_image = Some("python:3.12-alpine".to_owned()),
             "lifecycle" => common.lifecycle = Some(wire::Lifecycle::default()),
             _ => unreachable!(),
         }

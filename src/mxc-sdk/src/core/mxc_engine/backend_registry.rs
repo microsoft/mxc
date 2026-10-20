@@ -58,10 +58,7 @@ static BACKENDS: [BackendRegistration; 10] = [
     BackendRegistration {
         backend: ContainmentBackend::MicroVm,
         experimental: true,
-        probe_coverage: ProbeCoverage::NotDetected(
-            "no hypervisor-presence detector yet; see the follow-up items in \
-             docs/development/plans/backend-support-probe-api.md",
-        ),
+        probe_coverage: ProbeCoverage::Detected(&["windows"]),
     },
     BackendRegistration {
         backend: ContainmentBackend::Hyperlight,

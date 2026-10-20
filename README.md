@@ -66,6 +66,10 @@ environment settings. See the
 [NVX integration notes](src/mxc-sdk/README.md#experimental-nvx-create-and-run)
 for build requirements and supported execution.
 
+The experimental Rust API also supports live execution and container lifecycle
+operations with a required registry image fixed at provision. Stable Rust launch
+operations do not authorize MicroVM.
+
 ## How do I use MXC?
 
 Install an SDK through your package manager. You do not need to clone this

@@ -41,6 +41,7 @@ Linux / macOS (`.sh`):
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, build with `microvm`, complete signed bundle |
 | `run_microvm_tests.ps1` | Windows signed NVX command, output, exit, and timeout E2E suite | WHP enabled, build with `microvm`, complete signed bundle |
+| `run_microvm_state_aware_tests.ps1` | Windows signed NVX provision/start/exec/stop/deprovision executor E2E | WHP enabled, build with `microvm`, complete signed bundle |
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
 | `run_isolation_session_tests.ps1` | IsolationSession one-shot E2E suite | Interactive local session; OS-side IsolationSession service |

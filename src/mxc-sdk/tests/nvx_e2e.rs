@@ -145,6 +145,36 @@ mod windows_x64 {
         ]
     }
 
+    fn capability_requests() -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "readonly",
+                json!({"filesystem": {"readonlyPaths": ["C:\\work"]}}),
+            ),
+            (
+                "readwrite",
+                json!({"filesystem": {"readwritePaths": ["C:\\work"]}}),
+            ),
+            (
+                "denied",
+                json!({"filesystem": {"deniedPaths": ["C:\\work"]}}),
+            ),
+            ("network-empty", json!({"network": {}})),
+            (
+                "network-deny",
+                json!({"network": {"egress": {"default": "deny"}}}),
+            ),
+            (
+                "network-allow",
+                json!({"network": {"egress": {"default": "allow"}}}),
+            ),
+            (
+                "proxy",
+                json!({"runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}}),
+            ),
+        ]
+    }
+
     fn request_with_patch(patch: Value) -> Value {
         let mut request = process_only_request("printf forbidden");
         for (key, value) in patch.as_object().expect("patch object") {
@@ -219,6 +249,23 @@ mod windows_x64 {
             );
         }
 
+        // These capability-aware policies are accepted. With the signed bundle deliberately
+        // unavailable, each request must pass contract validation and stop at backend discovery.
+        for (label, patch) in capability_requests() {
+            let request = request_with_patch(patch);
+            let error = mxc_sdk::__ffi::run_json(&request.to_string(), true).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::BackendUnavailable,
+                "{label} must reach bundle discovery: {error:?}"
+            );
+            assert!(error.message.contains("NVX"), "{label}: {error:?}");
+            println!(
+                "HOST_ONLY accepted {label} through bundle discovery: {}",
+                error.message
+            );
+        }
+
         let request = process_only_request("printf forbidden").to_string();
         let error = mxc_sdk::__ffi::run_json(&request, true).unwrap_err();
         assert_eq!(error.code, ErrorCode::BackendUnavailable);
@@ -231,13 +278,15 @@ mod windows_x64 {
 
         let streaming = mxc_sdk::__ffi::spawn_container_json(&request, true)
             .err()
-            .expect("P1 must reject streaming");
-        assert_eq!(streaming.code, ErrorCode::UnsupportedContainment);
+            .expect("missing bundle must prevent streaming");
+        assert_eq!(streaming.code, ErrorCode::BackendUnavailable);
+        assert!(streaming.message.contains("NVX"));
         let pty =
             mxc_sdk::__ffi::spawn_with_pty_json(&request, true, Default::default()).unwrap_err();
         assert_eq!(pty.code, ErrorCode::UnsupportedContainment);
         let lifecycle = json!({
-            "version": "1.1.0-alpha", "phase": "provision", "containment": "microvm"
+            "version": "1.1.0-alpha", "phase": "provision", "containment": "microvm",
+            "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"}
         });
         assert!(mxc_sdk::__ffi::run_lifecycle_json(&lifecycle.to_string(), false, true).is_err());
     }
@@ -298,6 +347,20 @@ mod windows_x64 {
             );
             assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
             println!("HOST_ONLY executor rejected {label}: {stderr}");
+        }
+
+        // The executor remains captured create-and-run, but capability-aware policy is
+        // valid and therefore advances to the deliberately unavailable signed-bundle boundary.
+        for (label, patch) in capability_requests() {
+            let output = executor_output(&request_with_patch(patch), true);
+            assert!(!output.status.success(), "executor ran {label}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("backend_unavailable") && stderr.contains("NVX"),
+                "{label} did not reach bundle discovery: {stderr}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
+            println!("HOST_ONLY executor accepted {label}: {stderr}");
         }
     }
 
