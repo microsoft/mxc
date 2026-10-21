@@ -75,6 +75,13 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs. The
 test jobs need the three builds; a failed bundle fails only the IsolationSession
 jobs, at their bundle download.
 
+The Windows build retains the
+`runtime_proxy_preserves_allowed_host_to_container_loopback` regression test
+and its assertions. Its temporary ARM64 PR-only quarantine
+([#1551](https://github.com/microsoft/mxc/issues/1551)) does not apply to
+scheduled, main-branch, or manually dispatched builds. A failure here remains
+visible and fails the Windows build; it is not converted into a passing result.
+
 ### `Validation.Tests.Matrix.Job.yml` — "Create Validation Test Matrix"
 
 | Job | Runner | What it does |

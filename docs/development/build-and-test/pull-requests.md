@@ -13,6 +13,20 @@ versioning, repository-consistency, and SDK jobs. Repository consistency also
 checks that `mxc-sdk` is the only Rust release crate and has a valid package
 name, version, description, repository, and license.
 
+### Temporary Windows ARM64 test quarantine
+
+Windows ARM64 pull-request runs temporarily exclude
+`runtime_proxy_preserves_allowed_host_to_container_loopback`, tracked in
+[#1551](https://github.com/microsoft/mxc/issues/1551). The job emits a warning
+identifying the excluded test and tracking issue. The ARM64 build and all
+other tests remain required; Windows x64 PR runs are unchanged.
+
+The test and its assertions remain unchanged and still run in main-branch,
+scheduled, and manually dispatched builds. This quarantine does not change
+runtime proxy behavior. Remove it after the scenario demonstrably executes
+and passes on the affected Windows ARM64 environment, or after an explicit
+unsupported-policy fix has equivalent functional regression coverage.
+
 ### Local Node SDK package validation
 
 From `sdk/node`, run `npm run typecheck` before pushing SDK changes. It builds

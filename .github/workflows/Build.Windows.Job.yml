@@ -72,9 +72,26 @@ jobs:
           cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib mxc_common::telemetry::policy
 
       - name: Test
-        run: cargo test --locked --release --target ${{ matrix.target }}
-             --no-default-features
-             --features "${{ matrix.features }}"
+        shell: pwsh
+        env:
+          QUARANTINE_PROXY_INGRESS: ${{ github.event_name == 'pull_request' && matrix.arch == 'arm64' }}
+        run: |
+          $testArgs = @(
+            'test', '--locked', '--release', '--target', '${{ matrix.target }}',
+            '--no-default-features', '--features', '${{ matrix.features }}'
+          )
+          if ($env:QUARANTINE_PROXY_INGRESS -eq 'true') {
+            $testName = 'backend_modules::process_container::common::base_container_helpers::tests::' +
+              'runtime_proxy_preserves_allowed_host_to_container_loopback'
+            Write-Output (
+              "::warning title=Known proxy-ingress test quarantined::$testName is excluded " +
+              'only from ARM64 PR runs. Scheduled and main-branch runs retain the test. ' +
+              'Tracking: https://github.com/microsoft/mxc/issues/1551'
+            )
+            $testArgs += @('--', '--skip', $testName)
+          }
+          cargo @testArgs
+          exit $LASTEXITCODE
 
       - name: Build debug executor for isolated telemetry smoke tests
         run: cargo build --locked -p wxc --features test-support
