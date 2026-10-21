@@ -83,6 +83,9 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+serial_test.workspace = true
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 flate2 = { version = "1", optional = true }
 hyperlight-unikraft = { version = "=0.17.0", default-features = false, optional = true }

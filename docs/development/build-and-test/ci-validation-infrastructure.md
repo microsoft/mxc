@@ -236,6 +236,18 @@ get fixed or wired.
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
 
+### IsolationSession Rust test concurrency
+
+Tests in `src/mxc-sdk/tests/isolation_session.rs` that create sessions use
+`#[serial_test::serial(isolation_session)]` to prevent independent tests from
+overlapping, including under ordinary `cargo test`. Apply the same attribute to
+new tests that create sessions. Policy-only tests remain parallel.
+
+The lock is local to the test process. Cargo and the validation bundle run test
+executables sequentially. The `concurrent_one_shot_runs_stay_isolated` test still
+checks concurrent sessions within its own test; the lock keeps other tests out
+while it runs.
+
 ## Host preparation
 
 Preparation runs before the tests, keyed by the matrix backend id. A backend
