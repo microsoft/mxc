@@ -2837,7 +2837,11 @@ mod tests {
 
         let result = runner.validate_runner(&runtime_proxy_request("127.0.0.1"));
 
-        assert!(result.is_ok(), "got: {:?}", result.err().map(|r| r.error_message));
+        assert!(
+            result.is_ok(),
+            "got: {:?}",
+            result.err().map(|r| r.error_message)
+        );
     }
 
     #[test]
@@ -2849,9 +2853,9 @@ mod tests {
             ..NetworkEgressPolicy::default()
         });
 
-        let response = runner
-            .validate_runner(&request)
-            .expect_err("with a runtime proxy, the relayed port is the container's only outbound path");
+        let response = runner.validate_runner(&request).expect_err(
+            "with a runtime proxy, the relayed port is the container's only outbound path",
+        );
 
         assert!(
             response.error_message.contains("network.egress"),
