@@ -7,21 +7,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// How long a connection waits for the host's proxy to accept it, which also
-/// bounds how long stopping the relay can wait on a connection still opening.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// One accepted connection, carried to the host by a thread that connects
-/// upstream and copies toward the host, and a second it starts that copies
-/// back.
 pub(super) struct Connection {
     inbound: TcpStream,
     upstream: Arc<Mutex<Upstream>>,
     worker: JoinHandle<()>,
 }
 
-/// The host-side stream once the worker has connected it, and whether the
-/// relay has already asked the connection to close.
 #[derive(Default)]
 struct Upstream {
     closed: bool,
@@ -35,7 +28,9 @@ impl Connection {
         let worker_upstream = Arc::clone(&upstream);
         let worker = thread::Builder::new()
             .name("mxc-lxc-proxy-conn".to_string())
-            .spawn(move || carry(worker_inbound, &addresses, &worker_upstream))?;
+            .spawn(move || {
+                connect_to_proxy_and_copy(worker_inbound, &addresses, &worker_upstream)
+            })?;
 
         Ok(Self {
             inbound,
@@ -65,7 +60,7 @@ fn lock(upstream: &Mutex<Upstream>) -> MutexGuard<'_, Upstream> {
     upstream.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn carry(inbound: TcpStream, addresses: &[SocketAddr], slot: &Mutex<Upstream>) {
+fn connect_to_proxy_and_copy(inbound: TcpStream, addresses: &[SocketAddr], slot: &Mutex<Upstream>) {
     let connected = addresses
         .iter()
         .find_map(|address| TcpStream::connect_timeout(address, UPSTREAM_CONNECT_TIMEOUT).ok());
@@ -111,6 +106,5 @@ fn spawn_copy(from: TcpStream, to: TcpStream) -> io::Result<JoinHandle<()>> {
 fn copy_then_end(mut from: TcpStream, mut to: TcpStream) {
     let _ = io::copy(&mut from, &mut to);
 
-    // Tells the far side this direction has ended.
     let _ = to.shutdown(Shutdown::Write);
 }

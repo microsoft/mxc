@@ -28,22 +28,26 @@ use std::time::Duration;
 use nix::sched::{setns, CloneFlags};
 
 #[cfg(target_os = "linux")]
-mod connection;
-
-#[cfg(target_os = "linux")]
 use crate::mxc_common::models::unbracket_host;
 
 #[cfg(target_os = "linux")]
-use connection::Connection;
+use super::connection::Connection;
 
-/// How long the relay waits between checks for a new connection or a stop.
 #[cfg(target_os = "linux")]
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// The most connections relayed at once.  Each holds two threads in this
-/// process, and a connection over the limit is closed as soon as it arrives.
 #[cfg(target_os = "linux")]
 const MAX_RELAYED_CONNECTIONS: usize = 64;
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct LoopbackRelay;
+
+#[cfg(not(target_os = "linux"))]
+impl LoopbackRelay {
+    pub(crate) fn start(_pid: u32, _host: &str, _port: u16) -> Result<Self, String> {
+        Err("the loopback relay runs only on Linux".to_string())
+    }
+}
 
 /// A running relay.  Dropping it stops accepting, closes every relayed
 /// connection, and releases the container's network namespace.
@@ -71,12 +75,15 @@ impl LoopbackRelay {
             ));
         }
 
-        Self::serve(bind_in_namespace(pid, host, port)?, upstream)
+        Self::spawn_accept_thread(bind_in_namespace(pid, host, port)?, upstream)
     }
 
     /// Relay every connection `listeners` accept to the first of `upstream`
     /// that answers.
-    fn serve(listeners: Vec<TcpListener>, upstream: Arc<[SocketAddr]>) -> Result<Self, String> {
+    fn spawn_accept_thread(
+        listeners: Vec<TcpListener>,
+        upstream: Arc<[SocketAddr]>,
+    ) -> Result<Self, String> {
         for listener in &listeners {
             listener
                 .set_nonblocking(true)
@@ -87,7 +94,7 @@ impl LoopbackRelay {
         let worker_stop = Arc::clone(&stop);
         let worker = thread::Builder::new()
             .name("mxc-lxc-proxy-relay".to_string())
-            .spawn(move || relay(listeners, upstream, worker_stop))
+            .spawn(move || spin_and_accept_connections(listeners, upstream, worker_stop))
             .map_err(|e| format!("cannot start the relay thread: {e}"))?;
 
         Ok(Self {
@@ -157,7 +164,11 @@ fn bind_listeners(host: &str, port: u16) -> Result<Vec<TcpListener>, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn relay(listeners: Vec<TcpListener>, upstream: Arc<[SocketAddr]>, stop: Arc<AtomicBool>) {
+fn spin_and_accept_connections(
+    listeners: Vec<TcpListener>,
+    upstream: Arc<[SocketAddr]>,
+    stop: Arc<AtomicBool>,
+) {
     let mut connections: Vec<Connection> = Vec::new();
 
     while !stop.load(Ordering::Acquire) {
@@ -168,7 +179,6 @@ fn relay(listeners: Vec<TcpListener>, upstream: Arc<[SocketAddr]>, stop: Arc<Ato
             if let Ok((inbound, _)) = listener.accept() {
                 accepted = true;
 
-                // Dropping the stream closes it, refusing the connection.
                 if connections.len() >= MAX_RELAYED_CONNECTIONS {
                     continue;
                 }
@@ -188,16 +198,6 @@ fn relay(listeners: Vec<TcpListener>, upstream: Arc<[SocketAddr]>, stop: Arc<Ato
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) struct LoopbackRelay;
-
-#[cfg(not(target_os = "linux"))]
-impl LoopbackRelay {
-    pub(crate) fn start(_pid: u32, _host: &str, _port: u16) -> Result<Self, String> {
-        Err("the loopback relay runs only on Linux".to_string())
-    }
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -208,7 +208,8 @@ mod tests {
     fn relay_to(upstream: SocketAddr) -> (LoopbackRelay, SocketAddr) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
-        let relay = LoopbackRelay::serve(vec![listener], Arc::from([upstream])).unwrap();
+        let relay =
+            LoopbackRelay::spawn_accept_thread(vec![listener], Arc::from([upstream])).unwrap();
         (relay, address)
     }
 

@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 pub mod availability;
+#[cfg(target_os = "linux")]
+mod connection;
 pub mod filesystem_mounts;
 pub(crate) mod loopback_relay;
 pub mod lxc_bindings;

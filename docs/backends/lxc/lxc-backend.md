@@ -165,6 +165,10 @@ The workload reaches it at the same address and port from inside the container.
 there for the length of the run and carries each connection to the proxy on
 the host.  Nothing else on the host becomes reachable through it.
 
+MXC carries at most `MAX_RELAYED_CONNECTIONS` connections to the proxy at
+once.  Connections over that limit are closed as soon as they open.  Check the
+connection before using it.
+
 The workload is handed `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
 `FTP_PROXY` (and their lower-case forms) set to the proxy URL, with `NO_PROXY`
 empty.  Any proxy variables the caller put in `process.env` are replaced.
@@ -178,9 +182,11 @@ The proxy is the container's only way out:
 - `network.egress` must be omitted or `default: deny` with no rules.  The
   container gets no network interface unless `network.ingress` permits
   something, and then only the filtered interface ingress needs.
-- `preservePolicy: true` with `destroyOnExit: false` is rejected.  The relay
-  ends when MXC does, and a container kept running afterwards would have no
-  path to the proxy.
+
+MXC carries proxy connections only while the run lasts, and says so in the log
+when it starts.  With `destroyOnExit: false` the container outlives the run but
+has no path to the proxy until a later run with `runtimeConfig.networkProxy`
+reuses it.
 
 `HTTP_PROXY` reaches only clients that honor it.  A client that ignores it gets
 no network rather than a direct one.
