@@ -11,6 +11,8 @@ use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 
 #[cfg(target_os = "linux")]
+use nix::errno::Errno;
+#[cfg(target_os = "linux")]
 use nix::fcntl::{fcntl, FcntlArg};
 
 use crate::bwrap_common::bwrap_command::COMMAND_TAIL;
@@ -136,17 +138,17 @@ pub(crate) fn create_file() -> Result<File, String> {
     file.seek(SeekFrom::Start(0))
         .map_err(|error| format!("Bubblewrap: failed to rewind seccomp filter: {error}"))?;
     above_stdio(file)
+        .map_err(|error| format!("Bubblewrap: failed to move seccomp filter descriptor: {error}"))
 }
 
 // The child's stdio is mapped onto descriptors 0-2 before `pre_exec` runs, so
 // a filter left on one of those numbers is replaced before bwrap reads it.
 #[cfg(target_os = "linux")]
-fn above_stdio(file: File) -> Result<File, String> {
+fn above_stdio(file: File) -> Result<File, Errno> {
     let fd = fcntl(
         file.as_raw_fd(),
         FcntlArg::F_DUPFD_CLOEXEC(FIRST_NON_STDIO_FD),
-    )
-    .map_err(|error| format!("Bubblewrap: failed to move seccomp filter descriptor: {error}"))?;
+    )?;
 
     // SAFETY: `fcntl` returned a new descriptor that nothing else owns.
     Ok(unsafe { File::from_raw_fd(fd) })

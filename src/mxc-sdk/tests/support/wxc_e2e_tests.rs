@@ -686,7 +686,7 @@ pub fn has_bwrap() -> bool {
         match mxc_sdk::bwrap_common::bwrap_version::probe_bwrap() {
             Ok(_) => true,
             Err(err) => {
-                println!("SKIPPED: {err}");
+                skip_bwrap_test(&err.to_string());
                 false
             }
         }
@@ -697,6 +697,15 @@ pub fn has_bwrap() -> bool {
         println!("SKIPPED: Bubblewrap is only available on Linux");
         false
     }
+}
+
+/// Report a missing Bubblewrap test prerequisite, failing instead when
+/// `MXC_BWRAP_TESTS_REQUIRE_EXECUTION` is set.
+pub fn skip_bwrap_test(reason: &str) {
+    if std::env::var("MXC_BWRAP_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {
+        panic!("strict mode: {reason}");
+    }
+    println!("SKIPPED: {reason}");
 }
 
 /// Opt-in switch for the Windows ProcessContainer characterization tests.

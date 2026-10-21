@@ -12,8 +12,9 @@
 //! tracked separately.
 //!
 //! They run in the existing Linux CI job (`cargo test`) **only when `bwrap` is
-//! installed** — `has_bwrap()` skips them cleanly otherwise. Each test also
-//! skips if `lxc-exec` has not been built.
+//! installed** — `has_bwrap()` skips them cleanly otherwise, and fails them
+//! when `MXC_BWRAP_TESTS_REQUIRE_EXECUTION` is set. Each test also skips if
+//! `lxc-exec` has not been built.
 #![cfg(target_os = "linux")]
 
 #[path = "support/wxc_e2e_tests.rs"]
@@ -25,7 +26,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use wxc_e2e_tests::{
     has_bwrap, has_platform_exec, run_platform_config_value,
-    run_platform_config_value_within_duration,
+    run_platform_config_value_within_duration, skip_bwrap_test,
 };
 
 const SCHEMA_VERSION: &str = "0.9.0-alpha";
@@ -40,6 +41,14 @@ const SCHEMA_VERSION_0_9: &str = "0.9.0-alpha";
 /// Whether the Bubblewrap characterization prerequisites are present.
 fn ready() -> bool {
     has_platform_exec() && has_bwrap()
+}
+
+fn has_python3() -> bool {
+    let available = Command::new("python3").arg("--version").output().is_ok();
+    if !available {
+        skip_bwrap_test("python3 is required for the Bubblewrap seccomp tests");
+    }
+    available
 }
 
 /// Build a one-shot config that omits `containment` so the binary selects its
@@ -331,8 +340,7 @@ fn bubblewrap_allows_common_socket_families() {
     if !ready() {
         return;
     }
-    if Command::new("python3").arg("--version").output().is_err() {
-        println!("SKIPPED: python3 is required for the Bubblewrap socket-family seccomp test");
+    if !has_python3() {
         return;
     }
 
@@ -364,8 +372,7 @@ fn bubblewrap_denies_unlisted_families_with_eperm() {
     if !ready() {
         return;
     }
-    if Command::new("python3").arg("--version").output().is_err() {
-        println!("SKIPPED: python3 is required for the Bubblewrap socket-family seccomp test");
+    if !has_python3() {
         return;
     }
 
@@ -424,8 +431,7 @@ fn bubblewrap_denies_vsock_with_eperm() {
     if !ready() {
         return;
     }
-    if Command::new("python3").arg("--version").output().is_err() {
-        println!("SKIPPED: python3 is required for the Bubblewrap VSOCK seccomp test");
+    if !has_python3() {
         return;
     }
 
@@ -473,8 +479,7 @@ fn bubblewrap_denies_io_uring_with_enosys() {
     if !ready() {
         return;
     }
-    if Command::new("python3").arg("--version").output().is_err() {
-        println!("SKIPPED: python3 is required for the Bubblewrap io_uring seccomp test");
+    if !has_python3() {
         return;
     }
 
