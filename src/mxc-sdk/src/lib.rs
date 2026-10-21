@@ -232,7 +232,7 @@ pub mod v1 {
     #[cfg(target_os = "windows")]
     pub use crate::mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
     pub use crate::options::{
-        DeprovisionOptions, ProvisionOptions, RunInContainerOptions, RunOptions,
+        DeprovisionOptions, ProcfsPolicy, ProvisionOptions, RunInContainerOptions, RunOptions,
         SpawnInContainerOptions, SpawnInContainerWithPtyOptions, SpawnOptions, SpawnWithPtyOptions,
         StartOptions, StopOptions, TelemetryConfig,
     };
@@ -328,18 +328,60 @@ pub mod v1 {
     /// Returns a [`MxcProcess`] handle for live bidirectional stdio and termination;
     /// no pty is allocated. Any stdout/stderr stream the caller does not
     /// `take_*` is drained and discarded by [`wait`](MxcProcess::wait).
+    /// This entrypoint preserves the historical backend procfs default. New
+    /// callers should use [`spawn_with_procfs_policy`] with
+    /// [`ProcfsPolicy::default()`].
     pub fn spawn(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProcess, Error> {
         let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
         crate::mxc_engine::spawn_execution_request(&prepared.inner).map(MxcProcess::new)
     }
 
+    /// Spawn a request with an explicit Linux Bubblewrap procfs policy.
+    ///
+    /// `ProcfsPolicy::default()` omits procfs while retaining the private PID
+    /// namespace. Existing [`spawn`] calls retain their historical backend
+    /// behavior; choose `LegacyBackendDefault` here to request that behavior
+    /// explicitly.
+    pub fn spawn_with_procfs_policy(
+        request: ContainerRequest,
+        procfs_policy: ProcfsPolicy,
+        options: SpawnOptions,
+    ) -> Result<MxcProcess, Error> {
+        let prepared = crate::policy::prepare_creation_request_with_procfs_policy(
+            &request,
+            options.telemetry,
+            procfs_policy,
+        )?;
+        crate::mxc_engine::spawn_execution_request(&prepared.inner).map(MxcProcess::new)
+    }
+
     /// Spawn a [`ContainerRequest`] attached to a caller-controlled PTY.
+    /// This entrypoint preserves the historical backend procfs default; new
+    /// callers can choose explicitly with
+    /// [`spawn_with_pty_and_procfs_policy`].
     pub fn spawn_with_pty(
         request: ContainerRequest,
         options: SpawnWithPtyOptions,
     ) -> Result<MxcPtyProcess, Error> {
         options.size.validate()?;
         let prepared = crate::policy::prepare_creation_request(&request, options.telemetry)?;
+        crate::mxc_engine::spawn_with_pty(&prepared.inner, options.size.into())
+            .and_then(MxcPtyProcess::new)
+    }
+
+    /// Spawn a request on a caller-controlled PTY with an explicit Linux
+    /// Bubblewrap procfs policy.
+    pub fn spawn_with_pty_and_procfs_policy(
+        request: ContainerRequest,
+        procfs_policy: ProcfsPolicy,
+        options: SpawnWithPtyOptions,
+    ) -> Result<MxcPtyProcess, Error> {
+        options.size.validate()?;
+        let prepared = crate::policy::prepare_creation_request_with_procfs_policy(
+            &request,
+            options.telemetry,
+            procfs_policy,
+        )?;
         crate::mxc_engine::spawn_with_pty(&prepared.inner, options.size.into())
             .and_then(MxcPtyProcess::new)
     }
@@ -354,9 +396,23 @@ pub mod v1 {
     ///
     /// `Err` is returned when the backend can't be selected/spawned (an
     /// [`Error`]), or when waiting on the child fails at the OS level.
+    /// This entrypoint preserves the historical backend procfs default; new
+    /// callers should use [`run_with_procfs_policy`] with
+    /// [`ProcfsPolicy::default()`].
     pub fn run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionResult, Error> {
-        crate::wait_with_output(spawn(
+        run_with_procfs_policy(request, ProcfsPolicy::LegacyBackendDefault, options)
+    }
+
+    /// Run a request to completion with an explicit Linux Bubblewrap procfs
+    /// policy. `ProcfsPolicy::default()` omits procfs.
+    pub fn run_with_procfs_policy(
+        request: ContainerRequest,
+        procfs_policy: ProcfsPolicy,
+        options: RunOptions,
+    ) -> Result<ExecutionResult, Error> {
+        crate::wait_with_output(spawn_with_procfs_policy(
             request,
+            procfs_policy,
             SpawnOptions {
                 telemetry: options.telemetry,
             },

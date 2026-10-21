@@ -7,6 +7,10 @@ use std::net::IpAddr;
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::mxc_error::MxcErrorCode;
 
+/// Internal typed-SDK control consumed by the Linux Bubblewrap builder and
+/// never passed through to the sandboxed child environment.
+pub(crate) const INTERNAL_MOUNT_PROCFS_ENV: &str = "MXC_INTERNAL_MOUNT_PROCFS";
+
 /// Selects which containment backend to use for script execution.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

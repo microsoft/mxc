@@ -26,6 +26,7 @@ use crate::configs::{ProcessContainerConfig, WslcConfig};
 #[cfg(test)]
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{ExecutionRequest, TelemetryConfig};
+use crate::options::ProcfsPolicy;
 pub use network::{
     NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy,
     NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig,
@@ -849,8 +850,16 @@ pub(crate) fn build_request_with_containment(
     exact::build_request(policy, containment, script, container_name)
 }
 
+#[cfg(any(test, target_os = "windows"))]
 pub(crate) fn prepare_request(
     request: &ContainerRequest,
+) -> Result<PreparedContainerRequest, crate::Error> {
+    prepare_request_with_procfs_policy(request, ProcfsPolicy::LegacyBackendDefault)
+}
+
+pub(crate) fn prepare_request_with_procfs_policy(
+    request: &ContainerRequest,
+    procfs_policy: ProcfsPolicy,
 ) -> Result<PreparedContainerRequest, crate::Error> {
     let policy = ContainerPolicy {
         filesystem: request.filesystem.clone(),
@@ -868,10 +877,36 @@ pub(crate) fn prepare_request(
     prepared.inner.env = request.environment.as_ref().map(|environment| {
         environment
             .iter()
+            .filter(|(key, _)| key != crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV)
             .map(|(key, value)| format!("{key}={value}"))
             .collect()
     });
     prepared.inner.inherit_default_env = request.inherit_default_environment.unwrap_or(false);
+    let procfs_control = match procfs_policy {
+        ProcfsPolicy::Omit => Some("off"),
+        ProcfsPolicy::Mount => Some("on"),
+        ProcfsPolicy::LegacyBackendDefault => None,
+    };
+    if cfg!(target_os = "linux")
+        && matches!(
+            request.containment,
+            Containment::Process | Containment::Bubblewrap
+        )
+    {
+        if let Some(procfs_control) = procfs_control {
+            if request.environment.is_none() {
+                prepared.inner.inherit_default_env = true;
+            }
+            prepared
+                .inner
+                .env
+                .get_or_insert_with(Vec::new)
+                .push(format!(
+                    "{}={procfs_control}",
+                    crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
+                ));
+        }
+    }
     Ok(prepared)
 }
 
@@ -879,7 +914,19 @@ pub(crate) fn prepare_creation_request(
     request: &ContainerRequest,
     telemetry: Option<crate::options::TelemetryConfig>,
 ) -> Result<PreparedContainerRequest, crate::Error> {
-    let mut prepared = prepare_request(request)?;
+    prepare_creation_request_with_procfs_policy(
+        request,
+        telemetry,
+        ProcfsPolicy::LegacyBackendDefault,
+    )
+}
+
+pub(crate) fn prepare_creation_request_with_procfs_policy(
+    request: &ContainerRequest,
+    telemetry: Option<crate::options::TelemetryConfig>,
+    procfs_policy: ProcfsPolicy,
+) -> Result<PreparedContainerRequest, crate::Error> {
+    let mut prepared = prepare_request_with_procfs_policy(request, procfs_policy)?;
     prepared.inner.experimental_enabled = false;
     if let Some(telemetry) = telemetry {
         prepared.inner.telemetry = Some(TelemetryConfig {
@@ -1262,6 +1309,67 @@ mod tests {
             .contains(&"/tmp".to_string()));
         assert!(request.inner.script_code.contains(TEST_COMMAND));
         assert_eq!(request.inner.container_id, "test-container".to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procfs_policy_controls_bubblewrap_without_changing_legacy_requests() {
+        let mut request = super::ContainerRequest::new("/usr/bin/true");
+        request.containment = super::Containment::Bubblewrap;
+
+        let prepared = super::prepare_request_with_procfs_policy(
+            &request,
+            crate::options::ProcfsPolicy::default(),
+        )
+        .unwrap();
+        let environment = prepared.inner.env.as_ref().unwrap();
+
+        assert!(prepared.inner.inherit_default_env);
+        assert!(environment.iter().any(|entry| {
+            entry
+                == &format!(
+                    "{}=off",
+                    crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
+                )
+        }));
+
+        let legacy = super::prepare_request(&request).unwrap();
+        assert!(!legacy
+            .inner
+            .env
+            .unwrap_or_default()
+            .iter()
+            .any(|entry| entry == "MXC_INTERNAL_MOUNT_PROCFS=off"));
+
+        let explicit_mount = super::prepare_request_with_procfs_policy(
+            &request,
+            crate::options::ProcfsPolicy::Mount,
+        )
+        .unwrap();
+        assert!(explicit_mount
+            .inner
+            .env
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "MXC_INTERNAL_MOUNT_PROCFS=on"));
+
+        let mut spoofed = super::ContainerRequest::new("/usr/bin/true");
+        spoofed.containment = super::Containment::Bubblewrap;
+        spoofed.environment = Some(vec![(
+            crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV.into(),
+            "off".into(),
+        )]);
+        let prepared = super::prepare_request_with_procfs_policy(
+            &spoofed,
+            crate::options::ProcfsPolicy::LegacyBackendDefault,
+        )
+        .unwrap();
+        assert!(!prepared
+            .inner
+            .env
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "MXC_INTERNAL_MOUNT_PROCFS=off"));
     }
 
     #[test]

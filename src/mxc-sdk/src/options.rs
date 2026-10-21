@@ -8,6 +8,19 @@ pub struct TelemetryConfig {
     pub enabled: Option<bool>,
 }
 
+/// Procfs mount policy for Linux Bubblewrap execution.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProcfsPolicy {
+    /// Do not mount procfs. Bubblewrap still uses a private PID namespace.
+    #[default]
+    Omit,
+    /// Mount a fresh procfs inside the sandbox's private PID namespace.
+    Mount,
+    /// Preserve the historical backend default for compatibility.
+    LegacyBackendDefault,
+}
+
 /// Invocation controls for captured container execution.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunOptions {
