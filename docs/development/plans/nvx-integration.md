@@ -44,10 +44,10 @@ and corresponding-source delivery.
 
 ### 2.2 How MXC will consume NVX
 
-The NVX backend in `mxc-sdk` will call
+The NVX backend module in `mxc-sdk` (`src/mxc-sdk/src/backends/nvx/`) will call
 `AciEdgeSandbox::agent(AgentConfig::bundled(...))`.
-`mxc_engine` owns routing; the signed native agent owns VM execution and image
-preparation.
+`mxc_sdk::mxc_engine` owns routing; the signed native agent owns VM execution
+and image preparation.
 
 The final executable or SDK package cannot depend on a Cargo dependency's
 `OUT_DIR`.
@@ -226,8 +226,8 @@ publication.
 
 ### 3.1 MXC integration
 
-`mxc_engine` will resolve `containment: "microvm"` to the NVX runner.
-The backend stays in `mxc-sdk` under `src/backends/nvx/`.
+`mxc_sdk::mxc_engine` will resolve `containment: "microvm"` to the NVX runner
+module inside the `mxc-sdk` crate under `src/mxc-sdk/src/backends/nvx/`.
 [Appendix E.2](#e2-mxc-integration) describes the runner interfaces, SDK
 paths, and NVX calls.
 [Appendix A](#appendix-a-nvx-openvmm-and-guest-architecture) describes the
@@ -271,10 +271,10 @@ how NVX maps the network policy to OpenVMM.
 | `protocol: any` with ports | Yes |
 | `network.ingress.default: deny` | Yes |
 | `network.ingress.hostLoopback: deny` | Yes |
-| IPv6 rules | No |
-| ICMP-only rules | No |
+| IPv6 rules | Yes |
+| ICMP-only rules | Yes |
 | `network.ingress.default: allow` | No |
-| `network.ingress.hostLoopback: allow` | No |
+| `network.ingress.hostLoopback: allow` | Yes |
 | `runtimeConfig.networkProxy` | Yes |
 
 [Appendix F](#appendix-f-schema-and-policy-implementation-details) lists the
@@ -291,29 +291,29 @@ request shape.
 
 | MXC phase | How NVX handles it |
 | --- | --- |
-| `provision` | Resolves the OCI reference to an immutable digest. Selects or creates the converted artifact. Stores that identity with the configuration. Returns an NVX instance ID. |
+| `provision` | Resolves the OCI reference to an immutable digest. Selects or creates the converted artifact. Stores that identity with the configuration. Returns an MXC container ID. |
 | `start` | Launches OpenVMM and waits for the guest agent |
 | `exec` | Runs a workload in the running VM |
 | `stop` | Stops the VM while retaining provisioned state |
 | `deprovision` | Removes the provisioned state |
 | One-shot | MXC will compose provision, start, exec, stop, and deprovision |
 
-MXC will preserve the NVX instance ID unchanged. NVX provision returns IDs in
-the following form:
+MXC will expose container IDs in the following form:
 
 ```text
-aci-edge-sandboxes:<32 lowercase hexadecimal characters>
+microvm:<32 lowercase hexadecimal characters>
 ```
 
-MXC will register the `aci-edge-sandboxes:` prefix in
-`mxc_engine::backend_from_prefix` and state-aware dispatch so `start`, `exec`,
-`stop`, and `deprovision` route back to the NVX runner.
+MXC will register the `microvm:` prefix in state-aware dispatch so `start`,
+`exec`, `stop`, and `deprovision` route back to the NVX runner. The NVX backend
+will translate between this public ID and the native
+`aci-edge-sandboxes:<32 lowercase hexadecimal characters>` ID.
 
 [Appendix F](#appendix-f-schema-and-policy-implementation-details) describes
 ID routing, cleanup behavior, and repeated `exec` calls.
 
-- NVX runs one workload at a time. A second `exec` waits for up to 60 seconds
-  by default.
+- NVX runs up to 16 workloads at once in one sandbox. An additional `exec`
+  fails with `backend_error`.
 - `stop` waits for up to 30 seconds before forcing the VM to shut down.
 - Cancelling an SDK wait does not kill the workload. Use the execution handle
   to cancel the workload and its descendants.
@@ -330,7 +330,7 @@ ID routing, cleanup behavior, and repeated `exec` calls.
 | Separate stdout and stderr | Captured and streaming | Preserve distinct streams and the execution outcome |
 | Live stdin | Supported by the native agent | MXC streaming adapters must expose the pipe and explicit EOF ownership |
 | PTY | Unsupported | Future work needed; Reject before workload launch |
-| Guest memory override | Native capability; proposed provision setting | Use optional `microvm.provision.memoryMib`. Create-and-run memory control remains undecided. |
+| Guest memory override | Native capability; development setting | Use optional `microvm.provision.memoryMib` for create-and-run and provision. |
 | `fallback` | Unsupported | Reject. NVX does not select another backend. |
 
 [Appendix F](#appendix-f-schema-and-policy-implementation-details) describes
@@ -339,7 +339,7 @@ command execution, environment, output, and result behavior.
 Open question - The signed agent streams output without a total-output size limit. Capturing all output can therefore consume increasing host memory. Is this an issue?
 
 NVX lifecycle errors align with the existing
-[MXC SDK error classifications](api-reference/rust/v1/types.md). The NVX runner
+[MXC SDK error classifications](../../api-reference/rust/v1/types.md). The NVX runner
 will map the additional NVX execution outcomes as described in
 [Appendix B](#appendix-b-nvx-execution-outcome-mapping).
 
@@ -421,7 +421,7 @@ distinct timed-out result. `wxc-exec` is not part of the public NVX SDK API.
 | Lifecycle | Test each lifecycle phase and the exact ID prefix. Test repeated and overlapping exec calls. Test reconnect, invalid transitions, stale IDs, prefix isolation, and one-shot cleanup. |
 | Container process lifetime | Use the signed agent's process-lifetime contract, not a direct `OpenVmmConfig` setting in MXC. Verify persistence after the caller exits and reconnection from a later process. Surface host restrictions explicitly. |
 | SDKs and FFI | Rust, Node, and .NET produce the same policy and results. Verify `mxc_ffi` handle ownership and cleanup. Node registers the NVX runtime directory before `getPlatformSupport()` or execution. .NET registers both request shapes in `MxcJsonContext` and tests them in `Microsoft.Mxc.Sdk.AotSmokeTest`. |
-| Filesystem | Test read-only, read-write, and denied paths. Test files, directories, multiple mappings, and invalid combinations. Test file ownership, ACL inheritance, protected roots, aliases, reparse points, path limits, and command-line limits. |
+| Filesystem | Test read-only, read-write, and denied paths. Test files, directories, multiple mappings, and invalid combinations. Test file ownership, ACL inheritance, protected roots, ancestor and drive-root mappings, aliases, reparse points, path limits, and command-line limits. |
 | Network | Defaults, allow/deny precedence, CIDRs, exclusions, TCP/UDP ranges, and rejection of unsupported rules |
 | Process | Test command, CWD, environment, cancellation, output limits, nonzero exits, and descendant cleanup. Test timeouts through the three in-process SDK paths. Exclude the relayed `wxc-exec` path from timeout tests. |
 | PTY | Verify that the initial implementation rejects PTY requests. Add terminal tests when PTY support is available. |
@@ -471,7 +471,7 @@ The control environment prepares the workload image and runs the guest agent.
 
 ```mermaid
 flowchart LR
-    Engine["mxc_engine routing"] --> Runner["mxc-sdk NVX backend"]
+    Engine["mxc_sdk::mxc_engine routing"] --> Runner["src/mxc-sdk/src/backends/nvx/"]
     Runner --> API["AciEdgeSandbox::agent"]
     API --> DLL["Signed aci_edge_agent.dll"]
     DLL --> OpenVMM["Signed openvmm.exe"]
@@ -524,7 +524,8 @@ NVX's `SandboxSpec`.
 | `TimedOut` through an in-process Piped SDK path | Will return the existing MXC timed-out result |
 | `TimedOut` through the `wxc-exec` Relayed path | The relay cannot return a distinct timeout. Tests exclude this path. A returned `TimedOut` value produces `backend_error`. |
 | `Cancelled` | Live handles return exit code `137`. The captured mapper treats unexpected cancellation as `backend_error`. |
-| `Failed(WorkingDirectory)` | Will return `backend_error` with the working-directory failure |
+| `Failed(reason)` | Will return `backend_error` with the native failure reason preserved |
+| Working-directory setup failure | Reported by the native agent as `Exited(126)` with an `NVX-EDGE-STAGE-ERROR` diagnostic on stderr |
 | No outcome available | Will return `backend_error`. It will not invent a workload exit code. |
 
 ## Appendix C: OCI image conversion requirements
@@ -712,8 +713,8 @@ execution.
 
 ### E.2 MXC integration
 
-`mxc_engine` keeps `containment: "microvm"` and resolves it to the NVX
-backend module in `mxc-sdk`.
+`mxc_sdk::mxc_engine` keeps `containment: "microvm"` and resolves it to the
+internal NVX backend module in `mxc-sdk` (`src/mxc-sdk/src/backends/nvx/`).
 
 The NVX runner will follow the existing MXC backend interfaces:
 
@@ -728,8 +729,8 @@ It does not start a VM.
 | SDK | Required changes |
 | --- | --- |
 | Rust SDK | Explicit experimental V1 entry points and development MicroVM provision types |
-| .NET SDK | Add typed MicroVM requests through `mxc_ffi` and matching runtime packaging |
-| Node SDK | Add typed MicroVM requests, runtime packaging, and directory registration through `mxc_ffi` |
+| .NET SDK | Explicit experimental V1 entry points, development `1.1.0-alpha` request writers through `mxc_ffi`, and matching runtime packaging |
+| Node SDK | Explicit experimental V1 entry points, development `1.1.0-alpha` request writers, runtime packaging, and directory registration through `mxc_ffi` |
 
 Node and .NET will continue to use the existing `mxc_ffi` boundary. NVX will
 be linked on the Rust side. No separate NVX FFI library will be required.
@@ -752,8 +753,8 @@ flowchart LR
     DotNet[".NET SDK"] --> FFI
     FFI --> Parser["Registered contract parsing and binding"]
     RustSdk --> Parser
-    Parser --> Engine["mxc_engine routing"]
-    Engine --> Runner["mxc-sdk NVX backend"]
+    Parser --> Engine["mxc_sdk::mxc_engine routing"]
+    Engine --> Runner["src/mxc-sdk/src/backends/nvx/"]
     Runner --> NVX["AciEdgeSandbox::agent"]
 ```
 
@@ -764,7 +765,7 @@ fields into the operation-specific NVX request types. It then calls
 | MXC operation | Input passed to the NVX runner | `AciEdgeSandbox` calls |
 | --- | --- | --- |
 | Discovery | Private state root and discoverable approved bundle | Constructs the bundled agent client. Does not boot a VM. |
-| Captured or streaming create-and-run | Required caller image, supported provision policy, and process request | Validates, calls `provision_with`, `start`, and `exec`, then stops and deprovisions during cleanup |
+| Captured or streaming create-and-run | Required caller image, optional memory, supported provision policy, and process request | Validates, calls `provision_with`, `start`, and `exec`, then stops and deprovisions during cleanup |
 | Provision | Required caller image, optional memory, filesystem, network, and proxy policy | `validate_provision_with` and `provision_with`, according to the requested operation |
 | Start | Opaque MXC ID translated to the native NVX ID | `start` |
 | Execution | Translated NVX ID and process request | Validates and calls `exec`. Retains pipes, waiter, and cancellation ownership. |
@@ -872,6 +873,9 @@ released schemas or advance `sdkMajorTargets`.
 The ordinary V1 methods retain their stable contract.
 The explicit experimental Rust methods use the development contract and
 authorize experimental backend selection.
+Typed Node and .NET MicroVM support will likewise require explicit experimental
+V1 entry points and development `1.1.0-alpha` request writers before promotion
+to a stable contract.
 Experimental authorization is not a request JSON field.
 
 Contract publication and host availability remain separate. A published
@@ -941,8 +945,10 @@ For example, `C:\nvx-work\input` maps to `/mnt/c/nvx-work/input`.
 The native-agent README describes one common export with per-path guest mounts.
 Its mount arguments must fit the guest's 1024-byte kernel command line.
 
-MXC will reject mappings at or below protected Windows host roots.
-These include Windows, Program Files, Program Files (x86), and ProgramData.
+MXC will reject mappings at or below protected Windows host roots, and
+mappings that contain a protected root. These roots include Windows, Program
+Files, Program Files (x86), and ProgramData. A drive-root mapping such as
+`C:\` is rejected because it contains protected roots.
 Use canonical paths and Windows Known Folder resolution.
 Case differences, short names, junctions, and reparse points must not bypass
 the rule.
@@ -1023,10 +1029,10 @@ Changes to mapped host files do survive.
 - [NVX Rust API overview][nvx-rust]
 - [NVX setup guide][nvx-setup]
 - [Selected NVX release][nvx-release]
-- [MXC schema](schema.md)
-- [MXC architecture](development/architecture/repository-architecture.md)
-- [MXC versioning](development/architecture/versioning.md)
-- [MXC SDK error classifications](api-reference/rust/v1/types.md)
+- [MXC schema](../../schema.md)
+- [MXC architecture](../architecture/repository-architecture.md)
+- [MXC versioning](../architecture/versioning.md)
+- [MXC SDK error classifications](../../api-reference/rust/v1/types.md)
 
 [nvx-readme]: https://github.com/microsoft/nvx
 [nvx-rust]: https://github.com/microsoft/nvx/blob/0430ce79d125203c20f0aa69243480513a774296/aci_edge_sandboxes/README.md
