@@ -211,7 +211,6 @@ and `npm audit fix` may change one of these lockfiles:
 - `sdk/node/package-lock.json`
 - `sdk/node/tests/integration/package-lock.json`
 - `scripts/versioning/package-lock.json`
-- `tests/playground/package-lock.json`
 
 Microsoft developers resolve npm packages through an internal 1ES feed. That
 feed can write internal `ms-feed-*` tarball URLs and SHA-1 integrity values into
