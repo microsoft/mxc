@@ -138,9 +138,10 @@ impl WslcSdk {
     /// missing exports instead of panicking later at the call site.
     ///
     /// The list below must mirror the SDK functions invoked by
-    /// `wsl_container_runner.rs` and the RAII guards. Intentionally excludes
-    /// header-declared functions this crate never calls, since SDK headers may
-    /// declare exports ahead of what the shipping runtime implements.
+    /// `wsl_container_runner.rs` and the RAII guards, plus exports that mark the
+    /// minimum SDK version this build requires. Intentionally excludes other
+    /// header-declared functions, since SDK headers may declare exports ahead of
+    /// what the shipping runtime implements.
     fn ensure_required_symbols(&self, dll_path: &std::path::Path) -> Result<(), String> {
         let mut missing: Vec<&'static str> = Vec::new();
         macro_rules! require {
@@ -184,6 +185,8 @@ impl WslcSdk {
             WslcLoadSessionImageFromFile,
             WslcListSessionImages,
             WslcGetMissingComponents,
+            // Present only in SDKs that can open a process's stdin.
+            WslcSetProcessSettingsFlags,
         );
         if missing.is_empty() {
             return Ok(());

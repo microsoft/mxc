@@ -20,7 +20,7 @@ Native builds still require the `wslc` feature (`build.bat --with-wslc`).
 
 ## Why a daemon
 
-The WSLc SDK (`wslcsdk.dll`, 2.9.9) has **no cross-process session re-attach**: every operation
+The WSLc SDK (`wslcsdk.dll`, 3.0.3) has **no cross-process session re-attach**: every operation
 (`WslcCreateContainer`, `WslcStartContainer`, `WslcCreateContainerProcess`, image pull, stop /
 delete) requires a live in-process `WslcSession` / `WslcContainer` handle, and there is no
 `WslcOpenSession`. Each lifecycle phase runs as a **separate**
@@ -350,7 +350,7 @@ The session a sandbox joins is not a routing value, so it stays in the request b
 | provision-session | Load SDK, lease a store slot, `WslcCreateSession` with the requested sizing on a thread of its own, then validate the session with a store probe. Returns the minted `sessionId`. |
 | provision | Load SDK, ensure the session (`WslcCreateSession` on first use when none was named), resolve/import image, `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
 | start | `WslcStartContainer` — starts the container minted at provision-time (the keepalive init keeps it warm across later `exec` phases); marks it `started`. |
-| exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr and return the process exit code. Stdin is unavailable because the WSLc SDK exposes no process-input API. A timeout or caller cancellation SIGKILLs the **process**, not the container. |
+| exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr and return the process exit code. Stdin is not forwarded to the process. A timeout or caller cancellation SIGKILLs the **process**, not the container. |
 | stop | `WslcStopContainer`. |
 | deprovision | `WslcDeleteContainer`. The session stays warm for the next provision and is released once nothing is using it (see [Session lifetime](#session-lifetime)). |
 | deprovision-session | Refuse while anything is still in the session, else terminate the VM and return its store slot. |

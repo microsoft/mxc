@@ -51,8 +51,8 @@
 //! [`v1::spawn_with_pty`] allocates a caller-controlled terminal.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
-//! requires the `isolation_session` build feature. WSLC's container has no
-//! stdin (the WSLC SDK exposes no process-input API), so
+//! requires the `isolation_session` build feature. MXC does not forward stdin
+//! to a WSLC container, so
 //! [`MxcProcess::take_stdin`] returns `None` for it.
 //! IsolationSession is also available through the typed lifecycle API.
 //!

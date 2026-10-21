@@ -645,9 +645,9 @@ function Initialize-WslcHost {
        
     }
 
-    # WSLC needs a runtime at least as new as the pinned WSLC SDK, and those
-    # builds ship only on the pre-release ring -- the stable ring lands well
-    # behind it. Without this the SDK fails at run time with
+    # WSLC needs a runtime at least as new as the pinned WSLC SDK. A new SDK can
+    # ship on the pre-release ring before the stable ring, so update from there.
+    # Without this the SDK fails at run time with
     # "WSLC runtime unavailable. Missing components: WslPackage".
     $required = Get-RequiredWslVersion
     $installed = Get-InstalledWslVersion

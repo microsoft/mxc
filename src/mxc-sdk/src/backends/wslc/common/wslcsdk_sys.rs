@@ -498,6 +498,39 @@ impl ::std::ops::BitAndAssign for WslcDeleteContainerFlags {
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct WslcDeleteContainerFlags(pub ::std::os::raw::c_int);
+impl WslcProcessFlags {
+    pub const WSLC_PROCESS_FLAG_NONE: WslcProcessFlags = WslcProcessFlags(0);
+    pub const WSLC_PROCESS_FLAG_STDIN: WslcProcessFlags = WslcProcessFlags(1);
+}
+impl ::std::ops::BitOr<WslcProcessFlags> for WslcProcessFlags {
+    type Output = Self;
+    #[inline]
+    fn bitor(self, other: Self) -> Self {
+        WslcProcessFlags(self.0 | other.0)
+    }
+}
+impl ::std::ops::BitOrAssign for WslcProcessFlags {
+    #[inline]
+    fn bitor_assign(&mut self, rhs: WslcProcessFlags) {
+        self.0 |= rhs.0;
+    }
+}
+impl ::std::ops::BitAnd<WslcProcessFlags> for WslcProcessFlags {
+    type Output = Self;
+    #[inline]
+    fn bitand(self, other: Self) -> Self {
+        WslcProcessFlags(self.0 & other.0)
+    }
+}
+impl ::std::ops::BitAndAssign for WslcProcessFlags {
+    #[inline]
+    fn bitand_assign(&mut self, rhs: WslcProcessFlags) {
+        self.0 &= rhs.0;
+    }
+}
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct WslcProcessFlags(pub ::std::os::raw::c_int);
 impl WslcProcessIOHandle {
     pub const WSLC_PROCESS_IO_HANDLE_STDIN: WslcProcessIOHandle = WslcProcessIOHandle(0);
     pub const WSLC_PROCESS_IO_HANDLE_STDOUT: WslcProcessIOHandle = WslcProcessIOHandle(1);
@@ -1019,6 +1052,13 @@ pub struct WslcSdk {
         ) -> HRESULT,
         ::libloading::Error,
     >,
+    pub WslcSetProcessSettingsFlags: Result<
+        unsafe extern "C" fn(
+            processSettings: *mut WslcProcessSettings,
+            flags: WslcProcessFlags,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
     pub WslcSetProcessSettingsCallbacks: Result<
         unsafe extern "C" fn(
             processSettings: *mut WslcProcessSettings,
@@ -1288,6 +1328,9 @@ impl WslcSdk {
         let WslcSetProcessSettingsEnvVariables = __library
             .get(b"WslcSetProcessSettingsEnvVariables\0")
             .map(|sym| *sym);
+        let WslcSetProcessSettingsFlags = __library
+            .get(b"WslcSetProcessSettingsFlags\0")
+            .map(|sym| *sym);
         let WslcSetProcessSettingsCallbacks = __library
             .get(b"WslcSetProcessSettingsCallbacks\0")
             .map(|sym| *sym);
@@ -1366,6 +1409,7 @@ impl WslcSdk {
             WslcSetProcessSettingsWorkingDirectory,
             WslcSetProcessSettingsCmdLine,
             WslcSetProcessSettingsEnvVariables,
+            WslcSetProcessSettingsFlags,
             WslcSetProcessSettingsCallbacks,
             WslcSetContainerInitProcessIOCallbacks,
             WslcGetProcessPid,
@@ -1810,6 +1854,16 @@ impl WslcSdk {
             .WslcSetProcessSettingsEnvVariables
             .as_ref()
             .expect("Expected function, got error."))(processSettings, key_value, argc)
+    }
+    pub unsafe fn WslcSetProcessSettingsFlags(
+        &self,
+        processSettings: *mut WslcProcessSettings,
+        flags: WslcProcessFlags,
+    ) -> HRESULT {
+        (self
+            .WslcSetProcessSettingsFlags
+            .as_ref()
+            .expect("Expected function, got error."))(processSettings, flags)
     }
     pub unsafe fn WslcSetProcessSettingsCallbacks(
         &self,

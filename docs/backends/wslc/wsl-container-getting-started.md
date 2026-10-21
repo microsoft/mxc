@@ -14,7 +14,7 @@ MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 | Requirement | Details |
 |---|---|
 | **Windows 10 1903 (build 18362.1049)+ on x64, or Windows 10 2004 (build 19041)+ on ARM64** | WSL 2's own [system requirements](https://learn.microsoft.com/windows/wsl/install-manual#step-2---check-requirements-for-running-wsl-2). MXC does not check the OS version itself — see [How an unsupported Windows version is reported](#how-an-unsupported-windows-version-is-reported) below. The WSL runtime package installs only on build 19041 and later, so in practice a 1903/1909 host still needs an upgrade to reach the WSL version below. |
-| **WSL 2.9.9+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
+| **WSL 3.0.3+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
 | **WSLC SDK** | `wslcsdk.dll` is a separate client SDK and must be in the same directory as the running executable (`wxc-exec.exe`, or your own binary when using the Rust SDK) |
 | **Container images** | Reachable from a registry, already cached, or supplied as a local tar |
 
@@ -54,14 +54,13 @@ optional component is absent as well. Any SDK call that reaches the WSL service
 can return it, so an unexpected `0x80040327` from a WSLC operation means the host
 OS is below WSL 2's floor, not that WSL is merely uninstalled.
 
-## Step 1 — Install WSL 2.9.9+
+## Step 1 — Install WSL 3.0.3+
 
-The WSLC SDK requires WSL version 2.9.9 or later. Update WSL to the latest
-version. Note that 2.9.9 may only be available on the pre-release channel
-until it reaches the default Store channel, so include `--pre-release`:
+The WSLC SDK requires WSL version 3.0.3 or later. Update WSL to the latest
+version:
 
 ```powershell
-wsl --update --pre-release
+wsl --update
 ```
 
 Verify your WSL version after updating:
@@ -70,7 +69,7 @@ Verify your WSL version after updating:
 wsl --version
 ```
 
-The WSL version should be **2.9.9.0 or later**. If `wsl --update --pre-release`
+The WSL version should be **3.0.3.0 or later**. If `wsl --update`
 does not bring you to the required version, build WSL from the `master`
 branch:
 
@@ -328,8 +327,8 @@ Notes and limits:
 
 - **Windows only.** Selecting `Containment::Wslc` on Linux/macOS, or without the
   `wslc` feature, fails with `ErrorCode::UnsupportedContainment`.
-- **No stdin.** The WSLC SDK exposes no process-input API, so
-  `Sandbox::take_stdin()` returns `None` for a WSL container.
+- **No stdin.** MXC does not forward stdin to a WSL container, so
+  `Sandbox::take_stdin()` returns `None` for it.
 - **No host pid.** The process runs inside the WSL VM, so `Sandbox::id()` is `0`;
   use `kill()` (which stops the container and everything in it) to terminate it.
 - **Discovery.** `platform_support()` lists `"wslc"` in `available_methods` only
@@ -716,7 +715,7 @@ images — cannot be used.
 | `WSLC runtime unavailable` **on a host below WSL 2's minimum Windows version** | The WSL runtime package cannot install on this OS, so it reports as missing — MXC does not distinguish the two cases | Run `wsl --update`; WSL reports the version verdict ("Windows version {} does not support the packaged version of Windows Subsystem for Linux"). Upgrade Windows — see [How an unsupported Windows version is reported](#how-an-unsupported-windows-version-is-reported) |
 | HRESULT `0x80040327` (`WSL_E_OS_NOT_SUPPORTED`) from any WSLC call | The SDK reached WSL's service-connect guard on a host that is neither Windows 11 nor has the WSL support interface | Upgrade Windows. `0x80040321` (`WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`) is the sibling code when the legacy `lxss` component is absent too |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
-| `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
+| `WSLC runtime unavailable` | WSL runtime package is missing, older than 3.0.3, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (specified by `WSLC_SDK_VERSION` in `src/mxc-sdk/build/build_wslc_common.rs`) | Update MXC to a build that includes a newer SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
 | `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress. For a lifecycle operation the store is a daemon slot, so warm it with `setup-wslc.ps1 -DaemonSlots 1` |
 | `WSLc store unavailable: the image store at <path> is already held by another live session` | Two processes reached the same store, which admits one live session | Wait for the holder to release it. A running `wxc-wslc-daemon.exe` releases its slot after `MXC_WSLC_DAEMON_IDLE_TIMEOUT_SECS` (default 300s); a create-and-run execution releases its store when the run ends |

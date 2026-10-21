@@ -22,7 +22,7 @@
 //!   than pipe handles. Each exposed output needs its own blocking pump because
 //!   the SDK offers no waitable or overlapped read primitive; the cost is
 //!   therefore bounded at two threads per native-streaming sandbox.
-//! - **stdin** — the WSLC SDK exposes no process-input API, so
+//! - **stdin** — not forwarded to the container, so
 //!   [`take_stdin`](SandboxProcess::take_stdin) always returns `None`.
 //! - **[`id`](SandboxProcess::id)** — the process lives inside the WSL VM and
 //!   has no host process id, so this is always `0`.
@@ -401,8 +401,7 @@ impl SandboxProcess for WslcSandboxProcess {
         }))
     }
 
-    /// Always `None`: the WSLC SDK has no API to write to a container process's
-    /// stdin.
+    /// Always `None`: stdin is not forwarded to the container process.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
         None
     }
