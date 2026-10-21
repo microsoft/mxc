@@ -2851,7 +2851,7 @@ mod tests {
 
         let response = runner
             .validate_runner(&request)
-            .expect_err("the relayed port is the only outbound path a proxied container has");
+            .expect_err("with a runtime proxy, the relayed port is the container's only outbound path");
 
         assert!(
             response.error_message.contains("network.egress"),

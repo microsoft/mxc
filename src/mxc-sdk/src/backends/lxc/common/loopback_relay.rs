@@ -4,10 +4,11 @@
 //! Lets a workload in a container reach a proxy on the host's loopback at the
 //! same address it names on the host.
 //!
-//! A container's loopback is its own, so `127.0.0.1:PORT` inside it is not the
-//! host's.  The relay listens on that address inside the container's network
-//! namespace and carries each connection it accepts to the same address on the
-//! host.  Nothing else on the host becomes reachable through it.
+//! The host and the container each have their own loopback.  A connection to
+//! `127.0.0.1:PORT` inside the container stays in the container.  The relay
+//! accepts connections on the proxy's port inside the container and carries
+//! them to the proxy on the host's loopback.  Nothing else on the host becomes
+//! reachable through it.
 
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -64,25 +65,24 @@ impl LoopbackRelay {
     pub(crate) fn start(pid: u32, host: &str, port: u16) -> Result<Self, String> {
         let host = unbracket_host(host);
 
-        let upstream: Arc<[SocketAddr]> = (host, port)
+        let proxy_addresses: Arc<[SocketAddr]> = (host, port)
             .to_socket_addrs()
             .map_err(|e| format!("cannot resolve the proxy host '{host}': {e}"))?
             .filter(|address| address.ip().is_loopback())
             .collect();
-        if upstream.is_empty() {
+        if proxy_addresses.is_empty() {
             return Err(format!(
                 "the proxy host '{host}' resolves to no loopback address on the host"
             ));
         }
 
-        Self::spawn_accept_thread(bind_in_namespace(pid, host, port)?, upstream)
+        Self::spawn_accept_thread(bind_in_namespace(pid, host, port)?, proxy_addresses)
     }
 
-    /// Relay every connection `listeners` accept to the first of `upstream`
-    /// that answers.
+    /// Relay each accepted connection to the first proxy address that answers.
     fn spawn_accept_thread(
         listeners: Vec<TcpListener>,
-        upstream: Arc<[SocketAddr]>,
+        proxy_addresses: Arc<[SocketAddr]>,
     ) -> Result<Self, String> {
         for listener in &listeners {
             listener
@@ -94,7 +94,7 @@ impl LoopbackRelay {
         let worker_stop = Arc::clone(&stop);
         let worker = thread::Builder::new()
             .name("mxc-lxc-proxy-relay".to_string())
-            .spawn(move || spin_and_accept_connections(listeners, upstream, worker_stop))
+            .spawn(move || spin_and_accept_connections(listeners, proxy_addresses, worker_stop))
             .map_err(|e| format!("cannot start the relay thread: {e}"))?;
 
         Ok(Self {
@@ -166,7 +166,7 @@ fn bind_listeners(host: &str, port: u16) -> Result<Vec<TcpListener>, String> {
 #[cfg(target_os = "linux")]
 fn spin_and_accept_connections(
     listeners: Vec<TcpListener>,
-    upstream: Arc<[SocketAddr]>,
+    proxy_addresses: Arc<[SocketAddr]>,
     stop: Arc<AtomicBool>,
 ) {
     let mut connections: Vec<Connection> = Vec::new();
@@ -182,7 +182,7 @@ fn spin_and_accept_connections(
                 if connections.len() >= MAX_RELAYED_CONNECTIONS {
                     continue;
                 }
-                if let Ok(connection) = Connection::open(inbound, Arc::clone(&upstream)) {
+                if let Ok(connection) = Connection::open(inbound, Arc::clone(&proxy_addresses)) {
                     connections.push(connection);
                 }
             }
@@ -205,11 +205,11 @@ mod tests {
     use std::net::TcpStream;
     use std::sync::mpsc;
 
-    fn relay_to(upstream: SocketAddr) -> (LoopbackRelay, SocketAddr) {
+    fn relay_to(proxy_address: SocketAddr) -> (LoopbackRelay, SocketAddr) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let relay =
-            LoopbackRelay::spawn_accept_thread(vec![listener], Arc::from([upstream])).unwrap();
+            LoopbackRelay::spawn_accept_thread(vec![listener], Arc::from([proxy_address])).unwrap();
         (relay, address)
     }
 

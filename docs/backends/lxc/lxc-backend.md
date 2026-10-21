@@ -376,7 +376,7 @@ The zone query should answer the zone you assigned.
   installs and reports success, but no IPv6 traffic reaches that destination.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
   host that provides one.
-- **A proxied container cannot be kept running past the run.** See [Proxy](#proxy).
+- **A container reaches the proxy only while a run lasts.** See [Proxy](#proxy).
 - **No container lifecycle operations.** LXC implements `ScriptRunner` (create-and-run execution) and
   `SandboxBackend` (streaming over pipes or a caller-controlled PTY), not
   `StatefulSandboxBackend`. A
