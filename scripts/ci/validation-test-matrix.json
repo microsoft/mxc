@@ -11,7 +11,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-windows-prerelease-t1-x64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session",
             "wslc",
             "windows-sandbox",
@@ -23,7 +23,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-windows-prerelease-t1-arm64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session"
           ]
         }
@@ -39,7 +39,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-win-prerelease-isolationsesh-x64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session",
             "wslc",
             "windows-sandbox",
@@ -51,7 +51,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-win-prerelease-isosesh-arm64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session"
           ]
         }
@@ -67,7 +67,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-windows-26h2-pro-x64",
           "backends": [
-            "process-t1",
+            "process",
             "wslc",
             "windows-sandbox",
             "microvm"
@@ -78,7 +78,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-windows-26h2-pro-arm64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session"
           ]
         }
@@ -94,7 +94,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-windows-prerelease-26h1-x64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session",
             "wslc",
             "windows-sandbox",
@@ -106,7 +106,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-windows-prerelease-26h1-arm64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session"
           ]
         }
@@ -122,7 +122,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-25h2-pro-x64",
           "backends": [
-            "process-t1",
+            "process",
             "wslc",
             "windows-sandbox",
             "microvm"
@@ -133,7 +133,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-25h2-pro-arm64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session"
           ]
         }
@@ -149,7 +149,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-24h2-pro-x64",
           "backends": [
-            "process-t1",
+            "process",
             "wslc",
             "windows-sandbox",
             "microvm"
@@ -160,7 +160,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-24h2-pro-arm64",
           "backends": [
-            "process-t1",
+            "process",
             "isolation-session"
           ]
         }
@@ -176,7 +176,6 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-23h2-enterprise-x64",
           "backends": [
-            "process-t3",
             "wslc",
             "windows-sandbox",
             "microvm"
@@ -338,7 +337,7 @@
       {
         "os": "windows-prerelease-process-container",
         "backends": [
-          "process-t1",
+          "process",
           "wslc"
         ]
       },
@@ -351,14 +350,14 @@
       {
         "os": "windows-26h2",
         "backends": [
-          "process-t1",
+          "process",
           "wslc"
         ]
       },
       {
         "os": "windows-prerelease-26h1",
         "backends": [
-          "process-t1",
+          "process",
           "isolation-session",
           "wslc"
         ]
@@ -366,21 +365,20 @@
       {
         "os": "windows-25h2",
         "backends": [
-          "process-t1",
+          "process",
           "wslc"
         ]
       },
       {
         "os": "windows-24h2",
         "backends": [
-          "process-t1",
+          "process",
           "wslc"
         ]
       },
       {
         "os": "windows-23h2",
         "backends": [
-          "process-t3",
           "wslc"
         ]
       },

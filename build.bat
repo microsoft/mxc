@@ -111,17 +111,9 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\wxc-windows-sandbox-daemon.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-windows-sandbox-daemon.exe
         )
-        if exist "!BIN_DIR!\winhttp-proxy-shim.exe" (
-            copy /Y "!BIN_DIR!\winhttp-proxy-shim.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\winhttp-proxy-shim.exe
-        )
         if exist "!BIN_DIR!\wxc-test-proxy.exe" (
             copy /Y "!BIN_DIR!\wxc-test-proxy.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-test-proxy.exe
-        )
-        if exist "!BIN_DIR!\wxc-host-prep.exe" (
-            copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
-            echo   Copied !SDK_ARCH!\wxc-host-prep.exe
         )
         if exist "!BIN_DIR!\plm.exe" (
             copy /Y "!BIN_DIR!\plm.exe" "sdk\node\bin\!SDK_ARCH!\" >nul

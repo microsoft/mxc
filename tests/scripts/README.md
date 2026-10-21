@@ -32,11 +32,9 @@ Linux / macOS (`.sh`):
 | Script | Description | Extra prerequisites |
 |--------|-------------|---------------------|
 | `run_basicprocess_test.ps1` | Basic process container test | `wxc-exec.exe` |
-| `run_lpacac_test.ps1` | LPAC container test | `wxc-exec.exe` |
+| `run_base_container_network_tests.ps1` | Native ProcessContainer egress defaults, host-loopback policy, and IPv4/IPv6 proxy endpoint isolation | Native PSEC support for host loopback and identity-less loopback proxy; IPv6 loopback; Windows PowerShell 5.1; `curl.exe`; outbound access to the egress fixture |
+| `run_processcontainer_policy_tests.ps1` | Native filesystem allow/deny and aliases, fail-closed capability checks, Win32k, HANDLES and bidirectional atom isolation, and host-controlled privilege removal | Native PSEC; Windows PowerShell 5.1; `wxc-ui-probe.exe`; no PLM |
 | `run_pwsh_test.ps1` | PowerShell Set-Location test | `wxc-exec.exe` |
-| `run_filesystem_bfs_test.ps1` | BFS filesystem test | `wxc-exec.exe` |
-| `run_filesystem_bfsreadonly_test.ps1` | BFS read-only filesystem test | `wxc-exec.exe` |
-| `run_filesystem_bfs_spaces_test.ps1` | BFS path-with-spaces test | `wxc-exec.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, NanVix binaries |
@@ -47,45 +45,25 @@ Linux / macOS (`.sh`):
 | `run_isolation_session_state_aware_tests.ps1` | IsolationSession provision/start/exec/stop/deprovision E2E suite | Interactive local session; OS-side IsolationSession service |
 | `run_wslc_all_tests.ps1` | All WSLC create-and-run and container-lifecycle E2E tests; delegates the lifecycle half to `run_wslc_state_aware_tests.ps1` | WSL2, WSLC SDK, staged daemon, and registry access for the image preflight, which warms the create-and-run store and daemon store slots 0 through 2 (`-SkipSetup` needs all stores already warm, because the lifecycle fixtures deny egress) |
 | `run_wslc_state_aware_tests.ps1` | WSLC container and session lifecycle E2E suite, including shared sandboxes, identical-session independence, guest CPU/memory sizing, cold-store refusal, warm reuse, exec concurrency and idle teardown; GPU enforcement is not verified | WSL2, WSLC SDK, `wxc-wslc-daemon.exe` staged beside `wxc-exec.exe`, and `alpine:latest` / `python:3.12-alpine` cached in daemon store slots 0 through 2 (warm them with `scripts\setup-wslc.ps1 -DaemonSlots 3`); the fresh cold-store regression requires registry access even with `-SkipSetup` |
-| `run_processcontainer_all_tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, enumeration-only grants, UI mitigations, DACL restore, crash recovery, directional networking. Dispatches to the per-area `run_processcontainer_*_test.ps1` scripts | `wxc-exec.exe`, `wxc-ui-probe.exe`, `plm.exe` and `winhttp-proxy-shim.exe` beside `wxc-exec.exe` |
-| `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
 | `run_telemetry_consent_smoke_test.ps1` | Consent maintenance, presentation, policy, and exit-code smoke tests | Debug `wxc-exec.exe` built with `test-support` |
 | `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture | Debug `wxc-exec.exe` built with `test-support`; ETW tooling; Administrator, otherwise the test skips |
 | `run_telemetry_consent_release_test.ps1` | Consent path in a **release** executor, where the debug store/policy overrides are compiled out. Mutates the real consent store and HKLM policy, so it requires `-AcceptRealMachineMutation` and an ephemeral machine | Release `wxc-exec.exe`; Administrator for the HKLM policy section, otherwise that section skips unless `-RequirePolicyCeiling` is passed |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
-Each `run_processcontainer_<area>_test.ps1` also runs standalone against a
-built tree, which is the fastest way to iterate on one area:
+The IsolationSession and native ProcessContainer network suites dot-source
+`tests/scripts/lib/LoopbackAnchor.ps1` for their positive network oracle: host
+IPv4/IPv6 loopback listeners with known response bodies. Native proxy checks
+pair a successful proxied request with denied direct requests to other
+loopback endpoints; launch failures do not count as network denials.
 
-```powershell
-tests\scripts\run_processcontainer_network_proxy_test.ps1 -RequireTier base-container
-```
-
-When the host probe reports `baseContainerSupportsIdentitylessLoopbackProxy`,
-the proxy area requires workload launch and a successful proxied fetch on both
-PSEC 1.0-only hosts and PSEC 1.1 hosts, including those without ingress support.
-A clean policy rejection is a failure on these hosts.
-Older binaries that omit this probe fact do not enable the capability-specific
-assertions; the existing proxy assertions still apply.
-
-The loopback area checks direct access with both ingress defaults. The proxy
-area checks that other IPv4 and IPv6 loopback endpoints remain blocked.
-
-Shared helpers live in `tests/scripts/lib/WinProcessContainer.Common.ps1`. It
-must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`
-publishes the suite context into the calling script's scope, which only works
-because dot-sourcing merges scopes.
-
-The IsolationSession suites dot-source `tests/scripts/lib/LoopbackAnchor.ps1`
-for their positive network oracle: a host loopback listener an isolated session
-can reach, so the assertion covers the session's network posture rather than
-the runner's outbound internet access.
-
-T2 (`appcontainer-bfs`) is out of scope: it is off by default behind the
-`tier2_bfs` Cargo feature and is not in use, so the suite records no assertions
-about it. The remaining `bfscfg` checks are guards, not coverage — invoking
-`bfscfg.exe` hard-locks the `bfs.sys` minifilter on 25H2, so a run that detects
-one raises MXC-FATAL and stops the whole suite (child exit code 78).
+Both native ProcessContainer suites run contained workloads through
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` with
+`-NoProfile -NonInteractive -ExecutionPolicy Bypass` and the shared
+`lib/processcontainer_policy_probe.ps1`. Neither suite requires Python or Node.
+The timeout child is a uniquely named copy of Windows PowerShell. Native
+Win32k-disabled and global-atom probes use `wxc-ui-probe`; no in-container C#
+compilation is needed. Clipboard tests skip non-text formats before changing
+anything, and restore and verify the original text in `finally`.
 
 ### Unix suites
 
@@ -96,7 +74,73 @@ one raises MXC-FATAL and stops the whole suite (child exit code 78).
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
-run focused backend suites.
+run focused backend suites; the aggregate scripts above are what CI dispatches to.
+
+Not every script runs in CI: several depend on local OS features such as
+Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does
+run are reached through the dispatchers below rather than being invoked
+directly.
+
+### CI dispatch
+
+The validation matrix (see `scripts/ci/validation-test-matrix.json` and
+`.github/workflows/Validation.Tests.Matrix.Job.yml`, documented end to end in
+[`CI validation infrastructure`](../../docs/development/build-and-test/ci-validation-infrastructure.md))
+never builds from source.
+It downloads a build artifact, prepares the host, and then hands off to one of
+these dispatchers, which map a matrix backend id to the suites above:
+
+| Dispatcher | Platforms | Backend ids |
+|------------|-----------|-------------|
+| `scripts/ci/run_backend_validation_tests.ps1` | Windows | `process`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm` |
+| `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt` |
+
+The Unix dispatcher recognizes the catalog's `microvm` entry but exits nonzero
+because that suite is not wired. Neither dispatcher accepts `hyperlight`.
+
+Pass the backend id exactly as it appears in the catalog — there is no separate
+handler name. The `process` case requires `wxc-exec --probe` to report an
+enabled native PSEC contract, then runs a filesystem smoke test and
+`run_base_container_network_tests.ps1` plus `run_processcontainer_policy_tests.ps1`.
+The filesystem smoke checks a real write/read and its expected stdout marker.
+Network coverage includes explicit egress allow-list and deny precedence.
+Denied-path, enumerate-only, and Learning Mode cases verify enforcement when
+advertised and rejection before execution otherwise. The HANDLES check uses
+the published UI probe against a host-owned hidden window, with an uncontained
+positive control. Privilege removal is tested only when the host token contains
+a tested privilege; otherwise the non-attributable case is explicitly skipped.
+Missing required native network
+capabilities or listeners fail the job rather than silently skipping cases.
+
+```powershell
+scripts\ci\run_backend_validation_tests.ps1 -Backend process `
+    -BinaryDirectory <dir> -Architecture x64
+```
+
+```bash
+scripts/ci/run_backend_validation_tests.sh bubblewrap <binary-directory>
+```
+
+A backend with no wired suite exits non-zero on purpose, so accidentally
+enabling it in a trigger fails loudly instead of reporting a false success.
+
+To see exactly what a plan would schedule without pushing:
+
+```bash
+node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly
+```
+
+**Skip semantics.** Several suites degrade gracefully on an unsupported host:
+the IsolationSession suites decide availability from a single `wxc-exec --probe`
+read of `probes.isolationSessionAvailable`, print `SKIPPED`, and exit 0.
+
+Because a skip exits 0 and the dispatchers propagate only the exit code, **a
+green CI job does not by itself prove the suite ran.** Anything treating these
+suites as validation evidence must check the `SKIPPED` line or the executed
+count, not just the exit status — the matrix entry says the host is expected to
+support the backend, so a silent skip there is a gap in coverage rather than a
+graceful degradation. Independently, a run that reaches the summary having
+executed zero tests always fails, since it substantiates nothing.
 
 `run_lxc_rootless_no_network_test.sh` checks that `lxc-exec` runs a config
 with no network section without root.  Neither `run_lxc_all_tests.sh` nor CI
@@ -179,29 +223,27 @@ The `wxc_e2e_tests` crate runs executor E2E tests directly against
 ```powershell
 cd src
 cargo test -p wxc_e2e_tests              # Executor E2E tests (skips if prereqs missing)
-cargo test -p wxc_e2e_tests -- --ignored # Include BFS, networking, and stress tests
+cargo test -p wxc_e2e_tests -- --ignored # Include native ProcessContainer, networking, and stress tests
 ```
 
 ### Ignored tests
 
-The following tests are marked `#[ignore]` because they require velocity key
-61714527 (BFS deadlock fix) enabled on the machine. AppContainer process
-isolation with brokered filesystem or networking depends on this fix.
-Run them explicitly on capable machines with
+The following tests are marked `#[ignore]` because they require an enabled
+native PSEC contract, and some require additional host capabilities.
+Run them explicitly on a capable machine with
 `cargo test -p wxc_e2e_tests -- --ignored`:
 
 | Test | Reason |
 |------|--------|
-| `test_appcontainer_basic` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_appcontainer_lpac` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_filesystem_bfs` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_filesystem_bfs_readonly` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_filesystem_bfs_spaces` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_pwsh_setlocation` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_tests\configs` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_examples` | Requires velocity key 61714527 (BFS deadlock fix) |
-| `test_processcontainer_proxy` | Requires velocity key 61714527 (BFS deadlock fix) and elevation |
-| `test_on_repeat` | Stress test (loops BFS tests) |
+| `test_processcontainer_basic` | Requires native PSEC |
+| `test_processcontainer_filesystem*` | Requires native PSEC |
+| `test_pwsh_setlocation` | Requires native PSEC |
+| `test_tests\configs` | Requires the configured native backends |
+| `test_examples` | Requires the configured native backends |
+| `test_processcontainer_proxy_capture_uses_native_capture` | Requires compatible native proxy and Learning Mode capture support; no PLM elevation |
+| `test_processcontainer_capture_denials_output_file` | Requires native Learning Mode capture support |
+| `test_processcontainer_capture_denials_timeout_retention` | Requires native Learning Mode capture support and retained-ETL access |
+| `test_on_repeat` | Stress test |
 
 ## MicroVM E2E
 

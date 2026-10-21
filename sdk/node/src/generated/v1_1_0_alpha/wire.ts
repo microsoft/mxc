@@ -111,11 +111,11 @@ export interface ExecRequest {
 }
 
 /**
- * Operator consent for containment fallback behavior.
+ * Fallback settings accepted for 1.x compatibility and ignored.
  */
 export interface Fallback {
   /**
-   * Whether the runtime may mutate host filesystem DACLs as a fallback.
+   * Accepted for compatibility and ignored.
    */
   allowDaclMutation?: boolean;
 }
@@ -391,7 +391,7 @@ export interface OneShotRequest {
    */
   containment?: OneShotContainment;
   /**
-   * Optional fallback consent.
+   * Legacy settings accepted for 1.x compatibility and ignored.
    */
   fallback?: Fallback;
   /**

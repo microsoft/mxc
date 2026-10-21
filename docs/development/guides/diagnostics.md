@@ -137,8 +137,8 @@ MXC inserts the run identifier even when `outputPath` names `denials.json`.
 `wxc-exec` prints a structured JSON pointer on stderr containing the actual
 `outputPath` and, when retained, `etlPath`. Derive the verbose JSON path from
 the actionable filename; it is intentionally not repeated in the pointer.
-Native and guarded-WPR capture use different managed ETL locations, so callers
-must use the reported `etlPath` rather than guessing it.
+Use the reported `etlPath` rather than guessing the native capture's managed
+ETL location.
 
 Streaming SDK callers must complete the process with `wait` or
 `wait_with_output`. Abandoning the process without a terminal wait discards the
@@ -189,14 +189,19 @@ analysis writes the actionable and verbose JSON pair.
 > Learning Mode. Ungranted access checks are allowed for the duration of the
 > run, so deny-by-default is not enforced. Do not use it to validate production
 > containment. It cannot be combined with an explicit
-> `processContainer.captureDenials` section. Native PSEC/V2 capture runs without
-> UAC; a compatible legacy tier may use the guarded-WPR fallback, whose
-> fixed-operation guardian prompts for elevation.
+> `processContainer.captureDenials` section. Native ProcessContainer capture runs
+> without UAC and requires compatible native Learning Mode support. Unsupported
+> capture requests fail before a container is created.
 
-#### Recovering guarded-WPR state
+## Recovering standalone PLM WPR state
 
-If the guarded-WPR fallback is interrupted before it can prove that WPR
-stopped, MXC preserves an administrator-protected recovery marker. MXC will not
+The standalone `plm.exe log` command uses an elevated guardian to control a
+host-wide WPR recording. This recovery procedure applies only to that tool:
+`captureDenials` and `wxc-exec --audit` use native PSEC capture and do not depend
+on this WPR recovery state.
+
+If standalone PLM is interrupted before it can prove that WPR stopped, MXC
+preserves an administrator-protected recovery marker. MXC will not
 automatically stop or cancel the host-wide WPR recording because it may belong
 to another tool or user. A later successful PLM start clears a stale marker
 automatically. If start continues to fail, the error reports the exact marker
@@ -233,7 +238,7 @@ From an elevated PowerShell window:
    Remove-Item -LiteralPath "$env:ProgramData\Microsoft\MXC\PLM\active.marker"
    ```
 
-5. Retry `captureDenials` or `wxc-exec.exe --audit`.
+5. Retry `plm.exe log`.
 
 > **Do not delete the marker first.** Removing it neither stops WPR nor proves
 > that the recording is safe to discard. It only removes MXC's durable warning

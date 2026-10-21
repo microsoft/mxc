@@ -26,14 +26,10 @@ $configJson = @"
         "timeout": 30000
     },
     "processContainer": {
-        "leastPrivilege": true,
         "captureDenials": {
             "mode": "block",
             "outputPath": $((Join-Path $WorkDirectory "denials.json") | ConvertTo-Json -Compress)
         }
-    },
-    "fallback": {
-        "allowDaclMutation": true
     }
 }
 "@

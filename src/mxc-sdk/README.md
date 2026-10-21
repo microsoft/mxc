@@ -10,6 +10,13 @@ configures the backend.
 
 See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
+On Windows, ProcessContainer requires an enabled native PSEC contract.
+Platform discovery reports ProcessContainer only when native PSEC is available;
+other backends are detected independently. `mxc_sdk::v1::probe(Some(&request))`
+checks request compatibility without creating a container. An incompatible
+request has no selected tier and an explanatory error, while host facts remain
+available.
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or

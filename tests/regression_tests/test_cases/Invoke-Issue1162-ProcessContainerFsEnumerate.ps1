@@ -42,9 +42,6 @@ $configJson = @"
             "enumeratePaths": $((ConvertTo-Json -InputObject @($enumerateDirectory) -Compress))
         }
     },
-    "fallback": {
-        "allowDaclMutation": false
-    },
     "ui": {
         "disable": false
     }

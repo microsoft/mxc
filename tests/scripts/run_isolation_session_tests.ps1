@@ -136,13 +136,9 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 #                  be reported as a skip.
 #
 # stdout and stderr are captured SEPARATELY. Merging them would let any stderr
-# line corrupt the JSON, and stderr is not hypothetical here: wxc-exec runs a
-# best-effort DACL-recovery pass BEFORE the `--probe` arm and reports it on
-# stderr (`tools/wxc/src/main.rs`), so a host carrying leftover state from a
-# crashed prior run would emit unparseable output and be judged "unavailable"
-# while being perfectly capable. That failure mode is inverted with respect to
-# risk — the dirtier the host, the likelier the false skip — which is exactly
-# the kind of silent green this gate exists to prevent.
+# line corrupt the JSON. A native-command diagnostic on stderr must not turn
+# a valid probe response into an "unavailable" result or hide an infrastructure
+# failure behind a skip.
 function Get-IsolationSessionProbe {
     param([string]$Exe)
 
@@ -151,7 +147,7 @@ function Get-IsolationSessionProbe {
     try {
         # This script runs under `$ErrorActionPreference = "Stop"`, which turns
         # a native command's stderr output into a terminating error. The probe
-        # is expected to write to stderr on a host carrying leftover state, so
+        # may write diagnostics to stderr, so
         # relax it for the duration of the call — the same idiom used around
         # the wxc-exec invocation in Run-IsolationSessionTest below.
         $ErrorActionPreference = "Continue"

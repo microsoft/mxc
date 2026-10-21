@@ -10,9 +10,8 @@
 //! build on).
 //!
 //! Only the backends with a streaming path are handled here: ProcessContainer
-//! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
-//! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
-//! run-to-completion path via `crate::process_container_common::dispatcher`), Bubblewrap
+//! (native PSEC, shared with the run-to-completion path via
+//! `crate::process_container_common::dispatcher`), Bubblewrap
 //! and LXC (Linux), Seatbelt (macOS), WSLC, and IsolationSession (Windows,
 //! behind the `wslc` and `isolation_session` features). Every other backend —
 //! including the remaining experimental ones (Windows Sandbox, MicroVM,
@@ -275,64 +274,14 @@ fn spawn_process_container(
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     use crate::mxc_common::sandbox_process::StdioMode;
-    use crate::process_container_common::dispatcher::{
-        spawn_with_fallback, DispatchError, SpawnDispatchError,
-    };
-    use std::fmt::Write;
+    use crate::process_container_common::dispatcher::{self, SpawnDispatchError};
 
-    // ProcessContainer resolves to a concrete backend + isolation tier purely
-    // by host capability, via the shared `spawn_with_fallback`
-    // dispatcher — the streaming counterpart of the run-to-completion
-    // `dispatch_with_fallback` the executor binaries use. Both
-    // share `select_backend_with_fallback`, so the streaming and
-    // run-to-completion paths agree on tier selection and the streaming path
-    // gets the full three-tier fallback: BaseContainer (Tier 1), AppContainer
-    // + BFS (Tier 2), and AppContainer + DACL (Tier 3). The returned handle
-    // owns any DACL guard, so host-ACE restore outlives the child (see issue
-    // #643). When the request sets `captureDenials`, `factory_for_request`
-    // hands the guarded WPR fallback factory to the dispatcher so an
-    // AppContainer fallback tier can still honor it instead of failing
-    // closed.
-    let capture_factory = crate::mxc_engine::guarded_capture::factory_for_request(request);
-    match spawn_with_fallback(request, logger, StdioMode::Pipes, capture_factory) {
-        Ok(dispatched) => {
-            for w in &dispatched.warnings {
-                let _ = writeln!(logger, "warning: {w}");
-            }
-            let _ = writeln!(
-                logger,
-                "selected isolation tier: {}",
-                dispatched.tier.as_str()
-            );
-            Ok(dispatched.process)
+    match dispatcher::spawn(request, logger, StdioMode::Pipes) {
+        Ok(process) => Ok(process),
+        Err(SpawnDispatchError::Dispatch(error)) => {
+            Err(MxcError::backend_unavailable(error.to_string()))
         }
-        Err(SpawnDispatchError::Dispatch(e)) => {
-            // Surface any retained-entry DACL warnings through the logger so the
-            // caller's buffer flush still reports them — mirroring the
-            // run-to-completion `resolve_runner_inner`.
-            if let DispatchError::Dacl { warnings, .. } = &e {
-                for w in warnings {
-                    let _ = writeln!(logger, "dacl warning: {w}");
-                }
-            }
-            Err(MxcError::backend_unavailable(format!("{e}")))
-        }
-        Err(SpawnDispatchError::Spawn {
-            response,
-            tier,
-            warnings,
-        }) => {
-            // The tier was chosen (and any DACL ACEs applied then rolled back)
-            // before the spawn failed, so log the same tier/warnings the success
-            // arm does — the run-to-completion path logs these at resolve time,
-            // before its separate spawn attempt, so a spawn failure never loses
-            // them there either.
-            for w in &warnings {
-                let _ = writeln!(logger, "warning: {w}");
-            }
-            let _ = writeln!(logger, "selected isolation tier: {}", tier.as_str());
-            Err(map_spawn_error(*response))
-        }
+        Err(SpawnDispatchError::Spawn(response)) => Err(map_spawn_error(*response)),
     }
 }
 
@@ -342,7 +291,7 @@ fn spawn_process_container(
     _logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     Err(MxcError::unsupported_containment(
-        "ProcessContainer (AppContainer / BaseContainer) is only available on Windows",
+        "ProcessContainer (PSEC) is only available on Windows",
     ))
 }
 
@@ -380,6 +329,8 @@ fn spawn_wslc(
     }
 }
 
+/// Spawn the IsolationSession backend.
+///
 /// Serves piped stdio. Goes through the backend's own launch rather than the
 /// `SandboxBackend` trait so a lifecycle failure keeps the API call and status
 /// the trait's `ScriptResponse` cannot carry; a refusal has no such detail, so

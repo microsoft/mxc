@@ -1439,11 +1439,8 @@ impl GuardedSession {
     /// Abandon the session, confirming guardian termination within an explicit
     /// bounded `confirm_timeout` instead of the full stop timeout.
     ///
-    /// Used by the discard-failure fallback so that repeated confirmation
-    /// attempts cannot each inherit the multi-minute stop timeout (which would
-    /// otherwise let a small retry loop block for tens of minutes). Once a
-    /// discard has been requested the guardian releases promptly, so a short
-    /// deadline is the appropriate certainty bound.
+    /// `cancel` uses the standard confirmation timeout. Callers selecting a
+    /// shorter bound still receive an error if guardian exit cannot be proven.
     pub fn cancel_within(&mut self, confirm_timeout: Duration) -> Result<()> {
         let abandoned = !self.disarmed;
         if abandoned {

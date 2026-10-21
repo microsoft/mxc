@@ -595,11 +595,9 @@ export interface SeatbeltConfig {
 export type SandboxingMethod = ContainmentType | ContainmentBackend;
 
 /**
- * Isolation tier selected by the runtime fallback detector.
- *
- * - `base-container`: full BaseContainer (process security environment)
- * - `appcontainer-bfs`: AppContainer + BFS filesystem isolation
- * - `appcontainer-dacl`: AppContainer + host DACL augmentation (last-resort fallback)
+ * Windows ProcessContainer tier reported by the runtime.
+ * Historical AppContainer values remain readable for V1 compatibility;
+ * current native ProcessContainer execution reports only `base-container`.
  */
 export type IsolationTier =
   | 'base-container'
@@ -686,8 +684,11 @@ export interface ProbeOutput {
 export interface ProbeFacts {
   baseContainerApiPresent: boolean;
   nativeCaptureAvailable: boolean;
+  /** Legacy result compatibility; current native code reports false. */
   guardedCaptureAvailable: boolean;
+  /** Legacy result compatibility; current native code reports false. */
   bfscfgPresent: boolean;
+  /** Legacy result compatibility; current native code reports false. */
   bfsCompiledIn: boolean;
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
@@ -737,19 +738,19 @@ export interface PlatformSupport {
   /** Available sandboxing methods on this platform */
   availableMethods: ContainmentBackend[];
   /**
-   * Why individual Linux backends are unavailable, whether or not another
-   * backend keeps Linux supported. Omitted on other platforms and when no
-   * Linux backend failures were observed.
+   * Individual Linux backend unavailability or Windows discovery failures,
+   * whether or not another backend keeps the platform supported.
+   * Omitted when no such diagnostics were observed.
    */
   unavailableReasons?: Partial<Record<ContainmentBackend, string>>;
   /**
-   * Tier that would be selected for an empty policy on this system.
+   * Present when the native Windows BaseContainer contract is available.
    * Omitted on non-Windows platforms or when the probe fails.
    */
   isolationTier?: IsolationTier;
   /**
-   * Tier degradation warnings (one per fall-through during selection).
-   * Omitted on non-Windows platforms or when the probe fails.
+   * Native probe warnings.
+   * Omitted on non-Windows platforms or when the probe reports none.
    */
   isolationWarnings?: string[];
   /**

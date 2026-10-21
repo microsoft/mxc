@@ -73,7 +73,7 @@ pub struct Request {
     /// Optional filesystem policy.
     #[serde(default)]
     pub filesystem: OptionalField<Filesystem>,
-    /// Optional fallback consent.
+    /// Legacy settings accepted for 1.x compatibility and ignored.
     #[serde(default)]
     pub fallback: OptionalField<Fallback>,
     /// Optional network policy.

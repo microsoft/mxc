@@ -19,9 +19,9 @@ connecting to low-integrity listeners. See
 
 ## 1. What this backend targets at GA
 
-On ProcessContainer paths with OS-scoped enforcement, each container gets two enforcement primitives scoped to its
-container SID and applied with no UAC prompt per launch. The AppContainer compatibility behavior is documented in
-section 2 and is not equivalent to these guarantees.
+Native ProcessContainer provides two OS-scoped enforcement primitives for each
+container, applied with no UAC prompt per launch. The host must support the PSEC
+features required by the request; see section 2.
 
 - **WFP egress filters:** block outbound traffic by default, then allow or block specific public or private
   destinations by IP address or range, protocol, and port for both IPv4 and IPv6. An explicit block always wins over
@@ -44,17 +44,17 @@ narrows the outbound public and private destinations reachable through the grant
 |---|---|---|---|
 | `deny` | `deny` | None | Internet and private-network traffic are denied. |
 | `allow` | `deny` | `internetClient` | Internet outbound is allowed; private-network traffic is denied. |
-| `deny` | `allow` | `privateNetworkClientServer` | PSEC blocks outbound with WFP and permits private-network inbound. The AppContainer fallback rejects this combination because the capability is bidirectional. |
+| `deny` | `allow` | `privateNetworkClientServer` | PSEC blocks outbound with WFP and permits private-network inbound. |
 | `allow` | `allow` | Both capabilities | Internet outbound and bidirectional private-network traffic are allowed. |
 
 This matrix covers the direction defaults without explicit internet egress rules or proxy mode.
-It describes the ordinary non-capture capability posture. Native PSEC
-`captureDenials` temporarily adds `internetClient` only when the option-aware
-trace collects network decisions and the caller explicitly supplies a direct
+It describes the ordinary non-capture capability posture. `captureDenials`
+temporarily adds `internetClient` only when the option-aware trace collects
+network decisions and the caller explicitly supplies a direct
 `network.egress` section, allowing Tessera's WFP policy to observe and record
-the attempt while the authored egress table continues to enforce it. Legacy
-access-only capture, absent or ingress-only network policy, non-capture
-runs, and proxy mode retain the matrix posture.
+the attempt while the authored egress table continues to enforce it. Capture
+through the access-only trace API, absent or ingress-only network policy,
+non-capture runs, and proxy mode keep the matrix posture.
 
 ### Model 1: direct egress, WFP-filtered (least restrictive)
 
@@ -90,7 +90,7 @@ runs, and proxy mode retain the matrix posture.
 
 This is a ProcessContainer-specific mapping. Callers that need a private-network proxy or any other private-network
 communication must set `ingress.default` to `"allow"` and accept that Windows enables both private-network client and
-server behavior. On an enforcing BaseContainer path, per-container WFP permits the MXC client container to connect only
+server behavior. Per-container WFP permits the MXC client container to connect only
 to the configured loopback address and port and blocks direct public and private destinations.
 
 #### Proxy deployment choices
@@ -123,7 +123,7 @@ non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopbac
 development/testing compatibility deployment, not the shared policy's strict host-loopback-closure guarantee.
 The shared setting requests both host-loopback directions, while WFP restricts client-container egress to the
 configured proxy endpoint.
-Requests the PSEC contract cannot preserve continue to an AppContainer tier.
+Requests that native PSEC cannot enforce are rejected before a container is created.
 
 #### Discovering identity-less loopback proxy support
 
@@ -188,7 +188,7 @@ The OS sets this configuration per BaseContainer, and the WinHTTP stack uses it 
 does not use the BaseContainer's configuration.
 
 MXC also sets the standard proxy environment variables for libraries that use cooperative proxying. Direct internet
-traffic that bypasses the proxy is blocked. On an enforcing BaseContainer path, per-container WFP permits egress only to
+traffic that bypasses the proxy is blocked. Per-container WFP permits egress only to
 the configured loopback proxy address and port and blocks direct public and private destinations.
 
 Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. When a non-blank `allowedProxyPeer` names a
@@ -278,34 +278,21 @@ The egress schema selects numeric destinations, protocols, and ports, not
 durable DNS names or application payloads. Its ingress schema has only
 `default` and `hostLoopback` toggles; it cannot select inbound peers or ports.
 
-## 2. Supported-contract selection and downlevel behavior
+## 2. Native availability and version selection
 
-Both WFP filter writes and per-container WinHTTP proxy configuration require a
-privileged context. For requests using supported contracts, MXC probes the
-host and selects the strongest usable process-creation API.
+ProcessContainer uses native PSEC (`CreateProcessSecurityEnvironment`).
+Backend discovery checks native availability, and request probing and dispatch
+check whether the host can enforce the requested policy. If PSEC is unavailable
+or cannot enforce the request, MXC rejects it before creating a container.
 
-**Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
-probe succeed. PSEC is the only ProcessContainer path that receives directional egress filters, proxy peer identity, or
-host-loopback configuration because it owns the corresponding policy lifetime through workload completion. When PSEC
-is unavailable or incompatible, selection continues to AppContainer, where unsupported policy is rejected.
-
-**Downlevel behavior:** When PSEC is unavailable, compatible requests use the AppContainer fallback.
-`egress.default: "allow"` grants `internetClient`; `ingress.default: "allow"` grants the bidirectional
-`privateNetworkClientServer` capability. This is the documented ProcessContainer mapping on every tier, not a
-downlevel weakening. Retired `network.proxy` requests fail at exact-version
-dispatch. Supported runtime-proxy requests do not fall back when AppContainer
-cannot preserve their peer or host-loopback requirements.
-
-The AppContainer fallback is selected only when its capability mapping preserves the request. Explicit egress rules,
-proxy peer identity, and host-loopback allow fail with a typed unsupported-policy error when PSEC cannot enforce them.
+PSEC owns directional egress filters, proxy peer identity, and host-loopback
+configuration for the lifetime of the workload. MXC selects the native PSEC
+version required by the policy and checks the corresponding capability flags.
 
 ## 3. WFP enforcement
 
-PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. AppContainer fallback does not
-install directional WFP filters. It uses capabilities for supported direction
-defaults and keeps the external runtime proxy setup. Its network audit records retain the firewall fields with
-`firewall_rules_created` and `firewall_rules_removed` at `0`, `firewall_applied` at `false`, and
-`firewall_removal_ok` at `true`.
+PSEC applies outbound WFP filters in the OS's elevated context and owns their
+lifetime.
 
 WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.
 `privateNetworkClientServer`, selected through `ingress.default`, is the prerequisite for private-network access and

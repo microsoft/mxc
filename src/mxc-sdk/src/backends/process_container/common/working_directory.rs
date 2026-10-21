@@ -1,24 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Working-directory resolution shared by the two Windows ProcessContainer
-//! launch paths.
+//! Working-directory resolution for native Windows ProcessContainer.
 //!
-//! Both launch APIs treat a `NULL` current directory as "inherit the parent's
+//! The launch API treats a `NULL` current directory as "inherit the parent's
 //! cwd". Under a deny-by-default sandbox token that directory is usually not
 //! openable, and the kernel then silently restarts the child at the drive root
 //! instead of failing the launch — a confusing, unlogged relocation.
 //!
 //! [`launch_working_directory`] therefore always yields a concrete directory,
-//! so neither runner ever passes `NULL`. Keeping the mapping here (rather than
-//! inline at each launch site) means it is covered by ordinary unit tests that
-//! need no prepared host, and that the two runners cannot drift apart.
+//! so the runner never passes `NULL`. The mapping has unit coverage that
+//! needs no prepared host.
 
 use crate::mxc_common::models::{ExecutionRequest, WorkingDirectorySource};
 
 /// Drive root used when neither `process.cwd` nor the filesystem policy yields
-/// a usable directory. Matches what `wxc-host-prep prepare-system-drive` grants
-/// sandbox tokens traverse access to.
+/// a usable directory.
 const DEFAULT_DRIVE_ROOT: &str = "C:\\";
 
 /// Where the launch working directory came from.

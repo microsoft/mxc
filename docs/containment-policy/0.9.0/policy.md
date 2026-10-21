@@ -40,7 +40,7 @@ sandbox.
 | `filesystem`, `network`, `ui` | Cross-cutting policy sections (below). An omitted section is not proof that every backend enforces a restriction. |
 | `runtimeConfig` | Runtime settings, including a caller-managed network proxy. |
 | `lifecycle` | Optional `destroyOnExit` (default `true`) and `preservePolicy` (default `false`) booleans. |
-| `fallback` | Optional `allowDaclMutation` boolean (default `true`); `false` refuses the Windows host-DACL fallback. |
+| `fallback` | Optional `allowDaclMutation` boolean accepted for compatibility and ignored. Windows ProcessContainer uses native PSEC only. |
 | `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent and a permitting administrative policy. |
 | `processContainer`, `appContainer`, `lxc`, `seatbelt`, `macos_sandbox`, `wslc` | Backend-specific settings; only the section matching the selected backend is accepted. The two legacy spellings are 0.9 aliases (see below). |
 

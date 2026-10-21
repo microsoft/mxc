@@ -63,9 +63,6 @@ function Invoke-PathCase {
             readonlyPaths = @($env:SystemRoot)
             readwritePaths = @($WorkDirectory)
         }
-        fallback = [ordered]@{
-            allowDaclMutation = $true
-        }
         ui = [ordered]@{
             disable = $false
         }

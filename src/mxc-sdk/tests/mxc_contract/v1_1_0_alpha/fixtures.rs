@@ -84,3 +84,60 @@ fn the_request_parser_refuses_a_session_phase_for_a_foreign_containment() {
         }
     }
 }
+
+#[test]
+fn published_v1_one_shot_fixtures_remain_valid_in_the_next_minor() {
+    use mxc_sdk::mxc_contract::published::v1_0_0;
+
+    let fixtures = crate::exact_test_support::read_fixtures(
+        env!("CARGO_MANIFEST_DIR"), "v1_0_0", "one_shot", "valid",
+    );
+    for (name, json) in fixtures {
+        serde_json::from_str::<v1_0_0::OneShotRequest>(&json)
+            .unwrap_or_else(|error| panic!("published fixture {name}: {error}"));
+        let mut request: serde_json::Value = serde_json::from_str(&json).unwrap();
+        request["version"] = serde_json::json!("1.1.0-alpha");
+        assert!(
+            matches!(parse_request(&request.to_string()), Ok(Request::OneShot(_))),
+            "published one-shot fixture {name} was rejected by the next minor"
+        );
+    }
+}
+
+#[test]
+fn published_fallback_settings_remain_accepted_and_ignored_in_the_next_minor() {
+    use mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json;
+    use mxc_sdk::mxc_common::logger::{Logger, Mode};
+    use mxc_sdk::mxc_common::state_aware_request::MxcRequest;
+
+    let normalize = |request: &serde_json::Value| {
+        let parsed = load_mxc_request_from_json(
+            &request.to_string(), &mut Logger::new(Mode::Buffer),
+        ).expect("compatible request must normalize");
+        match parsed {
+            MxcRequest::OneShot(request) => serde_json::to_value(request).unwrap(),
+            _ => panic!("expected a create-and-run request"),
+        }
+    };
+    for version in ["1.0.0", "1.1.0-alpha"] {
+        let baseline = serde_json::json!({
+            "version": version,
+            "containerId": "fallback-compatibility",
+            "containment": "process",
+            "process": {"commandLine": "echo compatibility"},
+        });
+        let expected = normalize(&baseline);
+        for fallback in [
+            serde_json::json!({}),
+            serde_json::json!({"allowDaclMutation": true}),
+            serde_json::json!({"allowDaclMutation": false}),
+        ] {
+            let mut request = baseline.clone();
+            request["fallback"] = fallback;
+            assert_eq!(
+                normalize(&request), expected,
+                "fallback changed ExecutionRequest for {version}"
+            );
+        }
+    }
+}

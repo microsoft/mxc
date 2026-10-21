@@ -117,6 +117,11 @@ Per [semver.org](https://semver.org/):
 - **Minor** (x.Y.0) — new features, backward compatible
 - **Major** (X.0.0) — breaking changes
 
+A development prerelease for the next minor must retain accepted fields from
+the published major line. Retired settings such as `fallback.allowDaclMutation`
+remain accepted and ignored in 1.x; removing their accepted JSON form requires
+a new major contract, even when the setting no longer affects execution.
+
 ## The three version axes
 
 MXC tracks three independent "versions" that are deliberately **never
@@ -155,8 +160,8 @@ reasons:
   constants in step — but the two axes are not tied to each other.
 - **Host capability** is resolved by runtime negotiation, not by a version string.
   The schema `version` does not select the Windows backend:
-  ProcessContainer resolves to BaseContainer or AppContainer purely by host
-  capability (see [Version Negotiation](#version-negotiation)). An identical
+  ProcessContainer requires native PSEC support for the complete policy
+  (see [Version Negotiation](#version-negotiation)). An identical
   policy that is expressible in multiple registered contracts retains the same
   host-capability-driven backend selection.
 
@@ -499,8 +504,8 @@ MXC validates the request against the selected contract and policy
 Stage 2: resolve `containment` intent → concrete backend
         │
         ▼
-Stage 3: probe host capability → select backend tier
-        │  (ProcessContainer: BaseContainer if usable, else AppContainer)
+Stage 3: probe host capability → validate backend availability
+        │  (ProcessContainer: native PSEC or backend_unavailable)
         │
         ▼
 For the BaseContainer tier: translate policy → PSEC flat buffer
@@ -616,12 +621,9 @@ Stage 2 — Containment resolve (independent of schema version)
 
 Stage 3 — Host-capability negotiate (runtime probe, no version input)
   For ProcessContainer on Windows:
-    BaseContainer usable on this host?  (is_base_container_usable())
-      yes → BaseContainer (native OS sandbox API)
-      no  → AppContainer fallback tier (BFS when compiled in with the
-            `tier2_bfs` feature and `bfscfg.exe` is present, else DACL)
-  The chosen tier and any fallback are logged (warnings + "selected isolation
-  tier: …"). This capability fallback is the ONLY fallback.
+    PSEC compatible and usable? → PSEC
+    otherwise → backend_unavailable
+  MXC does not emulate native containment by modifying host filesystem ACLs.
 ```
 
 For the BaseContainer tier, Stage 3 translates the policy into a PSEC
@@ -687,8 +689,6 @@ Negotiation failures are **typed and actionable** — never a silent fallback:
   phase when the requested backend's API is absent (e.g. the BaseContainer OS
   sandbox API is not present on this build), with a hint pointing at the host
   requirement — not a downgrade to a weaker backend behind the caller's back.
-  (BaseContainer-vs-AppContainer is the one exception, and it is an explicit,
-  logged capability tier, not a security relaxation.)
 - **Policy-unsupported failures** (a backend that cannot honor a specific policy
   field, e.g. `deniedPaths`) fail with a specific message naming the
   unsupported field. Security policy is deterministic — no relaxation, no fuzzy

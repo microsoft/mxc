@@ -1576,13 +1576,6 @@ fn normalize_common_request_ir(
     validate_filesystem_paths(&policy)?;
     normalize_filesystem_paths(&mut policy, logger);
 
-    // Fallback section
-    if let Some(fbcfg) = cfg.fallback {
-        if let Some(v) = fbcfg.allow_dacl_mutation {
-            policy.fallback.allow_dacl_mutation = v;
-        }
-    }
-
     parse_network_policy(
         &mut policy,
         NetworkSections {
@@ -2157,6 +2150,10 @@ mod tests {
             "0.9.0",
             "0.9.1-alpha",
             "0.10.1-alpha",
+            "0.10.0-alpha",
+            "0.5.0-alpha",
+            "1.2.0-alpha",
+            "not-a-version",
         ] {
             let json = format!(
                 r#"{{
@@ -2195,6 +2192,32 @@ mod tests {
             );
             assert!(error.message().contains("Unsupported contract version"));
         }
+    }
+
+    #[test]
+    fn capture_output_path_requires_an_absolute_file_with_an_existing_parent() {
+        let directory = tempfile::tempdir().expect("temporary capture directory");
+        let missing = directory.path().join("missing").join("capture.json");
+        let root = directory.path().ancestors().last().unwrap();
+        for (path, message) in [
+            (
+                std::path::Path::new("capture.json"),
+                "must be an absolute path",
+            ),
+            (root, "directory root"),
+            (missing.as_path(), "parent directory does not exist"),
+            (directory.path(), "existing directory"),
+        ] {
+            let error =
+                validate_capture_denials_output_path(&path.to_string_lossy(), &mut test_logger())
+                    .unwrap_err();
+            assert!(error.to_string().contains(message), "{path:?}: {error}");
+        }
+        validate_capture_denials_output_path(
+            &directory.path().join("capture.json").to_string_lossy(),
+            &mut test_logger(),
+        )
+        .expect("valid absolute output file");
     }
 
     #[test]

@@ -27,6 +27,7 @@ import {
   _linuxProbeTimeouts,
   _setLxcAvailabilityProbe,
   _setDarwinBackendsReader,
+  _setWindowsBackendDetectors,
   _setPlatformDiagnosticLogger,
   findWxcExecutable,
   _resetWxcExecutableCache,
@@ -70,6 +71,16 @@ describe('native backend discovery', () => {
     }])), [{
       backend: 'unknown', tier: 'unknown', capabilities: ['unknown'], warnings: [],
     }]);
+  });
+
+  it('preserves historical V1 discovery tiers', () => {
+    for (const tier of ['appcontainer-bfs', 'appcontainer-dacl']) {
+      assert.deepStrictEqual(parseAvailableBackends(JSON.stringify([{
+        backend: 'processcontainer', tier,
+      }])), [{
+        backend: 'processcontainer', tier, capabilities: [], warnings: [],
+      }]);
+    }
   });
 
   it('reports identity-less loopback proxy support without general ingress support', () => {
@@ -262,10 +273,12 @@ describe('getPlatformSupport on macOS', { skip: os.platform() !== 'darwin' }, ()
 describe('getPlatformSupport probe integration', () => {
   beforeEach(() => {
     _resetPlatformSupportCache();
+    _setWindowsBackendDetectors(() => [], () => false);
   });
 
   afterEach(() => {
     _setProbeRunner(null);
+    _setWindowsBackendDetectors();
     _resetPlatformSupportCache();
   });
 
@@ -300,20 +313,15 @@ describe('getPlatformSupport probe integration', () => {
     _setProbeRunner(() => {
       calls += 1;
       return JSON.stringify({
-        tier: 'appcontainer-bfs',
-        needsDaclAugmentation: false,
-        warnings: ['BaseContainer API not present'],
-        probes: { baseContainerApiPresent: false, bfscfgPresent: true },
+        tier: 'base-container',
+        warnings: [],
+        probes: { baseContainerApiPresent: true },
       });
     });
     const support = getPlatformSupport();
-    if (!support.isSupported) {
-      // Host build doesn't satisfy the version gate; the probe path is
-      // not taken on this machine. Skip the assertion.
-      return;
-    }
-    assert.strictEqual(support.isolationTier, 'appcontainer-bfs');
-    assert.deepStrictEqual(support.isolationWarnings, ['BaseContainer API not present']);
+    assert.strictEqual(support.isSupported, true);
+    assert.strictEqual(support.isolationTier, 'base-container');
+    assert.ok(support.availableMethods.includes('processcontainer'));
     assert.strictEqual(calls, 1);
   });
 
@@ -324,6 +332,94 @@ describe('getPlatformSupport probe integration', () => {
     const support = getPlatformSupport();
     assert.strictEqual(support.isolationTier, undefined);
     assert.strictEqual(support.isolationWarnings, undefined);
+    assert.strictEqual(support.isSupported, false);
+    assert.match(support.reason ?? '', /probe failed: boom/);
+  });
+
+  it('retries a transient Windows probe failure instead of caching unsupported', { skip: !isWindows }, () => {
+    let calls = 0;
+    _setProbeRunner(() => {
+      if (++calls === 1) throw new Error('cold start timeout');
+      return JSON.stringify({ tier: 'base-container', probes: { baseContainerApiPresent: true } });
+    });
+    const failed = getPlatformSupport();
+    assert.strictEqual(failed.isSupported, false);
+    assert.match(failed.reason ?? '', /cold start timeout/);
+    const recovered = getPlatformSupport();
+    assert.strictEqual(recovered.isSupported, true);
+    assert.deepStrictEqual(recovered.availableMethods, ['processcontainer']);
+    assert.strictEqual(getPlatformSupport(), recovered);
+    assert.strictEqual(calls, 2);
+  });
+
+  it('caches a valid no-PSEC result and reports the host requirement', { skip: !isWindows }, () => {
+    let calls = 0;
+    _setProbeRunner(() => {
+      calls++;
+      return JSON.stringify({ probes: { baseContainerApiPresent: false } });
+    });
+
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, false);
+    assert.deepStrictEqual(support.availableMethods, []);
+    assert.match(support.reason ?? '', /requires PSEC/);
+    assert.strictEqual(getPlatformSupport(), support);
+    assert.strictEqual(calls, 1);
+  });
+
+  it('does not publish or cache partial Windows facts from malformed output', { skip: !isWindows }, () => {
+    for (const probes of [[], null, { baseContainerApiPresent: 'true' }]) {
+      _resetPlatformSupportCache();
+      let calls = 0;
+      _setProbeRunner(() => JSON.stringify({
+        tier: 'base-container',
+        warnings: ['partial warning'],
+        probes: ++calls === 1 ? probes : { baseContainerApiPresent: true },
+      }));
+      const failed = getPlatformSupport();
+      assert.strictEqual(failed.isSupported, false);
+      assert.strictEqual(failed.isolationTier, undefined);
+      assert.strictEqual(failed.isolationWarnings, undefined);
+      assert.match(failed.reason ?? '', /probe failed/);
+      assert.strictEqual(getPlatformSupport().isSupported, true);
+      assert.strictEqual(calls, 2);
+    }
+  });
+
+  it('supports a Windows host with only native feature-enabled WSLC', { skip: !isWindows }, () => {
+    _setProbeRunner(() => JSON.stringify({ probes: { baseContainerApiPresent: false } }));
+    _setWindowsBackendDetectors(
+      () => [{ backend: 'wslc', capabilities: [], warnings: [] }],
+      () => false,
+    );
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, true);
+    assert.deepStrictEqual(support.availableMethods, ['wslc']);
+  });
+
+  it('retries failed native Windows discovery and reports its cause', { skip: !isWindows }, () => {
+    let calls = 0;
+    _setProbeRunner(() => JSON.stringify({ probes: { baseContainerApiPresent: false } }));
+    _setWindowsBackendDetectors(() => {
+      if (++calls === 1) throw new Error('native discovery temporarily unavailable');
+      return [{ backend: 'wslc', capabilities: [], warnings: [] }];
+    }, () => false);
+    assert.match(getPlatformSupport().reason ?? '', /native discovery temporarily unavailable/);
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, true);
+    assert.deepStrictEqual(support.availableMethods, ['wslc']);
+    assert.strictEqual(getPlatformSupport(), support);
+    assert.strictEqual(calls, 2);
+  });
+
+  it('preserves historical V1 platform tiers', { skip: !isWindows }, () => {
+    for (const tier of ['appcontainer-bfs', 'appcontainer-dacl']) {
+      _resetPlatformSupportCache();
+      _setProbeRunner(() => JSON.stringify({ tier, probes: { baseContainerApiPresent: true } }));
+      const support = getPlatformSupport();
+      assert.strictEqual(support.isSupported, true);
+      assert.strictEqual(support.isolationTier, tier);
+    }
   });
 
   it('omits isolationTier when probe returns malformed JSON', { skip: !isWindows }, () => {
@@ -338,7 +434,7 @@ describe('getPlatformSupport probe integration', () => {
       JSON.stringify({
         tier: 'future-tier',
         warnings: [],
-        probes: { baseContainerApiPresent: true, bfscfgPresent: true },
+        probes: { baseContainerApiPresent: true },
       }),
     );
     const support = getPlatformSupport();
@@ -350,17 +446,16 @@ describe('getPlatformSupport probe integration', () => {
     _setProbeRunner(() => {
       calls += 1;
       return JSON.stringify({
-        tier: 'appcontainer-bfs',
+        tier: 'base-container',
         warnings: [],
-        probes: { baseContainerApiPresent: false, bfscfgPresent: true },
+        probes: { baseContainerApiPresent: true },
       });
     });
     const a = getPlatformSupport();
     const b = getPlatformSupport();
     assert.strictEqual(a, b, 'cached object identity');
-    if (a.isSupported) {
-      assert.strictEqual(calls, 1, 'probe should be invoked exactly once');
-    }
+    assert.strictEqual(a.isSupported, true);
+    assert.strictEqual(calls, 1, 'probe should be invoked exactly once');
   });
 
   it('still returns base PlatformSupport shape on non-Windows', { skip: isWindows }, () => {
@@ -377,10 +472,12 @@ describe('getPlatformSupport probe integration', () => {
   // `populateIsolationFromProbe` is the single point of contact; the
   // tests below stress it via `_setProbeRunner`.
   it('handles probe JSON with only `tier`', { skip: !isWindows }, () => {
-    _setProbeRunner(() => JSON.stringify({ tier: 'appcontainer-dacl' }));
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { baseContainerApiPresent: true } }),
+    );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
-    assert.strictEqual(support.isolationTier, 'appcontainer-dacl');
+    assert.strictEqual(support.isSupported, true);
+    assert.strictEqual(support.isolationTier, 'base-container');
     assert.strictEqual(
       support.isolationWarnings,
       undefined,
@@ -391,7 +488,6 @@ describe('getPlatformSupport probe integration', () => {
   it('handles probe JSON with only `warnings`', { skip: !isWindows }, () => {
     _setProbeRunner(() => JSON.stringify({ warnings: ['msg-1', 'msg-2'] }));
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
     // No `tier` field → isolationTier stays unset; warnings still
     // surface so callers can observe degraded-detection state.
     assert.strictEqual(support.isolationTier, undefined);
@@ -401,7 +497,6 @@ describe('getPlatformSupport probe integration', () => {
   it('handles empty probe JSON object', { skip: !isWindows }, () => {
     _setProbeRunner(() => JSON.stringify({}));
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
     assert.strictEqual(support.isolationTier, undefined);
     assert.strictEqual(support.isolationWarnings, undefined);
   });
@@ -409,25 +504,27 @@ describe('getPlatformSupport probe integration', () => {
   it('filters non-string entries out of warnings array', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-bfs',
+        tier: 'base-container',
+        probes: { baseContainerApiPresent: true },
         warnings: ['ok', 42, null, { not: 'a string' }, 'ok2'],
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.deepStrictEqual(support.isolationWarnings, ['ok', 'ok2']);
   });
 
   it('omits isolationWarnings when filtered warnings array is empty', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-bfs',
+        tier: 'base-container',
+        probes: { baseContainerApiPresent: true },
         warnings: [42, null], // every entry is non-string → empty after filter
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
-    assert.strictEqual(support.isolationTier, 'appcontainer-bfs');
+    assert.strictEqual(support.isSupported, true);
+    assert.strictEqual(support.isolationTier, 'base-container');
     assert.strictEqual(support.isolationWarnings, undefined);
   });
 
@@ -444,26 +541,24 @@ describe('getPlatformSupport probe integration', () => {
   it('surfaces portable UI capabilities from probes', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
           uiCapabilities: allUiCapabilities,
         },
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.deepStrictEqual(support.uiCapabilities, allUiCapabilities);
   });
 
   it('reports input-injection blocking unsupported from probe capabilities', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
           uiCapabilities: {
             ...allUiCapabilities,
             canBlockInputInjection: false,
@@ -472,7 +567,7 @@ describe('getPlatformSupport probe integration', () => {
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.strictEqual(support.uiCapabilities?.canBlockInputInjection, false);
     assert.strictEqual(support.uiCapabilities?.canBlockInputMethodChanges, true);
   });
@@ -480,10 +575,9 @@ describe('getPlatformSupport probe integration', () => {
   it('reports input-method and input-injection blocking unsupported from probe capabilities', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
           uiCapabilities: {
             ...allUiCapabilities,
             canBlockInputInjection: false,
@@ -493,7 +587,7 @@ describe('getPlatformSupport probe integration', () => {
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.strictEqual(support.uiCapabilities?.canBlockInputInjection, false);
     assert.strictEqual(support.uiCapabilities?.canBlockInputMethodChanges, false);
     assert.strictEqual(support.uiCapabilities?.canBlockClipboardRead, true);
@@ -501,34 +595,31 @@ describe('getPlatformSupport probe integration', () => {
   });
 
   it('omits UI capabilities when probes block is absent', { skip: !isWindows }, () => {
-    _setProbeRunner(() => JSON.stringify({ tier: 'appcontainer-dacl' }));
+    _setProbeRunner(() => JSON.stringify({ tier: 'base-container' }));
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
     assert.strictEqual(support.uiCapabilities, undefined);
   });
 
   it('omits UI capabilities when probe omits them', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
         },
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.strictEqual(support.uiCapabilities, undefined);
   });
 
   it('omits UI capabilities when probe returns a partial capability object', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
           uiCapabilities: {
             canBlockClipboardRead: true,
           },
@@ -536,7 +627,7 @@ describe('getPlatformSupport probe integration', () => {
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.strictEqual(support.uiCapabilities, undefined);
   });
 });
@@ -691,17 +782,20 @@ describe('isolation_session availability gate', () => {
       throw new Error('probe failed');
     });
     const support = getPlatformSupport();
-    assert.ok(support.isSupported, 'Windows support is independent of the probe');
+    assert.ok(!support.availableMethods.includes('processcontainer'));
     assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
-  it('always reports processcontainer as the default on Windows (no build gate)', { skip: !isWindows }, () => {
-    // The runtime gate lives in the native binary; the SDK reports Windows
-    // support regardless of isolation-session availability.
-    _setProbeRunner(() => JSON.stringify({ probes: { isolationSessionAvailable: false } }));
+  it('reports processcontainer when the native probe confirms PSEC', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({
+        tier: 'base-container',
+        probes: { baseContainerApiPresent: true, isolationSessionAvailable: false },
+      }),
+    );
     const support = getPlatformSupport();
     assert.ok(support.isSupported);
-    assert.strictEqual(support.availableMethods[0], 'processcontainer');
+    assert.ok(support.availableMethods.includes('processcontainer'));
   });
 });
 

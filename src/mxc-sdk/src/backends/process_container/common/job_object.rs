@@ -369,8 +369,7 @@ impl UiJobObject {
     /// This is the **strict** drain: a failure to observe the job reach zero
     /// active processes within [`JOB_EMPTY_WAIT_TIMEOUT`] is returned as an
     /// error. Use it only where full drain certainty is a correctness
-    /// requirement — notably the guarded-WPR `captureDenials` paths, where ETL
-    /// scoping is only sound if nothing can still be running unobserved.
+    /// requirement, including native capture finalization after workload teardown.
     /// Ordinary (non-capture) teardown should prefer
     /// [`Self::terminate_best_effort`], which does not fail an otherwise-valid
     /// run just because the kernel had not finished tearing the tree down

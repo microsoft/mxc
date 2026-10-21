@@ -319,6 +319,9 @@ public static IReadOnlyList<AvailableBackend> GetAvailableBackends();
 
 Probe whether the public SDK can launch containers on this host and which backends it can launch.
 
+On Windows, ProcessContainer requires native PSEC support. Other supported
+backends are detected independently; the host is unsupported when none are available.
+
 ```csharp
 public static PlatformSupport GetPlatformSupport();
 ```
