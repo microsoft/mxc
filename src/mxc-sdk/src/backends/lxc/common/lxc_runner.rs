@@ -664,40 +664,24 @@ impl LxcScriptRunner {
 
         // Started last, after every step that can fail and release the
         // container, and before the workload can try to reach the proxy.
-        let relay = if request.policy.runtime_network_proxy_specified {
-            let started = match &request.policy.network_proxy.address {
-                Some(address) => netns_pid
+        let relay = match &request.policy.network_proxy.address {
+            Some(address) if request.policy.runtime_network_proxy_specified => {
+                let started = netns_pid
                     .ok_or_else(|| "the container's init PID is not known".to_string())
-                    .and_then(|pid| LoopbackRelay::start(pid, address.host(), address.port())),
-                None => Err("the proxy address is missing".to_string()),
-            };
-            match started {
-                Ok(relay) => {
-                    let kept = if self.destroy_on_exit {
-                        ""
-                    } else {
-                        " The container is kept, and has no path to the proxy until a later \
-                         run with runtimeConfig.networkProxy starts the relay again."
-                    };
-                    let _ = writeln!(
-                        logger,
-                        "LXC: relaying runtimeConfig.networkProxy into the container. The relay \
-                         stops when this run ends.{}",
-                        kept
-                    );
-                    Some(relay)
-                }
-                Err(e) => {
-                    self.release_after_failure(&container, container_created, logger);
-                    return Err(ScriptResponse::error(&format!(
-                        "LXC: cannot relay runtimeConfig.networkProxy into the container: \
-                         {}. The script was not run.",
-                        e
-                    )));
+                    .and_then(|pid| LoopbackRelay::start(pid, address.host(), address.port()));
+                match started {
+                    Ok(relay) => Some(relay),
+                    Err(e) => {
+                        self.release_after_failure(&container, container_created, logger);
+                        return Err(ScriptResponse::error(&format!(
+                            "LXC: cannot relay runtimeConfig.networkProxy into the container: \
+                             {}. The script was not run.",
+                            e
+                        )));
+                    }
                 }
             }
-        } else {
-            None
+            _ => None,
         };
 
         Ok(PreparedSandbox {
