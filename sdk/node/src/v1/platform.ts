@@ -950,14 +950,6 @@ function getLinuxRustTargetTriple(): string {
 }
 
 /**
- * Get the Rust target triple for the current macOS machine architecture.
- */
-function getDarwinRustTargetTriple(): string {
-  const arch = os.arch();
-  return arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
-}
-
-/**
  * Find the wxc-exec executable
  * Searches in common locations relative to the SDK package,
  * selecting the build matching the current machine architecture.
@@ -1093,46 +1085,6 @@ export function findLxcExecutable(): string | null {
   for (const lxcPath of possiblePaths) {
     if (verifyExecutable(lxcPath)) {
       return lxcPath;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Find the mxc-exec-mac executable on macOS.
- * Searches in the SDK bin directory (npm install path) and Cargo build
- * output directories (monorepo dev path).
- * @returns Path to mxc-exec-mac if found, null otherwise
- */
-export function findSeatbeltExecutable(): string | null {
-  // Allow override for bundled deployments (debugging/testing)
-  if (process.env.MXC_BIN_DIR) {
-    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-mac');
-    if (verifyExecutable(overridePath)) {
-      return overridePath;
-    }
-  }
-
-  const targetTriple = getDarwinRustTargetTriple();
-  const targetDir = path.join(__dirname, '..', '..', '..', 'src', 'target');
-
-  const possiblePaths = [
-    // Bundled in the SDK package
-    path.join(__dirname, '..', 'bin', getSdkArch(), 'mxc-exec-mac'),
-    // Architecture-specific release build
-    path.join(targetDir, targetTriple, 'release', 'mxc-exec-mac'),
-    // Architecture-specific debug build
-    path.join(targetDir, targetTriple, 'debug', 'mxc-exec-mac'),
-    // Default Cargo release build
-    path.join(targetDir, 'release', 'mxc-exec-mac'),
-    // Default Cargo debug build
-    path.join(targetDir, 'debug', 'mxc-exec-mac'),
-  ];
-
-  for (const darwinPath of possiblePaths) {
-    if (verifyExecutable(darwinPath)) {
-      return darwinPath;
     }
   }
 

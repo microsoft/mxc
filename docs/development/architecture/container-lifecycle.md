@@ -570,8 +570,9 @@ Compile-time enforcement of valid combinations lives on the SDK's per-(backend, 
 Configs (§6.1), not on this illustrative aggregate. "MXC request JSON" containing
 backend sections is validated by the exact Rust contract and
 `validate_<phase>` hooks at runtime (§10.1). Runtime experimental authorization
-is supplied separately through `SandboxSpawnOptions.experimental` or the
-executor's `--experimental` flag; it is not a request JSON field.
+is supplied separately through the native entry points' `experimental` argument
+(which the published v1 SDKs always pass as off) or the executor's
+`--experimental` flag; it is not a request JSON field.
 
 For one-shot calls (phase absent), the top-level backend section directly holds
 the one-shot config object (e.g., `wslc?: WslcConfig`), as documented in

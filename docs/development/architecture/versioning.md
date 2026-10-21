@@ -405,25 +405,11 @@ silently ignored. Contract version and backend authorization are separate.
 The authorization switch is excluded from policy identity because it does not
 change the selected backend's enforcement.
 
-**2. SDK:** policy APIs come from `@microsoft/mxc-sdk/v1`; raw config
-spawning comes from `@microsoft/mxc-sdk`.
-```typescript
-// With policy:
-const pty = spawnSandbox("python app.py", policy, {
-  experimental: true,
-  debug: false
-});
-
-// Or with config:
-const config = createConfigFromPolicy(policy, "process");
-config.process!.commandLine = "python app.py";
-const pty = spawnSandboxFromConfig(config, {
-  experimental: true,
-  debug: false,
-});
-```
-
-The SDK passes `--experimental` to the underlying binary when this option is set.
+**2. SDK:** the published v1 SDKs do not authorize experimental backends.
+Their create-and-run and container lifecycle operations always pass the native
+entry points' `experimental` argument as off, so a request that selects an
+experimental backend fails with `backend_unavailable`. Exercise experimental
+backends through `wxc-exec --experimental`.
 
 ### Forking Code for Experimental Features
 

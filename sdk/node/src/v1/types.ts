@@ -74,35 +74,6 @@ export interface LifecycleConfig {
  */
 export type ContainmentType = "process" | "vm" | "microvm";
 
-/**
- * Runtime list of {@link ContainmentType} values. Kept in sync with the
- * `ContainmentType` union via the type annotation. Use this to recognise
- * abstract intents at run time (the union itself only exists at compile
- * time).
- */
-export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
-
-/**
- * Deprecated containment wire values, mapped to their canonical
- * {@link ContainmentBackend} replacement. Historical v0 contracts accept
- * these spellings via serde aliases; v1 contracts reject them.
- *
- * The map is intentionally partial: only deprecated keys appear. Use a
- * presence check (e.g. `LegacyContainmentAliases[value] ?? value`) rather
- * than indexing blindly.
- *
- * The wire payload is forwarded to wxc-exec unchanged — the Rust parser
- * performs the final mapping at runtime. Resolution here is purely so the
- * SDK's experimental-mode, platform-support, and availability checks see
- * the canonical backend.
- *
- * Internal to the SDK; not part of the public API.
- */
-export const LegacyContainmentAliases: Readonly<Partial<Record<string, ContainmentBackend>>> = {
-  appcontainer: 'processcontainer',
-  macos_sandbox: 'seatbelt',
-};
-
 /** @internal Network fields the stable V1 mapper must reject rather than omit. */
 export const UnsupportedV1NetworkFields = [
   'allowOutbound',
@@ -114,12 +85,6 @@ export const UnsupportedV1NetworkFields = [
   'proxy',
   'removeRulesOnExit',
 ] as const;
-
-const LegacyConfigAliasVersions: Readonly<Record<string, readonly string[]>> = {
-  appcontainer: ['0.9.0-alpha'],
-  appContainer: ['0.9.0-alpha'],
-  macos_sandbox: ['0.9.0-alpha'],
-};
 
 /**
  * Concrete containment backend. Each value names a specific runner
@@ -151,12 +116,6 @@ export type ContainmentChoice =
   | 'seatbelt'
   | 'isolation_session'
   | 'bubblewrap';
-
-/**
- * Containment values (abstract intent or concrete backend) that require
- * the `--experimental` flag.
- */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight'];
 
 /**
  * Clipboard access policy levels
@@ -435,35 +394,6 @@ export interface ContainerConfig {
   seatbelt?: SeatbeltConfig;
   /** Cross-platform UI configuration */
   ui?: UiConfig;
-}
-
-/** @internal Returns an actionable error when a raw config uses a retired alias. */
-export function legacyConfigAliasUnsupportedReason(config: ContainerConfig): string | undefined {
-  const rawContainment = config.containment as string | undefined;
-  if (
-    rawContainment !== undefined
-    && LegacyContainmentAliases[rawContainment] !== undefined
-    && !LegacyConfigAliasVersions[rawContainment]?.includes(config.version)
-  ) {
-    return `Schema ${config.version} does not support legacy containment alias '${rawContainment}'; use '${LegacyContainmentAliases[rawContainment]}' instead`;
-  }
-
-  if (
-    config.appContainer !== undefined
-    && !LegacyConfigAliasVersions.appContainer.includes(config.version)
-  ) {
-    return `Schema ${config.version} does not support legacy field 'appContainer'; use 'processContainer' instead`;
-  }
-
-  const legacySeatbelt = (config as ContainerConfig & { macos_sandbox?: unknown }).macos_sandbox;
-  if (
-    legacySeatbelt !== undefined
-    && !LegacyConfigAliasVersions.macos_sandbox.includes(config.version)
-  ) {
-    return `Schema ${config.version} does not support legacy field 'macos_sandbox'; use 'seatbelt' instead`;
-  }
-
-  return undefined;
 }
 
 /** Per-operation controls for the V1 in-process APIs. */

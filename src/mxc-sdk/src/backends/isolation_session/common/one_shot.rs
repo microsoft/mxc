@@ -73,10 +73,9 @@ impl ScriptRunner for IsolationSessionRunner {
         // the backend into ConPTY mode (`InteractiveConsole = true`) and
         // adjusts the redirect flags (no separate stderr in ConPTY mode —
         // the OS API merges it into stdout). The check sees the handle
-        // wxc-exec was given by its immediate parent: ConPTY when launched
-        // by node-pty (`spawnSandbox`), pipe when launched by
-        // `child_process.spawn` (`spawnSandboxFromConfig({usePty: false})`),
-        // console when launched directly from a shell.
+        // wxc-exec was given by its immediate parent: ConPTY when the parent
+        // attached a pseudo-terminal, a pipe when the parent redirected
+        // stdio, and a console when launched directly from a shell.
         let interactive = std::io::stdout().is_terminal();
         let options = build_process_options(request, interactive);
 
