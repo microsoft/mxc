@@ -395,8 +395,43 @@ The separate `provision` operation takes the same list under
 
 The lifecycle daemon creates one container per sandbox, so a forward belongs
 to the sandbox that declared it. The session-wide `cpuCount` / `memoryMb` /
-`gpu` settings remain available only for create-and-run execution, because that daemon shares a
-single WSL session across every sandbox. `storagePath` is create-and-run-only
+`gpu` settings size the session rather than the sandbox, so a lifecycle caller
+asks for them on a separate `provision-session` operation and then names the
+returned session on each `provision`:
+
+```json
+{
+    "version": "1.1.0-alpha",
+    "phase": "provision-session",
+    "containment": "wslc",
+    "wslc": {
+        "provisionSession": { "cpuCount": 4, "memoryMb": 8192 }
+    }
+}
+```
+
+```json
+{
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest",
+            "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+        }
+    }
+}
+```
+
+Every sandbox in the session shares that VM, so `cpuCount: 4` means the VM has
+four virtual CPUs rather than four per sandbox. Omitting `sessionId` joins an
+implicit session shared by every request that names none, which is what a WSLC
+`provision` has always done. Release the session with `deprovision-session`
+once its sandboxes are gone; it is refused while any remain. See
+[the lifecycle guide](wslc-state-aware.md#sessions).
+
+`storagePath` is create-and-run-only
 for a different reason: the daemon leases its store from a slot pool rather
 than taking a caller-named path, so warming its cache is a separate step. See
 [the lifecycle guide](wslc-state-aware.md#image-store).
@@ -641,7 +676,9 @@ policy-persistence primitive, so there is nothing for the flag to select.
 
 Container lifecycle JSON requests differ: they reject the whole `lifecycle` section
 at parse time, because a multi-invocation sandbox's lifetime is driven by the
-explicit `provision` / `deprovision` phases rather than by per-run flags.
+explicit `provision` / `deprovision` phases rather than by per-run flags. The
+session those sandboxes live in has its own pair, `provision-session` /
+`deprovision-session`.
 
 ## Supported workloads
 

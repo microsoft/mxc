@@ -135,21 +135,29 @@ pub enum ContainerFirewall {
     Absent,
 }
 
+/// Drop Network capabilities for sandboxing purposes.
 #[cfg(target_os = "linux")]
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
 
-    // `libc` does not export this; the value is from linux/capability.h.
+    // `libc` does not export these; the values are from linux/capability.h.
     const CAP_NET_ADMIN: libc::c_ulong = 12;
+    const CAP_NET_RAW: libc::c_ulong = 13;
 
     // SAFETY: `pre_exec` runs between fork and exec, where only
-    // async-signal-safe work is permitted. `prctl` is a bare syscall and this
+    // async-signal-safe work is permitted.  `prctl` is a bare syscall, and this
     // closure allocates nothing and captures nothing.
     unsafe {
         command.pre_exec(|| {
+            // Drop CAP_NET_ADMIN and CAP_NET_RAW from the bounding set.
             if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
+
+            if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_RAW, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
             Ok(())
         });
     }
@@ -1450,9 +1458,9 @@ mod tests {
         );
     }
 
-    // The attach paths drop this capability only when chains are installed: the
-    // drop is privileged, so applying it to every run costs an unprivileged
-    // caller the whole execution.
+    // The attach paths confine the workload only when chains are installed:
+    // dropping a capability is privileged, so applying it to every run costs an
+    // unprivileged caller the whole execution.
     #[cfg(target_os = "linux")]
     #[test]
     fn confining_a_command_takes_a_privilege_an_unprivileged_caller_lacks() {

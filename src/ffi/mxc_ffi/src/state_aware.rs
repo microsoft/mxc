@@ -6,8 +6,9 @@
 //! Entry points mirror the SDK's [`mxc_sdk::__ffi::run_lifecycle_json`],
 //! [`mxc_engine::exec_state_aware_attached`] and [`mxc_sdk::__ffi::execute_lifecycle_json`]:
 //!
-//! - [`mxc_run_state_aware_json`] drives the **envelope phases** (`provision` /
-//!   `start` / `stop` / `deprovision`, and a dry run of any phase): JSON
+//! - [`mxc_run_state_aware_json`] drives the **envelope phases** (`provision-session` /
+//!   `provision` / `start` / `stop` / `deprovision` / `deprovision-session`,
+//!   and a dry run of any phase): JSON
 //!   request in, JSON response envelope out, filled into an
 //!   [`MxcStateAwareResult`].
 //! - [`mxc_exec_state_aware_attached_json`] drives the **exec phase attached
@@ -100,26 +101,7 @@ impl MxcStateAwareResult {
     }
 }
 
-/// Run a state-aware lifecycle request (envelope phases) and capture the
-/// response-envelope JSON.
-///
-/// Parses `request_json_utf8` (the wire-format request, with a `phase` field),
-/// runs the requested phase, and writes the outcome into `*out`. A non-dry-run
-/// `exec` produces no envelope and is rejected here — run it through
-/// [`mxc_exec_state_aware_attached_json`] to attach the workload to this
-/// process's stdio, or [`mxc_exec_state_aware_json`] to drive the pipes
-/// directly.
-///
-/// Returns the resulting status code (also stored in `out->status`). Returns
-/// [`MXC_STATUS_NULL_ARGUMENT`] **without running the phase** if `out` is null:
-/// the caller has nowhere to receive a sandbox id, so provisioning one would
-/// strand it — nothing else can reclaim a sandbox whose only handle was
-/// discarded. [`mxc_exec_state_aware_json`] checks its out-parameter first for
-/// the same reason.
-///
-/// `experimental` is nonzero to permit an experimental backend such as Windows
-/// Sandbox; with zero such a backend is refused with `backend_unavailable`
-/// before any work is done. Production backends ignore it.
+/// Run an [MXC lifecycle JSON request](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/container-lifecycle.md#raw-json-entry-points) and capture its response envelope.
 ///
 /// # Safety
 /// - `request_json_utf8` must be null or a valid NUL-terminated UTF-8 C string.
@@ -666,6 +648,23 @@ mod tests {
         // SAFETY: filled by `mxc_run_state_aware_json`.
         unsafe { mxc_state_aware_result_free(&mut out) };
         assert!(out.error.message_utf8.is_null());
+    }
+
+    #[test]
+    fn a_malformed_session_release_keeps_its_id_error_through_ffi() {
+        for dry_run in [false, true] {
+            let mut out = call(
+                r#"{"version":"1.1.0-alpha","phase":"deprovision-session",
+                    "containment":"wslc","sessionId":"wslcsess:short"}"#,
+                dry_run,
+            );
+            assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_ID);
+            assert!(out.response_json_utf8.is_null());
+            assert!(!out.error.message_utf8.is_null());
+
+            // SAFETY: this call returned the result's owned allocations.
+            unsafe { mxc_state_aware_result_free(&mut out) };
+        }
     }
 
     #[test]

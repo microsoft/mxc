@@ -5,5 +5,6 @@ mod common;
 mod deprovision;
 mod exec;
 mod provision;
+mod session;
 mod start;
 mod stop;

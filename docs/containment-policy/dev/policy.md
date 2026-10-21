@@ -169,16 +169,91 @@ operations exist for **IsolationSession, WSLc, and Windows Sandbox** in this
 contract. `provision` requires a concrete `containment` and must omit
 `sandboxId`; subsequent phases require the ID returned by provision
 (`iso:...`, `wslc:...`, or `wsb:...`) and infer the backend from its prefix.
-Every phase requires `version`; all admit optional `$schema`, `_comment`,
-and `telemetry.enabled`.
+WSLc also supports `provision-session` and `deprovision-session`, which require
+`containment: "wslc"` and carry no `sandboxId`. Every phase requires `version`;
+all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
 
 | Phase | Allowed request fields besides the common fields |
 |---|---|
 | `provision` / `isolation_session` | Required all-allow `network`; optional `isolationSession.provision.appId` (string). No filesystem, UI, or proxy. |
-| `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, or `portMappings`. Port mappings require all-allow bridged networking; per-container CPU/memory/GPU/storage are not available at provision. |
+| `provision-session` / `wslc` | Optional `wslc.provisionSession.cpuCount`, `memoryMb`, and `gpu`; no process, filesystem, network, or UI policy. |
+| `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, `portMappings`, or `sessionId`. Port mappings require all-allow bridged networking; CPU/memory/GPU sizing belongs to the session, not the sandbox. No storage-path override. |
 | `provision` / `windows_sandbox` | Optional `filesystem` only. No network, UI, proxy, or backend-specific settings; provision stores the immutable filesystem policy. Requires experimental authorization. |
 | `start`, `stop`, `deprovision` | Required `sandboxId`; no process or policy sections. |
 | `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. All three backends reject supplied network policy at exec and inherit their provision posture. IsolationSession and Windows Sandbox reject a proxy; WSLc accepts an exec proxy. |
+| `deprovision-session` / `wslc` | Required `sessionId`; no process, filesystem, network, UI, or backend configuration. |
+
+### WSLc sessions
+
+A session is one WSL2 utility VM shared by the sandboxes placed in it.
+`provision-session` sets VM sizing; it does not create a sandbox:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision-session",
+  "containment": "wslc",
+  "wslc": {
+    "provisionSession": { "cpuCount": 2, "memoryMb": 4096, "gpu": false }
+  }
+}
+```
+
+| Sizing field | Meaning |
+|---|---|
+| `cpuCount` | Optional non-negative integer, up to `4294967295`; a positive value cannot exceed the host's logical processor count. Omitted or `0` uses the SDK default. |
+| `memoryMb` | Optional non-negative integer; the backend rejects values above `4294967295`. A ceiling, not a reservation, so it may exceed installed host RAM. Omitted or `0` uses the SDK default. |
+| `gpu` | Optional boolean, default `false`; enables GPU passthrough when supported by the host runtime. |
+
+Success returns `{"result":{"sessionId":"wslcsess:0123456789abcdef0123456789abcdef"}}`.
+The ID shown here is illustrative: use the returned value, which has exactly
+32 lowercase hexadecimal digits after `wslcsess:`, in later requests.
+Treat it as an opaque bearer capability and keep it out of logs.
+
+Place a sandbox in that session with `wslc.provision.sessionId`:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "wslc",
+  "wslc": {
+    "provision": {
+      "image": "alpine:latest",
+      "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+    }
+  }
+}
+```
+
+The VM's CPU, memory, and GPU settings apply to every sandbox in the session,
+not as per-sandbox quotas. Omitting `sessionId` joins the implicit shared
+session, preserving existing behavior. An isolated provision needs its image
+already cached in the selected session's store or supplied as `imageTarPath`.
+
+After deprovisioning every sandbox in the session, release it:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "deprovision-session",
+  "containment": "wslc",
+  "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+}
+```
+
+Release returns `{"result":{}}`. A session still holding sandboxes or work
+is refused rather than cascading deletion; the implicit session cannot be
+released explicitly. Unused sessions can expire before explicit release.
+Malformed IDs return `malformed_id`; a valid ID that no longer names a
+session returns `not_provisioned`.
+
+A dry run validates either session request without contacting the daemon,
+minting an ID, creating a VM or store, or reserving capacity, and returns
+`{"result":{}}`. Neither session phase is available through typed SDK V1,
+which still targets contract `1.0.0`.
+
+### Sandbox examples
 
 Example WSLc provision with a container-specific TCP port mapping:
 
@@ -228,7 +303,8 @@ with the returned one):
 }
 ```
 
-When calling the executor directly, pass routing fields via `--operation` and
-`--container-id` instead of putting `phase` and `sandboxId` in the JSON file;
-the executor inserts them before parsing. JSON library/FFI calls include
-those fields as shown above.
+When calling the executor directly, pass `phase` via `--operation`, `sandboxId`
+via `--container-id`, and a release's `sessionId` via `--session-id` instead
+of putting those fields in the JSON file; the executor inserts them before
+parsing. Placement's nested `wslc.provision.sessionId` stays in JSON.
+JSON library/FFI calls include routing fields as shown above.

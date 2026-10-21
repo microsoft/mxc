@@ -256,8 +256,26 @@ pub struct WslcProvisionConfig {
     /// Local image tarball to import instead of pulling an image.
     pub image_tar_path: Option<String>,
 
+    /// Join this session, or the shared default session when absent.
+    pub session_id: Option<String>,
+
     /// Host-to-container TCP forwards applied to the sandbox's own container.
     pub port_mappings: Option<Vec<PortMapping>>,
+}
+
+/// Runtime-owned state-aware session provision config for the WSLc backend.
+///
+/// Sizing belongs to the session, so these values describe the utility VM the
+/// session runs in rather than a per-sandbox quota. Defaulting remains a
+/// backend responsibility, so an absent field stays absent here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WslcProvisionSessionConfig {
+    pub cpu_count: Option<u32>,
+
+    pub memory_mb: Option<u64>,
+
+    /// Whether GPU passthrough is enabled.
+    pub gpu: Option<bool>,
 }
 
 /// Configuration specific to the LXC container backend.

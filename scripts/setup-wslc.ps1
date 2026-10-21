@@ -47,7 +47,9 @@
     a slot that has never been leased holds no images. Defaults to 0, matching
     `wxc-exec.exe --wslc-daemon-slots`, so warming a create-and-run cache stays
     one pull per image. Pass 1 before running container lifecycle operations
-    against an isolated posture; each slot costs another pull and another
+    against an isolated posture, and one slot per session you expect to run at
+    once beyond that — a session that leases a cold slot cannot resolve an
+    uncached image under that posture. Each slot costs another pull and another
     multi-GiB store.
 
 .PARAMETER DebugLogs

@@ -24,7 +24,8 @@ Creates an LXC container to provide:
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
 - LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime)
-- Root privileges, or unprivileged LXC for a policy that asks for no network.
+- Root privileges, or [unprivileged LXC](#running-without-root) for a policy
+  that asks for no network.
   Filtering egress or ingress installs iptables rules in the container's
   network namespace, which requires root.
 
@@ -39,28 +40,29 @@ sudo apt install lxc lxc-utils liblxc-dev
 ```bash
 sudo dnf install lxc lxc-templates dnsmasq lxc-devel
 ```
-RHEL needs EPEL enabled first, and a few more steps besides — see
-[Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup) for the whole
-process.
+RHEL needs EPEL enabled first — see
+[Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup).
 
 **Arch Linux:**
 ```bash
 sudo pacman -S lxc
 ```
 
+### Running without root
+
+A config with no `network` section can run without sudo once the host is set up
+for unprivileged LXC.  Everything else needs root.
+
+1. Follow LXC's
+   [Create Unprivileged Containers as a User](https://linuxcontainers.org/lxc/getting-started/#create-unprivileged-containers-as-a-user).
+2. Let the container's root user reach its files under your home directory:
+   `chmod o+x ~`.
+
+
 ### Container networking
 
-A policy that permits any network needs `lxcbr0` to hand the container an IPv4
-lease, so the bridge has to be up before a run: `sudo systemctl start lxc-net`.
-
-On a host running firewalld, which is the default on Fedora and RHEL, the bridge
-also has to sit in a zone that permits the traffic. The default zone rejects
-IPv4 DHCP while permitting router advertisement, so the container configures
-itself an IPv6 address, never receives a lease, and the run fails:
-
-```bash
-sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
-```
+Refer to your distribution's manual to configure networking for LXC
+containers.  A config with a `network` section fails without it.
 
 ## Configuration
 
@@ -313,65 +315,31 @@ streaming in a long-lived service.
    Add `lxc-devel` as well if you are building MXC against liblxc rather than
    running a released binary.
 
-3. **Start the bridge.**
-
-   ```bash
-   sudo systemctl enable --now lxc-net
-   ip -4 addr show lxcbr0
-   ```
-
-4. **Move the bridge into a firewalld zone that permits its traffic.**
-   firewalld is running by default on RHEL, and its default `public` zone
-   admits `ssh`, `cockpit` and `dhcpv6-client` but not IPv4 DHCP. Containers
-   therefore configure an IPv6 address from the router advertisement, never
-   receive a lease, and every run that asks for network fails:
-
-   ```bash
-   sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
-   ```
-
-   `<ZONE>` has to admit DHCP and DNS from the bridge, since dnsmasq answers
-   both on the bridge address.
-
-   Add `--permanent` and reload to keep the assignment across reboots. 
+3. **Configure container networking.**  See
+   [Container networking](#container-networking).
 
 ### Verifying the host
 
 ```bash
 sudo lxc-checkconfig
-ip -4 addr show lxcbr0
-sudo firewall-cmd --get-zone-of-interface=lxcbr0
 ```
-
-The zone query should answer the zone you assigned.
 
 ## Limitations
 
-- **Default-deny is not a containment boundary against the workload.** Both the
-  inbound and outbound chains live in the container's own network namespace, and
-  container init keeps `CAP_NET_ADMIN` there, so a process running as root inside
-  the container can flush or delete them. The command MXC runs is attached with
-  `CAP_NET_ADMIN` dropped from its bounding set whenever chains are installed, so
-  it cannot. Default-deny closes external reachability for a container that does
-  not deliberately tear it down, including services the workload itself starts.
-- **Raw sockets bypass egress filtering.** `CAP_NET_RAW` is retained so that an
-  explicit `protocol: "icmp"` allow works. It also permits `AF_PACKET` sockets,
-  which write link-layer frames straight to the interface without traversing the
-  filter chain.
-- **Policy is not in force while the container starts.** The chains are installed
-  after the container has started and its address has settled, so container init
-  and anything it starts run unfiltered in both directions for that interval. The
-  requested command is attached afterwards. A connection opened during that window
-  keeps working once the rules land, because the chains accept established flows.
-- **A filtered container cannot renew a DHCP lease.** The chains permit loopback
-  and established flows, with no implicit carve-out for DHCP or DNS. A container that
-  outlives its lease loses its address; one that finishes within the lease period
-  is unaffected.
-- **A container that needs a network waits for an IPv4 address.** A dual-stack
-  `lxcbr0` answers router solicitation seconds before its DHCP lease arrives, and
-  the bridge NATs IPv4 only, so an IPv6 address alone does not mean the container
-  can reach the destinations its policy names. A bridge that never provides an
-  IPv4 address fails the run rather than starting a workload that reaches nothing.
+- **The workload can send only ICMP Echo.** A `protocol: "icmp"` rule lets every
+  ICMP type through the firewall, but the command MXC runs can originate only Echo
+  requests, the ones `ping` sends.
+- **The network restrictions bind only the command MXC runs and its children.**
+  MXC takes away that command's ability to change the firewall or send raw
+  packets, but the container's init process (PID 1) keeps both.  The command
+  runs as root inside the container, so it can ask init to start a new process,
+  for example with `systemd-run` on Ubuntu.  That process is not a child of the
+  command, and it can change the firewall and send raw packets.
+- **Network access stops after about an hour.** The stock `lxcbr0` hands out
+  DHCP leases that last one hour, and MXC's firewall blocks the DHCP request the
+  container sends to renew one.  When the lease expires the container loses its
+  address and the workload can no longer reach the network.  A run that finishes
+  within the hour is unaffected.
 - **IPv6 egress is not supported.** An `egress` rule naming an IPv6 destination
   installs and reports success, but no IPv6 traffic reaches that destination.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a

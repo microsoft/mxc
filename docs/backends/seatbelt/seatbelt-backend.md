@@ -171,6 +171,9 @@ The `/dev/*` entries are writable because shell redirections (`>/dev/null`,
 `</dev/urandom`) need both directions. Writes to `/dev/null` and `/dev/zero` are
 discarded; writes to the entropy devices are harmless.
 
+MXC grants exact device paths for inherited terminals or the caller-owned PTY
+assigned to the workload. Explicit filesystem grants or `profileOverride` can widen access.
+
 The developer grant resolves from the `xcode-select` symlink, and only when root
 owns both the link and every directory above it, so an unprivileged process
 cannot point it elsewhere. `DEVELOPER_DIR` is ignored for the same reason. When
@@ -349,7 +352,7 @@ Set under a top-level `"seatbelt"` key.
 
 | Option | Type | Default | What it does |
 |---|---|---|---|
-| `nestedPty` | bool | `true` | Lets the inner process allocate its own ptys. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
+| `nestedPty` | bool | `true` | Lets the inner process allocate and use its own ptys, without granting access to unrelated host terminals. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
 | `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
@@ -360,8 +363,9 @@ Set under a top-level `"seatbelt"` key.
 
 All `mach-lookup` (an allowlist would be fragile — the services GUI frameworks
 need vary by macOS release), plus `mach-register`, `iokit-open` for GPU/Metal,
-`pseudo-tty` with the `/dev/ttys*` and `/dev/ptmx` devices, and POSIX shared
-memory.
+`pseudo-tty` with `/dev/ptmx` and sandbox-authorized `/dev/ttys*` devices, and
+POSIX shared memory. PTY allocation remains enabled even when `nestedPty` is
+`false`.
 
 It also grants read **and** write across all of `/private/tmp` and
 `/private/var/folders`, regardless of your `filesystem` policy. Deny rules are

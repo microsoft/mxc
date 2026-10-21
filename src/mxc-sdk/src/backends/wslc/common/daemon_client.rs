@@ -40,9 +40,9 @@ use serde::Serialize;
 
 use crate::wslc_common::container_steps::OutStream;
 use crate::wslc_common::daemon_protocol::{
-    encode_frame, CancelExecConfig, DaemonRequest, DaemonResponse, DeprovisionConfig, ErrKind,
-    ExecConfig, ExecTerminal, ProvisionConfig, StartConfig, StopConfig, StreamFrame,
-    MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    encode_frame, CancelExecConfig, DaemonRequest, DaemonResponse, DeprovisionConfig,
+    DeprovisionSessionConfig, ErrKind, ExecConfig, ExecTerminal, ProvisionConfig,
+    ProvisionSessionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use crate::wslc_common::daemon_record::{live_daemon, DaemonRecord, TransitionLock};
 
@@ -341,6 +341,20 @@ impl DaemonClient {
                 "unexpected reply to ping: {other:?}"
             ))),
         }
+    }
+
+    pub fn provision_session(&self, config: ProvisionSessionConfig) -> DaemonResult<String> {
+        match self.call(&DaemonRequest::ProvisionSession(config))? {
+            DaemonResponse::SessionProvisioned { session_ref } => Ok(session_ref),
+            DaemonResponse::Err { kind, message } => Err(DaemonError::Daemon { kind, message }),
+            other => Err(DaemonError::transport(format!(
+                "unexpected reply to provision_session: {other:?}"
+            ))),
+        }
+    }
+
+    pub fn deprovision_session(&self, config: DeprovisionSessionConfig) -> DaemonResult<()> {
+        expect_ok(self.call(&DaemonRequest::DeprovisionSession(config))?)
     }
 
     /// Provision a container; returns the daemon-minted sandbox id.

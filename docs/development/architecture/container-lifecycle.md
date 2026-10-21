@@ -446,8 +446,9 @@ Backend-routing fields:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `containment` | `ContainmentType` or `ContainmentBackend` member | One-shot: yes. State-aware: yes for `provision`, absent for `start` / `exec` / `stop` / `deprovision`. | Backend selection on calls that do not yet have a `sandboxId`. |
-| `sandboxId` | branded string | State-aware non-provision: yes. Otherwise absent. | Opaque sandbox id returned by `provision`. Carries the backend prefix used to route non-provision calls (§5). |
+| `containment` | `ContainmentType` or `ContainmentBackend` member | One-shot: yes. State-aware: yes for `provision` and both session phases, absent for `start` / `exec` / `stop` / `deprovision`. | Backend selection on calls that carry no backend-prefixed `sandboxId`. |
+| `sandboxId` | branded string | State-aware sandbox-addressed phases: yes. Otherwise absent. | Opaque sandbox id returned by `provision`. Carries the backend prefix used to route those calls (§5). |
+| `sessionId` | string | `deprovision-session`: yes. Otherwise absent. | Opaque session id returned by `provision-session`. Carries no routing prefix, which is why its phase declares `containment`. |
 
 State-aware-only fields:
 
@@ -456,29 +457,66 @@ State-aware-only fields:
 | `phase` | `Phase` member | Yes | Discriminator. Absence means a one-shot request. |
 | `process` | `ProcessConfig` | Required for `exec`; absent otherwise. | Cross-backend execution fields. |
 
+#### Raw JSON entry points
+
+Rust's `mxc_sdk::__ffi::run_lifecycle_json` returns the response-envelope JSON
+as a string. The C function `mxc_run_state_aware_json` accepts NUL-terminated
+UTF-8 request JSON and writes its response to `MxcStateAwareResult`.
+Both accept the routing fields shown above and use the declared contract.
+
+| Phase | Successful response |
+|---|---|
+| `provision` | `result.sandboxId` and any backend metadata |
+| `start`, `stop`, `deprovision` | `{"result":{}}` |
+| `provision-session` | `result.sessionId`; WSLc contract `1.1.0-alpha` only |
+| `deprovision-session` | `{"result":{}}`; WSLc contract `1.1.0-alpha` only |
+
+Session operations are not exposed by typed SDK V1. Their sizing, placement,
+and cleanup rules are described in the
+[development policy reference](../../containment-policy/dev/policy.md#wslc-sessions).
+With `dry_run` enabled, either entry point validates without allocating
+resources or minting IDs and returns `{"result":{}}`. A non-dry-run `exec`
+uses Rust's `execute_lifecycle_json` or a C exec entry point instead.
+
+The separate `experimental` argument authorizes experimental backends; without
+it they fail as `backend_unavailable` before execution. Production backends
+ignore this argument. Rust failures return `Error` with the matching
+`ErrorCode`; C failures populate the status and error fields, leaving the
+response JSON absent.
+
+The C status is both returned and stored in `out->status`. A null `out` returns
+`MXC_STATUS_NULL_ARGUMENT` before dispatch. Release every populated result with
+`mxc_state_aware_result_free`, including failures.
+
 #### `wxc-exec` lifecycle transport
 
-"MXC request JSON" retains `phase` and `sandboxId`. Direct
+"MXC request JSON" retains `phase`, `sandboxId`, and `sessionId`. Direct
 `wxc-exec` lifecycle calls instead remove those routing fields from the supplied JSON
 and pass them as command-line arguments:
 
 ```text
+wxc-exec.exe policy.json --operation provision-session
 wxc-exec.exe policy.json --operation provision
 wxc-exec.exe policy.json --operation start --container-id iso:abc
 wxc-exec.exe policy.json --operation exec --container-id iso:abc -- command arg
 wxc-exec.exe policy.json --operation stop --container-id iso:abc
 wxc-exec.exe policy.json --operation deprovision --container-id iso:abc
+wxc-exec.exe policy.json --operation deprovision-session --session-id wslcsess:0123456789abcdef0123456789abcdef
 ```
 
-Provision JSON still contains `containment`; later operations route from the
-`--container-id` prefix. Supplying `phase` or `sandboxId` in CLI JSON is rejected rather
+Replace the illustrative session ID with `result.sessionId` from a prior
+`provision-session` response; a correctly formatted ID must also name a live session.
+
+Provision and session JSON still contains `containment`; sandbox-addressed operations route from the
+`--container-id` prefix. Supplying `phase`, `sandboxId`, or `sessionId` in CLI JSON is rejected rather
 than overriding the command-line routing. Without `--operation`, `wxc-exec` accepts
 only one-shot JSON.
 
 `--operation` cannot be combined with delete or maintenance routing, including
 `--delete`, its `--containername` option, setup modes, probing, force-reclaim, or
-audit modes. Lifecycle identity comes only from `--container-id`; conflicting options
-are rejected rather than ignored.
+audit modes. Lifecycle identity comes only from `--container-id` or `--session-id`,
+which are mutually exclusive; an operation supplied the wrong one is told which it
+wanted. Conflicting options are rejected rather than ignored.
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
 declare which phases honor them, see §10.3):
@@ -1060,7 +1098,12 @@ telemetry is populated from the common top-level `telemetry` field.
 `operation: StateAwareOperation` fields with read-only accessors. The operation
 is the sole phase authority. Provision carries
 `IsolationSession(Option<IsolationSessionProvisionConfig>)`, `WindowsSandbox`,
-or `Wslc(Option<WslcProvisionConfig>)`; later variants each carry a required
+or `Wslc(Option<WslcProvisionConfig>)`. `ProvisionSession` carries
+`Option<WslcProvisionSessionConfig>` and is WSLc-only; `DeprovisionSession`
+carries a required `session_id`, reachable through `session_id()` rather than
+`sandbox_id()`. Because routing never reads a session id, operation validation
+rejects one that is not `wslcsess:` followed by 32 lowercase hex digits, the form
+the WSLc daemon mints. The sandbox-addressed variants each carry a required
 `sandbox_id`, with no backend-specific configuration today. Exec process
 settings stay in the common request.
 
@@ -1075,10 +1118,14 @@ the parser and schema generation.
 ### 9.2 The trait
 
 Backends implement the trait with two consts (id prefix and backend key, §5),
-associated types for each phase's config and metadata, and method overrides where they
-have substantive work.
+associated types for each sandbox phase's config and metadata, and method overrides
+where they have substantive work.
 Most methods have default no-op bodies; only `exec` is strictly required. Use `()` for
-any associated type the backend does not need.
+any associated type the backend does not need. The two session phases are the
+exception: they take the concrete `WslcProvisionSessionConfig`, return no backend
+metadata, and their defaults refuse with `unsupported_phase`, so a backend that
+owns no session needs no code to say so, and a dry run of a session phase
+cannot report success on a backend that cannot perform it.
 
 ```rust
 pub trait StatefulSandboxBackend {
@@ -1102,6 +1149,19 @@ pub trait StatefulSandboxBackend {
     type StartMetadata: serde::Serialize;
     type StopMetadata: serde::Serialize;
     type DeprovisionMetadata: serde::Serialize;
+
+    /// Optional. Default refuses: a backend that owns no session cannot mint
+    /// one. Override when the backend hosts sandboxes inside a session.
+    fn provision_session(
+        &mut self,
+        _request: &ExecutionRequest,
+        _config: Option<WslcProvisionSessionConfig>,
+    ) -> Result<ProvisionSessionResult, MxcError> {
+        Err(unsupported_session_operation(
+            Self::BACKEND_KEY,
+            "provisioning a session",
+        ))
+    }
 
     /// Optional. Default mints `<ID_PREFIX>:<random-token>` for a stateless-
     /// underneath backend; override when the backend has native provision work
@@ -1180,9 +1240,22 @@ pub trait StatefulSandboxBackend {
         Ok(DeprovisionResult { metadata: None })
     }
 
+    /// Optional. Default refuses, for the same reason as `provision_session`.
+    fn deprovision_session(
+        &mut self,
+        _session_id: &str,
+        _request: &ExecutionRequest,
+    ) -> Result<(), MxcError> {
+        Err(unsupported_session_operation(
+            Self::BACKEND_KEY,
+            "deprovisioning a session",
+        ))
+    }
+
     /// Per-phase validation hooks. Called by the dispatch layer before the
-    /// corresponding phase method. Default: accept all requests. Override to
-    /// add backend-specific checks (config field semantics, policy honor
+    /// corresponding phase method. Default: accept all requests, except for the
+    /// session phases, which refuse exactly as their phase method does. Override
+    /// to add backend-specific checks (config field semantics, policy honor
     /// enforcement, id format checks beyond the prefix). Failures surface as
     /// the chosen `MxcError` code.
     fn validate_provision(
@@ -1191,6 +1264,17 @@ pub trait StatefulSandboxBackend {
         _config: Option<&Self::ProvisionConfig>,
     ) -> Result<(), MxcError> {
         Ok(())
+    }
+
+    fn validate_provision_session(
+        &self,
+        _request: &ExecutionRequest,
+        _config: Option<&WslcProvisionSessionConfig>,
+    ) -> Result<(), MxcError> {
+        Err(unsupported_session_operation(
+            Self::BACKEND_KEY,
+            "provisioning a session",
+        ))
     }
 
     fn validate_start(
@@ -1228,11 +1312,26 @@ pub trait StatefulSandboxBackend {
     ) -> Result<(), MxcError> {
         Ok(())
     }
+
+    fn validate_deprovision_session(
+        &self,
+        _session_id: &str,
+        _request: &ExecutionRequest,
+    ) -> Result<(), MxcError> {
+        Err(unsupported_session_operation(
+            Self::BACKEND_KEY,
+            "deprovisioning a session",
+        ))
+    }
 }
 
 pub struct ProvisionResult<M> {
     pub sandbox_id: String,
     pub metadata: Option<M>,
+}
+
+pub struct ProvisionSessionResult {
+    pub session_id: String,
 }
 
 pub struct StartResult<M> {
@@ -1378,11 +1477,13 @@ surface introduces none, so the trait stays minimal and reuses `ExecutionRequest
 /// Typed backend result before raw response-envelope encoding.
 enum TypedDispatchOutcome<P, S, T, D> {
     DryRun,
+    ProvisionSession(ProvisionSessionResult),
     Provision(ProvisionResult<P>),
     Start(StartResult<S>),
     ExecCompleted { exit_code: i32 },
     Stop(StopResult<T>),
     Deprovision(DeprovisionResult<D>),
+    DeprovisionSession,
 }
 
 /// Dispatch outcome. Distinguishes structured-envelope responses (non-exec phases or
@@ -1417,6 +1518,12 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
 ) -> Result<DispatchOutcome, MxcError> {
     let (request, operation) = bound.into_parts();
     match operation {
+        BoundStateAwareOperation::ProvisionSession(config) => {
+            backend.validate_provision_session(&request, config.as_ref())?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            let result = backend.provision_session(&request, config)?;
+            Ok(DispatchOutcome::Envelope(provision_session_envelope(result)))
+        }
         BoundStateAwareOperation::Provision(config) => {
             backend.validate_provision(&request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
@@ -1451,6 +1558,12 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
             let result = backend.deprovision(&sandbox_id, &request, config)?;
             Ok(DispatchOutcome::Envelope(deprovision_envelope(result)))
         }
+        BoundStateAwareOperation::DeprovisionSession { session_id } => {
+            backend.validate_deprovision_session(&session_id, &request)?;
+            if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
+            backend.deprovision_session(&session_id, &request)?;
+            Ok(DispatchOutcome::Envelope(empty_envelope()))
+        }
     }
 }
 ```
@@ -1463,10 +1576,14 @@ metadata. The path accepting "MXC request JSON" wraps the same typed dispatch re
 response construction is therefore confined to raw/executor entry points
 rather than being an implementation step of typed Rust calls.
 
-`resolve_backend(&parsed)` reads `parsed.containment()` when `phase() == Provision`; for the
-other phases it reads the prefix from `parsed.sandbox_id()` and looks it up in the
-registered prefix table. Mismatches surface as `unsupported_containment` (unrecognised
-prefix) or `malformed_id` (no prefix structure) per §8.
+`resolve_backend(&parsed)` reads `parsed.containment()` for the phases where
+`phase.routes_by_containment()` is true (`provision-session`, `provision`, and
+`deprovision-session`); for the sandbox-addressed phases it reads the prefix from
+`parsed.sandbox_id()` and looks it up in the registered prefix table. A session id
+carries no backend prefix and is deliberately absent from that table, which is why both
+session phases declare a containment even though one of them also carries an id.
+Mismatches surface as `unsupported_containment` (unrecognised prefix) or `malformed_id`
+(no prefix structure) per §8.
 
 `bind_isolation_session`, `bind_windows_sandbox`, and `bind_wslc` live in
 `mxc_common::state_aware_binding`, without backend crate dependencies. The engine
@@ -1677,11 +1794,17 @@ provides default no-op bodies otherwise. The default `provision` mints a synthet
 (allocating a session, registering with the underlying service) override and produce
 their own structured id.
 
+`provision_session` and `deprovision_session` are the exception: their defaults refuse
+with `unsupported_phase`, and they take a concrete WSLc session configuration rather
+than an associated type, because only WSLc owns a session a sandbox can be placed into.
+A backend that owns no session needs no code at all to decline them.
+
 Override `validate_<phase>` hooks for backend-specific pre-execution checks (config
 field semantics, policy honor enforcement, id format verification beyond prefix
-matching). Defaults are no-ops; only override the phases the backend has checks for.
-Validation runs before the phase method; failures short-circuit and surface as typed
-`MxcError` codes without invoking the backend.
+matching). Defaults are no-ops for the five sandbox phases and refusals for the two
+session phases, matching their phase methods; only override the phases the backend has
+checks for. Validation runs before the phase method; failures short-circuit and surface
+as typed `MxcError` codes without invoking the backend.
 
 ### 11.3 Define typed `*Config` interfaces in the SDK
 

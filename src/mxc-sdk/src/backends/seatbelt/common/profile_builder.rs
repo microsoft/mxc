@@ -45,6 +45,15 @@ pub fn build_profile_with_proxy(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
 ) -> Result<String, String> {
+    build_profile_with_terminals(request, proxy_address, &[])
+}
+
+/// Bind terminal paths discovered by the runner, never supplied by the workload.
+pub(crate) fn build_profile_with_terminals(
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+    terminal_paths: &[PathBuf],
+) -> Result<String, String> {
     if let Some(override_profile) = request
         .seatbelt
         .as_ref()
@@ -69,12 +78,18 @@ pub fn build_profile_with_proxy(
     out.push_str(SYSTEM_READ_ALLOW);
     write_developer_dir_rule(&mut out);
 
-    // Pseudo-terminal access — when the executor binary runs under a pty
-    // the sandboxed shell inherits that TTY, so it sees a real terminal
-    // and calls `isatty()` / `tcgetattr()` / `ttyname()` against it.
-    // Without these rules, those calls fail with EPERM because the
-    // kernel calls block on the secondary fd.
+    // Keep the controlling terminal usable without granting other host PTYs.
     out.push_str(TTY_ALLOW);
+    for path in terminal_paths {
+        let path = path
+            .to_str()
+            .ok_or_else(|| "Seatbelt: assigned terminal path is not valid UTF-8".to_string())?;
+        let _ = writeln!(
+            out,
+            "(allow file-read* file-write* file-ioctl (literal {}))",
+            quote_scheme(path)
+        );
+    }
 
     // Policy-derived allow rules.
     let resolved = ResolvedPaths::from_policy(&request.policy)?;
@@ -250,18 +265,14 @@ fn push_developer_dir_rule(out: &mut String, dir: &Path) {
     let _ = writeln!(out, "(allow file-read* (subpath {}))", quote_scheme(path));
 }
 
-/// Pseudo-terminal device access required by the inner shell when the
-/// runner attaches it to a pty. The secondary fd we hand the child as
-/// stdin/stdout/stderr lives at `/dev/ttysNNN`, and the shell calls
-/// `isatty()` (→ `tcgetattr` → ioctl) plus `ttyname()` against it. We
-/// also need read access to `/dev/tty` because most shells re-open it
-/// at startup, and read access to `/dev/fd` for the `/dev/stdout` etc.
-/// indirection some tools use.
+/// Controlling-terminal access and kernel-scoped access to newly allocated PTYs.
 const TTY_ALLOW: &str = "\
-;; --- pseudo-terminal access (inherited TTY when run under a pty) ---
+;; --- controlling terminal and sandbox-allocated pseudo-terminals ---
+(allow file-read* file-write* file-ioctl (literal \"/dev/tty\"))
 (allow file-read* file-write* file-ioctl
-    (literal \"/dev/tty\")
-    (regex #\"^/dev/ttys[0-9]+$\"))
+    (require-all
+        (regex #\"^/dev/ttys[0-9]+$\")
+        (extension \"com.apple.sandbox.pty\")))
 (allow file-read* (subpath \"/dev/fd\"))
 ";
 
@@ -560,8 +571,7 @@ fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
             out.push_str(";; --- guiAccess: allow pseudo-TTY for shell sessions ---\n");
             out.push_str("(allow pseudo-tty)\n");
             out.push_str("(allow file-read* file-write* file-ioctl\n");
-            out.push_str("    (regex #\"/dev/ttys[0-9]+\")\n");
-            out.push_str("    (regex #\"/dev/ptmx\"))\n");
+            out.push_str("    (literal \"/dev/ptmx\"))\n");
 
             // POSIX shared memory and IPC — required by Terminal.app and
             // other apps that use notification center or shared memory.
@@ -606,9 +616,7 @@ fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
     }
     out.push_str(";; --- nestedPty: allow inner process to allocate its own pty ---\n");
     out.push_str("(allow pseudo-tty)\n");
-    // /dev/ptmx is the primary multiplexer; opening it is what posix_openpt
-    // does under the hood. The TTY_ALLOW baseline already grants access to
-    // /dev/ttysNNN (the secondary side).
+    // TTY_ALLOW restricts secondary-device access to the kernel's PTY extension.
     out.push_str("(allow file-read* file-write* file-ioctl\n");
     out.push_str("    (literal \"/dev/ptmx\"))\n");
 }

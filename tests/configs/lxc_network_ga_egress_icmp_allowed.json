@@ -4,7 +4,7 @@
   "containerId": "CLI-LXC-GA-Egress-Icmp-Allowed",
   "containment": "lxc",
   "process": {
-    "commandLine": "sh -c \"timeout 8 ping -c 1 -W 5 203.0.113.2 >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+    "commandLine": "sh -c \"command -v ping || echo MXC_PING_MISSING; timeout 8 ping -c 1 -W 5 203.0.113.2 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
   },
   "lifecycle": {
     "destroyOnExit": true

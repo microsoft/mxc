@@ -1067,6 +1067,12 @@ mod oci {
             .timeout_connect(Some(Duration::from_secs(30)))
             .timeout_recv_response(Some(Duration::from_secs(60)))
             .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
+            // ureq's default TLS provider is rustls, which is not compiled in.
+            .tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .provider(ureq::tls::TlsProvider::NativeTls)
+                    .build(),
+            )
             .build()
             .new_agent();
         let token = pull_token(&agent, registry, repo)?;

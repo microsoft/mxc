@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use mxc_sdk::mxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
-use mxc_sdk::mxc_common::config_parser::{LoadOptions, ParseError, RequestInputError};
+use mxc_sdk::mxc_common::config_parser::{CliTargetId, LoadOptions, ParseError, RequestInputError};
 #[cfg(target_os = "windows")]
 use mxc_sdk::mxc_common::diagnostic::DiagnosticConfig;
 use mxc_sdk::mxc_common::error::WxcError;
@@ -86,6 +86,14 @@ struct Cli {
     /// Opaque lifecycle ID (`sandboxId` in JSON) used by start, exec, stop, or deprovision.
     #[arg(long = "container-id", requires = "operation")]
     container_id: Option<String>,
+
+    /// Session ID returned by provision-session, used by deprovision-session.
+    #[arg(
+        long = "session-id",
+        requires = "operation",
+        conflicts_with = "container_id"
+    )]
+    session_id: Option<String>,
 
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
@@ -177,7 +185,8 @@ struct Cli {
             "probe",
             "force_reclaim",
             "operation",
-            "container_id"
+            "container_id",
+            "session_id"
         ]
     )]
     #[cfg_attr(
@@ -232,21 +241,25 @@ impl Cli {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliOperation {
+    ProvisionSession,
     Provision,
     Start,
     Exec,
     Stop,
     Deprovision,
+    DeprovisionSession,
 }
 
 impl From<CliOperation> for mxc_sdk::mxc_common::state_aware_request::Phase {
     fn from(operation: CliOperation) -> Self {
         match operation {
+            CliOperation::ProvisionSession => Self::ProvisionSession,
             CliOperation::Provision => Self::Provision,
             CliOperation::Start => Self::Start,
             CliOperation::Exec => Self::Exec,
             CliOperation::Stop => Self::Stop,
             CliOperation::Deprovision => Self::Deprovision,
+            CliOperation::DeprovisionSession => Self::DeprovisionSession,
         }
     }
 }
@@ -533,14 +546,9 @@ fn run_state_aware_main(
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
 
-    // This phase's Microsoft Correlation Vector (MS-CV), purely internal to
-    // MXC — no caller supplies or relays one. `provision` seeds a fresh
-    // vector (persisted post-dispatch below, once its `sandbox_id` exists);
-    // every later phase recalls that persisted lifecycle root and spins a
-    // child off it. Empty when telemetry is inactive.
     let correlation = telemetry::correlation_state::pre_dispatch_vector(
         telemetry_active,
-        is_provision,
+        parsed.phase(),
         sandbox_id.as_deref(),
     );
 
@@ -1333,12 +1341,25 @@ fn main() {
     let config_json = config_json.expect("config_json is Some on non-delete paths");
     if let Some(operation) = cli.operation {
         let phase = operation.into();
+        let target_id = cli
+            .container_id
+            .as_deref()
+            .map(|value| CliTargetId {
+                flag: "--container-id",
+                value,
+            })
+            .or_else(|| {
+                cli.session_id.as_deref().map(|value| CliTargetId {
+                    flag: "--session-id",
+                    value,
+                })
+            });
         let parsed =
             match mxc_sdk::mxc_common::config_parser::load_state_aware_request_from_json_with_options(
                 &config_json,
                 &mut logger,
                 phase,
-                cli.container_id.as_deref(),
+                target_id,
                 &cli.command,
             ) {
                 Ok(parsed) => parsed,
@@ -1788,11 +1809,13 @@ mod tests {
     #[test]
     fn cli_accepts_lifecycle_operation_and_container_id() {
         for (name, expected) in [
+            ("provision-session", CliOperation::ProvisionSession),
             ("provision", CliOperation::Provision),
             ("start", CliOperation::Start),
             ("exec", CliOperation::Exec),
             ("stop", CliOperation::Stop),
             ("deprovision", CliOperation::Deprovision),
+            ("deprovision-session", CliOperation::DeprovisionSession),
         ] {
             let cli = parse_cli(&["wxc-exec", "policy.json", "--operation", name]);
             assert_eq!(cli.operation, Some(expected));
@@ -1855,7 +1878,54 @@ mod tests {
         let help = Cli::command().render_help().to_string();
 
         assert!(help.contains("--container-id"));
+        assert!(help.contains("--session-id"));
         assert!(!help.contains("--sandbox-id"));
+    }
+
+    #[test]
+    fn cli_keeps_the_two_lifecycle_identities_on_separate_flags() {
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "deprovision-session",
+            "--session-id",
+            "wslcsess:0123456789abcdef0123456789abcdef",
+        ]);
+        assert_eq!(
+            cli.session_id.as_deref(),
+            Some("wslcsess:0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(cli.container_id, None);
+
+        let error = match Cli::try_parse_from([
+            "wxc-exec",
+            "policy.json",
+            "--session-id",
+            "wslcsess:0123456789abcdef0123456789abcdef",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("--session-id must require --operation"),
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let error = match Cli::try_parse_from([
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "deprovision-session",
+            "--container-id",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "--session-id",
+            "wslcsess:0123456789abcdef0123456789abcdef",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("--container-id and --session-id must conflict"),
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -2097,11 +2167,13 @@ mod tests {
         logger.enable_file_sink(&log_path).unwrap();
 
         for operation in [
+            CliOperation::ProvisionSession,
             CliOperation::Provision,
             CliOperation::Start,
             CliOperation::Exec,
             CliOperation::Stop,
             CliOperation::Deprovision,
+            CliOperation::DeprovisionSession,
         ] {
             let error = lifecycle_input_error(
                 operation,
@@ -2127,17 +2199,24 @@ mod tests {
         let log = std::fs::read_to_string(log_path).unwrap();
         assert_eq!(
             log.matches(r#""reason":"malformed_json""#).count(),
-            5,
+            7,
             "each lifecycle input failure must emit one ConfigRejected record: {log}"
         );
-        for phase in ["provision", "start", "exec", "stop", "deprovision"] {
+        for phase in [
+            "provision-session",
+            "provision",
+            "start",
+            "exec",
+            "stop",
+            "deprovision",
+            "deprovision-session",
+        ] {
             assert_eq!(
                 log.matches(&format!(r#""phase":"{phase}""#)).count(),
                 1,
                 "missing lifecycle phase {phase}: {log}"
             );
         }
-
         let mut logger = test_logger();
         let source_path = directory.path().join("source-audit.log");
         logger.enable_file_sink(&source_path).unwrap();
@@ -3095,14 +3174,31 @@ mod tests {
 
     #[test]
     fn pre_dispatch_vector_is_empty_when_telemetry_inactive() {
-        // Inactive telemetry does no RNG/clock work regardless of phase.
-        assert!(telemetry::correlation_state::pre_dispatch_vector(false, true, None).is_empty());
-        assert!(telemetry::correlation_state::pre_dispatch_vector(
-            false,
-            false,
-            Some("wsb:12345678")
-        )
-        .is_empty());
+        for phase in [
+            Phase::ProvisionSession,
+            Phase::Provision,
+            Phase::Start,
+            Phase::Exec,
+            Phase::Stop,
+            Phase::Deprovision,
+            Phase::DeprovisionSession,
+        ] {
+            assert!(
+                telemetry::correlation_state::pre_dispatch_vector(false, phase, None).is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn session_phase_correlation_never_creates_the_sandbox_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("correlation");
+        let _guard = StoreDirGuard::set(&store);
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            let vector = telemetry::correlation_state::pre_dispatch_vector(true, phase, None);
+            assert!(telemetry::correlation_vector::is_relayable(&vector));
+        }
+        assert!(!store.exists());
     }
 
     #[test]
@@ -3111,19 +3207,18 @@ mod tests {
         let _guard = StoreDirGuard::set(tmp.path());
         let sandbox_id = "wsb:12345678";
 
-        // Active provision seeds a fresh valid vector.
-        let provisioned = telemetry::correlation_state::pre_dispatch_vector(true, true, None);
+        let provisioned =
+            telemetry::correlation_state::pre_dispatch_vector(true, Phase::Provision, None);
         assert!(telemetry::correlation_vector::is_relayable(&provisioned));
 
-        // Persisting it (as `run_state_aware_main` does post-dispatch) lets a
-        // later phase recall it and spin a distinct child off the same base.
         let outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
             serde_json::json!({ "result": { "sandboxId": sandbox_id } }),
         ));
         telemetry::correlation_state::on_provision_outcome(true, &provisioned, &outcome);
 
         let base_prefix = provisioned.split('.').next().unwrap();
-        let spun = telemetry::correlation_state::pre_dispatch_vector(true, false, Some(sandbox_id));
+        let spun =
+            telemetry::correlation_state::pre_dispatch_vector(true, Phase::Start, Some(sandbox_id));
         assert!(spun.starts_with(&format!("{base_prefix}.")), "{spun:?}");
         assert_ne!(spun, provisioned);
     }

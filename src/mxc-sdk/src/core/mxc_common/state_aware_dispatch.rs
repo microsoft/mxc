@@ -27,11 +27,11 @@ use crate::mxc_common::models::ContainmentBackend;
 use crate::mxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
 use crate::mxc_common::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
-    StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, ProvisionSessionResult,
+    StartResult, StatefulSandboxBackend, StopResult,
 };
 use crate::mxc_common::state_aware_binding::{BoundStateAwareOperation, BoundStateAwareRequest};
-use crate::mxc_common::state_aware_request::{ParsedStateAwareRequest, Phase};
+use crate::mxc_common::state_aware_request::ParsedStateAwareRequest;
 use crate::mxc_common::validator::validate_exec_common;
 
 /// Outcome of dispatching one state-aware request. Distinguishes the two
@@ -50,11 +50,13 @@ pub enum DispatchOutcome {
 #[derive(Debug)]
 pub enum TypedDispatchOutcome<ProvisionMetadata, StartMetadata, StopMetadata, DeprovisionMetadata> {
     DryRun,
+    ProvisionSession(ProvisionSessionResult),
     Provision(ProvisionResult<ProvisionMetadata>),
     Start(StartResult<StartMetadata>),
     ExecCompleted { exit_code: i32 },
     Stop(StopResult<StopMetadata>),
     Deprovision(DeprovisionResult<DeprovisionMetadata>),
+    DeprovisionSession,
 }
 
 pub type TypedBackendDispatchOutcome<B> = TypedDispatchOutcome<
@@ -140,6 +142,9 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
 ) -> Result<DispatchOutcome, MxcError> {
     match dispatch_state_aware_typed(backend, bound, dry_run)? {
         TypedDispatchOutcome::DryRun => Ok(DispatchOutcome::Envelope(empty_result_envelope())),
+        TypedDispatchOutcome::ProvisionSession(result) => Ok(DispatchOutcome::Envelope(
+            provision_session_envelope(result)?,
+        )),
         TypedDispatchOutcome::Provision(result) => {
             Ok(DispatchOutcome::Envelope(provision_envelope(result)?))
         }
@@ -155,6 +160,9 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
         TypedDispatchOutcome::Deprovision(result) => {
             Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
         }
+        TypedDispatchOutcome::DeprovisionSession => {
+            Ok(DispatchOutcome::Envelope(empty_result_envelope()))
+        }
     }
 }
 
@@ -166,6 +174,14 @@ pub fn dispatch_state_aware_typed<B: StatefulSandboxBackend>(
 ) -> Result<TypedBackendDispatchOutcome<B>, MxcError> {
     let (request, operation) = bound.into_parts();
     match operation {
+        BoundStateAwareOperation::ProvisionSession(config) => {
+            backend.validate_provision_session(&request, config.as_ref())?;
+            if dry_run {
+                return Ok(TypedDispatchOutcome::DryRun);
+            }
+            let result = backend.provision_session(&request, config)?;
+            Ok(TypedDispatchOutcome::ProvisionSession(result))
+        }
         BoundStateAwareOperation::Provision(config) => {
             backend.validate_provision(&request, config.as_ref())?;
             if dry_run {
@@ -208,15 +224,24 @@ pub fn dispatch_state_aware_typed<B: StatefulSandboxBackend>(
             let result = backend.deprovision(&sandbox_id, &request, config)?;
             Ok(TypedDispatchOutcome::Deprovision(result))
         }
+        BoundStateAwareOperation::DeprovisionSession { session_id } => {
+            backend.validate_deprovision_session(&session_id, &request)?;
+            if dry_run {
+                return Ok(TypedDispatchOutcome::DryRun);
+            }
+            backend.deprovision_session(&session_id, &request)?;
+            Ok(TypedDispatchOutcome::DeprovisionSession)
+        }
     }
 }
 
-/// Resolves the target backend: from `containment` for provision, from the
-/// `sandbox_id` prefix for non-provision phases.
+/// Resolves the target backend: from `containment` for the phases that declare
+/// it, from the `sandbox_id` prefix for the rest.
 pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBackend, MxcError> {
-    if parsed.phase() == Phase::Provision {
+    let phase = parsed.phase();
+    if phase.routes_by_containment() {
         return parsed.containment().ok_or_else(|| {
-            MxcError::malformed_request("provision phase requires a containment field")
+            MxcError::malformed_request(format!("{phase} phase requires a containment field"))
         });
     }
     let sandbox_id = parsed.sandbox_id_required()?;
@@ -226,6 +251,9 @@ pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBa
 
 /// Maps a state-aware sandbox-id prefix to its `ContainmentBackend`.
 /// Subsequent state-aware backends register their prefix here.
+///
+/// Session IDs are deliberately absent: both session phases declare a
+/// containment, so none of them reaches this map.
 pub(crate) fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
     match prefix {
         "iso" => Ok(ContainmentBackend::IsolationSession),
@@ -567,6 +595,13 @@ struct MetadataWireBody<M: Serialize> {
     metadata: Option<M>,
 }
 
+/// `{ "result": { "sessionId": "..." } }`
+#[derive(Serialize)]
+struct ProvisionSessionWireBody {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
 fn provision_envelope<M: Serialize>(r: ProvisionResult<M>) -> Result<Value, MxcError> {
     let body = ProvisionWireBody {
         sandbox_id: r.sandbox_id,
@@ -585,6 +620,19 @@ fn metadata_envelope<R: HasMetadata>(r: R) -> Result<Value, MxcError> {
     let envelope = ResponseEnvelope::Result(body);
     serde_json::to_value(&envelope).map_err(|e| {
         MxcError::backend_error(format!("metadata envelope serialisation failed: {}", e))
+    })
+}
+
+fn provision_session_envelope(r: ProvisionSessionResult) -> Result<Value, MxcError> {
+    let body = ProvisionSessionWireBody {
+        session_id: r.session_id,
+    };
+    let envelope = ResponseEnvelope::Result(body);
+    serde_json::to_value(&envelope).map_err(|e| {
+        MxcError::backend_error(format!(
+            "session provision envelope serialisation failed: {}",
+            e
+        ))
     })
 }
 
@@ -622,11 +670,16 @@ impl<M: Serialize> HasMetadata for DeprovisionResult<M> {
 mod tests {
     use super::*;
     use crate::mxc_common::models::ExecutionRequest;
+    use crate::mxc_common::models::WslcProvisionSessionConfig;
     use crate::mxc_common::mxc_error::MxcErrorCode;
     use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+    use crate::mxc_common::state_aware_request::Phase;
     use serde_json::json;
     use std::cell::Cell;
+    use std::cell::RefCell;
     use std::time::Duration;
+
+    const SESSION_ID: &str = "wslcsess:0123456789abcdef0123456789abcdef";
 
     /// Fully-configurable backend stub for dispatcher tests.
     /// Each phase is wired to either succeed (the default — empty result with
@@ -676,6 +729,7 @@ mod tests {
         const ID_PREFIX: &'static str = "stubd";
         const BACKEND_KEY: &'static str = "stub_dispatch";
         type ProvisionConfig = ();
+
         type StartConfig = ();
         type ExecConfig = ();
         type StopConfig = ();
@@ -814,6 +868,7 @@ mod tests {
         const ID_PREFIX: &'static str = "typed";
         const BACKEND_KEY: &'static str = "typed_stub";
         type ProvisionConfig = ();
+
         type StartConfig = TypedStartConfig;
         type ExecConfig = ();
         type StopConfig = ();
@@ -844,8 +899,119 @@ mod tests {
         }
     }
 
+    /// Backend stub that implements the session phases, so dispatch ordering
+    /// can be observed on a backend that supports them.
+    struct SessionStubBackend {
+        provision_session_calls: Cell<u32>,
+        deprovision_session_calls: Cell<u32>,
+        validate_provision_session_calls: Cell<u32>,
+        validate_deprovision_session_calls: Cell<u32>,
+        released: RefCell<Vec<String>>,
+        validated_sizing: Cell<Option<WslcProvisionSessionConfig>>,
+        provisioned_sizing: Cell<Option<WslcProvisionSessionConfig>>,
+    }
+
+    impl SessionStubBackend {
+        fn new() -> Self {
+            Self {
+                provision_session_calls: Cell::new(0),
+                deprovision_session_calls: Cell::new(0),
+                validate_provision_session_calls: Cell::new(0),
+                validate_deprovision_session_calls: Cell::new(0),
+                released: RefCell::new(Vec::new()),
+                validated_sizing: Cell::new(None),
+                provisioned_sizing: Cell::new(None),
+            }
+        }
+    }
+
+    impl StatefulSandboxBackend for SessionStubBackend {
+        const ID_PREFIX: &'static str = "sess";
+        const BACKEND_KEY: &'static str = "session_stub";
+        type ProvisionConfig = ();
+
+        type StartConfig = ();
+        type ExecConfig = ();
+        type StopConfig = ();
+        type DeprovisionConfig = ();
+        type ProvisionMetadata = ();
+        type StartMetadata = ();
+        type StopMetadata = ();
+        type DeprovisionMetadata = ();
+
+        fn exec(
+            &mut self,
+            _sandbox_id: &str,
+            _request: &ExecutionRequest,
+            _config: Option<()>,
+            _stdio: ExecStdio,
+        ) -> Result<ExecHandle, MxcError> {
+            Err(MxcError::backend_error("session stub exec not wired"))
+        }
+
+        fn provision_session(
+            &mut self,
+            _request: &ExecutionRequest,
+            config: Option<WslcProvisionSessionConfig>,
+        ) -> Result<ProvisionSessionResult, MxcError> {
+            self.provision_session_calls
+                .set(self.provision_session_calls.get() + 1);
+            self.provisioned_sizing.set(config);
+            Ok(ProvisionSessionResult {
+                session_id: "wslcsess:fixed-token".to_string(),
+            })
+        }
+
+        fn deprovision_session(
+            &mut self,
+            session_id: &str,
+            _request: &ExecutionRequest,
+        ) -> Result<(), MxcError> {
+            self.deprovision_session_calls
+                .set(self.deprovision_session_calls.get() + 1);
+            self.released.borrow_mut().push(session_id.to_string());
+            Ok(())
+        }
+
+        fn validate_provision_session(
+            &self,
+            _request: &ExecutionRequest,
+            config: Option<&WslcProvisionSessionConfig>,
+        ) -> Result<(), MxcError> {
+            self.validate_provision_session_calls
+                .set(self.validate_provision_session_calls.get() + 1);
+            self.validated_sizing.set(config.copied());
+            Ok(())
+        }
+
+        fn validate_deprovision_session(
+            &self,
+            _session_id: &str,
+            _request: &ExecutionRequest,
+        ) -> Result<(), MxcError> {
+            self.validate_deprovision_session_calls
+                .set(self.validate_deprovision_session_calls.get() + 1);
+            Ok(())
+        }
+    }
+
+    fn session_bound(
+        phase: Phase,
+        session_id: Option<&str>,
+    ) -> BoundStateAwareRequest<SessionStubBackend> {
+        let operation = match phase {
+            Phase::ProvisionSession => BoundStateAwareOperation::ProvisionSession(None),
+            Phase::DeprovisionSession => BoundStateAwareOperation::DeprovisionSession {
+                session_id: session_id.unwrap().into(),
+            },
+            other => panic!("session_bound does not cover {other}"),
+        };
+        BoundStateAwareRequest::for_test(ExecutionRequest::default(), operation)
+    }
+
     fn bound(phase: Phase, sandbox_id: Option<&str>) -> BoundStateAwareRequest<StubBackend> {
         let operation = match phase {
+            Phase::ProvisionSession => BoundStateAwareOperation::ProvisionSession(None),
             Phase::Provision => BoundStateAwareOperation::Provision(None),
             Phase::Start => BoundStateAwareOperation::Start {
                 sandbox_id: sandbox_id.unwrap().into(),
@@ -862,6 +1028,9 @@ mod tests {
             Phase::Deprovision => BoundStateAwareOperation::Deprovision {
                 sandbox_id: sandbox_id.unwrap().into(),
                 config: None,
+            },
+            Phase::DeprovisionSession => BoundStateAwareOperation::DeprovisionSession {
+                session_id: sandbox_id.unwrap().into(),
             },
         };
         BoundStateAwareRequest::for_test(ExecutionRequest::default(), operation)
@@ -893,6 +1062,122 @@ mod tests {
         assert_eq!(b.validate_provision_calls.get(), 1);
         assert_eq!(b.provision_calls.get(), 1);
         assert_eq!(env, json!({"result": {"sandboxId": "stubd:fixed-token"}}));
+    }
+
+    #[test]
+    fn dispatch_provision_session_returns_the_minted_session_id() {
+        let mut b = SessionStubBackend::new();
+        let env = assert_envelope(
+            dispatch_state_aware(&mut b, session_bound(Phase::ProvisionSession, None), false)
+                .unwrap(),
+        );
+        assert_eq!(b.validate_provision_session_calls.get(), 1);
+        assert_eq!(b.provision_session_calls.get(), 1);
+        assert_eq!(
+            env,
+            json!({"result": {"sessionId": "wslcsess:fixed-token"}})
+        );
+    }
+
+    #[test]
+    fn dispatch_deprovision_session_releases_the_named_session() {
+        let mut b = SessionStubBackend::new();
+        let env = assert_envelope(
+            dispatch_state_aware(
+                &mut b,
+                session_bound(Phase::DeprovisionSession, Some(SESSION_ID)),
+                false,
+            )
+            .unwrap(),
+        );
+        assert_eq!(b.validate_deprovision_session_calls.get(), 1);
+        assert_eq!(b.deprovision_session_calls.get(), 1);
+        assert_eq!(*b.released.borrow(), vec![SESSION_ID.to_string()]);
+        assert_eq!(env, json!({"result": {}}));
+    }
+
+    #[test]
+    fn dispatch_carries_session_sizing_to_both_the_hook_and_the_phase_method() {
+        let sizing = WslcProvisionSessionConfig {
+            cpu_count: Some(4),
+            memory_mb: Some(8192),
+            gpu: Some(true),
+        };
+        let bound = BoundStateAwareRequest::<SessionStubBackend>::for_test(
+            ExecutionRequest::default(),
+            BoundStateAwareOperation::ProvisionSession(Some(sizing)),
+        );
+        let mut b = SessionStubBackend::new();
+        dispatch_state_aware(&mut b, bound, false).unwrap();
+        assert_eq!(b.validated_sizing.get(), Some(sizing));
+        assert_eq!(b.provisioned_sizing.get(), Some(sizing));
+    }
+
+    #[test]
+    fn a_session_dry_run_still_shows_the_hook_its_sizing() {
+        let sizing = WslcProvisionSessionConfig {
+            cpu_count: Some(2),
+            ..Default::default()
+        };
+        let bound = BoundStateAwareRequest::<SessionStubBackend>::for_test(
+            ExecutionRequest::default(),
+            BoundStateAwareOperation::ProvisionSession(Some(sizing)),
+        );
+        let mut b = SessionStubBackend::new();
+        dispatch_state_aware(&mut b, bound, true).unwrap();
+        assert_eq!(b.validated_sizing.get(), Some(sizing));
+        assert_eq!(b.provisioned_sizing.get(), None);
+        assert_eq!(b.provision_session_calls.get(), 0);
+    }
+
+    #[test]
+    fn dispatch_session_dry_run_validates_without_minting_or_releasing() {
+        let mut b = SessionStubBackend::new();
+        for bound in [
+            session_bound(Phase::ProvisionSession, None),
+            session_bound(Phase::DeprovisionSession, Some(SESSION_ID)),
+        ] {
+            assert_eq!(
+                assert_envelope(dispatch_state_aware(&mut b, bound, true).unwrap()),
+                json!({"result": {}})
+            );
+        }
+        assert_eq!(b.validate_provision_session_calls.get(), 1);
+        assert_eq!(b.validate_deprovision_session_calls.get(), 1);
+        assert_eq!(b.provision_session_calls.get(), 0);
+        assert_eq!(b.deprovision_session_calls.get(), 0);
+        assert!(b.released.borrow().is_empty());
+    }
+
+    #[test]
+    fn dispatch_session_phases_refuse_on_a_backend_without_sessions_even_in_dry_run() {
+        for dry_run in [false, true] {
+            let mut b = StubBackend::new();
+            for bound in [
+                bound(Phase::ProvisionSession, None),
+                bound(Phase::DeprovisionSession, Some(SESSION_ID)),
+            ] {
+                let error = dispatch_state_aware(&mut b, bound, dry_run).unwrap_err();
+                assert_eq!(error.code, MxcErrorCode::UnsupportedPhase, "{dry_run}");
+                assert!(error.message.contains("stub_dispatch"), "{error:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_phase_cannot_be_streamed_as_an_exec() {
+        let mut b = SessionStubBackend::new();
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            let bound = session_bound(phase, Some(SESSION_ID));
+            let error = dispatch_state_aware_exec(&mut b, bound).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+            assert_eq!(
+                error.message,
+                format!("streaming exec requires the exec phase, got {phase}")
+            );
+        }
+        assert_eq!(b.provision_session_calls.get(), 0);
+        assert_eq!(b.deprovision_session_calls.get(), 0);
     }
 
     #[test]
@@ -1158,6 +1443,23 @@ mod tests {
         let p = parsed_start("no-colon");
         let err = resolve_backend(&p).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
+    }
+
+    #[test]
+    fn resolve_backend_for_session_phases_uses_containment_not_the_id_prefix() {
+        for operation in [
+            StateAwareOperation::ProvisionSession(None),
+            StateAwareOperation::DeprovisionSession {
+                session_id: SESSION_ID.into(),
+            },
+        ] {
+            let parsed = ParsedStateAwareRequest::new(ExecutionRequest::default(), operation);
+            assert_eq!(resolve_backend(&parsed).unwrap(), ContainmentBackend::Wslc);
+        }
+        assert_eq!(
+            backend_from_prefix("wslcsess").unwrap_err().code,
+            MxcErrorCode::UnsupportedContainment
+        );
     }
 
     // ===== stdio topology per entry point ===================================

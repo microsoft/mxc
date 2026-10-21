@@ -3,10 +3,15 @@
 
 use thiserror::Error;
 
+use crate::mxc_common::mxc_error::MxcError;
+
 #[derive(Debug, Error)]
 pub enum WxcError {
     #[error("Configuration parse error: {0}")]
     ConfigParse(String),
+
+    #[error(transparent)]
+    StateAware(Box<MxcError>),
 
     #[error("Validation error: {0}")]
     Validation(String),
@@ -34,6 +39,21 @@ pub enum WxcError {
 
     #[error("String conversion error: {0}")]
     StringConversion(String),
+}
+
+impl WxcError {
+    pub(crate) fn into_state_aware(self) -> MxcError {
+        match self {
+            Self::StateAware(error) => *error,
+            error => MxcError::malformed_request(error.to_string()),
+        }
+    }
+}
+
+impl From<MxcError> for WxcError {
+    fn from(error: MxcError) -> Self {
+        Self::StateAware(Box::new(error))
+    }
 }
 
 impl From<serde_json::Error> for WxcError {

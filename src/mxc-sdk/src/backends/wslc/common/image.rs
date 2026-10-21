@@ -6,6 +6,7 @@
 use std::fmt::Write;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
@@ -201,11 +202,31 @@ pub unsafe fn pull_image(
     Ok(())
 }
 
-/// Off-thread pulls that have not returned.
+/// Off-thread pulls that have not returned, across every session in this
+/// process.
 ///
 /// The session outlives the daemon's worker only if nothing is still using it,
 /// so teardown consults this before releasing the handle.
 static PULLS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts one pull against a caller's own counter for as long as it runs.
+struct PullCount(Arc<AtomicUsize>);
+
+impl PullCount {
+    /// Enter the count, if the caller asked for one.
+    fn enter(counter: Option<Arc<AtomicUsize>>) -> Option<Self> {
+        counter.map(|counter| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Self(counter)
+        })
+    }
+}
+
+impl Drop for PullCount {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Everything an off-thread pull needs, in a form that can cross a thread.
 struct PullJob {
@@ -246,6 +267,35 @@ pub unsafe fn start_pull<F>(
 where
     F: FnOnce(Result<(), ScriptResponse>) + Send + 'static,
 {
+    // SAFETY: forwarded unchanged; this shares `start_pull_counted`'s contract.
+    unsafe { start_pull_counted(sdk, session, image, store, log_prefix, None, on_done) }
+}
+
+/// [`start_pull`], additionally counting the pull against `counter` until it has
+/// reported.
+///
+/// A caller holding several sessions needs to know whether a pull is still
+/// using *this* session, which the process-wide count cannot answer. `counter`
+/// is kept alongside [`PULLS_IN_FLIGHT`], never in place of it.
+///
+/// `counter` is released only once `on_done` has returned, so a caller that
+/// observes it at zero can rely on the report having been delivered.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle,
+/// both outliving the pull.
+pub unsafe fn start_pull_counted<F>(
+    sdk: &WslcSdk,
+    session: WslcSession,
+    image: &str,
+    store: &StoreHint,
+    log_prefix: &str,
+    counter: Option<Arc<AtomicUsize>>,
+    on_done: F,
+) -> Result<(), ScriptResponse>
+where
+    F: FnOnce(Result<(), ScriptResponse>) + Send + 'static,
+{
     let job = PullJob {
         sdk: sdk as *const WslcSdk,
         session,
@@ -254,11 +304,18 @@ where
     };
     let prefix = log_prefix.to_string();
 
+    // Entered before the spawn so a spawn failure unwinds it, rather than
+    // leaving a count for a thread that never started.
+    let counted = PullCount::enter(counter);
     PULLS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
     let spawned = std::thread::Builder::new()
         .name("wslc-pull".to_string())
         .spawn(move || {
             let job = job;
+
+            // Outlives `on_done` below, so a caller that sees this counter at
+            // zero knows the report has already been handed over.
+            let _counted = counted;
             let apartment = PullApartment::enter();
             let outcome = match apartment {
                 Err(e) => Err(e),
@@ -752,8 +809,18 @@ pub unsafe fn begin_resolve(
     }
 }
 
-/// The refusal for an uncached image a sandbox declaring no egress cannot pull.
 fn no_egress_refusal(image: &str, store: &StoreHint) -> ScriptResponse {
+    if let StoreHint::DaemonSlot(index) = store {
+        return WslcError::Rejected(format!(
+            "WSLC isolated provision refused: daemon image store slot {index} at '{}' is cold \
+             for image '{image}'. No container was created. Release the session or let it \
+             expire before warming this store with wxc-exec.exe --setup-wslc --image {image}{}. \
+             Alternatively, import a local tar with wslc.provision.imageTarPath or allow egress.",
+            store.store_path(),
+            store.warm_instruction(),
+        ))
+        .into_response();
+    }
     WslcError::Rejected(format!(
         "WSLC image '{}' is not cached, and this sandbox declares no egress. \
          Pulling it would reach the registry on the host's network, before the \
@@ -1648,6 +1715,22 @@ mod tests {
              against the same cold slot: {}",
             lifecycle.error_message
         );
+    }
+
+    #[test]
+    fn an_isolated_provision_names_the_selected_cold_store_and_how_to_warm_it() {
+        let refusal = no_egress_refusal("alpine:latest", &StoreHint::DaemonSlot(1));
+        let message = refusal.error_message;
+        assert_eq!(
+            refusal.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+        assert!(message.contains("daemon image store slot 1"));
+        assert!(message.contains(store_slots::slot_path(1).to_string_lossy().as_ref()));
+        assert!(message.contains("cold for image 'alpine:latest'"));
+        assert!(message.contains("No container was created"));
+        assert!(message.contains("--wslc-daemon-slots 2"));
+        assert!(message.contains("wslc.provision.imageTarPath"));
     }
 
     #[test]

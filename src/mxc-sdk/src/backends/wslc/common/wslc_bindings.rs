@@ -26,6 +26,9 @@ pub use crate::wslc_common::wslcsdk_sys::*;
 /// COM success sentinel. Not declared in `wslcsdk.h`, so defined here.
 pub const S_OK: HRESULT = 0;
 
+/// Unspecified COM failure. Not declared in `wslcsdk.h`, so defined here.
+pub const E_FAIL: HRESULT = 0x8000_4005_u32 as HRESULT;
+
 // The header declares its error codes with `MAKE_HRESULT(SEVERITY_ERROR,
 // FACILITY_ITF, WSLC_E_BASE + n)`, which bindgen cannot evaluate, so only the
 // base survives into the generated module. Packing severity 1 and facility 4
@@ -373,6 +376,38 @@ impl WslcSessionGuard {
     /// Get the raw handle for passing to SDK functions.
     pub fn as_raw(&self) -> WslcSession {
         self.handle
+    }
+
+    /// Terminate and release this session, reporting the terminate result.
+    ///
+    /// A session whose VM did not stop still holds its image store, so a
+    /// caller that reported success would hand back a store the next lease
+    /// cannot open.
+    ///
+    /// Returns the terminate `HRESULT`. The handle is released either way,
+    /// since a failed terminate still leaves the handle to give back.
+    pub fn release_checked(mut self) -> HRESULT {
+        if self.handle.is_null() {
+            return S_OK;
+        }
+
+        // Calling the SDK with no apartment is the one thing the `Send`
+        // argument exists to prevent, so a handle that cannot reach one is
+        // leaked instead.
+        let Ok(_com) = ComApartment::enter() else {
+            self.handle = std::ptr::null_mut();
+            return E_FAIL;
+        };
+
+        // SAFETY: the handle is non-null and owned by this guard. Nulling it
+        // below means `Drop` returns early, so this runs exactly once.
+        let hr = unsafe {
+            let hr = (self.terminate_fn)(self.handle);
+            (self.release_fn)(self.handle);
+            hr
+        };
+        self.handle = std::ptr::null_mut();
+        hr
     }
 }
 
