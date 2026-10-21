@@ -65,7 +65,7 @@ impl LoopbackRelay {
     pub(crate) fn start(pid: u32, host: &str, port: u16) -> Result<Self, String> {
         let host = unbracket_host(host);
 
-        let proxy_addresses: Arc<[SocketAddr]> = (host, port)
+        let proxy_addresses: Vec<SocketAddr> = (host, port)
             .to_socket_addrs()
             .map_err(|e| format!("cannot resolve the proxy host '{host}': {e}"))?
             .filter(|address| address.ip().is_loopback())
@@ -82,7 +82,7 @@ impl LoopbackRelay {
     /// Relay each accepted connection to the first proxy address that answers.
     fn spawn_accept_thread(
         listeners: Vec<TcpListener>,
-        proxy_addresses: Arc<[SocketAddr]>,
+        proxy_addresses: Vec<SocketAddr>,
     ) -> Result<Self, String> {
         for listener in &listeners {
             listener
@@ -166,7 +166,7 @@ fn bind_listeners(host: &str, port: u16) -> Result<Vec<TcpListener>, String> {
 #[cfg(target_os = "linux")]
 fn spin_and_accept_connections(
     listeners: Vec<TcpListener>,
-    proxy_addresses: Arc<[SocketAddr]>,
+    proxy_addresses: Vec<SocketAddr>,
     stop: Arc<AtomicBool>,
 ) {
     let mut connections: Vec<Connection> = Vec::new();
@@ -182,7 +182,7 @@ fn spin_and_accept_connections(
                 if connections.len() >= MAX_RELAYED_CONNECTIONS {
                     continue;
                 }
-                if let Ok(connection) = Connection::open(inbound, Arc::clone(&proxy_addresses)) {
+                if let Ok(connection) = Connection::open(inbound, &proxy_addresses) {
                     connections.push(connection);
                 }
             }
@@ -209,7 +209,7 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let relay =
-            LoopbackRelay::spawn_accept_thread(vec![listener], Arc::from([proxy_address])).unwrap();
+            LoopbackRelay::spawn_accept_thread(vec![listener], vec![proxy_address]).unwrap();
         (relay, address)
     }
 
