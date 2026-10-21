@@ -20,6 +20,9 @@ pub mod bwrap_command;
 #[cfg(target_os = "linux")]
 pub mod bwrap_runner;
 pub mod bwrap_version;
+/// Forks `bwrap` from a process-lifetime thread (see the module docs).
+#[cfg(target_os = "linux")]
+pub(crate) mod lifetime_spawner;
 /// Consumed only by the Linux-gated runner and proxy modules.
 #[cfg(target_os = "linux")]
 pub(crate) mod network_rules;

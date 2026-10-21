@@ -147,6 +147,12 @@ Bubblewrap creates a namespace-isolated process by:
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
 
+`bwrap` runs with `--die-with-parent`, whose parent-death signal Linux delivers
+when the *thread* that forked `bwrap` exits. MXC therefore forks `bwrap` from
+a dedicated thread that lives as long as the process, so a sandbox started from
+a pooled or short-lived thread (for example a Tokio `spawn_blocking` worker)
+survives that thread and dies only with the embedding process.
+
 ### Deny-by-default filesystem
 
 The baseline mirrors the macOS Seatbelt backend's `(deny default)` posture:

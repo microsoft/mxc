@@ -282,3 +282,42 @@ fn streaming_bubblewrap_reports_no_output_metadata() {
         "Bubblewrap should report no structured output metadata"
     );
 }
+
+#[test]
+fn streaming_bubblewrap_outlives_the_thread_that_spawned_it() {
+    // `bwrap --die-with-parent` arms PR_SET_PDEATHSIG, which Linux fires when
+    // the *thread* that forked bwrap exits. Callers that spawn on a pooled or
+    // short-lived thread and wait elsewhere must not have the sandbox killed
+    // when that thread is retired.
+    if !bwrap_available() {
+        return;
+    }
+    use std::io::{BufRead, BufReader, Read};
+
+    let (mut proc, mut stdout) = std::thread::spawn(|| {
+        let mut proc = spawn(
+            bwrap_request("echo ready; sleep 1; echo survived", 30_000),
+            Default::default(),
+        )
+        .expect("spawn");
+        let mut stdout = BufReader::new(proc.take_stdout().expect("stdout available"));
+        // The workload is running, so bwrap has armed its parent-death signal.
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("read first line");
+        assert_eq!(line.trim(), "ready");
+        (proc, stdout)
+    })
+    .join()
+    .expect("spawning thread");
+
+    let mut rest = String::new();
+    stdout
+        .read_to_string(&mut rest)
+        .expect("read remaining stdout");
+    assert_eq!(
+        rest.trim(),
+        "survived",
+        "sandbox died with its spawning thread"
+    );
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
+}
