@@ -54,6 +54,12 @@ pub fn generate_sandbox_identity() -> String {
 /// `DeriveAppContainerSidFromAppContainerName` is deterministic and does not
 /// require the AppContainer profile to already exist.
 pub fn derive_sid_string(identity: &str) -> Result<String, String> {
+    if identity.contains('\0') {
+        return Err(
+            "sandbox identity contains an embedded NUL and cannot be used as a security identity"
+                .to_string(),
+        );
+    }
     let wide_identity = string_util::to_wide(identity);
     let pcwstr = PCWSTR(wide_identity.as_ptr());
 

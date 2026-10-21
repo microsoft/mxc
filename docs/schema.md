@@ -403,7 +403,9 @@ containment tier selected at runtime:
   `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
   Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
   runs sharing the same `containerId` can revoke each other's ACEs — use distinct
-  `containerId` values for parallel runs.
+  `containerId` values for parallel runs. `containerId` must not contain an embedded
+  NUL. JSON can legally carry `\u0000`, and a truncating UTF-16 conversion would
+  otherwise turn visually different ids into the same AppContainer SID.
 
 #### Path grants and root directories for Windows BaseContainer
 
