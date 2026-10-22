@@ -124,12 +124,14 @@ fn bind_in_namespace(pid: u32, host: &str, port: u16) -> Result<Vec<TcpListener>
         File::open(&path).map_err(|e| format!("cannot open the container's {path}: {e}"))?;
 
     thread::scope(|scope| {
-        scope
-            .spawn(|| {
+        thread::Builder::new()
+            .name("mxc-lxc-proxy-bind".to_string())
+            .spawn_scoped(scope, || {
                 setns(&namespace, CloneFlags::CLONE_NEWNET)
                     .map_err(|e| format!("cannot enter the container's network namespace: {e}"))?;
                 bind_listeners(host, port)
             })
+            .map_err(|e| format!("cannot start the relay listener thread: {e}"))?
             .join()
             .unwrap_or_else(|_| Err("the relay listener thread panicked".to_string()))
     })
@@ -148,9 +150,11 @@ fn bind_listeners(host: &str, port: u16) -> Result<Vec<TcpListener>, String> {
         match TcpListener::bind(v6) {
             Ok(listener) => listeners.push(listener),
 
-            // A container with no IPv6 loopback gives a workload nothing at
-            // ::1 to connect to either.
-            Err(e) if e.kind() == ErrorKind::AddrNotAvailable => {}
+            // A container with no IPv6 loopback, or a kernel with no IPv6 at
+            // all, gives a workload nothing at ::1 to connect to either.
+            Err(e)
+                if e.kind() == ErrorKind::AddrNotAvailable
+                    || e.raw_os_error() == Some(libc::EAFNOSUPPORT) => {}
 
             Err(e) => return Err(format!("cannot listen on {v6} inside the container: {e}")),
         }
