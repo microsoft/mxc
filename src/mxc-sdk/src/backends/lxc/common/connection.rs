@@ -62,7 +62,56 @@ fn copy_both_ways(container: &TcpStream, proxy: &TcpStream) {
 }
 
 fn copy_then_end(mut from: &TcpStream, mut to: &TcpStream) {
-    let _ = io::copy(&mut from, &mut to);
+    match io::copy(&mut from, &mut to) {
+        Ok(_) => {
+            let _ = to.shutdown(Shutdown::Write);
+        }
+        // A broken socket would otherwise leave the opposite copier blocked on its read.
+        Err(_) => {
+            let _ = from.shutdown(Shutdown::Both);
+            let _ = to.shutdown(Shutdown::Both);
+        }
+    }
+}
 
-    let _ = to.shutdown(Shutdown::Write);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    fn reset(stream: TcpStream) {
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: `linger` outlives the call, and the length passed is its size.
+        unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&linger as *const libc::linger).cast(),
+                std::mem::size_of::<libc::linger>() as libc::socklen_t,
+            );
+        }
+    }
+
+    #[test]
+    fn a_proxy_reset_ends_the_connection_while_the_client_stays_open() {
+        let container = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let _client = TcpStream::connect(container.local_addr().unwrap()).unwrap();
+        let (inbound, _) = container.accept().unwrap();
+        let connection = Connection::open(inbound, &[proxy.local_addr().unwrap()]).unwrap();
+
+        reset(proxy.accept().unwrap().0);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !connection.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(connection.is_finished());
+    }
 }

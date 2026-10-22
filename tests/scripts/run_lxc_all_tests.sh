@@ -101,6 +101,7 @@ run_test "LXC Network Deny Precedence" "$SCRIPT_DIR/run_lxc_network_deny_precede
 run_test "LXC Network Proxy Rejection" "$SCRIPT_DIR/run_lxc_network_proxy_rejection_test.sh"
 run_test "LXC Network Proxy Relay" "$SCRIPT_DIR/run_lxc_network_proxy_relay_test.sh"
 run_test "LXC Network Proxy Reuse" "$SCRIPT_DIR/run_lxc_network_proxy_reuse_test.sh"
+run_test "LXC Network Proxy Reset" "$SCRIPT_DIR/run_lxc_network_proxy_reset_test.sh"
 run_test "LXC Network Proxy Credentials" "$SCRIPT_DIR/run_lxc_network_proxy_credentials_test.sh"
 run_test "LXC Network Preserve Policy" "$SCRIPT_DIR/run_lxc_network_preserve_policy_test.sh"
 run_test "LXC Network Reuse Tightening" "$SCRIPT_DIR/run_lxc_network_reuse_tighten_test.sh"
