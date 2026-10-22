@@ -242,6 +242,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         seatbelt,
         windows_sandbox,
         hyperlight,
+        microvm_image,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
@@ -262,6 +263,9 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     } = request;
 
     let mut root = Map::new();
+    if let Some(image) = microvm_image {
+        root.insert("microvm".into(), serde_json::json!({"image": image}));
+    }
 
     root.insert(
         "containment".into(),

@@ -109,6 +109,16 @@ fn parse_one_shot(json: &str) -> Result<Request, RequestParseError> {
 /// run before normalization; runtime backend capability validation occurs
 /// later on the resulting execution request.
 pub fn validate_one_shot_request(request: &OneShotRequest) -> Result<(), RequestParseError> {
+    let selects_microvm = matches!(
+        request.containment.as_ref(),
+        Some(OneShotContainment::Microvm)
+    );
+    if selects_microvm != request.microvm.as_ref().is_some() {
+        return Err(RequestParseError::InvalidCombination {
+            contract: "one-shot",
+            message: "microvm.image is required exactly when containment is microvm",
+        });
+    }
     match request.containment.as_ref() {
         Some(OneShotContainment::IsolationSession) => {
             validate_isolation_session_one_shot_network(request)

@@ -149,6 +149,11 @@ impl ContainerRequest {
 The SDK-defined backend choices carried by `ContainerRequest`. Select a variant with
 its typed configuration; the native engine validates backend and policy support.
 
+Experimental MicroVM creation selects `Containment::MicroVm { image: String }`.
+`image` is a required nonblank registry image reference resolved by the NVX
+runtime. Use only with `v1::experimental::run`; the published V1 contract target
+is unchanged.
+
 ```rust
 pub enum Containment {
   #[default]
@@ -159,6 +164,7 @@ pub enum Containment {
   Bubblewrap,
   Wslc(WslcConfig),
   IsolationSession,
+  MicroVm { image: String },
 }
 ```
 

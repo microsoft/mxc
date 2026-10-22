@@ -3,12 +3,61 @@
 
 use mxc_sdk::v1::ErrorCode;
 
+#[cfg(all(windows, target_arch = "x86_64", feature = "microvm"))]
+#[path = "nvx_e2e/network.rs"]
+mod windows_network;
+
 fn process_only_request(command: &str) -> serde_json::Value {
     serde_json::json!({
         "version": "1.1.0-alpha",
         "containment": "microvm",
+        "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"},
         "process": { "commandLine": command, "timeout": 30_000 }
     })
+}
+
+#[test]
+fn microvm_creation_rejects_missing_and_blank_images_before_runtime() {
+    for image in [None, Some(""), Some(" "), Some("\n")] {
+        let mut request = process_only_request("printf forbidden");
+        request.as_object_mut().unwrap().remove("microvm");
+        if let Some(image) = image {
+            request["microvm"] = serde_json::json!({"image": image});
+        }
+        let error = mxc_sdk::__ffi::run_json(&request.to_string(), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+        assert!(error.message.contains("microvm.image"), "{error}");
+    }
+}
+
+#[test]
+fn microvm_typed_stable_run_and_spawn_require_optin() {
+    for spawn in [false, true] {
+        let mut request = mxc_sdk::v1::ContainerRequest::new("printf forbidden");
+        request.containment = mxc_sdk::v1::Containment::MicroVm {
+            image: "python:3.12-alpine".to_owned(),
+        };
+        let error = if spawn {
+            mxc_sdk::v1::spawn(request, Default::default())
+                .err()
+                .expect("stable spawn must reject MicroVM")
+        } else {
+            mxc_sdk::v1::run(request, Default::default()).unwrap_err()
+        };
+        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+        assert!(error.message.contains("experimental"), "{error}");
+    }
+}
+
+#[test]
+fn microvm_experimental_typed_run_rejects_blank_image_before_runtime() {
+    let mut request = mxc_sdk::v1::ContainerRequest::new("printf forbidden");
+    request.containment = mxc_sdk::v1::Containment::MicroVm {
+        image: " ".to_owned(),
+    };
+    let error = mxc_sdk::v1::experimental::run(request, Default::default()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+    assert!(error.message.contains("microvm.image"), "{error}");
 }
 
 #[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
@@ -52,31 +101,6 @@ mod windows_x64 {
 
     fn rejected_requests() -> Vec<(&'static str, Value)> {
         vec![
-            (
-                "readonly",
-                json!({"filesystem": {"readonlyPaths": ["C:\\work"]}}),
-            ),
-            (
-                "readwrite",
-                json!({"filesystem": {"readwritePaths": ["C:\\work"]}}),
-            ),
-            (
-                "denied",
-                json!({"filesystem": {"deniedPaths": ["C:\\work"]}}),
-            ),
-            ("network-empty", json!({"network": {}})),
-            (
-                "network-deny",
-                json!({"network": {"egress": {"default": "deny"}}}),
-            ),
-            (
-                "network-allow",
-                json!({"network": {"egress": {"default": "allow"}}}),
-            ),
-            (
-                "proxy",
-                json!({"runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}}),
-            ),
             ("ui", json!({"ui": {"disable": true}})),
             (
                 "capture",
@@ -381,7 +405,7 @@ mod windows_x64 {
         )
     }
 
-    fn assert_no_run_state(pid: u32) {
+    pub(super) fn assert_no_run_state(pid: u32) {
         let prefix = format!("mxc-nvx-{pid}-");
         let retained: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .expect("temporary directory listing")
@@ -413,6 +437,73 @@ mod windows_x64 {
         assert_eq!(stdout.len(), CAPTURE_LIMIT / 2);
         assert_eq!(stderr.len(), stderr_bytes);
         assert!(stdout.iter().chain(stderr).all(|&byte| byte == 0));
+    }
+
+    #[test]
+    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
+    fn signed_bundle_typed_image_and_filesystem_policy() {
+        use mxc_sdk::v1::{ContainerRequest, Containment, FilesystemPolicy, NetworkPolicy};
+
+        let directory = tempfile::tempdir().unwrap();
+        let ro = directory.path().join("ro");
+        let rw = directory.path().join("rw");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::create_dir(&rw).unwrap();
+        std::fs::write(ro.join("input"), b"read-ok").unwrap();
+        std::fs::write(rw.join("secret"), b"secret").unwrap();
+        let host_root = directory.path().to_str().unwrap();
+        assert_eq!(host_root.as_bytes()[1], b':', "drive-qualified host path");
+        let guest_root = format!(
+            "/mnt/{}/{}",
+            host_root[..1].to_ascii_lowercase(),
+            host_root[3..].replace('\\', "/")
+        );
+        let script = r#"python3 -c 'import errno, os, pathlib, sys
+assert sys.version_info[:2] == (3, 12)
+root = pathlib.Path(os.environ["MXC_NVX_POLICY_ROOT"])
+assert (root / "ro" / "input").read_bytes() == b"read-ok"
+try:
+    (root / "ro" / "input").write_bytes(b"forbidden")
+except OSError as error:
+    assert error.errno in (errno.EACCES, errno.EROFS), error
+else:
+    raise AssertionError("read-only mapping was writable")
+try:
+    (root / "rw" / "secret").read_bytes()
+except OSError as error:
+    assert error.errno == errno.EACCES, error
+else:
+    raise AssertionError("denied path was readable")
+(root / "rw" / "result").write_bytes(b"write-ok")
+print("NVX_TYPED_IMAGE_AND_POLICY_OK", end="")
+'"#;
+        let result = mxc_sdk::v1::experimental::run(
+            ContainerRequest {
+                containment: Containment::MicroVm {
+                    image: "python:3.12-alpine".to_owned(),
+                },
+                filesystem: Some(FilesystemPolicy {
+                    readonly_paths: vec![ro.to_str().unwrap().to_owned()],
+                    readwrite_paths: vec![rw.to_str().unwrap().to_owned()],
+                    denied_paths: vec![rw.join("secret").to_str().unwrap().to_owned()],
+                    ..Default::default()
+                }),
+                network: Some(NetworkPolicy::default()),
+                environment: Some(vec![("MXC_NVX_POLICY_ROOT".to_owned(), guest_root)]),
+                inherit_default_environment: Some(true),
+                timeout_ms: Some(30_000),
+                ..ContainerRequest::new(script)
+            },
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
+        assert_eq!(result.stdout, b"NVX_TYPED_IMAGE_AND_POLICY_OK");
+        assert_eq!(std::fs::read(ro.join("input")).unwrap(), b"read-ok");
+        assert_eq!(std::fs::read(rw.join("secret")).unwrap(), b"secret");
+        assert_eq!(std::fs::read(rw.join("result")).unwrap(), b"write-ok");
+        assert_no_run_state(std::process::id());
+        println!("VM_EXECUTED typed selected-image filesystem read/write/deny and cleanup");
     }
 
     #[test]

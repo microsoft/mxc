@@ -109,4 +109,16 @@ pub struct Request {
     /// Optional one-shot Hyperlight backend settings.
     #[serde(default)]
     pub hyperlight: OptionalField<OneShotHyperlight>,
+    /// Required image selection when containment is MicroVM.
+    #[serde(default)]
+    pub microvm: OptionalField<OneShotMicroVm>,
+}
+
+/// Creation settings for the development MicroVM backend.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OneShotMicroVm {
+    /// Registry image reference resolved by the signed NVX agent.
+    pub image: super::ImageReference,
 }

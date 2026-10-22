@@ -140,6 +140,8 @@ export interface Filesystem {
 
 export type HyperlightRuntime = "agent" | "python" | "python-shell" | "node" | "bash" | "dotnet-jit";
 
+export type ImageReference = string;
+
 export type IsolationSessionContainment = "isolation_session";
 
 /**
@@ -371,6 +373,16 @@ export interface OneShotHyperlight {
 }
 
 /**
+ * Creation settings for the development MicroVM backend.
+ */
+export interface OneShotMicroVm {
+  /**
+   * Registry image reference resolved by the signed NVX agent.
+   */
+  image: ImageReference;
+}
+
+/**
  * A complete one-shot `1.1.0-alpha` configuration request.
  */
 export interface OneShotRequest {
@@ -410,6 +422,10 @@ export interface OneShotRequest {
    * Optional LXC distribution settings.
    */
   lxc?: Lxc;
+  /**
+   * Required image selection when containment is MicroVM.
+   */
+  microvm?: OneShotMicroVm;
   /**
    * Optional network policy.
    */

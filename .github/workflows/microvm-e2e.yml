@@ -8,6 +8,8 @@ on:
   pull_request:
     branches: [main, 'feature/*', 'user/*']
   workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * *'
 
 permissions:
   actions: write
@@ -66,6 +68,8 @@ jobs:
         shell: pwsh
         working-directory: src
         run: |
+          cargo test -p mxc-sdk --features microvm --lib backend_modules::nvx:: --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p mxc-sdk --features microvm --test nvx_bundle_integrity --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc

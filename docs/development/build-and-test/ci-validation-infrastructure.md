@@ -236,7 +236,7 @@ get fixed or wired.
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
 | IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
-| MicroVM | Experimental | Signed NVX on Windows x64, covered by `microvm-e2e.yml`. |
+| MicroVM | Experimental | Signed NVX on Windows x64, covered daily and on PRs by `microvm-e2e.yml`. Real-VM SDK scenarios cover image selection, filesystem restrictions, network allow/deny and port matching, and blocked direct egress alongside successful proxy traffic. Network scenarios use host-controlled endpoints with positive reachability controls before and after restrictions; the host needs a non-loopback IPv4 route outside the fixed `10.0.0.0/24` guest network. |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
 
 ### IsolationSession Rust test concurrency

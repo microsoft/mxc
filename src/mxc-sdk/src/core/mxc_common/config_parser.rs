@@ -1703,6 +1703,7 @@ fn normalize_common_request_ir(
         test_feature,
         windows_sandbox,
         hyperlight,
+        microvm_image: cfg.microvm_image,
         experimental_enabled: false,
         dry_run: false,
     })
@@ -1853,7 +1854,7 @@ mod tests {
 
         for process_container in [r#"{}"#, r#"{"leastPrivilege":false}"#] {
             let json = format!(
-                r#"{{"version":"1.1.0-alpha","containment":"microvm","process":{{"commandLine":"echo hello"}},"processContainer":{process_container}}}"#
+                r#"{{"version":"1.1.0-alpha","containment":"microvm","microvm":{{"image":"python:3.12-alpine"}},"process":{{"commandLine":"echo hello"}},"processContainer":{process_container}}}"#
             );
             let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
             assert!(matches!(error, ParseError::OneShot(_)), "{error:?}");
@@ -1863,6 +1864,7 @@ mod tests {
         let json = r#"{
             "version": "1.1.0-alpha",
             "containment": "microvm",
+            "microvm": {"image": "python:3.12-alpine"},
             "process": {"commandLine": "echo hello"}
         }"#;
         let MxcRequest::OneShot(request) =

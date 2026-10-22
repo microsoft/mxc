@@ -601,6 +601,11 @@ pub enum Containment {
     /// experimental opt-in. Uses piped stdio. Manual lifecycle operations are
     /// available through [`crate::v1::container`].
     IsolationSession,
+    /// Experimental Windows x64 NVX MicroVM backend.
+    ///
+    /// Requires the `microvm` build feature and an operation under
+    /// [`crate::v1::experimental`].
+    MicroVm { image: String },
 }
 
 impl Containment {
@@ -613,6 +618,7 @@ impl Containment {
             Self::Bubblewrap => "bubblewrap",
             Self::Wslc(_) => "wslc",
             Self::IsolationSession => "isolation_session",
+            Self::MicroVm { .. } => "microvm",
         }
     }
 }

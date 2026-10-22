@@ -5,5 +5,6 @@
         "commandLine": "i=0; while [ \"$i\" -lt 1000 ]; do printf 'line %d: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i + 1)); done",
         "timeout": 30000
     },
-    "containment": "microvm"
+    "containment": "microvm",
+    "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"}
 }

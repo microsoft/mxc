@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use crate::mxc_common::mxc_error::MxcError;
 
 use super::abi::{
-    map_error_body, AgentLibrary, BundleSource, Event, ExecEnd, ExecInput, ExecOutcome,
-    ExecRequest, HostInfo, ImageSource, ProvisionInput, ProvisionRequest, RuntimeSource,
-    SandboxSpec, SetupConfig,
+    map_error_body, AgentLibrary, BundleSource, Capabilities, Event, ExecEnd, ExecInput,
+    ExecOutcome, ExecRequest, HostInfo, ImageSource, ProvisionInput, RuntimeSource, SandboxSpec,
+    SetupConfig,
 };
 
 pub(super) const ARTIFACTS_DIR_ENV: &str = "ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR";
@@ -31,7 +31,6 @@ pub(super) const APPROVED_KERNEL_SHA256: &str =
 pub(super) const APPROVED_INITRD_SHA256: &str =
     "5e42d4617c1508e9116df8c330c0ff72243e954d7f132091ecdecfc743d904ed";
 
-const DEFAULT_IMAGE_REFERENCE: &str = "mcr.microsoft.com/azurelinux/base/core:3.0";
 const HOST_TIMEOUT_SLACK_MS: u64 = 30_000;
 const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -78,9 +77,11 @@ pub(super) struct ExecOutput {
 }
 
 pub(super) trait SandboxClient {
+    fn capabilities(&self) -> Result<Capabilities, MxcError>;
+    fn validate_provision(&self, input: &ProvisionInput) -> Result<(), MxcError>;
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
-    fn provision(&self) -> Result<SandboxId, MxcError>;
+    fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError>;
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
     fn exec_and_wait(
         &self,
@@ -181,12 +182,12 @@ fn verify_runtime_digests(info: &HostInfo) -> Result<(), MxcError> {
     Ok(())
 }
 
-pub(super) fn sandbox_spec() -> SandboxSpec {
-    // The edge initramfs is the control guest, not a workload userland. Use the official
-    // example's public image; its host-side pull does not grant the workload network access.
-    SandboxSpec {
-        image: Some(ImageSource::Reference(DEFAULT_IMAGE_REFERENCE.to_owned())),
-    }
+pub(super) fn sandbox_spec(image: &str) -> Result<SandboxSpec, MxcError> {
+    crate::mxc_contract::dev::ImageReference::validate(image)
+        .map_err(MxcError::malformed_request)?;
+    Ok(SandboxSpec {
+        image: Some(ImageSource::Reference(image.to_owned())),
+    })
 }
 
 fn discover_bundle_dir() -> Result<PathBuf, MxcError> {
@@ -406,6 +407,14 @@ impl NvxClient {
 }
 
 impl SandboxClient for NvxClient {
+    fn capabilities(&self) -> Result<Capabilities, MxcError> {
+        self.library.capabilities(self.host)
+    }
+
+    fn validate_provision(&self, input: &ProvisionInput) -> Result<(), MxcError> {
+        self.library.validate_provision(self.host, input)
+    }
+
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError> {
         self.library.validate_exec(self.host, request)
     }
@@ -414,14 +423,8 @@ impl SandboxClient for NvxClient {
         self.library.probe(self.host)
     }
 
-    fn provision(&self) -> Result<SandboxId, MxcError> {
-        let reply = self.library.provision(
-            self.host,
-            &ProvisionInput {
-                request: ProvisionRequest {},
-                spec: sandbox_spec(),
-            },
-        )?;
+    fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError> {
+        let reply = self.library.provision(self.host, input)?;
         SandboxId::from_token(&reply.token)
     }
 
@@ -534,6 +537,53 @@ mod tests {
             let err = SandboxId::from_token(invalid).unwrap_err();
             assert_eq!(err.code, MxcErrorCode::BackendError);
         }
+    }
+
+    #[test]
+    fn signed_library_validates_image_and_policy_without_provisioning() {
+        let state_root = tempfile::tempdir().unwrap();
+        let mut client = create_client(state_root.path()).unwrap();
+        let result = (|| {
+            let capabilities = client.capabilities()?;
+            assert!(capabilities.spec.image_reference);
+            assert!(capabilities.filesystem.readonly_paths);
+            assert!(capabilities.filesystem.readwrite_paths);
+            assert!(capabilities.filesystem.denied_paths);
+            assert!(capabilities.network.egress_rules);
+            assert!(capabilities.network.network_proxy);
+            let mut request = crate::mxc_common::models::ExecutionRequest {
+                microvm_image: Some("python:3.12-alpine".to_owned()),
+                script_code: "printf ok".to_owned(),
+                ..Default::default()
+            };
+            request.policy.network_specified = true;
+            request.policy.network_egress = Some(Default::default());
+            request.policy.network_ingress = Some(Default::default());
+            let (provision, spec) =
+                super::super::policy::provision_request(&request, &capabilities)?;
+            let mut input = ProvisionInput {
+                request: provision,
+                spec,
+            };
+            client.validate_provision(&input)?;
+            client.validate_exec(&super::super::policy::exec_request(
+                &request,
+                &capabilities,
+            )?)?;
+            input.request.runtime_config = Some(super::super::abi::RuntimeConfig {
+                network_proxy: Some("http://192.0.2.1:3128".to_owned()),
+            });
+            let error = client.validate_provision(&input).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+            assert_eq!(
+                error.message,
+                "NVX signed bundled agent: \"http://192.0.2.1:3128\" must name host loopback: 127.0.0.1 or localhost"
+            );
+            Ok::<_, MxcError>(())
+        })();
+        let close = client.close();
+        result.unwrap();
+        close.unwrap();
     }
 
     enum FakeStep {

@@ -12,6 +12,30 @@
             "$ref": "#/definitions/OneShotRequest"
           },
           {
+            "else": {
+              "not": {
+                "required": [
+                  "microvm"
+                ]
+              }
+            },
+            "if": {
+              "properties": {
+                "containment": {
+                  "const": "microvm"
+                }
+              },
+              "required": [
+                "containment"
+              ]
+            },
+            "then": {
+              "required": [
+                "microvm"
+              ]
+            }
+          },
+          {
             "else": true,
             "if": {
               "properties": {
@@ -484,6 +508,11 @@
         }
       ]
     },
+    "ImageReference": {
+      "minLength": 1,
+      "pattern": "^[^\\s\\x00-\\x1f\\x7f-\\x9f]+$",
+      "type": "string"
+    },
     "IsolationSessionContainment": {
       "enum": [
         "isolation_session"
@@ -905,6 +934,20 @@
       },
       "type": "object"
     },
+    "OneShotMicroVm": {
+      "additionalProperties": false,
+      "description": "Creation settings for the development MicroVM backend.",
+      "properties": {
+        "image": {
+          "$ref": "#/definitions/ImageReference",
+          "description": "Registry image reference resolved by the signed NVX agent."
+        }
+      },
+      "required": [
+        "image"
+      ],
+      "type": "object"
+    },
     "OneShotRequest": {
       "additionalProperties": false,
       "description": "A complete one-shot `1.1.0-alpha` configuration request.",
@@ -943,6 +986,10 @@
         "lxc": {
           "$ref": "#/definitions/Lxc",
           "description": "Optional LXC distribution settings."
+        },
+        "microvm": {
+          "$ref": "#/definitions/OneShotMicroVm",
+          "description": "Required image selection when containment is MicroVM."
         },
         "network": {
           "$ref": "#/definitions/Network",

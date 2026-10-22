@@ -155,6 +155,53 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     }
 }
 
+/// Nonblank image-reference input. Registry syntax is validated by the runtime,
+/// not by this presence and character check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageReference(String);
+
+impl ImageReference {
+    /// Validate image input before any backend state is opened.
+    pub fn new(value: String) -> Result<Self, String> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Reject missing text, whitespace and control characters.
+    pub fn validate(value: &str) -> Result<(), String> {
+        if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err("microvm.image must be a nonempty image reference without whitespace or control characters".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Consume the validated input.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageReference {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for ImageReference {
+    fn schema_name() -> String {
+        "ImageReference".to_owned()
+    }
+
+    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let mut schema = <String as schemars::JsonSchema>::json_schema(generator).into_object();
+        let string = schema.string.get_or_insert_with(Default::default);
+        string.min_length = Some(1);
+        string.pattern = Some(r"^[^\s\x00-\x1f\x7f-\x9f]+$".to_owned());
+        schema.into()
+    }
+}
+
 /// A JSON array that must contain at least one element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NonEmptyVec<T>(Vec<T>);

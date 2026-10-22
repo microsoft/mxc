@@ -294,6 +294,7 @@ pub(super) fn into_common_request_ir(
         windows_sandbox,
         wslc,
         hyperlight,
+        microvm,
     } = request;
     crate::mxc_common::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
@@ -320,6 +321,9 @@ pub(super) fn into_common_request_ir(
         test_feature: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         hyperlight: hyperlight.into_option().map(convert_hyperlight),
+        microvm_image: microvm
+            .into_option()
+            .map(|config| config.image.into_inner()),
     }
 }
 

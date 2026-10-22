@@ -292,6 +292,9 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
             Containment::Bubblewrap => contract::OneShotContainment::Bubblewrap,
             Containment::Wslc(_) => contract::OneShotContainment::Wslc,
             Containment::IsolationSession => contract::OneShotContainment::IsolationSession,
+            Containment::MicroVm { .. } => {
+                return Err(error("MicroVm is emitted through the development contract"))
+            }
         }),
         lifecycle: contract::OptionalField::present(contract::Lifecycle {
             destroy_on_exit: contract::OptionalField::present(true),

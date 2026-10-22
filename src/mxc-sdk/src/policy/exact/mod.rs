@@ -20,6 +20,7 @@ macro_rules! optional {
     };
 }
 
+mod dev_microvm;
 mod v1_0;
 
 struct PreparedInput<'a> {
@@ -79,7 +80,12 @@ pub(super) fn build_request(
         script,
         container_id: container_id(container_name),
     };
-    let contract = ExactOneShotContract::V1_0(Box::new(v1_0::build(&prepared)?));
+    let contract = match containment {
+        Containment::MicroVm { .. } => {
+            ExactOneShotContract::Dev(Box::new(dev_microvm::build(&prepared)?))
+        }
+        _ => ExactOneShotContract::V1_0(Box::new(v1_0::build(&prepared)?)),
+    };
     let mut logger = Logger::new(Mode::Buffer);
     let mut inner =
         load_one_shot_request_from_contract(contract, &mut logger).map_err(|error| {
@@ -110,6 +116,37 @@ mod tests {
             }),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn microvm_authoring_preserves_image_and_rejects_blank_input() {
+        for image in [
+            "python:3.12-alpine",
+            "mcr.microsoft.com/azurelinux/base/core:3.0",
+        ] {
+            let request = build_request(
+                &ContainerPolicy::default(),
+                &Containment::MicroVm {
+                    image: image.to_owned(),
+                },
+                "echo hello",
+                None,
+            )
+            .unwrap();
+            assert_eq!(request.inner.microvm_image.as_deref(), Some(image));
+        }
+        for image in ["", " ", "python:\n3.12", "python:\u{0}3.12"] {
+            let error = build_request(
+                &ContainerPolicy::default(),
+                &Containment::MicroVm {
+                    image: image.to_owned(),
+                },
+                "echo hello",
+                None,
+            )
+            .unwrap_err();
+            assert!(error.message.contains("microvm.image"));
+        }
     }
 
     fn assert_blank_proxy_peer_uses_shared_validation(peer: &str) {

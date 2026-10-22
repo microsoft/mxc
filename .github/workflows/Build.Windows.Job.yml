@@ -125,5 +125,6 @@ jobs:
             src/target/${{ matrix.target }}/release/wslcsdk.dll
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
+            src/target/${{ matrix.target }}/release/aci-edge-sandboxes/**
           if-no-files-found: error
           retention-days: 1

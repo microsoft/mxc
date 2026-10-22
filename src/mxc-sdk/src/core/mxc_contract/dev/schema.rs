@@ -64,6 +64,11 @@ fn one_shot_dispatch(one_shot: Value) -> Value {
         "allOf": [
             one_shot,
             branch(
+                discriminator("containment", "microvm"),
+                json!({"required": ["microvm"]}),
+                json!({"not": {"required": ["microvm"]}})
+            ),
+            branch(
                 discriminator("containment", "isolation_session"),
                 json!({
                     "required": ["network"],

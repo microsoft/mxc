@@ -1000,6 +1000,8 @@ pub struct ExecutionRequest {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// Hyperlight backend configuration (used when containment == Hyperlight).
     pub hyperlight: Option<HyperlightConfig>,
+    /// Caller-selected registry image for MicroVM creation.
+    pub microvm_image: Option<String>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Dry-run mode: validate config and runner setup then return success

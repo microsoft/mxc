@@ -180,19 +180,22 @@ temporary storage without creating directories.
 ### Experimental NVX create-and-run
 
 The `microvm` feature enables only Windows x64 and requires runtime experimental
-authorization. P1 stages the official signed `aci-edge-sandboxes.zip` release
+authorization. MXC stages the official signed `aci-edge-sandboxes.zip` release
 bundle (`v0.1.0-dev.0430ce79d125` from NVX revision
 `0430ce79d125203c20f0aa69243480513a774296`) during the crate build and loads the
 verified `bin/aci_edge_agent.dll` C ABI v1 in-process without unpublished Rust
 dependencies; it does not enable standalone OpenVMM execution.
 
-The existing hidden JSON facade `mxc_sdk::__ffi::run_json(json, true)` supports
-the development `1.1.0-alpha` MicroVM create-and-run request with captured
-stdout/stderr, exit status and timeout. Typed V1 targeting, streaming, PTY and
-public Rust container lifecycle operations are not broadened by P1.
+`mxc_sdk::v1::experimental::run(request, options)` supports typed MicroVM
+create-and-run requests with captured stdout/stderr, exit status and timeout.
+Select `Containment::MicroVm { image: String }` with a required registry image
+reference. The hidden JSON facade `mxc_sdk::__ffi::run_json(json, true)` accepts
+the development `1.1.0-alpha` contract with root `"microvm": {"image": "..."}`.
+Stable `run` and `spawn` do not authorize this backend. Streaming, PTY and
+public Rust MicroVM container lifecycle operations are not available.
 Distribute the complete `aci-edge-sandboxes/` directory beside the consuming
-executable. The native agent pulls the official example's public Azure Linux
-workload image on the host; guest network access remains ungranted.
+executable. The native agent resolves the caller's image reference on the host;
+there is no default image or local image-file input.
 
 NVX captures at most 64 MiB (67,108,864 bytes) of stdout and stderr combined,
 including when the process timeout is zero. Output up to that limit is returned
@@ -201,16 +204,18 @@ container, and returns `BackendError` instead of truncated output. Cleanup
 failures are reported alongside the capture-limit error.
 
 The host requires Windows Hypervisor Platform and hardware virtualization.
-Requests cannot include filesystem grants or denials, network or proxy policy,
-UI policy, or capture-denials. Containers must be destroyed after execution,
-without preserving policy.
+Filesystem read-only, read-write and denied paths, directional network policy
+and `runtimeConfig.networkProxy` are mapped to the NVX runtime and checked
+against its advertised capabilities before sandbox creation. Unsupported policy
+fails closed. UI policy and capture-denials are unsupported. Containers must be
+destroyed after execution without preserving policy.
 
 The guest working directory must be absolute, contain no `..` path components,
 and use at most 4095 UTF-8 bytes. Additive environment settings require
 `inheritDefaultEnv: true` and allow at most 256 entries and 32 KiB including
 entry terminators. Repeated names count as separate entries; later entries
 override earlier ones. MXC rejects these limits before bundle discovery and
-validates the mapped execution request with the native agent before probing
+validates the mapped provision and execution requests with the native agent before probing
 the host or provisioning a container.
 
 Backend implementations, shared runtime support, backend dispatch, and host

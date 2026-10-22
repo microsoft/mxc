@@ -94,7 +94,12 @@ const DEVELOPMENT_CONTAINMENT_CASES: &[DevelopmentContainmentCase] = &[
 #[test]
 fn development_containment_variants_map_expected_wire_values() {
     for case in DEVELOPMENT_CONTAINMENT_CASES {
-        let wire = adapt(&request_with_containment(case.input));
+        let mut json: serde_json::Value =
+            serde_json::from_str(&request_with_containment(case.input)).unwrap();
+        if case.input == "microvm" {
+            json["microvm"] = serde_json::json!({"image": "python:3.12-alpine"});
+        }
+        let wire = adapt(&json.to_string());
         assert_eq!(
             serde_json::to_value(wire.containment.unwrap()).unwrap(),
             serde_json::json!(case.expected)

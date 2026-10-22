@@ -5,5 +5,6 @@
         "commandLine": "x = 42\ny = 58\nprint('Hello from NanVix/KVM on Linux! sum=%d' % (x + y))",
         "timeout": 30000
     },
-    "containment": "microvm"
+    "containment": "microvm",
+    "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"}
 }

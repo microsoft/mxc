@@ -57,6 +57,10 @@ pub fn spawn_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    crate::mxc_engine::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
     ensure_host_supported()?;
     // `dry_run` means "validate, don't execute" — there is no process to
     // stream, so reject it rather than silently ignoring it.

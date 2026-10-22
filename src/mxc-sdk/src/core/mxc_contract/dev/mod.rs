@@ -236,8 +236,8 @@ pub use network::{
     Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
     NetworkProtocol, NetworkRule,
 };
-pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
-pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
+pub use one_shot::{Containment as OneShotContainment, OneShotMicroVm, Request as OneShotRequest};
+pub use primitives::{ImageReference, NonEmptyString, NonEmptyVec, OptionalField, True};
 pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
 #[cfg(feature = "schema-gen")]
 pub use schema::development_schema;

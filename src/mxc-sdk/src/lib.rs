@@ -262,6 +262,35 @@ pub mod v1 {
         };
     }
 
+    /// Experimental V1 create-and-run execution.
+    pub mod experimental {
+        use super::{ContainerRequest, Error, ExecutionResult, RunOptions};
+
+        /// Run a typed request to completion with experimental backend authorization.
+        ///
+        /// MicroVM captures output; streaming and manual lifecycle operations are
+        /// not available through this entry point.
+        pub fn run(
+            request: ContainerRequest,
+            options: RunOptions,
+        ) -> Result<ExecutionResult, Error> {
+            let mut prepared =
+                crate::policy::prepare_creation_request(&request, options.telemetry)?;
+            prepared.inner.experimental_enabled = true;
+            let logger =
+                crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            match crate::mxc_engine::execute_one_shot_request(&prepared.inner, logger)? {
+                #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+                crate::mxc_engine::OneShotExecution::Captured(result) => {
+                    Ok(crate::captured_execution_result(result))
+                }
+                crate::mxc_engine::OneShotExecution::Streaming(process) => {
+                    crate::wait_with_output(crate::sandbox::MxcProcess::new(process))
+                }
+            }
+        }
+    }
+
     /// V1 typed lifecycle entry points.
     pub mod container {
         use super::{

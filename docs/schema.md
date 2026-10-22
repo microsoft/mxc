@@ -122,8 +122,13 @@ identity-less host proxies omit `allowedProxyPeer` and require
 deployment: it opens both host-loopback directions without restricting access
 to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
 
-The initial development Windows x64 NVX MicroVM backend rejects every network
-policy and `runtimeConfig.networkProxy` before creating a VM.
+The experimental Windows x64 NVX MicroVM backend maps directional network policy
+and `runtimeConfig.networkProxy` to its runtime, rejecting capabilities the
+runtime cannot enforce before creating a sandbox. MicroVM creation requires
+`"microvm": {"image": "python:3.12-alpine"}` alongside
+`"containment": "microvm"` in the development contract. The image is a caller
+supplied registry reference, not a local file path; no default image is selected.
+Native execution still requires `--experimental` and a `microvm` feature build.
 
 ```json
 {

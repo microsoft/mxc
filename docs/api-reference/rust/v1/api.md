@@ -11,6 +11,12 @@ Attached execution is not exposed by the V1 SDK.
 
 ## Choosing a launch operation
 
+Experimental Windows x64 MicroVM captured execution uses
+`v1::experimental::run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionResult, Error>`.
+It requires the `microvm` build feature and
+`Containment::MicroVm { image: String }`. Stable operations do not authorize
+MicroVM. There is no experimental streaming or MicroVM lifecycle API.
+
 | Output | Create and run a container | Run in an existing container | Result |
 |---|---|---|---|
 | Capture stdout and stderr | `v1::run` | `v1::container::run_in_container` | `ExecutionResult` |

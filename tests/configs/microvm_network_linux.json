@@ -6,6 +6,7 @@
         "timeout": 30000
     },
     "containment": "microvm",
+    "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"},
     "network": {
         "egress": { "default": "allow" },
         "ingress": { "default": "allow", "hostLoopback": "allow" }
