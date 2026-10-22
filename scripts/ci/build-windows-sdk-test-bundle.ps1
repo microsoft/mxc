@@ -138,7 +138,7 @@ foreach ($project in $nodeSdkRoot, $integrationRoot) {
 $dotnetOut = Join-Path $OutputDirectory 'dotnet'
 $publish = @(
     'publish', (Join-Path $repoRoot 'sdk\dotnet\Microsoft.Mxc.Sdk.Tests\Microsoft.Mxc.Sdk.Tests.csproj'),
-    '-c', 'Release', '-r', "win-$Architecture", '-p:MxcWithIsolationSession=true', '-p:MxcWithWslc=true',
+    '-c', 'Release', '-f', 'net10.0', '-r', "win-$Architecture", '-p:MxcWithIsolationSession=true', '-p:MxcWithWslc=true',
     '--self-contained', 'true', '-o', $dotnetOut, '--nologo'
 )
 if ($NuGetSource) {

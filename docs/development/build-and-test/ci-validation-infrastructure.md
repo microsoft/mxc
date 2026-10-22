@@ -76,6 +76,14 @@ test jobs only ever `download-artifact`.
 
 Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
 
+The standalone bundle builder publishes the .NET tests for `net10.0`.
+The Azure two-branch template evaluates the selected checkout's test project,
+prefers `net10.0`, and falls back to `net8.0` for older branches. It fails if
+neither framework is supported or project evaluation fails. Both builders
+publish self-contained applications with the selected runtime, so validation
+hosts need no installed .NET SDK or runtime. Runtime servicing requires
+rebuilding the bundle.
+
 Build artifacts are kept for 1 day — they exist only to feed these jobs. The
 test jobs need the three builds; a failed SDK bundle fails the ProcessContainer,
 IsolationSession, and WSLC jobs at their bundle download.

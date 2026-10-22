@@ -55,6 +55,12 @@ build and CI entry points.
 
 ### Targeted validation
 
+The .NET SDK, behavioral tests, and Native AOT smoke test target `net8.0` and
+`net10.0`; samples and the console driver target `net10.0`. The root
+`global.json` selects a stable .NET 10 SDK and the Microsoft.Testing.Platform
+test runner. Windows test bundles explicitly publish `net10.0`; the Azure
+two-branch template falls back to `net8.0` for older checkouts.
+
 ```text
 # From src/
 cargo fmt --all -- --check
@@ -67,7 +73,7 @@ cargo test -p mxc-sdk --lib -- config_parser
 npm test
 npm run test:integration
 
-# From sdk/dotnet/ (requires .NET SDK 10+)
+# From sdk/dotnet/ (requires .NET SDK 10)
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 

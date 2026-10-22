@@ -72,10 +72,6 @@ jobs:
   - checkout: ${{ parameters.checkoutRepo }}
     path: s
 
-  - powershell: |
-      & "$(Pipeline.Workspace)/lock-check/scripts/ci/test-isolation-session-test-helpers.ps1"
-    displayName: 'Validate test script helper staging'
-
   - task: UseNode@1
     displayName: Use Node.js 24.21
     inputs:
@@ -203,17 +199,33 @@ jobs:
     displayName: 'Use .NET SDK 10'
     inputs:
       packageType: sdk
-      version: 10.x
+      version: 10.0.x
+
+  - powershell: |
+      & "$(Pipeline.Workspace)/lock-check/scripts/ci/test-isolation-session-test-helpers.ps1"
+    displayName: 'Validate test bundle compatibility'
 
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate .NET package restore'
 
   - powershell: |
       $project = "$(Build.SourcesDirectory)/sdk/dotnet/Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj"
+      $frameworkProperties = & dotnet msbuild $project -nologo -getProperty:TargetFramework,TargetFrameworks
+      if ($LASTEXITCODE -ne 0) {
+          throw "Evaluating target frameworks for $project failed with exit code $LASTEXITCODE"
+      }
+      $properties = ($frameworkProperties -join "`n" | ConvertFrom-Json -ErrorAction Stop).Properties
+      $frameworks = @($properties.TargetFramework, $properties.TargetFrameworks) -join ';'
+      $frameworks = $frameworks.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)
+      $framework = @('net10.0', 'net8.0') | Where-Object { $_ -in $frameworks } | Select-Object -First 1
+      if (-not $framework) {
+          throw "The test project $project must support net10.0 or net8.0; evaluated frameworks: $frameworks"
+      }
+      Write-Host "Publishing .NET tests for $framework"
       $out = Join-Path $env:AGENT_TEMPDIRECTORY 'mxc-dotnet-tests'
       Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
 
-      & dotnet publish $project -c Release -r win-x64 `
+      & dotnet publish $project -c Release -f $framework -r win-x64 `
           -p:MxcWithIsolationSession=true `
           --source "https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json" `
           --self-contained true -o $out --nologo

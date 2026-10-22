@@ -67,6 +67,35 @@ package. Scheduled Bubblewrap, LXC, and WSLC suites
 require this executable, verify the expected tests are present, and run their
 backend's cases without rebuilding.
 
+### .NET SDK validation
+
+The SDK, behavioral tests, and Native AOT smoke test target `net8.0` and
+`net10.0`; samples and the console driver target `net10.0`. Use the .NET 10 SDK
+selected by the root `global.json`; its Microsoft.Testing.Platform runner
+selection also applies to `dotnet test`. Windows test bundles explicitly
+publish `net10.0`; the Azure two-branch template selects `net8.0` for older
+checkouts that do not support `net10.0`.
+
+The .NET SDK job builds and tests both frameworks on Windows, Linux, and macOS.
+The Linux LXC and Bubblewrap regression checks and Windows optional-backend
+checks run separately for each framework and reject empty test selections.
+It installs the pinned Rust toolchain before building either framework.
+It publishes and runs the reflection-free JSON Native AOT smoke test for
+both .NET 8 and .NET 10, then packs the SDK and installs it into separate
+temporary .NET 8 and .NET 10 applications outside the checkout. Each application
+calls the platform and backend discovery APIs without `MXC_FFI_DIR` and checks
+that its managed SDK assembly matches the package asset for its target
+framework. An unsupported-host result is valid; native loading, interop, and
+deserialization exceptions still fail the check. These package checks do not
+require an available containment backend.
+
+From `sdk/dotnet`, run:
+
+```text
+dotnet build Microsoft.Mxc.Sdk.slnx -c Release
+dotnet test --solution Microsoft.Mxc.Sdk.slnx -c Release --no-build
+```
+
 ### Local Node SDK package validation
 
 From `sdk/node`, run `npm run typecheck` before pushing SDK changes. It builds
