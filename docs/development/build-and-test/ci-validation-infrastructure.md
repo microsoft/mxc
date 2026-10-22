@@ -147,6 +147,21 @@ checks to standalone native runners. These retain the host controls and
 enforcement assertions; enumeration also checks live request-probe agreement
 and fixture security on supported and unsupported hosts.
 
+The policy suite also runs the native CLI contract boundary cases, including
+the six network-policy rejection shapes and a launched valid control for each
+minimum/stable/development contract, and issue #694's DOS/NT final-path
+regression. The SDK bundle builder compiles the
+final-path fixture into `inproc/mxc-final-path-probe.exe`; validation passes it
+explicitly and does not compile it on test hosts. Native UI coverage includes
+permissive contained controls and policy permutations for clipboard, input
+injection, system parameters, display-settings validation, and desktop control,
+alongside the existing handle and atom isolation cases. Inconclusive host
+operations are reported as skips, not passing policy assertions.
+
+`tests/scripts/run_processcontainer_workload_tests.ps1` restores the application
+workloads for manual native-PSEC use only. It is not included in this matrix or
+called by the native policy suite.
+
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
 accepted-id lists (`ValidateSet` on Windows, the `case` arms on Unix) are what
@@ -194,7 +209,7 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| ProcessContainer | ✅ Good | Requires native PSEC; verifies public Rust, .NET, and Node SDK streaming, filesystem policy, aliases, pre-execution rejection, egress/loopback/proxy rules, Win32k, HANDLES, and global atoms. Unsupported host capabilities must reject requests. Privilege removal uses a host-token control. |
+| ProcessContainer | ✅ Good | Requires native PSEC; verifies public SDK streaming, filesystem policy and aliases, CLI contract boundaries, DOS/NT final paths, egress/loopback/proxy rules, the functional UI matrix, HANDLES, and global atoms. Unsupported host capabilities must reject requests. Privilege removal uses a host-token control. Application workload tests remain manual-only. |
 | Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. The Linux build job also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |

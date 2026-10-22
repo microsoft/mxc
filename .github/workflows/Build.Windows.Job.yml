@@ -34,6 +34,10 @@ jobs:
         shell: pwsh
         run: ..\tests\scripts\test_native_process_container_capture.ps1
 
+      - name: Test native policy result oracles
+        shell: pwsh
+        run: ..\tests\scripts\test_native_policy_results.ps1
+
       - name: Test SDK suite execution gates
         shell: pwsh
         run: ..\tests\scripts\test_sdk_suite_results.ps1

@@ -31,6 +31,14 @@
         HarnessArguments = "Default"
         Destructive = $false
     }
+    "694" = @{
+        FriendlyName = "Native DOS and NT Final Paths"
+        Script = "test_cases\Invoke-Issue694-GetFinalPathNameByHandle.ps1"
+        ExpectedTierSupport = @("base-container-psec")
+        Prerequisites = @("wxc-exec", "PSEC BaseContainer-capable host", "inbox .NET Framework compiler or prebuilt probe")
+        HarnessArguments = "Default"
+        Destructive = $false
+    }
     "785" = @{
         FriendlyName = "Capture Probe Agreement"
         Script = "test_cases\Invoke-Issue785-ProbeCaptureDenials.ps1"

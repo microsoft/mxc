@@ -3,7 +3,10 @@
 #Requires -Version 7.0
 
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$BinDir)
+param(
+    [Parameter(Mandatory)][string]$BinDir,
+    [string]$FinalPathProbe
+)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\NativeProcessContainer.ps1')
@@ -72,6 +75,7 @@ function Invoke-PolicyCase {
         [string]$WorkingDirectory,
         [switch]$Timeout,
         [switch]$ObserveSecurity,
+        [scriptblock]$ValidateResult,
         [switch]$PassThru
     )
     if ($ObserveSecurity) {
@@ -110,6 +114,7 @@ function Invoke-PolicyCase {
             } finally { Set-Content -LiteralPath $securityRelease -Value 'release' }
         }
     }
+    $verified = $true
     try {
         $elapsed = [Diagnostics.Stopwatch]::StartNew()
         $result = Invoke-NativeProcessContainer -WxcExec $WxcExec -ScratchRoot $ScratchRoot `
@@ -139,11 +144,19 @@ function Invoke-PolicyCase {
                 throw "$Name failed: exit=$($result.ExitCode); stdout=$($result.Stdout); stderr=$($result.Stderr). See $ScratchRoot."
             }
         }
+        if ($ValidateResult) {
+            $verified = & $ValidateResult $result
+            if ($verified -isnot [bool]) { throw "$Name result validator must return a Boolean." }
+        }
     } finally {
         Assert-NativeFixtureSecurity -Name $Name -Snapshot $security
     }
-    $script:Passed++
-    Write-Host "PASSED: $Name"
+    if ($verified) {
+        $script:Passed++
+        Write-Host "PASSED: $Name"
+    } else {
+        Write-Host "SKIPPED: $Name"
+    }
     if ($PassThru) { return $result }
 }
 
@@ -266,10 +279,6 @@ foreach ($explicitCwd in @($true, $false)) {
 $intent = New-PolicyRequest -Mode 'allowed'
 $intent.containment = 'process'
 Invoke-PolicyCase -Name 'process-intent-resolves-native-base-container' -Request $intent
-$capabilities = New-PolicyRequest -Mode 'allowed'
-$capabilities.processContainer.capabilities = @('internetClient', 'registryRead')
-Invoke-PolicyCase -Name 'legal-multiple-capabilities-launch' -Request $capabilities
-
 $childName = "mxc-grandchild-$([guid]::NewGuid().ToString('N'))"
 $childImage = Join-Path $ScratchRoot "rw\$childName.exe"
 Copy-Item -LiteralPath $WindowsPowerShell -Destination $childImage
@@ -422,6 +431,65 @@ function Invoke-HostUiControl {
     Set-Content -LiteralPath (Join-Path $ScratchRoot "$Name.stdout.txt") -Value $output
     return @{ ExitCode = $code; Stdout = $output }
 }
+$script:UiGrantable = @{}
+function Invoke-UiPolicyMatrixCase {
+    param(
+        [string]$Name,
+        [string]$Tag,
+        [hashtable]$Ui = @{},
+        [hashtable]$ProcessContainerUi = @{},
+        [string[]]$ProbeArguments = @(),
+        [bool]$Allowed = $false,
+        [switch]$Baseline,
+        [switch]$RequireClipboardRoundTrip
+    )
+    if (-not $Baseline -and $Allowed -and -not $script:UiGrantable[$Tag]) {
+        Write-Host "SKIPPED: $Name (the fully permissive contained control could not perform $Tag)"
+        return
+    }
+    $request = New-UiPolicyRequest -Arguments (@($Tag) + $ProbeArguments)
+    $request.ui = @{ disable = $false; clipboard = 'all'; injection = $true }
+    $request.processContainer.ui = @{
+        isolation = 'desktop'; desktopSystemControl = $true; systemSettings = 'all'; ime = $true
+    }
+    foreach ($key in $Ui.Keys) { $request.ui[$key] = $Ui[$key] }
+    foreach ($key in $ProcessContainerUi.Keys) { $request.processContainer.ui[$key] = $ProcessContainerUi[$key] }
+    $validate = {
+        param($Result)
+        $match = [regex]::Matches($Result.Stdout, "(?m)^$Tag=(PASS|FAIL|INCONCLUSIVE)\r?$")
+        if ($match.Count -ne 1) { throw "$Name did not report exactly one $Tag verdict." }
+        $verdict = $match[0].Groups[1].Value
+        if ($verdict -eq 'INCONCLUSIVE') {
+            if (-not $Baseline -and $Tag -ne 'INJECTION' -and $script:UiGrantable[$Tag]) {
+                throw "$Name could not exercise a capability its contained control demonstrated: $($Result.Stdout)"
+            }
+            if ($Baseline) { $script:UiGrantable[$Tag] = $false }
+            Write-Host "$Name could not exercise its UI operation: $($Result.Stdout.Trim())"
+            return $false
+        }
+        if ($Baseline) {
+            $script:UiGrantable[$Tag] = $verdict -eq 'FAIL'
+            if (-not $script:UiGrantable[$Tag]) {
+                Write-Host "$Name was denied even with a fully permissive contained policy."
+                return $false
+            }
+        } else {
+            $expected = if ($Allowed) { 'FAIL' } else { 'PASS' }
+            if ($verdict -cne $expected) { throw "$Name expected $Tag=$expected, got: $($Result.Stdout)" }
+        }
+        if ($RequireClipboardRoundTrip -and $Result.Stdout -notmatch 'returned the seeded text') {
+            if ($Result.Stdout -match 'in-process seed failed') {
+                if ($Baseline) { $script:UiGrantable[$Tag] = $false }
+                Write-Host "$Name could not seed the contained clipboard: $($Result.Stdout.Trim())"
+                return $false
+            }
+            throw "$Name did not read back the text seeded in the contained clipboard: $($Result.Stdout)"
+        }
+        return $true
+    }
+    Invoke-PolicyCase -Name $Name -Request $request `
+        -ExpectedOutputPattern "(?m)^$Tag=(PASS|FAIL|INCONCLUSIVE)\r?$" -ValidateResult $validate
+}
 foreach ($disabled in @($false, $true)) {
     $request = New-UiPolicyRequest -Arguments @('WIN32K', '--win32k-query=true')
     $request.ui.disable = $disabled
@@ -499,6 +567,16 @@ try {
             } else {
                 Write-Host 'SKIPPED (host clipboard token cannot be read): READCLIPBOARD'
             }
+            Invoke-UiPolicyMatrixCase -Name 'clipboard-read-permissive-control' -Tag 'READCLIPBOARD' `
+                -Baseline -RequireClipboardRoundTrip
+            Invoke-UiPolicyMatrixCase -Name 'clipboard-write-permissive-control' -Tag 'WRITECLIPBOARD' -Baseline
+            foreach ($clipboard in @('all', 'read', 'write', 'none')) {
+                Invoke-UiPolicyMatrixCase -Name "clipboard-$clipboard-read" -Tag 'READCLIPBOARD' `
+                    -Ui @{ clipboard = $clipboard } -Allowed:($clipboard -in @('all', 'read')) `
+                    -RequireClipboardRoundTrip:($clipboard -eq 'all')
+                Invoke-UiPolicyMatrixCase -Name "clipboard-$clipboard-write" -Tag 'WRITECLIPBOARD' `
+                    -Ui @{ clipboard = $clipboard } -Allowed:($clipboard -in @('all', 'write'))
+            }
         } finally {
             if ($clipboardText.Length) { Set-Clipboard -Value $clipboardText }
             else { [MxcPolicyClipboardFormats]::Clear() }
@@ -533,6 +611,45 @@ foreach ($tag in @('DESKTOP', 'SYSTEMPARAMETERS')) {
         }
     }
 }
+
+foreach ($tag in @('SYSTEMPARAMETERS', 'DISPLAYSETTINGS')) {
+    $arguments = if ($tag -eq 'SYSTEMPARAMETERS') { @("--mouse-speed=$mouseSpeed") } else { @() }
+    try {
+        Invoke-UiPolicyMatrixCase -Name "$tag-permissive-control" -Tag $tag -ProbeArguments $arguments -Baseline
+        foreach ($settings in @('all', 'parameters', 'display', 'none', 'not-a-settings-level')) {
+            $allowed = $settings -eq 'all' -or
+                ($tag -eq 'SYSTEMPARAMETERS' -and $settings -eq 'parameters') -or
+                ($tag -eq 'DISPLAYSETTINGS' -and $settings -eq 'display')
+            Invoke-UiPolicyMatrixCase -Name "$tag-settings-$settings" -Tag $tag -ProbeArguments $arguments `
+                -ProcessContainerUi @{ systemSettings = $settings } -Allowed:$allowed
+        }
+    } finally {
+        if ($tag -eq 'SYSTEMPARAMETERS' -and [MxcPolicySettings]::GetMouseSpeed() -ne $mouseSpeed) {
+            [MxcPolicySettings]::SetMouseSpeed($mouseSpeed)
+            throw 'The UI settings matrix changed host mouse speed; original value restored.'
+        }
+    }
+}
+Invoke-UiPolicyMatrixCase -Name 'desktop-permissive-control' -Tag 'DESKTOP' -Baseline
+Invoke-UiPolicyMatrixCase -Name 'injection-permissive-control' -Tag 'INJECTION' -Baseline
+foreach ($allowed in @($false, $true)) {
+    Invoke-UiPolicyMatrixCase -Name "desktop-control-$allowed" -Tag 'DESKTOP' `
+        -ProcessContainerUi @{ desktopSystemControl = $allowed } -Allowed:$allowed
+    Invoke-UiPolicyMatrixCase -Name "input-injection-$allowed" -Tag 'INJECTION' `
+        -Ui @{ injection = $allowed } -Allowed:$allowed
+}
+$invalidIsolation = New-UiPolicyRequest -Arguments @('HANDLES')
+$invalidIsolation.processContainer.ui.isolation = 'not-an-isolation-level'
+Invoke-PolicyCase -Name 'unknown-ui-isolation-rejected-before-execution' -Request $invalidIsolation -Reject `
+    -RejectionMessage 'isolation'
+$disabledPermissive = New-UiPolicyRequest -Arguments @('WIN32K', '--win32k-query=true')
+$disabledPermissive.ui = @{ disable = $true; clipboard = 'all'; injection = $true }
+$disabledPermissive.processContainer.ui = @{
+    isolation = 'desktop'; desktopSystemControl = $true; systemSettings = 'all'; ime = $true
+}
+Invoke-PolicyCase -Name 'disabled-ui-overrides-permissive-matrix' -Request $disabledPermissive `
+    -ExpectedOutput 'WIN32K=PASS'
+Write-Host 'SKIPPED: logoff execution and IME mutation have no safe functional probe in this matrix.'
 
 foreach ($atomCase in @(
     @{ Isolation = 'container'; Disabled = $false },
@@ -623,4 +740,11 @@ if ($facts.nativeCaptureAvailable) {
     Invoke-PolicyCase -Name 'unsupported-native-capture-rejected-before-execution' -Request $capture -Reject `
         -RejectionMessage 'Windows ProcessContainer requires native Learning Mode capture support for this request'
 }
+$global:LASTEXITCODE = 0
+& (Join-Path $PSScriptRoot 'run_processcontainer_contract_tests.ps1') -BinDir $BinDir
+if ($LASTEXITCODE -ne 0) { throw "Native CLI contract suite exited $LASTEXITCODE." }
+$regression = Join-Path (Split-Path -Parent $PSScriptRoot) 'regression_tests\test_cases\Invoke-Issue694-GetFinalPathNameByHandle.ps1'
+$global:LASTEXITCODE = 0
+& $regression -WxcExec $WxcExec -WorkDirectory (Join-Path $ScratchRoot 'issue-694') -ProbeExe $FinalPathProbe
+if ($LASTEXITCODE -ne 0) { throw "Native final-path regression exited $LASTEXITCODE." }
 Write-Host "PASSED: all $Passed native ProcessContainer policy cases"

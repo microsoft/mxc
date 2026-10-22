@@ -142,6 +142,15 @@ Invoke-Checked 'dotnet publish' { dotnet @publish }
 Copy-Item -LiteralPath $WxcExecPath -Destination (New-Directory (Join-Path $OutputDirectory "bin\$Architecture"))
 
 $inproc = New-Directory (Join-Path $OutputDirectory 'inproc')
+$finalPathProbe = Join-Path $inproc 'mxc-final-path-probe.exe'
+$finalPathSource = Join-Path $repoRoot 'tests\regression_tests\test_cases\data\Issue694-FinalPathProbe.cs'
+$fixtureCompiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (-not (Test-Path -LiteralPath $fixtureCompiler -PathType Leaf)) {
+    throw "The inbox .NET Framework compiler is required: $fixtureCompiler"
+}
+Invoke-Checked 'Building the native final-path fixture' {
+    & $fixtureCompiler /nologo /target:exe /platform:anycpu "/out:$finalPathProbe" $finalPathSource
+}
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'isolation_session') -Destination (Join-Path $inproc 'mxc-sdk-isolation-session-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'sdk_helpers') -Destination (Join-Path $inproc 'mxc-sdk-helpers-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'streaming_processcontainer') -Destination (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe')
@@ -196,6 +205,7 @@ $required = @(
     'inproc\mxc-sdk-isolation-session-tests.exe',
     'inproc\mxc-sdk-helpers-tests.exe',
     'inproc\mxc-sdk-process-container-streaming-tests.exe',
+    'inproc\mxc-final-path-probe.exe',
     'inproc\sta_probe.exe',
     'dotnet\Microsoft.Mxc.Sdk.Tests.exe',
     'dotnet\mxc_ffi.dll',

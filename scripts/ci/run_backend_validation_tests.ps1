@@ -117,8 +117,10 @@ function Invoke-ProcessContainerTests {
     Invoke-ProcessContainerStreamingTests
     Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_base_container_network_tests.ps1') `
         -Arguments @{ BinDir = $binaryDirectoryPath }
+    $finalPathProbe = Join-Path $binaryDirectoryPath 'windows-sdk-bundle\inproc\mxc-final-path-probe.exe'
+    Assert-File -Path $finalPathProbe
     Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_processcontainer_policy_tests.ps1') `
-        -Arguments @{ BinDir = $binaryDirectoryPath }
+        -Arguments @{ BinDir = $binaryDirectoryPath; FinalPathProbe = $finalPathProbe }
 }
 
 # stderr is read apart from stdout: wxc-exec can report host cleanup there

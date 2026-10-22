@@ -33,12 +33,16 @@ Linux / macOS (`.sh`):
 |--------|-------------|---------------------|
 | `test_loopback_anchor_command.ps1` | Host-only regression checks for direct and shell-wrapped loopback commands, with and without proxy-environment handling; runs in Windows PR builds | `curl.exe`; no sandbox backend |
 | `test_native_process_container_capture.ps1` | Host-only capture regression: preserves normal output and rejects inherited output handles within a bounded wait; runs in Windows PR builds | Windows .NET Framework compiler; no sandbox backend |
+| `test_native_policy_results.ps1` | Host-only checks that inconclusive UI probes remain skips, both broken allow/deny directions fail, clipboard reads require their round trip, and CLI refusals require the expected error before execution; runs in Windows PR builds | No sandbox backend |
 | `test_sdk_suite_results.ps1` | Checks that required Rust, .NET, and Node tests cannot pass CI through an empty selection or skipped streaming cases; runs in Windows PR builds | No sandbox backend |
 | `run_basicprocess_test.ps1` | Basic process container test | `wxc-exec.exe` |
 | `run_base_container_network_tests.ps1` | Native ProcessContainer egress defaults, host-loopback policy, and IPv4/IPv6 proxy endpoint isolation | Native PSEC support for host loopback and identity-less loopback proxy; IPv6 loopback; Windows PowerShell 5.1; `curl.exe`; outbound access to the egress fixture |
 | `run_processcontainer_network_loopback_test.ps1` | Focused default-deny, explicit-deny, and explicit-allow host-loopback checks under both ingress defaults | Native PSEC; `curl.exe`; host loopback; no internet fixture |
 | `run_processcontainer_filesystem_enumerate_test.ps1` | Focused request-probe agreement, enumeration-only enforcement, unsupported-host refusal, and unchanged fixture ACLs | Native PSEC; Windows PowerShell 5.1; no UI probe or internet fixture |
-| `run_processcontainer_policy_tests.ps1` | Native filesystem allow/deny and aliases, fail-closed capability checks, Win32k, HANDLES and bidirectional atom isolation, and host-controlled privilege removal | Native PSEC; Windows PowerShell 5.1; `wxc-ui-probe.exe`; no PLM |
+| `run_processcontainer_policy_tests.ps1` | Native filesystem policy, CLI contract boundaries, final-path regression #694, functional UI policy matrix, atom isolation, and host-controlled privilege removal | Native PSEC; Windows PowerShell 5.1; `wxc-ui-probe.exe`; no PLM |
+| `run_processcontainer_contract_tests.ps1` | Focused minimum/stable/development contract launches, capabilities and registry access, lifecycle/telemetry options, malformed network policies, capture-output path rejection before execution, and unsupported versions | Native PSEC; Windows PowerShell 5.1 |
+| `run_processcontainer_workload_tests.ps1` | **Manual only, not wired into CI:** 19 native runtime scenarios covering PowerShell 7, Git, Node, Python, file I/O, child processes, and runtime directory changes | Native PSEC; missing optional interpreters are reported as skips |
+| `test_processcontainer_workload_environment.ps1` | **Manual host-only regression:** Git fixture setup preserves absent, empty, and existing caller environment variables, including failure paths | Git and PowerShell 7; no sandbox backend |
 | `run_pwsh_test.ps1` | PowerShell Set-Location test | `wxc-exec.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
@@ -89,6 +93,40 @@ The shared native-process capture helper allows 45 seconds for execution and
 five seconds for redirected output to close after executor exit. A descendant
 retaining an output handle causes a stream-drain failure rather than an
 unbounded wait. Process cleanup also uses a bounded wait.
+
+The UI matrix measures each operation under a fully permissive contained
+policy before checking its allow direction. Unavailable operations and input
+injection probes that cannot acquire the foreground are explicit skips, not
+passes. Clipboard round trips use owned tokens; the host's original clipboard
+text and mouse speed are restored and checked. Display-settings probes use
+`ChangeDisplaySettingsW` with `CDS_TEST`, which validates a mode without
+applying it. The matrix never executes a logoff or mutates IME configuration.
+
+The policy suite also calls the focused CLI contract runner and regression
+#694. For each minimum/stable/development contract, network rejection cases
+check empty destination/port lists, hostname CIDRs, ranges without a start,
+remote ProcessContainer proxies, and retired `defaultPolicy`. Each version
+also launches a valid network-policy control; these cases require no external
+connectivity. Parser/contract tests remain in the build jobs as well.
+
+Scheduled jobs pass the prebuilt final-path probe from the Windows SDK
+test bundle through `-FinalPathProbe`; missing artifacts fail rather than
+triggering compilation on validation hosts. Direct local policy runs compile
+that small fixture with the inbox .NET Framework compiler when no probe is supplied.
+
+Run the restored application workloads explicitly:
+
+```powershell
+.\tests\scripts\run_processcontainer_workload_tests.ps1 -BinDir .\src\target\debug
+```
+
+This manual suite uses owned temporary fixtures and native filesystem grants,
+not retired host preparation or drive-wide DACL mutation. It is intentionally
+not called by the policy aggregate or any CI dispatcher.
+Git preparation and contained Git commands use fixture-owned global/system
+configuration and XDG files; they do not read the operator's private Git
+configuration or require a grant to the operator's profile. Configuration
+overrides are assigned only to child processes, never to the invoking shell.
 
 ### Unix suites
 

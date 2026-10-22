@@ -953,13 +953,24 @@ fn probe_displaysettings(user32: Hmodule) {
             return;
         }
     };
-    // NULL devmode + flags=0 -> restore registry settings as the active mode.
-    // DISP_CHANGE_SUCCESSFUL = 0. Any non-zero is a refusal.
-    let rc = unsafe { cds(std::ptr::null_mut(), 0) };
-    if rc != 0 {
+    // CDS_TEST validates the saved mode without resetting the host's active display.
+    const CDS_TEST: u32 = 0x0000_0002;
+    const DISP_CHANGE_FAILED: i32 = -1;
+    unsafe { SetLastError(0) };
+    let rc = unsafe { cds(std::ptr::null_mut(), CDS_TEST) };
+    emit_diag(
+        "DISPLAYSETTINGS",
+        &format!(
+            "ChangeDisplaySettingsW(CDS_TEST) returned {rc}, gle={}",
+            unsafe { GetLastError() }
+        ),
+    );
+    if rc == DISP_CHANGE_FAILED {
         emit_pass("DISPLAYSETTINGS");
-    } else {
+    } else if rc == 0 {
         emit_fail("DISPLAYSETTINGS");
+    } else {
+        emit_inconclusive("DISPLAYSETTINGS");
     }
 }
 

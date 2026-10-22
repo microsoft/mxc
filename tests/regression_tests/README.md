@@ -22,6 +22,12 @@ Full
 .\Run-RegressionTests.ps1
 ```
 
+Issue #694 checks both DOS and NT `GetFinalPathNameByHandleW` results against
+successful host controls, using the same file in native ProcessContainer. It
+uses the included C# fixture and inbox .NET Framework compiler, so Go is not
+required. Manual runs compile the fixture; `-ProbeExe <path>` selects a prebuilt
+copy. Scheduled native validation uses that option with the Windows SDK bundle.
+
 ## Harness info
 - Harness warns about all missing manifest-listed dependencies and prints their installation commands.
 - Missing dependencies stop the run by default; pass `-InstallMissingDependencies` to install supported dependencies with `winget`, or `-RunWithMissingDependencies` to attempt the tests anyway.
