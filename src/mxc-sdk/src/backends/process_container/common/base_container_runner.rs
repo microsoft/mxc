@@ -298,14 +298,16 @@ impl BaseContainerRunner {
         Self::default()
     }
 
-    /// Construct the runner after [`Self::can_backend_service_request`] returned
-    /// [`BaseContainerRequestDecision::Serviceable`] for the request that will
-    /// be executed. The dispatcher owns that invariant and uses this constructor
-    /// so validation does not repeat the OS capability decision.
-    pub(crate) fn new_for_selected_request() -> Self {
-        Self {
-            request_serviceability_confirmed: true,
-            ..Self::default()
+    /// Construct a runner for `request`, or return why native PSEC cannot fully
+    /// enforce it. The serviceability decision is made once here, so
+    /// validation during execution does not repeat the OS capability check.
+    pub(crate) fn for_request(request: &ExecutionRequest) -> Result<Self, &'static str> {
+        match Self::can_backend_service_request(request).rejection_message() {
+            Some(reason) => Err(reason),
+            None => Ok(Self {
+                request_serviceability_confirmed: true,
+                ..Self::default()
+            }),
         }
     }
 
@@ -3714,6 +3716,66 @@ mod tests {
         // expose the API.
         if BaseContainerRunner::is_base_container_api_present() {
             assert!(runner.validate(&request).is_ok());
+        }
+    }
+
+    #[test]
+    fn lpac_is_rejected_before_constructing_a_runner() {
+        let _guard =
+            crate::process_container_common::test_env::CaptureCapabilityGuard::set(true, true);
+        let mut request = ExecutionRequest::default();
+        request.policy.least_privilege_mode = true;
+        assert_eq!(
+            BaseContainerRunner::for_request(&request).err(),
+            Some(
+                "Windows ProcessContainer cannot enforce the requested LPAC or legacy network.proxy policy"
+            )
+        );
+    }
+
+    #[test]
+    fn unsupported_host_capabilities_are_rejected_by_runner_and_probe() {
+        use crate::process_container_common::probe::run_probe;
+        use crate::process_container_common::test_env::PolicyCapabilityGuard;
+        use BaseContainerRequestDecision::{
+            DeniedPathsUnsupported, EnumeratePathsUnsupported, NativeCaptureUnavailable,
+        };
+
+        for (decision, message) in [
+            (
+                DeniedPathsUnsupported,
+                "Windows ProcessContainer requires native PSEC denied-path support for this request",
+            ),
+            (
+                EnumeratePathsUnsupported,
+                "Windows ProcessContainer requires native PSEC enumeration-only access support for this request",
+            ),
+            (
+                NativeCaptureUnavailable,
+                "Windows ProcessContainer requires native Learning Mode capture support for this request",
+            ),
+        ] {
+            let _guard = PolicyCapabilityGuard::set(
+                decision != DeniedPathsUnsupported,
+                decision != EnumeratePathsUnsupported,
+                decision != NativeCaptureUnavailable,
+            );
+            let mut request = ExecutionRequest::default();
+            match decision {
+                DeniedPathsUnsupported => request.policy.denied_paths.push(r"C:\denied".into()),
+                EnumeratePathsUnsupported => request.policy.enumerate_paths.push(r"C:\enumerate".into()),
+                NativeCaptureUnavailable => request.policy.capture_denials = Some(Default::default()),
+                _ => unreachable!("only unsupported capability decisions are exercised"),
+            }
+            assert_eq!(
+                BaseContainerRunner::can_backend_service_request(&request),
+                decision
+            );
+            assert_eq!(BaseContainerRunner::for_request(&request).err(), Some(message));
+            let probe = run_probe(&request);
+            assert_eq!(probe.tier, None);
+            assert_eq!(probe.needs_dacl_augmentation, None);
+            assert_eq!(probe.error.as_deref(), Some(message));
         }
     }
 }

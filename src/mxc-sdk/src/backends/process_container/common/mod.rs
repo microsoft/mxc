@@ -15,8 +15,6 @@ pub mod base_container_runner;
 #[cfg(target_os = "windows")]
 pub mod capture_output;
 #[cfg(target_os = "windows")]
-pub mod dispatcher;
-#[cfg(target_os = "windows")]
 mod environment;
 #[cfg(target_os = "windows")]
 pub mod job_object;
@@ -30,8 +28,6 @@ mod network_policy_helpers;
 pub mod probe;
 #[cfg(target_os = "windows")]
 pub mod process_mitigation;
-#[cfg(target_os = "windows")]
-pub mod sandbox_tracking;
 #[cfg(target_os = "windows")]
 mod secenv;
 #[cfg(target_os = "windows")]

@@ -295,12 +295,6 @@ impl UiJobObject {
             .map_err(|e| WxcError::Process(format!("AssignProcessToJobObject: {e}")))
     }
 
-    /// Returns this process's numeric HANDLE value for authenticated
-    /// cross-process duplication by the elevated guarded-WPR guardian.
-    pub fn handle_value(&self) -> usize {
-        self.handle.0 as usize
-    }
-
     /// Terminates every process currently assigned to this job (the sandboxed
     /// child and all of its descendants) with the given exit code.
     pub fn terminate(&self, exit_code: u32) -> Result<(), WxcError> {

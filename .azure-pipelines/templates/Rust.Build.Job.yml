@@ -51,7 +51,6 @@ jobs:
           cargoFeatures: hyperlight isolation_session microvm wslc
         signPattern: |
             wxc-exec.exe
-            plm.exe
             wxc-windows-sandbox-daemon.exe
             wxc-windows-sandbox-guest.exe
             wxc-wslc-daemon.exe
@@ -143,15 +142,6 @@ jobs:
           cargo build --locked -p mxc_ffi --features "test-support isolation_session wslc" --target $(triplet) --target-dir $(dotnetTestSupportTargetDir)
         displayName: Build .NET test-support native library
         workingDirectory: $(Build.SourcesDirectory)/src
-        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
-
-      # plm (Permissive Learning Mode) is functionally Windows-only, but it
-      # builds cross-platform via a no-op stub `fn main()` so it sits in the
-      # workspace default-members. Tests run on x64 only (arm64 emulation in
-      # 1ES windows-11-arm is too slow for the WPR-touching helpers).
-      - script: |
-          cargo test --release --target $(triplet) -p plm --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
-        displayName: Test plm
         condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
       - script: |

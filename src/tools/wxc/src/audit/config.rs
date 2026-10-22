@@ -1,19 +1,17 @@
-//! Port of the config-update logic from `stop_plm_logging.ps1`.
-//!
-//! Reads an MXC container config (JSON) and merges discovered
-//! file-access paths and AppContainer capabilities into it, then writes
-//! the result out as `Adjusted_*.json`.
+//! Native audit compatibility-policy generation from actionable denials.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::plm::access_event::LearningModeAccessEvent;
+#[derive(Debug, Clone)]
+pub(super) struct LearningModeAccessEvent {
+    pub file_path: String,
+    pub access_mask: u32,
+}
 
-/// How a single file-access-mask bit maps onto PLM's read/write policy
-/// buckets. Kept as one axis so the decode table, `READ_MASK`, and
-/// `WRITE_MASK` can all be derived from a single source of truth.
+/// How a file-access-mask bit contributes to learned read/write policy.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Access {
     /// Grants data / attribute read — contributes to `READ_MASK`.
@@ -23,101 +21,73 @@ enum Access {
     Write,
     /// Grants both (e.g. `GENERIC_ALL`) — contributes to both masks.
     ReadWrite,
-    /// Recognized for *decoding* but grants neither data read nor
-    /// write (`SYNCHRONIZE`, `READ_CONTROL`). Present so
-    /// `decode_access_mask` prints the mnemonic instead of
-    /// `OTHER(0x…)`, but deliberately excluded from `READ_MASK` /
-    /// `WRITE_MASK` so `classify_mask` and `update_from_access_events`
-    /// don't treat a synchronize- or read-control-only event as a read.
+    /// Grants neither data read nor write (`SYNCHRONIZE`, `READ_CONTROL`).
     None,
 }
 
 struct MaskFlag {
     bit: u32,
-    name: &'static str,
     access: Access,
 }
 
-/// Single source of truth for the file-access-mask bits PLM recognizes
-/// (mirror of `Get-PlmAccessMasks` in `stop_plm_logging.ps1`). Both the
-/// decode names and the `READ_MASK` / `WRITE_MASK` classification masks
-/// are derived from this table, so a newly-recognized bit is added in
-/// exactly one place and can never be classified without also decoding
-/// (or vice-versa).
+/// Single source for the read/write classification masks.
 const ACCESS_FLAGS: &[MaskFlag] = &[
     // Specific rights.
     MaskFlag {
         bit: 0x1,
-        name: "READ_DATA",
         access: Access::Read,
     },
     MaskFlag {
         bit: 0x2,
-        name: "FILE_WRITE",
         access: Access::Write,
     },
     MaskFlag {
         bit: 0x4,
-        name: "FILE_APPEND",
         access: Access::Write,
     },
     MaskFlag {
         bit: 0x8,
-        name: "READ_EA",
         access: Access::Read,
     },
     MaskFlag {
         bit: 0x10,
-        name: "WRITE_EA",
         access: Access::Write,
     },
     MaskFlag {
         bit: 0x20,
-        name: "DIRECTORY_TRAVERSE",
         access: Access::Read,
     },
     MaskFlag {
         bit: 0x40,
-        name: "DIRECTORY_DELETE",
         access: Access::Write,
     },
     MaskFlag {
         bit: 0x80,
-        name: "READ_ATTRIBUTES",
         access: Access::Read,
     },
     MaskFlag {
         bit: 0x100,
-        name: "WRITE_ATTRIBUTES",
         access: Access::Write,
     },
     MaskFlag {
         bit: 0x10000,
-        name: "FILE_DELETE",
         access: Access::Write,
     },
-    // Standard rights. READ_CONTROL / SYNCHRONIZE are recognized so they
-    // decode to a mnemonic, but classify as neither read nor write:
-    // holding them grants no data access, so an event carrying only one
-    // of them must not promote a path into readonlyPaths.
+    // Standard control rights alone must not promote a path into readonlyPaths.
     MaskFlag {
         bit: 0x20000,
-        name: "READ_CONTROL",
         access: Access::None,
     },
     MaskFlag {
         bit: 0x40000,
-        name: "WRITE_DAC",
         access: Access::Write,
     },
     MaskFlag {
         bit: 0x80000,
-        name: "WRITE_OWNER",
         access: Access::Write,
     },
     MaskFlag {
         bit: 0x100000,
-        name: "SYNCHRONIZE",
         access: Access::None,
     },
     // Generic rights. EventID=14 usually carries specific rights (the
@@ -129,22 +99,18 @@ const ACCESS_FLAGS: &[MaskFlag] = &[
     // buckets as read.
     MaskFlag {
         bit: 0x1000_0000,
-        name: "GENERIC_ALL",
         access: Access::ReadWrite,
     },
     MaskFlag {
         bit: 0x2000_0000,
-        name: "GENERIC_EXECUTE",
         access: Access::Read,
     },
     MaskFlag {
         bit: 0x4000_0000,
-        name: "GENERIC_WRITE",
         access: Access::Write,
     },
     MaskFlag {
         bit: 0x8000_0000,
-        name: "GENERIC_READ",
         access: Access::Read,
     },
 ];
@@ -734,7 +700,7 @@ pub fn resolve_adjusted_config_path(dest_config: &Path) -> Result<PathBuf> {
 /// ever observe the complete old file or the complete new file — never
 /// a truncated/partial write from a crash, full disk, or mid-write
 /// failure. This matters because a downstream enforcing run consumes
-/// this file directly as its policy, and `plm stop` can be re-run
+/// this file directly as its policy, and native audit can be re-run
 /// against an existing `Adjusted_*.json`.
 ///
 /// Keeping the temp file on the same volume ensures the final rename is
@@ -756,84 +722,6 @@ pub fn save_adjusted_config(config: &Value, path: &Path) -> Result<()> {
         .map_err(|e| e.error)
         .with_context(|| format!("failed to replace {}", path.display()))?;
     Ok(())
-}
-
-/// Decode a Windows file access mask into a |-separated list of the
-/// mnemonic flag names PLM cares about. Unknown bits are reported as a
-/// trailing OTHER(0x...) token so nothing is silently dropped.
-fn decode_access_mask(mask: u32) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    let mut covered: u32 = 0;
-    for flag in ACCESS_FLAGS {
-        if mask & flag.bit != 0 {
-            parts.push(flag.name);
-            covered |= flag.bit;
-        }
-    }
-    let leftover = mask & !covered;
-    if leftover != 0 {
-        let joined = parts.join("|");
-        if joined.is_empty() {
-            return format!("OTHER(0x{leftover:X})");
-        }
-        return format!("{joined}|OTHER(0x{leftover:X})");
-    }
-    if parts.is_empty() {
-        "NONE".to_string()
-    } else {
-        parts.join("|")
-    }
-}
-
-fn classify_mask(mask: u32) -> &'static str {
-    let w = mask & WRITE_MASK != 0;
-    let r = mask & READ_MASK != 0;
-    match (r, w) {
-        (true, true) => "RW",
-        (false, true) => "W",
-        (true, false) => "R",
-        (false, false) => "-",
-    }
-}
-
-/// Print every unique file path observed in vents with the OR-ed
-/// access mask requested against it, plus the set of capabilities
-/// discovered in the trace. UI-violation summary lands in a later PR.
-pub fn write_detection_summary(events: &[LearningModeAccessEvent], capabilities: &HashSet<String>) {
-    use std::collections::BTreeMap;
-
-    let mut per_path: BTreeMap<&str, u32> = BTreeMap::new();
-    for ev in events {
-        *per_path.entry(ev.file_path.as_str()).or_insert(0) |= ev.access_mask;
-    }
-
-    println!();
-    println!("Detected file paths ({}):", per_path.len());
-    if per_path.is_empty() {
-        println!("  (none)");
-    } else {
-        for (path, mask) in &per_path {
-            println!(
-                "  [{:2}] 0x{:08X} {} {}",
-                classify_mask(*mask),
-                mask,
-                decode_access_mask(*mask),
-                path
-            );
-        }
-    }
-
-    println!();
-    println!("Detected capabilities ({}):", capabilities.len());
-    if capabilities.is_empty() {
-        println!("  (none)");
-    } else {
-        let mut sorted: Vec<&String> = capabilities.iter().collect();
-        sorted.sort();
-        for c in sorted {
-            println!("  + {c}");
-        }
-    }
 }
 
 pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose: bool) {
@@ -859,10 +747,11 @@ pub fn write_requested_capabilities_summary(requested: &HashSet<String>, verbose
 /// set must never write them back into the adjusted config.
 const RESERVED_CAPABILITIES: &[&str] = &["learningModeLogging", "permissiveLearningMode"];
 
-/// Case-insensitive ASCII ordering, shared with the CLI so merged and
-/// printed capability lists agree. See
-/// [`crate::plm::extract_caps::ascii_ci_cmp`].
-use crate::plm::extract_caps::ascii_ci_cmp;
+fn ascii_ci_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .cmp(b.bytes().map(|byte| byte.to_ascii_lowercase()))
+}
 
 /// Look up a key in a JSON object ignoring ASCII case, returning the
 /// key's actual spelling. MXC configs are normally camelCase, but the
@@ -995,14 +884,10 @@ pub fn merge_capabilities(config: &mut Value, requested: &HashSet<String>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plm::access_event::LearningModeAccessEvent;
     use serde_json::json;
 
     fn ev_write(path: &str) -> LearningModeAccessEvent {
         LearningModeAccessEvent {
-            time_created: chrono::Utc::now(),
-            process_id: 0,
-            thread_id: 0,
             file_path: path.to_string(),
             access_mask: 0x2, // FILE_WRITE
         }
@@ -1010,9 +895,6 @@ mod tests {
 
     fn ev_read(path: &str) -> LearningModeAccessEvent {
         LearningModeAccessEvent {
-            time_created: chrono::Utc::now(),
-            process_id: 0,
-            thread_id: 0,
             file_path: path.to_string(),
             access_mask: 0x1, // READ_DATA
         }
@@ -1140,7 +1022,7 @@ mod tests {
         // `\\.\` handling) so call sites that bypass
         // the canonical ETL analyzer still gives us a comparable
         // drive-letter form. Without this, the self-event filter
-        // would miss `\??\C:\plm\plm.exe`.
+        // would miss `\??\C:\tools\wxc-exec.exe`.
         assert_eq!(normalize_path("\\??\\C:\\foo").as_deref(), Some("c:\\foo"));
     }
 
@@ -1236,13 +1118,13 @@ mod tests {
         let mut cfg = json!({});
         let added = run_update_with_bin(
             &mut cfg,
-            "C:\\bin\\plm.exe",
-            &[ev_read("C:\\bin\\plm.exe")],
+            "C:\\bin\\wxc-exec.exe",
+            &[ev_read("C:\\bin\\wxc-exec.exe")],
             &[],
         );
         assert!(
             added.readonly.is_empty(),
-            "events referencing the PLM binary itself must be filtered"
+            "events referencing the executor binary itself must be filtered"
         );
     }
 
@@ -1254,8 +1136,8 @@ mod tests {
         let mut cfg = json!({});
         let added = run_update_with_bin(
             &mut cfg,
-            "\\\\?\\C:\\bin\\plm.exe",
-            &[ev_read("C:\\bin\\plm.exe")],
+            "\\\\?\\C:\\bin\\wxc-exec.exe",
+            &[ev_read("C:\\bin\\wxc-exec.exe")],
             &[],
         );
         assert!(
@@ -1269,8 +1151,8 @@ mod tests {
         let mut cfg = json!({});
         let added = run_update_with_bin(
             &mut cfg,
-            "C:\\bin\\plm.exe",
-            &[ev_read("c:\\BIN\\PLM.EXE")],
+            "C:\\bin\\wxc-exec.exe",
+            &[ev_read("c:\\BIN\\WXC-EXEC.EXE")],
             &[],
         );
         assert!(
@@ -1284,7 +1166,7 @@ mod tests {
         let mut cfg = json!({});
         let added = run_update_with_bin(
             &mut cfg,
-            "C:\\bin\\plm.exe",
+            "C:\\bin\\wxc-exec.exe",
             &[ev_read("C:\\Users\\foo\\bar.txt")],
             &[],
         );
@@ -1528,38 +1410,6 @@ mod tests {
         assert_eq!(WRITE_MASK & 0x8000_0000, 0);
         assert_eq!(WRITE_MASK & 0x4000_0000, 0x4000_0000);
         assert_eq!(READ_MASK & 0x4000_0000, 0);
-    }
-
-    #[test]
-    fn classify_mask_table() {
-        assert_eq!(classify_mask(0x0), "-");
-        assert_eq!(classify_mask(0x1), "R"); // READ_DATA
-        assert_eq!(classify_mask(0x2), "W"); // FILE_WRITE
-        assert_eq!(classify_mask(0x1 | 0x2), "RW");
-        // SYNCHRONIZE / READ_CONTROL alone are neither R nor W now.
-        assert_eq!(classify_mask(0x100000), "-", "SYNCHRONIZE-only");
-        assert_eq!(classify_mask(0x20000), "-", "READ_CONTROL-only");
-        // Generic bits classify.
-        assert_eq!(classify_mask(0x8000_0000), "R", "GENERIC_READ");
-        assert_eq!(classify_mask(0x4000_0000), "W", "GENERIC_WRITE");
-        assert_eq!(classify_mask(0x1000_0000), "RW", "GENERIC_ALL");
-    }
-
-    #[test]
-    fn decode_access_mask_table() {
-        assert_eq!(decode_access_mask(0x0), "NONE");
-        assert_eq!(decode_access_mask(0x1), "READ_DATA");
-        assert_eq!(decode_access_mask(0x2), "FILE_WRITE");
-        assert_eq!(decode_access_mask(0x1 | 0x2), "READ_DATA|FILE_WRITE");
-        // Recognized-but-non-granting bits still decode (not OTHER).
-        assert_eq!(decode_access_mask(0x100000), "SYNCHRONIZE");
-        assert_eq!(decode_access_mask(0x20000), "READ_CONTROL");
-        // Generic bits decode instead of falling through to OTHER.
-        assert_eq!(decode_access_mask(0x8000_0000), "GENERIC_READ");
-        // Unknown-only bit reports OTHER, nothing silently dropped.
-        assert_eq!(decode_access_mask(0x800), "OTHER(0x800)");
-        // Known + unknown are both surfaced.
-        assert_eq!(decode_access_mask(0x1 | 0x800), "READ_DATA|OTHER(0x800)");
     }
 
     #[test]

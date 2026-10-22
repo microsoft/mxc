@@ -181,9 +181,14 @@ fn resolve_runner_inner_windows(
 
     match request.containment {
         ContainmentBackend::ProcessContainer => {
-            crate::process_container_common::dispatcher::dispatch(request)
-                .map(|runner| ResolvedRunner { runner })
-                .map_err(|error| MxcError::backend_unavailable(error.to_string()))
+            use crate::mxc_common::sandbox_process::Runner;
+            use crate::process_container_common::base_container_runner::BaseContainerRunner;
+
+            BaseContainerRunner::for_request(request)
+                .map(|backend| ResolvedRunner {
+                    runner: Box::new(Runner::new(backend)),
+                })
+                .map_err(MxcError::backend_unavailable)
         }
         ContainmentBackend::Wslc => {
             #[cfg(feature = "wslc")]
@@ -453,10 +458,7 @@ mod tests {
     #[test]
     fn policy_hash_identity_matches_runner_identity_rules() {
         assert_eq!(policy_hash_identity(""), "CLI");
-        assert_eq!(
-            policy_hash_identity("sandbox-0123456789abcdef"),
-            "sandbox-0123456789abcdef"
-        );
+        assert_eq!(policy_hash_identity("sandbox-0123456789abcdef"), "redacted");
         assert_eq!(policy_hash_identity("alice@example.com"), "entra-upn");
         assert_eq!(policy_hash_identity("arbitrary identity"), "redacted");
     }

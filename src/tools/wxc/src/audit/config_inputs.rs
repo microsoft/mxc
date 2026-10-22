@@ -1,65 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Actionable Learning Mode analysis and compatibility views for `plm.exe`.
+//! Derive native audit policy suggestions from actionable denials.
 
+use super::config::LearningModeAccessEvent;
+use mxc_sdk::learning_mode_core::{AccessType, DeniedResource, ResourceType};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
-use crate::learning_mode_core::{
-    verbose_logging_sibling_path, write_document, write_paired_output_files,
-    write_verbose_logging_document, AccessType, AnalysisResult, DenialAnalyzer, DenialSummary,
-    DenialsDocument, DeniedResource, ExistingOutputPolicy, ResourceType, VerboseLoggingDocument,
-};
-use crate::learning_mode_windows::EtlDenialAnalyzer;
-use anyhow::{Context, Result};
-
-use crate::plm::access_event::LearningModeAccessEvent;
-
-/// Analyze a sealed ETL through the same decoder used by `captureDenials`.
-pub fn analyze_trace(trace_file: &Path) -> Result<AnalysisResult> {
-    EtlDenialAnalyzer
-        .analyze(trace_file)
-        .map_err(anyhow::Error::new)
-        .with_context(|| format!("failed to analyze {}", trace_file.display()))
-}
-
-/// Write actionable denials JSON and its verbose logging sibling, then return the
-/// actionable document.
-pub fn write_denials(
-    output_path: &Path,
-    analysis: &AnalysisResult,
-    exit_code: i32,
-) -> Result<DenialsDocument> {
-    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
-
-    let summary = DenialSummary::new(
-        exit_code,
-        analysis.denials.len(),
-        analysis.denied_resources_truncated,
-    );
-    let document = DenialsDocument::new(analysis.denials.clone(), summary);
-    let verbose_logging_document = VerboseLoggingDocument::new(&analysis.verbose_logging);
-    let verbose_logging_path = verbose_logging_sibling_path(output_path)
-        .with_context(|| format!("failed to derive sibling for {}", output_path.display()))?;
-    write_paired_output_files(
-        "plm stop",
-        output_path,
-        &verbose_logging_path,
-        ExistingOutputPolicy::Replace,
-        |writer| write_document(writer, &document),
-        |writer| write_verbose_logging_document(writer, &verbose_logging_document),
-    )?;
-    Ok(document)
-}
-
-/// Build the temporary legacy config-generator inputs from actionable denials.
-///
-/// The adjusted-config generator is removed in the regeneration work item.
-/// Until then, this adapter preserves its existing file/capability behavior
-/// without retaining a second ETL parser.
+/// Build config-generator inputs without retaining a second ETL parser.
 pub fn legacy_config_inputs(
     denials: &[DeniedResource],
     current_directory: Option<&str>,
@@ -89,9 +37,6 @@ pub fn legacy_config_inputs(
                 } else {
                     file_event_indices.insert(key, events.len());
                     events.push(LearningModeAccessEvent {
-                        time_created: chrono::Utc::now(),
-                        process_id: denial.pid,
-                        thread_id: 0,
                         file_path,
                         access_mask,
                     });
@@ -158,25 +103,6 @@ fn is_local_drive_path(path: &str) -> bool {
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && matches!(bytes[2], b'\\' | b'/')
-}
-
-/// Print a concise human-readable view of actionable denials.
-pub fn write_detection_summary(analysis: &AnalysisResult) {
-    println!();
-    println!("Detected denials ({}):", analysis.denials.len());
-    if analysis.denials.is_empty() {
-        println!("  (none)");
-    } else {
-        for denial in &analysis.denials {
-            println!(
-                "  [{:?}/{:?}] {}",
-                denial.resource_type, denial.access_type, denial.resource
-            );
-        }
-    }
-    if analysis.denied_resources_truncated {
-        println!("  (truncated)");
-    }
 }
 
 #[cfg(test)]
@@ -285,49 +211,5 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].file_path, "C:\\data\\folder");
         assert_eq!(events[0].access_mask, 0x3);
-    }
-
-    #[test]
-    fn actionable_document_preserves_analysis_results() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("denials.json");
-        let analysis = AnalysisResult {
-            denials: vec![denial(r"C:\read.txt", ResourceType::File, AccessType::Read)],
-            denied_resources_truncated: true,
-            verbose_logging: Default::default(),
-        };
-
-        write_denials(&path, &analysis, 7).unwrap();
-        let document: DenialsDocument =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let verbose_logging_path =
-            crate::learning_mode_core::verbose_logging_sibling_path(&path).unwrap();
-        let verbose_logging_document: crate::learning_mode_core::VerboseLoggingDocument =
-            serde_json::from_slice(&std::fs::read(verbose_logging_path).unwrap()).unwrap();
-        assert_eq!(document.denials, analysis.denials);
-        assert_eq!(document.summary.exit_code, 7);
-        assert!(document.summary.denied_resources_truncated);
-        assert_eq!(verbose_logging_document.summary.total_occurrences, 0);
-    }
-
-    #[test]
-    fn actionable_promotion_failure_removes_verbose_logging_sibling() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("denials.json");
-        std::fs::create_dir(&path).unwrap();
-        let verbose_logging_path =
-            crate::learning_mode_core::verbose_logging_sibling_path(&path).unwrap();
-        let analysis = AnalysisResult {
-            denials: Vec::new(),
-            denied_resources_truncated: false,
-            verbose_logging: Default::default(),
-        };
-
-        let error = write_denials(&path, &analysis, 0).unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("cannot replace non-file actionable"));
-        assert!(!verbose_logging_path.exists());
     }
 }

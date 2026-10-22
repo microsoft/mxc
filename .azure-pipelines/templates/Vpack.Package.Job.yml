@@ -146,7 +146,6 @@ extends:
                       'inproc\sta_probe.exe',
                       'dotnet\Microsoft.Mxc.Sdk.Tests.exe',
                       'dotnet\mxc_ffi.dll',
-                      'dotnet\plm.exe',
                       'node\node.exe',
                       'node\LICENSE',
                       'sdk-integration\package.json',

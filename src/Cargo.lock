@@ -1822,24 +1822,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
-name = "plm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cc",
- "chrono",
- "clap",
- "getrandom 0.2.17",
- "mxc-sdk",
- "quick-xml",
- "serde",
- "serde_json",
- "tempfile",
- "windows",
- "winresource",
-]
-
-[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3177,6 +3159,7 @@ version = "1.0.1"
 dependencies = [
  "anyhow",
  "cc",
+ "chrono",
  "clap",
  "mxc-sdk",
  "serde",

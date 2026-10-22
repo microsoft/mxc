@@ -197,8 +197,6 @@ pub use core_modules::mxc_schema_support;
 #[doc(hidden)]
 pub use core_modules::mxc_telemetry;
 #[doc(hidden)]
-pub use core_modules::plm;
-#[doc(hidden)]
 pub use core_modules::process_security_environment_spec;
 
 mod configs;

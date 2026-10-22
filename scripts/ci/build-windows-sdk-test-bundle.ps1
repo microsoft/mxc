@@ -116,6 +116,8 @@ if (-not $nativeLibrary) {
 }
 
 $sdkBin = New-Directory (Join-Path $nodeSdkRoot "bin\$Architecture")
+$retiredPlm = Join-Path $sdkBin 'plm.exe'
+if (Test-Path -LiteralPath $retiredPlm) { Remove-Item -LiteralPath $retiredPlm }
 Copy-Item -LiteralPath $WxcExecPath, $nativeLibrary -Destination $sdkBin -Force
 foreach ($project in $nodeSdkRoot, $integrationRoot) {
     Push-Location $project
@@ -209,7 +211,6 @@ $required = @(
     'inproc\sta_probe.exe',
     'dotnet\Microsoft.Mxc.Sdk.Tests.exe',
     'dotnet\mxc_ffi.dll',
-    'dotnet\plm.exe',
     'node\node.exe',
     'node\LICENSE',
     'sdk-integration\package.json',

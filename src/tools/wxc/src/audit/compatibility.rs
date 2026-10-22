@@ -1,59 +1,28 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `plm stop` — keep caller-selected path handling and ETL analysis
-//! unelevated. Only the fixed `wpr -stop` operation runs in the restricted
-//! elevated child, which transfers the ETL back over an authenticated pipe.
+//! Native audit output locations and compatibility artifacts.
 
-use crate::learning_mode_core::DenialsDocument;
-use anyhow::{Context, Result};
-use chrono::Local;
-use serde::Serialize;
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
-
-use crate::plm::analysis::{
-    analyze_trace, legacy_config_inputs, write_denials, write_detection_summary,
-};
-use crate::plm::config::{
+use super::config::{
     deny_file_set, initialize_filesystem, load_config, merge_capabilities,
     resolve_adjusted_config_path, save_adjusted_config, update_from_access_events,
     write_added_paths_summary, write_requested_capabilities_summary,
 };
-use crate::plm::wpr_path::wpr_command;
-
-pub struct StopOptions {
-    pub log_dir: Option<PathBuf>,
-    pub bin_path: Option<PathBuf>,
-    pub config_path: Option<PathBuf>,
-    /// When set, skip `wpr -stop` and treat the supplied .etl as the
-    /// captured trace. Useful for re-processing a previously captured
-    /// trace without an active WPR session.
-    pub trace_file: Option<PathBuf>,
-    /// Exit code recorded in the actionable denials document.
-    pub exit_code: i32,
-    pub verbose: bool,
-}
+use super::config_inputs::legacy_config_inputs;
+use anyhow::{Context, Result};
+use chrono::Local;
+use mxc_sdk::learning_mode_core::DenialsDocument;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 /// Inputs for generating compatibility artifacts from actionable denials.
 #[derive(Debug, Clone)]
 pub struct PostProcessOptions {
     pub log_dir: PathBuf,
-    pub bin_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     pub trace_path: PathBuf,
     pub denials_path: PathBuf,
     pub verbose: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StopResult {
-    pub trace_path: PathBuf,
-    pub denials_path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub adjusted_config_path: Option<PathBuf>,
 }
 
 pub fn default_log_dir() -> PathBuf {
@@ -71,6 +40,7 @@ fn default_log_dir_with_local_app_data(local_app_data: Option<&OsStr>) -> PathBu
         .unwrap_or_else(std::env::temp_dir)
         .join("Microsoft")
         .join("MXC")
+        // Preserve the native audit output location used by existing callers.
         .join("PLM")
         .join("logs")
         .join(stamp)
@@ -90,7 +60,7 @@ fn prepare_config_output_paths(
     denials_path: &Path,
 ) -> Result<Option<ConfigOutputPaths>> {
     let verbose_logging_path =
-        crate::learning_mode_core::verbose_logging_sibling_path(denials_path)
+        mxc_sdk::learning_mode_core::verbose_logging_sibling_path(denials_path)
             .context("failed to derive verbose logging output path")?;
     if same_config_target(trace_path, denials_path)
         || same_config_target(trace_path, &verbose_logging_path)
@@ -141,128 +111,6 @@ fn prepare_config_output_paths(
     }))
 }
 
-/// Abstraction over `wpr -stop` invocations so the failure-mapping
-/// state machine in `stop_plm_trace_with` is testable without
-/// actually spawning processes. Mirrors `start::WprLauncher`.
-pub trait WprStopper {
-    fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus>;
-}
-
-pub struct WprExeStopper;
-
-impl WprStopper for WprExeStopper {
-    fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
-        let mut cmd = wpr_command();
-        let resolved = cmd.get_program().to_string_lossy().into_owned();
-        let output = cmd
-            .arg("-stop")
-            .arg(trace_file)
-            .output()
-            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))?;
-        if !output.status.success() {
-            return Err(crate::plm::start::describe_wpr_failure("stop", &output));
-        }
-        Ok(output.status)
-    }
-}
-
-/// Testable wrapper for `wpr -stop` status handling.
-pub fn stop_plm_trace_with<S: WprStopper>(stopper: &mut S, trace_file: &Path) -> Result<()> {
-    let status = stopper.stop(trace_file)?;
-    if !status.success() {
-        anyhow::bail!("wpr -stop exited with {status}");
-    }
-    Ok(())
-}
-
-/// Resolve `--bin-path` (or fall back to the calling exe directory)
-/// to its canonical form. Consumed by `update_from_access_events` as
-/// the self-access filter: events referencing this path are dropped
-/// from the adjusted config so the container never grants itself
-/// broad access to its own binary directory.
-///
-/// Fallback chain:
-///   1. `canonicalize(opt.bin_path)` if `Some`
-///   2. raw `opt.bin_path` if `Some` (with a warning)
-///   3. `exe_dir` (no warning)
-pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<String>) {
-    let Some(raw) = opt else {
-        return (exe_dir.to_path_buf(), None);
-    };
-    match raw.canonicalize() {
-        Ok(p) => (p, None),
-        Err(e) => {
-            let warning = format!(
-                "could not canonicalize --bin-path {} ({}); self-access filter \
-                 will use the raw path. Events referencing the binary via a \
-                 different spelling (e.g. verbatim \\\\?\\) may leak into the \
-                 adjusted config.",
-                raw.display(),
-                e
-            );
-            // Prefer the raw operator-supplied path over silently
-            // substituting exe_dir; that would drop operator intent.
-            (raw.to_path_buf(), Some(warning))
-        }
-    }
-}
-
-pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
-    // $LogDir defaults to the caller-writable per-user local data directory.
-    // Including PID + sub-second component avoids collisions when
-    // parallel PLM tasks finish in the same second.
-    let log_dir = opts.log_dir.unwrap_or_else(default_log_dir);
-    std::fs::create_dir_all(&log_dir)
-        .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
-
-    // Resolve bin_path to its canonical form so the self-access filter
-    // in `config::update_from_access_events` can compare it against the
-    // verbatim-prefixed paths ETW emits. The fallback chain is in
-    // `resolve_bin_path`.
-    let trace_file = opts
-        .trace_file
-        .context("plm stop requires --trace-file from a retained guardian capture")?;
-    let denials_path = log_dir.join("denials.json");
-    let config_outputs = prepare_config_output_paths(
-        opts.config_path.as_deref(),
-        &log_dir,
-        &trace_file,
-        &denials_path,
-    )?;
-
-    if !trace_file.exists() {
-        anyhow::bail!("trace file does not exist: {}", trace_file.display());
-    }
-
-    if opts.verbose {
-        println!("Beginning event parsing, this may take several minutes");
-    }
-
-    let analysis = analyze_trace(&trace_file)?;
-    write_detection_summary(&analysis);
-    let document = write_denials(&denials_path, &analysis, opts.exit_code)?;
-
-    let adjusted_config_path = postprocess_denials_with_paths(
-        &document,
-        &PostProcessOptions {
-            log_dir,
-            bin_path: opts.bin_path,
-            config_path: opts.config_path,
-            trace_path: trace_file.clone(),
-            denials_path: denials_path.clone(),
-            verbose: opts.verbose,
-        },
-        exe_dir,
-        config_outputs,
-    )?;
-
-    Ok(StopResult {
-        trace_path: trace_file,
-        denials_path,
-        adjusted_config_path,
-    })
-}
-
 /// Generates the source-config snapshot and adjusted config from actionable denials.
 pub fn postprocess_denials(
     document: &DenialsDocument,
@@ -290,11 +138,6 @@ fn postprocess_denials_with_paths(
         return Ok(None);
     };
 
-    let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
-    if let Some(warning) = warning {
-        eprintln!("[plm] warning: {warning}");
-    }
-
     // Load the source config before copying or mutating it. The trace and
     // actionable denials remain useful even if this compatibility-only
     // adjusted-config phase fails.
@@ -314,7 +157,7 @@ fn postprocess_denials_with_paths(
 
     if document.summary.denied_resources_truncated {
         eprintln!(
-            "[plm] warning: denial analysis was truncated; skipping adjusted-config \
+            "[audit] warning: denial analysis was truncated; skipping adjusted-config \
              generation because the learned policy would be incomplete"
         );
         return Ok(None);
@@ -342,7 +185,7 @@ fn postprocess_denials_with_paths(
     initialize_filesystem(&mut config)?;
     let deny = deny_file_set(&config);
 
-    let bin_path_s = bin_path.to_string_lossy().into_owned();
+    let bin_path_s = exe_dir.to_string_lossy().into_owned();
     let added = update_from_access_events(
         &mut config,
         &bin_path_s,
@@ -384,7 +227,7 @@ fn postprocess_denials_with_paths(
 /// pre-capture check. The final path comparison is case-insensitive because
 /// Windows paths are case-insensitive.
 fn same_config_target(a: &Path, b: &Path) -> bool {
-    use crate::mxc_common::filesystem_object::{
+    use mxc_sdk::mxc_common::filesystem_object::{
         compare_existing_filesystem_objects, ExistingObjectComparison,
     };
 
@@ -397,7 +240,7 @@ fn same_config_target(a: &Path, b: &Path) -> bool {
 }
 
 fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
-    crate::mxc_common::string_util::windows_paths_equal_ignore_case(a, b)
+    mxc_sdk::mxc_common::string_util::windows_paths_equal_ignore_case(a, b)
 }
 
 fn target_comparison_key(path: &Path) -> String {
@@ -468,7 +311,7 @@ fn normalize_win32_components(path: &str, trim_trailing_dots_and_spaces: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::learning_mode_core::{AccessType, DenialSummary, DeniedResource, ResourceType};
+    use mxc_sdk::learning_mode_core::{AccessType, DenialSummary, DeniedResource, ResourceType};
 
     fn postprocess_fixture(
         document: &DenialsDocument,
@@ -489,7 +332,6 @@ mod tests {
             document,
             &PostProcessOptions {
                 log_dir: log_dir.clone(),
-                bin_path: None,
                 config_path: Some(config_path),
                 trace_path,
                 denials_path,
@@ -546,16 +388,6 @@ mod tests {
         assert!(!log_dir.join("Adjusted_policy.json").exists());
     }
 
-    // ---- resolve_bin_path -----------------------------------------------
-
-    #[test]
-    fn resolve_bin_path_falls_back_to_exe_dir_when_no_override() {
-        let exe = std::env::temp_dir();
-        let (p, warn) = resolve_bin_path(None, &exe);
-        assert_eq!(p, exe);
-        assert!(warn.is_none(), "no operator intent means no warning");
-    }
-
     #[test]
     fn default_log_dir_uses_per_user_local_app_data() {
         let root = Path::new(r"C:\Users\caller\AppData\Local");
@@ -577,95 +409,6 @@ mod tests {
         );
         let normal = normalize_win32_components(r"\\server\share\denials.json", true);
         assert!(windows_paths_equal_ignore_case(&verbatim, &normal));
-    }
-
-    #[test]
-    fn resolve_bin_path_canonicalizes_existing_override() {
-        let exe = std::env::temp_dir();
-        let override_path = std::env::temp_dir();
-        let (p, warn) = resolve_bin_path(Some(&override_path), &exe);
-        assert!(p.exists(), "canonicalized path should still exist");
-        assert!(warn.is_none(), "successful canonicalize must not warn");
-    }
-
-    #[test]
-    fn resolve_bin_path_warns_and_returns_raw_when_canonicalize_fails() {
-        let exe = std::env::temp_dir();
-        let bogus = std::path::PathBuf::from("Z:\\definitely-does-not-exist-plm-test");
-        let (p, warn) = resolve_bin_path(Some(&bogus), &exe);
-        assert_eq!(
-            p, bogus,
-            "must return the raw operator path rather than silently \
-             substituting exe_dir (would drop operator intent)"
-        );
-        let w = warn.expect("canonicalize failure must surface a warning");
-        assert!(
-            w.contains("Z:\\definitely-does-not-exist-plm-test"),
-            "warning must reference the failing path: {w}",
-        );
-    }
-
-    // ---- WprStopper / stop_plm_trace_with -------------------------------
-
-    use std::os::windows::process::ExitStatusExt;
-
-    struct FakeStopper {
-        result: std::cell::Cell<Option<Result<ExitStatus>>>,
-        calls: std::cell::Cell<usize>,
-    }
-    impl FakeStopper {
-        fn ok(code: u32) -> Self {
-            Self {
-                result: std::cell::Cell::new(Some(Ok(ExitStatus::from_raw(code)))),
-                calls: std::cell::Cell::new(0),
-            }
-        }
-        fn err(msg: &'static str) -> Self {
-            Self {
-                result: std::cell::Cell::new(Some(Err(anyhow::anyhow!(msg)))),
-                calls: std::cell::Cell::new(0),
-            }
-        }
-    }
-    impl WprStopper for FakeStopper {
-        fn stop(&mut self, _trace_file: &Path) -> Result<ExitStatus> {
-            self.calls.set(self.calls.get() + 1);
-            self.result
-                .replace(None)
-                .expect("FakeStopper.stop called more than once")
-        }
-    }
-
-    #[test]
-    fn stop_plm_trace_returns_ok_on_zero_exit() {
-        let mut s = FakeStopper::ok(0);
-        stop_plm_trace_with(&mut s, Path::new("trace.etl"))
-            .expect("zero-exit must propagate as Ok");
-        assert_eq!(s.calls.get(), 1);
-    }
-
-    #[test]
-    fn stop_plm_trace_propagates_nonzero_exit_with_context() {
-        let mut s = FakeStopper::ok(1);
-        let err = stop_plm_trace_with(&mut s, Path::new("trace.etl"))
-            .expect_err("non-zero exit must propagate as Err");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("wpr -stop exited"),
-            "error must name the failed command: {msg}",
-        );
-    }
-
-    #[test]
-    fn stop_plm_trace_propagates_spawn_error_verbatim() {
-        let mut s = FakeStopper::err("simulated spawn failure: not found");
-        let err = stop_plm_trace_with(&mut s, Path::new("trace.etl"))
-            .expect_err("spawn error must propagate");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("simulated spawn failure"),
-            "error must surface the underlying io::Error context: {msg}",
-        );
     }
 
     #[test]
