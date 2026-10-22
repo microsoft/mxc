@@ -409,12 +409,23 @@ fn compute_attr_count(least_privilege_mode: bool, ui_disable: bool, pipe_mode: b
 /// Returns [`WxcError::Initialization`] if `profile_name` is empty, the
 /// derivation Win32 call fails, or the returned SID cannot be converted to
 /// a string.
+fn reject_embedded_nul_identity(name: &str) -> Result<(), WxcError> {
+    if name.contains('\0') {
+        return Err(WxcError::Initialization(
+            "AppContainer profile name contains an embedded NUL and cannot be used as a security identity"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn derive_sid_string(profile_name: &str) -> Result<String, WxcError> {
     if profile_name.is_empty() {
         return Err(WxcError::Initialization(
             "AppContainer profile name is empty; cannot derive SID".to_string(),
         ));
     }
+    reject_embedded_nul_identity(profile_name)?;
 
     let wide_name = string_util::to_wide(profile_name);
     let pcwstr_name = PCWSTR(wide_name.as_ptr());
@@ -729,6 +740,7 @@ impl AppContainerScriptRunner {
     /// [`derive_sid_string`] — it shares the underlying derivation so the
     /// two paths can't drift in name normalization.
     fn create_app_container_sid(name: &str) -> Result<PSID, WxcError> {
+        reject_embedded_nul_identity(name)?;
         let wide_name = string_util::to_wide(name);
         let pcwstr_name = PCWSTR(wide_name.as_ptr());
 
@@ -2520,6 +2532,30 @@ mod tests {
         let a = super::derive_sid_string("MxcDeriveSidTestStable").expect("first derivation");
         let b = super::derive_sid_string("MxcDeriveSidTestStable").expect("second derivation");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn derive_sid_string_embedded_nul_is_rejected() {
+        let embedded = super::derive_sid_string("MxcNulProbeAlpha\0evil");
+        assert!(
+            matches!(
+                embedded,
+                Err(crate::mxc_common::error::WxcError::Initialization(_))
+            ),
+            "embedded NUL must not reach SID derivation, got {embedded:?}"
+        );
+        let message = embedded.expect_err("checked above").to_string();
+        assert!(
+            message.contains("embedded NUL"),
+            "rejection must name the hazard, got {message}"
+        );
+        assert!(
+            !message.contains('\0'),
+            "rejection must not echo the raw NUL identity"
+        );
+
+        let plain = super::derive_sid_string("MxcNulProbeAlpha").expect("plain derivation");
+        assert!(plain.starts_with("S-1-15-"));
     }
 
     /// Helper: build a double-null-terminated UTF-16 env block from strings.
