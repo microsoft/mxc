@@ -143,7 +143,7 @@ export class MxcProcess {
   /**
    * Returns stdin and transfers responsibility for closing it to the caller.
    * Returns `null` when the selected backend does not expose stdin, as for a
-   * WSLC command not started by `spawnInContainerWithStdin`.
+   * WSLC command in a container not started by `spawnInContainerWithStdin`.
    */
   get standardInput(): Writable | null {
     this.throwIfDisposed();

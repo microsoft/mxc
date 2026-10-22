@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writable `StandardInput`. For a WSLC container, disposing it, or waiting
   before taking it, gives the command end-of-file; `SpawnInContainer` still
   gives a WSLC command end-of-file at once.
+- `MxcContainer.Spawn` exposes `StandardInput` for a WSLC request. Closing it
+  gives the command end-of-file; a command that reads stdin now waits for that
+  instead of seeing end-of-file at once. `MxcContainer.Run` and `RunAsync`
+  still give the command end-of-file at once.
 
 ### Changed
 

@@ -559,8 +559,8 @@ so the process never sees a truncated input as complete,
 and the caller gets an error saying stdin could not be forwarded. A caller that
 kills the exec itself gets the ordinary killed result instead.
 
-The create-and-run (one-shot) WSLc path does not forward stdin; its process
-reads end-of-file at once.
+The create-and-run (one-shot) WSLc path forwards stdin too; see
+[Sending input (stdin)](wsl-container-getting-started.md#sending-input-stdin).
 
 ### exec admission, cancellation, and failure containment
 
