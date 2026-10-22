@@ -403,15 +403,15 @@ pub fn build_args_classified(
     denied_files: &HashSet<String>,
 ) -> Vec<String> {
     let network_mode = ResolvedNetworkMode::from_request(request, proxy_address.is_some());
-    build_args_classified_with_mode(request, proxy_address, denied_files, network_mode)
+    build_args_classified_with_mode(request, proxy_address, denied_files, network_mode, None)
 }
 
-/// Build Bubblewrap arguments using a previously resolved network mode.
 pub(crate) fn build_args_classified_with_mode(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
     denied_files: &HashSet<String>,
     network_mode: ResolvedNetworkMode,
+    seccomp_fd: Option<i32>,
 ) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
     let mut args = Vec::new();
@@ -533,6 +533,10 @@ pub(crate) fn build_args_classified_with_mode(
         }
     }
 
+    if let Some(fd) = seccomp_fd {
+        args.extend(["--seccomp".into(), fd.to_string()]);
+    }
+
     // -- Command -----------------------------------------------------------
     args.extend(COMMAND_TAIL.iter().map(|arg| arg.to_string()));
     args.push(request.script_code.clone());
@@ -550,6 +554,68 @@ mod tests {
             working_directory: "/home/user".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn seccomp_descriptor_precedes_the_command_in_every_network_mode() {
+        let request = base_request();
+        let proxy = ProxyAddress::new("127.0.0.1".into(), 3128);
+        for (mode, proxy_address) in [
+            (ResolvedNetworkMode::Isolated, None),
+            (ResolvedNetworkMode::FirewallEnforced, None),
+            (ResolvedNetworkMode::ProxyOnly, Some(&proxy)),
+        ] {
+            let args = build_args_classified_with_mode(
+                &request,
+                proxy_address,
+                &HashSet::new(),
+                mode,
+                Some(17),
+            );
+            assert_eq!(
+                &args[args.len() - 6..],
+                ["--seccomp", "17", "--", "sh", "-c", "echo hello"],
+                "{mode:?}"
+            );
+            assert_eq!(args.iter().filter(|arg| *arg == "--seccomp").count(), 1);
+            assert!(!args.iter().any(|arg| arg == "--add-seccomp-fd"));
+        }
+    }
+
+    #[test]
+    fn seccomp_preserves_option_like_operands_in_generated_arguments() {
+        let mut request = base_request();
+        request.env = Some(vec![
+            "FIRST=--seccomp".into(),
+            "SECOND=--add-seccomp-fd".into(),
+            "THIRD=--".into(),
+        ]);
+        request.script_code = "--seccomp".into();
+        let mut expected = build_args(&request, None);
+        let command_index = expected.len() - 4;
+        expected.splice(
+            command_index..command_index,
+            ["--seccomp".into(), "17".into()],
+        );
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            Some(17),
+        );
+        assert_eq!(args, expected);
+        for (key, value) in [
+            ("FIRST", "--seccomp"),
+            ("SECOND", "--add-seccomp-fd"),
+            ("THIRD", "--"),
+        ] {
+            assert!(args.windows(3).any(|args| args == ["--setenv", key, value]));
+        }
+        assert_eq!(
+            &args[args.len() - 6..],
+            ["--seccomp", "17", "--", "sh", "-c", "--seccomp"]
+        );
     }
 
     #[test]

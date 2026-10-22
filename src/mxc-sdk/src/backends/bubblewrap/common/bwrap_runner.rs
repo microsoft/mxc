@@ -520,20 +520,6 @@ impl BubblewrapScriptRunner {
             None => None,
         };
 
-        // 2. Build the bwrap argument vector. `denied_files` is the file-mask
-        //    subset classified during symlink resolution (see
-        //    [`resolve_denied_paths`]).
-        let mut args = bwrap_command::build_args_classified_with_mode(
-            request,
-            proxy_address,
-            denied_files,
-            network_mode,
-        );
-
-        if stdio == StdioMode::Inherit {
-            args.insert(0, "--new-session".into());
-        }
-
         let seccomp_filter = match seccomp_filter::create_file() {
             Ok(file) => file,
             Err(error) => {
@@ -541,9 +527,16 @@ impl BubblewrapScriptRunner {
                 return Err(ScriptResponse::error(&error));
             }
         };
-        if let Err(error) = seccomp_filter::add_bwrap_args(&mut args, seccomp_filter.as_raw_fd()) {
-            stop_proxy_network(&mut proxy_network, logger);
-            return Err(ScriptResponse::error(&error));
+        let mut args = bwrap_command::build_args_classified_with_mode(
+            request,
+            proxy_address,
+            denied_files,
+            network_mode,
+            Some(seccomp_filter.as_raw_fd()),
+        );
+
+        if stdio == StdioMode::Inherit {
+            args.insert(0, "--new-session".into());
         }
         let mut network_startup = match proxy_network.as_ref() {
             Some(network) => match network.configure_bwrap(&mut args, logger) {

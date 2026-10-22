@@ -132,24 +132,24 @@ jobs:
             exit 1
           fi
 
-      # The library tests are selected by module, so the seccomp filter needs
-      # its own step; a zero-test run must fail.
-      - name: Test Bubblewrap seccomp_filter module
+      - name: Test Bubblewrap seccomp and argument-builder modules
         working-directory: src
         shell: bash
         run: |
           set -uo pipefail
           log="$(mktemp)"
-          cargo test --locked --release --target "${{ matrix.target }}" \
-            -p mxc-sdk --lib 'backend_modules::bubblewrap::common::seccomp_filter::' 2>&1 | tee "$log"
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            exit "$status"
-          fi
-          if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
-            echo "::error::Bubblewrap seccomp_filter module filter ran no tests."
-            exit 1
-          fi
+          for module in seccomp_filter bwrap_command; do
+            cargo test --locked --release --target "${{ matrix.target }}" \
+              -p mxc-sdk --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              exit "$status"
+            fi
+            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+              echo "::error::Bubblewrap $module module filter ran no tests."
+              exit 1
+            fi
+          done
 
       # The job defaults working-directory to src/tools/lxc, so the `Test lxc`
       # step above covers only the lxc package. This streaming suite must follow

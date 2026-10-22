@@ -15,8 +15,6 @@ use nix::errno::Errno;
 #[cfg(target_os = "linux")]
 use nix::fcntl::{fcntl, FcntlArg};
 
-use crate::bwrap_common::bwrap_command::COMMAND_TAIL;
-
 const BPF_LD_W_ABS: u16 = 0x20;
 #[cfg(any(target_arch = "x86_64", test))]
 const BPF_ALU_AND_K: u16 = 0x54;
@@ -152,55 +150,6 @@ fn above_stdio(file: File) -> Result<File, Errno> {
 
     // SAFETY: `fcntl` returned a new descriptor that nothing else owns.
     Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-pub(crate) fn add_bwrap_args(args: &mut Vec<String>, fd: i32) -> Result<(), String> {
-    let command_index = args
-        .len()
-        .checked_sub(COMMAND_TAIL.len() + 1)
-        .filter(|&index| args[index..index + COMMAND_TAIL.len()] == COMMAND_TAIL)
-        .ok_or_else(|| {
-            "Bubblewrap: cannot install the seccomp filter because the command tail is malformed"
-                .to_string()
-        })?;
-    reject_conflicting_options(&args[..command_index])?;
-    args.splice(
-        command_index..command_index,
-        ["--seccomp".to_string(), fd.to_string()],
-    );
-    Ok(())
-}
-
-fn reject_conflicting_options(args: &[String]) -> Result<(), String> {
-    let mut index = 0;
-    while index < args.len() {
-        let option = args[index].as_str();
-        if matches!(option, "--seccomp" | "--add-seccomp-fd") {
-            return Err(
-                "Bubblewrap: cannot combine the address-family filter with another seccomp option"
-                    .to_string(),
-            );
-        }
-        let operands = match option {
-            "--unshare-user" | "--unshare-pid" | "--unshare-ipc" | "--unshare-uts"
-            | "--die-with-parent" | "--unshare-net" | "--clearenv" | "--new-session" => 0,
-            "--dev" | "--proc" | "--tmpfs" | "--chdir" | "--userns" | "--info-fd"
-            | "--block-fd" => 1,
-            "--ro-bind-try" | "--symlink" | "--bind" | "--ro-bind" | "--setenv" => 2,
-            _ => {
-                return Err(format!(
-                    "Bubblewrap: cannot install the seccomp filter after unknown option {option}"
-                ));
-            }
-        };
-        index = index
-            .checked_add(operands + 1)
-            .filter(|next| *next <= args.len())
-            .ok_or_else(|| {
-                format!("Bubblewrap: option {option} is missing one or more operands")
-            })?;
-    }
-    Ok(())
 }
 
 pub(crate) fn unsupported_architecture(architecture: &str) -> Option<String> {
@@ -425,29 +374,40 @@ mod tests {
     const AF_PACKET: u64 = 17;
     const AF_VSOCK: u64 = 40;
 
-    #[derive(Clone, Copy)]
-    struct SeccompData {
-        number: u32,
-        architecture: u32,
-        args: [u64; 6],
-    }
+    // Syscall and audit values follow Linux v6.18's UAPI headers and syscall tables:
+    // https://github.com/torvalds/linux/tree/v6.18
+    const SOCKET_ABIS: [(NativeArchitecture, u32, u32, u32); 5] = [
+        (NativeArchitecture::X86_64, 0xc000_003e, 41, 53),
+        (
+            NativeArchitecture::X86_64,
+            0xc000_003e,
+            0x4000_0029,
+            0x4000_0035,
+        ),
+        (NativeArchitecture::X86_64, 0x4000_0003, 359, 360),
+        (NativeArchitecture::Aarch64, 0xc000_00b7, 198, 199),
+        (NativeArchitecture::Aarch64, 0x4000_0028, 281, 288),
+    ];
 
-    fn evaluate(program: &[Instruction], data: SeccompData) -> u32 {
+    fn evaluate(program: &[Instruction], data: &[u8; 64]) -> u32 {
         let mut accumulator = 0_u32;
         let mut pc = 0_usize;
 
         loop {
             let instruction = program[pc];
             match instruction.code {
-                BPF_LD_W_ABS => {
-                    accumulator = load_word(data, instruction.value);
+                0x20 => {
+                    let offset = usize::try_from(instruction.value).expect("cBPF load offset");
+                    assert_eq!(offset % 4, 0, "seccomp loads must be word-aligned");
+                    accumulator =
+                        u32::from_le_bytes(data[offset..offset + 4].try_into().expect("cBPF word"));
                     pc += 1;
                 }
-                BPF_ALU_AND_K => {
+                0x54 => {
                     accumulator &= instruction.value;
                     pc += 1;
                 }
-                BPF_JMP_JEQ_K => {
+                0x15 => {
                     let jump = if accumulator == instruction.value {
                         instruction.jump_if_true
                     } else {
@@ -455,71 +415,29 @@ mod tests {
                     };
                     pc += usize::from(jump) + 1;
                 }
-                BPF_RET_K => return instruction.value,
+                0x06 => return instruction.value,
                 code => panic!("unsupported cBPF instruction {code:#x}"),
             }
         }
     }
 
-    fn load_word(data: SeccompData, offset: u32) -> u32 {
-        match offset {
-            SECCOMP_DATA_NR_OFFSET => data.number,
-            SECCOMP_DATA_ARCH_OFFSET => data.architecture,
-            SECCOMP_DATA_ARG0_LOW_OFFSET => data.args[0] as u32,
-            _ => panic!("unsupported seccomp_data offset {offset}"),
-        }
-    }
-
+    // Byte layout: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/seccomp.h
     fn result(native: NativeArchitecture, audit: u32, number: u32, first_argument: u64) -> u32 {
-        evaluate(
-            &build_program(native),
-            SeccompData {
-                number,
-                architecture: audit,
-                args: [first_argument, 0, 0, 0, 0, 0],
-            },
-        )
+        let mut data = [0xa5; 64];
+        data[0..4].copy_from_slice(&number.to_le_bytes());
+        data[4..8].copy_from_slice(&audit.to_le_bytes());
+        data[16..24].copy_from_slice(&first_argument.to_le_bytes());
+        evaluate(&build_program(native), &data)
     }
 
     #[test]
     fn allows_required_socket_families() {
-        for (native, audit, socket, socketpair) in [
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X86_64_SOCKET,
-                X86_64_SOCKETPAIR,
-            ),
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X32_SYSCALL_BIT | X86_64_SOCKET,
-                X32_SYSCALL_BIT | X86_64_SOCKETPAIR,
-            ),
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_I386,
-                I386_SOCKET,
-                I386_SOCKETPAIR,
-            ),
-            (
-                NativeArchitecture::Aarch64,
-                AUDIT_ARCH_AARCH64,
-                AARCH64_SOCKET,
-                AARCH64_SOCKETPAIR,
-            ),
-            (
-                NativeArchitecture::Aarch64,
-                AUDIT_ARCH_ARM,
-                ARM_SOCKET,
-                ARM_SOCKETPAIR,
-            ),
-        ] {
+        for (native, audit, socket, socketpair) in SOCKET_ABIS {
             for number in [socket, socketpair] {
-                for family in ALLOWED_FAMILIES {
+                for family in [1_u64, 2, 10, 16] {
                     assert_eq!(
-                        result(native, audit, number, u64::from(family)),
-                        SECCOMP_RET_ALLOW,
+                        result(native, audit, number, family),
+                        0x7fff_0000,
                         "family {family} should be allowed for syscall {number} on arch {audit:#x}"
                     );
                 }
@@ -529,52 +447,22 @@ mod tests {
 
     #[test]
     fn denies_vsock_for_socketpair() {
-        for (native, audit, socketpair) in [
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X86_64_SOCKETPAIR,
-            ),
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X32_SYSCALL_BIT | X86_64_SOCKETPAIR,
-            ),
-            (NativeArchitecture::X86_64, AUDIT_ARCH_I386, I386_SOCKETPAIR),
-            (
-                NativeArchitecture::Aarch64,
-                AUDIT_ARCH_AARCH64,
-                AARCH64_SOCKETPAIR,
-            ),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_ARM, ARM_SOCKETPAIR),
-        ] {
-            assert_eq!(result(native, audit, socketpair, AF_VSOCK), errno(EPERM));
+        for (native, audit, _, socketpair) in SOCKET_ABIS {
+            assert_eq!(result(native, audit, socketpair, AF_VSOCK), 0x0005_0001);
         }
     }
 
     #[test]
     fn denies_vsock_packet_and_unknown_families() {
-        for (native, audit, socket) in [
-            (NativeArchitecture::X86_64, AUDIT_ARCH_X86_64, X86_64_SOCKET),
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X32_SYSCALL_BIT | X86_64_SOCKET,
-            ),
-            (NativeArchitecture::X86_64, AUDIT_ARCH_I386, I386_SOCKET),
-            (
-                NativeArchitecture::Aarch64,
-                AUDIT_ARCH_AARCH64,
-                AARCH64_SOCKET,
-            ),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_ARM, ARM_SOCKET),
-        ] {
-            for family in [AF_VSOCK, AF_PACKET, 0xffff] {
-                assert_eq!(
-                    result(native, audit, socket, family),
-                    errno(EPERM),
-                    "family {family} should be denied on arch {audit:#x}"
-                );
+        for (native, audit, socket, socketpair) in SOCKET_ABIS {
+            for number in [socket, socketpair] {
+                for family in [AF_VSOCK, AF_PACKET, 0xffff] {
+                    assert_eq!(
+                        result(native, audit, number, family),
+                        0x0005_0001,
+                        "family {family} should be denied for syscall {number} on arch {audit:#x}"
+                    );
+                }
             }
         }
     }
@@ -582,29 +470,25 @@ mod tests {
     #[test]
     fn allows_unfiltered_syscalls() {
         for (native, audit, number) in [
-            (NativeArchitecture::X86_64, AUDIT_ARCH_X86_64, 0),
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X32_SYSCALL_BIT,
-            ),
-            (NativeArchitecture::X86_64, AUDIT_ARCH_I386, 3),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_AARCH64, 63),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_ARM, 3),
+            (NativeArchitecture::X86_64, 0xc000_003e, 0),
+            (NativeArchitecture::X86_64, 0xc000_003e, 0x4000_0000),
+            (NativeArchitecture::X86_64, 0x4000_0003, 3),
+            (NativeArchitecture::Aarch64, 0xc000_00b7, 63),
+            (NativeArchitecture::Aarch64, 0x4000_0028, 3),
         ] {
-            assert_eq!(result(native, audit, number, AF_VSOCK), SECCOMP_RET_ALLOW);
+            assert_eq!(result(native, audit, number, AF_VSOCK), 0x7fff_0000);
         }
     }
 
     #[test]
     fn rejects_foreign_architectures() {
         for (native, foreign) in [
-            (NativeArchitecture::X86_64, AUDIT_ARCH_AARCH64),
-            (NativeArchitecture::X86_64, AUDIT_ARCH_ARM),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_X86_64),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_I386),
+            (NativeArchitecture::X86_64, 0xc000_00b7),
+            (NativeArchitecture::X86_64, 0x4000_0028),
+            (NativeArchitecture::Aarch64, 0xc000_003e),
+            (NativeArchitecture::Aarch64, 0x4000_0003),
         ] {
-            assert_eq!(result(native, foreign, 0, 0), errno(ENOSYS));
+            assert_eq!(result(native, foreign, 0, 0), 0x0005_0026);
         }
     }
 
@@ -613,69 +497,50 @@ mod tests {
         assert_eq!(
             result(
                 NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X32_SYSCALL_BIT | X86_64_SOCKET,
+                0xc000_003e,
+                0x4000_0029,
                 AF_VSOCK,
             ),
-            errno(EPERM)
+            0x0005_0001
         );
         assert_eq!(
             result(
                 NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X32_SYSCALL_BIT,
+                0xc000_003e,
+                0x4000_0000,
                 AF_VSOCK,
             ),
-            SECCOMP_RET_ALLOW
+            0x7fff_0000
         );
     }
 
     #[test]
     fn filters_i386_direct_socket_syscalls() {
         assert_eq!(
-            result(
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_I386,
-                I386_SOCKET,
-                AF_VSOCK,
-            ),
-            errno(EPERM)
+            result(NativeArchitecture::X86_64, 0x4000_0003, 359, AF_VSOCK),
+            0x0005_0001
         );
         assert_eq!(
-            result(
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_I386,
-                I386_SOCKET,
-                u64::from(AF_INET),
-            ),
-            SECCOMP_RET_ALLOW
+            result(NativeArchitecture::X86_64, 0x4000_0003, 359, 2),
+            0x7fff_0000
         );
     }
 
     #[test]
     fn denies_io_uring_on_every_supported_abi() {
-        for (native, audit, bit) in [
-            (NativeArchitecture::X86_64, AUDIT_ARCH_X86_64, 0),
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X32_SYSCALL_BIT,
-            ),
-            (NativeArchitecture::X86_64, AUDIT_ARCH_I386, 0),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_AARCH64, 0),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_ARM, 0),
-        ] {
-            for number in IO_URING_SYSCALLS {
+        for (native, audit, socket, _) in SOCKET_ABIS {
+            let bit = socket & 0x4000_0000;
+            for number in [425, 426, 427] {
                 assert_eq!(
                     result(native, audit, bit | number, 0),
-                    errno(ENOSYS),
+                    0x0005_0026,
                     "io_uring syscall {number} should be denied on arch {audit:#x}"
                 );
             }
-            for neighbor in [IO_URING_SETUP - 1, IO_URING_REGISTER + 1] {
+            for neighbor in [424, 428] {
                 assert_eq!(
                     result(native, audit, bit | neighbor, 0),
-                    SECCOMP_RET_ALLOW,
+                    0x7fff_0000,
                     "syscall {neighbor} should stay allowed on arch {audit:#x}"
                 );
             }
@@ -684,53 +549,31 @@ mod tests {
 
     #[test]
     fn denies_i386_socketcall_creation_subcalls() {
-        for subcall in [SOCKETCALL_SOCKET, SOCKETCALL_SOCKETPAIR] {
+        for subcall in [1, 8] {
             assert_eq!(
-                result(
-                    NativeArchitecture::X86_64,
-                    AUDIT_ARCH_I386,
-                    I386_SOCKETCALL,
-                    u64::from(subcall),
-                ),
-                errno(EPERM)
+                result(NativeArchitecture::X86_64, 0x4000_0003, 102, subcall),
+                0x0005_0001
             );
         }
         assert_eq!(
-            result(
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_I386,
-                I386_SOCKETCALL,
-                2,
-            ),
-            SECCOMP_RET_ALLOW
+            result(NativeArchitecture::X86_64, 0x4000_0003, 102, 2),
+            0x7fff_0000
         );
     }
 
     #[test]
     fn ignores_the_family_upper_word() {
-        for (native, audit, socket) in [
-            (NativeArchitecture::X86_64, AUDIT_ARCH_X86_64, X86_64_SOCKET),
-            (
-                NativeArchitecture::X86_64,
-                AUDIT_ARCH_X86_64,
-                X32_SYSCALL_BIT | X86_64_SOCKET,
-            ),
-            (NativeArchitecture::X86_64, AUDIT_ARCH_I386, I386_SOCKET),
-            (
-                NativeArchitecture::Aarch64,
-                AUDIT_ARCH_AARCH64,
-                AARCH64_SOCKET,
-            ),
-            (NativeArchitecture::Aarch64, AUDIT_ARCH_ARM, ARM_SOCKET),
-        ] {
-            for family in [u64::from(AF_UNIX), u64::from(AF_INET6), AF_VSOCK, AF_PACKET] {
-                let expected = result(native, audit, socket, family);
-                for upper in [1_u64, 0xffff_ffff] {
-                    assert_eq!(
-                        result(native, audit, socket, (upper << 32) | family),
-                        expected,
-                        "upper word {upper:#x} changed the verdict for family {family} on arch {audit:#x}"
-                    );
+        for (native, audit, socket, socketpair) in SOCKET_ABIS {
+            for number in [socket, socketpair] {
+                for family in [1, 10, AF_VSOCK, AF_PACKET] {
+                    let expected = result(native, audit, number, family);
+                    for upper in [1_u64, 0xffff_ffff] {
+                        assert_eq!(
+                            result(native, audit, number, (upper << 32) | family),
+                            expected,
+                            "upper word {upper:#x} changed the verdict for family {family} on arch {audit:#x}"
+                        );
+                    }
                 }
             }
         }
@@ -800,104 +643,5 @@ mod tests {
             unsupported_architecture("riscv64"),
             Some("riscv64".to_string())
         );
-    }
-
-    #[test]
-    fn inserts_seccomp_before_the_workload_command() {
-        let mut args = vec![
-            "--clearenv".to_string(),
-            "--".to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            "echo hello".to_string(),
-        ];
-        add_bwrap_args(&mut args, 17).expect("valid bwrap arguments");
-        assert_eq!(
-            args,
-            [
-                "--clearenv",
-                "--seccomp",
-                "17",
-                "--",
-                "sh",
-                "-c",
-                "echo hello"
-            ]
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_bwrap_arguments() {
-        let mut args = vec!["--clearenv".to_string(), "echo hello".to_string()];
-        assert!(add_bwrap_args(&mut args, 17).is_err());
-    }
-
-    #[test]
-    fn rejects_conflicting_seccomp_arguments() {
-        for option in ["--seccomp", "--add-seccomp-fd"] {
-            let mut args = vec![
-                option.to_string(),
-                "23".to_string(),
-                "--".to_string(),
-                "sh".to_string(),
-                "-c".to_string(),
-                "echo hello".to_string(),
-            ];
-            assert!(add_bwrap_args(&mut args, 17).is_err());
-        }
-    }
-
-    #[test]
-    fn ignores_seccomp_words_in_option_operands_and_the_script() {
-        let mut args = vec![
-            "--setenv".to_string(),
-            "FIRST".to_string(),
-            "--seccomp".to_string(),
-            "--chdir".to_string(),
-            "--add-seccomp-fd".to_string(),
-            "--".to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            "printf '%s' --seccomp".to_string(),
-        ];
-        add_bwrap_args(&mut args, 17).expect("seccomp words in operands are not options");
-        assert_eq!(&args[5..7], ["--seccomp", "17"]);
-    }
-
-    #[test]
-    fn rejects_unknown_or_incomplete_generated_options() {
-        for mut args in [
-            vec![
-                "--future-option".to_string(),
-                "--".to_string(),
-                "sh".to_string(),
-                "-c".to_string(),
-                "echo hello".to_string(),
-            ],
-            vec![
-                "--setenv".to_string(),
-                "NAME".to_string(),
-                "--".to_string(),
-                "sh".to_string(),
-                "-c".to_string(),
-                "echo hello".to_string(),
-            ],
-        ] {
-            assert!(add_bwrap_args(&mut args, 17).is_err());
-        }
-    }
-
-    #[test]
-    fn accepts_the_cli_new_session_option() {
-        let mut args = vec![
-            "--new-session".to_string(),
-            "--clearenv".to_string(),
-            "--".to_string(),
-            "sh".to_string(),
-            "-c".to_string(),
-            "echo hello".to_string(),
-        ];
-        add_bwrap_args(&mut args, 17).expect("--new-session takes no operand");
-        assert_eq!(&args[2..4], ["--seccomp", "17"]);
     }
 }

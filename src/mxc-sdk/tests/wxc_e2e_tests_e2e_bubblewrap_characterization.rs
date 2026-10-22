@@ -142,21 +142,35 @@ fn bubblewrap_clears_host_env_by_default() {
     );
 }
 
-/// Locks in that an explicitly requested `process.env` reaches the child.
 #[test]
 fn bubblewrap_applies_requested_env() {
     if !ready() {
         return;
     }
-    let mut cfg = config("env-set", "printf 'SET=[%s]\\n' \"$MXC_CHAR_SET\"");
-    cfg["process"]["env"] = json!(["MXC_CHAR_SET=from_config_c93b"]);
+    let mut cfg = config(
+        "env-set",
+        r#"printf 'SET=[%s]\nSECCOMP=[%s]\nADD_SECCOMP=[%s]\nSEPARATOR=[%s]\n' "$MXC_CHAR_SET" "$MXC_CHAR_SECCOMP" "$MXC_CHAR_ADD_SECCOMP" "$MXC_CHAR_SEPARATOR""#,
+    );
+    cfg["process"]["env"] = json!([
+        "MXC_CHAR_SET=from_config_c93b",
+        "MXC_CHAR_SECCOMP=--seccomp",
+        "MXC_CHAR_ADD_SECCOMP=--add-seccomp-fd",
+        "MXC_CHAR_SEPARATOR=--"
+    ]);
     let result = run_platform_config_value("bwrap env set", &cfg, &[], None);
     assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
-    assert!(
-        result.combined_output().contains("SET=[from_config_c93b]"),
-        "expected requested env var to reach the child. Output:\n{}",
-        result.combined_output()
-    );
+    let output = result.combined_output();
+    for expected in [
+        "SET=[from_config_c93b]",
+        "SECCOMP=[--seccomp]",
+        "ADD_SECCOMP=[--add-seccomp-fd]",
+        "SEPARATOR=[--]",
+    ] {
+        assert!(
+            output.contains(expected),
+            "expected requested env value {expected} to reach the child:\n{output}"
+        );
+    }
 }
 
 /// Locks in that a filesystem grant is **not** a working directory.
@@ -483,48 +497,78 @@ fn bubblewrap_denies_io_uring_with_enosys() {
         return;
     }
 
-    let mut params = [0_u8; IO_URING_PARAMS_SIZE];
-    // SAFETY: `params` is a zeroed buffer the size of `struct io_uring_params`,
-    // and the returned descriptor is checked before use.
-    let control =
-        unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, params.as_mut_ptr()) } as libc::c_int;
-    if control < 0 {
-        println!(
-            "SKIPPED: unfiltered io_uring_setup control failed with errno {}; the host cannot prove the filter caused ENOSYS",
-            std::io::Error::last_os_error()
-                .raw_os_error()
-                .unwrap_or_default()
-        );
+    let probe = format!(
+        r#"import ctypes, json, os
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+params = ctypes.create_string_buffer({IO_URING_PARAMS_SIZE})
+invalid_fd = ctypes.c_int(-1)
+zero = ctypes.c_uint(0)
+null = ctypes.c_void_p()
+unregister_buffers = ctypes.c_uint(1)
+calls = (
+    ("io_uring_setup", {setup}, (ctypes.c_uint(1), ctypes.byref(params))),
+    ("io_uring_enter", {enter}, (invalid_fd, zero, zero, zero, null, ctypes.c_size_t(0))),
+    ("io_uring_register", {register}, (invalid_fd, unregister_buffers, null, zero)),
+)
+errors = {{}}
+for name, number, args in calls:
+    result = libc.syscall(ctypes.c_long(number), *args)
+    errors[name] = ctypes.get_errno() if result < 0 else 0
+    if name == "io_uring_setup" and result >= 0:
+        os.close(result)
+print("IO_URING_ERRNOS=" + json.dumps(errors))"#,
+        setup = libc::SYS_io_uring_setup,
+        enter = libc::SYS_io_uring_enter,
+        register = libc::SYS_io_uring_register,
+    );
+    let parse = |output: &str| -> std::collections::BTreeMap<String, i32> {
+        let payload = output
+            .lines()
+            .find_map(|line| line.strip_prefix("IO_URING_ERRNOS="))
+            .unwrap_or_else(|| panic!("missing io_uring probe results:\n{output}"));
+        serde_json::from_str(payload).expect("io_uring errno results")
+    };
+    let control = Command::new("python3")
+        .args(["-c", &probe])
+        .output()
+        .expect("run unfiltered io_uring control");
+    assert!(
+        control.status.success(),
+        "unfiltered io_uring probe failed:\n{}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    let host_errors = parse(&String::from_utf8_lossy(&control.stdout));
+    let mut verifiable = Vec::new();
+    for name in ["io_uring_setup", "io_uring_enter", "io_uring_register"] {
+        if host_errors[name] == libc::ENOSYS {
+            println!(
+                "SKIPPED: unfiltered {name} also returned ENOSYS; its sandbox denial would be indistinguishable"
+            );
+        } else {
+            verifiable.push(name);
+        }
+    }
+    if verifiable.is_empty() {
         return;
     }
 
-    // SAFETY: The descriptor was returned by the successful io_uring_setup call above.
-    unsafe { libc::close(control) };
-
-    let command = format!(
-        r#"python3 -c 'import ctypes, errno, os, sys
-libc = ctypes.CDLL(None, use_errno=True)
-params = ctypes.create_string_buffer({IO_URING_PARAMS_SIZE})
-ring = libc.syscall({}, 1, params)
-if ring >= 0:
-    os.close(ring)
-    print("IO_URING_ALLOWED")
-    sys.exit(3)
-error = ctypes.get_errno()
-print(f"IO_URING_ERRNO={{error}}")
-sys.exit(0 if error == errno.ENOSYS else 2)'"#,
-        libc::SYS_io_uring_setup
-    );
     let result = run_platform_config_value(
         "bwrap io_uring seccomp",
-        &config("io-uring-seccomp", &command),
+        &config("io-uring-seccomp", &format!("python3 -c '{probe}'")),
         &[],
         None,
     );
     let output = result.combined_output();
-    assert_eq!(result.code, Some(0), "io_uring filter failed:\n{output}");
-    assert!(
-        output.contains(&format!("IO_URING_ERRNO={}", libc::ENOSYS)),
-        "expected exact ENOSYS from io_uring_setup:\n{output}"
-    );
+    assert_eq!(result.code, Some(0), "io_uring probe failed:\n{output}");
+    let sandbox_errors = parse(&output);
+    for name in verifiable {
+        assert_eq!(
+            sandbox_errors[name],
+            libc::ENOSYS,
+            "{name}: expected sandbox ENOSYS after host errno {}:\n{output}",
+            host_errors[name]
+        );
+        println!("{name}: host errno {}, sandbox ENOSYS", host_errors[name]);
+    }
 }
