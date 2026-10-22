@@ -25,9 +25,11 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
   unique Azure Pipelines build ID in its prerelease version so repeated
   publications do not collide.
 - A fast .NET pipeline validation stage runs in parallel with the Rust builds.
-  It verifies the .NET SDK/runtime setup and packs both NuGet variants with
+  It verifies the .NET 10 SDK/runtime setup and packs both NuGet variants with
   synthetic native inputs so pipeline and package-contract failures surface
   without waiting for the cross-platform Rust artifacts.
+  Both variants contain managed assemblies under `lib/net10.0`; consumers
+  must target .NET 10 or later.
 - `1ES.Release.Nuget.yml` lets the runner publish the signed .NET SDK package to
   the internal `Mxc-Azure-Feed` by default, or to NuGet.org through ESRP.
 - `1ES.Release.Npm.yml` publishes the signed npm SDK package through ESRP.

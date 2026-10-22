@@ -55,6 +55,9 @@ build and CI entry points.
 
 ### Targeted validation
 
+The .NET SDK and samples target `net10.0`. The root `global.json` selects a
+stable .NET 10 SDK and the Microsoft.Testing.Platform test runner.
+
 ```text
 # From src/
 cargo fmt --all -- --check
@@ -67,7 +70,7 @@ cargo test -p mxc-sdk --lib -- config_parser
 npm test
 npm run test:integration
 
-# From sdk/dotnet/ (requires .NET SDK 10+)
+# From sdk/dotnet/ (requires .NET SDK 10)
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 

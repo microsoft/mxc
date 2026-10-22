@@ -191,3 +191,23 @@ jobs:
           & $exe
           if ($LASTEXITCODE -ne 0) { throw "AOT smoke test exited $LASTEXITCODE" }
           Write-Host "AOT publish gate passed on ${rid}: reflection-free JSON layer verified."
+
+      - name: Test packed .NET SDK outside the checkout
+        shell: pwsh
+        env:
+          MXC_FFI_DIR: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'dotnet-package-smoke'
+          $feed = Join-Path $root 'feed'
+          $consumer = Join-Path $root 'consumer'
+          $version = '0.0.0-package-smoke'
+          dotnet pack Microsoft.Mxc.Sdk -c Release --no-restore -o $feed --nologo -p:PackageVersion=$version -p:MxcPackSingleRid=true
+          if ($LASTEXITCODE -ne 0) { throw "Packing the SDK exited $LASTEXITCODE" }
+          dotnet new console --framework net10.0 --output $consumer --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "Creating the package consumer exited $LASTEXITCODE" }
+          Copy-Item ../../samples/dryrun-check-containment-support/dotnet/Program.cs (Join-Path $consumer 'Program.cs')
+          dotnet package add Microsoft.Mxc.Sdk --project $consumer --version $version --source $feed --package-directory (Join-Path $root 'cache')
+          if ($LASTEXITCODE -ne 0) { throw "Restoring the packed SDK exited $LASTEXITCODE" }
+          dotnet run --project $consumer -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "The packed SDK consumer exited $LASTEXITCODE" }

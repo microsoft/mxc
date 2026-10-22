@@ -16,8 +16,8 @@ try {
     }
 
     $required = @(
-        'lib/net8.0/Microsoft.Mxc.Sdk.dll',
-        'lib/net8.0/Microsoft.Mxc.Sdk.pdb',
+        'lib/net10.0/Microsoft.Mxc.Sdk.dll',
+        'lib/net10.0/Microsoft.Mxc.Sdk.pdb',
         'runtimes/win-x64/native/mxc_ffi.dll',
         'runtimes/win-x64/native/plm.exe',
         'runtimes/win-arm64/native/mxc_ffi.dll',

@@ -26,16 +26,10 @@ jobs:
   - checkout: self
 
   - task: UseDotNet@2
-    displayName: Use .NET runtime 8
-    inputs:
-      packageType: runtime
-      version: 8.0.x
-
-  - task: UseDotNet@2
     displayName: Use .NET SDK 10
     inputs:
       packageType: sdk
-      version: 10.x
+      version: 10.0.x
 
   - task: PowerShell@2
     displayName: Verify .NET toolchain
@@ -43,13 +37,13 @@ jobs:
       targetType: inline
       script: |
         $sdkVersion = (& dotnet --version).Trim()
-        if ($sdkVersion -notmatch '^10\.') {
+        if ($sdkVersion -notmatch '^10\.0\.') {
           throw "Expected .NET SDK 10, found '$sdkVersion'"
         }
 
         $runtimes = @(& dotnet --list-runtimes)
-        if (-not ($runtimes -match '^Microsoft\.NETCore\.App 8\.')) {
-          throw ".NET 8 runtime is not installed:`n$($runtimes -join "`n")"
+        if (-not ($runtimes -match '^Microsoft\.NETCore\.App 10\.0\.')) {
+          throw ".NET 10 runtime is not installed:`n$($runtimes -join "`n")"
         }
 
   - task: PowerShell@2

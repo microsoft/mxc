@@ -13,6 +13,26 @@ versioning, repository-consistency, and SDK jobs. Repository consistency also
 checks that `mxc-sdk` is the only Rust release crate and has a valid package
 name, version, description, repository, and license.
 
+### .NET SDK validation
+
+The SDK and samples target `net10.0`. Use the .NET 10 SDK selected by the root
+`global.json`; its Microsoft.Testing.Platform runner selection also applies
+to `dotnet test`.
+
+The .NET SDK job builds and tests the solution on Windows, Linux, and macOS.
+It publishes and runs the reflection-free JSON Native AOT smoke test, then
+packs the SDK and installs it into a temporary .NET 10 application outside
+the checkout. That application runs the containment-discovery sample without
+`MXC_FFI_DIR`, so checkout native-build output cannot hide missing package
+runtime assets.
+
+From `sdk/dotnet`, run:
+
+```text
+dotnet build Microsoft.Mxc.Sdk.slnx -c Release
+dotnet test --solution Microsoft.Mxc.Sdk.slnx -c Release --no-build
+```
+
 ### Local Node SDK package validation
 
 From `sdk/node`, run `npm run typecheck` before pushing SDK changes. It builds

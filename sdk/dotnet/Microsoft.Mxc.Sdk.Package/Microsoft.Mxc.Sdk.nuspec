@@ -14,12 +14,12 @@
     <description>.NET SDK for MXC (Microsoft eXecution Container), including Windows, Linux, and macOS native runtime assets.</description>
     <tags>mxc sandbox isolation security</tags>
     <dependencies>
-      <group targetFramework="net8.0" />
+      <group targetFramework="net10.0" />
     </dependencies>
   </metadata>
   <files>
-    <file src="$managedOutput$\Microsoft.Mxc.Sdk.dll" target="lib\net8.0" />
-    <file src="$managedOutput$\Microsoft.Mxc.Sdk.pdb" target="lib\net8.0" />
+    <file src="$managedOutput$\Microsoft.Mxc.Sdk.dll" target="lib\net10.0" />
+    <file src="$managedOutput$\Microsoft.Mxc.Sdk.pdb" target="lib\net10.0" />
     <file src="$x64Native$\*" target="runtimes\win-x64\native" />
     <file src="$arm64Native$\*" target="runtimes\win-arm64\native" />
     <file src="$linuxX64Native$\*" target="runtimes\linux-x64\native" />

@@ -8,6 +8,18 @@ versioned public API is in `Microsoft.Mxc.Sdk.V1`. All request and policy types
 in this API use the SDK-selected contract version; callers do not select
 that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
+## Requirements
+
+The SDK targets `net10.0` and requires .NET 10 or later in the consuming
+application. Applications targeting .NET 8 or .NET 9 must retarget before
+upgrading to this SDK.
+
+Building from source requires the .NET 10 SDK and the Rust toolchain selected
+by `src/rust-toolchain.toml`. The repository's `global.json` selects the latest
+installed stable .NET 10.0 SDK feature band. Framework-dependent applications
+require a .NET 10 runtime; self-contained applications include their runtime.
+Backend-specific operating-system requirements still apply.
+
 ## Run to completion
 
 ```csharp
