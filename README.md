@@ -12,7 +12,8 @@ behind a unified containment model and typed SDKs.
 - **JSON-based configuration**: Versioned container-creation requests and
   security policies
 - **Multiple containment backends**: ProcessContainer, Windows Sandbox, LXC,
-  Bubblewrap, Seatbelt, MicroVM (Nanvix), Hyperlight, IsolationSession, and WSLC
+  Bubblewrap, Seatbelt, MicroVM (NVX on Windows x64), Hyperlight,
+  IsolationSession, and WSLC
 - **Policy-driven sandboxing**:
   - **Filesystem policy**: Read-only, read-write, and denied path lists
   - **Network policy**: Proxy support, outbound controls, and backend-dependent
@@ -52,10 +53,18 @@ Linux, and macOS.
 | Runtime platform | Default backend | Other backends | Minimum host OS |
 |---|---|---|---|
 | Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`\*, `wslc`, `microvm`\*, `hyperlight`\*, `isolation_session` | [Windows OS-version support](docs/backends/process-container/os-version-support.md)|
-| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | - |
+| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `hyperlight` | - |
 | macOS ARM64 / x64 | `seatbelt` | - | - |
 
 \* These backends are **experimental**.
+
+The Windows x64 `microvm` backend is a development NVX integration. A build
+with `--with-microvm` stages the pinned signed NVX agent bundle and requires the
+runtime `--experimental` opt-in. It supports create-and-run
+execution with the command, timeout, guest working directory, and additive
+environment settings. See the
+[NVX integration notes](src/mxc-sdk/README.md#experimental-nvx-create-and-run)
+for build requirements and supported execution.
 
 ## How do I use MXC?
 

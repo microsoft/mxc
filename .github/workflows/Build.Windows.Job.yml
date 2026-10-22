@@ -76,6 +76,13 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      - name: Test NVX host-only executor matrix
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --no-default-features --features microvm
+             --test nvx_e2e windows_x64::host_only_executor_request_matrix
+             -- --ignored --exact
+
       - name: Build debug executor for isolated telemetry smoke tests
         run: cargo build --locked -p wxc --features test-support
 

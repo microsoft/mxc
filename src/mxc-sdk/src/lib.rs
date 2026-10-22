@@ -158,14 +158,8 @@ pub use backend_modules::isolation_session::common as isolation_session_common;
 #[doc(hidden)]
 pub use backend_modules::lxc::common as lxc_common;
 #[doc(hidden)]
-#[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
-pub use backend_modules::nanvix::binaries as nanvix_binaries;
-#[doc(hidden)]
-#[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
-pub use backend_modules::nanvix::common as nanvix_common;
-#[doc(hidden)]
-#[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
-pub use backend_modules::nanvix::runner as nanvix_runner;
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+pub use backend_modules::nvx::runner as nvx_runner;
 #[doc(hidden)]
 #[cfg(target_os = "windows")]
 pub use backend_modules::process_container::common as process_container_common;
@@ -412,7 +406,15 @@ pub mod __ffi {
     /// Run a raw exact-version JSON container request to completion and capture
     /// its output. The JSON and `experimental` rules match [`spawn_container_json`].
     pub fn run_json(request_json: &str, experimental: bool) -> Result<ExecutionResult, Error> {
-        wait_with_output(spawn_container_json(request_json, experimental)?)
+        match crate::mxc_engine::execute_one_shot_json(request_json, experimental)? {
+            #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+            crate::mxc_engine::OneShotExecution::Captured(result) => {
+                Ok(captured_execution_result(result))
+            }
+            crate::mxc_engine::OneShotExecution::Streaming(process) => {
+                wait_with_output(MxcProcess::new(process))
+            }
+        }
     }
 
     /// Run an [MXC lifecycle JSON request](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/container-lifecycle.md#raw-json-entry-points) and return its JSON response envelope.
@@ -478,6 +480,22 @@ pub mod __ffi {
                 ExecOutcome::TimedOut => WaitResult::TimedOut,
             }
         })
+    }
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+fn captured_execution_result(
+    result: crate::mxc_engine::CapturedExecutionResult,
+) -> ExecutionResult {
+    ExecutionResult {
+        outcome: match result.outcome {
+            crate::mxc_engine::CapturedOutcome::Exited(code) => sandbox::WaitResult::Exited(code),
+            crate::mxc_engine::CapturedOutcome::TimedOut => sandbox::WaitResult::TimedOut,
+        },
+        warnings: result.warnings,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        output_metadata: None,
     }
 }
 

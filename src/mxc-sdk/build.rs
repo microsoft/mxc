@@ -10,28 +10,16 @@ mod build_mxc_build_common;
 mod build_mxc_common;
 #[path = "build/build_mxc_telemetry.rs"]
 mod build_mxc_telemetry;
-#[path = "build/build_nanvix_binaries.rs"]
-mod build_nanvix_binaries;
+#[path = "build/build_nvx_bundled.rs"]
+mod build_nvx_bundled;
 #[cfg(feature = "link-wslcsdk")]
 #[path = "build/build_wslc_common.rs"]
 mod build_wslc_common;
-// The SDK build uses the download/cache subset. Executor build scripts include
-// this same module and use its artifact-staging helpers.
-#[allow(dead_code)]
-#[path = "build/build_nanvix_build_common.rs"]
-mod nanvix_build_common;
-// The SDK build uses the release metadata subset. Runtime and executor modules
-// include the remaining constants and stderr helpers.
-#[allow(dead_code)]
-#[path = "src/backends/nanvix/common/mod.rs"]
-mod nanvix_common;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_isolation_session_bindings::run();
     build_mxc_telemetry::run();
-    if let Some((bin_dir, use_prefetched_binaries)) = build_nanvix_binaries::run() {
-        nanvix_build_common::stage_artifacts_next_to_exe(&bin_dir, !use_prefetched_binaries);
-    }
+    build_nvx_bundled::run();
     #[cfg(feature = "link-wslcsdk")]
     build_wslc_common::run();
     build_mxc_common::run()?;

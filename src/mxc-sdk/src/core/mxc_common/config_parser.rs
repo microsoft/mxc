@@ -1439,6 +1439,11 @@ fn normalize_common_request_ir(
     // the newer BaseContainer implementation (ui).
     let mut process_container_network = None;
     if let Some(ac) = cfg.process_container {
+        policy.least_privilege_specified = ac.least_privilege.is_some();
+        policy.learning_mode_specified = ac.learning_mode.is_some();
+        policy.capabilities_specified = ac.capabilities.is_some();
+        policy.base_process_ui_specified = ac.ui.is_some();
+
         if let Some(lp) = ac.least_privilege {
             policy.least_privilege_mode = lp;
         }
@@ -1577,6 +1582,7 @@ fn normalize_common_request_ir(
     normalize_filesystem_paths(&mut policy, logger);
 
     // Fallback section
+    policy.fallback_specified = cfg.fallback.is_some();
     if let Some(fbcfg) = cfg.fallback {
         if let Some(v) = fbcfg.allow_dacl_mutation {
             policy.fallback.allow_dacl_mutation = v;
@@ -1838,6 +1844,35 @@ mod tests {
         assert!(matches!(parsed, MxcRequest::OneShot(_)));
     }
 
+    #[test]
+    fn microvm_rejects_process_container_sections_but_accepts_a_minimal_request() {
+        const ERROR: &str = "Configuration parse error: Multiple containment backends configured: \
+            'containment' is 'microvm' (no per-backend section is defined for this backend), but \
+            the config includes backend section(s): processContainer. Only one backend section is \
+            allowed; remove the unused section(s).";
+
+        for process_container in [r#"{}"#, r#"{"leastPrivilege":false}"#] {
+            let json = format!(
+                r#"{{"version":"1.1.0-alpha","containment":"microvm","process":{{"commandLine":"echo hello"}},"processContainer":{process_container}}}"#
+            );
+            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)), "{error:?}");
+            assert_eq!(error.message(), ERROR);
+        }
+
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "microvm",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.containment, ContainmentBackend::MicroVm);
+    }
+
     fn parse_exact_for_test(json: &str) -> Result<MxcRequest, ParseError> {
         parse_exact_mxc_request_json(json, &mut test_logger())
     }
@@ -1857,6 +1892,11 @@ mod tests {
         network_mode_specified: bool,
         runtime_network_proxy_specified: bool,
         ui_specified: bool,
+        least_privilege_specified: bool,
+        learning_mode_specified: bool,
+        capabilities_specified: bool,
+        base_process_ui_specified: bool,
+        fallback_specified: bool,
         requested_sandbox_kind: Option<&'static str>,
     }
 
@@ -1877,6 +1917,11 @@ mod tests {
                 network_mode_specified: request.policy.network_mode_specified,
                 runtime_network_proxy_specified: request.policy.runtime_network_proxy_specified,
                 ui_specified: request.policy.ui_specified,
+                least_privilege_specified: request.policy.least_privilege_specified,
+                learning_mode_specified: request.policy.learning_mode_specified,
+                capabilities_specified: request.policy.capabilities_specified,
+                base_process_ui_specified: request.policy.base_process_ui_specified,
+                fallback_specified: request.policy.fallback_specified,
                 requested_sandbox_kind: request
                     .telemetry
                     .as_ref()

@@ -2,7 +2,7 @@
     "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
     "version": "1.1.0-alpha",
     "process": {
-        "commandLine": "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n\nfor i in range(10):\n    print(f'fib({i}) = {fib(i)}')",
+        "commandLine": "a=0; b=1; i=0; while [ \"$i\" -lt 10 ]; do printf 'fib(%d) = %d\\n' \"$i\" \"$a\"; next=$((a + b)); a=$b; b=$next; i=$((i + 1)); done",
         "timeout": 30000
     },
     "containment": "microvm"

@@ -660,12 +660,20 @@ impl Default for FallbackPolicy {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ContainerPolicy {
     pub least_privilege_mode: bool,
+    #[serde(skip)]
+    pub least_privilege_specified: bool,
     pub capabilities: Vec<String>,
+    #[serde(skip)]
+    pub learning_mode_specified: bool,
+    #[serde(skip)]
+    pub capabilities_specified: bool,
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
     pub enumerate_paths: Vec<String>,
     pub denied_paths: Vec<String>,
     pub fallback: FallbackPolicy,
+    #[serde(skip)]
+    pub fallback_specified: bool,
     /// Outbound CIDR, protocol, and port policy.
     pub network_egress: Option<NetworkEgressPolicy>,
     /// Inbound and host-loopback policy.
@@ -712,6 +720,8 @@ pub struct ContainerPolicy {
     pub ui_specified: bool,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
     pub base_process_ui: BaseProcessUiConfig,
+    #[serde(skip)]
+    pub base_process_ui_specified: bool,
     /// Windows denial capture (from `processContainer.captureDenials`). When
     /// `Some`, the runner records the sandboxed process's ungranted access
     /// attempts to a learning-mode ETL trace. `None` disables capture.

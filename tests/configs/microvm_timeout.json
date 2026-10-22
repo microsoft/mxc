@@ -1,9 +1,9 @@
 {
     "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
     "version": "1.1.0-alpha",
-    "_comment": "Timeout test. Note: MicroVM adds a 60s boot grace to the 5s script timeout, so actual wall time is ~65s.",
+    "_comment": "Timeout test for the signed NVX agent workload guest.",
     "process": {
-        "commandLine": "import time; time.sleep(120); print('should not reach here')",
+        "commandLine": "sleep 120; printf 'should not reach here\\n'",
         "timeout": 5000
     },
     "containment": "microvm"

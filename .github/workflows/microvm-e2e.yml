@@ -6,7 +6,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'feature/*', 'user/*']
   workflow_dispatch:
 
 permissions:
@@ -40,7 +40,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: cargo build --features microvm --target x86_64-pc-windows-msvc
+        run: cargo build -p wxc --features microvm --target x86_64-pc-windows-msvc
 
       - name: Exclude build output from Windows Defender
         shell: pwsh
@@ -49,26 +49,29 @@ jobs:
           Add-MpPreference -ExclusionPath $binDir
           Write-Host "Added Defender exclusion for $binDir"
 
-      - name: Verify MicroVM binaries
+      - name: Verify MicroVM executable
         shell: pwsh
         run: |
           $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
-          $required = @(
-            "wxc-exec.exe",
-            "nanvixd.exe",
-            "nanvix_rootfs.img",
-            "python3.initrd",
-            "bin\kernel.elf",
-            "snapshots\kernel.vmem",
-            "snapshots\kernel.whp.cbor"
-          )
-          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
+          $required = @((Join-Path $binDir "wxc-exec.exe"))
+          $required += Join-Path $binDir "aci-edge-sandboxes\bundle-manifest.json"
+          $missing = $required | Where-Object { -not (Test-Path $_ -PathType Leaf) }
           if ($missing) {
             Write-Host "::error::Missing binaries: $($missing -join ', ')"
             exit 1
           }
-          $leaves = $required | ForEach-Object { Split-Path $_ -Leaf }
-          Get-ChildItem $binDir -Include $leaves -Recurse | Format-Table FullName, Length
+          Get-Item $required | Format-Table FullName, Length
+
+      - name: Run MicroVM bundle integrity and host-only tests
+        shell: pwsh
+        working-directory: src
+        run: |
+          cargo test -p mxc-sdk --features microvm --test nvx_bundle_integrity --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc windows_x64::host_only_executor_request_matrix -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Diagnose hypervisor environment
         shell: pwsh
@@ -84,7 +87,10 @@ jobs:
         shell: pwsh
         working-directory: src
         run: |
-          cargo test -p mxc-sdk --test wxc_e2e_tests_e2e_windows --target x86_64-pc-windows-msvc test_microvm_ -- --nocapture
+          cargo test -p mxc-sdk --features microvm --test wxc_e2e_tests_e2e_windows --target x86_64-pc-windows-msvc test_microvm_ -- --include-ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc -- --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload logs on failure
         if: failure() || cancelled()

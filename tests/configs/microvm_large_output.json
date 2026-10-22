@@ -2,7 +2,7 @@
     "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
     "version": "1.1.0-alpha",
     "process": {
-        "commandLine": "for i in range(1000):\n    print(f'line {i}: ' + 'x' * 80)",
+        "commandLine": "i=0; while [ \"$i\" -lt 1000 ]; do printf 'line %d: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i + 1)); done",
         "timeout": 30000
     },
     "containment": "microvm"
