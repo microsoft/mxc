@@ -1,4 +1,4 @@
-name: Isolation Session Test Bundle
+name: Windows SDK Test Bundle
 
 on:
   workflow_call:
@@ -55,9 +55,9 @@ jobs:
           BUNDLE_REF: ${{ github.ref }}
           BUNDLE_BUILD_ID: ${{ github.run_id }}
         run: |
-          & ./scripts/ci/build-isolation-session-test-bundle.ps1 `
+          & ./scripts/ci/build-windows-sdk-test-bundle.ps1 `
             -Architecture $env:BUNDLE_ARCH `
-            -OutputDirectory (Join-Path $env:RUNNER_TEMP 'isolation-session-bundle') `
+            -OutputDirectory (Join-Path $env:RUNNER_TEMP 'windows-sdk-bundle') `
             -Pipeline $env:BUNDLE_PIPELINE `
             -BranchName $env:BUNDLE_BRANCH `
             -SourceRef $env:BUNDLE_REF `
@@ -66,7 +66,7 @@ jobs:
       - name: Upload bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: isolation-session-test-bundle-${{ matrix.target }}
-          path: ${{ runner.temp }}/isolation-session-bundle
+          name: windows-sdk-test-bundle-${{ matrix.target }}
+          path: ${{ runner.temp }}/windows-sdk-bundle
           if-no-files-found: error
           retention-days: 1

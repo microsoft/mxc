@@ -1,12 +1,11 @@
 <#
 .SYNOPSIS
-Builds the isolation-session test bundle for one Windows architecture.
+Builds the Windows SDK test bundle for one Windows architecture.
 
 .DESCRIPTION
-Builds the in-process Rust tests, the apartment probe, the self-contained .NET
-SDK tests and the Node SDK integration suite, stages them beside wxc-exec, a
-Node runtime and the PowerShell suites, and checks that every payload
-discovers its tests.
+Builds the IsolationSession and ProcessContainer streaming test payloads for
+Rust, .NET, and Node, stages the native dependencies and PowerShell suites,
+and checks that every payload discovers its tests.
 #>
 [CmdletBinding()]
 param(
@@ -103,7 +102,9 @@ $sdkPackage = @('-p', 'mxc-sdk', '--features', 'isolation_session')
 if (-not $WxcExecPath) {
     $WxcExecPath = Get-CargoExecutable (Invoke-CargoBuild @('build', '-p', 'wxc', '--features', 'isolation_session')) 'wxc-exec'
 }
-$testArtifacts = Invoke-CargoBuild (@('test') + $sdkPackage + @('--test', 'isolation_session', '--test', 'sdk_helpers', '--no-run'))
+$testArtifacts = Invoke-CargoBuild (@('test') + $sdkPackage + @(
+    '--test', 'isolation_session', '--test', 'sdk_helpers',
+    '--test', 'streaming_processcontainer', '--no-run'))
 $probeArtifacts = Invoke-CargoBuild (@('build') + $sdkPackage + @('--example', 'sta_probe'))
 $nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', 'isolation_session') |
     Where-Object { $_.target.name -eq 'mxc_ffi' } |
@@ -143,6 +144,7 @@ Copy-Item -LiteralPath $WxcExecPath -Destination (New-Directory (Join-Path $Outp
 $inproc = New-Directory (Join-Path $OutputDirectory 'inproc')
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'isolation_session') -Destination (Join-Path $inproc 'mxc-sdk-isolation-session-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'sdk_helpers') -Destination (Join-Path $inproc 'mxc-sdk-helpers-tests.exe')
+Copy-Item -LiteralPath (Get-CargoExecutable $testArtifacts 'streaming_processcontainer') -Destination (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe')
 Copy-Item -LiteralPath (Get-CargoExecutable $probeArtifacts 'sta_probe') -Destination (Join-Path $inproc 'sta_probe.exe')
 
 $nodeExe = (Get-Command node -CommandType Application | Select-Object -First 1).Source
@@ -157,7 +159,7 @@ $helperPaths = @(& (Join-Path $PSScriptRoot 'stage-isolation-session-test-helper
     -SourceDirectory (Join-Path $repoRoot 'tests\scripts') -ScriptsDirectory $scriptsOut)
 
 $integrationOut = New-Directory (Join-Path $OutputDirectory 'sdk-integration')
-Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
+Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\windows-process-container.test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
 Copy-Item -LiteralPath (Join-Path $integrationRoot 'package.json'), (Join-Path $integrationRoot 'run-tests.js') -Destination $integrationOut
 # Stages the SDK built above in place of the installed copy.
 $modulesOut = New-Directory (Join-Path $integrationOut 'node_modules')
@@ -193,6 +195,7 @@ $required = @(
     "bin\$Architecture\wxc-exec.exe",
     'inproc\mxc-sdk-isolation-session-tests.exe',
     'inproc\mxc-sdk-helpers-tests.exe',
+    'inproc\mxc-sdk-process-container-streaming-tests.exe',
     'inproc\sta_probe.exe',
     'dotnet\Microsoft.Mxc.Sdk.Tests.exe',
     'dotnet\mxc_ffi.dll',
@@ -202,6 +205,7 @@ $required = @(
     'sdk-integration\package.json',
     'sdk-integration\run-tests.js',
     'sdk-integration\dist\isolation-session-state-aware.test.js',
+    'sdk-integration\dist\windows-process-container.test.js',
     'test_scripts\run_isolation_session_tests.ps1',
     'test_scripts\run_isolation_session_state_aware_tests.ps1',
     'test_scripts\run_isolation_session_resize_smoke.ps1'
@@ -236,14 +240,23 @@ Assert-Discovery 'in-process tests' '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$' {
 Assert-Discovery 'SDK helper tests' '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$' {
     & (Join-Path $inproc 'mxc-sdk-helpers-tests.exe') --list
 }
+Assert-Discovery 'ProcessContainer streaming test' '(?m)^streaming_processcontainer_bidirectional_stdio: test\r?$' {
+    & (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe') --list --ignored --exact streaming_processcontainer_bidirectional_stdio
+}
 Assert-Discovery '.NET tests' 'Microsoft\.Mxc\.Sdk\.Tests' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full
+}
+Assert-Discovery '.NET streaming tests' 'MxcProcessTests\.Streaming_WritesStdin_AndReadsEchoedStdout' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcProcessTests'
 }
 Push-Location $integrationOut
 $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '1'
 try {
     Assert-Discovery 'Node SDK integration suite' '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/isolation-session-state-aware.test.js
+    }
+    Assert-Discovery 'Node ProcessContainer suite' '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$' {
+        & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/windows-process-container.test.js
     }
 }
 finally {
@@ -261,4 +274,4 @@ if ($probeExit -ne 2 -or $probeOutput -notmatch 'unknown mode: invalid') {
 }
 $global:LASTEXITCODE = 0
 
-Write-Host "Isolation-session test bundle for $Architecture staged at $OutputDirectory"
+Write-Host "Windows SDK test bundle for $Architecture staged at $OutputDirectory"

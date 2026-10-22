@@ -29,6 +29,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptRoot 'lib\TestSuiteResults.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
 $testScriptRoot = Join-Path $repoRoot 'tests\scripts'
 $binaryDirectoryPath = (Resolve-Path -LiteralPath $BinaryDirectory).Path
@@ -113,6 +114,7 @@ function Invoke-ProcessContainerTests {
         throw "Native ProcessContainer read/write smoke failed: exit=$LASTEXITCODE; output=$output"
     }
     Write-Host $output
+    Invoke-ProcessContainerStreamingTests
     Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_base_container_network_tests.ps1') `
         -Arguments @{ BinDir = $binaryDirectoryPath }
     Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_processcontainer_policy_tests.ps1') `
@@ -179,53 +181,66 @@ function Invoke-ScriptSuite {
     $skipped
 }
 
-function Get-LibtestFailure {
-    param([Parameter(Mandatory)][hashtable]$Run)
-
-    if ($Run.ExitCode -ne 0) {
-        return "exited $($Run.ExitCode)"
+function Invoke-ProcessContainerStreamingTests {
+    $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
+    $rustTests = Join-Path $bundle 'inproc\mxc-sdk-process-container-streaming-tests.exe'
+    $dotnetTests = Join-Path $bundle 'dotnet\Microsoft.Mxc.Sdk.Tests.exe'
+    $node = Join-Path $bundle 'node\node.exe'
+    $nodeSuiteRoot = Join-Path $bundle 'sdk-integration'
+    foreach ($file in $rustTests, $dotnetTests, $node, (Join-Path $nodeSuiteRoot 'dist\windows-process-container.test.js')) {
+        Assert-File -Path $file
     }
-    $summary = Select-String -LiteralPath $Run.Log -Pattern '^test result: \w+\. (\d+) passed; (\d+) failed;' |
-        Select-Object -Last 1
-    if (-not $summary -or ([int]$summary.Matches[0].Groups[1].Value + [int]$summary.Matches[0].Groups[2].Value) -eq 0) {
-        return 'executed no tests'
-    }
-}
 
-# Node reports a skipped describe block as a top-level skipped testcase.
-function Get-NodeSuiteFailure {
-    param([Parameter(Mandatory)][string]$JunitPath)
+    $rustCase = 'streaming_processcontainer_bidirectional_stdio'
+    $run = Invoke-LoggedNative -FilePath $rustTests -LogName 'process-container-rust-streaming.log' `
+        -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
+    $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
+    if ($failure) { throw "Rust ProcessContainer streaming: $failure" }
 
-    [xml]$report = Get-Content -LiteralPath $JunitPath -Raw
-    $blocks = @($report.testsuites.ChildNodes | Where-Object { $_.NodeType -eq 'Element' })
-    if ($blocks.Count -eq 0) {
-        return 'executed no tests'
-    }
-    $failures = foreach ($block in $blocks) {
-        if (@($block.SelectNodes('descendant-or-self::testcase[not(skipped)]')).Count -eq 0) {
-            "'$($block.name)' executed no tests"
+    $previousPsec = $env:MXC_E2E_PSEC_CAPABLE_HOST
+    $previousSkip = $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS
+    try {
+        $env:MXC_E2E_PSEC_CAPABLE_HOST = '1'
+        $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '0'
+        $resultXml = Join-Path $env:TEMP 'process-container-dotnet-streaming.xml'
+        if (Test-Path -LiteralPath $resultXml) { Remove-Item -LiteralPath $resultXml }
+        $run = Invoke-LoggedNative -FilePath $dotnetTests -LogName 'process-container-dotnet-streaming.log' `
+            -ArgumentList @('-class', '*.MxcProcessTests', '-result-xml', $resultXml)
+        if ($run.ExitCode -ne 0) { throw ".NET ProcessContainer streaming exited $($run.ExitCode)." }
+        $failure = Get-XunitSuiteFailure -ResultXml $resultXml -Classes 'MxcProcessTests' -RejectSkipped `
+            -RequiredMethods @('Streaming_WritesStdin_AndReadsEchoedStdout', 'OutputHeavyChild_DoesNotDeadlock',
+                'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
+                'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock')
+        if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
+
+        $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
+        if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
+        $requiredNodeTests = @(
+            'public run captures output and the workload exit code',
+            'public spawn returns an SDK process with live standard streams'
+        )
+        Push-Location $nodeSuiteRoot
+        try {
+            $run = Invoke-LoggedNative -FilePath $node -LogName 'process-container-node-streaming.log' `
+                -ArgumentList @('--test', '--test-force-exit',
+                    '--test-name-pattern', ($requiredNodeTests -join '|'),
+                    '--test-reporter=spec', '--test-reporter-destination=stdout',
+                    '--test-reporter=junit', "--test-reporter-destination=$junit",
+                    'dist/windows-process-container.test.js')
+        } finally {
+            Pop-Location
         }
+        if ($run.ExitCode -ne 0) { throw "Node ProcessContainer streaming exited $($run.ExitCode)." }
+        $failure = Get-NodeSuiteFailure -JunitPath $junit -RequiredTests $requiredNodeTests
+        if ($failure) { throw "Node ProcessContainer streaming: $failure" }
+    } finally {
+        [Environment]::SetEnvironmentVariable('MXC_E2E_PSEC_CAPABLE_HOST', $previousPsec)
+        [Environment]::SetEnvironmentVariable('MXC_SKIP_OS_BUILD_DEPENDENT_TESTS', $previousSkip)
     }
-    $failures -join '; '
-}
-
-function Get-XunitSuiteFailure {
-    param(
-        [Parameter(Mandatory)][string]$ResultXml,
-        [Parameter(Mandatory)][string[]]$Classes
-    )
-
-    $tests = @(([xml](Get-Content -LiteralPath $ResultXml -Raw)).SelectNodes("//test[@result='Pass' or @result='Fail']"))
-    $failures = foreach ($class in $Classes) {
-        if (@($tests | Where-Object { $_.type -like "*.$class" }).Count -eq 0) {
-            "'$class' executed no tests"
-        }
-    }
-    $failures -join '; '
 }
 
 function Invoke-IsolationSessionSuites {
-    $bundle = Join-Path $binaryDirectoryPath 'isolation-session-bundle'
+    $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
     $inProcTests = Join-Path $bundle 'inproc\mxc-sdk-isolation-session-tests.exe'
     $helperTests = Join-Path $bundle 'inproc\mxc-sdk-helpers-tests.exe'
     $staProbe = Join-Path $bundle 'inproc\sta_probe.exe'

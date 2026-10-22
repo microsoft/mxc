@@ -1,6 +1,48 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+function Get-NativeFixtureSecuritySnapshot {
+    param([Parameter(Mandatory)][string[]]$Paths)
+
+    $snapshot = @{}
+    foreach ($path in $Paths) {
+        $acl = Get-Acl -LiteralPath $path
+        $snapshot[$path] = @{ Acl = $acl; Sddl = $acl.Sddl }
+    }
+    $snapshot
+}
+
+function Assert-NativeFixtureSecurity {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][hashtable]$Snapshot
+    )
+
+    $changed = @()
+    foreach ($entry in $Snapshot.GetEnumerator()) {
+        if ((Get-Acl -LiteralPath $entry.Key).Sddl -cne $entry.Value.Sddl) {
+            $changed += $entry.Key
+            # Restore only the owned fixture before reporting the violation.
+            $directory = [IO.DirectoryInfo]::new($entry.Key)
+            $restore = [IO.FileSystemAclExtensions]::GetAccessControl($directory)
+            $sections = [Security.AccessControl.AccessControlSections]::Access
+            $sid = [Security.Principal.SecurityIdentifier]
+            if ($restore.GetOwner($sid) -ne $entry.Value.Acl.GetOwner($sid)) {
+                $sections = $sections -bor [Security.AccessControl.AccessControlSections]::Owner
+            }
+            if ($restore.GetGroup($sid) -ne $entry.Value.Acl.GetGroup($sid)) {
+                $sections = $sections -bor [Security.AccessControl.AccessControlSections]::Group
+            }
+            $restore.SetSecurityDescriptorSddlForm($entry.Value.Sddl, $sections)
+            [IO.FileSystemAclExtensions]::SetAccessControl($directory, $restore)
+            if ((Get-Acl -LiteralPath $entry.Key).Sddl -cne $entry.Value.Sddl) {
+                throw "$Name could not restore owned fixture security: $($entry.Key)"
+            }
+        }
+    }
+    if ($changed.Count) { throw "$Name changed fixture security descriptors: $($changed -join ', ')" }
+}
+
 function Invoke-NativeProcessContainer {
     param(
         [Parameter(Mandatory)][string]$WxcExec,
@@ -17,6 +59,7 @@ function Invoke-NativeProcessContainer {
     foreach ($argument in (@('--log-file', $logPath) + $Arguments)) {
         $info.ArgumentList.Add($argument)
     }
+
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $info.UseShellExecute = $false
@@ -35,6 +78,10 @@ function Invoke-NativeProcessContainer {
                 throw "$Name timed out and executor PID $($process.Id) did not stop."
             }
         }
+        $drain = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
+        if (-not $drain.Wait(5000)) {
+            throw [TimeoutException]::new("$Name redirected output did not close within 5 seconds after executor exit. See $ScratchRoot.")
+        }
         $stdout = $stdoutTask.GetAwaiter().GetResult()
         $stderr = $stderrTask.GetAwaiter().GetResult()
         Set-Content -LiteralPath (Join-Path $ScratchRoot "$Name.stdout.txt") -Value $stdout
@@ -50,10 +97,15 @@ function Invoke-NativeProcessContainer {
             }
         }
     } finally {
-        if (-not $process.HasExited) {
-            $process.Kill($true)
-            $process.WaitForExit()
+        try {
+            if (-not $process.HasExited) {
+                $process.Kill($true)
+                if (-not $process.WaitForExit(5000)) {
+                    throw "$Name executor PID $($process.Id) did not stop during cleanup."
+                }
+            }
+        } finally {
+            $process.Dispose()
         }
-        $process.Dispose()
     }
 }

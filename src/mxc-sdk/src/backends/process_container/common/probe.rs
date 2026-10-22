@@ -10,7 +10,7 @@ use crate::mxc_common::ui_policy::EffectiveUiRestrictions;
 
 use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-/// JSON output emitted by `wxc-exec --probe`.
+/// Host capabilities and request compatibility for Windows ProcessContainer.
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeOutput {

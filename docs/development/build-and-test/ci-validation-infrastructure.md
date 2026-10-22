@@ -15,9 +15,9 @@ the individual local test scripts are documented in
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
-  `Build.MacOS.Job.yml`, and for IsolationSession the test bundle from
-  `Package.IsolationSession.TestBundle.Job.yml`, in the same workflow run, so
-  what gets tested is exactly what got built.
+  `Build.MacOS.Job.yml`, and for ProcessContainer and IsolationSession the
+  Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`, in the same
+  workflow run, so what gets tested is exactly what got built.
 - The matrix is **declarative**. `scripts/ci/validation-test-matrix.json` is the
   only file you edit to change *what runs where*;
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
@@ -30,8 +30,8 @@ the individual local test scripts are documented in
 |------|------|
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
-| `.github/workflows/Package.IsolationSession.TestBundle.Job.yml` | `workflow_call`-only. Builds the IsolationSession test bundle natively on x64 and arm64 and uploads it as `isolation-session-test-bundle-<target>`. |
-| `scripts/ci/build-isolation-session-test-bundle.ps1` | Builds and assembles the IsolationSession test bundle, and checks that each payload discovers its tests. |
+| `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
+| `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession and ProcessContainer SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
@@ -47,10 +47,10 @@ the individual local test scripts are documented in
 Validation.Tests.Scheduled.yml
   └─ dependency-feed-check
       ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
-      ├─ isolation-session-bundle   →  Package.IsolationSession.TestBundle.Job.yml  (upload bundle)
+      ├─ windows-sdk-bundle         →  Package.WindowsSdk.TestBundle.Job.yml  (upload bundle)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
-                 ├─ windows job (matrix) → download artifact (+ bundle for isolation-session) → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
+                 ├─ windows job (matrix) → download artifact (+ SDK bundle for process/isolation-session) → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
                  ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_backend_validation_tests.sh
                  └─ macos   job (matrix) → download artifact → prepare-macos-host.sh  → run_backend_validation_tests.sh
 ```
@@ -68,22 +68,22 @@ test jobs only ever `download-artifact`.
 | `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. |
 | `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
-| `isolation-session-bundle` | `Package.IsolationSession.TestBundle.Job.yml` — uploads `isolation-session-test-bundle-<target>` for x64 + arm64. |
+| `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |
 
 Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
 
 Build artifacts are kept for 1 day — they exist only to feed these jobs. The
-test jobs need the three builds; a failed bundle fails only the IsolationSession
-jobs, at their bundle download.
+test jobs need the three builds; a failed SDK bundle fails the ProcessContainer
+and IsolationSession jobs at their bundle download.
 
 ### `Validation.Tests.Matrix.Job.yml` — "Create Validation Test Matrix"
 
 | Job | Runner | What it does |
 |-----|--------|--------------|
 | `resolve` | `ubuntu-latest` | Runs the resolver, emits one matrix per OS family plus `has_<family>` flags so an empty family is skipped rather than failing on an empty matrix. |
-| `windows` | `A self-hosted 1ES Pool` | Download artifact (plus the test bundle for `isolation-session`) → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
+| `windows` | `A self-hosted 1ES Pool` | Download artifact (plus the SDK bundle for `process` and `isolation-session`) → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
 | `linux` | `A self-hosted 1ES Pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `prepare-macos-host.sh <backend id>` → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. |
 
@@ -140,7 +140,12 @@ virtualization on ARM CPUs yet, so only backends that don't require virtualizati
 A backend id is passed straight through: the matrix job hands it to the host-prep
 script and then to the dispatcher, which has one `switch`/`case` per id. The
 `process` case requires `wxc-exec --probe` to report an enabled native PSEC
-contract, then runs a filesystem smoke test against the downloaded artifact.
+contract, then runs a filesystem smoke test, public SDK streaming tests, and
+the native network and policy suites against the downloaded artifacts.
+The network and policy suites delegate their focused loopback and enumeration
+checks to standalone native runners. These retain the host controls and
+enforcement assertions; enumeration also checks live request-probe agreement
+and fixture security on supported and unsupported hosts.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -189,7 +194,7 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| ProcessContainer | ✅ Good | Requires native PSEC; verifies filesystem policy, aliases, pre-execution rejection, egress/loopback/proxy rules, Win32k, HANDLES, and global atoms. Unsupported host capabilities must reject requests. Privilege removal uses a host-token control. |
+| ProcessContainer | ✅ Good | Requires native PSEC; verifies public Rust, .NET, and Node SDK streaming, filesystem policy, aliases, pre-execution rejection, egress/loopback/proxy rules, Win32k, HANDLES, and global atoms. Unsupported host capabilities must reject requests. Privilege removal uses a host-token control. |
 | Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. The Linux build job also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
@@ -197,6 +202,20 @@ get fixed or wired.
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
+
+### ProcessContainer SDK streaming
+
+Every scheduled `process` job downloads the architecture-matched Windows SDK
+test bundle. The bundle contains native test executables, self-contained .NET
+tests, and the Node SDK with its Node 24.21.0 runtime; validation hosts do not
+compile or restore SDK dependencies.
+
+The dispatcher explicitly runs the ignored Rust bidirectional-stdio test,
+enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET `MxcProcessTests`, and runs the
+Node public `run` and `spawn` integration cases. The .NET suite checks stdin,
+stdout, stderr, large output, cancellation, kill, and timeout behavior.
+Required test names and methods must pass; empty selections and skipped
+streaming cases fail the job even when the runner exits successfully.
 
 ### IsolationSession Rust test concurrency
 
@@ -568,12 +587,12 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
-  isolation-session-bundle:
+  windows-sdk-bundle:
     needs: dependency-feed-check
-    uses: ./.github/workflows/Package.IsolationSession.TestBundle.Job.yml
+    uses: ./.github/workflows/Package.WindowsSdk.TestBundle.Job.yml
 
   test:
-    needs: [windows, linux, macos, isolation-session-bundle]
+    needs: [windows, linux, macos, windows-sdk-bundle]
     if: >-
       ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success'
       && needs.macos.result == 'success' }}

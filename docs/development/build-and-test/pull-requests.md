@@ -13,6 +13,14 @@ versioning, repository-consistency, and SDK jobs. Repository consistency also
 checks that `mxc-sdk` is the only Rust release crate and has a valid package
 name, version, description, repository, and license.
 
+Windows builds first run host-only regression checks for loopback command
+quoting and native-process output capture. These verify direct and
+shell-wrapped launches, normal stdout/stderr capture, and prompt failure when
+an exited process leaves a descendant holding an output handle. Result-gate
+regressions also reject empty selections and skipped SDK streaming cases.
+These checks do not require PSEC; scheduled ProcessContainer hosts execute the
+prebuilt public SDK streaming tests from the Windows SDK test bundle.
+
 ### Local Node SDK package validation
 
 From `sdk/node`, run `npm run typecheck` before pushing SDK changes. It builds

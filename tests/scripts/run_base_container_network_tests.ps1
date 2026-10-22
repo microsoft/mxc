@@ -107,6 +107,11 @@ if ($probe.tier -ne "base-container") {
     throw "Native PSEC is required; selected tier: $($probe.tier)"
 }
 
+$global:LASTEXITCODE = 0
+& (Join-Path $PSScriptRoot 'run_processcontainer_network_loopback_test.ps1') `
+    -BinDir (Split-Path -Parent $WxcExec)
+if ($LASTEXITCODE -ne 0) { throw "Focused loopback suite exited $LASTEXITCODE." }
+
 $destinations = @(
     @{ Url = 'https://dev.azure.com/'; Pattern = 'Object moved' },
     @{ Url = 'https://example.com/'; Pattern = 'Example Domain' }
@@ -166,12 +171,18 @@ function Invoke-LoopbackCase {
         [string[]]$ReadonlyPaths = @(),
         [switch]$Blocked
     )
+    $curlArguments = @()
+    if ($ResolveAddress) {
+        $uri = [Uri]$Url
+        $curlArguments += @('--resolve', "$($uri.Host):$($uri.Port):$ResolveAddress")
+    }
+    if ($IPv4) { $curlArguments += '--ipv4' }
     $config = @{
         version = '1.0.0'
         containment = 'processcontainer'
         process = @{
             commandLine = (Get-LoopbackAnchorCommand -Url $Url -TimeoutSec 5 `
-                -UseProxyEnvironment:([bool]$ProxyUrl -and -not $Blocked))
+                -UseProxyEnvironment:([bool]$ProxyUrl -and -not $Blocked) -AdditionalArguments $curlArguments)
             cwd = $ScratchRoot
             timeout = 30000
         }
@@ -183,10 +194,6 @@ function Invoke-LoopbackCase {
         ui = @{ disable = $false }
     }
     if ($Egress) { $config.network.egress = $Egress }
-    if ($ResolveAddress) {
-        $uri = [Uri]$Url
-        $config.process.commandLine += ' --resolve "' + $uri.Host + ':' + $uri.Port + ':' + $ResolveAddress + '"'
-    }
     if ($IngressDefault -or $HostLoopback) {
         $config.network.ingress = @{}
         if ($IngressDefault) { $config.network.ingress.default = $IngressDefault }
@@ -198,7 +205,6 @@ function Invoke-LoopbackCase {
     }
     if ($NetworkForm -eq 'omitted') { $config.Remove('network') }
     if ($NetworkForm -eq 'empty') { $config.network = @{} }
-    if ($IPv4) { $config.process.commandLine += ' --ipv4' }
     if ($ProxyEnvironment) {
         $config.process.commandLine = 'cmd.exe /d /s /c "set HTTP_PROXY & set HTTPS_PROXY & set NO_PROXY & exit /b 0"'
     }
@@ -271,13 +277,6 @@ try {
         -ResolveAddress $target.Address -Blocked
     Invoke-LoopbackCase -Name 'capability-matrix-allow-allow' -Url $target.Url `
         -IngressDefault 'allow' -HostLoopback 'deny' -ResolveAddress $target.Address -ExpectedBodyPattern $target.Pattern
-    Invoke-LoopbackCase -Name 'omitted-host-loopback-denies' -Url $ipv4.Url -Blocked
-    Invoke-LoopbackCase -Name 'explicit-host-loopback-denies' -Url $ipv4.Url `
-        -IngressDefault 'deny' -HostLoopback 'deny' -Blocked
-    foreach ($ingress in @('allow', 'deny')) {
-        Invoke-LoopbackCase -Name "host-loopback-allows-ingress-$ingress" -Url $ipv4.Url `
-            -IngressDefault $ingress -HostLoopback 'allow' -ExpectedBody $ipv4.Body
-    }
     Invoke-LoopbackCase -Name 'proxy-endpoint-reachable' -Url 'http://mxc-proxy-probe.invalid/' `
         -IngressDefault 'allow' -HostLoopback 'allow' -ProxyUrl $proxy.Url -ExpectedBody $proxy.Body
     Invoke-LoopbackCase -Name 'proxy-child-environment' -Url $proxy.Url -ProxyEnvironment `

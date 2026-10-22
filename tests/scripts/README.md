@@ -31,8 +31,13 @@ Linux / macOS (`.sh`):
 
 | Script | Description | Extra prerequisites |
 |--------|-------------|---------------------|
+| `test_loopback_anchor_command.ps1` | Host-only regression checks for direct and shell-wrapped loopback commands, with and without proxy-environment handling; runs in Windows PR builds | `curl.exe`; no sandbox backend |
+| `test_native_process_container_capture.ps1` | Host-only capture regression: preserves normal output and rejects inherited output handles within a bounded wait; runs in Windows PR builds | Windows .NET Framework compiler; no sandbox backend |
+| `test_sdk_suite_results.ps1` | Checks that required Rust, .NET, and Node tests cannot pass CI through an empty selection or skipped streaming cases; runs in Windows PR builds | No sandbox backend |
 | `run_basicprocess_test.ps1` | Basic process container test | `wxc-exec.exe` |
 | `run_base_container_network_tests.ps1` | Native ProcessContainer egress defaults, host-loopback policy, and IPv4/IPv6 proxy endpoint isolation | Native PSEC support for host loopback and identity-less loopback proxy; IPv6 loopback; Windows PowerShell 5.1; `curl.exe`; outbound access to the egress fixture |
+| `run_processcontainer_network_loopback_test.ps1` | Focused default-deny, explicit-deny, and explicit-allow host-loopback checks under both ingress defaults | Native PSEC; `curl.exe`; host loopback; no internet fixture |
+| `run_processcontainer_filesystem_enumerate_test.ps1` | Focused request-probe agreement, enumeration-only enforcement, unsupported-host refusal, and unchanged fixture ACLs | Native PSEC; Windows PowerShell 5.1; no UI probe or internet fixture |
 | `run_processcontainer_policy_tests.ps1` | Native filesystem allow/deny and aliases, fail-closed capability checks, Win32k, HANDLES and bidirectional atom isolation, and host-controlled privilege removal | Native PSEC; Windows PowerShell 5.1; `wxc-ui-probe.exe`; no PLM |
 | `run_pwsh_test.ps1` | PowerShell Set-Location test | `wxc-exec.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
@@ -56,6 +61,21 @@ IPv4/IPv6 loopback listeners with known response bodies. Native proxy checks
 pair a successful proxied request with denied direct requests to other
 loopback endpoints; launch failures do not count as network denials.
 
+The aggregate network and policy suites call the focused loopback and
+enumeration runners, respectively. They can also be run independently from
+the repository root:
+
+```powershell
+.\tests\scripts\run_processcontainer_network_loopback_test.ps1 -BinDir .\src\target\debug
+.\tests\scripts\run_processcontainer_filesystem_enumerate_test.ps1 -BinDir .\src\target\debug
+```
+
+The enumeration runner probes and executes the same request. Supported hosts
+must list the granted directory while denying file reads, writes, and
+ungranted-directory enumeration. Unsupported hosts must reject the request
+before execution with the enumeration-specific reason. Both paths leave the
+owned fixtures' security descriptors unchanged.
+
 Both native ProcessContainer suites run contained workloads through
 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` with
 `-NoProfile -NonInteractive -ExecutionPolicy Bypass` and the shared
@@ -64,6 +84,11 @@ The timeout child is a uniquely named copy of Windows PowerShell. Native
 Win32k-disabled and global-atom probes use `wxc-ui-probe`; no in-container C#
 compilation is needed. Clipboard tests skip non-text formats before changing
 anything, and restore and verify the original text in `finally`.
+
+The shared native-process capture helper allows 45 seconds for execution and
+five seconds for redirected output to close after executor exit. A descendant
+retaining an output handle causes a stream-drain failure rather than an
+unbounded wait. Process cleanup also uses a bounded wait.
 
 ### Unix suites
 

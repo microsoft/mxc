@@ -15,13 +15,13 @@ if (-not (Test-Path -LiteralPath $UiProbe -PathType Leaf)) {
 $ScratchRoot = Join-Path $env:TEMP ("mxc-native-policy-" + [guid]::NewGuid().ToString('N'))
 $FixtureDirectories = @(
     '', 'rw', 'rw\blocked', 'rw\child', 'rw\conflict', 'rw\denied-long-directory',
-    'rw\granted-long-directory', 'ro', 'unlisted', 'enumerate', 'rw\denied-parent',
+    'rw\granted-long-directory', 'ro', 'unlisted', 'rw\denied-parent',
     'rw\denied-parent\child', 'rw\denied-parent\sibling', 'launcher'
 )
 foreach ($directory in $FixtureDirectories) {
     New-Item -ItemType Directory -Path (Join-Path $ScratchRoot $directory) -Force | Out-Null
 }
-foreach ($directory in @('rw\blocked', 'rw\conflict', 'rw\denied-long-directory', 'rw\granted-long-directory', 'ro', 'unlisted', 'enumerate', 'rw\denied-parent\sibling')) {
+foreach ($directory in @('rw\blocked', 'rw\conflict', 'rw\denied-long-directory', 'rw\granted-long-directory', 'ro', 'unlisted', 'rw\denied-parent\sibling')) {
     Set-Content -LiteralPath (Join-Path $ScratchRoot "$directory\seed.txt") -Value 'seed' -NoNewline
 }
 $WindowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -89,12 +89,8 @@ function Invoke-PolicyCase {
     }
     $path = Join-Path $ScratchRoot "$Name.json"
     $Request | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path
-    $security = @{}
-    foreach ($relative in $FixtureDirectories) {
-        $fixturePath = Join-Path $ScratchRoot $relative
-        $acl = Get-Acl -LiteralPath $fixturePath
-        $security[$fixturePath] = @{ Acl = $acl; Sddl = $acl.Sddl }
-    }
+    $security = Get-NativeFixtureSecuritySnapshot -Paths @(
+        $FixtureDirectories | ForEach-Object { Join-Path $ScratchRoot $_ })
     if ($ObserveSecurity) {
         $Observe = {
             param($Process)
@@ -144,29 +140,7 @@ function Invoke-PolicyCase {
             }
         }
     } finally {
-        $changed = @()
-        foreach ($entry in $security.GetEnumerator()) {
-            if ((Get-Acl -LiteralPath $entry.Key).Sddl -cne $entry.Value.Sddl) {
-                $changed += $entry.Key
-                # Set-Acl can request audit privileges that fixture DACL cleanup does not need.
-                $directory = [IO.DirectoryInfo]::new($entry.Key)
-                $restore = [IO.FileSystemAclExtensions]::GetAccessControl($directory)
-                $sections = [Security.AccessControl.AccessControlSections]::Access
-                $sid = [Security.Principal.SecurityIdentifier]
-                if ($restore.GetOwner($sid) -ne $entry.Value.Acl.GetOwner($sid)) {
-                    $sections = $sections -bor [Security.AccessControl.AccessControlSections]::Owner
-                }
-                if ($restore.GetGroup($sid) -ne $entry.Value.Acl.GetGroup($sid)) {
-                    $sections = $sections -bor [Security.AccessControl.AccessControlSections]::Group
-                }
-                $restore.SetSecurityDescriptorSddlForm($entry.Value.Sddl, $sections)
-                [IO.FileSystemAclExtensions]::SetAccessControl($directory, $restore)
-                if ((Get-Acl -LiteralPath $entry.Key).Sddl -cne $entry.Value.Sddl) {
-                    throw "$Name could not restore owned fixture security: $($entry.Key)"
-                }
-            }
-        }
-        if ($changed.Count) { throw "$Name changed fixture security descriptors: $($changed -join ', ')" }
+        Assert-NativeFixtureSecurity -Name $Name -Snapshot $security
     }
     $script:Passed++
     Write-Host "PASSED: $Name"
@@ -330,16 +304,9 @@ try {
     }
 }
 
-if ($facts.baseContainerSupportsEnumeratePaths) {
-    $enumerate = New-PolicyRequest -Mode 'enumerate'
-    $enumerate.processContainer.filesystem = @{ enumeratePaths = @((Join-Path $ScratchRoot 'enumerate')) }
-    Invoke-PolicyCase -Name 'enumerate-without-content-access' -Request $enumerate
-} else {
-    $enumerate = New-PolicyRequest -Mode 'enumerate'
-    $enumerate.processContainer.filesystem = @{ enumeratePaths = @((Join-Path $ScratchRoot 'enumerate')) }
-    Invoke-PolicyCase -Name 'unsupported-enumerate-rejected-before-execution' -Request $enumerate -Reject `
-        -RejectionMessage 'Windows ProcessContainer requires native PSEC enumeration-only access support for this request'
-}
+$global:LASTEXITCODE = 0
+& (Join-Path $PSScriptRoot 'run_processcontainer_filesystem_enumerate_test.ps1') -BinDir $BinDir
+if ($LASTEXITCODE -ne 0) { throw "Focused enumeration suite exited $LASTEXITCODE." }
 
 $rejected = New-PolicyRequest -Mode 'filesystem' -ProbeArguments @('0')
 $rejected.processContainer.leastPrivilege = $true

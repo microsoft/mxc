@@ -43,6 +43,8 @@ jobs:
       # lane does not build that backend. Both report as skips, so what this
       # lane establishes is the managed surface plus the native library loading
       # on this platform.
+      # The scheduled ProcessContainer jobs run MxcProcessTests from the Windows
+      # SDK test bundle with the PSEC switch enabled and reject skipped tests.
       #
       # A zero exit code is not sufficient evidence on its own, because a run in
       # which every test skipped also exits 0. Parsing the summary is what

@@ -85,7 +85,7 @@ Write-Output 'LoopbackAnchor.ps1'
     $tokens = $null
     $errors = $null
     $builder = [System.Management.Automation.Language.Parser]::ParseFile(
-        (Join-Path $PSScriptRoot 'build-isolation-session-test-bundle.ps1'),
+        (Join-Path $PSScriptRoot 'build-windows-sdk-test-bundle.ps1'),
         [ref]$tokens, [ref]$errors)
     $updates = @($builder.FindAll({
         param($node)

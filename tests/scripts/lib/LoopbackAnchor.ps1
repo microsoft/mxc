@@ -81,9 +81,17 @@ function Get-LoopbackAnchorCommand {
     param(
         [Parameter(Mandatory)][string]$Url,
         [int]$TimeoutSec = 15,
-        [switch]$UseProxyEnvironment
+        [switch]$UseProxyEnvironment,
+        [string[]]$AdditionalArguments = @()
     )
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     $noProxy = if ($UseProxyEnvironment) { '' } else { ' --noproxy "*"' }
-    "`"$curl`" --silent --show-error --fail$noProxy --max-time $TimeoutSec `"$Url`""
+    $extra = foreach ($argument in $AdditionalArguments) {
+        if ($argument.Contains('"')) { throw 'Additional curl arguments must not contain double quotes.' }
+        '"' + $argument + '"'
+    }
+    $command = "`"$curl`" --silent --show-error --fail$noProxy --max-time $TimeoutSec `"$Url`""
+    if ($extra) { $command += ' ' + ($extra -join ' ') }
+    # Preserve curl's quotes for both direct creation and an outer cmd.exe /c.
+    "cmd.exe /d /s /c `"$command`""
 }

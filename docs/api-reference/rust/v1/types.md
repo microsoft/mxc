@@ -552,7 +552,7 @@ pub struct ProbeFacts {
 
 ## `mxc_sdk::v1::ProbeOutput`
 
-JSON output emitted by `wxc-exec --probe`.
+Host capabilities and request compatibility for Windows ProcessContainer.
 
 When native ProcessContainer cannot serve the request, `tier` and
 `needs_dacl_augmentation` are `None` and `error` explains why. `probes` still

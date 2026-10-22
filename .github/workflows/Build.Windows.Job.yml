@@ -26,6 +26,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Test loopback command quoting
+        shell: pwsh
+        run: ..\tests\scripts\test_loopback_anchor_command.ps1
+
+      - name: Test bounded native output capture
+        shell: pwsh
+        run: ..\tests\scripts\test_native_process_container_capture.ps1
+
+      - name: Test SDK suite execution gates
+        shell: pwsh
+        run: ..\tests\scripts\test_sdk_suite_results.ps1
+
       # actions-rust-lang/setup-rust-toolchain auto-reads rust-toolchain.toml
       # from the repo root only. Surface src/rust-toolchain.toml there so the
       # 1.93 pin is honored without duplicating the version in this workflow.
