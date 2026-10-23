@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
-use crate::mxc_common::mxc_error::MxcError;
+use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::process_util::{
     InterruptiblePipeReader, OwnedHandle as ProcessOwnedHandle, PipeReadCanceller,
 };
@@ -75,13 +75,24 @@ pub fn spawn_one_shot(
 /// workload exits, and whose relay scope borrows the process — into a
 /// non-blocking start with detached relays.
 fn inherit_not_served() -> ScriptResponse {
-    ScriptResponse {
-        failure_phase: FailurePhase::Rejected,
-        ..ScriptResponse::error(
-            "the isolation session backend does not yet support inherited stdio; it serves piped \
-             stdio, which is what an in-process caller receives. Run it through wxc-exec to have \
-             the workload relayed onto this process's own stdio.",
-        )
+    ScriptResponse::rejected(
+        "the isolation session backend does not yet support inherited stdio; it serves piped \
+         stdio, which is what an in-process caller receives. Run it through wxc-exec to have \
+         the workload relayed onto this process's own stdio.",
+    )
+}
+
+/// Flattens a launch failure onto a [`ScriptResponse`], keeping the side the
+/// typed error blames.
+///
+/// A launch reaches the OS API, so it can fail because that API is not there at
+/// all. Reporting that as a launch failure would point the caller at a retry
+/// that cannot help.
+fn launch_failure_response(error: &MxcError) -> ScriptResponse {
+    match error.code {
+        MxcErrorCode::BackendUnavailable => ScriptResponse::unavailable(&error.message),
+        MxcErrorCode::PolicyValidation => ScriptResponse::rejected(&error.message),
+        _ => ScriptResponse::failed(FailurePhase::LaunchFailed, &error.message),
     }
 }
 
@@ -89,13 +100,7 @@ impl SandboxBackend for IsolationSessionRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // One-shot runs the whole lifecycle, so provision-phase rules apply to
         // the whole call — the same check the run-to-completion path makes.
-        //
-        // Everything it refuses is a caller-fixable request problem, and the
-        // phase is what the dispatcher reads back to classify it.
-        ScriptRunner::validate_runner(self, request).map_err(|resp| ScriptResponse {
-            failure_phase: FailurePhase::Rejected,
-            ..resp
-        })
+        ScriptRunner::validate_runner(self, request)
     }
 
     /// Provision, start, and hand back the exec's live pipes.
@@ -114,19 +119,13 @@ impl SandboxBackend for IsolationSessionRunner {
             StdioMode::Pty(size) => {
                 spawn_one_shot_pty(request, logger, size).map_err(|error| match error {
                     OneShotSpawnFailure::Refused(response) => response,
-                    OneShotSpawnFailure::Launch(error) => ScriptResponse {
-                        failure_phase: FailurePhase::LaunchFailed,
-                        ..ScriptResponse::error(&error.message)
-                    },
+                    OneShotSpawnFailure::Launch(error) => launch_failure_response(&error),
                 })
             }
             // Delegated so both entry points share one validation prologue.
             StdioMode::Pipes => spawn_one_shot(request, logger).map_err(|e| match e {
                 OneShotSpawnFailure::Refused(resp) => resp,
-                OneShotSpawnFailure::Launch(err) => ScriptResponse {
-                    failure_phase: FailurePhase::LaunchFailed,
-                    ..ScriptResponse::error(&err.message)
-                },
+                OneShotSpawnFailure::Launch(err) => launch_failure_response(&err),
             }),
         }
     }
@@ -801,7 +800,6 @@ impl Drop for IsolationPtyProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     /// A launch failure that also failed to clean up keeps its own
     /// classification, so a caller still branches on the real cause.
@@ -836,5 +834,30 @@ mod tests {
         let before = launch.to_string();
         let after = with_cleanup_failures(launch, &[]).to_string();
         assert_eq!(before, after);
+    }
+
+    /// Flattening onto a `ScriptResponse` must not turn an absent API into a
+    /// launch failure the caller would retry.
+    #[test]
+    fn a_launch_response_keeps_the_side_the_typed_error_blames() {
+        let unavailable =
+            launch_failure_response(&MxcError::backend_unavailable("the API is not registered"));
+        assert_eq!(unavailable.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(unavailable.exit_code, -1);
+
+        let refused = launch_failure_response(&MxcError::policy_validation("no proxy"));
+        assert_eq!(refused.failure_phase, FailurePhase::Rejected);
+        assert_eq!(refused.exit_code, 1);
+
+        let launch = launch_failure_response(&MxcError::backend_error("StartSessionAsync failed"));
+        assert_eq!(launch.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(launch.exit_code, -1);
+    }
+
+    #[test]
+    fn inherited_stdio_is_refused_as_a_request_problem() {
+        let refused = inherit_not_served();
+        assert_eq!(refused.failure_phase, FailurePhase::Rejected);
+        assert_eq!(refused.exit_code, 1);
     }
 }

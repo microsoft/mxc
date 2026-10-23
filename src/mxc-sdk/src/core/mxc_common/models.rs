@@ -1110,9 +1110,8 @@ pub enum FailurePhase {
     /// the VM/sandbox bring-up, or a transient resource contention (e.g. a
     /// single-instance backend already running). Generally worth retrying.
     LaunchFailed,
-    /// The request cannot be honored and will not succeed on a blind retry
-    /// without changing the input or host: a policy rejection, or a missing
-    /// host prerequisite (backend/runtime not installed).
+    /// The request itself is refusable: the policy asks for something the
+    /// selected backend cannot enforce. Only a changed request can succeed.
     Rejected,
     /// The launch command succeeded but the guest/sandbox infrastructure failed
     /// before or while running user code (agent rendezvous, channel connect, or
@@ -1125,25 +1124,37 @@ pub enum FailurePhase {
     /// can detect a timeout uniformly across backends rather than inferring it
     /// from `exit_code == -1` (which collides with other failures).
     Timeout,
-    /// The selected containment backend is unavailable on this host: the API is
-    /// missing, or present but not usable (e.g. feature-disabled). Distinct from
-    /// [`LaunchFailed`] so callers can fall back to a lower tier rather than
-    /// hard-fail.
+    /// The host cannot provide the selected containment backend at all: the API
+    /// is missing, the runtime is not installed, or an OS feature it depends on
+    /// is disabled. No change to the request can satisfy it — the host has to
+    /// be provisioned, or a different backend selected. Distinct from
+    /// [`LaunchFailed`], which is a backend that is present and failed.
     BackendUnavailable,
 }
 
 impl FailurePhase {
     /// The wire error code a failure in this phase is reported as.
     ///
-    /// [`Rejected`](FailurePhase::Rejected) is the one phase a caller can act on
-    /// by changing the request, so it is the only one that earns a code of its
-    /// own; every other failure is an infrastructure problem the caller cannot
-    /// distinguish usefully and stays `backend_error`.
+    /// Two phases earn a code of their own because they tell the caller which
+    /// side is at fault: [`Rejected`](FailurePhase::Rejected) blames the
+    /// request, and [`BackendUnavailable`](FailurePhase::BackendUnavailable)
+    /// blames the host. Every other failure is a runtime fault the caller
+    /// cannot distinguish usefully and stays `backend_error`.
     pub fn error_code(&self) -> MxcErrorCode {
         match self {
             FailurePhase::Rejected => MxcErrorCode::PolicyValidation,
+            FailurePhase::BackendUnavailable => MxcErrorCode::BackendUnavailable,
             _ => MxcErrorCode::BackendError,
         }
+    }
+
+    /// The process exit status a failure in this phase terminates with.
+    ///
+    /// Derived from [`error_code`](FailurePhase::error_code) so a response and
+    /// an entry-point failure carrying the same code always exit alike: a
+    /// refusal exits 1, and a host or runtime fault exits -1.
+    pub fn failure_exit_code(&self) -> i32 {
+        self.error_code().exit_code()
     }
 }
 
@@ -1162,6 +1173,17 @@ pub struct ScriptResponse {
     /// Indicates at what phase the failure occurred.
     #[serde(default)]
     pub failure_phase: FailurePhase,
+    /// Non-fatal diagnostics raised while building or running the sandbox,
+    /// carried on the response so a programmatic caller can filter them
+    /// instead of scraping stderr.
+    ///
+    /// Boxed, like `output_metadata`, to keep `ScriptResponse` small enough to
+    /// serve as a `Result` error type. Reach for it through
+    /// [`warnings`](ScriptResponse::warnings) and
+    /// [`extend_warnings`](ScriptResponse::extend_warnings) rather than the
+    /// field, so the "absent" and "empty" spellings cannot drift apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Box<Vec<String>>>,
     /// Structured metadata produced after the sandboxed process exits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_metadata: Option<Box<SandboxOutputMetadata>>,
@@ -1176,6 +1198,7 @@ impl Default for ScriptResponse {
             error_message: String::new(),
             extended_error: String::new(),
             failure_phase: FailurePhase::None,
+            warnings: None,
             output_metadata: None,
         }
     }
@@ -1250,12 +1273,46 @@ impl ScriptResponse {
     /// copying it would print the message bare and then again inside the JSON
     /// envelope.
     pub fn rejected(msg: &str) -> Self {
+        Self::failed(FailurePhase::Rejected, msg)
+    }
+
+    /// Create a response for a backend this host cannot provide.
+    ///
+    /// Reports `backend_unavailable`, which tells the caller the host is at
+    /// fault: no change to the request will satisfy it. Like
+    /// [`ScriptResponse::rejected`] nothing ran, so the message is left to the
+    /// envelope rather than copied into `standard_err`.
+    pub fn unavailable(msg: &str) -> Self {
+        Self::failed(FailurePhase::BackendUnavailable, msg)
+    }
+
+    /// Create a response for a failure attributed to `phase`.
+    ///
+    /// The exit code follows the phase, and the message is left to the error
+    /// envelope rather than copied into `standard_err`.
+    pub fn failed(phase: FailurePhase, msg: &str) -> Self {
         ScriptResponse {
-            exit_code: 1,
+            exit_code: phase.failure_exit_code(),
             error_message: msg.to_string(),
-            failure_phase: FailurePhase::Rejected,
+            failure_phase: phase,
             ..Default::default()
         }
+    }
+
+    /// The non-fatal diagnostics this run recorded.
+    pub fn warnings(&self) -> &[String] {
+        self.warnings.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    /// Append diagnostics, allocating only once there is something to record.
+    pub fn extend_warnings(&mut self, warnings: impl IntoIterator<Item = String>) {
+        let mut incoming = warnings.into_iter().peekable();
+        if incoming.peek().is_none() {
+            return;
+        }
+        self.warnings
+            .get_or_insert_with(Box::default)
+            .extend(incoming);
     }
 }
 
@@ -1264,11 +1321,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_rejection_earns_a_caller_actionable_error_code() {
+    fn each_caller_actionable_phase_earns_its_own_error_code() {
         assert_eq!(
             FailurePhase::Rejected.error_code(),
             MxcErrorCode::PolicyValidation
         );
+        assert_eq!(
+            FailurePhase::BackendUnavailable.error_code(),
+            MxcErrorCode::BackendUnavailable
+        );
+        for phase in [
+            FailurePhase::None,
+            FailurePhase::LaunchFailed,
+            FailurePhase::PostLaunchFailed,
+            FailurePhase::ProcessExited,
+            FailurePhase::Timeout,
+        ] {
+            assert_eq!(
+                phase.error_code(),
+                MxcErrorCode::BackendError,
+                "phase {phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_refusal_exits_one() {
+        assert_eq!(FailurePhase::Rejected.failure_exit_code(), 1);
         for phase in [
             FailurePhase::None,
             FailurePhase::LaunchFailed,
@@ -1277,12 +1356,50 @@ mod tests {
             FailurePhase::Timeout,
             FailurePhase::BackendUnavailable,
         ] {
-            assert_eq!(
-                phase.error_code(),
-                MxcErrorCode::BackendError,
-                "phase {phase:?}"
-            );
+            assert_eq!(phase.failure_exit_code(), -1, "phase {phase:?}");
         }
+    }
+
+    #[test]
+    fn an_unavailable_host_is_told_apart_from_a_refusal_and_a_crash() {
+        let unavailable = ScriptResponse::unavailable("WSL is not installed");
+
+        assert_eq!(unavailable.exit_code, -1);
+        assert_eq!(
+            unavailable.failure_phase.error_code(),
+            MxcErrorCode::BackendUnavailable
+        );
+        assert!(unavailable.standard_err.is_empty());
+    }
+
+    #[test]
+    fn warnings_are_omitted_from_the_wire_when_there_are_none() {
+        let quiet = serde_json::to_string(&ScriptResponse::default()).unwrap();
+        assert!(!quiet.contains("warnings"), "{quiet}");
+
+        let mut noisy = ScriptResponse::default();
+        noisy.extend_warnings(["dacl augmentation fell back".to_string()]);
+        let noisy = serde_json::to_string(&noisy).unwrap();
+        assert!(noisy.contains("dacl augmentation fell back"), "{noisy}");
+    }
+
+    #[test]
+    fn recording_nothing_allocates_nothing() {
+        let mut response = ScriptResponse::default();
+        response.extend_warnings(Vec::new());
+        assert!(response.warnings.is_none());
+        assert!(response.warnings().is_empty());
+    }
+
+    // `ScriptResponse` is used as a `Result` error type, so it has to stay
+    // under clippy's `result_large_err` threshold.
+    #[test]
+    fn the_response_stays_small_enough_to_be_an_error_type() {
+        assert!(
+            std::mem::size_of::<ScriptResponse>() <= 128,
+            "{} bytes",
+            std::mem::size_of::<ScriptResponse>()
+        );
     }
 
     #[test]
@@ -1295,6 +1412,16 @@ mod tests {
         // The envelope carries the message; duplicating it into standard_err
         // would print it twice, unseparated, ahead of the JSON.
         assert!(rejected.standard_err.is_empty());
+    }
+
+    #[test]
+    fn a_phased_failure_takes_its_exit_code_from_the_phase() {
+        let launch = ScriptResponse::failed(FailurePhase::LaunchFailed, "spawn failed");
+
+        assert_eq!(launch.exit_code, -1);
+        assert_eq!(launch.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(launch.error_message, "spawn failed");
+        assert!(launch.standard_err.is_empty());
     }
 
     #[test]

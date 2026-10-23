@@ -341,10 +341,13 @@ as `malformed_request`. Requests that pass the exact structural contract but
 violate a backend semantic invariant surface as `policy_validation`; a
 structurally valid but oversized `appId` is one such case.
 
-On the **one-shot** surface the backend's typed policy variant is discarded
-(`ScriptResponse::error`) and the envelope carries `error.code =
-"backend_error"` with the reason in the message. A supplied `network.proxy` is
-also structurally refused as `malformed_request`.
+On the **one-shot** surface the backend's typed policy variant becomes
+`ScriptResponse::rejected`, so the envelope carries `error.code =
+"policy_validation"` and exits 1, matching the state-aware mapping. A supplied
+`network.proxy` is also structurally refused as `malformed_request`. An
+activation failure of the runtime API becomes `ScriptResponse::unavailable`
+(`backend_unavailable`, exit -1); every other lifecycle failure stays
+`backend_error`.
 
 ## Mode-specific fields
 
@@ -496,13 +499,11 @@ State-aware exec (and other phases) use OS-level cancellation in v1:
 - On the `wxc-exec` route, cancellation is process termination.
 - The agent process's pipes EOF, the relay threads exit.
 - The OS-side service's per-process timer (set from
-  `process.timeout`) reaps the agent if the runner does not. On the
-  streaming path that timer is armed with a **margin** past the caller's
-  deadline, so it acts purely as a watchdog: the service kills with an
-  ordinary exit code (the host suite pins it as exit code 1), so if it
-  fired first a genuine timeout would be indistinguishable from a normal
-  exit and could not be reported as one. The run-to-completion path arms
-  it unchanged — it has no timeout channel to report through.
+  `process.timeout`) reaps the agent if the runner does not. That timer is
+  armed with a **margin** past the caller's deadline, so it acts purely as
+  a watchdog: the service kills with an ordinary exit code, so if it fired
+  first a genuine timeout would be indistinguishable from a normal exit
+  and could not be reported as one.
 - The runner's existing 3-tier shutdown (`CloseStandardInput` →
   `SendCtrlClose` → `Terminate`) handles the timeout case from inside the
   agent process before returning.
@@ -550,7 +551,8 @@ An exited process is never routed through the shutdown ladder, which reads only 
 and so cannot tell a `259` exit from a live process. The adapter maps
 `TimedOut` onto `ErrorKind::TimedOut`, which is what
 `mxc_sdk::v1::MxcProcess::wait` reads as `WaitResult::TimedOut`. That outcome
-is reachable only under `Piped`; the `Relayed` arm reports `Exited`.
+is reachable only under `Piped`; the `Relayed` arm reports a timeout as a
+`backend_error` instead.
 
 Teardown is bounded only insofar as the kill is: the streaming adapter's
 `Drop` joins the waiter when the kill was accepted, and abandons the

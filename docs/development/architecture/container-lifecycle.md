@@ -613,9 +613,9 @@ diagnostic. The rejection is recorded through the same `ConfigRejected` audit pa
 Diagnostics are never duplicated to stdout, and lifecycle stderr is not gated on
 `--debug`.
 
-Without `--operation`, `wxc-exec` accepts only one-shot requests. Input-source and
-pre-parse failures on that path retain the legacy primary diagnostic on stderr and do
-not emit a lifecycle envelope. Raw SDK and FFI lifecycle calls do not use this CLI
+Without `--operation`, `wxc-exec` accepts only create-and-run requests. Input-source
+and pre-parse failures on that path emit a typed `{error}` envelope on stderr rather
+than the lifecycle envelope on stdout. Raw SDK and FFI lifecycle calls do not use this CLI
 stream protocol; they return their status and error data through their binding result
 surfaces.
 
@@ -668,7 +668,10 @@ because a script's stderr may not end in a newline.
 `code` and `message` are always present. `code` is the machine-readable category a
 consumer branches on; `message` is the human-readable description, and for a failure
 raised by an underlying platform API it is that API's own message, passed through
-verbatim rather than concatenated with the other fields.
+verbatim rather than concatenated with the other fields. The executor's own exit
+code follows `code`: a refused request exits `1`, and an unavailable host or a
+runtime fault exits `-1`. See the error contract in
+[versioning.md](versioning.md#error-contract).
 
 The three optional named fields carry structured failure detail. `operation` and
 `nativeCode` describe an underlying platform call; `remediation` describes the failure:

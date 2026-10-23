@@ -24,9 +24,10 @@ use crate::mxc_contract::{probe_version, supported_versions, ContractVersion, Ve
 use std::fs;
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
-/// variant to choose the failure-output convention: state-aware failures
-/// emit a JSON `{"error": ...}` envelope on stdout, while one-shot and
-/// pre-discrimination failures keep the existing diagnostic-on-stderr path.
+/// variant to choose where the failure is written: state-aware failures emit a
+/// JSON `{"error": ...}` envelope on stdout, because there the envelope *is*
+/// the operation's response document, while one-shot and pre-discrimination
+/// failures emit theirs on stderr alongside the diagnostics.
 #[derive(Debug)]
 pub enum ParseError {
     /// I/O, base64-decode, or top-level JSON parse failure — the input could
@@ -42,6 +43,23 @@ pub enum ParseError {
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
+}
+
+impl ParseError {
+    /// The typed error this failure is reported to the caller as.
+    ///
+    /// Every variant resolves to a code, so a request that never reached a
+    /// backend is still classified rather than being reported as an
+    /// unexplained non-zero exit.
+    pub fn to_mxc_error(&self) -> MxcError {
+        match self {
+            ParseError::Decode(error)
+            | ParseError::Version(error)
+            | ParseError::OneShot(error)
+            | ParseError::OneShotMalformed(error) => error.to_mxc_error(),
+            ParseError::StateAware(error) => error.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

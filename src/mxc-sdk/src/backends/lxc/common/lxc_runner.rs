@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, NetworkAction, ScriptResponse,
+    ContainerPolicy, ExecutionRequest, FailurePhase, LifecycleConfig, LxcConfig, NetworkAction,
+    ScriptResponse,
 };
 use crate::mxc_common::proxy_env::{apply_proxy_env, proxy_url_has_credentials, redact_proxy_url};
 use crate::mxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
@@ -31,6 +32,7 @@ use crate::mxc_common::sandbox_process::{
 #[cfg(target_os = "linux")]
 use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
+use crate::lxc_common::availability::LxcTooling;
 use crate::lxc_common::filesystem_mounts;
 use crate::lxc_common::loopback_relay::LoopbackRelay;
 use crate::lxc_common::lxc_bindings::{ContainerFirewall, LxcContainer, StartNetwork};
@@ -207,13 +209,16 @@ impl LxcScriptRunner {
             return self.claim_generated_name();
         }
         ContainerNameClaim::acquire(&self.container_id).ok_or_else(|| {
-            ScriptResponse::error(&format!(
-                "LXC: container '{}' is already in use by a run in this process. LXC reads a \
-                 run's network section only when the container starts, so a second run would \
-                 stop the first one's workload to restart it under its own policy. Let the \
-                 first run finish, or give this one its own containerId.",
-                self.container_id
-            ))
+            ScriptResponse::failed(
+                FailurePhase::LaunchFailed,
+                &format!(
+                    "LXC: container '{}' is already in use by a run in this process. LXC reads a \
+                     run's network section only when the container starts, so a second run would \
+                     stop the first one's workload to restart it under its own policy. Let the \
+                     first run finish, or give this one its own containerId.",
+                    self.container_id
+                ),
+            )
         })
     }
 
@@ -225,7 +230,8 @@ impl LxcScriptRunner {
                 return Ok(claim);
             }
         }
-        Err(ScriptResponse::error(
+        Err(ScriptResponse::failed(
+            FailurePhase::LaunchFailed,
             "LXC: could not find a free container name for this run; every generated name was \
              already in use by another run in this process. Retry, or set containerId to a name \
              of your own.",
@@ -398,13 +404,16 @@ impl LxcScriptRunner {
         let release = self.release_kind(container_created);
         Self::report_release_failure(release, release_container(release), logger);
 
-        Some(ScriptResponse::error(&format!(
-            "Container did not receive an IPv4 address within {:.0}s; \
-             check that lxc-net/dnsmasq is running and able to assign one. \
-             A bridge offering only IPv6 leaves the container unable to reach \
-             the IPv4 destinations its policy names.",
-            timeout.as_secs_f64()
-        )))
+        Some(ScriptResponse::failed(
+            FailurePhase::PostLaunchFailed,
+            &format!(
+                "Container did not receive an IPv4 address within {:.0}s; \
+                 check that lxc-net/dnsmasq is running and able to assign one. \
+                 A bridge offering only IPv6 leaves the container unable to reach \
+                 the IPv4 destinations its policy names.",
+                timeout.as_secs_f64()
+            ),
+        ))
     }
 
     /// Everything that must succeed before a workload can launch; a failure
@@ -428,14 +437,13 @@ impl LxcScriptRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(error) => return Err(error.into_response()),
         };
-        if let Err(msg) = crate::mxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
-        }
+        crate::mxc_common::filesystem_access::check_delegation(&request.policy)
+            .map_err(|error| error.into_response())?;
 
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "LXC distribution and release are required \
                  (e.g., \"distribution\": \"alpine\", \"release\": \"3.23\")",
             ));
@@ -447,7 +455,21 @@ impl LxcScriptRunner {
         // The policy lowers to the same rules with or without a container, so
         // one that cannot be programmed is refused before a container exists.
         if let Err(msg) = NetworkIptablesManager::validate_egress_lowering(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
+            return Err(ScriptResponse::rejected(&msg));
+        }
+
+        match crate::lxc_common::availability::lxc_tooling_for_execution() {
+            LxcTooling::Available => {}
+            LxcTooling::Unavailable => {
+                return Err(ScriptResponse::unavailable(LXC_TOOLING_UNAVAILABLE));
+            }
+            LxcTooling::ProbeFailed => {
+                return Err(ScriptResponse::failed(
+                    FailurePhase::LaunchFailed,
+                    "LXC: probing the LXC tooling (`lxc-ls --version`) timed out or \
+                     could not run; retry once the host is responsive",
+                ));
+            }
         }
 
         if self.destroy_on_exit {
@@ -476,10 +498,10 @@ impl LxcScriptRunner {
         if !container.is_defined() {
             let _ = writeln!(logger, "Creating LXC container...");
             if let Err(e) = container.create(&self.config.distribution, &self.config.release) {
-                return Err(ScriptResponse::error(&format!(
-                    "Failed to create container: {}",
-                    e
-                )));
+                return Err(ScriptResponse::failed(
+                    FailurePhase::LaunchFailed,
+                    &format!("Failed to create container: {}", e),
+                ));
             }
             let _ = writeln!(logger, "Container created successfully.");
             container_created = true;
@@ -493,10 +515,10 @@ impl LxcScriptRunner {
             if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
-            return Err(ScriptResponse::error(&format!(
-                "Failed to configure filesystem: {}",
-                e
-            )));
+            return Err(ScriptResponse::failed(
+                FailurePhase::LaunchFailed,
+                &format!("Failed to configure filesystem: {}", e),
+            ));
         }
 
         // LXC reads the network section only at start.  A container an earlier
@@ -510,11 +532,14 @@ impl LxcScriptRunner {
                 if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
                 }
-                return Err(ScriptResponse::error(&format!(
-                    "Failed to stop a container left running by an earlier run: {}. \
-                     Its network policy is the earlier run's, so the script was not run.",
-                    e
-                )));
+                return Err(ScriptResponse::failed(
+                    FailurePhase::LaunchFailed,
+                    &format!(
+                        "Failed to stop a container left running by an earlier run: {}. \
+                         Its network policy is the earlier run's, so the script was not run.",
+                        e
+                    ),
+                ));
             }
         }
 
@@ -535,10 +560,10 @@ impl LxcScriptRunner {
             if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
-            return Err(ScriptResponse::error(&format!(
-                "Failed to start container: {}",
-                e
-            )));
+            return Err(ScriptResponse::failed(
+                FailurePhase::LaunchFailed,
+                &format!("Failed to start container: {}", e),
+            ));
         }
         let _ = writeln!(logger, "Container started successfully.");
 
@@ -567,7 +592,8 @@ impl LxcScriptRunner {
         let netns_pid = container.init_pid();
         let Some(hook_point) = egress_hook_point(netns_pid, plan.installs_firewall()) else {
             self.release_after_failure(&container, container_created, logger);
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::failed(
+                FailurePhase::PostLaunchFailed,
                 "Failed to discover the container init PID; cannot enter the container \
                  network namespace to install its firewall. Aborting rather than \
                  running without it.",
@@ -593,7 +619,7 @@ impl LxcScriptRunner {
             Ok(managers) => managers,
             Err(e) => {
                 self.release_after_failure(&container, container_created, logger);
-                return Err(ScriptResponse::error(&e));
+                return Err(ScriptResponse::failed(FailurePhase::PostLaunchFailed, &e));
             }
         };
 
@@ -613,7 +639,7 @@ impl LxcScriptRunner {
         if is_firewall_installed == ContainerFirewall::Installed {
             if let Err(e) = fw_manager.allow_ping_sockets(logger) {
                 self.release_after_failure(&container, container_created, logger);
-                return Err(ScriptResponse::error(&e));
+                return Err(ScriptResponse::failed(FailurePhase::PostLaunchFailed, &e));
             }
         }
 
@@ -632,12 +658,15 @@ impl LxcScriptRunner {
         });
         if let Err(reason) = stale_pin_error {
             self.release_after_failure(&container, container_created, logger);
-            return Err(ScriptResponse::error(&format!(
-                "Failed to clear a stale network proxy pin from the container's \
-                 /etc/hosts: {}. The script was not run, because it could have resolved \
-                 the pinned hostname to an address this policy did not authorize.",
-                reason
-            )));
+            return Err(ScriptResponse::failed(
+                FailurePhase::PostLaunchFailed,
+                &format!(
+                    "Failed to clear a stale network proxy pin from the container's \
+                     /etc/hosts: {}. The script was not run, because it could have resolved \
+                     the pinned hostname to an address this policy did not authorize.",
+                    reason
+                ),
+            ));
         }
 
         // `script_timeout == 0` means "no timeout" per the SDK contract.
@@ -659,11 +688,14 @@ impl LxcScriptRunner {
                     Ok(relay) => Some(relay),
                     Err(e) => {
                         self.release_after_failure(&container, container_created, logger);
-                        return Err(ScriptResponse::error(&format!(
-                            "LXC: cannot relay runtimeConfig.networkProxy into the container: \
+                        return Err(ScriptResponse::failed(
+                            FailurePhase::PostLaunchFailed,
+                            &format!(
+                                "LXC: cannot relay runtimeConfig.networkProxy into the container: \
                              {}. The script was not run.",
-                            e
-                        )));
+                                e
+                            ),
+                        ));
                     }
                 }
             }
@@ -975,6 +1007,11 @@ pub const LXC_INHERIT_STDIO_UNSUPPORTED: &str =
 
 pub const LXC_STREAMING_LINUX_ONLY: &str = "LXC: sandboxes can only be launched on Linux.";
 
+pub const LXC_TOOLING_UNAVAILABLE: &str =
+    "LXC: the LXC runtime is not available on this host — `lxc-ls --version` did not run. \
+     Install the LXC tools (e.g. apt install lxc) and make sure they are on PATH, or select \
+     a backend this host can provide.";
+
 fn unsupported_network_proxy(policy: &ContainerPolicy) -> Option<&'static str> {
     if policy.network_proxy.is_enabled() && !policy.runtime_network_proxy_specified {
         Some("network.proxy")
@@ -995,7 +1032,7 @@ impl LxcScriptRunner {
     fn validate_runtime_proxy(&self, policy: &ContainerPolicy) -> Result<(), ScriptResponse> {
         if let Some(address) = &policy.network_proxy.address {
             if !host_is_canonical_loopback(address.host()) {
-                return Err(ScriptResponse::error(&format!(
+                return Err(ScriptResponse::rejected(&format!(
                     "LXC: runtimeConfig.networkProxy host '{}' must be localhost, 127.0.0.1, or \
                      ::1. The proxy is relayed into the container at the same loopback address \
                      and port.",
@@ -1004,7 +1041,7 @@ impl LxcScriptRunner {
             }
             let url = address.to_url();
             if proxy_url_has_credentials(&url) {
-                return Err(ScriptResponse::error(&format!(
+                return Err(ScriptResponse::rejected(&format!(
                     "LXC: runtimeConfig.networkProxy must not carry credentials ('{}'). LXC \
                      passes the proxy URL to lxc-attach as a --set-var command-line argument, \
                      and process arguments are world-readable through /proc/<pid>/cmdline.",
@@ -1017,7 +1054,7 @@ impl LxcScriptRunner {
                 || !egress.allow.is_empty()
                 || !egress.deny.is_empty()
         }) {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "LXC: runtimeConfig.networkProxy cannot be combined with network.egress rules or \
                  default='allow'. The relayed proxy port is the container's only outbound path. \
                  Use network.egress.default='deny' with no rules, or remove the proxy.",
@@ -1033,7 +1070,7 @@ impl ScriptRunner for LxcScriptRunner {
             self.validate_runtime_proxy(&request.policy)?;
         }
         if let Some(field) = unsupported_network_proxy(&request.policy) {
-            return Err(ScriptResponse::error(&format!(
+            return Err(ScriptResponse::rejected(&format!(
                 "LXC: {field} is not supported and cannot be enforced; \
                  remove the proxy request."
             )));
@@ -1092,7 +1129,7 @@ impl LxcScriptRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         match stdio {
             StdioMode::Inherit => {
-                return Err(ScriptResponse::error(LXC_INHERIT_STDIO_UNSUPPORTED));
+                return Err(ScriptResponse::rejected(LXC_INHERIT_STDIO_UNSUPPORTED));
             }
             StdioMode::Pty(_) | StdioMode::Pipes => {}
         }
@@ -1150,10 +1187,10 @@ impl LxcScriptRunner {
             Ok(launched) => launched,
             Err(e) => {
                 let cleanup = self.abandon_prepared(&mut prepared, logger);
-                return Err(ScriptResponse::error(&launch_failure_message(
-                    &format!("Execution failed: {}", e),
-                    &cleanup,
-                )));
+                return Err(ScriptResponse::failed(
+                    FailurePhase::LaunchFailed,
+                    &launch_failure_message(&format!("Execution failed: {}", e), &cleanup),
+                ));
             }
         };
 
@@ -1180,13 +1217,16 @@ impl LxcScriptRunner {
                 let cleanup = self.abandon_prepared(&mut prepared, logger);
 
                 let error = out_result.err().or(err_result.err());
-                return Err(ScriptResponse::error(&launch_failure_message(
-                    &format!(
-                        "Failed to wrap the lxc-attach stdio pipes: {}",
-                        error.map_or_else(|| "unknown error".to_string(), |e| e.to_string())
+                return Err(ScriptResponse::failed(
+                    FailurePhase::PostLaunchFailed,
+                    &launch_failure_message(
+                        &format!(
+                            "Failed to wrap the lxc-attach stdio pipes: {}",
+                            error.map_or_else(|| "unknown error".to_string(), |e| e.to_string())
+                        ),
+                        &cleanup,
                     ),
-                    &cleanup,
-                )));
+                ));
             }
         };
 
@@ -1216,7 +1256,7 @@ impl LxcScriptRunner {
         _logger: &mut Logger,
         _stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        Err(ScriptResponse::error(LXC_STREAMING_LINUX_ONLY))
+        Err(ScriptResponse::unavailable(LXC_STREAMING_LINUX_ONLY))
     }
 }
 
@@ -2728,6 +2768,7 @@ mod tests {
                 .validate_runner(&runtime_proxy_request(host))
                 .expect_err("a wildcard host is not a loopback endpoint the relay can serve");
 
+            assert_eq!(response.failure_phase, FailurePhase::Rejected);
             assert!(
                 response
                     .error_message
@@ -2768,6 +2809,7 @@ mod tests {
             "with a runtime proxy, the relayed port is the container's only outbound path",
         );
 
+        assert_eq!(response.failure_phase, FailurePhase::Rejected);
         assert!(
             response.error_message.contains("network.egress"),
             "got: {}",
@@ -2812,6 +2854,7 @@ mod tests {
             .validate_runner(&request)
             .expect_err("credentials would be visible in /proc/<pid>/cmdline");
 
+        assert_eq!(response.failure_phase, FailurePhase::Rejected);
         assert!(
             response.error_message.contains("credentials")
                 && !response.error_message.contains("secret"),
@@ -2976,9 +3019,9 @@ mod tests {
             "the fail-closed readiness timeout message changed unexpectedly: {}",
             response.error_message
         );
-        assert_eq!(
-            response.standard_err, response.error_message,
-            "error responses should carry the message in stderr as well"
+        assert!(
+            response.standard_err.is_empty(),
+            "the message belongs in the error envelope, not repeated in stderr"
         );
     }
 
@@ -3177,6 +3220,125 @@ mod tests {
                 .contains("Script content must not be empty"),
             "expected the shared refusal, got: {refusal:?}"
         );
+        // The shared checks judge the request, so they have to reach the
+        // caller as a rejection on the launch path too, not only through a
+        // standalone `validate`.
+        assert_eq!(refusal.failure_phase, FailurePhase::Rejected);
+        assert_eq!(
+            refusal.exit_code,
+            FailurePhase::Rejected.failure_exit_code()
+        );
+    }
+
+    /// A caller can only act on a failure it can attribute: a refused policy is
+    /// worth rewriting, a host that cannot run LXC at all is not.
+    #[test]
+    fn a_policy_this_backend_cannot_enforce_is_blamed_on_the_request() {
+        let mut runtime_proxy = runtime_proxy_request("10.0.0.1");
+        runtime_proxy.script_code = "echo hello".to_string();
+
+        for (what, request) in [
+            ("runtimeConfig.networkProxy", runtime_proxy),
+            (
+                "network.proxy",
+                request_with_proxy_url("http://proxy.example.com:8080"),
+            ),
+            (
+                "unlowerable network.egress",
+                request_with_unlowerable_egress(),
+            ),
+        ] {
+            let refusal = runner_for_guard_tests("refusal-phase")
+                .prepare(&request, &mut Logger::new(Mode::Buffer))
+                .err()
+                .unwrap_or_else(|| panic!("input={what}; expected a refusal"));
+
+            assert_eq!(
+                refusal.failure_phase,
+                FailurePhase::Rejected,
+                "input={what}; expected a refusal of the request; output={refusal:?}"
+            );
+            assert_eq!(
+                refusal.exit_code, 1,
+                "input={what}; a refusal exits 1; output={refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_image_the_config_never_named_is_blamed_on_the_request() {
+        let refusal = validating_runner()
+            .prepare(&ExecutionRequest::default(), &mut Logger::new(Mode::Buffer))
+            .err()
+            .expect("an empty distribution and release cannot name an image to create");
+
+        assert_eq!(refusal.failure_phase, FailurePhase::Rejected);
+        assert_eq!(refusal.exit_code, 1);
+    }
+
+    #[test]
+    fn inherited_stdio_is_refused_as_a_request_fault() {
+        let refusal = validating_runner()
+            .spawn(
+                &streamable_request(),
+                &mut Logger::new(Mode::Buffer),
+                StdioMode::Inherit,
+            )
+            .err()
+            .expect("the library path has no pty to hand a workload");
+
+        assert_eq!(
+            refusal.failure_phase,
+            FailurePhase::Rejected,
+            "pipes and a caller-owned PTY are both reachable, so only the request has to change"
+        );
+    }
+
+    /// A container another live sandbox holds is contention, not a refusal: the
+    /// same request succeeds once the first run finishes.
+    #[test]
+    fn a_container_another_run_holds_is_a_launch_fault() {
+        let runner = runner_named("mxc-claim-phase-test");
+        let _held = runner
+            .claim_container_name()
+            .expect("the first sandbox takes a container no other one is using");
+
+        let refusal = runner
+            .claim_container_name()
+            .expect_err("a second sandbox on a live container must be refused");
+
+        assert_eq!(refusal.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(refusal.exit_code, -1);
+    }
+
+    #[test]
+    fn a_container_that_never_got_an_address_is_a_post_launch_fault() {
+        let runner = runner_for_network_readiness_tests(false);
+        let response = fail_network_readiness(&runner, false).response;
+
+        assert_eq!(
+            response.failure_phase,
+            FailurePhase::PostLaunchFailed,
+            "the container started; it was the sandbox network that never came up"
+        );
+    }
+
+    /// Only reachable off Linux, where the backend does not exist at all.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_host_that_cannot_run_lxc_is_blamed_instead_of_the_request() {
+        let refusal = validating_runner()
+            .launch_streaming(
+                &streamable_request(),
+                &mut Logger::new(Mode::Buffer),
+                StdioMode::Pipes,
+            )
+            .err()
+            .expect("LXC sandboxes only launch on Linux");
+
+        assert_eq!(refusal.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(refusal.exit_code, -1);
+        assert_eq!(refusal.error_message, LXC_STREAMING_LINUX_ONLY);
     }
 
     #[test]

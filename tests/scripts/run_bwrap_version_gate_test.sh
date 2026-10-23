@@ -56,6 +56,10 @@ assert_gated() {
         echo "$out"
         fail "$label (refused, but not for the expected reason: '$marker')"
     fi
+    if [ "$rc" != 255 ] || ! grep -qF '"code":"backend_unavailable"' <<<"$out"; then
+        echo "$out"
+        fail "$label (expected exit 255 with a backend_unavailable envelope, got exit $rc)"
+    fi
     echo "PASS: $label"
 }
 

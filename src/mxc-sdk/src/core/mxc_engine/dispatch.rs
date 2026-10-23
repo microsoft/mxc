@@ -276,8 +276,7 @@ fn spawn_process_container(
     use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
     use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-    let mut backend =
-        BaseContainerRunner::for_request(request).map_err(MxcError::backend_unavailable)?;
+    let mut backend = BaseContainerRunner::for_request(request)?;
     backend
         .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
@@ -315,7 +314,7 @@ fn spawn_wslc(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::unsupported_containment(
+        Err(MxcError::backend_unavailable(
             "WSLC backend not compiled. Rebuild with --features wslc.",
         ))
     }
@@ -369,7 +368,7 @@ fn spawn_isolation_session(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::unsupported_containment(
+        Err(MxcError::backend_unavailable(
             "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
         ))
     }
@@ -389,7 +388,7 @@ fn spawn_isolation_session_pty(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::unsupported_containment(
+        Err(MxcError::backend_unavailable(
             "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
         ))
     }
@@ -549,6 +548,22 @@ mod tests {
         };
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
         assert!(err.message.contains("Windows"), "got: {}", err.message);
+    }
+
+    #[cfg(all(target_os = "windows", not(feature = "wslc")))]
+    #[test]
+    fn streaming_reports_a_backend_this_build_omits_as_unavailable() {
+        // Run-to-completion resolution calls the same build/host pair
+        // `backend_unavailable`, so streaming must not hand the caller a
+        // different code for it.
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Wslc;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_runner(&request, &mut logger) {
+            Ok(_) => panic!("a backend this build omits must not spawn"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -23,6 +23,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
+use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse, WslcConfig};
 use crate::mxc_common::mxc_error::MxcError;
@@ -846,9 +847,13 @@ impl WSLContainerRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => {
-                let _ = writeln!(logger, "[WSLC] {}", msg);
-                return Err(WslcError::Rejected(msg).into_response());
+            Err(error) => {
+                let _ = writeln!(logger, "[WSLC] {}", error.message());
+                return Err(match error {
+                    FilesystemPolicyError::Policy(message) => WslcError::Rejected(message),
+                    FilesystemPolicyError::Host(message) => WslcError::Host(message),
+                }
+                .into_response());
             }
         };
 
@@ -1643,7 +1648,15 @@ mod tests {
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
-        assert_eq!(response.exit_code, -1, "overlap must fail the run");
+        assert_eq!(
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
+            "overlap must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
         assert!(
             response.error_message.contains("cannot be enforced"),
             "expected the overlap error, got: {}",
@@ -1692,8 +1705,13 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(
-            response.exit_code, -1,
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
             "junction-aliased deny must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             response.error_message.contains("cannot be enforced"),
@@ -1742,8 +1760,13 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(
-            response.exit_code, -1,
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
             "absent junction-aliased deny must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             response.error_message.contains("cannot be enforced"),

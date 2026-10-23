@@ -5,7 +5,8 @@ use clap::Parser;
 use mxc_sdk::mxc_common::config_parser::load_one_shot_request;
 use mxc_sdk::mxc_common::logger::Logger;
 use mxc_sdk::mxc_common::models::ExecutionRequest;
-use std::process;
+use mxc_sdk::mxc_common::mxc_error::MxcError;
+use mxc_sdk::mxc_common::script_runner::emit_mxc_error_exit;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -99,19 +100,17 @@ impl LinuxExecutorArguments {
         } else if let Some(ref path) = self.config_path {
             (path.clone(), false)
         } else {
-            eprintln!(
-                "Error: No config provided. Use a positional path, --config, or --config-base64"
-            );
-            process::exit(1);
+            emit_mxc_error_exit(&MxcError::malformed_request(
+                "No config provided. Use a positional path, --config, or --config-base64",
+            ));
         };
 
         let mut request = match load_one_shot_request(&config_data, logger, is_base64) {
             Ok(r) => r,
-            Err(_) => {
-                eprintln!("Request error");
+            Err(error) => {
                 crate::emit_warnings(logger);
                 eprint!("{}", logger.get_buffer());
-                process::exit(1);
+                emit_mxc_error_exit(&error.to_mxc_error());
             }
         };
 
@@ -187,8 +186,9 @@ impl LinuxExecutorArguments {
         let name = match self.containername {
             Some(ref n) => n,
             None => {
-                eprintln!("Error: --containername is required with --delete");
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::malformed_request(
+                    "--containername is required with --delete",
+                ));
             }
         };
 

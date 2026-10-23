@@ -694,6 +694,46 @@ Negotiation failures are **typed and actionable** — never a silent fallback:
   unsupported field. Security policy is deterministic — no relaxation, no fuzzy
   fallback.
 
+Every executor failure is classified by **which side can act on it**, and that
+classification drives both the wire code and the process exit code:
+
+| Side at fault | Failure phase | Wire code | Exit code |
+|---|---|---|---|
+| The request — a different request succeeds | `Rejected` | `policy_validation` | `1` |
+| The host — no request change helps | `BackendUnavailable` | `backend_unavailable` | `-1` |
+| The runtime, during an accepted run | all other phases | `backend_error` | `-1` |
+
+Common cases:
+
+| Failure | Wire code |
+|---|---|
+| Policy field the backend cannot enforce (e.g. ProcessContainer `enumeratePaths`, `deniedPaths`, LPAC) | `policy_validation` |
+| Policy path the invoking user cannot access | `policy_validation` |
+| Host fault while checking a policy path (I/O error, unresolvable path) | `backend_error` |
+| Missing host capability (e.g. no native PSEC, no denial-capture provider) | `backend_unavailable` |
+| Backend not compiled into this build | `backend_unavailable` |
+| Experimental backend without the experimental opt-in | `backend_unavailable` |
+| Backend for another OS: create-and-run / container lifecycle operations | `unsupported_containment` / `backend_unavailable` |
+
+Unsupported policy is never silently dropped, and no failure above starts the
+run. The phase-specific codes `malformed_request`, `unsupported_containment`,
+`unsupported_phase`, and `malformed_id` also exit `1`.
+
+Envelope lines share stderr with the workload's own output, so a workload can
+print text that looks like an envelope. Treat stderr envelopes as diagnostics,
+not as an authenticated result; the exit code and a held `ScriptResponse` are
+authoritative.
+
+`ScriptResponse` carries an optional `warnings` array of diagnostic strings.
+Warnings are advisory and never change the exit code; they are omitted from the
+wire entirely when a run produced none. The serialized response and the
+executor's stderr stream are two distinct shapes of the same warnings: on the
+response they are a `warnings: string[]` field, while an executor writes each
+one to stderr as its own line-delimited JSON object,
+`{"warning":{"message":"..."}}`, matching the error envelope
+`{"error":{"code":"...","message":"..."}}`. A caller reading stderr must parse
+the per-line objects; the array exists only on a response it holds directly.
+
 The MXC ↔ OS contract therefore reports: which feature failed, whether it was a
 version mismatch or a runtime/capability unavailability (e.g. Hyper-V off), and
 what the user should do (upgrade OS, enable feature, change the config).

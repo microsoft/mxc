@@ -53,9 +53,12 @@ impl ResolvedRunner {
 /// Experimental backends, classified by the engine's backend registry, require
 /// `request.experimental_enabled`; without it they return a
 /// [`backend_unavailable`](MxcError::backend_unavailable) error before any
-/// host-specific resolution. Backends that are not available on this host /
-/// not compiled in return an
-/// [`unsupported_containment`](MxcError::unsupported_containment) error.
+/// host-specific resolution. A backend that this build did not compile in
+/// reports the same code, since only a rebuilt executor can serve it. A
+/// backend that belongs to a different operating system, or one that does not
+/// exist yet, reports
+/// [`unsupported_containment`](MxcError::unsupported_containment) instead,
+/// because naming a backend this host does support will succeed.
 pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
@@ -161,11 +164,21 @@ pub fn resolve_runner_for_audit(
 /// Resolve `request`'s backend and run it to completion.
 ///
 /// Convenience over [`resolve_runner`] that runs the resolved backend to
-/// completion.
+/// completion. Warnings the logger recorded are moved onto the response;
+/// nothing is written to the terminal.
 pub fn run(request: &ExecutionRequest, logger: &mut Logger) -> Result<ScriptResponse, Error> {
-    let mut resolved = resolve_runner(request, logger)?;
-    let response = resolved.runner.run(request, logger);
-    Ok(response)
+    let resolved = resolve_runner(request, logger)?;
+    Ok(run_resolved(resolved, request, logger))
+}
+
+fn run_resolved(
+    mut resolved: ResolvedRunner,
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> ScriptResponse {
+    let mut response = resolved.runner.run(request, logger);
+    response.extend_warnings(logger.take_warnings());
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -177,22 +190,20 @@ fn resolve_runner_inner_windows(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
-    use std::fmt::Write;
-
     match request.containment {
         ContainmentBackend::ProcessContainer => {
             use crate::mxc_common::sandbox_process::Runner;
             use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-            BaseContainerRunner::for_request(request)
-                .map(|backend| ResolvedRunner {
-                    runner: Box::new(Runner::new(backend)),
-                })
-                .map_err(MxcError::backend_unavailable)
+            BaseContainerRunner::for_request(request).map(|backend| ResolvedRunner {
+                runner: Box::new(Runner::new(backend)),
+            })
         }
         ContainmentBackend::Wslc => {
             #[cfg(feature = "wslc")]
             {
+                use std::fmt::Write;
+
                 let _ = writeln!(logger, "Using WSLContainer runner");
                 let wslc_config = request.wslc.as_ref().cloned().unwrap_or_default();
                 Ok(ResolvedRunner::without_guard(Box::new(
@@ -202,7 +213,7 @@ fn resolve_runner_inner_windows(
             #[cfg(not(feature = "wslc"))]
             {
                 let _ = logger;
-                Err(MxcError::unsupported_containment(
+                Err(MxcError::backend_unavailable(
                     "WSLC backend not compiled. Rebuild with --features wslc.",
                 ))
             }
@@ -228,7 +239,7 @@ fn resolve_runner_inner_windows(
             }
             #[cfg(not(feature = "microvm"))]
             {
-                Err(MxcError::unsupported_containment(
+                Err(MxcError::backend_unavailable(
                     "MicroVM backend not compiled in (build with --features microvm)",
                 ))
             }
@@ -240,11 +251,9 @@ fn resolve_runner_inner_windows(
                 if ws.idle_timeout_ms != default.idle_timeout_ms
                     || ws.daemon_pipe_name != default.daemon_pipe_name
                 {
-                    let _ = writeln!(
-                        logger,
-                        "warning: windowsSandbox.idleTimeoutMs and daemonPipeName \
-                         are ignored by the one-shot backend; each invocation launches and tears \
-                         down a fresh VM"
+                    logger.warning_line(
+                        "windowsSandbox.idleTimeoutMs and daemonPipeName are ignored by the \
+                         one-shot backend; each invocation launches and tears down a fresh VM",
                     );
                 }
             }
@@ -261,7 +270,7 @@ fn resolve_runner_inner_windows(
             }
             #[cfg(not(feature = "isolation_session"))]
             {
-                Err(MxcError::unsupported_containment(
+                Err(MxcError::backend_unavailable(
                     "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
                 ))
             }
@@ -292,7 +301,7 @@ fn resolve_runner_inner(
             }
             #[cfg(not(feature = "microvm"))]
             {
-                Err(MxcError::unsupported_containment(
+                Err(MxcError::backend_unavailable(
                     "MicroVM backend not compiled in (build with --features microvm)",
                 ))
             }
@@ -434,8 +443,9 @@ fn resolve_hyperlight() -> Result<ResolvedRunner, MxcError> {
     }
     #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
     {
-        Err(MxcError::unsupported_containment(
-            "Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)",
+        Err(MxcError::backend_unavailable(
+            "Hyperlight backend not compiled in; it requires x86_64 and --features hyperlight \
+             (Hyperlight needs KVM or WHP).",
         ))
     }
 }
@@ -499,6 +509,7 @@ mod tests {
             let mut logger = Logger::new(Mode::Buffer);
             resolve_runner_inner_windows(&request, &mut logger).unwrap();
             assert!(logger.get_buffer().is_empty());
+            assert!(logger.warnings().is_empty());
         }
     }
 
@@ -513,7 +524,7 @@ mod tests {
 
         resolve_runner_inner_windows(&request, &mut logger).unwrap();
 
-        let warning = logger.get_buffer();
+        let warning = logger.warnings().join("\n");
         assert!(warning.contains("idleTimeoutMs"));
         assert!(warning.contains("daemonPipeName"));
         assert!(warning.contains("fresh VM"));
@@ -532,5 +543,73 @@ mod tests {
             .expect("WSLC selection must not require runtime experimental authorization");
 
         assert!(!logger.get_buffer().contains("experimental"));
+    }
+
+    fn resolve_error(request: &ExecutionRequest) -> Error {
+        let mut logger = Logger::new(Mode::Buffer);
+        match resolve_runner(request, &mut logger) {
+            Ok(_) => panic!("{:?} must not resolve", request.containment),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn an_unenforceable_process_container_field_is_a_policy_validation_error() {
+        let _guard = crate::process_container_common::test_env::PolicyCapabilityGuard::set(
+            true, false, true,
+        );
+        let mut request = ExecutionRequest {
+            containment: ContainmentBackend::ProcessContainer,
+            ..Default::default()
+        };
+        request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
+
+        let error = resolve_error(&request);
+
+        assert_eq!(error.code, crate::ErrorCode::PolicyValidation, "{error}");
+    }
+
+    #[cfg(not(feature = "microvm"))]
+    #[test]
+    fn a_backend_not_compiled_in_is_unavailable() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::MicroVm,
+            experimental_enabled: true,
+            ..Default::default()
+        };
+
+        let error = resolve_error(&request);
+
+        assert_eq!(error.code, crate::ErrorCode::BackendUnavailable, "{error}");
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+    use crate::mxc_common::logger::Mode;
+
+    struct WarningRunner;
+
+    impl ScriptRunner for WarningRunner {
+        fn execute(&mut self, _request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+            logger.warning_line("advisory");
+            ScriptResponse::default()
+        }
+    }
+
+    #[test]
+    fn run_moves_logger_warnings_onto_the_response() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let response = run_resolved(
+            ResolvedRunner::without_guard(Box::new(WarningRunner)),
+            &ExecutionRequest {
+                script_code: "echo hi".to_string(),
+                ..Default::default()
+            },
+            &mut logger,
+        );
+        assert_eq!(response.warnings(), ["advisory"]);
+        assert!(logger.warnings().is_empty());
     }
 }

@@ -42,6 +42,23 @@ pub struct ProfileInputs {
     pub user_keychains: Option<String>,
 }
 
+/// Why a profile could not be built: the request, or the executor's host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileError {
+    /// The request names something the profile cannot express.
+    Policy(String),
+    /// The executor's environment lacks something the profile needs.
+    Host(String),
+}
+
+impl std::fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Policy(message) | Self::Host(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
 /// reachability to the resolved address supplied by the runner.
 ///
@@ -52,7 +69,7 @@ pub fn build_profile_with_proxy(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
     inputs: &ProfileInputs,
-) -> Result<String, String> {
+) -> Result<String, ProfileError> {
     build_profile_with_terminals(request, proxy_address, inputs, &[])
 }
 
@@ -62,7 +79,7 @@ pub(crate) fn build_profile_with_terminals(
     proxy_address: Option<&ProxyAddress>,
     inputs: &ProfileInputs,
     terminal_paths: &[PathBuf],
-) -> Result<String, String> {
+) -> Result<String, ProfileError> {
     if let Some(override_profile) = request
         .seatbelt
         .as_ref()
@@ -90,9 +107,9 @@ pub(crate) fn build_profile_with_terminals(
     // Keep the controlling terminal usable without granting other host PTYs.
     out.push_str(TTY_ALLOW);
     for path in terminal_paths {
-        let path = path
-            .to_str()
-            .ok_or_else(|| "Seatbelt: assigned terminal path is not valid UTF-8".to_string())?;
+        let path = path.to_str().ok_or_else(|| {
+            ProfileError::Host("Seatbelt: assigned terminal path is not valid UTF-8".into())
+        })?;
         let _ = writeln!(
             out,
             "(allow file-read* file-write* file-ioctl (literal {}))",
@@ -544,13 +561,16 @@ fn write_keychain_rules(
     out: &mut String,
     request: &ExecutionRequest,
     user_keychains: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), ProfileError> {
     let enabled = request.seatbelt.as_ref().is_some_and(|c| c.keychain_access);
     if !enabled {
         return Ok(());
     }
-    let user_keychains = user_keychains
-        .ok_or_else(|| "User keychain directory was not prepared for keychainAccess".to_string())?;
+    let user_keychains = user_keychains.ok_or_else(|| {
+        ProfileError::Host(
+            "User keychain directory was not prepared for keychainAccess".to_string(),
+        )
+    })?;
 
     out.push_str(";; --- keychainAccess: Mach IPC for Keychain (securityd, prefs, XPC, LS) ---\n");
     out.push_str("(allow mach-lookup\n");
@@ -628,14 +648,14 @@ mod tests {
     use super::*;
     use crate::mxc_common::models::{NetworkAction, SeatbeltConfig, UiPolicy};
 
-    fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
+    fn build_profile(request: &ExecutionRequest) -> Result<String, ProfileError> {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
     }
 
     fn build_profile_with_proxy(
         request: &ExecutionRequest,
         proxy_address: Option<&ProxyAddress>,
-    ) -> Result<String, String> {
+    ) -> Result<String, ProfileError> {
         let inputs = ProfileInputs {
             readonly_paths: request.policy.readonly_paths.clone(),
             readwrite_paths: request.policy.readwrite_paths.clone(),
@@ -1710,6 +1730,11 @@ mod tests {
         });
         let error =
             super::build_profile_with_proxy(&request, None, &ProfileInputs::default()).unwrap_err();
-        assert!(error.contains("not prepared for keychainAccess"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("not prepared for keychainAccess"),
+            "{error}"
+        );
     }
 }

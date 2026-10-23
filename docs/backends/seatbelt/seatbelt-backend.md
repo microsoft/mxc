@@ -601,7 +601,9 @@ once you can see the rules that were emitted.
 ### What gets rejected
 
 MXC refuses any config it cannot faithfully enforce, rather than quietly
-approximating it. This is the complete list.
+approximating it. This is the complete list. A refusal carries the
+`policy_validation` error code and exit code `1`: nothing ran, and only a
+changed config can succeed.
 
 One documented exception: `ingress.hostLoopback: "deny"` under
 `ingress.default: "allow"` is accepted with the container-to-host half enforced

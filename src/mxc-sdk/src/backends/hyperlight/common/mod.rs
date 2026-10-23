@@ -89,9 +89,10 @@
 //! ## Exit codes
 //!
 //! Guest exit code on clean completion (0 for normal exit, non-zero for
-//! `sys.exit(N)` or unhandled exceptions), -1 on any runner error
-//! (preflight, install, runtime, guest crash, timeout). The specific
-//! failure mode is in `error_message`.
+//! `sys.exit(N)` or unhandled exceptions). A refused request exits 1; a
+//! host that cannot provide the backend, a failed install or boot, a guest
+//! crash and a timeout all exit -1. The specific failure mode is in
+//! `error_message`, and `failure_phase` says which side is at fault.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -99,7 +100,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, HyperlightRuntime, ScriptResponse};
+use crate::mxc_common::models::{
+    ExecutionRequest, FailurePhase, HyperlightRuntime, ScriptResponse,
+};
 use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
@@ -137,32 +140,53 @@ pub fn is_whp_available() -> bool {
 
 #[derive(Debug)]
 enum RunnerError {
-    /// Pre-spawn validation failures (missing image, unsupported policy).
-    Preflight(String),
-    /// Runtime construction, install, or execution failure.
-    Runtime(String),
+    /// The request asks for something the guest cannot do.
+    Policy(String),
+    /// This host cannot provide the backend: no usable guest image for the
+    /// requested runtime, and nothing to install one from.
+    Unavailable(String),
+    /// Host-side preparation of a run failed (mount staging, path resolution).
+    Setup(String),
+    /// Boot, install, or snapshot bring-up failed.
+    Launch(String),
+    /// The guest failed while running the call.
+    Exec(String),
+    /// The call outlived `scriptTimeout` and was cut short.
+    Timeout(String),
 }
 
 impl std::fmt::Display for RunnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunnerError::Preflight(msg) => write!(f, "hyperlight preflight error: {msg}"),
-            RunnerError::Runtime(msg) => write!(f, "hyperlight runtime error: {msg}"),
+            RunnerError::Policy(msg) => write!(f, "hyperlight policy error: {msg}"),
+            RunnerError::Unavailable(msg) => {
+                write!(f, "hyperlight is not available on this host: {msg}")
+            }
+            RunnerError::Setup(msg) => write!(f, "hyperlight setup error: {msg}"),
+            RunnerError::Launch(msg) | RunnerError::Exec(msg) | RunnerError::Timeout(msg) => {
+                write!(f, "hyperlight runtime error: {msg}")
+            }
         }
     }
 }
 
 impl RunnerError {
-    fn to_response(&self) -> ScriptResponse {
-        ScriptResponse {
-            exit_code: ERROR_EXIT_CODE,
-            error_message: self.to_string(),
-            ..Default::default()
+    /// Which side a failure is attributed to: the request, the host, or the
+    /// run itself.
+    fn failure_phase(&self) -> FailurePhase {
+        match self {
+            RunnerError::Policy(_) => FailurePhase::Rejected,
+            RunnerError::Unavailable(_) => FailurePhase::BackendUnavailable,
+            RunnerError::Setup(_) | RunnerError::Launch(_) => FailurePhase::LaunchFailed,
+            RunnerError::Exec(_) => FailurePhase::PostLaunchFailed,
+            RunnerError::Timeout(_) => FailurePhase::Timeout,
         }
     }
-}
 
-const ERROR_EXIT_CODE: i32 = -1;
+    fn to_response(&self) -> ScriptResponse {
+        ScriptResponse::failed(self.failure_phase(), &self.to_string())
+    }
+}
 
 /// Env var override for the Hyperlight image home. Set this to force a
 /// specific location; otherwise the runner uses a standard OS-local
@@ -406,7 +430,7 @@ impl HyperlightScriptRunner {
                 default.join(name)
             ),
         };
-        Err(RunnerError::Preflight(format!(
+        Err(RunnerError::Unavailable(format!(
             "no hyperlight image found for the {name} runtime. searched ${HOME_ENV}, \
              {default:?}, <exe>/{EXE_RELATIVE_HOME}/, <cwd>/{CWD_RELATIVE_HOME}/, each under \
              `{name}/`. {hint}"
@@ -444,10 +468,10 @@ impl HyperlightScriptRunner {
     /// Reject policies the guest cannot enforce before any sandbox is booted.
     fn validate_policies(request: &ExecutionRequest) -> Result<(), RunnerError> {
         if request.policy.network_proxy.is_enabled() {
-            return Err(RunnerError::Preflight(ERR_PROXY_POLICY.to_string()));
+            return Err(RunnerError::Policy(ERR_PROXY_POLICY.to_string()));
         }
         if !request.working_directory.is_empty() {
-            return Err(RunnerError::Preflight(ERR_WORKDIR.to_string()));
+            return Err(RunnerError::Policy(ERR_WORKDIR.to_string()));
         }
         // Denied paths: block early if any appears in the allow lists.
         for denied in &request.policy.denied_paths {
@@ -459,15 +483,24 @@ impl HyperlightScriptRunner {
             {
                 match path_relationship(allowed, denied) {
                     PathRelationship::Overlaps => {
-                        return Err(RunnerError::Preflight(format!(
+                        return Err(RunnerError::Policy(format!(
                             "deniedPaths entry {denied:?} overlaps allow list path {allowed:?}; \
                              Hyperlight cannot safely expose overlapping allowed and denied \
                              host paths"
                         )));
                     }
                     PathRelationship::Separate => {}
-                    PathRelationship::Indeterminate => {
-                        return Err(RunnerError::Preflight(format!(
+                    PathRelationship::Unresolvable(reason) => {
+                        return Err(RunnerError::Setup(format!(
+                            "Hyperlight: cannot verify deniedPaths against allow lists because \
+                             the host could not resolve {allowed:?} or {denied:?} ({reason}). \
+                             With deniedPaths present, MXC fails closed rather than risk an \
+                             unenforced deny."
+                        )));
+                    }
+                    #[cfg(target_os = "windows")]
+                    PathRelationship::Ambiguous => {
+                        return Err(RunnerError::Policy(format!(
                             "Hyperlight: cannot verify deniedPaths against allow lists because \
                              {allowed:?} or {denied:?} could not be resolved to a canonical \
                              location. With deniedPaths present, MXC fails closed rather than \
@@ -511,13 +544,13 @@ impl HyperlightScriptRunner {
                     .map(|p| p.as_os_str().is_empty() || p.exists())
                     .unwrap_or(false);
                 if !parent_ok {
-                    return Err(RunnerError::Preflight(format!(
+                    return Err(RunnerError::Policy(format!(
                         "mount path {host:?} does not exist and its parent doesn't either; \
                          refusing to auto-create (fix the path or `mkdir -p` manually)"
                     )));
                 }
                 std::fs::create_dir_all(&host_path).map_err(|e| {
-                    RunnerError::Preflight(format!("auto-create mount dir {host:?}: {e}"))
+                    RunnerError::Setup(format!("auto-create mount dir {host:?}: {e}"))
                 })?;
             }
 
@@ -525,12 +558,12 @@ impl HyperlightScriptRunner {
             // so a relative path keeps meaning the same directory after a
             // cwd change.
             let host_path = std::fs::canonicalize(&host_path)
-                .map_err(|e| RunnerError::Preflight(format!("resolve mount path {host:?}: {e}")))?;
+                .map_err(|e| RunnerError::Setup(format!("resolve mount path {host:?}: {e}")))?;
             let basename = host_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| {
-                    RunnerError::Preflight(format!("mount path {host:?} has no filename component"))
+                    RunnerError::Policy(format!("mount path {host:?} has no filename component"))
                 })?;
             // The guest path travels to the kernel in its `vfs.fstab`
             // list, which these characters would break; the library
@@ -539,14 +572,14 @@ impl HyperlightScriptRunner {
                 .chars()
                 .any(|c| c.is_whitespace() || matches!(c, ':' | '[' | ']'))
             {
-                return Err(RunnerError::Preflight(format!(
+                return Err(RunnerError::Policy(format!(
                     "mount path {host:?}: the directory name may not contain whitespace, \
                      ':' or brackets (it names the guest mount point)"
                 )));
             }
             let guest_path = format!("{GUEST_MOUNT_ROOT}/{basename}");
             if !seen_guest_paths.insert(guest_path.clone()) {
-                return Err(RunnerError::Preflight(format!(
+                return Err(RunnerError::Policy(format!(
                     "two mount paths collide on guest path {guest_path:?}; \
                      rename one of the host directories"
                 )));
@@ -616,7 +649,7 @@ impl HyperlightScriptRunner {
         let builder = SandboxBuilder::from_snapshot(rewind).mounts(mounts.iter().cloned());
         let sandbox = builder
             .boot()
-            .map_err(|e| RunnerError::Runtime(format!("restore hyperlight snapshot: {e}")))?;
+            .map_err(|e| RunnerError::Launch(format!("restore hyperlight snapshot: {e}")))?;
         Ok(Guest {
             sandbox,
             fresh: true,
@@ -724,11 +757,11 @@ impl HyperlightScriptRunner {
                 // next call boots another from the rewind point.
                 self.guest = None;
                 let err = match failure {
-                    RunError::TimedOut(timeout) => RunnerError::Runtime(format!(
+                    RunError::TimedOut(timeout) => RunnerError::Timeout(format!(
                         "execution timed out after {:.1}s",
                         timeout.as_secs_f64()
                     )),
-                    RunError::Failed(msg) => RunnerError::Runtime(format!("run: {msg}")),
+                    RunError::Failed(msg) => RunnerError::Exec(format!("run: {msg}")),
                 };
                 logger.log_line(&err.to_string());
                 err.to_response()
@@ -873,7 +906,7 @@ fn warm_snapshot(
     configure_surrogates();
     let mut sandbox = rootfs_builder(home, runtime)
         .boot()
-        .map_err(|e| RunnerError::Runtime(format!("boot hyperlight rootfs: {e}")))?;
+        .map_err(|e| RunnerError::Launch(format!("boot hyperlight rootfs: {e}")))?;
     // Saved beside the snapshot directory, so a failed save leaves whatever
     // is there standing, then published by rename.
     let staged = home.join(format!(".{SNAPSHOT_DIR}.{}.part", std::process::id()));
@@ -882,7 +915,7 @@ fn warm_snapshot(
         Ok(snapshot) => snapshot,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&staged);
-            return Err(RunnerError::Runtime(format!(
+            return Err(RunnerError::Launch(format!(
                 "save snapshot to {staged:?}: {e}"
             )));
         }
@@ -975,7 +1008,7 @@ fn load_persisted_snapshot(
         Err(e) => e,
     };
     if !has_install_source(home, runtime) {
-        return Err(RunnerError::Preflight(no_install_source(runtime)));
+        return Err(RunnerError::Unavailable(no_install_source(runtime)));
     }
     logger.log_line(&match unloadable {
         hyperlight_unikraft::Error::SnapshotRelease { saved_by, .. } => format!(
@@ -1280,11 +1313,13 @@ fn stamp_matches(home: &Path, runtime: HyperlightRuntime) -> bool {
 /// Whether an allowed host path overlaps a denied path after canonicalization,
 /// with a platform-aware lexical fallback for paths that do not exist yet.
 fn path_relationship(allowed: &str, denied: &str) -> PathRelationship {
-    let Ok(allowed) = anchor_policy_path(allowed) else {
-        return PathRelationship::Indeterminate;
-    };
-    let Ok(denied) = anchor_policy_path(denied) else {
-        return PathRelationship::Indeterminate;
+    let (allowed, denied) = match (anchor_policy_path(allowed), anchor_policy_path(denied)) {
+        (Ok(allowed), Ok(denied)) => (allowed, denied),
+        (Err(e), _) | (_, Err(e)) => {
+            return PathRelationship::Unresolvable(format!(
+                "could not read the current directory: {e}"
+            ));
+        }
     };
     match (
         std::fs::canonicalize(&allowed),
@@ -1310,7 +1345,11 @@ fn anchor_policy_path(path: &str) -> Result<PathBuf, std::io::Error> {
 enum PathRelationship {
     Overlaps,
     Separate,
-    Indeterminate,
+    /// The path spelling cannot be compared safely.
+    #[cfg(target_os = "windows")]
+    Ambiguous,
+    /// The host could not resolve a path.
+    Unresolvable(String),
 }
 
 impl PathRelationship {
@@ -1343,16 +1382,19 @@ fn path_relationship_fallback_with(
             let Some(allowed_norm) =
                 WindowsFallbackPath::parse_canonical(allowed, &allowed_resolved)
             else {
-                return PathRelationship::Indeterminate;
+                return PathRelationship::Ambiguous;
             };
             let Some(denied_norm) = WindowsFallbackPath::parse_canonical(denied, &denied_resolved)
             else {
-                return PathRelationship::Indeterminate;
+                return PathRelationship::Ambiguous;
             };
             return PathRelationship::from_overlaps(allowed_norm.overlaps(&denied_norm));
         }
-        (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => {
-            return PathRelationship::Indeterminate;
+        (PathCanonical::Unknown, _) => {
+            return PathRelationship::Unresolvable(format!("{allowed:?} could not be examined"));
+        }
+        (_, PathCanonical::Unknown) => {
+            return PathRelationship::Unresolvable(format!("{denied:?} could not be examined"));
         }
         _ => {}
     }
@@ -1470,11 +1512,13 @@ fn has_trim_sensitive_component(path: &str) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
-    let Ok(allowed) = resolve_non_windows_fallback_path(Path::new(allowed)) else {
-        return PathRelationship::Indeterminate;
+    let resolve = |path: &str| {
+        resolve_non_windows_fallback_path(Path::new(path))
+            .map_err(|e| PathRelationship::Unresolvable(format!("{path:?}: {e}")))
     };
-    let Ok(denied) = resolve_non_windows_fallback_path(Path::new(denied)) else {
-        return PathRelationship::Indeterminate;
+    let (allowed, denied) = match (resolve(allowed), resolve(denied)) {
+        (Ok(allowed), Ok(denied)) => (allowed, denied),
+        (Err(unresolvable), _) | (_, Err(unresolvable)) => return unresolvable,
     };
     PathRelationship::from_overlaps(denied.starts_with(&allowed) || allowed.starts_with(&denied))
 }
@@ -1851,7 +1895,8 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        assert_eq!(resp.exit_code, FailurePhase::Rejected.failure_exit_code());
         assert_denied_overlap_message(&resp.error_message);
     }
 
@@ -1918,6 +1963,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_host_path_is_a_setup_failure_not_a_policy_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = fresh_tmp("deny-unresolvable");
+        let locked = tmp.join("locked");
+        std::fs::create_dir_all(locked.join("inner")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let restore = || {
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&tmp);
+        };
+        // Root ignores directory permissions.
+        if std::fs::canonicalize(locked.join("inner")).is_ok() {
+            restore();
+            return;
+        }
+
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![locked.join("inner").to_string_lossy().to_string()],
+                denied_paths: vec![tmp.join("secret").to_string_lossy().to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resp = runner().run(&request, &mut Logger::new(Mode::Buffer));
+        restore();
+
+        assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(
+            resp.exit_code,
+            FailurePhase::LaunchFailed.failure_exit_code()
+        );
+        assert!(
+            resp.error_message
+                .contains("cannot verify deniedPaths against allow lists"),
+            "got: {}",
+            resp.error_message
+        );
+    }
+
     #[test]
     fn policy_rejects_denied_absolute_descendant_of_missing_relative_mount() {
         let relative_mount = format!("hyperlight-relative-{}", std::process::id());
@@ -1955,7 +2044,8 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        assert_eq!(resp.exit_code, FailurePhase::Rejected.failure_exit_code());
         assert_denied_overlap_message(&resp.error_message);
     }
 
@@ -1976,7 +2066,8 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        assert_eq!(resp.exit_code, FailurePhase::Rejected.failure_exit_code());
         assert_denied_overlap_message(&resp.error_message);
     }
 
@@ -2017,17 +2108,17 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn fallback_reports_indeterminate_for_unresolved_windows_paths() {
+    fn fallback_reports_unresolved_windows_paths_as_host_failures() {
         use crate::mxc_common::filesystem_canonical::PathCanonical;
 
-        assert_eq!(
+        assert!(matches!(
             path_relationship_fallback_with(
                 "C:\\MXC\\HyperlightUnknown\\allow",
                 "C:\\MXC\\HyperlightUnknown\\deny",
                 |_| PathCanonical::Unknown,
             ),
-            PathRelationship::Indeterminate
-        );
+            PathRelationship::Unresolvable(_)
+        ));
     }
 
     #[cfg(target_os = "windows")]
@@ -2071,7 +2162,7 @@ mod tests {
         assert!(
             matches!(
                 relationship,
-                PathRelationship::Overlaps | PathRelationship::Indeterminate
+                PathRelationship::Overlaps | PathRelationship::Ambiguous
             ),
             "same resolved tree must overlap or fail closed, got {relationship:?}"
         );
@@ -2093,7 +2184,7 @@ mod tests {
                     _ => PathCanonical::Absent,
                 },
             ),
-            PathRelationship::Indeterminate
+            PathRelationship::Ambiguous
         );
     }
 
@@ -2173,7 +2264,43 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        assert_eq!(resp.exit_code, FailurePhase::Rejected.failure_exit_code());
         assert!(resp.error_message.contains(ERR_WORKDIR));
+    }
+
+    #[test]
+    fn a_host_without_an_image_blames_the_host() {
+        let resp =
+            RunnerError::Unavailable(no_install_source(HyperlightRuntime::Agent)).to_response();
+        assert_eq!(resp.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(resp.exit_code, -1);
+        assert!(resp.error_message.contains("not available on this host"));
+    }
+
+    #[test]
+    fn run_faults_keep_the_generic_backend_error_code() {
+        for (err, phase) in [
+            (
+                RunnerError::Setup("mount".to_string()),
+                FailurePhase::LaunchFailed,
+            ),
+            (
+                RunnerError::Launch("boot".to_string()),
+                FailurePhase::LaunchFailed,
+            ),
+            (
+                RunnerError::Exec("run".to_string()),
+                FailurePhase::PostLaunchFailed,
+            ),
+            (
+                RunnerError::Timeout("deadline".to_string()),
+                FailurePhase::Timeout,
+            ),
+        ] {
+            let resp = err.to_response();
+            assert_eq!(resp.failure_phase, phase, "{err}");
+            assert_eq!(resp.exit_code, -1, "{err}");
+        }
     }
 }

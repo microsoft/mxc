@@ -325,8 +325,9 @@ request is validated by the same native engine as executor requests.
 
 Notes and limits:
 
-- **Windows only.** Selecting `Containment::Wslc` on Linux/macOS, or without the
-  `wslc` feature, fails with `ErrorCode::UnsupportedContainment`.
+- **Windows only.** Selecting `Containment::Wslc` on Linux/macOS fails with
+  `ErrorCode::UnsupportedContainment`; on Windows without the `wslc` feature it
+  fails with `ErrorCode::BackendUnavailable`.
 - **No stdin.** MXC does not forward stdin to a WSL container, so
   `Sandbox::take_stdin()` returns `None` for it.
 - **No host pid.** The process runs inside the WSL VM, so `Sandbox::id()` is `0`;
