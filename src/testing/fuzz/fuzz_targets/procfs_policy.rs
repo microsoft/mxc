@@ -8,7 +8,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mxc_sdk::mxc_common::config_parser::load_mxc_request;
+use mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json;
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::state_aware_request::MxcRequest;
 
@@ -19,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let mut logger = Logger::new(Mode::Buffer);
-    if let Ok(MxcRequest::OneShot(request)) = load_mxc_request(json, &mut logger, false) {
+    if let Ok(MxcRequest::OneShot(request)) = load_mxc_request_from_json(json, &mut logger) {
         if let Some(environment) = request.env {
             assert!(!environment.iter().any(|entry| {
                 entry
