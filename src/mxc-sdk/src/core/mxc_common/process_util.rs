@@ -144,6 +144,10 @@ unsafe impl Sync for CancelablePipe {}
 /// pipe (all write ends closed) still reads as EOF as usual. `Send` so it can
 /// be handed to a reader thread. Single-reader: at most one thread may `read` it
 /// at a time (any number of cancellers may fire concurrently).
+///
+/// Cancelling can discard data that a read has received but has not yet returned
+/// to the caller. When collecting remaining output, allow it to drain before
+/// cancelling at the timeout.
 pub struct InterruptiblePipeReader(Arc<CancelablePipe>);
 
 impl InterruptiblePipeReader {
