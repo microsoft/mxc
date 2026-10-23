@@ -22,8 +22,10 @@
 //!   than pipe handles. Each exposed output needs its own blocking pump because
 //!   the SDK offers no waitable or overlapped read primitive; the cost is
 //!   therefore bounded at two threads per native-streaming sandbox.
-//! - **stdin** — not forwarded to the container, so
-//!   [`take_stdin`](SandboxProcess::take_stdin) always returns `None`.
+//! - **stdin** — not forwarded to a create-and-run container, so
+//!   [`take_stdin`](SandboxProcess::take_stdin) always returns `None`. An exec
+//!   in a provisioned container does forward it; see
+//!   [`crate::wslc_common::state_aware`].
 //! - **[`id`](SandboxProcess::id)** — the process lives inside the WSL VM and
 //!   has no host process id, so this is always `0`.
 

@@ -130,6 +130,23 @@ internal interface IContainerLifecycle
         throw new NotSupportedException(
             "This lifecycle implementation does not support PTY processes.");
 
+    /// <summary>Spawn an execution request with live standard streams and a writable stdin.</summary>
+    IMxcProcess SpawnInContainerWithStdin(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null) =>
+        throw new NotSupportedException(
+            "This lifecycle implementation does not support forwarding stdin.");
+
+    /// <summary>Asynchronous form of <see cref="SpawnInContainerWithStdin"/>.</summary>
+    Task<IMxcProcess> SpawnInContainerWithStdinAsync(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException(
+            "This lifecycle implementation does not support forwarding stdin.");
+
     /// <summary>Validate an execution request without starting a process.</summary>
     ValidationResult ValidateProcess(
         ContainerId id,
@@ -213,6 +230,22 @@ internal sealed class MxcContainerLifecycle : IContainerLifecycle
         ExecutionRequest request,
         SpawnInContainerWithPtyOptions? options = null) =>
         MxcLifecycle.SpawnInContainerWithPty(id, request, options);
+
+    /// <inheritdoc/>
+    public IMxcProcess SpawnInContainerWithStdin(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null) =>
+        MxcLifecycle.SpawnInContainerWithStdin(id, request, options);
+
+    /// <inheritdoc/>
+    public async Task<IMxcProcess> SpawnInContainerWithStdinAsync(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        await MxcLifecycle.SpawnInContainerWithStdinAsync(id, request, options, cancellationToken)
+            .ConfigureAwait(false);
 
     /// <inheritdoc/>
     public ValidationResult ValidateProcess(

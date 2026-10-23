@@ -154,7 +154,10 @@ finally
 }
 ```
 
-Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. The
+Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. A
+WSLC command started this way reads end-of-file on stdin; use
+`SpawnInContainerWithStdin` or `SpawnInContainerWithStdinAsync` to give it a
+writable `StandardInput`. The
 asynchronous methods are convenience wrappers over native operations and
 support cancellation. Backend and phase-specific policy requirements are
 described in the

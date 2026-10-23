@@ -13,6 +13,7 @@ Callers do not supply JSON or a schema version.
 |---|---|---|---|
 | Capture stdout and stderr | `Run` / `RunAsync` | `RunInContainer` / `RunInContainerAsync` | `ExecutionResult` |
 | Live standard pipes | `Spawn` / `SpawnAsync` | `SpawnInContainer` / `SpawnInContainerAsync` | `MxcProcess` |
+| Live standard pipes with a writable WSLC stdin | — | `SpawnInContainerWithStdin` / `SpawnInContainerWithStdinAsync` | `MxcProcess` |
 | Interactive terminal | `SpawnWithPty` | `SpawnInContainerWithPty` | `MxcPtyProcess` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
@@ -194,7 +195,8 @@ public static ValidationResult ValidateStart(ContainerId id, StartOptions? optio
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainer
 
-Run a command in a started container and return live stdio streams.
+Run a command in a started container and return live stdio streams. A WSLC
+command reads end-of-file on stdin.
 
 ```csharp
 public static MxcProcess SpawnInContainer(
@@ -210,6 +212,32 @@ Spawn a command asynchronously and return live stdio streams.
 
 ```csharp
 public static Task<MxcProcess> SpawnInContainerAsync(
+    ContainerId id,
+    ExecutionRequest request,
+    SpawnInContainerOptions? options = null,
+    CancellationToken cancellationToken = default);
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainerWithStdin
+
+Run a command in a started container and return live stdio streams, including a
+writable `StandardInput`. Disposing it gives the command end-of-file.
+
+```csharp
+public static MxcProcess SpawnInContainerWithStdin(
+    ContainerId id,
+    ExecutionRequest request,
+    SpawnInContainerOptions? options = null);
+```
+
+
+## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainerWithStdinAsync
+
+Asynchronous form of `SpawnInContainerWithStdin`.
+
+```csharp
+public static Task<MxcProcess> SpawnInContainerWithStdinAsync(
     ContainerId id,
     ExecutionRequest request,
     SpawnInContainerOptions? options = null,

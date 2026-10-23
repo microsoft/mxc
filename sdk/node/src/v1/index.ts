@@ -84,6 +84,7 @@ export type { ProcessNetworkConfig } from './lifecycle-types.js';
 
 export {
   spawnInContainer,
+  spawnInContainerWithStdin,
   provisionContainer,
   startContainer,
   spawnInContainerWithPty,

@@ -52,6 +52,11 @@ fn typed_lifecycle_api_is_operation_specific() {
     let _: fn(
         &ContainerId,
         ExecutionRequest,
+        SpawnInContainerOptions,
+    ) -> Result<MxcProcess, Error> = container::spawn_in_container_with_stdin;
+    let _: fn(
+        &ContainerId,
+        ExecutionRequest,
         RunInContainerOptions,
     ) -> Result<ExecutionResult, Error> = container::run_in_container;
     let _: fn(

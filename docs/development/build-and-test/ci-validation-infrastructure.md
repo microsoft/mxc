@@ -15,7 +15,7 @@ the individual local test scripts are documented in
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
-  `Build.MacOS.Job.yml`, and for ProcessContainer and IsolationSession the
+  `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, and WSLC the
   Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`, in the same
   workflow run, so what gets tested is exactly what got built.
 - The matrix is **declarative**. `scripts/ci/validation-test-matrix.json` is the
@@ -31,7 +31,7 @@ the individual local test scripts are documented in
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
-| `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession and ProcessContainer SDK test payloads and checks that each payload discovers its tests. |
+| `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
@@ -50,7 +50,7 @@ Validation.Tests.Scheduled.yml
       ├─ windows-sdk-bundle         →  Package.WindowsSdk.TestBundle.Job.yml  (upload bundle)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
-                 ├─ windows job (matrix) → download artifact (+ SDK bundle for process/isolation-session) → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
+                 ├─ windows job (matrix) → download artifact (+ SDK bundle for process/isolation-session/wslc) → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
                  ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_backend_validation_tests.sh
                  └─ macos   job (matrix) → download artifact → prepare-macos-host.sh  → run_backend_validation_tests.sh
 ```
@@ -75,21 +75,22 @@ test jobs only ever `download-artifact`.
 Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
 
 Build artifacts are kept for 1 day — they exist only to feed these jobs. The
-test jobs need the three builds; a failed SDK bundle fails the ProcessContainer
-and IsolationSession jobs at their bundle download.
+test jobs need the three builds; a failed SDK bundle fails the ProcessContainer,
+IsolationSession, and WSLC jobs at their bundle download.
 
 ### `Validation.Tests.Matrix.Job.yml` — "Create Validation Test Matrix"
 
 | Job | Runner | What it does |
 |-----|--------|--------------|
 | `resolve` | `ubuntu-latest` | Runs the resolver, emits one matrix per OS family plus `has_<family>` flags so an empty family is skipped rather than failing on an empty matrix. |
-| `windows` | `A self-hosted 1ES Pool` | Download artifact (plus the SDK bundle for `process` and `isolation-session`) → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
+| `windows` | `A self-hosted 1ES Pool` | Download artifact (plus the SDK bundle for `process`, `isolation-session`, and `wslc`) → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
 | `linux` | `A self-hosted 1ES Pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `prepare-macos-host.sh <backend id>` → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
-the architecture). Job timeout 180 min; host prep 15 min; the test step 45 min
-(60 on macOS), so a hung backend fails while the log is still useful. Logs are
+the architecture). Job timeout 180 min; host prep 15 min (20 on Windows); the
+test step 45 min on Linux and 60 on Windows and macOS, so a hung backend fails
+while the log is still useful. Logs are
 uploaded either way — see [Log collection](#log-collection).
 
 ## The catalog
@@ -161,6 +162,13 @@ operations are reported as skips, not passing policy assertions.
 `tests/scripts/run_processcontainer_workload_tests.ps1` restores the application
 workloads for manual native-PSEC use only. It is not included in this matrix or
 called by the native policy suite.
+
+`isolation-session` and `wslc` run every suite and report each one. For
+`wslc` that is the command-line suite from the build artifact plus the .NET and
+Node lifecycle suites from the SDK bundle. The SDK suites skip unless
+`MXC_ENABLE_WSLC_TESTS=1`, which the dispatcher sets, and a suite that executed
+no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
+tests.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'

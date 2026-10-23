@@ -51,9 +51,10 @@
 //! [`v1::spawn_with_pty`] allocates a caller-controlled terminal.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
-//! requires the `isolation_session` build feature. MXC does not forward stdin
-//! to a WSLC container, so
-//! [`MxcProcess::take_stdin`] returns `None` for it.
+//! requires the `isolation_session` build feature. A WSLC process reads
+//! end-of-file on stdin, and [`MxcProcess::take_stdin`] returns `None` for it,
+//! unless it was started in a provisioned container by
+//! [`v1::container::spawn_in_container_with_stdin`].
 //! IsolationSession is also available through the typed lifecycle API.
 //!
 //! The `wslc` feature stages `wslcsdk.dll` into the cargo profile directory,
@@ -119,7 +120,8 @@
 //! [`v1::container::spawn_in_container_with_pty`]. [`v1::run`] captures both output streams. With
 //! [`v1::spawn`] or [`v1::container::spawn_in_container`], callers
 //! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
-//! stream they did not take. WSLC does not expose stdin.
+//! stream they did not take. WSLC exposes stdin only for
+//! [`v1::container::spawn_in_container_with_stdin`].
 //!
 //! [`v1::spawn_with_pty`] allocates a caller-controlled PTY for create-and-run
 //! execution on supported backends, including IsolationSession, Bubblewrap, LXC,
@@ -275,9 +277,9 @@ pub mod v1 {
 
         pub use crate::sandbox::{
             deprovision as deprovision_container, provision as provision_container,
-            spawn_in_container, spawn_in_container_with_pty, start as start_container,
-            stop as stop_container, validate_deprovision, validate_process, validate_provision,
-            validate_start, validate_stop,
+            spawn_in_container, spawn_in_container_with_pty, spawn_in_container_with_stdin,
+            start as start_container, stop as stop_container, validate_deprovision,
+            validate_process, validate_provision, validate_start, validate_stop,
         };
 
         /// Run a workload in an existing container to completion and capture output.
@@ -431,8 +433,10 @@ pub mod __ffi {
     /// `sandboxId` identifying a started container). No pty is allocated.
     ///
     /// IsolationSession and WSLC serve this with the crate's corresponding
-    /// `isolation_session` or `wslc` feature. WSLC returns separate stdout/stderr
-    /// pipes but no stdin. Windows Sandbox cannot hand back pipes and refuses.
+    /// `isolation_session` or `wslc` feature. WSLC returns stdout and stderr
+    /// pipes, and its process reads end-of-file on stdin; use
+    /// [`execute_lifecycle_with_stdin_json`] to give it input. Windows Sandbox
+    /// cannot hand back pipes and refuses.
     /// `experimental` opts in to experimental backends, as for
     /// [`run_lifecycle_json`].
     ///
@@ -443,7 +447,18 @@ pub mod __ffi {
         request_json: &str,
         experimental: bool,
     ) -> Result<MxcProcess, Error> {
-        crate::mxc_engine::exec_state_aware_json(request_json, experimental).map(MxcProcess::new)
+        crate::mxc_engine::exec_state_aware_json(request_json, experimental, false)
+            .map(MxcProcess::new)
+    }
+
+    /// [`execute_lifecycle_json`] with a writable stdin, which
+    /// [`MxcProcess::take_stdin`] returns.
+    pub fn execute_lifecycle_with_stdin_json(
+        request_json: &str,
+        experimental: bool,
+    ) -> Result<MxcProcess, Error> {
+        crate::mxc_engine::exec_state_aware_json(request_json, experimental, true)
+            .map(MxcProcess::new)
     }
 
     /// Spawn a lifecycle execution request with a caller-controlled PTY.

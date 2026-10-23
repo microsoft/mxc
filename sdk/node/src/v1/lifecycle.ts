@@ -143,6 +143,7 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
   request: ExecutionRequest<C>,
   options: SpawnInContainerOptions,
   apiName: string,
+  stdin = false,
 ): Promise<MxcProcess> {
   assertStateAwareOptions(apiName, options);
   assertPipedExecBackend(apiName, sandboxId);
@@ -150,6 +151,7 @@ function spawnStateAwareExecProcess<C extends LifecycleContainmentKind>(
     JSON.stringify(buildExecEnvelope(sandboxId, request, options.telemetry)),
     false,
     request.timeoutMs,
+    stdin,
   );
 }
 
@@ -237,7 +239,8 @@ export async function startContainer<C extends LifecycleContainmentKind>(
 /**
  * Streams a script execution inside a started IsolationSession or WSLC container over Node
  * pipes, returning an owning `MxcProcess` for waiting, termination,
- * stream access, and disposal.
+ * stream access, and disposal. A WSLC command reads end-of-file on stdin; use
+ * {@link spawnInContainerWithStdin} to give it input.
  */
 export async function spawnInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
@@ -250,6 +253,25 @@ export async function spawnInContainer<C extends PipedExecuteBackend>(
     request,
     options,
     'spawnInContainer',
+  );
+}
+
+/**
+ * {@link spawnInContainer} with a writable `standardInput` whose end gives the
+ * command end-of-file.
+ */
+export async function spawnInContainerWithStdin<C extends PipedExecuteBackend>(
+  containerId: ContainerId<C>,
+  request: ExecutionRequest<C>,
+  options: SpawnInContainerOptions = {},
+): Promise<MxcProcess> {
+  assertStateAwareStreamingOptions('spawnInContainerWithStdin', options);
+  return spawnStateAwareExecProcess(
+    containerId,
+    request,
+    options,
+    'spawnInContainerWithStdin',
+    true,
   );
 }
 

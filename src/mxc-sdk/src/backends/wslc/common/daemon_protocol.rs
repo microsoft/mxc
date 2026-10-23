@@ -53,7 +53,10 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 ///
 /// Changing this strands whatever a running daemon is holding, since the SDK
 /// offers no way to re-attach to a live session from another process.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
+
+/// Largest payload one [`StreamFrame::Stdin`] may carry.
+pub const MAX_STDIN_CHUNK_BYTES: usize = 64 * 1024;
 
 fn deserialize_exec_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -205,6 +208,12 @@ pub struct ExecConfig {
     /// Timeout in milliseconds (0 = no timeout).
     #[serde(default)]
     pub timeout_ms: u32,
+
+    /// Whether the client will send the process's stdin over
+    /// [`DaemonRequest::ExecStdin`]; without it the process reads end-of-file
+    /// immediately.
+    #[serde(default)]
+    pub stdin: bool,
 }
 
 /// Inputs to `stop`: stop the running container, keeping it created for a later
@@ -225,6 +234,16 @@ pub struct DeprovisionConfig {
 /// stopping its warm container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CancelExecConfig {
+    #[serde(deserialize_with = "deserialize_exec_id")]
+    pub exec_id: String,
+    #[serde(deserialize_with = "deserialize_exec_id")]
+    pub run_token: String,
+}
+
+/// Inputs to `exec_stdin`: attach the stdin of one admitted exec that asked for
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecStdinConfig {
     #[serde(deserialize_with = "deserialize_exec_id")]
     pub exec_id: String,
     #[serde(deserialize_with = "deserialize_exec_id")]
@@ -265,6 +284,10 @@ pub enum DaemonRequest {
     Exec(ExecConfig),
     /// Request termination of one admitted exec. Replies [`DaemonResponse::Ok`].
     CancelExec(CancelExecConfig),
+
+    /// Attach an admitted exec's stdin; after [`DaemonResponse::Ok`] the client
+    /// sends [`StreamFrame::Stdin`] frames, ending with an empty one.
+    ExecStdin(ExecStdinConfig),
     /// Stop the running container. Replies [`DaemonResponse::Ok`].
     Stop(StopConfig),
     /// Delete the container (refcount--). Replies [`DaemonResponse::Ok`].
@@ -336,10 +359,11 @@ pub enum ErrKind {
 // Exec data-phase stream frames
 // ---------------------------------------------------------------------------
 
-/// A frame exchanged during the exec data phase (after an admitted
-/// [`DaemonRequest::Exec`]). Client→daemon carries [`StreamFrame::Stdin`];
+/// A frame exchanged during the exec data phase. Client→daemon carries
+/// [`StreamFrame::Stdin`] on a [`DaemonRequest::ExecStdin`] connection;
 /// daemon→client carries [`StreamFrame::Stdout`] / [`StreamFrame::Stderr`] and
-/// one terminal exit, timeout, cancellation, or error frame.
+/// one terminal exit, timeout, cancellation, or error frame on the
+/// [`DaemonRequest::Exec`] connection.
 ///
 /// The raw byte payloads are base64-encoded on the wire (see [`base64_bytes`]).
 /// serde_json renders a `Vec<u8>` as a JSON array of decimal integers (`[104,
@@ -506,8 +530,13 @@ mod tests {
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
             env_scope: EnvScope::Replace,
             timeout_ms: 30_000,
+            stdin: true,
         }));
         roundtrip(DaemonRequest::CancelExec(CancelExecConfig {
+            exec_id: "exec-1".to_string(),
+            run_token: "run-1".to_string(),
+        }));
+        roundtrip(DaemonRequest::ExecStdin(ExecStdinConfig {
             exec_id: "exec-1".to_string(),
             run_token: "run-1".to_string(),
         }));
@@ -548,6 +577,7 @@ mod tests {
             ],
             env_scope: EnvScope::Replace,
             timeout_ms: 0,
+            stdin: false,
         };
 
         let frame = encode_frame(&DaemonRequest::Exec(config.clone())).unwrap();
@@ -698,6 +728,21 @@ mod tests {
             "run_token": "x".repeat(MAX_EXEC_ID_BYTES + 1)
         });
         assert!(serde_json::from_value::<DaemonRequest>(cancel).is_err());
+
+        let stdin = serde_json::json!({
+            "op": "exec_stdin",
+            "exec_id": "",
+            "run_token": "run-1"
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(stdin).is_err());
+    }
+
+    #[test]
+    fn an_exec_config_without_stdin_gives_the_process_none() {
+        let without = r#"{"exec_id":"e","run_token":"r","sandbox_id":"s","script_code":"run"}"#;
+        let parsed: ExecConfig = serde_json::from_str(without).expect("stdin is optional");
+
+        assert!(!parsed.stdin);
     }
 
     #[test]

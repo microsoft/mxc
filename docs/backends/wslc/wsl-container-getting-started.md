@@ -281,8 +281,9 @@ try {
 }
 ```
 
-WSLC SDK execution uses standard output/error streams and does not expose a
-caller-controlled PTY or stdin.
+Create-and-run WSLC execution uses standard output/error streams and does not
+expose a caller-controlled PTY or stdin. See [Sending input (stdin)](#sending-input-stdin)
+for how to give a command input.
 
 ### Rust SDK
 
@@ -327,13 +328,31 @@ Notes and limits:
 
 - **Windows only.** Selecting `Containment::Wslc` on Linux/macOS, or without the
   `wslc` feature, fails with `ErrorCode::UnsupportedContainment`.
-- **No stdin.** MXC does not forward stdin to a WSL container, so
-  `Sandbox::take_stdin()` returns `None` for it.
+- **No stdin for create-and-run.** `v1::spawn` and `v1::run` do not forward
+  stdin to a WSL container, so `MxcProcess::take_stdin()` returns `None` for
+  it. See [Sending input (stdin)](#sending-input-stdin).
 - **No host pid.** The process runs inside the WSL VM, so `Sandbox::id()` is `0`;
   use `kill()` (which stops the container and everything in it) to terminate it.
 - **Discovery.** `platform_support()` lists `"wslc"` in `available_methods` only
   when this host can actually run it (`wslcsdk.dll` loads and the WSLC runtime
   reports no missing components).
+
+### Sending input (stdin)
+
+Stdin is forwarded only to a command run in a provisioned container (container
+lifecycle operations). Create-and-run execution forwards none: its command sees
+end-of-file on stdin at once.
+
+| Flow | Stdin |
+|---|---|
+| Create-and-run: `wxc-exec` with a `wslc` config, or SDK `run` / `spawn` | Not forwarded. |
+| Lifecycle exec from the CLI: `wxc-exec --operation exec` | The executor's own stdin is forwarded when it is a pipe, a file, or `NUL`, for example `type input.txt \| wxc-exec.exe --operation exec ...` or `wxc-exec.exe --operation exec ... < input.txt`. A terminal is not forwarded. |
+| Lifecycle exec from an SDK: `spawn_in_container_with_stdin` (Rust), `MxcLifecycle.SpawnInContainerWithStdin` (.NET), `spawnInContainerWithStdin` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. |
+| Lifecycle exec from an SDK: `spawn_in_container` (Rust), `MxcLifecycle.SpawnInContainer` (.NET), `spawnInContainer` (Node) | Not forwarded. |
+
+The run-to-completion helpers (`run_in_container`, `RunInContainer`,
+`runInContainer`) take no input. See
+[exec stdin](wslc-state-aware.md#exec-stdin) for the details and limits.
 
 ## Configuration Reference
 
@@ -692,7 +711,7 @@ Four workload shapes are not:
 
 | Workload type | Why |
 |---|---|
-| Interactive processes (REPLs, shells) | MXC does not pass stdin — execution is fire-and-forget |
+| Interactive processes (REPLs, shells) | Interactive terminal input is not forwarded; piped input reaches only a lifecycle exec (see [Sending input (stdin)](#sending-input-stdin)) |
 | GUI applications (X11, Wayland) | No display server — MXC captures stdout/stderr only |
 | Long-running daemons (web servers, databases) | MXC expects the process to exit within the configured timeout |
 | Hardware access (USB, serial, Bluetooth) | The micro-VM does not expose host hardware beyond filesystem and network |

@@ -41,8 +41,9 @@ use serde::Serialize;
 use crate::wslc_common::container_steps::OutStream;
 use crate::wslc_common::daemon_protocol::{
     encode_frame, CancelExecConfig, DaemonRequest, DaemonResponse, DeprovisionConfig,
-    DeprovisionSessionConfig, ErrKind, ExecConfig, ExecTerminal, ProvisionConfig,
-    ProvisionSessionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    DeprovisionSessionConfig, ErrKind, ExecConfig, ExecStdinConfig, ExecTerminal, ProvisionConfig,
+    ProvisionSessionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE,
+    MAX_STDIN_CHUNK_BYTES, PROTOCOL_VERSION,
 };
 use crate::wslc_common::daemon_record::{live_daemon, DaemonRecord, TransitionLock};
 
@@ -488,6 +489,43 @@ impl DaemonClient {
         }))?)
     }
 
+    /// Copy `input` into an admitted exec's stdin over a connection of its own,
+    /// ending with end-of-file.
+    pub(crate) fn forward_stdin(
+        &self,
+        exec_id: String,
+        run_token: String,
+        input: impl Read,
+    ) -> DaemonResult<()> {
+        copy_stdin(input, || self.attach_stdin(exec_id, run_token))
+    }
+
+    /// Open the connection carrying an exec's stdin, or return `None` if the
+    /// exec's run is already over.
+    fn attach_stdin(&self, exec_id: String, run_token: String) -> DaemonResult<Option<File>> {
+        let mut pipe = self.open_pipe()?;
+        write_frame(
+            &mut pipe,
+            &DaemonRequest::ExecStdin(ExecStdinConfig { exec_id, run_token }),
+        )?;
+        let (pipe, response) = read_frame_with_deadline(
+            move || {
+                let response = read_frame::<DaemonResponse>(&mut pipe)?;
+                Ok((pipe, response))
+            },
+            call_timeout(),
+        )?;
+        match response {
+            // The daemon registers an exec before admitting it, so it refuses
+            // this client's own exec only once that exec's run is over.
+            DaemonResponse::Err {
+                kind: ErrKind::Rejected,
+                ..
+            } => Ok(None),
+            response => expect_ok(response).map(|()| Some(pipe)),
+        }
+    }
+
     /// Issue a single non-streaming request on a fresh connection and return the
     /// daemon's reply.
     ///
@@ -720,8 +758,47 @@ fn expect_ok(response: DaemonResponse) -> DaemonResult<()> {
     }
 }
 
+/// Copy `input` as stdin frames, ending with end-of-file, to the connection
+/// `attach` opens once there is input or end-of-file to send.
+fn copy_stdin<W: Write>(
+    mut input: impl Read,
+    attach: impl FnOnce() -> DaemonResult<Option<W>>,
+) -> DaemonResult<()> {
+    let mut buf = vec![0u8; MAX_STDIN_CHUNK_BYTES];
+
+    // Reading first keeps a caller whose stdin stays open and silent from
+    // holding a daemon connection for the whole run.
+    let mut read = read_stdin(&mut input, &mut buf)?;
+    let Some(mut pipe) = attach()? else {
+        return Ok(());
+    };
+    while read > 0 {
+        let chunk = StreamFrame::Stdin {
+            data: buf[..read].to_vec(),
+        };
+        write_frame(&mut pipe, &chunk).context("send stdin to the WSLc daemon")?;
+        read = read_stdin(&mut input, &mut buf)?;
+    }
+    write_frame(&mut pipe, &StreamFrame::Stdin { data: Vec::new() })
+        .context("send stdin end-of-file to the WSLc daemon")?;
+    Ok(())
+}
+
+fn read_stdin(input: &mut impl Read, buf: &mut [u8]) -> DaemonResult<usize> {
+    loop {
+        match input.read(buf) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            read => {
+                return read.map_err(|error| {
+                    DaemonError::transport(format!("reading the exec's stdin failed: {error}"))
+                })
+            }
+        }
+    }
+}
+
 /// Serialise `msg` and write it as one length-prefixed frame.
-fn write_frame<T: Serialize>(pipe: &mut File, msg: &T) -> Result<()> {
+fn write_frame<T: Serialize>(pipe: &mut impl Write, msg: &T) -> Result<()> {
     let frame = encode_frame(msg).context("encode frame")?;
     pipe.write_all(&frame).context("write frame")?;
     pipe.flush().context("flush frame")?;
@@ -729,7 +806,7 @@ fn write_frame<T: Serialize>(pipe: &mut File, msg: &T) -> Result<()> {
 }
 
 /// Read exactly one length-prefixed frame and deserialise it.
-fn read_frame<T: DeserializeOwned>(pipe: &mut File) -> Result<T> {
+fn read_frame<T: DeserializeOwned>(pipe: &mut impl Read) -> Result<T> {
     let mut len_buf = [0u8; 4];
     pipe.read_exact(&mut len_buf)
         .context("read frame length prefix")?;
@@ -818,6 +895,109 @@ fn recover_or_cancel_read<T>(
     None
 }
 
+/// A daemon served from the test process, so a test can script each reply to
+/// the client under test.
+#[cfg(all(test, windows))]
+pub(crate) mod test_daemon {
+    use super::*;
+    use std::os::windows::io::FromRawHandle;
+    use std::sync::mpsc::{channel, Receiver};
+
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
+    use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
+        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    };
+
+    pub(crate) struct Connection {
+        pub(crate) request: DaemonRequest,
+        pipe: File,
+    }
+
+    impl Connection {
+        pub(crate) fn reply<T: Serialize>(&mut self, msg: &T) {
+            write_frame(&mut self.pipe, msg).expect("reply to the client");
+        }
+
+        pub(crate) fn read<T: DeserializeOwned>(&mut self) -> T {
+            read_frame(&mut self.pipe).expect("read from the client")
+        }
+    }
+
+    pub(crate) struct TestDaemon {
+        pub(crate) client: DaemonClient,
+        connections: Receiver<Connection>,
+    }
+
+    impl TestDaemon {
+        pub(crate) fn start() -> Self {
+            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let pipe_name = format!(
+                r"\\.\pipe\mxc-wslc-test-daemon-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            );
+            let (connected, connections) = channel();
+            let name = pipe_name.clone();
+            std::thread::spawn(move || {
+                let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+                loop {
+                    // SAFETY: `wide` is a NUL-terminated name that outlives the call.
+                    let server = unsafe {
+                        CreateNamedPipeW(
+                            PCWSTR(wide.as_ptr()),
+                            PIPE_ACCESS_DUPLEX,
+                            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                            PIPE_UNLIMITED_INSTANCES,
+                            4096,
+                            4096,
+                            0,
+                            None,
+                        )
+                    };
+                    assert!(!server.is_invalid(), "create a test daemon pipe instance");
+
+                    // SAFETY: `server` is a pipe instance this loop just created.
+                    if let Err(error) = unsafe { ConnectNamedPipe(server, None) } {
+                        assert_eq!(error.code(), ERROR_PIPE_CONNECTED.to_hresult());
+                    }
+
+                    // SAFETY: the instance is owned by nothing else.
+                    let mut pipe = unsafe { File::from_raw_handle(server.0) };
+                    let Ok(request) = read_frame(&mut pipe) else {
+                        continue;
+                    };
+                    if connected.send(Connection { request, pipe }).is_err() {
+                        return;
+                    }
+                }
+            });
+
+            let pid = std::process::id();
+            let client = DaemonClient {
+                pipe_name,
+                server_pid: pid,
+                server_pid_creation_time: crate::wslc_common::daemon_record::process_creation_time(
+                    pid,
+                )
+                .expect("read this process's creation time"),
+            };
+            Self {
+                client,
+                connections,
+            }
+        }
+
+        pub(crate) fn next(&self) -> Connection {
+            self.connections
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the client did not connect")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,6 +1040,90 @@ mod tests {
         assert!(err.to_string().contains("sandbox not started"));
 
         assert!(expect_ok(DaemonResponse::Pong).is_err());
+    }
+
+    struct ScriptedInput<F>(F);
+
+    impl<F: FnMut(&mut [u8]) -> std::io::Result<usize>> Read for ScriptedInput<F> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            (self.0)(buf)
+        }
+    }
+
+    fn stdin_frames(mut sent: &[u8]) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        while !sent.is_empty() {
+            match read_frame::<StreamFrame>(&mut sent).unwrap() {
+                StreamFrame::Stdin { data } => frames.push(data),
+                other => panic!("expected a stdin frame, got {other:?}"),
+            }
+        }
+        frames
+    }
+
+    #[test]
+    fn stdin_is_attached_only_once_there_is_input_to_send() {
+        let attached = std::cell::Cell::new(false);
+        let mut chunks = vec![b"world".to_vec(), b"hello ".to_vec()];
+        let input = ScriptedInput(|buf: &mut [u8]| {
+            if chunks.len() == 2 {
+                assert!(
+                    !attached.get(),
+                    "stdin was attached before any input arrived"
+                );
+            }
+            let chunk = chunks.pop().unwrap_or_default();
+            buf[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
+        });
+        let mut sent = Vec::new();
+        let sink = &mut sent;
+        let attaching = &attached;
+
+        copy_stdin(input, move || {
+            attaching.set(true);
+            Ok(Some(sink))
+        })
+        .unwrap();
+
+        assert_eq!(
+            stdin_frames(&sent),
+            vec![b"hello ".to_vec(), b"world".to_vec(), Vec::new()]
+        );
+    }
+
+    #[test]
+    fn an_input_that_is_already_closed_still_sends_end_of_file() {
+        let mut sent = Vec::new();
+        let sink = &mut sent;
+
+        copy_stdin(std::io::empty(), move || Ok(Some(sink))).unwrap();
+
+        assert_eq!(stdin_frames(&sent), vec![Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn stdin_for_a_run_that_is_over_is_dropped_without_error() {
+        let mut reads = 0;
+        let input = ScriptedInput(|buf: &mut [u8]| {
+            reads += 1;
+            buf[0] = b'x';
+            Ok(1)
+        });
+
+        copy_stdin::<Vec<u8>>(input, || Ok(None)).unwrap();
+
+        assert_eq!(reads, 1, "input was read after the run was over");
+    }
+
+    #[test]
+    fn a_failed_read_of_the_input_is_an_error_without_attaching() {
+        let input = ScriptedInput(|_: &mut [u8]| Err(std::io::Error::other("input broke")));
+
+        let error =
+            copy_stdin::<Vec<u8>>(input, || panic!("attached for a failed input")).unwrap_err();
+
+        assert!(error.to_string().contains("input broke"), "{error}");
     }
 
     #[test]

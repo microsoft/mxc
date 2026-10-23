@@ -31,6 +31,7 @@ describe('public SDK namespace exports', () => {
       'provisionContainer',
       'startContainer',
       'spawnInContainer',
+      'spawnInContainerWithStdin',
       'runInContainer',
       'stopContainer',
       'deprovisionContainer',

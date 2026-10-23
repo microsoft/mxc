@@ -619,6 +619,17 @@ public static class MxcLifecycle
         SpawnInContainerOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    public static MxcProcess SpawnInContainerWithStdin(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null);
+
+    public static Task<MxcProcess> SpawnInContainerWithStdinAsync(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     public static MxcPtyProcess SpawnInContainerWithPty(
         ContainerId id,
         ExecutionRequest request,

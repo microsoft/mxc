@@ -13,6 +13,7 @@ Callers do not supply JSON or a schema version.
 |---|---|---|---|
 | Capture stdout and stderr | `run` | `runInContainer` | `Promise<ExecutionResult>` |
 | Live standard pipes | `spawn` | `spawnInContainer` | `Promise<MxcProcess>` |
+| Live standard pipes with a writable WSLC stdin | — | `spawnInContainerWithStdin` | `Promise<MxcProcess>` |
 | Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `Promise<MxcPtyProcess>` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
@@ -186,10 +187,20 @@ export async function spawn(request: ContainerRequest, options: SpawnOptions = {
 ## `@microsoft/mxc-sdk/v1::spawnInContainer`
 
 Spawn a workload asynchronously inside a started IsolationSession or WSLC
-container with live standard pipes.
+container with live standard pipes. A WSLC workload reads end-of-file on stdin.
 
 ```typescript
 export async function spawnInContainer<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
+```
+
+
+## `@microsoft/mxc-sdk/v1::spawnInContainerWithStdin`
+
+`spawnInContainer` with a writable `standardInput`. Ending it gives the workload
+end-of-file.
+
+```typescript
+export async function spawnInContainerWithStdin<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
 ```
 
 
