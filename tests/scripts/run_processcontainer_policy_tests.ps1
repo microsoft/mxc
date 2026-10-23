@@ -286,10 +286,12 @@ Copy-Item -LiteralPath "$WindowsPowerShell.config" -Destination "$childImage.con
 $readyFile = Join-Path $ScratchRoot 'rw\grandchild-ready'
 $timeoutSpec = @{ powershell = $childImage; ready = $readyFile }
 $timeoutRequest = New-PolicyRequest -Mode 'timeout-parent' -ProbeArguments @((ConvertTo-ProbeArgument $timeoutSpec))
-$timeoutRequest.process.timeout = 6000
+# Two Windows PowerShell cold starts take over 5 seconds on some arm64 hosts.
+# The grandchild must be ready before the timeout fires.
+$timeoutRequest.process.timeout = 20000
 $observeTree = {
     param($Process)
-    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while (-not (Test-Path -LiteralPath $readyFile)) {
         if ($Process.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'Grandchild did not demonstrate readiness before timeout.' }
         Start-Sleep -Milliseconds 20
