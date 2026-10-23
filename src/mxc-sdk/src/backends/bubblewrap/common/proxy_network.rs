@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -15,7 +15,7 @@ use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
+use crate::mxc_common::filesystem_resolve::resolve_mount_order;
 use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
@@ -27,11 +27,12 @@ use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::{access, dup2, pipe2, AccessFlags, Pid};
 use tempfile::TempDir;
 
-use crate::bwrap_common::bwrap_command::{COMMAND_TAIL, COMPAT_RUN_LINK, COMPAT_RUN_TARGET};
+use crate::bwrap_common::bwrap_command::{path_is_denied, COMMAND_TAIL};
 use crate::bwrap_common::network_rules::{
     payload_file_name, render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
 };
 use crate::bwrap_common::probe_exec;
+use crate::bwrap_common::resolver_file::{resolver_target_is_denied, sandbox_mount_path};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
@@ -1439,13 +1440,6 @@ fn strip_host_from_hosts(contents: &str, hostname: &str) -> String {
     out
 }
 
-/// A generated resolver file and the sandbox path it is mounted over.
-///
-/// The sandbox always runs in a private network namespace, so a host that
-/// resolves through a loopback stub -- `systemd-resolved` at `127.0.0.53`,
-/// `dnsmasq` at `127.0.0.1` -- hands it a nameserver address that belongs to
-/// its own empty loopback. Binding the host's resolver directories makes the
-/// file *readable*; it does not make the address *reachable*.
 #[derive(Debug)]
 pub(crate) struct ResolverPin {
     /// Canonical host path, which is what the filesystem policy is compared
@@ -1515,7 +1509,7 @@ impl ResolverPin {
                 return None;
             }
         };
-        if path_is_denied(policy, &destination_text) {
+        if resolver_target_is_denied(policy, &destination) {
             logger.warning_line(&format!(
                 "WARNING: Bubblewrap: the host resolves through a loopback nameserver, but the \
                  filesystem policy denies {destination_text}, so the sandbox keeps the host's \
@@ -1591,17 +1585,6 @@ fn stage_resolver(
             None
         }
     }
-}
-
-/// The spelling bwrap has to mount over, which is not always the host's.
-fn sandbox_mount_path(host_path: &str) -> String {
-    // bwrap cannot create a mount point beneath a symlinked ancestor, and the
-    // sandbox always gets `/var/run` as a symlink.
-    host_path
-        .strip_prefix(COMPAT_RUN_LINK)
-        .filter(|rest| rest.starts_with('/'))
-        .map(|rest| format!("{COMPAT_RUN_TARGET}{rest}"))
-        .unwrap_or_else(|| host_path.to_string())
 }
 
 /// Whether every nameserver the host declares is a loopback address, with at
@@ -1728,23 +1711,6 @@ pub(crate) fn check_hosts_pin_against_policy(
 /// an ancestor denial counts, and a more specific grant beneath it wins back.
 fn hosts_file_is_denied(policy: &ContainerPolicy) -> bool {
     path_is_denied(policy, SANDBOX_HOSTS_PATH)
-}
-
-/// Whether the filesystem policy masks `target`.
-fn path_is_denied(policy: &ContainerPolicy, target: &str) -> bool {
-    resolve_mount_order(policy)
-        .iter()
-        .rfind(|mount| covers_path(&mount.path, target))
-        .is_some_and(|mount| mount.intent == FsIntent::Denied)
-}
-
-/// Whether `path` is `target` or a directory holding it.
-fn covers_path(path: &str, target: &str) -> bool {
-    let path = path.trim_end_matches('/');
-    path == target
-        || target
-            .strip_prefix(path)
-            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Whether the filesystem policy names `target` itself rather than an ancestor.
@@ -2342,6 +2308,17 @@ pub(crate) fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
     }
 }
 
+// The child's stdio replaces descriptors 0-2 before pre_exec runs.
+pub(crate) fn above_stdio(file: File) -> Result<File, Errno> {
+    let fd = fcntl(
+        file.as_raw_fd(),
+        FcntlArg::F_DUPFD_CLOEXEC(libc::STDERR_FILENO + 1),
+    )?;
+
+    // SAFETY: fcntl returned a new descriptor that nothing else owns.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
 /// Hand `mapping` to one specific child at fixed, known descriptor numbers.
 ///
 /// Two problems are solved together. `FD_CLOEXEC` is per-process, so clearing
@@ -2446,6 +2423,7 @@ fn has_exited_unreaped(pid: u32) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bwrap_common::bwrap_command::{COMPAT_RUN_LINK, COMPAT_RUN_TARGET};
 
     /// The reported concern: a hostname proxy resolves through the host's
     /// resolver during setup, before the script timeout applies, so an

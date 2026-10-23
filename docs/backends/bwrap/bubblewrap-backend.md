@@ -141,8 +141,9 @@ Bubblewrap creates a namespace-isolated process by:
 1. Unsharing user, PID, IPC, and UTS namespaces (`--unshare-*`)
 2. Bind-mounting a **minimal deny-by-default baseline** read-only into the
    sandbox (`/bin`, `/sbin`, `/lib*`, `/usr/bin`, `/usr/sbin`, `/usr/lib*`,
-   `/usr/libexec`, `/usr/share`, `/etc`, plus DNS stub-resolver dirs
-   under `/run`). Everything else on the host — including the caller's
+   `/usr/libexec`, `/usr/share`, `/etc`, plus a read-only copy of the resolver
+   configuration when its target is in a supported resolver location).
+   Everything else on the host — including the caller's
    `$HOME`, `/root`, `/opt`, `/var`, `/sys`, and `/run/user/<uid>` — is
    invisible inside the sandbox.
 3. Layering filesystem policy overrides (read-write, read-only, denied paths)
@@ -230,20 +231,37 @@ Common consequences of this default:
   paths (including `..` and paths near policy mounts) are left to Bubblewrap;
   silence does not prove a cwd is accessible. The hint does not change
   execution or replace Bubblewrap's error.
-- The sandbox can *read* the host's resolver on systemd-resolved,
-  NetworkManager, and resolvconf hosts because the corresponding `/run/...`
-  directories are bound. The common symlink targets *outside* `/run` are
-  covered too: `/var/run/...`-routed `/etc/resolv.conf` symlinks resolve via a
-  synthesised `/var/run -> /run` compat symlink, and WSL's
-  `/mnt/wsl/resolv.conf` is bound directly. Neither exposes host `/var` or
-  `/mnt` contents. Hosts that point `/etc/resolv.conf` at some other custom
-  location still need that target listed in `readonlyPaths`. Bubblewrap
+- The sandbox can read resolver configuration on systemd-resolved,
+  NetworkManager, resolvconf, and WSL hosts without exposing their runtime
+  directories. MXC copies the regular file used by `/etc/resolv.conf` from
+  `/run/systemd/resolve`, `/run/NetworkManager`, `/run/resolvconf`, or
+  `/mnt/wsl/resolv.conf`, and recreates only the links needed to reach it.
+  Relative links and paths through the sandbox's `/var/run -> /run` link
+  are supported. The copy is read-only and does not track later host updates.
+  Filesystem-policy mounts still take precedence, including explicit grants
+  to custom resolver targets. An ancestor denial still applies when a resolver
+  directory is a symlink to another location.
+
+  Resolver snapshots use sealed, anonymous file descriptors rather than
+  temporary host pathnames. Bubblewrap copies them into private read-only
+  directories before applying filesystem policy.
+
+  The default mounts exclude host resolver sockets, including
+  `io.systemd.Resolve`, in every network mode. An unavailable or invalid resolver
+  produces a warning rather than a directory-wide fallback; an absent resolver
+  file is allowed.
+  NSS configurations using `nss-resolve` need a `dns` fallback when the host
+  daemon's socket is unavailable.
+
+  Hosts that point `/etc/resolv.conf` at another custom location still need
+  the resolver file listed in `readonlyPaths` unless it is already covered
+  by the system baseline. Bubblewrap
   retains a mount-configuration hint for SDK callers, which `lxc-exec` also
   prints to stderr, when a direct, absolute resolver symlink target has no
   overlapping known mount destination. The check reads the link but does not
   resolve or stat its target or policy paths; a missing file or symlink alias
-  can make the hint inapplicable. Check the link and consider listing its
-  containing directory in `readonlyPaths`. Relative targets, uncertain
+  can make the hint inapplicable. Check the link and consider listing the
+  resolver file in `readonlyPaths`. Relative targets, uncertain
   mounts, and synthetic destinations such as `/tmp` and `/var/run` suppress
   the hint. Silence does not prove DNS is available; the hint never changes
   mounts or the run's outcome.
@@ -377,8 +395,8 @@ chain never authorized.
 Every mode runs the sandbox in its own network namespace, so a nameserver on
 the host's loopback — `systemd-resolved`'s stub at `127.0.0.53`, a local
 `dnsmasq` at `127.0.0.1` — names an address that belongs to the sandbox's own
-empty loopback. Binding the host's resolver directories makes the file
-readable; it does not make that address reachable, and names do not resolve.
+empty loopback. Making the resolver file readable does not make that address
+reachable, and names do not resolve through it.
 
 Under **address filtering**, MXC therefore replaces the sandbox's resolver with
 slirp's built-in forwarder, `10.0.2.3`. libslirp rewrites a query sent there to
@@ -995,11 +1013,13 @@ parent-death protection during startup without relying on a scheduling race.
 
 - **Linux only** — Bubblewrap requires Linux kernel namespaces
 - **Deny-by-default filesystem** — the sandbox sees a minimal allowlist
-  of host paths (system binaries, libs, `/etc`, DNS stub-resolver dirs)
+  of host paths (system binaries, libs, `/etc`, resolver configuration)
   and nothing else. `$HOME`, `/opt`, `/var`, `/sys`, `/run/user/<uid>`,
   and `/usr/local` are invisible unless explicitly listed in
   `readonlyPaths` / `readwritePaths`. There is no separate rootfs — the
-  visible paths are bind-mounted from the host.
+  visible paths are bind-mounted from the host, except for the resolver-file
+  copy. Explicitly granting a host directory containing Unix sockets can
+  expose host services outside IP egress filtering.
 - **Network filtering** — `network.egress` allows or denies numeric addresses
   and CIDRs without root (rules live in the sandbox's own namespace). Allowed
   IPv6 destinations remain unreachable until slirp supports IPv6 here.

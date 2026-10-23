@@ -22,62 +22,13 @@ use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 /// environment value can also be. Shared so the two cannot drift apart.
 pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
 
-/// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
-/// deny-by-default baseline. Mirrors the seatbelt backend's
-/// `SYSTEM_READ_ALLOW` (`src/backends/seatbelt/common/src/profile_builder.rs`):
-/// just enough of the host for a shell, the dynamic linker, libc, and
-/// system tools to work. Everything else — including the caller's `$HOME`,
-/// `/root`, `/opt`, `/var`, `/sys`, `/mnt`, `/media`, and the rest of
-/// `/run` — is invisible until the caller opts in via `readonlyPaths` /
-/// `readwritePaths`.
-///
-/// Notes:
-/// - Missing paths are silently skipped because the runner emits these
-///   via `--ro-bind-try` (e.g. `/lib32` does not exist on x86_64-only
-///   systems; `/run/systemd/resolve` does not exist on hosts without
-///   systemd-resolved).
-/// - On merged-usr distros (modern Debian, Ubuntu, Fedora, Arch) the
-///   top-level `/bin`, `/sbin`, `/lib*` entries are symlinks pointing
-///   under `/usr`. `bwrap` follows the source-side symlink, so the
-///   bind-mount still succeeds and the sandbox sees `/bin/sh` etc.
-/// - We deliberately do NOT bind `/usr` wholesale: that would expose
-///   `/usr/local`, which contains locally-installed (and sometimes
-///   user-managed) software. Callers who need `/usr/local` must list it
-///   explicitly in `readonlyPaths`.
-/// - We deliberately do NOT bind `/run` wholesale: `/run/user/<uid>`
-///   holds the caller's D-Bus session socket, keyring sockets, and
-///   ssh-agent socket. We only bind the well-known DNS stub-resolver
-///   directories so the resolver file is *readable* when `/etc/resolv.conf`
-///   is a symlink (the default on systemd-resolved hosts).
-/// - To keep that file readable when `/etc/resolv.conf` points *outside*
-///   those dirs, we also synthesise a `/var/run -> /run` compat symlink (for
-///   `/var/run/...`-routed targets — older RHEL/CentOS-era and some
-///   container images) and `--ro-bind-try` `/mnt/wsl/resolv.conf` (for
-///   WSL). Neither exposes host `/var` or `/mnt` contents — only the
-///   resolver path itself.
-/// - Readable is not reachable. A nameserver on the host's loopback — the
-///   systemd-resolved stub at `127.0.0.53`, a local `dnsmasq` — belongs to
-///   the sandbox's own empty loopback once it is in a private network
-///   namespace, so these binds alone leave names unresolvable. Reaching such
-///   a resolver is what `proxy_network::ResolverPin` does, by pointing the
-///   sandbox at slirp's forwarder.
-/// - `/etc` is bound whole because cherry-picking files (`passwd`,
-///   `nsswitch.conf`, `ssl/`, `ld.so.conf*`, …) is fragile and breaks
-///   tools that read other config files. Files with sensitive contents
-///   (`/etc/shadow`, `/etc/sudoers`, `/etc/ssh/ssh_host_*_key`) are mode
-///   `0400` / `0640` root and remain unreadable to a non-root caller —
-///   user-namespace UID mapping does not bypass kernel DAC.
-const BASELINE_RO_BIND_PATHS: &[&str] = &[
-    // Top-level executable / library dirs (symlinks under /usr on
-    // merged-usr distros, real directories on Alpine and older Debian).
+pub(crate) const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/bin",
     "/sbin",
     "/lib",
     "/lib32",
     "/lib64",
     "/libx32",
-    // /usr subpaths — aligned with seatbelt's baseline, intentionally
-    // excluding /usr/local.
     "/usr/bin",
     "/usr/sbin",
     "/usr/lib",
@@ -85,27 +36,43 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/usr/lib64",
     "/usr/libexec",
     "/usr/share",
-    // System configuration (ld.so config, certs, resolv.conf, hosts,
-    // passwd, group, machine-id, …). See module-level note on DAC.
     "/etc",
-    // DNS stub-resolver directories. /etc/resolv.conf is usually a
-    // symlink into one of these on modern Linux distros (systemd-resolved
-    // / NetworkManager / resolvconf). We bind the narrow subdirectories
-    // rather than all of /run to avoid exposing /run/user/<uid>.
+];
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const RESOLVER_DIRS: &[&str] = &[
     "/run/systemd/resolve",
     "/run/NetworkManager",
     "/run/resolvconf",
-    // WSL generates its resolv.conf here and points /etc/resolv.conf at
-    // it. Bind just this single file (not /mnt) so DNS works under WSL
-    // without exposing the Windows drive mounts. Skipped on non-WSL hosts
-    // because the baseline is emitted via `--ro-bind-try`.
-    "/mnt/wsl/resolv.conf",
 ];
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const WSL_RESOLV_CONF: &str = "/mnt/wsl/resolv.conf";
 
 /// The compatibility symlink the sandbox gets in place of a real `/var/run`,
 /// and the directory it points at.
 pub(crate) const COMPAT_RUN_LINK: &str = "/var/run";
 pub(crate) const COMPAT_RUN_TARGET: &str = "/run";
+
+#[cfg(target_os = "linux")]
+pub(crate) fn path_intent(
+    policy: &ContainerPolicy,
+    target: impl AsRef<std::path::Path>,
+) -> Option<FsIntent> {
+    let target = target.as_ref();
+    crate::mxc_common::filesystem_resolve::resolve_mount_order(policy)
+        .iter()
+        .rfind(|mount| target.starts_with(&mount.path))
+        .map(|mount| mount.intent)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn path_is_denied(
+    policy: &ContainerPolicy,
+    target: impl AsRef<std::path::Path>,
+) -> bool {
+    path_intent(policy, target) == Some(FsIntent::Denied)
+}
 
 /// An absolute resolver target with no overlapping known mount destination.
 /// This lexical check does not resolve host or sandbox symlinks.
@@ -130,6 +97,8 @@ pub(crate) fn resolver_target_without_matching_mount(
     for mount in BASELINE_RO_BIND_PATHS
         .iter()
         .copied()
+        .chain(RESOLVER_DIRS.iter().copied())
+        .chain([WSL_RESOLV_CONF])
         .chain(["/dev", "/proc", "/tmp", "/var/run"])
         .chain(policy_mounts.clone())
     {
@@ -403,7 +372,14 @@ pub fn build_args_classified(
     denied_files: &HashSet<String>,
 ) -> Vec<String> {
     let network_mode = ResolvedNetworkMode::from_request(request, proxy_address.is_some());
-    build_args_classified_with_mode(request, proxy_address, denied_files, network_mode, None)
+    build_args_classified_with_mode(
+        request,
+        proxy_address,
+        denied_files,
+        network_mode,
+        None,
+        &[],
+    )
 }
 
 pub(crate) fn build_args_classified_with_mode(
@@ -412,6 +388,7 @@ pub(crate) fn build_args_classified_with_mode(
     denied_files: &HashSet<String>,
     network_mode: ResolvedNetworkMode,
     seccomp_fd: Option<i32>,
+    resolver_args: &[String],
 ) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
     let mut args = Vec::new();
@@ -468,6 +445,7 @@ pub(crate) fn build_args_classified_with_mode(
     args.extend(["--dev".into(), "/dev".into()]);
     args.extend(["--proc".into(), "/proc".into()]);
     args.extend(["--tmpfs".into(), "/tmp".into()]);
+    args.extend_from_slice(resolver_args);
 
     // Policy mounts, emitted in most-specific-path-wins order so a deeper path
     // always overrides a shallower ancestor with a different intent regardless
@@ -571,6 +549,7 @@ mod tests {
                 &HashSet::new(),
                 mode,
                 Some(17),
+                &[],
             );
             assert_eq!(
                 &args[args.len() - 6..],
@@ -580,6 +559,46 @@ mod tests {
             assert_eq!(args.iter().filter(|arg| *arg == "--seccomp").count(), 1);
             assert!(!args.iter().any(|arg| arg == "--add-seccomp-fd"));
         }
+    }
+
+    #[test]
+    fn resolver_mounts_follow_virtual_filesystems_and_precede_policy() {
+        let mut request = base_request();
+        request.policy.denied_paths = vec!["/run".into()];
+        let resolver = vec![
+            "--tmpfs".into(),
+            "/run/resolver".into(),
+            "--file".into(),
+            "19".into(),
+            "/run/resolver/resolv.conf".into(),
+            "--remount-ro".into(),
+            "/run/resolver".into(),
+        ];
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            None,
+            &resolver,
+        );
+        let temporary = args
+            .windows(2)
+            .position(|args| args == ["--tmpfs", "/tmp"])
+            .unwrap();
+        let file = args
+            .windows(2)
+            .position(|args| args == ["--file", "19"])
+            .unwrap();
+        let denial = args
+            .windows(2)
+            .position(|args| args == ["--tmpfs", "/run"])
+            .unwrap();
+        assert!(temporary < file, "private /tmp must not hide the resolver");
+        assert!(
+            file < denial,
+            "the resolver must not override filesystem policy"
+        );
     }
 
     #[test]
@@ -603,6 +622,7 @@ mod tests {
             &HashSet::new(),
             ResolvedNetworkMode::Isolated,
             Some(17),
+            &[],
         );
         assert_eq!(args, expected);
         for (key, value) in [
@@ -1665,12 +1685,8 @@ mod tests {
         }
     }
 
-    /// DNS stub-resolver dirs must be in the baseline so an `/etc/resolv.conf`
-    /// symlink has a target to resolve to. Emitted via `--ro-bind-try` so hosts
-    /// without systemd-resolved / NetworkManager / resolvconf still build a
-    /// valid argument vector.
     #[test]
-    fn baseline_includes_dns_stub_resolver_dirs() {
+    fn baseline_excludes_resolver_runtime_directories() {
         let args = build_args(&base_request(), None);
         for path in [
             "/run/systemd/resolve",
@@ -1680,21 +1696,10 @@ mod tests {
             let found = args
                 .windows(3)
                 .any(|w| w[0] == "--ro-bind-try" && w[1] == path && w[2] == path);
-            assert!(
-                found,
-                "baseline must emit `--ro-bind-try {} {}` so the sandbox can read \
-                 /etc/resolv.conf when it is a symlink",
-                path, path
-            );
+            assert!(!found, "baseline must not expose host IPC from {path}");
         }
     }
 
-    /// Regression test for the `/etc/resolv.conf -> /var/run/.../resolv.conf`
-    /// symlink case (older RHEL/CentOS-era, some container images). We never
-    /// mount `/var`, so without a `/var/run -> /run` compat symlink the
-    /// target dangles and DNS silently breaks. Assert the symlink is emitted
-    /// so `/var/run/NetworkManager/resolv.conf` resolves into the bound
-    /// `/run/NetworkManager`.
     #[test]
     fn baseline_recreates_var_run_compat_symlink() {
         let args = build_args(&base_request(), None);
@@ -1707,19 +1712,14 @@ mod tests {
              symlinks routed through /var/run/... resolve; got: {:?}",
             args
         );
-        // The compat symlink must not drag a host /var bind in with it.
         let var_bound = args.windows(2).any(|w| {
             matches!(w[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try") && w[1] == "/var"
         });
         assert!(!var_bound, "compat symlink must not bind host /var");
     }
 
-    /// Regression test for WSL, where `/etc/resolv.conf` points at
-    /// `/mnt/wsl/resolv.conf`. We bind that single file (via `--ro-bind-try`,
-    /// so it is skipped on non-WSL hosts) without exposing the rest of
-    /// `/mnt`.
     #[test]
-    fn baseline_includes_wsl_resolv_conf() {
+    fn baseline_does_not_bind_unchecked_wsl_resolver_paths() {
         let args = build_args(&base_request(), None);
         let found = args.windows(3).any(|w| {
             w[0] == "--ro-bind-try"
@@ -1727,12 +1727,9 @@ mod tests {
                 && w[2] == "/mnt/wsl/resolv.conf"
         });
         assert!(
-            found,
-            "baseline must emit `--ro-bind-try /mnt/wsl/resolv.conf ...` so DNS \
-             works under WSL; got: {:?}",
-            args
+            !found,
+            "the runner must verify the WSL resolver is a regular file"
         );
-        // Only the single resolv.conf file — never /mnt or /mnt/wsl wholesale.
         let mnt_whole = args.windows(2).any(|w| {
             matches!(w[0].as_str(), "--bind" | "--ro-bind" | "--ro-bind-try")
                 && (w[1] == "/mnt" || w[1] == "/mnt/wsl")
