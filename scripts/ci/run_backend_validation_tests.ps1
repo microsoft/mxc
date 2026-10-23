@@ -23,7 +23,9 @@ param(
 
     [Parameter(Mandatory)]
     [ValidateSet('x64', 'arm64')]
-    [string]$Architecture
+    [string]$Architecture,
+
+    [string]$TempDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,20 +50,15 @@ function Assert-File {
 # artifact and copy it afterwards, point TEMP at the upload directory for the
 # duration of the run: parameter defaults, .NET GetTempPath(), and child
 # processes all follow it, so anything temp-rooted lands where CI collects it.
-#
-# The suites' scratch-root guards compare against $env:TEMP, so they stay
-# satisfied — this redirects what TEMP means rather than pointing a path
-# outside it.
-function Redirect-TempToRunnerTemp {
-    if (-not $env:RUNNER_TEMP) {
+# CI passes the upload directory as -TempDirectory.
+function Redirect-Temp {
+    if (-not $TempDirectory) {
         return
     }
-    if (-not (Test-Path -LiteralPath $env:RUNNER_TEMP)) {
-        New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP | Out-Null
-    }
-    $env:TEMP = $env:RUNNER_TEMP
-    $env:TMP  = $env:RUNNER_TEMP
-    Write-Host "Redirected TEMP to $env:RUNNER_TEMP so test logs are collected."
+    $directory = (New-Item -ItemType Directory -Force -Path $TempDirectory).FullName
+    $env:TEMP = $directory
+    $env:TMP  = $directory
+    Write-Host "Redirected TEMP to $directory so test logs are collected."
 }
 
 function Invoke-TestScript {
@@ -353,7 +350,7 @@ function Invoke-IsolationSessionSuites {
     }
 }
 
-Redirect-TempToRunnerTemp
+Redirect-Temp
 
 switch ($Backend) {
     'process' { Invoke-ProcessContainerTests }
