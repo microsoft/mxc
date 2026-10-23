@@ -877,7 +877,11 @@ pub(crate) fn prepare_request_with_procfs_policy(
     prepared.inner.env = request.environment.as_ref().map(|environment| {
         environment
             .iter()
-            .filter(|(key, _)| key != crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV)
+            .filter(|(key, _)| {
+                key.split_once('=')
+                    .map_or(key.as_str(), |(name, _)| name)
+                    != crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
+            })
             .map(|(key, value)| format!("{key}={value}"))
             .collect()
     });
