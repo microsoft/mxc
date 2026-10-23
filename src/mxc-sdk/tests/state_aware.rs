@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Host-independent tests for typed lifecycle APIs and internal binding adapters.
+//! Host-independent tests for typed and raw lifecycle APIs and internal binding adapters.
 //!
 //! These exercise request parsing, phase routing, and error mapping without a
 //! live host backend. The lifecycle backends — IsolationSession, WSLc
@@ -20,9 +20,10 @@
 
 use mxc_sdk::__ffi::{execute_lifecycle_json, run_lifecycle_json};
 use mxc_sdk::v1::{
-    container, ContainerId, DeprovisionOptions, ExecutionRequest, ExecutionResult, LifecycleResult,
-    MxcProcess, ProvisionOptions, ProvisionRequest, ProvisionResult, RunInContainerOptions,
-    SpawnInContainerOptions, StartOptions, StopOptions, ValidationResult,
+    container, dev, ContainerId, DeprovisionOptions, ExecutionRequest, ExecutionResult,
+    LifecycleResult, MxcProcess, MxcPtyProcess, ProvisionOptions, ProvisionRequest,
+    ProvisionResult, RunInContainerOptions, SpawnInContainerOptions, StartOptions, StopOptions,
+    ValidationResult,
 };
 use mxc_sdk::v1::{Error, ErrorCode};
 
@@ -59,6 +60,35 @@ fn typed_lifecycle_api_is_operation_specific() {
         ExecutionRequest,
         SpawnInContainerOptions,
     ) -> Result<ValidationResult, Error> = container::validate_process;
+}
+
+#[test]
+fn dev_json_api_is_public_and_operation_specific() {
+    type JsonPhaseCall = fn(&str, dev::JsonOptions) -> Result<String, Error>;
+
+    let _: fn(&str, dev::JsonOptions) -> Result<ExecutionResult, Error> = dev::run_json;
+    let _: fn(&str, dev::JsonOptions) -> Result<MxcProcess, Error> = dev::spawn_json;
+    let _: fn(&str, dev::PtyJsonOptions) -> Result<MxcPtyProcess, Error> = dev::spawn_with_pty_json;
+    let _: fn(&str, dev::JsonOptions) -> Result<ExecutionResult, Error> =
+        dev::run_in_container_json;
+    let _: fn(&str, dev::JsonOptions) -> Result<MxcProcess, Error> = dev::spawn_in_container_json;
+    let _: fn(&str, dev::PtyJsonOptions) -> Result<MxcPtyProcess, Error> =
+        dev::spawn_in_container_with_pty_json;
+    let _: [JsonPhaseCall; 9] = [
+        dev::provision_container_json,
+        dev::start_container_json,
+        dev::stop_container_json,
+        dev::deprovision_container_json,
+        dev::validate_provision_json,
+        dev::validate_start_json,
+        dev::validate_stop_json,
+        dev::validate_deprovision_json,
+        dev::validate_process_json,
+    ];
+
+    let json = r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
+    let error = dev::validate_start_json(json, dev::JsonOptions::default()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::UnsupportedContainment);
 }
 
 #[test]
