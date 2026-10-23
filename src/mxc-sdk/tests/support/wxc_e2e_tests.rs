@@ -686,7 +686,7 @@ pub fn has_bwrap() -> bool {
         match mxc_sdk::bwrap_common::bwrap_version::probe_bwrap() {
             Ok(_) => true,
             Err(err) => {
-                println!("SKIPPED: {err}");
+                skip_bwrap_test(&err.to_string());
                 false
             }
         }
@@ -699,19 +699,26 @@ pub fn has_bwrap() -> bool {
     }
 }
 
+/// Report a missing Bubblewrap test prerequisite, failing instead when
+/// `MXC_BWRAP_TESTS_REQUIRE_EXECUTION` is set.
+pub fn skip_bwrap_test(reason: &str) {
+    if std::env::var("MXC_BWRAP_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {
+        panic!("strict mode: {reason}");
+    }
+    println!("SKIPPED: {reason}");
+}
+
 /// Opt-in switch for the Windows ProcessContainer characterization tests.
 ///
-/// AppContainer/BaseContainer execution requires an elevated, host-prepped
-/// Windows host (see `docs/backends/process-container/host-prep.md`). Standard CI runners are NOT capable,
-/// so these tests are skipped unless a host-prepped lane explicitly sets
-/// `MXC_E2E_HOST_PREPPED=1`. This keeps them from ever red-failing on incapable
-/// CI while still being runnable on a prepared box.
-pub fn host_prepped_optin() -> bool {
-    let enabled = std::env::var("MXC_E2E_HOST_PREPPED").as_deref() == Ok("1");
+/// ProcessContainer execution requires a PSEC-capable Windows host. Standard
+/// CI runners are not necessarily capable, so these tests are skipped unless a
+/// capable lane sets `MXC_E2E_PSEC_CAPABLE_HOST=1`.
+pub fn processcontainer_optin() -> bool {
+    let enabled = std::env::var("MXC_E2E_PSEC_CAPABLE_HOST").as_deref() == Ok("1");
     if !enabled {
         println!(
-            "SKIPPED: ProcessContainer characterization requires a host-prepped Windows host; \
-             set MXC_E2E_HOST_PREPPED=1 on a prepared lane to enable"
+            "SKIPPED: ProcessContainer characterization requires a PSEC-capable Windows host; \
+             set MXC_E2E_PSEC_CAPABLE_HOST=1 on a capable lane to enable"
         );
     }
     enabled

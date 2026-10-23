@@ -57,6 +57,9 @@ struct ProbeArgs {
     /// can read the owner back via `GetWindowThreadProcessId` and it matches,
     /// the handle restriction failed.
     handle_pid: Option<u32>,
+    clipboard_token: Option<String>,
+    mouse_speed: Option<u32>,
+    query_win32k: bool,
 }
 
 #[repr(C)]
@@ -152,7 +155,6 @@ const CF_UNICODETEXT: u32 = 13;
 const SEED_CLIPBOARD_TEXT: &str = "MXC_UI_PROBE_READ_SEED";
 const GMEM_MOVEABLE: u32 = 0x0002;
 const SPI_SETMOUSESPEED: u32 = 0x0071;
-const SPIF_SENDCHANGE: u32 = 0x0002;
 const EWX_LOGOFF: u32 = 0x00000000;
 const EWX_FORCEIFHUNG: u32 = 0x00000010;
 const DESKTOP_CREATEWINDOW: u32 = 0x0002;
@@ -187,6 +189,13 @@ extern "system" {
     fn SetLastError(error: Dword);
     fn GetModuleHandleW(name: LpcWstr) -> Hmodule;
     fn GetCurrentProcessId() -> Dword;
+    fn GetCurrentProcess() -> *mut c_void;
+    fn GetProcessMitigationPolicy(
+        process: *mut c_void,
+        policy: i32,
+        buffer: *mut c_void,
+        length: usize,
+    ) -> Bool;
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -514,7 +523,7 @@ fn seed_unicode_clipboard(user32: Hmodule) -> Result<Hwnd, String> {
     Ok(owner)
 }
 
-fn probe_readclipboard(user32: Hmodule) {
+fn probe_readclipboard(user32: Hmodule, args: &ProbeArgs) {
     type OpenClipboardFn = unsafe extern "system" fn(Hwnd) -> Bool;
     type CloseClipboardFn = unsafe extern "system" fn() -> Bool;
     type GetClipboardDataFn = unsafe extern "system" fn(u32) -> Hglobal;
@@ -554,9 +563,12 @@ fn probe_readclipboard(user32: Hmodule) {
         .map(|p| unsafe { std::mem::transmute::<FarProc, DestroyWindowFn>(p) });
 
     // The seed's owner window stays alive until the read has completed.
-    let seed = seed_unicode_clipboard(user32);
+    let seed = args
+        .clipboard_token
+        .is_none()
+        .then(|| seed_unicode_clipboard(user32));
     let release_seed = || {
-        if let (Ok(owner), Some(destroy)) = (&seed, destroy_window) {
+        if let (Some(Ok(owner)), Some(destroy)) = (&seed, destroy_window) {
             unsafe {
                 let _ = destroy(*owner);
             }
@@ -570,6 +582,10 @@ fn probe_readclipboard(user32: Hmodule) {
     let open_error = unsafe { GetLastError() };
     if opened == 0 {
         release_seed();
+        if args.clipboard_token.is_some() && open_error == ERROR_ACCESS_DENIED {
+            emit_pass("READCLIPBOARD");
+            return;
+        }
         emit_diag(
             "READCLIPBOARD",
             &format!("OpenClipboard failed gle={open_error}"),
@@ -612,6 +628,25 @@ fn probe_readclipboard(user32: Hmodule) {
         let _ = close();
     }
     release_seed();
+    if let Some(expected) = args.clipboard_token.as_deref() {
+        match readback {
+            Some(Ok(text)) if text == expected => emit_fail("READCLIPBOARD"),
+            Some(Err(reason)) => {
+                emit_diag("READCLIPBOARD", &reason);
+                emit_inconclusive("READCLIPBOARD");
+            }
+            Some(Ok(_)) => emit_pass("READCLIPBOARD"),
+            None if error == 0 || error == ERROR_ACCESS_DENIED => emit_pass("READCLIPBOARD"),
+            None => {
+                emit_diag(
+                    "READCLIPBOARD",
+                    &format!("GetClipboardData failed gle={error}"),
+                );
+                emit_inconclusive("READCLIPBOARD");
+            }
+        }
+        return;
+    }
     if let Some(readback) = readback {
         // Never echo clipboard contents: on a shared window station they can
         // be the host user's.
@@ -640,8 +675,9 @@ fn probe_readclipboard(user32: Hmodule) {
     }
 
     let seed_state = match &seed {
-        Ok(_) => "seeded in-process".to_string(),
-        Err(reason) => format!("in-process seed failed: {reason}"),
+        Some(Ok(_)) => "seeded in-process".to_string(),
+        Some(Err(reason)) => format!("in-process seed failed: {reason}"),
+        None => "host-seeded".to_string(),
     };
     let counted = match format_count {
         Some(n) => n.to_string(),
@@ -671,7 +707,7 @@ fn probe_readclipboard(user32: Hmodule) {
     emit_fail("READCLIPBOARD");
 }
 
-fn probe_writeclipboard(user32: Hmodule) {
+fn probe_writeclipboard(user32: Hmodule, args: &ProbeArgs) {
     type OpenClipboardFn = unsafe extern "system" fn(Hwnd) -> Bool;
     type CloseClipboardFn = unsafe extern "system" fn() -> Bool;
     type EmptyClipboardFn = unsafe extern "system" fn() -> Bool;
@@ -778,6 +814,10 @@ fn probe_writeclipboard(user32: Hmodule) {
         unsafe {
             let _ = destroy_window(owner);
         }
+        if open_error == ERROR_ACCESS_DENIED {
+            emit_pass("WRITECLIPBOARD");
+            return;
+        }
         emit_diag(
             "WRITECLIPBOARD",
             &format!("OpenClipboard failed gle={open_error}"),
@@ -786,7 +826,11 @@ fn probe_writeclipboard(user32: Hmodule) {
         return;
     }
 
-    let text = to_wide("MXC_UI_PROBE_WRITE");
+    let text = to_wide(
+        args.clipboard_token
+            .as_deref()
+            .unwrap_or("MXC_UI_PROBE_WRITE"),
+    );
     let byte_count = text.len() * std::mem::size_of::<u16>();
     let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_count) };
     if memory.is_null() {
@@ -864,7 +908,7 @@ fn probe_writeclipboard(user32: Hmodule) {
     }
 }
 
-fn probe_systemparameters(user32: Hmodule) {
+fn probe_systemparameters(user32: Hmodule, args: &ProbeArgs) {
     type SpiFn = unsafe extern "system" fn(u32, u32, LpVoid, u32) -> Bool;
     let spi = match get_proc(user32, "SystemParametersInfoW") {
         Some(p) => unsafe { std::mem::transmute::<FarProc, SpiFn>(p) },
@@ -874,16 +918,28 @@ fn probe_systemparameters(user32: Hmodule) {
             return;
         }
     };
-    // Restoring the user's current speed would require GET first; we
-    // intentionally pick a value that's a no-op when the call is allowed:
-    // SPI_SETMOUSESPEED with pvParam = current speed. We can't query under
-    // the mitigation, so use the OS default (10) and accept that an allowed
-    // call slightly perturbs the user setting on the test host.
-    let ok = unsafe { spi(SPI_SETMOUSESPEED, 0, 10usize as LpVoid, SPIF_SENDCHANGE) };
-    if ok == 0 {
+    let Some(speed @ 1..=20) = args.mouse_speed else {
+        emit_diag(
+            "SYSTEMPARAMETERS",
+            "pass the current host speed with --mouse-speed=1..20",
+        );
+        emit_inconclusive("SYSTEMPARAMETERS");
+        return;
+    };
+    unsafe { SetLastError(0) };
+    let ok = unsafe { spi(SPI_SETMOUSESPEED, 0, speed as usize as LpVoid, 0) };
+    if ok != 0 {
+        emit_fail("SYSTEMPARAMETERS");
+    } else if unsafe { GetLastError() } == ERROR_ACCESS_DENIED {
         emit_pass("SYSTEMPARAMETERS");
     } else {
-        emit_fail("SYSTEMPARAMETERS");
+        emit_diag(
+            "SYSTEMPARAMETERS",
+            &format!("SystemParametersInfoW failed gle={}", unsafe {
+                GetLastError()
+            }),
+        );
+        emit_inconclusive("SYSTEMPARAMETERS");
     }
 }
 
@@ -897,13 +953,24 @@ fn probe_displaysettings(user32: Hmodule) {
             return;
         }
     };
-    // NULL devmode + flags=0 -> restore registry settings as the active mode.
-    // DISP_CHANGE_SUCCESSFUL = 0. Any non-zero is a refusal.
-    let rc = unsafe { cds(std::ptr::null_mut(), 0) };
-    if rc != 0 {
+    // CDS_TEST validates the saved mode without resetting the host's active display.
+    const CDS_TEST: u32 = 0x0000_0002;
+    const DISP_CHANGE_FAILED: i32 = -1;
+    unsafe { SetLastError(0) };
+    let rc = unsafe { cds(std::ptr::null_mut(), CDS_TEST) };
+    emit_diag(
+        "DISPLAYSETTINGS",
+        &format!(
+            "ChangeDisplaySettingsW(CDS_TEST) returned {rc}, gle={}",
+            unsafe { GetLastError() }
+        ),
+    );
+    if rc == DISP_CHANGE_FAILED {
         emit_pass("DISPLAYSETTINGS");
-    } else {
+    } else if rc == 0 {
         emit_fail("DISPLAYSETTINGS");
+    } else {
+        emit_inconclusive("DISPLAYSETTINGS");
     }
 }
 
@@ -926,10 +993,29 @@ fn probe_desktop(user32: Hmodule) {
             return;
         }
     };
-    let close = get_proc(user32, "CloseDesktop")
-        .map(|p| unsafe { std::mem::transmute::<FarProc, CloseDesktopFn>(p) });
-
-    let name = to_wide("mxc_probe_desktop");
+    let Some(close) = get_proc(user32, "CloseDesktop")
+        .map(|p| unsafe { std::mem::transmute::<FarProc, CloseDesktopFn>(p) })
+    else {
+        emit_diag("DESKTOP", "CloseDesktop not resolvable");
+        emit_inconclusive("DESKTOP");
+        return;
+    };
+    let elapsed = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => elapsed,
+        Err(error) => {
+            emit_diag(
+                "DESKTOP",
+                &format!("cannot create a unique desktop name: {error}"),
+            );
+            emit_inconclusive("DESKTOP");
+            return;
+        }
+    };
+    let name = to_wide(&format!(
+        "mxc_probe_desktop_{}_{}",
+        std::process::id(),
+        elapsed.as_nanos()
+    ));
     let h = unsafe {
         create(
             name.as_ptr(),
@@ -944,10 +1030,8 @@ fn probe_desktop(user32: Hmodule) {
         emit_pass("DESKTOP");
         return;
     }
-    if let Some(close) = close {
-        unsafe {
-            let _ = close(h);
-        }
+    if unsafe { close(h) } == 0 {
+        emit_diag("DESKTOP", "CloseDesktop failed");
     }
     emit_fail("DESKTOP");
 }
@@ -1270,6 +1354,32 @@ fn probe_injection(user32: Hmodule) {
     }
 }
 
+fn query_win32k_policy() {
+    let mut flags: Dword = 0;
+    // The syscall-disable policy is a DWORD; kernel32 queries need no GUI subsystem.
+    let ok = unsafe {
+        GetProcessMitigationPolicy(
+            GetCurrentProcess(),
+            4,
+            (&mut flags as *mut Dword).cast(),
+            std::mem::size_of::<Dword>(),
+        )
+    };
+    if ok == 0 {
+        emit_diag(
+            "WIN32K",
+            &format!("GetProcessMitigationPolicy failed gle={}", unsafe {
+                GetLastError()
+            }),
+        );
+        emit_inconclusive("WIN32K");
+    } else if flags & 1 != 0 {
+        emit_pass("WIN32K");
+    } else {
+        emit_fail("WIN32K");
+    }
+}
+
 fn probe_win32k(user32: Hmodule) {
     type GetMessageWFn = unsafe extern "system" fn(*mut Msg, Hwnd, u32, u32) -> Bool;
     let get_message = match get_proc(user32, "GetMessageW") {
@@ -1292,15 +1402,15 @@ fn run_probe(tag: &str, user32: Option<Hmodule>, probe_args: &ProbeArgs) {
     match tag {
         "GLOBALATOMS" => probe_globalatoms(probe_args),
         "READCLIPBOARD" => match user32 {
-            Some(h) => probe_readclipboard(h),
+            Some(h) => probe_readclipboard(h, probe_args),
             None => user32_unavailable("READCLIPBOARD"),
         },
         "WRITECLIPBOARD" => match user32 {
-            Some(h) => probe_writeclipboard(h),
+            Some(h) => probe_writeclipboard(h, probe_args),
             None => user32_unavailable("WRITECLIPBOARD"),
         },
         "SYSTEMPARAMETERS" => match user32 {
-            Some(h) => probe_systemparameters(h),
+            Some(h) => probe_systemparameters(h, probe_args),
             None => user32_unavailable("SYSTEMPARAMETERS"),
         },
         "DISPLAYSETTINGS" => match user32 {
@@ -1324,6 +1434,7 @@ fn run_probe(tag: &str, user32: Option<Hmodule>, probe_args: &ProbeArgs) {
             Some(h) => probe_injection(h),
             None => user32_unavailable("INJECTION"),
         },
+        "WIN32K" if probe_args.query_win32k => query_win32k_policy(),
         "WIN32K" => match user32 {
             Some(h) if destructive_probe_allowed() => probe_win32k(h),
             Some(_) => refuse_destructive("WIN32K"),
@@ -1383,6 +1494,9 @@ fn parse_args(raw: Vec<String>) -> (Vec<String>, ProbeArgs) {
             Some(("atom-release-file", value)) => args.release_file = Some(value.to_string()),
             Some(("handle-hwnd", value)) => args.handle_hwnd = value.parse::<usize>().ok(),
             Some(("handle-pid", value)) => args.handle_pid = value.parse::<u32>().ok(),
+            Some(("clipboard-token", value)) => args.clipboard_token = Some(value.to_string()),
+            Some(("mouse-speed", value)) => args.mouse_speed = value.parse::<u32>().ok(),
+            Some(("win32k-query", "true")) => args.query_win32k = true,
             Some(_) => {} // unknown flag: ignore
             None => tags.push(arg),
         }
@@ -1400,7 +1514,11 @@ fn main() {
              GLOBALATOMS accepts --atom-host-name=, --atom-guest-name=, \
              --atom-ready-file=, --atom-release-file= for the host/guest \
              isolation handshake; HANDLES accepts --handle-hwnd=, --handle-pid= \
-             for the external-window access check."
+             for the external-window access check; READCLIPBOARD accepts \
+             --clipboard-token= to read a host seed without replacing it; \
+             WRITECLIPBOARD accepts --clipboard-token= for its write; \
+             SYSTEMPARAMETERS requires --mouse-speed= with the host's current value; \
+             WIN32K accepts --win32k-query=true for a non-destructive kernel policy query."
         );
         std::process::exit(2);
     }

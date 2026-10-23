@@ -8,10 +8,12 @@ use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, ScriptResponse,
+    ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, NetworkAction, ScriptResponse,
 };
+use crate::mxc_common::proxy_env::{apply_proxy_env, proxy_url_has_credentials, redact_proxy_url};
 use crate::mxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
 use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::validator::{
@@ -30,6 +32,7 @@ use crate::mxc_common::sandbox_process::{
 use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
 use crate::lxc_common::filesystem_mounts;
+use crate::lxc_common::loopback_relay::LoopbackRelay;
 use crate::lxc_common::lxc_bindings::{ContainerFirewall, LxcContainer, StartNetwork};
 use crate::lxc_common::network_ingress::IngressManager;
 use crate::lxc_common::network_iptables::{
@@ -93,8 +96,11 @@ fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
 /// The state dispatch and overlay merge are shared; see
 /// [`crate::mxc_common::default_env::resolve_env`]. Below 0.9 the caller's entries are
 /// passed through untouched and the `lxc-attach` baseline is the only default.
+/// A runtime proxy replaces whatever proxy variables the caller set.
 fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
-    crate::mxc_common::default_env::resolve_env(request, || default_env(request))
+    let mut env = crate::mxc_common::default_env::resolve_env(request, || default_env(request));
+    apply_proxy_env(&mut env, &request.policy.network_proxy);
+    env
 }
 
 /// The `/etc/hosts` rewrites are short shell commands and must not inherit the script timeout.
@@ -305,6 +311,8 @@ impl LxcScriptRunner {
     /// reporting whatever it could not release.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn abandon_prepared(&self, prepared: &mut PreparedSandbox, logger: &mut Logger) -> Vec<String> {
+        prepared.relay = None;
+
         // Namespace-scoped chains come out before the container does.
         let mut failures = prepared.remove_in_container_state(self.cleanup_policy, logger);
 
@@ -397,31 +405,6 @@ impl LxcScriptRunner {
              the IPv4 destinations its policy names.",
             timeout.as_secs_f64()
         )))
-    }
-
-    fn enforce_netns_discovery<R>(
-        &self,
-        netns_pid: Option<u32>,
-        installs_firewall: bool,
-        container_created: bool,
-        logger: &mut Logger,
-        mut release_container: R,
-    ) -> Result<EgressHookPoint, ScriptResponse>
-    where
-        R: FnMut(ContainerRelease) -> Result<(), String>,
-    {
-        if let Some(hook_point) = egress_hook_point(netns_pid, installs_firewall) {
-            return Ok(hook_point);
-        }
-
-        let release = self.release_kind(container_created);
-        Self::report_release_failure(release, release_container(release), logger);
-
-        Err(ScriptResponse::error(
-            "Failed to discover the container init PID; cannot enter the container \
-             network namespace to enforce the requested firewall. Aborting rather \
-             than running with enforcement silently disabled.",
-        ))
     }
 
     /// Everything that must succeed before a workload can launch; a failure
@@ -582,16 +565,14 @@ impl LxcScriptRunner {
 
         // The init PID names the container's network namespace.
         let netns_pid = container.init_pid();
-        let hook_point = self.enforce_netns_discovery(
-            netns_pid,
-            plan.installs_firewall(),
-            container_created,
-            logger,
-            |release| match release {
-                ContainerRelease::Destroy => container.destroy(),
-                ContainerRelease::Stop => container.stop(),
-            },
-        )?;
+        let Some(hook_point) = egress_hook_point(netns_pid, plan.installs_firewall()) else {
+            self.release_after_failure(&container, container_created, logger);
+            return Err(ScriptResponse::error(
+                "Failed to discover the container init PID; cannot enter the container \
+                 network namespace to install its firewall. Aborting rather than \
+                 running without it.",
+            ));
+        };
 
         if let Some(pid) = netns_pid {
             let _ = writeln!(logger, "Container init PID: {}", pid);
@@ -616,12 +597,25 @@ impl LxcScriptRunner {
             }
         };
 
-        let firewall = container_firewall(
-            fw_manager.rules_applied(),
-            ingress_manager
+        // figure out if a firewall needs to be installed.
+        let is_firewall_installed = if fw_manager.rules_applied()
+            || ingress_manager
                 .as_ref()
-                .is_some_and(|mgr| mgr.rules_applied()),
-        );
+                .is_some_and(|mgr| mgr.rules_applied())
+        {
+            ContainerFirewall::Installed
+        } else {
+            ContainerFirewall::Absent
+        };
+
+        // Dropping CAP_NET_RAW also removed raw ICMP.  Widen the container's
+        // ping_group_range so unprivileged ping still works.
+        if is_firewall_installed == ContainerFirewall::Installed {
+            if let Err(e) = fw_manager.allow_ping_sockets(logger) {
+                self.release_after_failure(&container, container_created, logger);
+                return Err(ScriptResponse::error(&e));
+            }
+        }
 
         // A reused container can carry a pin left by an older run.
         let stale_pin_error = Self::clear_stale_hosts_pin(container_created, |command| {
@@ -632,7 +626,7 @@ impl LxcScriptRunner {
                     &[],
                     true,
                     Some(HOSTS_COMMAND_TIMEOUT),
-                    firewall,
+                    is_firewall_installed,
                 )
                 .map_err(|e| e.to_string())
         });
@@ -654,12 +648,35 @@ impl LxcScriptRunner {
         };
         let exec_env = resolved_env(request);
 
+        // Started last, after every step that can fail and release the
+        // container, and before the workload can try to reach the proxy.
+        let relay = match &request.policy.network_proxy.address {
+            Some(address) if request.policy.runtime_network_proxy_specified => {
+                let started = netns_pid
+                    .ok_or_else(|| "the container's init PID is not known".to_string())
+                    .and_then(|pid| LoopbackRelay::start(pid, address.host(), address.port()));
+                match started {
+                    Ok(relay) => Some(relay),
+                    Err(e) => {
+                        self.release_after_failure(&container, container_created, logger);
+                        return Err(ScriptResponse::error(&format!(
+                            "LXC: cannot relay runtimeConfig.networkProxy into the container: \
+                             {}. The script was not run.",
+                            e
+                        )));
+                    }
+                }
+            }
+            _ => None,
+        };
+
         Ok(PreparedSandbox {
             fw_manager,
             ingress_manager,
             container,
             container_created,
-            firewall,
+            firewall: is_firewall_installed,
+            relay,
             released: false,
             force_stopped: false,
             stop_failed: false,
@@ -781,6 +798,11 @@ struct PreparedSandbox {
     container_created: bool,
 
     firewall: ContainerFirewall,
+
+    /// Carries the runtime proxy's loopback port into the container, and holds
+    /// the container's network namespace open until it is dropped.
+    relay: Option<LoopbackRelay>,
+
     released: bool,
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -868,6 +890,7 @@ impl PreparedSandbox {
         logger: &mut Logger,
     ) -> Vec<String> {
         let mut failures = Vec::new();
+        self.relay = None;
 
         // Destroying takes the network namespace down with it. Chains that
         // were never hooked live on the host and still have to come out below.
@@ -943,12 +966,6 @@ impl PreparedSandbox {
     }
 }
 
-pub const LXC_RUNTIME_PROXY_UNSUPPORTED: &str =
-    "LXC: runtimeConfig.networkProxy is not supported. It must name a loopback endpoint, which \
-     inside the container's own network namespace is the container rather than the host. LXC \
-     has no proxy surface in any supported contract. Select a backend that can enforce a \
-     loopback proxy, or remove the proxy request.";
-
 pub const LXC_INHERIT_STDIO_UNSUPPORTED: &str =
     "LXC: inherited stdio is not available from the in-process sandbox API. LXC gives a workload \
      the host's own stdin/stdout/stderr by allocating a pty and bridging it, which runs the \
@@ -959,7 +976,7 @@ pub const LXC_INHERIT_STDIO_UNSUPPORTED: &str =
 pub const LXC_STREAMING_LINUX_ONLY: &str = "LXC: sandboxes can only be launched on Linux.";
 
 fn unsupported_network_proxy(policy: &ContainerPolicy) -> Option<&'static str> {
-    if policy.network_proxy.is_enabled() {
+    if policy.network_proxy.is_enabled() && !policy.runtime_network_proxy_specified {
         Some("network.proxy")
     } else {
         None
@@ -971,12 +988,49 @@ fn lxc_network_policy_support() -> NetworkPolicySupport {
         | NetworkPolicySupport::EGRESS_RULES
         | NetworkPolicySupport::INGRESS_DEFAULT
         | NetworkPolicySupport::HOST_LOOPBACK
+        | NetworkPolicySupport::RUNTIME_PROXY
+}
+
+impl LxcScriptRunner {
+    fn validate_runtime_proxy(&self, policy: &ContainerPolicy) -> Result<(), ScriptResponse> {
+        if let Some(address) = &policy.network_proxy.address {
+            if !host_is_canonical_loopback(address.host()) {
+                return Err(ScriptResponse::error(&format!(
+                    "LXC: runtimeConfig.networkProxy host '{}' must be localhost, 127.0.0.1, or \
+                     ::1. The proxy is relayed into the container at the same loopback address \
+                     and port.",
+                    address.host()
+                )));
+            }
+            let url = address.to_url();
+            if proxy_url_has_credentials(&url) {
+                return Err(ScriptResponse::error(&format!(
+                    "LXC: runtimeConfig.networkProxy must not carry credentials ('{}'). LXC \
+                     passes the proxy URL to lxc-attach as a --set-var command-line argument, \
+                     and process arguments are world-readable through /proc/<pid>/cmdline.",
+                    redact_proxy_url(&url)
+                )));
+            }
+        }
+        if policy.network_egress.as_ref().is_some_and(|egress| {
+            egress.default != NetworkAction::Deny
+                || !egress.allow.is_empty()
+                || !egress.deny.is_empty()
+        }) {
+            return Err(ScriptResponse::error(
+                "LXC: runtimeConfig.networkProxy cannot be combined with network.egress rules or \
+                 default='allow'. The relayed proxy port is the container's only outbound path. \
+                 Use network.egress.default='deny' with no rules, or remove the proxy.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ScriptRunner for LxcScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         if request.policy.runtime_network_proxy_specified {
-            return Err(ScriptResponse::error(LXC_RUNTIME_PROXY_UNSUPPORTED));
+            self.validate_runtime_proxy(&request.policy)?;
         }
         if let Some(field) = unsupported_network_proxy(&request.policy) {
             return Err(ScriptResponse::error(&format!(
@@ -1529,6 +1583,8 @@ fn uuid_simple() -> String {
     format!("{:08x}", (t & 0xFFFF_FFFF) as u32)
 }
 
+/// Where egress rules attach, or `None` when a firewall is needed and the
+/// container's network namespace cannot be found.
 fn egress_hook_point(netns_pid: Option<u32>, installs_firewall: bool) -> Option<EgressHookPoint> {
     match netns_pid {
         Some(pid) => Some(EgressHookPoint::ContainerNetns(pid)),
@@ -1551,15 +1607,6 @@ fn launch_failure_message(reason: &str, cleanup_failures: &[String]) -> String {
         reason,
         cleanup_failures.join("; ")
     )
-}
-
-/// Whether the workload must be kept away from chains in its own namespace.
-fn container_firewall(egress_applied: bool, ingress_applied: bool) -> ContainerFirewall {
-    if egress_applied || ingress_applied {
-        ContainerFirewall::Installed
-    } else {
-        ContainerFirewall::Absent
-    }
 }
 
 #[cfg(test)]
@@ -2044,6 +2091,7 @@ mod tests {
             container: LxcContainer::new(&name, Some("/var/lib/lxc")),
             container_created: false,
             firewall: ContainerFirewall::Absent,
+            relay: None,
             released: false,
             force_stopped: false,
             stop_failed: false,
@@ -2090,68 +2138,16 @@ mod tests {
     }
 
     #[test]
-    fn a_known_netns_hooks_the_chain_inside_the_container() {
-        assert!(matches!(
-            egress_hook_point(Some(4242), true),
-            Some(EgressHookPoint::ContainerNetns(4242))
-        ));
+    fn a_missing_init_pid_stops_a_run_that_needs_a_firewall() {
+        assert!(egress_hook_point(None, true).is_none());
     }
 
     #[test]
-    fn an_unknown_netns_refuses_to_run_when_a_firewall_was_requested() {
-        let mut logger = Logger::new(Mode::Buffer);
-
-        let response = runner_for_network_readiness_tests(true)
-            .enforce_netns_discovery(None, true, true, &mut logger, |_release| Ok(()))
-            .expect_err("a firewall was requested and the namespace is unknown");
-
-        assert_ne!(response.exit_code, 0);
-        assert!(response.standard_out.is_empty());
-    }
-
-    #[test]
-    fn a_known_netns_lets_the_run_proceed() {
-        let mut logger = Logger::new(Mode::Buffer);
-
-        assert!(matches!(
-            runner_for_network_readiness_tests(true).enforce_netns_discovery(
-                Some(4242),
-                true,
-                true,
-                &mut logger,
-                |_release| Ok(())
-            ),
-            Ok(EgressHookPoint::ContainerNetns(4242))
-        ));
-    }
-
-    #[test]
-    fn an_unknown_netns_is_allowed_when_no_firewall_was_requested() {
+    fn a_missing_init_pid_does_not_stop_a_run_with_no_firewall() {
         assert!(matches!(
             egress_hook_point(None, false),
             Some(EgressHookPoint::Unhooked)
         ));
-    }
-
-    #[test]
-    fn either_installed_chain_confines_the_workload() {
-        for (egress, ingress) in [(true, false), (false, true), (true, true)] {
-            assert_eq!(
-                container_firewall(egress, ingress),
-                ContainerFirewall::Installed,
-                "egress={egress} ingress={ingress} leaves a chain the workload could flush"
-            );
-        }
-    }
-
-    #[test]
-    fn a_policy_that_installs_no_chain_leaves_the_capability_alone() {
-        // Dropping it needs CAP_SETPCAP, which an unprivileged caller lacks.
-        assert_eq!(
-            container_firewall(false, false),
-            ContainerFirewall::Absent,
-            "a run with no firewall must not be confined"
-        );
     }
 
     /// `process.env` resolution, which schema 0.9 gave a default block.
@@ -2589,7 +2585,7 @@ mod tests {
     }
 
     use crate::mxc_common::models::{
-        NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress, ProxyConfig,
+        NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule, ProxyAddress, ProxyConfig,
     };
 
     fn request_with_proxy_url(url: &str) -> ExecutionRequest {
@@ -2701,45 +2697,125 @@ mod tests {
         );
     }
 
+    fn runtime_proxy_request(host: &str) -> ExecutionRequest {
+        let mut request = egress_only_directional_request();
+        request.policy.runtime_network_proxy_specified = true;
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new(host.to_string(), 3128)),
+        };
+        request
+    }
+
     #[test]
-    fn the_declared_support_set_withholds_the_runtime_proxy_bit() {
+    fn a_loopback_runtime_proxy_passes_validation() {
+        let runner = runner_for_guard_tests("runtime-proxy");
+
+        let result = runner.validate_runner(&runtime_proxy_request("127.0.0.1"));
+
         assert!(
-            !lxc_network_policy_support().contains(NetworkPolicySupport::RUNTIME_PROXY),
-            "claiming the bit would accept the config and then open the container's own \
-             loopback, where no proxy is listening, so the workload would fail at runtime \
-             instead of at validation"
+            result.is_ok(),
+            "got: {:?}",
+            result.err().map(|r| r.error_message)
         );
     }
 
     #[test]
-    fn a_runtime_proxy_request_is_refused_before_any_container_work() {
-        let runner = runner_for_guard_tests("runtime-proxy");
-        let mut request = egress_only_directional_request();
-        request.policy.runtime_network_proxy_specified = true;
+    fn a_directly_built_wildcard_runtime_proxy_is_refused() {
+        let runner = runner_for_guard_tests("runtime-proxy-wildcard");
+
+        for host in ["0.0.0.0", "::", "[::]"] {
+            let response = runner
+                .validate_runner(&runtime_proxy_request(host))
+                .expect_err("a wildcard host is not a loopback endpoint the relay can serve");
+
+            assert!(
+                response
+                    .error_message
+                    .contains("must be localhost, 127.0.0.1, or ::1"),
+                "host {host}, got: {}",
+                response.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn a_runtime_proxy_is_accepted_on_a_preserved_container() {
+        let lifecycle = LifecycleConfig {
+            preserve_policy: true,
+            destroy_on_exit: false,
+        };
+        let runner = LxcScriptRunner::new(&LxcConfig::default(), "runtime-proxy-kept", &lifecycle);
+
+        let result = runner.validate_runner(&runtime_proxy_request("127.0.0.1"));
+
+        assert!(
+            result.is_ok(),
+            "got: {:?}",
+            result.err().map(|r| r.error_message)
+        );
+    }
+
+    #[test]
+    fn a_runtime_proxy_is_refused_alongside_egress_rules() {
+        let runner = runner_for_guard_tests("runtime-proxy-egress");
+        let mut request = runtime_proxy_request("127.0.0.1");
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..NetworkEgressPolicy::default()
+        });
 
         let response = runner.validate_runner(&request).expect_err(
-            "a loopback proxy is unreachable from the container's network namespace, so the \
-             request must be refused",
+            "with a runtime proxy, the relayed port is the container's only outbound path",
         );
 
         assert!(
-            response
-                .error_message
-                .contains("runtimeConfig.networkProxy"),
-            "the refusal must name the field the caller wrote, got: {}",
+            response.error_message.contains("network.egress"),
+            "got: {}",
             response.error_message
         );
+    }
+
+    #[test]
+    fn a_runtime_proxy_is_refused_alongside_an_egress_allow_rule() {
+        let runner = runner_for_guard_tests("runtime-proxy-egress-allow-rule");
+        let mut request = runtime_proxy_request("127.0.0.1");
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            allow: vec![NetworkRule::default()],
+            deny: Vec::new(),
+        });
+
+        let response = runner
+            .validate_runner(&request)
+            .expect_err("an allow rule would open a path besides the relayed proxy port");
+
         assert!(
-            response.error_message.contains("LXC"),
-            "the refusal must name the backend that refused, or the caller cannot tell which \
-             part of the request to change, got: {}",
+            response.error_message.contains("network.egress"),
+            "got: {}",
             response.error_message
         );
+    }
+
+    #[test]
+    fn a_runtime_proxy_carrying_credentials_is_refused() {
+        let runner = runner_for_guard_tests("runtime-proxy-credentials");
+        let mut request = runtime_proxy_request("127.0.0.1");
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::from_url(
+                "http://user:secret@127.0.0.1:3128",
+                "127.0.0.1".to_string(),
+                3128,
+            )),
+        };
+
+        let response = runner
+            .validate_runner(&request)
+            .expect_err("credentials would be visible in /proc/<pid>/cmdline");
+
         assert!(
-            response.error_message.contains("no proxy surface")
-                && response.error_message.contains("Select a backend")
-                && !response.error_message.contains("network.proxy.url"),
-            "the refusal must recommend a supported alternative, got: {}",
+            response.error_message.contains("credentials")
+                && !response.error_message.contains("secret"),
+            "got: {}",
             response.error_message
         );
     }
@@ -3064,23 +3140,22 @@ mod tests {
 
     #[test]
     fn a_request_the_backend_cannot_honor_is_refused_before_anything_launches() {
-        let policy = ContainerPolicy {
-            runtime_network_proxy_specified: true,
-            ..Default::default()
-        };
         let request = ExecutionRequest {
             script_code: "echo hello".to_string(),
-            policy,
-            ..Default::default()
+            ..request_with_proxy_url("http://proxy.example.com:8080")
         };
         let mut logger = Logger::new(Mode::Buffer);
 
         let refusal = validating_runner()
             .spawn(&request, &mut logger, StdioMode::Pipes)
             .err()
-            .expect("a runtime proxy has no loopback the container shares with the host");
+            .expect("LXC has no surface for the retired network.proxy");
 
-        assert_eq!(refusal.error_message, LXC_RUNTIME_PROXY_UNSUPPORTED);
+        assert!(
+            refusal.error_message.contains("network.proxy"),
+            "got: {}",
+            refusal.error_message
+        );
         assert!(
             !logger.get_buffer().contains("Container name:"),
             "validation must run before the container is named"

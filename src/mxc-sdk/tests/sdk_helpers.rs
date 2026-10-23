@@ -29,9 +29,8 @@ fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn platform_support_reports_host() {
     let support = platform_support();
-    // Every platform this test runs on (macOS/Linux/Windows in CI) is supported.
-    assert!(support.is_supported, "reason: {:?}", support.reason);
-    assert!(!support.available_methods.is_empty());
+    assert_eq!(support.is_supported, !support.available_methods.is_empty());
+    assert_eq!(support.reason.is_some(), !support.is_supported);
 }
 
 #[cfg(target_os = "macos")]
@@ -254,14 +253,24 @@ fn platform_support_linux_reports_the_backends_it_can_launch() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn platform_support_windows_includes_processcontainer() {
+fn platform_support_windows_matches_processcontainer_availability() {
     let support = platform_support();
-    assert!(support.is_supported, "reason: {:?}", support.reason);
-    // ProcessContainer is always available on Windows and is reported first.
+    let process_container_available = mxc_sdk::v1::available_backends()
+        .iter()
+        .any(|backend| backend.backend == "processcontainer");
     assert_eq!(
-        support.available_methods.first().map(String::as_str),
-        Some("processcontainer")
+        support
+            .available_methods
+            .iter()
+            .any(|method| method == "processcontainer"),
+        process_container_available
     );
+    if process_container_available {
+        assert_eq!(
+            support.available_methods.first().map(String::as_str),
+            Some("processcontainer")
+        );
+    }
     // Beyond processcontainer, only the opt-in backends may appear.
     // `windows_sandbox` is a host-capability backend reported by
     // `available_backends()`, not here — so assert it never leaks into this

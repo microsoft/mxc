@@ -18,10 +18,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $TestScripts = @(
-    "run_basicprocess_test.ps1",
-    "run_filesystem_bfs_test.ps1",
-    "run_filesystem_bfsreadonly_test.ps1",
-    "run_lpacac_test.ps1"
+    "run_basicprocess_test.ps1"
 )
 
 $passThrough = @()

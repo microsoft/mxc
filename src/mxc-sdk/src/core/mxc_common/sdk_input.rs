@@ -138,6 +138,13 @@ impl SdkStateAwareInput {
                 version.as_str()
             )));
         }
+        if wslc_session_requested(&operation) && version != ContractVersion::V1_1_0Alpha {
+            return Err(WxcError::ConfigParse(format!(
+                "state-aware session operations require schema version \
+                 1.1.0-alpha, got {}",
+                version.as_str()
+            )));
+        }
         operation.validate()?;
         Ok(Self {
             version,
@@ -175,7 +182,6 @@ impl SdkStateAwareInput {
                 readonly_paths: Some(filesystem.readonly_paths),
                 denied_paths: Some(filesystem.denied_paths),
             }),
-            fallback: None,
             network: self.network.map(map_network),
             runtime_config: self.runtime_config.map(|runtime| wire::RuntimeConfig {
                 network_proxy: runtime.network_proxy,
@@ -201,6 +207,17 @@ fn wslc_port_mappings_requested(operation: &StateAwareOperation) -> bool {
             Some(config)
         )) if config.port_mappings.is_some()
     )
+}
+
+fn wslc_session_requested(operation: &StateAwareOperation) -> bool {
+    match operation {
+        StateAwareOperation::ProvisionSession(_)
+        | StateAwareOperation::DeprovisionSession { .. } => true,
+        StateAwareOperation::Provision(
+            crate::mxc_common::state_aware_operation::StateAwareProvision::Wslc(Some(config)),
+        ) => config.session_id.is_some(),
+        _ => false,
+    }
 }
 
 fn map_network(network: SdkNetworkInput) -> wire::Network {
@@ -302,6 +319,7 @@ mod tests {
                 crate::mxc_common::models::WslcProvisionConfig {
                     image: None,
                     image_tar_path: None,
+                    session_id: None,
                     port_mappings,
                 },
             )),
@@ -335,6 +353,51 @@ mod tests {
         for version in [ContractVersion::V1_0_0, ContractVersion::V1_1_0Alpha] {
             SdkStateAwareInput::new(version, wslc_provision(None))
                 .expect("an absent list clears the gate on every supported contract");
+        }
+    }
+
+    fn wslc_provision_in_session(session_id: Option<&str>) -> StateAwareOperation {
+        StateAwareOperation::Provision(
+            crate::mxc_common::state_aware_operation::StateAwareProvision::Wslc(Some(
+                crate::mxc_common::models::WslcProvisionConfig {
+                    session_id: session_id.map(str::to_string),
+                    ..Default::default()
+                },
+            )),
+        )
+    }
+
+    #[test]
+    fn the_stable_contract_rejects_session_ids_even_when_empty() {
+        for session_id in ["", "wslcsess:0123456789abcdef0123456789abcdef"] {
+            let error = SdkStateAwareInput::new(
+                ContractVersion::V1_0_0,
+                wslc_provision_in_session(Some(session_id)),
+            )
+            .expect_err("1.0.0 does not declare wslc.provision.sessionId");
+            assert!(
+                error.to_string().contains("1.1.0-alpha"),
+                "the message must name the contract that declares session placement: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_alpha_contract_preserves_session_id_presence() {
+        for session_id in ["", "wslcsess:0123456789abcdef0123456789abcdef"] {
+            let operation = wslc_provision_in_session(Some(session_id));
+            let input = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation.clone())
+                .expect("1.1.0-alpha declares wslc.provision.sessionId");
+            let (_, observed) = input.into_normalization_input().unwrap().into_parts();
+            assert_eq!(observed, operation);
+        }
+    }
+
+    #[test]
+    fn an_omitted_session_id_is_accepted_on_both_contracts() {
+        for version in [ContractVersion::V1_0_0, ContractVersion::V1_1_0Alpha] {
+            SdkStateAwareInput::new(version, wslc_provision_in_session(None))
+                .expect("unnamed-session provisioning must remain compatible");
         }
     }
 

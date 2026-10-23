@@ -353,6 +353,9 @@ function Start-StateAwareAsync {
     $proc = Start-Process -FilePath $WxcExec -ArgumentList $argList `
         -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile `
         -NoNewWindow -PassThru
+    # Caching the handle keeps ExitCode readable after the process exits; with
+    # redirected output, Windows PowerShell 5.1 otherwise reports none.
+    $null = $proc.Handle
     @{
         Process    = $proc
         StdoutFile = $stdoutFile

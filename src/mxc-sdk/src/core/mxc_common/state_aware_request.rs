@@ -7,25 +7,65 @@ use crate::mxc_common::models::{ContainmentBackend, ExecutionRequest};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_operation::StateAwareOperation;
 
+/// The out-of-band identity a phase is addressed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TargetIdKind {
+    None,
+    SandboxId,
+    SessionId,
+}
+
+impl TargetIdKind {
+    /// Wire member that carries this identity on a lifecycle request.
+    pub fn wire_member(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::SandboxId => Some("sandboxId"),
+            Self::SessionId => Some("sessionId"),
+        }
+    }
+}
+
 /// Lifecycle phase in a state-aware request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Phase {
+    ProvisionSession,
     Provision,
     Start,
     Exec,
     Stop,
     Deprovision,
+    DeprovisionSession,
 }
 
 impl Phase {
     /// Wire-format string matching the SDK's `Phase` union.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ProvisionSession => "provision-session",
             Self::Provision => "provision",
             Self::Start => "start",
             Self::Exec => "exec",
             Self::Stop => "stop",
             Self::Deprovision => "deprovision",
+            Self::DeprovisionSession => "deprovision-session",
+        }
+    }
+
+    /// Whether the backend comes from the declared `containment` rather than
+    /// from the prefix of the phase's target ID.
+    ///
+    /// Only a sandbox ID carries a backend prefix, so a phase addressed by
+    /// anything else has to declare its containment.
+    pub fn routes_by_containment(self) -> bool {
+        !matches!(self.target_id_kind(), TargetIdKind::SandboxId)
+    }
+
+    pub fn target_id_kind(self) -> TargetIdKind {
+        match self {
+            Self::ProvisionSession | Self::Provision => TargetIdKind::None,
+            Self::Start | Self::Exec | Self::Stop | Self::Deprovision => TargetIdKind::SandboxId,
+            Self::DeprovisionSession => TargetIdKind::SessionId,
         }
     }
 }
@@ -128,17 +168,23 @@ impl ParsedStateAwareRequest {
         self.operation.phase()
     }
 
-    /// Declared backend for provision; later phases route by sandbox ID.
+    /// Declared backend for the phases that route by containment; the rest
+    /// route by sandbox ID.
     pub fn containment(&self) -> Option<ContainmentBackend> {
         self.operation.containment()
     }
 
-    /// Sandbox ID carried by a non-provision operation.
+    /// Sandbox ID carried by a sandbox-addressed operation.
     pub fn sandbox_id(&self) -> Option<&str> {
         self.operation.sandbox_id()
     }
 
-    /// Require an ID for a non-provision execution entry point.
+    /// Session ID carried by a session-addressed operation.
+    pub fn session_id(&self) -> Option<&str> {
+        self.operation.session_id()
+    }
+
+    /// Require an ID for a sandbox-addressed execution entry point.
     pub fn sandbox_id_required(&self) -> Result<&str, MxcError> {
         self.sandbox_id().ok_or_else(|| {
             MxcError::malformed_request(format!("phase {} requires a sandboxId", self.phase()))
@@ -214,5 +260,70 @@ mod tests {
         assert!(parsed.sandbox_id_required().is_err());
         let (_, observed) = parsed.into_parts();
         assert_eq!(observed, operation);
+    }
+
+    #[test]
+    fn every_phase_has_a_distinct_wire_string() {
+        let phases = [
+            Phase::ProvisionSession,
+            Phase::Provision,
+            Phase::Start,
+            Phase::Exec,
+            Phase::Stop,
+            Phase::Deprovision,
+            Phase::DeprovisionSession,
+        ];
+        let mut seen: Vec<&str> = phases.iter().map(|phase| phase.as_str()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), phases.len());
+        assert_eq!(Phase::ProvisionSession.as_str(), "provision-session");
+        assert_eq!(Phase::DeprovisionSession.as_str(), "deprovision-session");
+        assert_eq!(Phase::ProvisionSession.to_string(), "provision-session");
+    }
+
+    #[test]
+    fn session_phases_route_by_containment_and_carry_no_sandbox_id() {
+        for phase in [Phase::ProvisionSession, Phase::DeprovisionSession] {
+            assert!(phase.routes_by_containment(), "{phase}");
+            assert_ne!(phase.target_id_kind(), TargetIdKind::SandboxId, "{phase}");
+        }
+        assert_eq!(Phase::ProvisionSession.target_id_kind(), TargetIdKind::None);
+        assert_eq!(
+            Phase::DeprovisionSession.target_id_kind(),
+            TargetIdKind::SessionId
+        );
+    }
+
+    #[test]
+    fn sandbox_addressed_phases_route_by_their_id() {
+        for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+            assert!(!phase.routes_by_containment(), "{phase}");
+            assert_eq!(phase.target_id_kind(), TargetIdKind::SandboxId, "{phase}");
+        }
+        assert!(Phase::Provision.routes_by_containment());
+        assert_eq!(Phase::Provision.target_id_kind(), TargetIdKind::None);
+    }
+
+    #[test]
+    fn each_identity_has_its_own_wire_member() {
+        assert_eq!(TargetIdKind::None.wire_member(), None);
+        assert_eq!(TargetIdKind::SandboxId.wire_member(), Some("sandboxId"));
+        assert_eq!(TargetIdKind::SessionId.wire_member(), Some("sessionId"));
+    }
+
+    #[test]
+    fn a_session_operation_exposes_its_id_only_as_a_session_id() {
+        let parsed = ParsedStateAwareRequest::new(
+            ExecutionRequest::default(),
+            StateAwareOperation::DeprovisionSession {
+                session_id: "wslcsess:abcd".into(),
+            },
+        );
+        assert_eq!(parsed.phase(), Phase::DeprovisionSession);
+        assert_eq!(parsed.containment(), Some(ContainmentBackend::Wslc));
+        assert_eq!(parsed.session_id(), Some("wslcsess:abcd"));
+        assert!(parsed.sandbox_id().is_none());
+        assert!(parsed.sandbox_id_required().is_err());
     }
 }

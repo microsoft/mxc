@@ -41,7 +41,7 @@
 //! | Bubblewrap | Linux | [`v1::Containment::Process`] or [`v1::Containment::Bubblewrap`] |
 //! | LXC | Linux | [`v1::Containment::Lxc`] |
 //! | Seatbelt | macOS | [`v1::Containment::Process`] or [`v1::Containment::Seatbelt`] |
-//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`v1::Containment::Process`] |
+//! | ProcessContainer (PSEC) | Windows | [`v1::Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`v1::Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`v1::Containment::Wslc`] |
 //! | IsolationSession | Windows | [`v1::Containment::IsolationSession`] |
@@ -51,8 +51,8 @@
 //! [`v1::spawn_with_pty`] allocates a caller-controlled terminal.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
-//! requires the `isolation_session` build feature. WSLC's container has no
-//! stdin (the WSLC SDK exposes no process-input API), so
+//! requires the `isolation_session` build feature. MXC does not forward stdin
+//! to a WSLC container, so
 //! [`MxcProcess::take_stdin`] returns `None` for it.
 //! IsolationSession is also available through the typed lifecycle API.
 //!
@@ -196,8 +196,6 @@ pub use core_modules::mxc_pty;
 pub use core_modules::mxc_schema_support;
 #[doc(hidden)]
 pub use core_modules::mxc_telemetry;
-#[doc(hidden)]
-pub use core_modules::plm;
 #[doc(hidden)]
 pub use core_modules::process_security_environment_spec;
 
@@ -415,24 +413,7 @@ pub mod __ffi {
         wait_with_output(spawn_container_json(request_json, experimental)?)
     }
 
-    /// Run a lifecycle request (as a JSON string) and return the
-    /// response-envelope JSON string.
-    ///
-    /// Handles the envelope phases (`provision`, `start`, `stop`, `deprovision`)
-    /// and a dry run of any phase. A non-dry-run execution produces no envelope, so
-    /// it is rejected here; use an execution entry point instead:
-    /// [`execute_lifecycle_json`] to drive the pipes yourself.
-    ///
-    /// The request JSON is the same wire format the executor accepts (an object with
-    /// a `phase` field). Errors (malformed request, unsupported phase, backend
-    /// failures) come back as an [`Error`] with the matching [`ErrorCode`].
-    ///
-    /// `experimental` is the in-process equivalent of the executor's
-    /// `--experimental` flag. It permits selecting an experimental backend, which
-    /// is otherwise refused with [`ErrorCode::BackendUnavailable`] before any work
-    /// is done, and is ignored for production backends.
-    /// It is an API parameter rather than a field in the request JSON so that a
-    /// config cannot grant itself experimental access.
+    /// Run an [MXC lifecycle JSON request](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/container-lifecycle.md#raw-json-entry-points) and return its JSON response envelope.
     pub fn run_lifecycle_json(
         request_json: &str,
         dry_run: bool,

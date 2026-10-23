@@ -77,6 +77,10 @@ disabled_test() {
     echo ""
 }
 
+echo "NOTE: LXC Rootless No-Network is not run here, because it adds a temporary user account to this machine."
+echo "      Run it manually with: sudo bash $SCRIPT_DIR/run_lxc_rootless_no_network_test.sh"
+echo ""
+
 run_test "Basic LXC" "$SCRIPT_DIR/run_lxc_basic_test.sh"
 run_test "LXC Filesystem" "$SCRIPT_DIR/run_lxc_filesystem_test.sh"
 run_test "LXC Object Validation" "$SCRIPT_DIR/run_lxc_object_test.sh"
@@ -95,6 +99,9 @@ run_test "LXC Network Extra Interface Isolation" "$SCRIPT_DIR/run_lxc_network_ex
 run_test "LXC Network Deny-All Loopback" "$SCRIPT_DIR/run_lxc_network_deny_all_loopback_test.sh"
 run_test "LXC Network Deny Precedence" "$SCRIPT_DIR/run_lxc_network_deny_precedence_test.sh"
 run_test "LXC Network Proxy Rejection" "$SCRIPT_DIR/run_lxc_network_proxy_rejection_test.sh"
+run_test "LXC Network Proxy Relay" "$SCRIPT_DIR/run_lxc_network_proxy_relay_test.sh"
+run_test "LXC Network Proxy Reuse" "$SCRIPT_DIR/run_lxc_network_proxy_reuse_test.sh"
+run_test "LXC Network Proxy Reset" "$SCRIPT_DIR/run_lxc_network_proxy_reset_test.sh"
 run_test "LXC Network Proxy Credentials" "$SCRIPT_DIR/run_lxc_network_proxy_credentials_test.sh"
 run_test "LXC Network Preserve Policy" "$SCRIPT_DIR/run_lxc_network_preserve_policy_test.sh"
 run_test "LXC Network Reuse Tightening" "$SCRIPT_DIR/run_lxc_network_reuse_tighten_test.sh"
@@ -104,6 +111,7 @@ run_test "LXC Inbound Traffic" "$SCRIPT_DIR/run_lxc_inbound_traffic_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
 run_test "LXC Environment" "$SCRIPT_DIR/run_lxc_env_test.sh"
+run_test "LXC Log File" "$SCRIPT_DIR/run_lxc_log_file_test.sh"
 
 echo "================================"
 echo "Results: $PASSED passed, $FAILED failed, $SKIPPED skipped, $DISABLED disabled"

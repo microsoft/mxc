@@ -447,7 +447,9 @@ mod host_tests {
     use super::*;
 
     use crate::mxc_common::logger::{Logger, Mode};
-    use crate::wslc_common::container_steps::{create_daemon_session, list_stored_images};
+    use crate::wslc_common::container_steps::{
+        create_daemon_session, list_stored_images, SessionSizing,
+    };
     use crate::wslc_common::image::pull_image;
     use crate::wslc_common::sdk_init::init_and_load_sdk;
 
@@ -482,6 +484,7 @@ mod host_tests {
                         sdk,
                         "mxc-slot-probe-a",
                         &path.to_string_lossy(),
+                        SessionSizing::default(),
                         &mut log,
                     )
                 }
@@ -495,6 +498,7 @@ mod host_tests {
                         sdk,
                         "mxc-slot-probe-b",
                         &path.to_string_lossy(),
+                        SessionSizing::default(),
                         &mut log,
                     )
                 }
@@ -534,7 +538,13 @@ mod host_tests {
             .lease_with(|path| {
                 // SAFETY: `sdk` is live and the store is a fresh directory.
                 unsafe {
-                    create_daemon_session(sdk, "mxc-slot-holder", &path.to_string_lossy(), &mut log)
+                    create_daemon_session(
+                        sdk,
+                        "mxc-slot-holder",
+                        &path.to_string_lossy(),
+                        SessionSizing::default(),
+                        &mut log,
+                    )
                 }
             })
             .expect("first lease");
@@ -543,15 +553,28 @@ mod host_tests {
         // The pool would never hand this slot out again, so take it the way a
         // process outside this pool's bookkeeping would.
         // SAFETY: `sdk` is live; this targets the held store on purpose.
-        let second = unsafe { create_daemon_session(sdk, "mxc-slot-intruder", &store, &mut log) };
+        let second = unsafe {
+            create_daemon_session(
+                sdk,
+                "mxc-slot-intruder",
+                &store,
+                SessionSizing::default(),
+                &mut log,
+            )
+        };
 
-        let refusal = match second {
-            Err(resp) => resp,
+        let failure = match second {
+            Err(failure) => failure,
             Ok(_) => panic!(
                 "a session on a held store must be refused at create; letting it \
                  through mints a sandbox id that dies at an arbitrary later phase"
             ),
         };
+        assert!(
+            !failure.store_may_be_held,
+            "the refused VM never opened the held store, so stopping it must succeed"
+        );
+        let refusal = failure.response;
         assert!(
             refusal.error_message.contains("80070020"),
             "the refusal must carry the sharing violation: {}",
@@ -579,7 +602,13 @@ mod host_tests {
             .lease_with(|path| {
                 // SAFETY: `sdk` is live and the pool hands out a distinct store.
                 unsafe {
-                    create_daemon_session(sdk, "mxc-slot-lease", &path.to_string_lossy(), &mut log)
+                    create_daemon_session(
+                        sdk,
+                        "mxc-slot-lease",
+                        &path.to_string_lossy(),
+                        SessionSizing::default(),
+                        &mut log,
+                    )
                 }
             })
             .expect("first lease");
@@ -618,7 +647,13 @@ mod host_tests {
             .lease_with(|path| {
                 // SAFETY: `sdk` is live and the pool hands out a distinct store.
                 unsafe {
-                    create_daemon_session(sdk, "mxc-slot-lease", &path.to_string_lossy(), &mut log)
+                    create_daemon_session(
+                        sdk,
+                        "mxc-slot-lease",
+                        &path.to_string_lossy(),
+                        SessionSizing::default(),
+                        &mut log,
+                    )
                 }
             })
             .expect("re-lease after return");

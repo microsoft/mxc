@@ -1530,7 +1530,7 @@ mod tests {
 
     /// Full streaming round-trip against a real sandbox: spawn `echo`, drain
     /// stdout to EOF, and wait for a clean exit. Ignored by default because it
-    /// requires a host able to launch a sandboxed process (host-prepped Windows
+    /// requires a host able to launch a sandboxed process (PSEC-capable Windows
     /// / capable Linux or macOS); run explicitly on such a host with
     /// `cargo test -p mxc_ffi -- --ignored real_echo_streaming_roundtrip`.
     #[test]

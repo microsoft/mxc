@@ -12,12 +12,8 @@ use crate::mxc_common::mxc_error::MxcErrorCode;
 #[serde(rename_all = "lowercase")]
 pub enum ContainmentBackend {
     #[default]
-    /// Windows process-level containment. Resolves at runtime to either
-    /// AppContainer (legacy OS API) or BaseContainer (newer Windows
-    /// process security environment API)
-    /// based purely on host capability — BaseContainer is preferred when
-    /// the OS supports it, AppContainer is the downlevel fallback. The
-    /// schema version does not influence this choice.
+    /// Windows process-level containment using native PSEC. The schema version
+    /// does not influence native contract selection.
     /// Selected on the wire as `"processcontainer"`.
     ProcessContainer,
     /// Linux container via WSL Container SDK (WSLC SDK).
@@ -256,8 +252,26 @@ pub struct WslcProvisionConfig {
     /// Local image tarball to import instead of pulling an image.
     pub image_tar_path: Option<String>,
 
+    /// Join this session, or the shared default session when absent.
+    pub session_id: Option<String>,
+
     /// Host-to-container TCP forwards applied to the sandbox's own container.
     pub port_mappings: Option<Vec<PortMapping>>,
+}
+
+/// Runtime-owned state-aware session provision config for the WSLc backend.
+///
+/// Sizing belongs to the session, so these values describe the utility VM the
+/// session runs in rather than a per-sandbox quota. Defaulting remains a
+/// backend responsibility, so an absent field stays absent here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WslcProvisionSessionConfig {
+    pub cpu_count: Option<u32>,
+
+    pub memory_mb: Option<u64>,
+
+    /// Whether GPU passthrough is enabled.
+    pub gpu: Option<bool>,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -615,30 +629,6 @@ impl Default for BaseProcessUiConfig {
     }
 }
 
-/// Operator consent for host-impacting containment fallbacks. Each flag gates
-/// a specific fallback the runner may otherwise pick when the preferred
-/// primitive is unavailable. Defaults preserve the pre-fallback-section
-/// behavior (all permitted).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FallbackPolicy {
-    /// When neither the in-process BaseContainer API nor the OS-side
-    /// filesystem broker helper is available, allow MXC to apply DACL ACEs
-    /// on policy paths (Tier 3 fallback). This modifies host filesystem
-    /// security descriptors; original DACLs are restored on exit. Defaults
-    /// to `true`. Set to `false` to refuse the fallback (the run will fail
-    /// on machines that require Tier 3).
-    pub allow_dacl_mutation: bool,
-}
-
-impl Default for FallbackPolicy {
-    fn default() -> Self {
-        Self {
-            allow_dacl_mutation: true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ContainerPolicy {
     pub least_privilege_mode: bool,
@@ -647,7 +637,6 @@ pub struct ContainerPolicy {
     pub readonly_paths: Vec<String>,
     pub enumerate_paths: Vec<String>,
     pub denied_paths: Vec<String>,
-    pub fallback: FallbackPolicy,
     /// Outbound CIDR, protocol, and port policy.
     pub network_egress: Option<NetworkEgressPolicy>,
     /// Inbound and host-loopback policy.

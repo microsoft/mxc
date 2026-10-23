@@ -37,11 +37,14 @@ jobs:
 
       # `--no-build` reuses the compile above rather than repeating it.
       #
-      # Tests needing a prepared sandbox host gate on MXC_E2E_HOST_PREPPED,
-      # deliberately left unset: no runner satisfies it. The isolation-session
-      # tests gate on the SDK's backend probe, and this lane does not build that
-      # backend. Both report as skips, so what this lane establishes is
-      # the managed surface plus the native library loading on this platform.
+      # Tests that spawn real sandboxes gate on MXC_E2E_PSEC_CAPABLE_HOST, which
+      # this job deliberately leaves unset, so they skip on every runner here.
+      # The isolation-session tests gate on the SDK's backend probe, and this
+      # lane does not build that backend. Both report as skips, so what this
+      # lane establishes is the managed surface plus the native library loading
+      # on this platform.
+      # The scheduled ProcessContainer jobs run MxcProcessTests from the Windows
+      # SDK test bundle with the PSEC switch enabled and reject skipped tests.
       #
       # A zero exit code is not sufficient evidence on its own, because a run in
       # which every test skipped also exits 0. Parsing the summary is what

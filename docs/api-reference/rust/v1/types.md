@@ -527,7 +527,7 @@ pub struct PlatformSupport {
 
 ## `mxc_sdk::v1::ProbeFacts`
 
-Raw machine facts gathered prior to running tier selection.
+Host capability facts, returned even when the supplied request is incompatible.
 
 ```rust
 pub struct ProbeFacts {
@@ -552,7 +552,11 @@ pub struct ProbeFacts {
 
 ## `mxc_sdk::v1::ProbeOutput`
 
-JSON output emitted by wxc-execution --probe.
+Host capabilities and request compatibility for Windows ProcessContainer.
+
+When native ProcessContainer cannot serve the request, `tier` and
+`needs_dacl_augmentation` are `None` and `error` explains why. `probes` still
+contains host capability facts.
 
 ```rust
 pub struct ProbeOutput {

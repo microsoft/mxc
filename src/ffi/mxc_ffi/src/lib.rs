@@ -15,9 +15,10 @@
 //! - **Streaming** (`streaming` module) — [`mxc_spawn_json`] accepts the same
 //!   document and returns an opaque live handle.
 //! - **State-aware lifecycle** (`state_aware` module) —
-//!   [`mxc_run_state_aware_json`] drives the envelope phases (provision /
-//!   start / stop / deprovision), and [`mxc_exec_state_aware_json`] runs the
-//!   exec phase as a live streaming handle (reusing the streaming externs).
+//!   [`mxc_run_state_aware_json`] drives the envelope phases (provision-session /
+//!   provision / start / stop / deprovision / deprovision-session), and
+//!   [`mxc_exec_state_aware_json`] runs the exec phase as a live streaming handle
+//!   (reusing the streaming externs).
 //!
 //! ## Ingress rule
 //!

@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_VERBOSE_LOGGING_GROUPS: usize = 4_096;
 /// Maximum compact-JSON bytes retained across distinct serialized signatures.
 ///
-/// This leaves substantial headroom under the guarded WPR analysis protocol's
-/// 64 MiB frame limit for actionable denials and envelope overhead.
+/// This leaves substantial headroom under the 64 MiB serialized-analysis limit
+/// for actionable denials and envelope overhead.
 pub const MAX_VERBOSE_LOGGING_SIGNATURE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stable category for a known Learning Mode ETW provider.
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_budget_leaves_guarded_analysis_protocol_headroom() {
+    fn byte_budget_leaves_serialized_analysis_headroom() {
         let mut summary = VerboseLoggingSummary::default();
         let mut retained_bytes = 0;
         let properties = (0..24)

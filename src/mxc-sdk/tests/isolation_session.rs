@@ -5,6 +5,8 @@
 //!
 //! Host-dependent tests skip when the backend is unavailable, so this file is
 //! safe to run on any host.
+//! They share a serial_test lock to avoid overlapping independent session
+//! lifecycles. Policy-refusal tests do not create sessions and remain parallel.
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
@@ -104,6 +106,7 @@ macro_rules! skip_unless_supported {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn a_single_threaded_apartment_drives_the_full_lifecycle() {
     skip_unless_supported!();
 
@@ -188,6 +191,7 @@ fn one_shot_refuses_an_environment_it_cannot_launch_as_policy_validation() {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_run_captures_output() {
     skip_unless_supported!();
     let request = iso_request("echo marker-oneshot", None);
@@ -205,6 +209,7 @@ fn one_shot_run_captures_output() {
 /// A one-shot exec's exit code reaches the caller unchanged. Paired with the
 /// test above so a backend that always reported success could not satisfy both.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_run_propagates_a_nonzero_exit() {
     skip_unless_supported!();
     let request = iso_request("exit 7", None);
@@ -250,6 +255,7 @@ impl Held {
 /// be a line produced earlier. A sibling whose session had been reached would
 /// fall silent, lose its marker, or exit non-zero.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn concurrent_one_shot_runs_stay_isolated() {
     skip_unless_supported!();
     const RUNS: usize = 3;
@@ -498,6 +504,7 @@ fn concurrent_one_shot_runs_stay_isolated() {
 /// there. `kill` reports whether the session stopped, which is what that
 /// refusal breaks.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_finished_on_an_sta_thread_still_tears_down() {
     skip_unless_supported!();
     let request = iso_request("ping -n 300 127.0.0.1", None);
@@ -519,6 +526,7 @@ fn one_shot_finished_on_an_sta_thread_still_tears_down() {
 /// Fails if teardown is made under the finishing thread's impersonation, whose
 /// token cannot be duplicated at `SecurityImpersonation` level.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_its_session() {
     skip_unless_supported!();
     let request = iso_request("ping -n 300 127.0.0.1", None);
@@ -546,6 +554,7 @@ fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_
 /// it *succeeded* is not observable here — the surface returns no identity to
 /// attribute an account to.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn an_abandoned_one_shot_handle_completes_teardown() {
     skip_unless_supported!();
     let request = iso_request("ping -n 300 127.0.0.1", None);
@@ -570,6 +579,7 @@ fn an_abandoned_one_shot_handle_completes_teardown() {
 /// assertion, because dropping it would tear the session down and produce the
 /// same EOF without `kill` having done anything.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn one_shot_kill_stops_the_workload() {
     skip_unless_supported!();
     // Long enough that a prompt EOF proves the kill worked, rather than racing
@@ -646,6 +656,7 @@ fn one_shot_kill_stops_the_workload() {
 struct Teardown(String);
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn typed_lifecycle_returns_metadata_and_warnings() {
     use mxc_sdk::v1::{
         container, ExecutionRequest, ProvisionMetadata, ProvisionRequest, WaitResult,
@@ -724,6 +735,7 @@ impl Drop for Teardown {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn state_aware_lifecycle_runs_end_to_end() {
     skip_unless_supported!();
 
@@ -842,6 +854,7 @@ fn account_of(whoami_output: &str) -> String {
 /// The workload must run as the isolated agent user. Every other host-gated test
 /// here would also pass against an unsandboxed `cmd.exe`; this one would not.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn exec_runs_as_the_isolated_agent_user() {
     skip_unless_supported!();
     let started = provision_and_start();
@@ -857,6 +870,7 @@ fn exec_runs_as_the_isolated_agent_user() {
 /// The ephemeral workspace is readable and writable from both sides, and
 /// deprovision removes it synchronously.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
     skip_unless_supported!();
     let started = provision_and_start();
@@ -911,6 +925,7 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn state_aware_exec_propagates_a_non_zero_exit_code() {
     skip_unless_supported!();
     let started = provision_and_start();
@@ -932,6 +947,7 @@ fn state_aware_exec_propagates_a_non_zero_exit_code() {
 }
 
 #[test]
+#[serial_test::serial(isolation_session)]
 fn state_aware_exec_can_be_killed() {
     skip_unless_supported!();
     let started = provision_and_start();
@@ -971,6 +987,7 @@ fn state_aware_exec_can_be_killed() {
 /// Ignored: the platform keeps a stdin write handle open that this crate cannot
 /// reach, so the workload never sees EOF. Tracked as an OS bug.
 #[test]
+#[serial_test::serial(isolation_session)]
 #[ignore = "blocked on an OS fix: a platform-held stdin write handle prevents EOF"]
 fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
     skip_unless_supported!();
@@ -1013,6 +1030,7 @@ fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
 /// that descendant's lifetime. The descendant inherits the agent's write ends,
 /// so the output relays reach no EOF and must be ended by cancellation.
 #[test]
+#[serial_test::serial(isolation_session)]
 fn a_backgrounded_descendant_does_not_hold_the_exec_open() {
     skip_unless_supported!();
     let started = provision_and_start();

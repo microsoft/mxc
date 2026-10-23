@@ -12,19 +12,20 @@ import {
   readProbeJsonWithNative,
 } from '../../src/bindings/probe.js';
 import { findMxcFfiLibrary } from '../../src/native-library.js';
+import type { IsolationTier } from '../../src/v1/index.js';
 import {
   _setRequestProbeDependencies,
   probe,
 } from '../../src/v1/probe.js';
 
 const completeProbe = {
-  tier: 'appcontainer-dacl',
-  needsDaclAugmentation: true,
+  tier: 'base-container',
+  needsDaclAugmentation: false,
   warnings: [],
   probes: {
     baseContainerApiPresent: true,
     nativeCaptureAvailable: false,
-    guardedCaptureAvailable: true,
+    guardedCaptureAvailable: false,
     bfscfgPresent: false,
     bfsCompiledIn: false,
     baseContainerSupportsDenyPaths: false,
@@ -89,7 +90,7 @@ describe('probe', () => {
       command: 'cmd /c exit 0',
     });
 
-    assert.equal(output.tier, 'appcontainer-dacl');
+    assert.equal(output.tier, 'base-container');
     assert.equal(typeof forwarded, 'string');
   });
 
@@ -102,7 +103,7 @@ describe('probe', () => {
 
     const output = probe();
 
-    assert.equal(output.tier, 'appcontainer-dacl');
+    assert.equal(output.tier, 'base-container');
     assert.equal(forwarded, 'default');
   });
 
@@ -189,8 +190,23 @@ describe('probe', () => {
   it('accepts a complete output envelope', () => {
     const output = runProbeOutput(cloneCompleteProbe());
 
-    assert.equal(output.tier, 'appcontainer-dacl');
-    assert.equal(output.needsDaclAugmentation, true);
+    assert.equal(output.tier, 'base-container');
+    assert.equal(output.needsDaclAugmentation, false);
+  });
+
+  it('preserves historical V1 tiers and DACL augmentation state', () => {
+    const tiers: IsolationTier[] = ['appcontainer-bfs', 'appcontainer-dacl'];
+    for (const tier of tiers) {
+      for (const needsDaclAugmentation of [false, true]) {
+        const output = runProbeOutput({
+          ...completeProbe,
+          tier,
+          needsDaclAugmentation,
+        });
+        assert.equal(output.tier, tier);
+        assert.equal(output.needsDaclAugmentation, needsDaclAugmentation);
+      }
+    }
   });
 
   it('preserves identity-less proxy support with or without general ingress', () => {

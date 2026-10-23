@@ -180,6 +180,9 @@ options: StopOptions,
 
 Detect MXC support on the current host.
 
+On Windows, ProcessContainer requires native PSEC support. Other supported
+backends are detected independently; the host is unsupported when none are available.
+
 ```rust
 pub fn platform_support() -> PlatformSupport;
 ```

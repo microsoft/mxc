@@ -43,6 +43,20 @@ console.log(output.stdout, output.exitCode);
 `run` returns a `Promise<ExecutionResult>` containing captured stdout, stderr,
 the workload exit code, timeout state, warnings, and optional output metadata.
 
+On Windows, `getPlatformSupport` reports ProcessContainer only when native PSEC
+is available; other backends are detected independently. `probe(request)` from
+`@microsoft/mxc-sdk/v1` checks request compatibility without creating a container.
+If native ProcessContainer cannot serve the request, `tier` is omitted and
+`error` explains why; `probes` still contains host capability facts.
+V1 result types and readers retain the historical `appcontainer-bfs` and
+`appcontainer-dacl` tier values for compatibility with older native results.
+Current native ProcessContainer execution reports only `base-container`.
+Windows discovery also includes WSLC when the packaged native library reports
+that the feature is available. Probe failures are reported with their cause and
+retried rather than cached as permanent lack of host support. Request probing
+reports host-capability serviceability; launch still validates the environment,
+network policy, and required PSEC contract version.
+
 ## Spawn with streaming output
 
 ```typescript

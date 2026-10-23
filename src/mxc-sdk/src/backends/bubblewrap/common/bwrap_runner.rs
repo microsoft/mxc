@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -40,7 +40,7 @@ use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
     bwrap_version, network_rules,
     provider_monitor::ProviderMonitor,
-    proxy_network,
+    proxy_network, seccomp_filter,
 };
 
 const DNS_PORT: u16 = 53;
@@ -520,15 +520,24 @@ impl BubblewrapScriptRunner {
             None => None,
         };
 
-        // 2. Build the bwrap argument vector. `denied_files` is the file-mask
-        //    subset classified during symlink resolution (see
-        //    [`resolve_denied_paths`]).
+        let seccomp_filter = match seccomp_filter::create_file() {
+            Ok(file) => file,
+            Err(error) => {
+                stop_proxy_network(&mut proxy_network, logger);
+                return Err(ScriptResponse::error(&error));
+            }
+        };
         let mut args = bwrap_command::build_args_classified_with_mode(
             request,
             proxy_address,
             denied_files,
             network_mode,
+            Some(seccomp_filter.as_raw_fd()),
         );
+
+        if stdio == StdioMode::Inherit {
+            args.insert(0, "--new-session".into());
+        }
         let mut network_startup = match proxy_network.as_ref() {
             Some(network) => match network.configure_bwrap(&mut args, logger) {
                 Ok(startup) => Some(startup),
@@ -584,17 +593,24 @@ impl BubblewrapScriptRunner {
                 }
             },
         };
-        // Pipes and PTY modes put bwrap in its own process group so a timeout
-        // or `kill()` can tree-kill it without touching the host's group.
-        // Inherit mode keeps bwrap in the executor's group (so it retains the
-        // controlling terminal); `--die-with-parent` takes its sandbox down.
+
         let group = stdio != StdioMode::Inherit;
+
+        // Keep namespace init in the killable group before parent-death cleanup is armed.
+        // SAFETY: setsid is async-signal-safe and runs only in the forked child.
         if stdio == StdioMode::Pipes {
-            command.process_group(0);
+            unsafe {
+                command.pre_exec(|| {
+                    nix::unistd::setsid()
+                        .map(|_| ())
+                        .map_err(std::io::Error::from)
+                });
+            }
         }
         if let Some(startup) = network_startup.as_ref() {
             startup.prepare_command(&mut command);
         }
+        proxy_network::inherit_descriptors(&mut command, vec![seccomp_filter.as_raw_fd()]);
 
         let mut child = match command.spawn() {
             Ok(process) => process,
@@ -2117,6 +2133,7 @@ mod tests {
     fn validate_surfaces_every_environment_probe_failure() {
         let request = base_request();
         let failures = [
+            bwrap_version::BwrapUnavailable::UnsupportedArchitecture("riscv64".to_string()),
             bwrap_version::BwrapUnavailable::NotFound,
             bwrap_version::BwrapUnavailable::ProbeFailed {
                 status: Some(126),

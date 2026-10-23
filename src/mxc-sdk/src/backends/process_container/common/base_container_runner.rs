@@ -60,7 +60,7 @@ use crate::process_container_common::base_container_helpers::{
 };
 use crate::process_container_common::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
-    remove_internal_capture_file, unique_denials_output_paths, write_capture_denials_document,
+    remove_internal_capture_file, unique_denials_output_path, write_capture_denials_document,
     write_stderr_line_best_effort,
 };
 use crate::process_container_common::job_object::UiJobObject;
@@ -69,7 +69,6 @@ use crate::process_container_common::launch_diagnostics::{
     validate_required_child_env,
 };
 use crate::process_container_common::native_capture::CaptureSession;
-use crate::process_container_common::proxy_coordinator::ProxyCoordinator;
 use crate::process_container_common::secenv::{
     self, ProcessSecurityEnvironment, SecurityEnvironmentStartupInfo, SecurityEnvironmentSupport,
     SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
@@ -115,9 +114,9 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
     let entries = match request.env.as_deref() {
         None => {
             let mut entries =
-                crate::process_container_common::appcontainer_runner::create_default_env_entries()?;
+                crate::process_container_common::environment::create_default_env_entries()?;
             if let Some(address) = proxy_address {
-                crate::process_container_common::appcontainer_runner::inject_proxy_vars(
+                crate::process_container_common::environment::inject_proxy_vars(
                     &mut entries,
                     address,
                 );
@@ -125,20 +124,18 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
             entries
         }
         Some(supplied) if request.inherit_default_env => {
-            crate::process_container_common::appcontainer_runner::build_inherited_entries(
+            crate::process_container_common::environment::build_inherited_entries(
                 supplied,
                 proxy_address,
             )?
         }
-        Some(supplied) => {
-            crate::process_container_common::appcontainer_runner::build_explicit_entries(
-                supplied,
-                proxy_address,
-            )
-        }
+        Some(supplied) => crate::process_container_common::environment::build_explicit_entries(
+            supplied,
+            proxy_address,
+        ),
     };
     Ok(Some(
-        crate::process_container_common::appcontainer_runner::encode_env_block(&entries),
+        crate::process_container_common::environment::encode_env_block(&entries),
     ))
 }
 
@@ -163,8 +160,7 @@ fn log_base_network_policy_audit(
             crate::process_container_common::network_policy_helpers::network_policy_applied_record(
                 &request.policy,
                 sanitize_identity(identity),
-                crate::process_container_common::fallback_detector::IsolationTier::BaseContainer
-                    .as_str(),
+                "base-container",
                 request.policy.network_proxy.address.as_ref(),
                 status,
             );
@@ -245,8 +241,8 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
 }
 
 /// Request-level BaseContainer eligibility. This is the authoritative decision
-/// consumed by tier selection; callers must not reconstruct eligibility from
-/// individual host capability probes.
+/// consumed by dispatch and request probing; callers must not reconstruct
+/// eligibility from individual host capability probes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BaseContainerRequestDecision {
     Serviceable,
@@ -261,11 +257,29 @@ impl BaseContainerRequestDecision {
     pub(crate) fn can_service_request(self) -> bool {
         self == Self::Serviceable
     }
+
+    pub(crate) fn rejection_message(self) -> Option<&'static str> {
+        match self {
+            Self::Serviceable => None,
+            Self::Unavailable => Some("Windows ProcessContainer is unavailable: PSEC is not enabled"),
+            Self::PolicyIncompatible => Some(
+                "Windows ProcessContainer cannot enforce the requested LPAC or legacy network.proxy policy",
+            ),
+            Self::DeniedPathsUnsupported => Some(
+                "Windows ProcessContainer requires native PSEC denied-path support for this request",
+            ),
+            Self::EnumeratePathsUnsupported => Some(
+                "Windows ProcessContainer requires native PSEC enumeration-only access support for this request",
+            ),
+            Self::NativeCaptureUnavailable => Some(
+                "Windows ProcessContainer requires native Learning Mode capture support for this request",
+            ),
+        }
+    }
 }
 
 /// Script runner that launches through a process security environment.
 pub struct BaseContainerRunner {
-    proxy_coordinator: ProxyCoordinator,
     capture_factory: Arc<dyn CaptureSessionFactory>,
     request_serviceability_confirmed: bool,
 }
@@ -273,7 +287,6 @@ pub struct BaseContainerRunner {
 impl Default for BaseContainerRunner {
     fn default() -> Self {
         Self {
-            proxy_coordinator: ProxyCoordinator::default(),
             capture_factory: Arc::new(RealCaptureSessionFactory),
             request_serviceability_confirmed: false,
         }
@@ -285,21 +298,22 @@ impl BaseContainerRunner {
         Self::default()
     }
 
-    /// Construct the runner after [`Self::can_backend_service_request`] returned
-    /// [`BaseContainerRequestDecision::Serviceable`] for the request that will
-    /// be executed. The dispatcher owns that invariant and uses this constructor
-    /// so validation does not repeat the OS capability decision.
-    pub(crate) fn new_for_selected_request() -> Self {
-        Self {
-            request_serviceability_confirmed: true,
-            ..Self::default()
+    /// Construct a runner for `request`, or return why native PSEC cannot fully
+    /// enforce it. The serviceability decision is made once here, so
+    /// validation during execution does not repeat the OS capability check.
+    pub(crate) fn for_request(request: &ExecutionRequest) -> Result<Self, &'static str> {
+        match Self::can_backend_service_request(request).rejection_message() {
+            Some(reason) => Err(reason),
+            None => Ok(Self {
+                request_serviceability_confirmed: true,
+                ..Self::default()
+            }),
         }
     }
 
     #[cfg(test)]
     fn with_capture_factory(capture_factory: Arc<dyn CaptureSessionFactory>) -> Self {
         Self {
-            proxy_coordinator: ProxyCoordinator::default(),
             capture_factory,
             request_serviceability_confirmed: true,
         }
@@ -327,12 +341,6 @@ impl BaseContainerRunner {
             version,
             capture_network_decisions,
         ))
-    }
-
-    fn cleanup_capture_begin_failure(&mut self, logger: &mut Logger) {
-        // CaptureSession owns and closes the PSEC environment. No legacy
-        // identity/tracking state is created for this path.
-        self.proxy_coordinator.stop(logger);
     }
 
     /// Whether the process security-environment API set is present.
@@ -378,6 +386,11 @@ impl BaseContainerRunner {
 
     /// Whether PSEC can enforce `processContainer.filesystem.enumeratePaths`.
     pub fn supports_enumerate_paths() -> bool {
+        #[cfg(test)]
+        if let Ok(forced) = std::env::var("MXC_FORCE_ENUMERATE_PATHS") {
+            return forced == "1";
+        }
+
         Self::is_base_container_api_present()
             && secenv::query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
     }
@@ -472,10 +485,10 @@ impl BaseContainerRunner {
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
         );
 
-        // --- Learning-mode capabilities (parity with AppContainerScriptRunner) ---
+        // --- Native learning-mode capabilities ---
         // Emit per-capability diagnostics (informational for `learningModeLogging`,
         // a security warning for `permissiveLearningMode`).
-        crate::process_container_common::appcontainer_runner::log_learning_mode_capability_diagnostics(
+        crate::process_container_common::environment::log_learning_mode_capability_diagnostics(
             &request.policy.capabilities,
             logger,
         );
@@ -524,9 +537,7 @@ impl BaseContainerRunner {
 
         // Resolve two paths for the capture:
         //   * `capture_etl_path` — a runner-managed `.etl` in a protected
-        //     per-run directory for native V2 capture. Guarded WPR analyzes
-        //     its ETL while elevated and returns only a bounded process-scoped
-        //     result.
+        //     per-run directory for native capture.
         //   * `capture_output_path` — the JSON denials deliverable that consuming
         //     apps read: caller-specified via `captureDenials.outputPath` when
         //     provided, else a managed per-run temp `.json` file.
@@ -534,25 +545,20 @@ impl BaseContainerRunner {
             .as_ref()
             .map(|config| managed_capture_output_path(config.retain_etl))
             .transpose()?;
-        let capture_output_paths = capture_denials
+        let capture_output_path = capture_denials
             .as_ref()
-            .map(|config| unique_denials_output_paths(config.output_path.as_deref(), false))
+            .map(|config| unique_denials_output_path(config.output_path.as_deref()))
             .transpose()
             .map_err(|error| ScriptResponse::error(&error))?;
-        let capture_output_path = match capture_output_paths {
-            Some(paths) => Some(paths.denials),
-            None => None,
-        };
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Launch process");
 
-        // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
+        // 3. Build the command line, passed directly to the process-creation API.
         let mut cmd_wide = string_util::to_wide(&request.script_code);
 
-        // Resolved via the shared helper so both Windows launch paths agree and
-        // neither can pass a NULL cwd (see `working_directory`).
+        // Always pass a concrete directory rather than inheriting the parent's cwd.
         let working_directory =
             crate::process_container_common::working_directory::launch_working_directory(request);
         let _ = writeln!(
@@ -773,7 +779,6 @@ impl BaseContainerRunner {
                         } else {
                             FailurePhase::LaunchFailed
                         };
-                        self.cleanup_capture_begin_failure(logger);
                         return Err(ScriptResponse {
                             exit_code: -1,
                             error_message: msg.clone(),
@@ -867,9 +872,6 @@ impl BaseContainerRunner {
                     } else {
                         FailurePhase::LaunchFailed
                     };
-                    if capture_denials.is_some() {
-                        self.cleanup_capture_begin_failure(logger);
-                    }
                     return Err(ScriptResponse {
                         exit_code: -1,
                         error_message: msg.clone(),
@@ -914,9 +916,6 @@ impl BaseContainerRunner {
             let capture_cleanup_error = capture_session
                 .take()
                 .and_then(|session| session.finish(None).err());
-            if capture_denials.is_some() {
-                self.cleanup_capture_begin_failure(logger);
-            }
 
             //
             // Diagnose the launch failure (FailurePhase::LaunchFailed).
@@ -1025,10 +1024,6 @@ impl BaseContainerRunner {
                 let capture_cleanup_error = capture_session
                     .take()
                     .and_then(|session| session.finish(None).err());
-                if capture_denials.is_some() {
-                    self.cleanup_capture_begin_failure(logger);
-                }
-                self.proxy_coordinator.stop(logger);
 
                 const JOB_SETUP_FAILED_MSG: &str =
                     "BaseContainer sandbox could not be placed in a job object, so it \
@@ -1081,7 +1076,6 @@ impl BaseContainerRunner {
                     "; additionally failed to discard the learning-mode trace: {error}"
                 );
             }
-            self.proxy_coordinator.stop(logger);
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::LaunchFailed,
                 ..ScriptResponse::error(&message)
@@ -1119,7 +1113,6 @@ impl BaseContainerRunner {
             timeout_ms: get_timeout_milliseconds(request.script_timeout),
             preserve_policy: request.lifecycle.preserve_policy,
             identity,
-            proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
             capture_session,
             security_environment,
             managed_capture: managed_capture.take(),
@@ -1150,7 +1143,6 @@ struct BaseChild {
     timeout_ms: u32,
     preserve_policy: bool,
     identity: String,
-    proxy_coordinator: ProxyCoordinator,
     /// Live learning-mode capture session (`Some` only when `captureDenials`
     /// is configured and the OS API is available). Sealed in `run_teardown`
     /// after the child exits.
@@ -1261,7 +1253,6 @@ struct BaseContainerSandboxProcess {
     timeout_requested: bool,
     preserve_policy: bool,
     identity: String,
-    proxy_coordinator: ProxyCoordinator,
     /// Cached teardown outcome so repeated terminal waits cannot hide a
     /// capture failure after the session has been consumed.
     teardown_result: Option<Result<(), String>>,
@@ -1313,7 +1304,6 @@ impl BaseContainerSandboxProcess {
             timeout_requested: false,
             preserve_policy: child.preserve_policy,
             identity: sanitize_identity(&std::mem::take(&mut child.identity)).to_string(),
-            proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
             teardown_result: None,
             capture_session: child.capture_session.take(),
             security_environment: child.security_environment.take(),
@@ -1330,11 +1320,7 @@ impl BaseContainerSandboxProcess {
         AuditEvent::new(name)
             .str("backend", ContainmentBackend::ProcessContainer.wire_name())
             .str("identity", &self.identity)
-            .str(
-                "tier",
-                crate::process_container_common::fallback_detector::IsolationTier::BaseContainer
-                    .as_str(),
-            )
+            .str("tier", "base-container")
             .u64("pid", self.pid as u64)
     }
 
@@ -1346,8 +1332,6 @@ impl BaseContainerSandboxProcess {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
-        let mut logger = self.audit_logger.clone_diagnostic_sink();
-
         // Seal the learning-mode ETL trace now that the child has exited and
         // been reaped (both `wait` and `Drop` kill + reap before calling this).
         // Seal the ETL, decode it into the JSON denials deliverable, and either
@@ -1488,16 +1472,15 @@ impl BaseContainerSandboxProcess {
             Ok(None)
         };
         self.security_environment.take();
-        let proxy_stopped = self.proxy_coordinator.stop(&mut logger);
         let result = capture_result
             .map(|_| ())
             .map_err(|error| error.to_string());
-        self.log_teardown(&result, proxy_stopped);
+        self.log_teardown(&result);
         self.teardown_result = Some(result.clone());
         result.map_err(std::io::Error::other)
     }
 
-    fn log_teardown(&mut self, capture_result: &Result<(), String>, proxy_stopped: bool) {
+    fn log_teardown(&mut self, capture_result: &Result<(), String>) {
         if !self.audit_enabled() && !crate::mxc_common::telemetry::is_active() {
             return;
         }
@@ -1506,10 +1489,8 @@ impl BaseContainerSandboxProcess {
         crate::mxc_common::telemetry::log_sandbox_torn_down(
             &self.identity,
             status.as_str(),
-            &format!(
-                "firewall_rules_removed=0,bfs_removed=false,proxy_stopped={proxy_stopped},\
-                 container_released=false"
-            ),
+            "firewall_rules_removed=0,bfs_removed=false,proxy_stopped=false,\
+             container_released=false",
         );
         if self.audit_enabled() {
             let mut record = self
@@ -1518,7 +1499,7 @@ impl BaseContainerSandboxProcess {
                 .u64("firewall_rules_removed", 0)
                 .bool("firewall_removal_ok", true)
                 .bool("bfs_removed", false)
-                .bool("proxy_stopped", proxy_stopped)
+                .bool("proxy_stopped", false)
                 .bool("preserve_policy", self.preserve_policy)
                 .bool("container_released", false);
             if let Some(reason) = skip_reason {
@@ -1979,7 +1960,7 @@ fn promote_capture_for_retention(
     let retained_root = capture_root
         .join(crate::process_container_common::capture_output::RETAINED_CAPTURE_DIR_NAME);
     std::fs::create_dir_all(&retained_root)?;
-    crate::mxc_common::filesystem_dacl::set_owner_only_dacl(&retained_root, true)
+    crate::mxc_common::filesystem_security::set_owner_only_dacl(&retained_root, true)
         .map_err(std::io::Error::other)?;
     let directory_name = directory.file_name().ok_or_else(|| {
         std::io::Error::other("captureDenials working directory has no file name")
@@ -2013,12 +1994,14 @@ fn managed_capture_output_path_in(
                 root.display()
             ))
         })?;
-        crate::mxc_common::filesystem_dacl::set_owner_only_dacl(root, true).map_err(|error| {
-            ScriptResponse::error(&format!(
-                "captureDenials failed to secure ETL root {}: {error}",
-                root.display()
-            ))
-        })?;
+        crate::mxc_common::filesystem_security::set_owner_only_dacl(root, true).map_err(
+            |error| {
+                ScriptResponse::error(&format!(
+                    "captureDenials failed to secure ETL root {}: {error}",
+                    root.display()
+                ))
+            },
+        )?;
     }
 
     for _ in 0..8 {
@@ -2028,7 +2011,7 @@ fn managed_capture_output_path_in(
         match std::fs::create_dir(&directory) {
             Ok(()) => {
                 if let Err(error) =
-                    crate::mxc_common::filesystem_dacl::set_owner_only_dacl(&directory, true)
+                    crate::mxc_common::filesystem_security::set_owner_only_dacl(&directory, true)
                 {
                     let _ = std::fs::remove_dir(&directory);
                     return Err(ScriptResponse::error(&format!(
@@ -2297,7 +2280,7 @@ mod tests {
             Some("etl")
         );
         assert!(
-            crate::mxc_common::filesystem_dacl::owner_is_self(&first.directory)
+            crate::mxc_common::filesystem_security::owner_is_self(&first.directory)
                 .expect("read managed directory owner")
         );
         drop(first);
@@ -2817,6 +2800,32 @@ mod tests {
     }
 
     #[test]
+    fn supplied_required_environment_values_reach_psec_verbatim() {
+        let mut supplied = vec![
+            "SYSTEMROOT=C:\\CallerWindows".to_string(),
+            "LOCALAPPDATA=C:\\CallerProfile".to_string(),
+            "SPACES=one two".to_string(),
+            "EQUALS=one=two".to_string(),
+            "EMPTY=".to_string(),
+        ];
+        let request = ExecutionRequest {
+            env: Some(supplied.clone()),
+            ..Default::default()
+        };
+        let block = build_child_env_block(&request)
+            .expect("environment")
+            .expect("explicit PSEC environment");
+        let rendered = String::from_utf16(block.as_slice()).expect("valid UTF-16");
+        let mut actual = rendered
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        supplied.sort_unstable();
+        assert_eq!(actual, supplied);
+    }
+
+    #[test]
     fn build_process_security_environment_spec_produces_valid_psec() {
         let mut request = ExecutionRequest::default();
         request.policy.capabilities = vec!["internetClient".into(), "registryRead".into()];
@@ -2889,6 +2898,59 @@ mod tests {
 
         assert!(!spec.disallow_win32k_system_calls());
         assert_eq!(spec.ui_restrictions(), 0);
+    }
+
+    #[test]
+    fn every_ui_knob_is_serialized_into_the_psec_spec() {
+        type Change = fn(&mut ExecutionRequest);
+        let cases: &[(&str, Change, u64)] = &[
+            (
+                "clipboard",
+                |r| r.policy.ui.clipboard = ClipboardPolicy::Write,
+                0x2,
+            ),
+            ("injection", |r| r.policy.ui.injection = false, 0x200),
+            (
+                "isolation",
+                |r| r.policy.base_process_ui.isolation = "handles".into(),
+                0x1,
+            ),
+            (
+                "systemSettings",
+                |r| r.policy.base_process_ui.system_settings = "parameters".into(),
+                0x10,
+            ),
+            (
+                "desktopSystemControl",
+                |r| r.policy.base_process_ui.desktop_system_control = false,
+                0xc0,
+            ),
+            ("ime", |r| r.policy.base_process_ui.ime = false, 0x100),
+            ("disable", |r| r.policy.ui.disable = true, 0x2ff),
+        ];
+        for (name, change, mask) in cases {
+            let mut request = ExecutionRequest::default();
+            request.policy.ui = UiPolicy {
+                disable: false,
+                clipboard: ClipboardPolicy::All,
+                injection: true,
+            };
+            request.policy.base_process_ui = BaseProcessUiConfig {
+                isolation: "desktop".into(),
+                desktop_system_control: true,
+                system_settings: "all".into(),
+                ime: true,
+            };
+            change(&mut request);
+            let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+            assert_eq!(spec.ui_restrictions(), *mask, "{name}");
+            assert_eq!(
+                spec.disallow_win32k_system_calls(),
+                request.policy.ui.disable,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -3216,7 +3278,8 @@ mod tests {
 
     #[test]
     fn loopback_and_proxy_do_not_raise_minimum_psec_version() {
-        let _guard = crate::process_container_common::test_env::BcUsableGuard::set(true);
+        let _guard =
+            crate::process_container_common::test_env::CaptureCapabilityGuard::set(true, false);
         for request in [host_loopback_request(), identityless_proxy_request()] {
             assert!(
                 BaseContainerRunner::can_backend_service_request(&request).can_service_request()
@@ -3249,7 +3312,8 @@ mod tests {
 
     #[test]
     fn identityless_loopback_proxy_requires_base_container_api() {
-        let _guard = crate::process_container_common::test_env::BcUsableGuard::set(false);
+        let _guard =
+            crate::process_container_common::test_env::CaptureCapabilityGuard::set(false, false);
         assert!(!BaseContainerRunner::supports_identityless_loopback_proxy().unwrap());
     }
 
@@ -3621,7 +3685,7 @@ mod tests {
 
         assert!(
             !BaseContainerRunner::can_backend_service_request(&request).can_service_request(),
-            "legacy proxy requests must fall through to an AppContainer tier"
+            "legacy proxy requests must be rejected by native ProcessContainer"
         );
     }
 
@@ -3655,7 +3719,63 @@ mod tests {
         }
     }
 
-    // ETL-retention capability validation (the retainEtl gate, including the
-    // BaseContainer native-PSEC exception) is exercised as a consolidated
-    // matrix in `crate::guarded_capture`'s tests, so it is not duplicated here.
+    #[test]
+    fn lpac_is_rejected_before_constructing_a_runner() {
+        let _guard =
+            crate::process_container_common::test_env::CaptureCapabilityGuard::set(true, true);
+        let mut request = ExecutionRequest::default();
+        request.policy.least_privilege_mode = true;
+        assert_eq!(
+            BaseContainerRunner::for_request(&request).err(),
+            Some(
+                "Windows ProcessContainer cannot enforce the requested LPAC or legacy network.proxy policy"
+            )
+        );
+    }
+
+    #[test]
+    fn unsupported_host_capabilities_are_rejected_by_runner_and_probe() {
+        use crate::process_container_common::probe::run_probe;
+        use crate::process_container_common::test_env::PolicyCapabilityGuard;
+        use BaseContainerRequestDecision::{
+            DeniedPathsUnsupported, EnumeratePathsUnsupported, NativeCaptureUnavailable,
+        };
+
+        for (decision, message) in [
+            (
+                DeniedPathsUnsupported,
+                "Windows ProcessContainer requires native PSEC denied-path support for this request",
+            ),
+            (
+                EnumeratePathsUnsupported,
+                "Windows ProcessContainer requires native PSEC enumeration-only access support for this request",
+            ),
+            (
+                NativeCaptureUnavailable,
+                "Windows ProcessContainer requires native Learning Mode capture support for this request",
+            ),
+        ] {
+            let _guard = PolicyCapabilityGuard::set(
+                decision != DeniedPathsUnsupported,
+                decision != EnumeratePathsUnsupported,
+                decision != NativeCaptureUnavailable,
+            );
+            let mut request = ExecutionRequest::default();
+            match decision {
+                DeniedPathsUnsupported => request.policy.denied_paths.push(r"C:\denied".into()),
+                EnumeratePathsUnsupported => request.policy.enumerate_paths.push(r"C:\enumerate".into()),
+                NativeCaptureUnavailable => request.policy.capture_denials = Some(Default::default()),
+                _ => unreachable!("only unsupported capability decisions are exercised"),
+            }
+            assert_eq!(
+                BaseContainerRunner::can_backend_service_request(&request),
+                decision
+            );
+            assert_eq!(BaseContainerRunner::for_request(&request).err(), Some(message));
+            let probe = run_probe(&request);
+            assert_eq!(probe.tier, None);
+            assert_eq!(probe.needs_dacl_augmentation, None);
+            assert_eq!(probe.error.as_deref(), Some(message));
+        }
+    }
 }

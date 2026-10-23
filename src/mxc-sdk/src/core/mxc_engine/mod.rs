@@ -33,8 +33,6 @@ mod backend_registry;
 mod dispatch;
 mod error;
 mod experimental;
-#[cfg(target_os = "windows")]
-mod guarded_capture;
 mod platform;
 mod probe;
 #[cfg(target_os = "windows")]
@@ -52,10 +50,6 @@ pub use platform::{platform_support, BubblewrapNetworkSupport, PlatformSupport, 
 pub use probe::{available_backends, to_json_pretty, AvailableBackend, BackendCapability};
 #[cfg(target_os = "windows")]
 pub use request_probe::{probe_execution_request, ProbeFacts, ProbeOutput, UiCapabilitySupport};
-#[cfg(target_os = "windows")]
-pub fn guarded_capture_available() -> bool {
-    guarded_capture::is_available()
-}
 #[cfg(target_os = "windows")]
 pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

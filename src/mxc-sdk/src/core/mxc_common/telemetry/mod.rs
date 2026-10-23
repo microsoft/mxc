@@ -34,9 +34,9 @@ use crate::mxc_common::state_aware_dispatch::DispatchOutcome;
 
 pub use consent::ConsentState;
 pub use events::{
-    log_config_rejected, log_enforcement_degraded, log_error, log_execution,
-    log_network_policy_applied, log_policy_hash, log_process_event, log_sandbox_torn_down,
-    log_verbose, ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext, VerboseEvent,
+    log_config_rejected, log_error, log_execution, log_network_policy_applied, log_policy_hash,
+    log_process_event, log_sandbox_torn_down, log_verbose, ExecutionEvent, FailureReason,
+    ProcessEvent, TelemetryContext, VerboseEvent,
 };
 pub use policy::PolicyState;
 

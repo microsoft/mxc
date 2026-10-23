@@ -436,10 +436,20 @@ public class MxcContainerTests
         Assert.NotNull(backends);
         if (OperatingSystem.IsWindows())
         {
-            var processContainer = Assert.Single(
-                backends,
-                backend => backend.Backend == ContainmentBackend.ProcessContainer);
-            Assert.NotNull(processContainer.Tier);
+            var probe = MxcContainer.Probe();
+            if (probe.Probes.BaseContainerApiPresent)
+            {
+                var processContainer = Assert.Single(
+                    backends,
+                    backend => backend.Backend == ContainmentBackend.ProcessContainer);
+                Assert.Equal(IsolationTier.BaseContainer, processContainer.Tier);
+            }
+            else
+            {
+                Assert.DoesNotContain(
+                    backends,
+                    backend => backend.Backend == ContainmentBackend.ProcessContainer);
+            }
         }
     }
 

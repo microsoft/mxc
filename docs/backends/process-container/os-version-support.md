@@ -25,9 +25,9 @@ compatible Learning Mode start export and both lifecycle exports:
 The option-aware start collects access and network events. The legacy start
 collects access events only, so its trace cannot contain WFP network decisions.
 If the selected option-aware call fails, MXC reports that failure and does not
-retry through the legacy export. When native capture is unavailable, MXC uses
-the guarded WPR provider only when the selected AppContainer tier and helper can
-fully honor the request.
+retry through the legacy export. When native capture is unavailable or cannot
+fully honor the request, MXC fails with `backend_unavailable` before creating a
+container.
 
 Internal validation found no native capture support on build `26657.1002` and
 the complete option-aware contract on build `26663.1000`. These are validation

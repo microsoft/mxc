@@ -22,12 +22,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::mxc_common::logger::{Logger, Mode};
-use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
+use crate::mxc_common::models::{
+    ContainerPolicy, ExecutionRequest, WslcProvisionConfig, WslcProvisionSessionConfig,
+};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
-    StartResult, StatefulSandboxBackend, StopResult,
+    ProvisionSessionResult, StartResult, StatefulSandboxBackend, StopResult,
 };
+use crate::mxc_common::state_aware_operation::validate_wslc_session_id;
 use crate::mxc_common::validator::validate_state_aware_network_policy_support;
 
 use crate::wslc_common::container_steps::OutStream;
@@ -35,8 +38,9 @@ use crate::wslc_common::daemon_client::{
     truncation_suffix, DaemonClient, DaemonError, DaemonExecOutcome,
 };
 use crate::wslc_common::daemon_protocol::{
-    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, PortMapping as DaemonPortMapping,
-    ProvisionConfig, StartConfig, StopConfig, VolumeMount,
+    DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig, NetworkMode,
+    PortMapping as DaemonPortMapping, ProvisionConfig,
+    ProvisionSessionConfig as DaemonProvisionSessionConfig, StartConfig, StopConfig, VolumeMount,
 };
 use crate::wslc_common::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
@@ -83,6 +87,21 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     type StopMetadata = ();
     type DeprovisionMetadata = ();
 
+    fn provision_session(
+        &mut self,
+        _request: &ExecutionRequest,
+        config: Option<WslcProvisionSessionConfig>,
+    ) -> Result<ProvisionSessionResult, MxcError> {
+        let session_config = build_provision_session_config(config);
+
+        let client = connect_daemon()?;
+        let session_id = client
+            .provision_session(session_config)
+            .map_err(map_daemon_error)?;
+
+        Ok(ProvisionSessionResult { session_id })
+    }
+
     fn provision(
         &mut self,
         request: &ExecutionRequest,
@@ -95,8 +114,6 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             .provision(provision_config)
             .map_err(map_daemon_error)?;
 
-        // The daemon mints a fully `wslc:`-prefixed id; return it verbatim so
-        // later phases present the daemon's own map key.
         Ok(ProvisionResult {
             sandbox_id,
             metadata: None,
@@ -148,6 +165,20 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         Ok(DeprovisionResult { metadata: None })
     }
 
+    fn deprovision_session(
+        &mut self,
+        session_id: &str,
+        _request: &ExecutionRequest,
+    ) -> Result<(), MxcError> {
+        validate_wslc_session_id(session_id)?;
+        let client = connect_daemon()?;
+        client
+            .deprovision_session(DeprovisionSessionConfig {
+                session_ref: session_id.to_string(),
+            })
+            .map_err(map_daemon_error)
+    }
+
     /// Runs one command in the warm container. Relayed callers receive live
     /// output on this process's stdout/stderr; piped callers receive synthesized
     /// native stdout/stderr pipes fed from the same daemon stream.
@@ -172,13 +203,44 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     fn validate_provision(
         &self,
         request: &ExecutionRequest,
-        _config: Option<&WslcProvisionConfig>,
+        config: Option<&WslcProvisionConfig>,
     ) -> Result<(), MxcError> {
+        if let Some(session_id) = config.and_then(|config| config.session_id.as_deref()) {
+            validate_wslc_session_id(session_id)?;
+        }
         validate_state_aware_network_policy_support(
             request,
             crate::wslc_common::policy::network_policy_support(),
         )?;
         validate_provision_policy(request)
+    }
+
+    fn validate_provision_session(
+        &self,
+        request: &ExecutionRequest,
+        config: Option<&WslcProvisionSessionConfig>,
+    ) -> Result<(), MxcError> {
+        validate_session_sizing(config)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::wslc_common::policy::network_policy_support(),
+        )?;
+
+        // Filesystem and network policy belong to containers, not the session.
+        validate_post_provision_policy(request)
+    }
+
+    fn validate_deprovision_session(
+        &self,
+        session_id: &str,
+        request: &ExecutionRequest,
+    ) -> Result<(), MxcError> {
+        validate_wslc_session_id(session_id)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::wslc_common::policy::network_policy_support(),
+        )?;
+        validate_post_provision_policy(request)
     }
 
     fn validate_start(
@@ -474,6 +536,39 @@ fn truncated_run_error(exit_code: i32) -> MxcError {
     .with_details(serde_json::json!({ "exitCode": exit_code }))
 }
 
+fn build_provision_session_config(
+    config: Option<WslcProvisionSessionConfig>,
+) -> DaemonProvisionSessionConfig {
+    let config = config.unwrap_or_default();
+    DaemonProvisionSessionConfig {
+        cpu_count: config.cpu_count,
+        memory_mb: config.memory_mb,
+        gpu: config.gpu.unwrap_or(false),
+    }
+}
+
+fn validate_session_sizing(config: Option<&WslcProvisionSessionConfig>) -> Result<(), MxcError> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    if let Some(memory_mb) = config.memory_mb {
+        u32::try_from(memory_mb).map_err(|_| {
+            MxcError::policy_validation(format!(
+                "wslc.provisionSession.memoryMb {memory_mb} exceeds the {} MB the WSLc SDK accepts",
+                u32::MAX
+            ))
+        })?;
+    }
+    crate::wslc_common::container_steps::check_sizing_against_host(
+        crate::wslc_common::container_steps::SessionSizing {
+            cpu_count: config.cpu_count,
+            memory_mb: config.memory_mb,
+            gpu: config.gpu.unwrap_or(false),
+        },
+    )
+    .map_err(|response| MxcError::policy_validation(response.error_message))
+}
+
 /// Map a typed [`DaemonError`] onto the matching wire-format [`MxcError`] code.
 fn map_daemon_error(err: DaemonError) -> MxcError {
     match err {
@@ -541,7 +636,11 @@ fn build_provision_config(
                 .collect()
         })
         .unwrap_or_default();
-    let image_tar_path = config.and_then(|c| c.image_tar_path);
+    let image_tar_path = config.as_ref().and_then(|c| c.image_tar_path.clone());
+    let session_id = config.and_then(|c| c.session_id);
+    if let Some(session_id) = session_id.as_deref() {
+        validate_wslc_session_id(session_id)?;
+    }
 
     // WSLc provision-time filesystem-policy gate (D6 normalization → D3
     // delegation → denied-path overlap), shared verbatim with the one-shot
@@ -576,6 +675,7 @@ fn build_provision_config(
         volumes,
         network,
         port_mappings,
+        session_ref: session_id,
     })
 }
 
@@ -637,6 +737,177 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
         .into_iter()
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect()
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use crate::mxc_common::mxc_error::MxcErrorCode;
+
+    const VALID_SESSION_ID: &str = "wslcsess:0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn validate_session_id_accepts_a_daemon_minted_id() {
+        assert!(validate_wslc_session_id(VALID_SESSION_ID).is_ok());
+    }
+
+    #[test]
+    fn validate_session_id_rejects_everything_else() {
+        let mut runner = WslcStateAwareRunner::new();
+        for session_id in [
+            "",
+            "wslcsess",
+            "wslcsess:",
+            "0123456789abcdef0123456789abcdef",
+            "wslc:0123456789abcdef0123456789abcdef",
+            "wslcsess:default",
+            "wslcsess:0123456789abcdef0123456789abcde",
+            "wslcsess:0123456789abcdef0123456789abcdef0",
+            "wslcsess:0123456789ABCDEF0123456789ABCDEF",
+            "wslcsess:0123456789abcdef0123456789abcdeg",
+        ] {
+            let error = validate_wslc_session_id(session_id)
+                .expect_err("malformed session IDs must not be accepted");
+            assert_eq!(error.code, MxcErrorCode::MalformedId);
+            let error = runner
+                .deprovision_session(session_id, &ExecutionRequest::default())
+                .expect_err("direct session release must reject a malformed ID before connecting");
+            assert_eq!(error.code, MxcErrorCode::MalformedId);
+        }
+    }
+
+    #[test]
+    fn absent_sizing_reaches_the_daemon_as_host_defaults() {
+        for config in [None, Some(WslcProvisionSessionConfig::default())] {
+            let forwarded = build_provision_session_config(config);
+            assert_eq!(forwarded.cpu_count, None);
+            assert_eq!(forwarded.memory_mb, None);
+            assert!(
+                !forwarded.gpu,
+                "an unrequested GPU must not become a passthrough grant"
+            );
+        }
+    }
+
+    #[test]
+    fn each_sizing_field_is_forwarded_to_the_daemon() {
+        let forwarded = build_provision_session_config(Some(WslcProvisionSessionConfig {
+            cpu_count: Some(4),
+            memory_mb: Some(8192),
+            gpu: Some(true),
+        }));
+        assert_eq!(forwarded.cpu_count, Some(4));
+        assert_eq!(forwarded.memory_mb, Some(8192));
+        assert!(forwarded.gpu);
+
+        let gpu_off = build_provision_session_config(Some(WslcProvisionSessionConfig {
+            gpu: Some(false),
+            ..Default::default()
+        }));
+        assert!(!gpu_off.gpu);
+    }
+
+    #[test]
+    fn zero_sizing_is_accepted_and_forwarded_as_the_sdk_default() {
+        for config in [
+            WslcProvisionSessionConfig {
+                cpu_count: Some(0),
+                ..Default::default()
+            },
+            WslcProvisionSessionConfig {
+                memory_mb: Some(0),
+                ..Default::default()
+            },
+            WslcProvisionSessionConfig {
+                cpu_count: Some(0),
+                memory_mb: Some(0),
+                gpu: Some(false),
+            },
+        ] {
+            validate_session_sizing(Some(&config))
+                .unwrap_or_else(|error| panic!("zero selects the SDK default: {error}"));
+            let forwarded = build_provision_session_config(Some(config));
+            assert_eq!(forwarded.cpu_count, config.cpu_count);
+            assert_eq!(forwarded.memory_mb, config.memory_mb);
+            assert!(!forwarded.gpu);
+        }
+        assert!(validate_session_sizing(None).is_ok());
+    }
+
+    #[test]
+    fn session_memory_is_bounded_by_the_sdk_integer_width() {
+        for memory_mb in [u64::from(u32::MAX) + 1, u64::MAX] {
+            let error = validate_session_sizing(Some(&WslcProvisionSessionConfig {
+                memory_mb: Some(memory_mb),
+                ..Default::default()
+            }))
+            .expect_err("the SDK cannot represent this memory size");
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+            assert!(error.message.contains("wslc.provisionSession.memoryMb"));
+            assert!(error.message.contains(&u32::MAX.to_string()));
+        }
+        assert!(validate_session_sizing(Some(&WslcProvisionSessionConfig {
+            memory_mb: Some(u64::from(u32::MAX)),
+            ..Default::default()
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn session_cpu_validation_reuses_the_create_and_run_host_check() {
+        let expected = crate::wslc_common::container_steps::check_sizing_against_host(
+            crate::wslc_common::container_steps::SessionSizing {
+                cpu_count: Some(u32::MAX),
+                ..Default::default()
+            },
+        )
+        .expect_err("this host cannot supply u32::MAX virtual CPUs");
+        let error = validate_session_sizing(Some(&WslcProvisionSessionConfig {
+            cpu_count: Some(u32::MAX),
+            ..Default::default()
+        }))
+        .expect_err("session provisioning must reject the same host CPU limit");
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(error.message, expected.error_message);
+    }
+
+    #[test]
+    fn a_provision_forwards_the_session_it_names_and_omits_one_it_does_not() {
+        let forward = |session_id: Option<&str>| {
+            build_provision_config(
+                &ExecutionRequest::default(),
+                Some(WslcProvisionConfig {
+                    image: Some("alpine:latest".to_string()),
+                    session_id: session_id.map(str::to_string),
+                    ..Default::default()
+                }),
+            )
+        };
+
+        assert_eq!(forward(None).unwrap().session_ref, None);
+        assert_eq!(
+            forward(Some(VALID_SESSION_ID)).unwrap().session_ref,
+            Some(VALID_SESSION_ID.to_string())
+        );
+    }
+
+    #[test]
+    fn a_provision_naming_a_malformed_session_is_refused_before_the_daemon() {
+        let runner = WslcStateAwareRunner::new();
+        let config = WslcProvisionConfig {
+            session_id: Some("wslcsess:not-hex".to_string()),
+            ..Default::default()
+        };
+
+        let validated = runner
+            .validate_provision(&ExecutionRequest::default(), Some(&config))
+            .expect_err("a malformed session must not validate");
+        assert_eq!(validated.code, MxcErrorCode::MalformedId);
+
+        let built = build_provision_config(&ExecutionRequest::default(), Some(config))
+            .expect_err("a malformed session must not be forwarded");
+        assert_eq!(built.code, MxcErrorCode::MalformedId);
+    }
 }
 
 #[cfg(test)]
@@ -900,6 +1171,7 @@ mod tests {
         let phase = WslcProvisionConfig {
             image: Some("custom/image:tag".to_string()),
             image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+            session_id: None,
             port_mappings: None,
         };
         let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
@@ -1011,6 +1283,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: Some("custom/image:tag".to_string()),
                     image_tar_path: None,
+                    session_id: None,
                     port_mappings: None,
                 },
                 "custom/image:tag",
@@ -1020,6 +1293,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: None,
                     image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                    session_id: None,
                     port_mappings: None,
                 },
                 "alpine:latest",
@@ -1029,6 +1303,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: Some(String::new()),
                     image_tar_path: Some(String::new()),
+                    session_id: None,
                     port_mappings: None,
                 },
                 "",

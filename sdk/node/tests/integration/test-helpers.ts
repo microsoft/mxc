@@ -115,9 +115,6 @@ export function getSdkBinDir(): string {
 export const EXPECTED_WINDOWS_BINARIES = [
   'mxc_ffi.dll',
   'wxc-exec.exe',
-  'plm.exe',
-  'wxc-host-prep.exe',
-  'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
   'wxc-windows-sandbox-guest.exe',
@@ -144,15 +141,13 @@ const OPTIONAL_BINARIES = [
   'nanvixd.exe',           // Only built with --with-microvm
   'nanvix_rootfs.img',     // Only built with --with-microvm
   'python3.initrd',        // Only built with --with-microvm
-  'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
-                   // only when the plm crate is included in the build.
   // Test-only binaries. The GitHub build artifact carries them so the
   // validation matrix can run the Windows suites from a downloaded artifact,
   // and the npm packager copies that whole artifact into bin/ — so they show
   // up here. They are not required: no SDK consumer needs them, and the ADO
   // package producer filters its artifact through signPattern, which
   // deliberately ships only product binaries.
-  'wxc-ui-probe.exe',     // run_processcontainer_ui_mitigations_test.ps1
+  'wxc-ui-probe.exe',     // Windows UI-policy validation
   'wxc-test-driver.exe',  // run_test_configs.ps1
 ];
 
@@ -176,10 +171,8 @@ export function platformName(): string {
 /**
  * Assert that a dry-run completed successfully (exit 0 + validation-passed banner).
  *
- * Dry-run failure paths aren't asserted here — the dispatcher's tier-fallback
- * chain (BaseContainer → AppContainer+BFS → AppContainer+DACL) finds a viable
- * runner on every supported host, so a failing dry-run from the test harness
- * is a real regression, not an expected outcome.
+ * Dry-run failure paths aren't asserted here because these tests run only on
+ * hosts where the native ProcessContainer contract is expected to be usable.
  */
 // Environment / skip helpers
 

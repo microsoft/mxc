@@ -26,6 +26,9 @@ pub use crate::wslc_common::wslcsdk_sys::*;
 /// COM success sentinel. Not declared in `wslcsdk.h`, so defined here.
 pub const S_OK: HRESULT = 0;
 
+/// Unspecified COM failure. Not declared in `wslcsdk.h`, so defined here.
+pub const E_FAIL: HRESULT = 0x8000_4005_u32 as HRESULT;
+
 // The header declares its error codes with `MAKE_HRESULT(SEVERITY_ERROR,
 // FACILITY_ITF, WSLC_E_BASE + n)`, which bindgen cannot evaluate, so only the
 // base survives into the generated module. Packing severity 1 and facility 4
@@ -135,9 +138,10 @@ impl WslcSdk {
     /// missing exports instead of panicking later at the call site.
     ///
     /// The list below must mirror the SDK functions invoked by
-    /// `wsl_container_runner.rs` and the RAII guards. Intentionally excludes
-    /// header-declared functions this crate never calls, since SDK headers may
-    /// declare exports ahead of what the shipping runtime implements.
+    /// `wsl_container_runner.rs` and the RAII guards, plus exports that mark the
+    /// minimum SDK version this build requires. Intentionally excludes other
+    /// header-declared functions, since SDK headers may declare exports ahead of
+    /// what the shipping runtime implements.
     fn ensure_required_symbols(&self, dll_path: &std::path::Path) -> Result<(), String> {
         let mut missing: Vec<&'static str> = Vec::new();
         macro_rules! require {
@@ -181,6 +185,8 @@ impl WslcSdk {
             WslcLoadSessionImageFromFile,
             WslcListSessionImages,
             WslcGetMissingComponents,
+            // Present only in SDKs that can open a process's stdin.
+            WslcSetProcessSettingsFlags,
         );
         if missing.is_empty() {
             return Ok(());
@@ -373,6 +379,38 @@ impl WslcSessionGuard {
     /// Get the raw handle for passing to SDK functions.
     pub fn as_raw(&self) -> WslcSession {
         self.handle
+    }
+
+    /// Terminate and release this session, reporting the terminate result.
+    ///
+    /// A session whose VM did not stop still holds its image store, so a
+    /// caller that reported success would hand back a store the next lease
+    /// cannot open.
+    ///
+    /// Returns the terminate `HRESULT`. The handle is released either way,
+    /// since a failed terminate still leaves the handle to give back.
+    pub fn release_checked(mut self) -> HRESULT {
+        if self.handle.is_null() {
+            return S_OK;
+        }
+
+        // Calling the SDK with no apartment is the one thing the `Send`
+        // argument exists to prevent, so a handle that cannot reach one is
+        // leaked instead.
+        let Ok(_com) = ComApartment::enter() else {
+            self.handle = std::ptr::null_mut();
+            return E_FAIL;
+        };
+
+        // SAFETY: the handle is non-null and owned by this guard. Nulling it
+        // below means `Drop` returns early, so this runs exactly once.
+        let hr = unsafe {
+            let hr = (self.terminate_fn)(self.handle);
+            (self.release_fn)(self.handle);
+            hr
+        };
+        self.handle = std::ptr::null_mut();
+        hr
     }
 }
 

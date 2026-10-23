@@ -64,6 +64,9 @@ export function getAvailableToolsPolicy(environment?: {
 
 Get platform support information.
 
+On Windows, ProcessContainer requires native PSEC support. Other supported
+backends are detected independently; the host is unsupported when none are available.
+
 ```typescript
 export function getPlatformSupport(): PlatformSupport;
 ```
@@ -111,7 +114,11 @@ export function mxcErrorFromCode(code: string, message: string, details?: Record
 
 ## `@microsoft/mxc-sdk/v1::probe`
 
-Probe which Windows ProcessContainer tier can serve an optional request.
+Report native Windows ProcessContainer host-capability serviceability for an
+optional request without creating a container. Launch still validates the
+environment, network policy, and required PSEC version. Windows platform
+discovery reports probe failures and retries them rather than caching a
+transient failure as unsupported.
 
 ```typescript
 export function probe(request?: ContainerRequest): ProbeOutput;

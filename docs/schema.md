@@ -39,11 +39,16 @@ Typed Rust, .NET, and Node SDK callers use `ContainerRequest`,
 `ProvisionRequest`, and `ExecutionRequest`, not JSON. Node and .NET produce
 "MXC request JSON" internally.
 
-Creation requests omit `phase` and `sandboxId`. Lifecycle requests include
-`phase`, and operations after provision include `sandboxId`. For executor
-lifecycle calls, supply those values through `--operation` and `--container-id`,
-not in the JSON file. The executor inserts them before using the same contract
-parser.
+Creation requests omit `phase`, `sandboxId`, and `sessionId`. Lifecycle
+requests include `phase`. Sandbox-addressed operations (`start`, `exec`,
+`stop`, and `deprovision`) take `sandboxId`; `deprovision-session` instead
+takes `sessionId`. Both provision operations create their own IDs.
+
+For executor lifecycle calls, supply `phase` through `--operation` and the
+target ID through `--container-id` or `--session-id`, not as top-level JSON
+fields. The executor inserts them before using the same contract parser.
+`wslc.provision.sessionId` stays in the JSON body: it selects the session a new
+sandbox joins, not the target of the operation.
 
 For example, starting a provisioned WSLc container uses this "MXC request JSON"
 with `mxc_run_state_aware_json`:
@@ -207,10 +212,6 @@ that can be executed independently.
         "deniedPaths": ["C:\\Windows"]      // Blocked paths
     },
 
-    "fallback": {
-        "allowDaclMutation": true          // Allow Tier 3 DACL fallback (default true)
-    },
-
     "network": {
         "egress": {
             "default": "deny",
@@ -236,7 +237,7 @@ that can be executed independently.
     },
 
     "processContainer": {                  // Process-based container-specific
-        "leastPrivilege": false,
+        "leastPrivilege": false,           // true is rejected: PSEC has no LPAC token option
         "capabilities": ["internetClient"],
         "filesystem": {
             "enumeratePaths": ["C:\\tools"] // Query/list entries without reading file contents
@@ -253,18 +254,13 @@ that can be executed independently.
                                            // path in output metadata. Defaults to false.
                                            // Retention requires a terminal wait; abandoning the
                                            // process handle deletes the internal trace.
-                                           // Supported by native PSEC and guarded-WPR capture.
-                                           // Guarded WPR retains only a workload-process-filtered
-                                           // ETL, never its host-wide source trace.
+                                           // Requires compatible native PSEC capture support.
         }
                                            // Omit outputPath for a managed JSON output file.
                                            // Native PSEC capture supports runtimeConfig.networkProxy
                                            // without adding the direct-egress capture capability.
-                                           // leastPrivilege and other proxy policies use a compatible
-                                           // AppContainer tier with guarded WPR. Hosts without compatible
-                                           // native capture exports also use that fallback.
-                                           // If guarded-WPR prerequisites are unavailable, the request
-                                           // fails before MXC creates the sandbox.
+                                           // Missing native capture exports or required PSEC
+                                           // capabilities fail before MXC creates the container.
     },
 
     "lxc": {                               // LXC-specific
@@ -303,6 +299,12 @@ that can be executed independently.
 }
 ```
 
+> **Compatibility settings.** Create-and-run contracts `0.9.0-alpha`, `1.0.0`,
+> and `1.1.0-alpha` accept `fallback.allowDaclMutation` as an optional boolean
+> for compatibility and ignore it. It does not enable host-DACL mutation or
+> change native enforcement. Removing this accepted field from the 1.x line
+> requires a new major contract.
+
 > **Lifecycle operation fields.** The `phase` top-level field selects a
 > container lifecycle operation: JSON that includes it is parsed as input for
 > that operation (see below), *not* the create-and-run configuration above. The `sandboxId`
@@ -326,7 +328,7 @@ use:
 
 | Backend | Default when `process.cwd` is omitted |
 |---------|----------------------------------------|
-| Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
+| Windows ProcessContainer (PSEC) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
@@ -367,6 +369,10 @@ from the agent user's default environment and cannot replace or empty it, so
 `process.env` without `inheritDefaultEnv` — including `[]` — is rejected before
 launch.
 
+Native Windows PSEC can replace `LOCALAPPDATA` with a container-profile path
+after MXC supplies the environment block. Supplying the required entry does
+not guarantee that the contained process observes the host profile path.
+
 What the default block contains is backend-specific; see the backend's guide.
 On the WSL Container backend it is the container image's own `ENV`, which MXC
 neither authors nor enumerates — see
@@ -386,19 +392,23 @@ The ProcessContainer-only `processContainer.filesystem` section contains:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. It cannot be combined with `processContainer.leastPrivilege`; that combination fails rather than falling back. |
+| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. |
 
-On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
-containment tier selected at runtime:
+On Windows, `deniedPaths` is enforced natively when PSEC advertises
+`PSE_SUPPORT_FS_DENY`; on a host without it, a request with `deniedPaths` is
+rejected before execution.
 
-- **BaseContainer (Tier 1):** enforced natively by the OS when PSEC advertises
-  `PSE_SUPPORT_FS_DENY`. No host filesystem changes are made.
-- **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
-  the run and removed on exit. This path is gated by `allowDaclMutation`, requires
-  `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
-  Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
-  runs sharing the same `containerId` can revoke each other's ACEs — use distinct
-  `containerId` values for parallel runs.
+#### Overlapping paths for Windows BaseContainer
+
+When paths overlap across `readwritePaths` and `deniedPaths`:
+
+- The same directory in both `readwritePaths` and `deniedPaths` is denied.
+- An explicitly granted readwrite child of a denied parent remains readable
+  and writable. A sibling without that child grant remains denied, even when
+  the denied parent is beneath a broader readwrite grant.
+
+Denying a parent does not cancel a more specific child grant. To block the
+child, remove its grant or add the child itself to `deniedPaths`.
 
 #### Path grants and root directories for Windows BaseContainer
 
@@ -450,14 +460,6 @@ fields `isolation`, `desktopSystemControl`, `systemSettings`, and `ime`.
 `processContainer.filesystem` carries `enumeratePaths`. Both sub-blocks are
 valid only when `containment` is `processcontainer`.
 
-### Fallback Policy
-
-The `fallback` section gates the runner's host-impacting fallbacks. Each flag is an explicit operator consent for a specific mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `allowDaclMutation` | boolean | `true` | When the BaseContainer feature and the OS-side filesystem broker helper are both unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback; the run will then fail on machines that require Tier 3. |
-
 ### Containment Backends
 
 The `containment` field accepts both **abstract intent values** (which the
@@ -477,7 +479,7 @@ force a particular backend.
 
 | Value | Description |
 |-------|-------------|
-| `"processcontainer"` | (Default) Windows process-level isolation. Resolves to AppContainer (legacy) or BaseContainer (newer OS sandbox API) at run time depending on host capabilities and the `--experimental` flag. |
+| `"processcontainer"` | Windows process-level isolation through native PSEC (BaseContainer). Requests the host cannot fully enforce are rejected before container creation; schema version and `--experimental` do not enable an AppContainer fallback. |
 | `"windows_sandbox"` | Windows Sandbox VM isolation. Supports create-and-run execution with a fresh disposable VM per execution, and container lifecycle operations backed by a long-lived per-container daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
@@ -497,7 +499,8 @@ These examples use ["MXC request JSON"](#mxc-request-json). For executor
 calls, use the conversion described above.
 
 The development schema documents JSON objects for container lifecycle
-operations (`provision` / `start` / `exec` / `stop` / `deprovision`).
+operations (`provision-session` / `provision` / `start` / `exec` / `stop` /
+`deprovision` / `deprovision-session`).
 The create-and-run JSON above describes container setup and a workload together.
 Lifecycle JSON instead identifies an operation: `provision` allocates a new
 container; later operations use the returned `sandboxId`.
@@ -506,8 +509,8 @@ Choose a supported contract version for the backend and operation:
 
 - IsolationSession uses published `0.9.0-alpha`.
 - WSLC uses published `0.9.0-alpha`, or development `1.1.0-alpha` for
-  `wslc.provision.portMappings`; Windows Sandbox uses development
-  `1.1.0-alpha`.
+  `wslc.provision.portMappings` and the session operations; Windows Sandbox
+  uses development `1.1.0-alpha`.
 
 Contracts before `0.9.0-alpha` are retired. The supported published
 `0.9.0-alpha` and `1.0.0` contracts describe create-and-run JSON requests plus
@@ -518,30 +521,34 @@ development schema for `1.1.0-alpha`:
 {
     "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
     "version": "1.1.0-alpha",
-    "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
-    "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
-                                           // Prefix routes to the backend (wsb: -> windows_sandbox,
-                                           // iso: -> isolation_session).
-    "containment": "windows_sandbox",      // Required for `provision`; ignored for other phases
-                                           // (the backend is inferred from sandboxId).
+    "phase": "exec",
+    "sandboxId": "wsb:abcd1234",
     "process": { "commandLine": "echo hi" }
-    // Cross-cutting fields (process / filesystem / network / ui) sit at the TOP
-    // level, exactly as in a create-and-run request -- there is no wrapping `config`
-    // object. Backend- and phase-specific config, when a phase has any, nests
-    // under its permanent backend section, e.g.:
-    //   "isolationSession": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } }
 }
 ```
 
-Phase / sandboxId / containment validation:
+The `sandboxId` prefix routes sandbox-addressed operations to the backend;
+those requests do not accept `containment`. Provision and both WSLc session
+operations instead require `containment`. Cross-cutting policy stays at the
+top level, and backend-specific settings stay under the backend section
+(such as `wslc.provision`).
 
-| Phase | `sandboxId` | `containment` |
-|---|---|---|
-| `provision`     | (not allowed) | **Required** — picks the backend whose `provision` mints a fresh sandboxId |
-| `start`         | **Required** (`<prefix>:<token>`) | Ignored if present |
-| `exec`          | **Required** | Ignored if present |
-| `stop`          | **Required** | Ignored if present |
-| `deprovision`   | **Required** | Ignored if present |
+Phase / sandboxId / sessionId / containment validation:
+
+| Phase | `sandboxId` | `sessionId` | `containment` |
+|---|---|---|---|
+| `provision-session` | (not allowed) | (not allowed) | **Required** — `wslc` only |
+| `provision`     | (not allowed) | (not allowed) | **Required** — picks the backend whose `provision` mints a fresh sandboxId |
+| `start`         | **Required** (`<prefix>:<token>`) | (not allowed) | (not allowed) |
+| `exec`          | **Required** | (not allowed) | (not allowed) |
+| `stop`          | **Required** | (not allowed) | (not allowed) |
+| `deprovision`   | **Required** | (not allowed) | (not allowed) |
+| `deprovision-session` | (not allowed) | **Required** (`wslcsess:<token>`) | **Required** — `wslc` only |
+
+A session ID carries no backend prefix, so the session phases declare their
+containment instead of being routed by their target. Any containment other than
+`wslc` is refused with `unsupported_containment`: no other backend owns a
+session that sandboxes are placed into.
 
 Backends supporting container lifecycle operations today are `isolation_session`, `windows_sandbox`,
 and `wslc` (all Windows-only). IsolationSession does not require runtime
@@ -575,10 +582,60 @@ WSLC `provision` accepts `wslc.provision.portMappings`, the same
 Mappings require the bridged (all-`allow`) posture shown above; the isolated
 posture is rejected at provision.
 
-Two entries claiming the same `windowsPort` are rejected on both surfaces. The
-session sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) stay
-available only for create-and-run execution, because the lifecycle daemon shares one WSL session across
-every sandbox and cannot size them individually.
+Two entries claiming the same `windowsPort` are rejected on both surfaces.
+
+#### WSLC session operations
+
+Sizing is a property of the session rather than of a sandbox, so a WSLC caller
+asks for a sized session first and then places sandboxes in it:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "phase": "provision-session",
+    "containment": "wslc",
+    "wslc": {
+        "provisionSession": {
+            "cpuCount": 4,
+            "memoryMb": 8192,
+            "gpu": false
+        }
+    }
+}
+```
+
+The response carries `result.sessionId` (`wslcsess:<32 lowercase hex>`). A
+`provision` joins that session by naming it:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest",
+            "sessionId": "wslcsess:0123456789abcdef0123456789abcdef"
+        }
+    }
+}
+```
+
+`cpuCount: 4` means the VM has four virtual CPUs shared by every sandbox in the
+session, not four per sandbox, which is why a `provision` declares no sizing of
+its own. Omitting `sessionId` joins an implicit session shared by every request
+that names none — the behaviour every WSLC `provision` had before these
+operations existed.
+
+A `deprovision-session` names the session in a top-level `sessionId` and is
+refused while any sandbox is still in it; deprovision those first. Session IDs
+are opaque bearer values: any same-user process holding one can release that
+session, so keep them out of logs.
+
+The create-and-run `wslc` section keeps its own `cpuCount` / `memoryMb` / `gpu`
+/ `storagePath` knobs, which size the session that one run creates for itself.
 
 Full lifecycle API: [container lifecycle](container-lifecycle.md).
 

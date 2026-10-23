@@ -127,14 +127,14 @@ function Invoke-RegressionTestCase {
         [string]$Shell,
         [string]$WxcExec,
         [string]$SecondaryDriveWorkDirectory,
-        [string]$HostPrepExe,
-        [string]$DisposableVolumeRoot,
-        [switch]$IncludeDestructive,
         [switch]$RunWithMissingDependencies
     )
 
-    if ($Metadata.Destructive -and -not $IncludeDestructive) {
-        return New-RegressionTestResult $Issue $Metadata "Skipped" "Destructive test; use -IncludeDestructive" $null
+    if ($Metadata.Destructive) {
+        return New-RegressionTestResult $Issue $Metadata "Failed" "Destructive cases are not supported by this harness" 1
+    }
+    if ($Metadata.HarnessArguments -notin @('Default', 'SecondaryDrive')) {
+        return New-RegressionTestResult $Issue $Metadata "Failed" "Unsupported harness arguments: $($Metadata.HarnessArguments)" 1
     }
 
     $test = Join-Path $RegressionRoot $Metadata.Script
@@ -162,15 +162,7 @@ function Invoke-RegressionTestCase {
         }
     }
 
-    if ($Metadata.HarnessArguments -eq "HostPrep") {
-        if (-not $DisposableVolumeRoot) {
-            return New-RegressionTestResult $Issue $Metadata "Failed" "-DisposableVolumeRoot is required" 1
-        }
-        $arguments += @("-DisposableVolumeRoot", $DisposableVolumeRoot, "-AllowDestructive", "-AcknowledgeDisposableVolume")
-        if ($HostPrepExe) {
-            $arguments += @("-HostPrepExe", $HostPrepExe)
-        }
-    } elseif ($Metadata.HarnessArguments -eq "SecondaryDrive") {
+    if ($Metadata.HarnessArguments -eq "SecondaryDrive") {
         if (-not $SecondaryDriveWorkDirectory) {
             $systemDrive = [IO.Path]::GetPathRoot($env:SystemRoot).TrimEnd("\")
             $secondaryDrive = Get-PSDrive -PSProvider FileSystem |

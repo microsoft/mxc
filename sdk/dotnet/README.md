@@ -237,6 +237,12 @@ sandbox on the current host. `MxcPlatform.GetAvailableBackends()` reports
 host backend capabilities; availability is advisory and launch-time
 validation still applies.
 
+On Windows, ProcessContainer is reported only when native PSEC is available;
+other backends are detected independently. `MxcContainer.Probe(request)` checks
+request compatibility without creating a container. If native ProcessContainer
+cannot serve the request, `Tier` is null and `Error` explains why; `Probes`
+still contains host capability facts.
+
 Creation telemetry is supplied through `Telemetry` on `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
 leaves telemetry disabled; `new TelemetryConfig { Enabled = false }`

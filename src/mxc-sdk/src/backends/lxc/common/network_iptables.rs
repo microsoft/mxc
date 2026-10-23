@@ -1169,6 +1169,16 @@ impl NetworkIptablesManager {
         Ok(())
     }
 
+    /// The CAP_NET_RAW drop removes raw ICMP.  Opening net.ipv4.ping_group_range
+    /// to every gid lets the workload still ping through a datagram ICMP socket.
+    pub fn allow_ping_sockets(&self, logger: &mut Logger) -> Result<bool, String> {
+        self.run_firewall_command(
+            "sysctl",
+            &["-w", "net.ipv4.ping_group_range=0 2147483647"],
+            logger,
+        )
+    }
+
     // Clean up the iptables state recorded by another thread.
     // The ownership record keeps signal-time cleanup from flushing a later
     // run's chain under the same container name.
@@ -1327,6 +1337,28 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn allowing_ping_opens_the_ping_group_range_in_the_container_netns() {
+        let fake = super::test_firewall::install();
+        let manager =
+            NetworkIptablesManager::new("lxc-ping", EgressHookPoint::ContainerNetns(4242));
+        let mut logger = Logger::new(Mode::Buffer);
+
+        manager
+            .allow_ping_sockets(&mut logger)
+            .expect("the fake firewall accepts every command");
+
+        assert_eq!(
+            fake.issued(),
+            vec![vec![
+                "sysctl".to_string(),
+                "-w".to_string(),
+                "net.ipv4.ping_group_range=0 2147483647".to_string(),
+            ]],
+            "ping restore must open the ping group range to every gid"
+        );
     }
 
     #[test]

@@ -945,7 +945,7 @@ public sealed class PlatformSupport
 
 ## `Microsoft.Mxc.Sdk.V1.ProbeFacts`
 
-Raw host facts used by request tier selection.
+Host capability facts, returned even when the supplied request is incompatible.
 
 ```csharp
 public sealed class ProbeFacts
@@ -976,6 +976,10 @@ public sealed class ProbeFacts
 ## `Microsoft.Mxc.Sdk.V1.ProbeOutput`
 
 Result of probing which Windows ProcessContainer tier can serve a request.
+
+When native ProcessContainer cannot serve the request, `Tier` and
+`NeedsDaclAugmentation` are null and `Error` explains why. `Probes` still
+contains host capability facts.
 
 ```csharp
 public sealed class ProbeOutput

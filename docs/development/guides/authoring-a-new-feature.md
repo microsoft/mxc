@@ -303,17 +303,10 @@ Verify three things:
 
 ## Step 6: Update the SDK (if needed)
 
-If your feature should be accessible from the TypeScript SDK, add
-`experimental` to the `SandboxSpawnOptions` interface in `sdk/node/src/sandbox.ts`:
-
-```typescript
-export interface SandboxSpawnOptions {
-  debug?: boolean;
-  experimental?: boolean;
-}
-```
-
-The SDK passes `--experimental` to the underlying binary when this is set.
+The published v1 SDKs never authorize experimental features: their operations
+always pass the native entry points' `experimental` argument as off. Exercise an
+experimental feature through `wxc-exec --experimental`, and expose it in the
+SDKs' typed request types only when it is promoted to a published contract.
 
 ## Promoting to Stable
 

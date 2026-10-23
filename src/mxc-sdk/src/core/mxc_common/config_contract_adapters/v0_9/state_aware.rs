@@ -59,6 +59,7 @@ fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig
     WslcProvisionConfig {
         image: image.into_option(),
         image_tar_path: image_tar_path.into_option(),
+        session_id: None,
         port_mappings: None,
     }
 }
@@ -86,7 +87,6 @@ fn state_aware_common(
         sandbox_id: None,
         process: None,
         filesystem: None,
-        fallback: None,
         network: None,
         runtime_config: None,
         telemetry: telemetry.into_option().map(convert_telemetry),

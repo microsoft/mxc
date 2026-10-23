@@ -11,7 +11,8 @@
 
 .DESCRIPTION
     Each test invokes wxc-exec.exe with lifecycle routing in --operation /
-    --container-id and a base64-encoded phase-specific request payload.
+    --container-id / --session-id and a base64-encoded phase-specific request
+    payload.
     Provision / start / stop / deprovision return a JSON envelope on stdout
     (asserted on `result` / `error`); a successful exec streams the script's
     own stdout (relayed from the daemon) and exits with the script's exit code.
@@ -21,6 +22,11 @@
     written by one exec is visible to a later, separate wxc-exec invocation,
     and (2) after the last sandbox is deprovisioned the daemon idles out and
     exits on its own.
+
+    Explicit-session tests cover shared sandboxes and independent lifetimes
+    for identically sized VMs, plus guest CPU and memory for different sizing.
+    GPU passthrough enforcement is not verified by this suite.
+    The cold-store regression warms one private store and requires registry access.
 
     Requires: Windows 11, WSL2, the WSLC SDK runtime (wslcsdk.dll staged next
     to the binaries), registry access or an already-cached alpine:latest, and a
@@ -50,7 +56,8 @@
 
 .PARAMETER SkipSetup
     Skip the image-cache warming preflight. The provision fixtures declare deny
-    egress, which refuses a registry pull, so the cache has to be warm already.
+    egress, so daemon store slots 0 through 2 must already contain the images.
+    The cold-store regression still warms its own isolated store.
 
 .EXAMPLE
     .\run_wslc_state_aware_tests.ps1
@@ -124,23 +131,18 @@ if (-not $ConfigDir) {
 
 # ---------------- Image pre-pull preflight ----------------
 
-# The daemon leases its store from the slot pool, not from
-# %TEMP%\mxc-wslc-sessions, and the fixtures below provision with the isolated
-# posture, which refuses a registry pull. Slot 0 is the one a daemon holding a
-# single session leases, so that is the store these images have to be in.
+# Warm stores for the implicit session and two explicit sessions; isolated
+# provisions cannot pull images into a cold store.
 if (-not $SkipSetup) {
     $SetupScript = Join-Path $RepoRoot "scripts\setup-wslc.ps1"
     if (Test-Path $SetupScript) {
         Write-Host "Pre-pulling WSLc images (pass -SkipSetup to skip)..." -ForegroundColor Cyan
-        & $SetupScript -WxcExecPath $WxcExec -Image @("alpine:latest", "python:3.12-alpine") -DaemonSlots 1 -Force
+        & $SetupScript -WxcExecPath $WxcExec -Image @("alpine:latest", "python:3.12-alpine") -DaemonSlots 3 -Force
         if ($LASTEXITCODE -ne 0) {
-            # Continuing would leave slot 0 cold, and the isolated fixtures
-            # cannot pull, so every later provision fails for a reason that
-            # looks nothing like this preflight.
-            Write-Host "ERROR: setup-wslc.ps1 failed to warm daemon store slot 0." -ForegroundColor Red
+            Write-Host "ERROR: setup-wslc.ps1 failed to warm daemon store slots 0 through 2." -ForegroundColor Red
             Write-Host "  The lifecycle fixtures provision with the isolated posture, which refuses a" -ForegroundColor Yellow
             Write-Host "  registry pull, so a cold slot fails every provision rather than pulling." -ForegroundColor Yellow
-            Write-Host "  Resolve the setup failure above, or pass -SkipSetup if slot 0 is already warm." -ForegroundColor Yellow
+            Write-Host "  Resolve the setup failure above, or pass -SkipSetup if all three slots are warm." -ForegroundColor Yellow
             exit 1
         }
         Write-Host ""
@@ -156,6 +158,7 @@ function ConvertTo-StateAwareInvocation {
         [hashtable]$Request,
         [string]$ConfigFile,
         [string]$SandboxId,
+        [string]$SessionId,
         [int]$WindowsPort
     )
 
@@ -172,6 +175,16 @@ function ConvertTo-StateAwareInvocation {
             }
             $json = $json -replace 'wslc:\{\{SANDBOX_ID\}\}', $SandboxId
             $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
+        }
+
+        if ($json -match '\{\{SESSION_ID\}\}') {
+            if (-not $SessionId) {
+                throw "Fixture $ConfigFile contains {{SESSION_ID}} but -SessionId was not supplied"
+            }
+            if (-not $SessionId.StartsWith('wslcsess:')) {
+                throw "Fixture $ConfigFile requires a wslcsess: session ID, got '$SessionId'"
+            }
+            $json = $json -replace '\{\{SESSION_ID\}\}', $SessionId
         }
         try {
             $requestObject = $json | ConvertFrom-Json
@@ -213,29 +226,41 @@ function ConvertTo-StateAwareInvocation {
     }
     if ($phase -isnot [string]) { throw "State-aware request must contain a string 'phase'" }
 
-    $routingSandboxId = $null
-    if ($phase -ne 'provision') {
+    $targetMember = switch ($phase) {
+        'provision-session' { $null }
+        'provision' { $null }
+        'deprovision-session' { 'sessionId' }
+        default { 'sandboxId' }
+    }
+    $targetFlag = switch ($targetMember) {
+        'sessionId' { '--session-id' }
+        'sandboxId' { '--container-id' }
+        default { $null }
+    }
+
+    $routingId = $null
+    if ($targetMember) {
         if ($requestObject -is [System.Collections.IDictionary]) {
-            $sandboxIdKey = $requestObject.Keys |
-                Where-Object { $_ -ceq 'sandboxId' } |
+            $targetKey = $requestObject.Keys |
+                Where-Object { $_ -ceq $targetMember } |
                 Select-Object -First 1
-            if ($null -eq $sandboxIdKey) {
-                throw "State-aware '$phase' request must contain a string 'sandboxId'"
+            if ($null -eq $targetKey) {
+                throw "State-aware '$phase' request must contain a string '$targetMember'"
             }
-            $routingSandboxId = $requestObject[$sandboxIdKey]
-            $null = $requestObject.Remove($sandboxIdKey)
+            $routingId = $requestObject[$targetKey]
+            $null = $requestObject.Remove($targetKey)
         } else {
-            $sandboxIdProperty = $requestObject.PSObject.Properties |
-                Where-Object { $_.Name -ceq 'sandboxId' } |
+            $targetProperty = $requestObject.PSObject.Properties |
+                Where-Object { $_.Name -ceq $targetMember } |
                 Select-Object -First 1
-            if ($null -eq $sandboxIdProperty) {
-                throw "State-aware '$phase' request must contain a string 'sandboxId'"
+            if ($null -eq $targetProperty) {
+                throw "State-aware '$phase' request must contain a string '$targetMember'"
             }
-            $routingSandboxId = $sandboxIdProperty.Value
-            $requestObject.PSObject.Properties.Remove($sandboxIdProperty.Name)
+            $routingId = $targetProperty.Value
+            $requestObject.PSObject.Properties.Remove($targetProperty.Name)
         }
-        if ($routingSandboxId -isnot [string]) {
-            throw "State-aware '$phase' request must contain a string 'sandboxId'"
+        if ($routingId -isnot [string]) {
+            throw "State-aware '$phase' request must contain a string '$targetMember'"
         }
     }
 
@@ -243,7 +268,9 @@ function ConvertTo-StateAwareInvocation {
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
     @{
         Operation    = [string]$phase
-        SandboxId    = $routingSandboxId
+        TargetFlag   = $targetFlag
+        TargetId     = $routingId
+        SandboxId    = if ($targetMember -eq 'sandboxId') { $routingId } else { $null }
         ConfigBase64 = $b64
     }
 }
@@ -265,16 +292,18 @@ function Start-StateAware {
         [hashtable]$Request,
         [string]$ConfigFile,
         [string]$SandboxId,
+        [string]$SessionId,
         [int]$WindowsPort,
         [switch]$DryRun
     )
 
     $invocation = ConvertTo-StateAwareInvocation `
-        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId -WindowsPort $WindowsPort
+        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId `
+        -SessionId $SessionId -WindowsPort $WindowsPort
 
     $argList = @('--operation', $invocation.Operation)
-    if ($invocation.Operation -ne 'provision') {
-        $argList += @('--container-id', $invocation.SandboxId)
+    if ($invocation.TargetFlag) {
+        $argList += @($invocation.TargetFlag, $invocation.TargetId)
     }
     if ($DryRun) { $argList += '--dry-run' }
     if ($Debug) { $argList += '--debug' }
@@ -331,15 +360,17 @@ function Start-StateAwareLines {
         [hashtable]$Request,
         [string]$ConfigFile,
         [string]$SandboxId,
+        [string]$SessionId,
         [int]$WindowsPort
     )
 
     $invocation = ConvertTo-StateAwareInvocation `
-        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId -WindowsPort $WindowsPort
+        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId `
+        -SessionId $SessionId -WindowsPort $WindowsPort
 
     $argList = @('--operation', $invocation.Operation)
-    if ($invocation.Operation -ne 'provision') {
-        $argList += @('--container-id', $invocation.SandboxId)
+    if ($invocation.TargetFlag) {
+        $argList += @($invocation.TargetFlag, $invocation.TargetId)
     }
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $invocation.ConfigBase64)
@@ -433,13 +464,14 @@ function Invoke-StateAware {
         [hashtable]$Request,
         [string]$ConfigFile,
         [string]$SandboxId,
+        [string]$SessionId,
         [int]$WindowsPort,
         [switch]$DryRun
     )
 
     Wait-StateAware (Start-StateAware `
         -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId `
-        -WindowsPort $WindowsPort -DryRun:$DryRun)
+        -SessionId $SessionId -WindowsPort $WindowsPort -DryRun:$DryRun)
 }
 
 # Like Invoke-StateAware but records the wall-clock arrival time of each stdout
@@ -457,8 +489,8 @@ function Invoke-StateAwareStreaming {
         -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId
 
     $argList = @('--operation', $invocation.Operation)
-    if ($invocation.Operation -ne 'provision') {
-        $argList += @('--container-id', $invocation.SandboxId)
+    if ($invocation.TargetFlag) {
+        $argList += @($invocation.TargetFlag, $invocation.TargetId)
     }
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $invocation.ConfigBase64)
@@ -662,6 +694,72 @@ function Assert-ResultEnvelope {
     }
     Assert-True ($Result.ExitCode -eq 0) "$What exit code = 0 on success"
     return $envObj
+}
+
+function Assert-ErrorEnvelope {
+    param($Result, [string]$ExpectedCode, [string]$What)
+    $envObj = Parse-Envelope -Stdout $Result.Stdout
+    $isExpected = (Envelope-Arm $envObj) -eq 'error' -and
+        $envObj.error.code -eq $ExpectedCode -and $Result.ExitCode -ne 0
+    if (-not $isExpected) {
+        Write-Host "  Stdout: $($Result.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($Result.Stderr)" -ForegroundColor Gray
+    }
+    Assert-True $isExpected "$What returns $ExpectedCode and exits non-zero"
+    return $envObj
+}
+
+function Get-SandboxBootId {
+    param([string]$SandboxId, [string]$What)
+
+    # The Linux boot ID identifies the VM, not an individual container.
+    $r = Invoke-StateAware -Request @{
+        version = '1.1.0-alpha'
+        phase = 'exec'
+        sandboxId = $SandboxId
+        process = @{ commandLine = 'cat /proc/sys/kernel/random/boot_id'; timeout = 30000 }
+    }
+    $bootId = $r.Stdout.Trim()
+    $valid = $r.ExitCode -eq 0 -and
+        $bootId -cmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+    if (-not $valid) {
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+    }
+    Assert-True $valid "$What reads a valid VM boot ID"
+    if ($valid) { return $bootId }
+    return $null
+}
+
+function Assert-SandboxSizing {
+    param([string]$SandboxId, [int]$CpuCount, [int]$MemoryMb, [string]$What)
+
+    $r = Invoke-StateAware -Request @{
+        version = '1.1.0-alpha'
+        phase = 'exec'
+        sandboxId = $SandboxId
+        process = @{
+            commandLine = 'nproc; awk ''/^MemTotal:/ { print $2 }'' /proc/meminfo'
+            timeout = 30000
+        }
+    }
+    $values = $r.Stdout.Trim() -split '\s+'
+    $valid = $r.ExitCode -eq 0 -and $values.Count -eq 2 -and
+        $values[0] -match '^\d+$' -and $values[1] -match '^\d+$'
+    Assert-True $valid "$What reports guest CPU count and memory"
+    if (-not $valid) {
+        Write-Host "  Stdout: $($r.Stdout)" -ForegroundColor Gray
+        Write-Host "  Stderr: $($r.Stderr)" -ForegroundColor Gray
+        return
+    }
+    Assert-True ([int]$values[0] -eq $CpuCount) `
+        "$What has $CpuCount CPUs (reported $($values[0]))"
+    $expectedKiB = [long]$MemoryMb * 1024
+
+    # Allow up to 10% for guest-kernel reservations excluded from MemTotal.
+    $minimumKiB = [math]::Ceiling($expectedKiB * 0.9)
+    Assert-True ([long]$values[1] -ge $minimumKiB -and [long]$values[1] -le $expectedKiB) `
+        "$What guest memory is within 10% below $MemoryMb MB (reported $($values[1]) KiB)"
 }
 
 # Provision a throwaway sandbox and return its sandbox_id (or $null).
@@ -1869,6 +1967,381 @@ try {
         try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:ccSandboxB } catch { }
     }
 }
+
+# ---------------- Lifecycle K: explicit sessions ----------------
+
+$sharedSandboxes = @(
+    @{ Name = 'A1'; Id = $null; Started = $false; Released = $false; BootId = $null },
+    @{ Name = 'A2'; Id = $null; Started = $false; Released = $false; BootId = $null }
+)
+$independentSandbox = @{
+    Name = 'B'; Id = $null; Started = $false; Released = $false; BootId = $null
+}
+$resizedSandbox = @{
+    Name = 'C'; Id = $null; Started = $false; Released = $false
+}
+$resizedSession = @{
+    Name = 'C'; Id = $null; Released = $false; Sandboxes = @($resizedSandbox)
+}
+$explicitSessions = @(
+    @{ Name = 'A'; Id = $null; Released = $false; Sandboxes = $sharedSandboxes },
+    @{ Name = 'B'; Id = $null; Released = $false; Sandboxes = @($independentSandbox) },
+    $resizedSession
+)
+$sharedSession = $explicitSessions[0]
+$independentSession = $explicitSessions[1]
+$sessionFixture = Get-Content (Join-Path $ConfigDir 'wslc_state_aware_provision_session.json') -Raw |
+    ConvertFrom-Json
+$sessionSizing = $sessionFixture.wslc.provisionSession
+try {
+    Run-StateAwareTest "K: dry-run provision-session mints nothing" {
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_session.json' -DryRun
+        $envObj = Assert-ResultEnvelope $r "dry-run provision-session"
+        if ($envObj) {
+            Assert-True ($null -eq $envObj.result.sessionId) `
+                "a dry run must not mint a session id"
+        }
+    } | Out-Null
+
+    foreach ($session in @($sharedSession, $independentSession)) {
+        $provisioned = Run-StateAwareTest "K: provision-session $($session.Name) with identical sizing" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_session.json'
+            $envObj = Assert-ResultEnvelope $r "provision-session $($session.Name)"
+            if ($envObj) {
+                $session.Id = [string]$envObj.result.sessionId
+                Assert-True ($session.Id -cmatch '^wslcsess:[0-9a-f]{32}$') `
+                    "session_id matches wslcsess:<32 lowercase hex>"
+                Assert-True ($null -eq $envObj.result.sandboxId) `
+                    "provision-session returns no sandbox id"
+            }
+        }
+        if (-not $provisioned) { continue }
+
+        foreach ($sandbox in $session.Sandboxes) {
+            Run-StateAwareTest "K: provision and start sandbox $($sandbox.Name) in session $($session.Name)" {
+                $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_in_session.json' `
+                    -SessionId $session.Id
+                $envObj = Assert-ResultEnvelope $r "provision sandbox $($sandbox.Name)"
+                if ($null -eq $envObj) { return }
+                $sandbox.Id = [string]$envObj.result.sandboxId
+                Assert-True ($sandbox.Id -cmatch '^wslc:[0-9a-f]{32}$') `
+                    "sandbox_id matches wslc:<32 lowercase hex>"
+
+                $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' `
+                    -SandboxId $sandbox.Id
+                $envObj = Assert-ResultEnvelope $r "start sandbox $($sandbox.Name)"
+                $sandbox.Started = $null -ne $envObj -and $r.ExitCode -eq 0
+                if ($sandbox.Started) {
+                    $sandbox.BootId = Get-SandboxBootId -SandboxId $sandbox.Id -What $sandbox.Name
+                }
+            } | Out-Null
+        }
+    }
+
+    Run-StateAwareTest "K: two sandboxes share the named session's VM" {
+        Assert-True ($sharedSandboxes[0].Started -and $sharedSandboxes[1].Started) `
+            "both sandboxes are running at the same time"
+        Assert-True (-not [string]::IsNullOrEmpty($sharedSandboxes[0].BootId) -and
+            $sharedSandboxes[0].BootId -ceq $sharedSandboxes[1].BootId) `
+            "two sandboxes in the same session have the same VM boot ID"
+        foreach ($sandbox in $sharedSandboxes) {
+            if ($sandbox.Started) {
+                Assert-SandboxSizing -SandboxId $sandbox.Id -What $sandbox.Name `
+                    -CpuCount $sessionSizing.cpuCount -MemoryMb $sessionSizing.memoryMb
+            }
+        }
+    } | Out-Null
+
+    Run-StateAwareTest "K: identical sizing creates two distinct sessions and VMs" {
+        Assert-True (-not [string]::IsNullOrEmpty($sharedSession.Id) -and
+            -not [string]::IsNullOrEmpty($independentSession.Id) -and
+            $sharedSession.Id -cne $independentSession.Id) `
+            "two sessions with identical settings have different IDs"
+        Assert-True ($sharedSandboxes[0].Started -and $independentSandbox.Started) `
+            "sandboxes in both sessions are live simultaneously"
+        Assert-True (-not [string]::IsNullOrEmpty($sharedSandboxes[0].BootId) -and
+            -not [string]::IsNullOrEmpty($independentSandbox.BootId) -and
+            $sharedSandboxes[0].BootId -cne $independentSandbox.BootId) `
+            "identically sized sessions have different VM boot IDs"
+    } | Out-Null
+
+    foreach ($sandbox in $sharedSandboxes) {
+        Run-StateAwareTest "K: session release is refused while sandbox $($sandbox.Name) remains" {
+            Assert-True $sandbox.Started "sandbox $($sandbox.Name) was started"
+            if (-not $sandbox.Started) { return }
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+                -SessionId $sharedSession.Id
+            $null = Assert-ErrorEnvelope $r 'policy_validation' "release of a held session"
+            $bootId = Get-SandboxBootId -SandboxId $sandbox.Id -What $sandbox.Name
+            Assert-True (-not [string]::IsNullOrEmpty($bootId) -and
+                $bootId -ceq $sandbox.BootId) "the refused release leaves the sandbox usable"
+        } | Out-Null
+
+        Run-StateAwareTest "K: stop and deprovision shared sandbox $($sandbox.Name)" {
+            Assert-True (-not [string]::IsNullOrEmpty($sandbox.Id)) `
+                "sandbox $($sandbox.Name) was provisioned"
+            if (-not $sandbox.Id) { return }
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $sandbox.Id
+            $null = Assert-ResultEnvelope $r "stop sandbox $($sandbox.Name)"
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' `
+                -SandboxId $sandbox.Id
+            $envObj = Assert-ResultEnvelope $r "deprovision sandbox $($sandbox.Name)"
+            $sandbox.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+        } | Out-Null
+    }
+
+    Run-StateAwareTest "K: deprovision-session once both shared sandboxes are gone" {
+        Assert-True ($sharedSandboxes[0].Released -and $sharedSandboxes[1].Released) `
+            "both sandboxes were deprovisioned before their session"
+        if (-not $sharedSession.Id) { return }
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+            -SessionId $sharedSession.Id
+        $envObj = Assert-ResultEnvelope $r "release session A"
+        $sharedSession.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+    } | Out-Null
+
+    Run-StateAwareTest "K: the identically sized session survives the other's release" {
+        Assert-True ($sharedSession.Released -and $independentSandbox.Started) `
+            "session A is gone while session B still has a running sandbox"
+        if (-not $sharedSession.Released -or -not $independentSandbox.Started) { return }
+        $bootId = Get-SandboxBootId -SandboxId $independentSandbox.Id -What 'surviving session B'
+        Assert-True (-not [string]::IsNullOrEmpty($bootId) -and
+            $bootId -ceq $independentSandbox.BootId) `
+            "releasing session A leaves session B's original VM usable"
+    } | Out-Null
+
+    Run-StateAwareTest "K: different CPU and memory sizing reaches each session's guest" {
+        Assert-True ($sharedSession.Released -and $independentSandbox.Started) `
+            "session A returned its warm store while session B remains live"
+        if (-not $sharedSession.Released -or -not $independentSandbox.Started) { return }
+        Assert-SandboxSizing -SandboxId $independentSandbox.Id -What 'session B' `
+            -CpuCount $sessionSizing.cpuCount -MemoryMb $sessionSizing.memoryMb
+
+        $r = Invoke-StateAware -Request @{
+            version = '1.1.0-alpha'
+            phase = 'provision-session'
+            containment = 'wslc'
+            wslc = @{ provisionSession = @{ cpuCount = 2; memoryMb = 4096 } }
+        }
+        $envObj = Assert-ResultEnvelope $r "provision differently sized session C"
+        if ($null -eq $envObj) { return }
+        $resizedSession.Id = [string]$envObj.result.sessionId
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_in_session.json' `
+            -SessionId $resizedSession.Id
+        $envObj = Assert-ResultEnvelope $r "provision sandbox C"
+        if ($null -eq $envObj) { return }
+        $resizedSandbox.Id = [string]$envObj.result.sandboxId
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' `
+            -SandboxId $resizedSandbox.Id
+        $envObj = Assert-ResultEnvelope $r "start sandbox C"
+        $resizedSandbox.Started = $null -ne $envObj -and $r.ExitCode -eq 0
+        if (-not $resizedSandbox.Started) { return }
+        Assert-SandboxSizing -SandboxId $resizedSandbox.Id -What 'session C' `
+            -CpuCount 2 -MemoryMb 4096
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' `
+            -SandboxId $resizedSandbox.Id
+        $null = Assert-ResultEnvelope $r "stop sandbox C"
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' `
+            -SandboxId $resizedSandbox.Id
+        $envObj = Assert-ResultEnvelope $r "deprovision sandbox C"
+        $resizedSandbox.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+            -SessionId $resizedSession.Id
+        $envObj = Assert-ResultEnvelope $r "release session C"
+        $resizedSession.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+    } | Out-Null
+
+    Run-StateAwareTest "K: a released session is no longer addressable" {
+        Assert-True $sharedSession.Released "session A was released"
+        if (-not $sharedSession.Released) { return }
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+            -SessionId $sharedSession.Id
+        $null = Assert-ErrorEnvelope $r 'not_provisioned' "release of an already released session"
+    } | Out-Null
+
+    Run-StateAwareTest "K: stop and deprovision the independent session's sandbox" {
+        Assert-True (-not [string]::IsNullOrEmpty($independentSandbox.Id)) `
+            "session B's sandbox was provisioned"
+        if (-not $independentSandbox.Id) { return }
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' `
+            -SandboxId $independentSandbox.Id
+        $null = Assert-ResultEnvelope $r "stop session B's sandbox"
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' `
+            -SandboxId $independentSandbox.Id
+        $envObj = Assert-ResultEnvelope $r "deprovision session B's sandbox"
+        $independentSandbox.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+    } | Out-Null
+
+    Run-StateAwareTest "K: deprovision the independent session" {
+        Assert-True $independentSandbox.Released "session B's sandbox was deprovisioned"
+        if (-not $independentSession.Id) { return }
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+            -SessionId $independentSession.Id
+        $envObj = Assert-ResultEnvelope $r "release session B"
+        $independentSession.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+    } | Out-Null
+
+    Run-StateAwareTest "K: provision naming an unknown session is refused" {
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_in_session.json' `
+            -SessionId 'wslcsess:00000000000000000000000000000000'
+        $envObj = Assert-ErrorEnvelope $r 'not_provisioned' "provision in an unknown session"
+        Assert-True ($null -eq $envObj.result.sandboxId) `
+            "a refused provision mints no sandbox"
+    } | Out-Null
+
+    Run-StateAwareTest "K: malformed placement and release IDs return malformed_id" {
+        foreach ($dryRun in @($false, $true)) {
+            foreach ($phase in @('provision', 'deprovision-session')) {
+                $req = @{
+                    version = '1.1.0-alpha'
+                    phase = $phase
+                    containment = 'wslc'
+                }
+                if ($phase -eq 'provision') {
+                    $req.wslc = @{ provision = @{ sessionId = 'wslcsess:not-hex' } }
+                } else {
+                    $req.sessionId = 'wslcsess:not-hex'
+                }
+                $r = Invoke-StateAware -Request $req -DryRun:$dryRun
+                $null = Assert-ErrorEnvelope $r 'malformed_id' "$phase with a malformed session id"
+            }
+        }
+    } | Out-Null
+} finally {
+    foreach ($session in $explicitSessions) {
+        foreach ($sandbox in $session.Sandboxes) {
+            if (-not $sandbox.Id -or $sandbox.Released) { continue }
+            Run-StateAwareTest "K: cleanup sandbox $($sandbox.Name)" {
+                $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' `
+                    -SandboxId $sandbox.Id
+                $envObj = Parse-Envelope -Stdout $r.Stdout
+                if ((Envelope-Arm $envObj) -eq 'error' -and
+                    $envObj.error.code -eq 'not_provisioned') {
+                    $sandbox.Released = $true
+                } else {
+                    $envObj = Assert-ResultEnvelope $r "cleanup sandbox $($sandbox.Name)"
+                    $sandbox.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+                }
+            } | Out-Null
+        }
+    }
+    foreach ($session in $explicitSessions) {
+        if (-not $session.Id -or $session.Released) { continue }
+        Run-StateAwareTest "K: cleanup session $($session.Name)" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+                -SessionId $session.Id
+            $envObj = Parse-Envelope -Stdout $r.Stdout
+            if ((Envelope-Arm $envObj) -eq 'error' -and
+                $envObj.error.code -eq 'not_provisioned') {
+                $session.Released = $true
+            } else {
+                $envObj = Assert-ResultEnvelope $r "cleanup session $($session.Name)"
+                $session.Released = $null -ne $envObj -and $r.ExitCode -eq 0
+            }
+        } | Out-Null
+    }
+}
+
+# ---------------- Lifecycle L: one warmed slot ----------------
+
+Run-StateAwareTest "L: isolated provision names the cold store when the only warm slot is held" {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ("mxc-wslc-cold-" + [guid]::NewGuid().ToString('N'))
+    $root = [IO.Path]::GetFullPath($root)
+    $oldLocalAppData = $env:LOCALAPPDATA
+    $oldStateRoot = $env:MXC_WSLC_STATE_ROOT
+    $sessionIds = [System.Collections.Generic.List[string]]::new()
+    $warmSandboxId = $null
+    $coldSandboxId = $null
+    $daemonProcess = $null
+    $null = New-Item -ItemType Directory -Path $root
+    try {
+
+        # Keep this test's stores and daemon discovery separate from normal runs.
+        $env:LOCALAPPDATA = $root
+        $env:MXC_WSLC_STATE_ROOT = Join-Path $root 'records'
+        & (Join-Path $RepoRoot 'scripts\setup-wslc.ps1') -WxcExecPath $WxcExec `
+            -StoragePath (Join-Path $root 'create-and-run') -Image @('alpine:latest') `
+            -DaemonSlots 1 -Force
+        $setupExit = $LASTEXITCODE
+        Assert-True ($setupExit -eq 0) "the private pool was warmed with -DaemonSlots 1"
+        if ($setupExit -ne 0) { return }
+
+        $coldStore = Join-Path $root 'mxc\wslc-store-slots\slot-1'
+        Assert-True (-not (Test-Path $coldStore)) "setup left the second slot cold"
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_session.json'
+        $record = Get-Content (Join-Path $env:MXC_WSLC_STATE_ROOT 'daemon.json') -Raw | ConvertFrom-Json
+        $daemonProcess = [System.Diagnostics.Process]::GetProcessById([int]$record.pid)
+        $envObj = Assert-ResultEnvelope $r "create the warm session"
+        if ($null -eq $envObj) { return }
+        $warmSessionId = [string]$envObj.result.sessionId
+        $sessionIds.Add($warmSessionId)
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_in_session.json' `
+            -SessionId $warmSessionId
+        $envObj = Assert-ResultEnvelope $r "hold the only warm slot with a sandbox"
+        if ($null -eq $envObj) { return }
+        $warmSandboxId = [string]$envObj.result.sandboxId
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_session.json'
+        $envObj = Assert-ResultEnvelope $r "create a session on the second slot"
+        if ($null -eq $envObj) { return }
+        $coldSessionId = [string]$envObj.result.sessionId
+        $sessionIds.Add($coldSessionId)
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_in_session.json' `
+            -SessionId $coldSessionId
+        $envObj = Assert-ErrorEnvelope $r 'policy_validation' "isolated provision on the cold store"
+        $coldSandboxId = [string]$envObj.result.sandboxId
+        $message = [string]$envObj.error.message
+        Assert-True ($message.Contains('daemon image store slot 1')) `
+            "the refusal names the selected slot"
+        Assert-True ($message.Contains($coldStore)) `
+            "the refusal names the actual private store path"
+        Assert-True ($message.Contains("cold for image 'alpine:latest'")) `
+            "the refusal identifies the cold cache rather than a missing registry image"
+        Assert-True ($message.Contains('No container was created')) `
+            "the cold-store refusal happens before container creation"
+        Assert-True ($null -eq $envObj.result.sandboxId) "the refused provision returns no sandbox"
+
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $warmSandboxId
+        $null = Assert-ResultEnvelope $r "start the original warm sandbox after the refusal"
+        $null = Get-SandboxBootId -SandboxId $warmSandboxId -What 'the original warm sandbox'
+    } finally {
+        try {
+            foreach ($sandboxId in @($warmSandboxId, $coldSandboxId)) {
+                if (-not $sandboxId) { continue }
+                $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' `
+                    -SandboxId $sandboxId
+                $null = Assert-ResultEnvelope $r "cleanup a private sandbox"
+            }
+            foreach ($sessionId in $sessionIds) {
+                $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision_session.json' `
+                    -SessionId $sessionId
+                $envObj = Parse-Envelope -Stdout $r.Stdout
+                if ((Envelope-Arm $envObj) -ne 'error' -or
+                    $envObj.error.code -ne 'not_provisioned') {
+                    $null = Assert-ResultEnvelope $r "cleanup a private session"
+                }
+            }
+        } finally {
+            try {
+                if ($null -ne $daemonProcess -and -not $daemonProcess.WaitForExit(60000)) {
+                    Assert-True $false "the private test daemon did not exit after cleanup"
+                    Stop-Process -Id $daemonProcess.Id -Force
+                    $daemonProcess.WaitForExit()
+                }
+            } finally {
+                if ($null -ne $daemonProcess) { $daemonProcess.Dispose() }
+                $env:LOCALAPPDATA = $oldLocalAppData
+                $env:MXC_WSLC_STATE_ROOT = $oldStateRoot
+            }
+        }
+        Remove-Item -LiteralPath $root -Recurse -Force
+    }
+} | Out-Null
 
 # ---------------- Lifecycle S: store isolation from create-and-run ----------------
 

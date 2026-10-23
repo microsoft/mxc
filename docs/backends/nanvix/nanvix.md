@@ -80,16 +80,9 @@ wxc-exec.exe --experimental config.json
 
 ## SDK Usage
 
-Use `spawnSandboxFromConfig` with `usePty: false` for reliable exit codes and
-separate stdout/stderr streams:
-
-```typescript
-const child = spawnSandboxFromConfig(config, {
-  experimental: true,
-  usePty: false,
-});
-
-```
+MicroVM is an experimental backend, and the published v1 SDKs do not authorize
+experimental backends. Run MicroVM requests through `wxc-exec --experimental`
+as shown above.
 
 ## Filesystem Policy
 

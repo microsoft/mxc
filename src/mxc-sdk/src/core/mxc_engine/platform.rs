@@ -70,6 +70,43 @@ struct ProxyEnforcementProbe<G>(G);
 #[cfg(target_os = "linux")]
 struct LxcProbe<H>(H);
 
+#[cfg(target_os = "windows")]
+struct WindowsPlatformAvailability {
+    process_container: bool,
+    wslc: bool,
+    isolation_session: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_platform_support_with(availability: WindowsPlatformAvailability) -> PlatformSupport {
+    let mut available_methods = Vec::new();
+    for (backend, available) in [
+        (
+            ContainmentBackend::ProcessContainer,
+            availability.process_container,
+        ),
+        (ContainmentBackend::Wslc, availability.wslc),
+        (
+            ContainmentBackend::IsolationSession,
+            availability.isolation_session,
+        ),
+    ] {
+        if available {
+            available_methods.push(backend.wire_name().to_string());
+        }
+    }
+    let is_supported = !available_methods.is_empty();
+    PlatformSupport {
+        is_supported,
+        reason: (!is_supported).then(|| {
+            "No supported Windows containment backend is available; ProcessContainer requires PSEC"
+                .to_string()
+        }),
+        available_methods,
+        ..Default::default()
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_platform_support_with<F, G, H>(
     lxc: LxcProbe<H>,
@@ -128,11 +165,10 @@ where
 /// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
 /// `mxc-sdk` library can actually run. On Linux both `bubblewrap` and `lxc` are
 /// reported when present, and either one alone makes the host supported. On
-/// Windows the isolation tier and UI capabilities come from the in-process
-/// fallback probe rather than a `wxc-exec --probe` subprocess, and `wslc` is
-/// reported when the host has the WSL Container runtime (requires the `wslc`
-/// feature). The broader host-capability set (backends the host can run but the
-/// SDK cannot launch) is reported separately by
+/// Windows the native capability probe supplies isolation and UI capabilities,
+/// and `wslc` is reported when the host has the WSL Container runtime (requires
+/// the `wslc` feature). The broader host-capability set (backends the host can
+/// run but the SDK cannot launch) is reported separately by
 /// [`available_backends`](crate::v1::available_backends).
 ///
 /// Every probe here answers "is the tooling usable", not "may this process use
@@ -171,24 +207,13 @@ pub fn platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "windows")]
     {
-        let mut available_methods =
-            vec![ContainmentBackend::ProcessContainer.wire_name().to_string()];
         // `windows_sandbox` is a host-capability backend the SDK can't launch,
         // so it is reported by `available_backends()` rather than here.
-        //
-        // WSLC and IsolationSession are additional explicit backends rather
-        // than fallbacks: report each only when the host has it.
-        if wslc_available() {
-            available_methods.push(ContainmentBackend::Wslc.wire_name().to_string());
-        }
-        if isolation_session_present() {
-            available_methods.push(ContainmentBackend::IsolationSession.wire_name().to_string());
-        }
-        PlatformSupport {
-            is_supported: true,
-            available_methods,
-            ..Default::default()
-        }
+        windows_platform_support_with(WindowsPlatformAvailability {
+            process_container: crate::process_container_common::base_container_runner::BaseContainerRunner::is_base_container_api_present(),
+            wslc: wslc_available(),
+            isolation_session: isolation_session_present(),
+        })
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -273,6 +298,60 @@ mod tests {
     #[cfg(target_os = "linux")]
     use crate::bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
     use crate::mxc_engine::backend_registry::{self, CANONICAL_BACKEND_NAMES};
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_support_uses_native_psec_availability() {
+        use crate::process_container_common::test_env::CaptureCapabilityGuard;
+
+        for available in [false, true] {
+            let _guard = CaptureCapabilityGuard::set(available, false);
+            let support = platform_support();
+            assert_eq!(
+                support
+                    .available_methods
+                    .iter()
+                    .any(|method| method == "processcontainer"),
+                available
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_support_requires_an_available_backend() {
+        use super::{windows_platform_support_with, WindowsPlatformAvailability};
+
+        let cases: &[(bool, bool, bool, &[&str])] = &[
+            (false, false, false, &[]),
+            (true, false, false, &["processcontainer"]),
+            (false, true, false, &["wslc"]),
+            (false, false, true, &["isolation_session"]),
+            (
+                true,
+                true,
+                true,
+                &["processcontainer", "wslc", "isolation_session"],
+            ),
+        ];
+        for &(process_container, wslc, isolation_session, expected) in cases {
+            let support = windows_platform_support_with(WindowsPlatformAvailability {
+                process_container,
+                wslc,
+                isolation_session,
+            });
+            assert_eq!(support.available_methods, expected);
+            assert_eq!(support.is_supported, !expected.is_empty());
+            if expected.is_empty() {
+                assert!(support
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("PSEC")));
+            } else {
+                assert_eq!(support.reason, None);
+            }
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

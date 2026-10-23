@@ -39,14 +39,14 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
-  isolation-session-bundle:
+  windows-sdk-bundle:
     needs: dependency-feed-check
-    uses: ./.github/workflows/Package.IsolationSession.TestBundle.Job.yml
+    uses: ./.github/workflows/Package.WindowsSdk.TestBundle.Job.yml
 
-  # Runs even when the bundle failed; the isolation-session jobs then fail at
-  # their bundle download.
+  # Runs even when the bundle failed; the ProcessContainer and IsolationSession
+  # jobs then fail at their bundle download.
   test-nightly:
-    needs: [windows, linux, macos, isolation-session-bundle]
+    needs: [windows, linux, macos, windows-sdk-bundle]
     if: >-
       ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success'
       && needs.macos.result == 'success'
@@ -56,7 +56,7 @@ jobs:
       plan: nightly
 
   test-weekly:
-    needs: [windows, linux, macos, isolation-session-bundle]
+    needs: [windows, linux, macos, windows-sdk-bundle]
     if: >-
       ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success'
       && needs.macos.result == 'success'

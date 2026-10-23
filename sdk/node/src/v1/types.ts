@@ -74,35 +74,6 @@ export interface LifecycleConfig {
  */
 export type ContainmentType = "process" | "vm" | "microvm";
 
-/**
- * Runtime list of {@link ContainmentType} values. Kept in sync with the
- * `ContainmentType` union via the type annotation. Use this to recognise
- * abstract intents at run time (the union itself only exists at compile
- * time).
- */
-export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
-
-/**
- * Deprecated containment wire values, mapped to their canonical
- * {@link ContainmentBackend} replacement. Historical v0 contracts accept
- * these spellings via serde aliases; v1 contracts reject them.
- *
- * The map is intentionally partial: only deprecated keys appear. Use a
- * presence check (e.g. `LegacyContainmentAliases[value] ?? value`) rather
- * than indexing blindly.
- *
- * The wire payload is forwarded to wxc-exec unchanged — the Rust parser
- * performs the final mapping at runtime. Resolution here is purely so the
- * SDK's experimental-mode, platform-support, and availability checks see
- * the canonical backend.
- *
- * Internal to the SDK; not part of the public API.
- */
-export const LegacyContainmentAliases: Readonly<Partial<Record<string, ContainmentBackend>>> = {
-  appcontainer: 'processcontainer',
-  macos_sandbox: 'seatbelt',
-};
-
 /** @internal Network fields the stable V1 mapper must reject rather than omit. */
 export const UnsupportedV1NetworkFields = [
   'allowOutbound',
@@ -114,12 +85,6 @@ export const UnsupportedV1NetworkFields = [
   'proxy',
   'removeRulesOnExit',
 ] as const;
-
-const LegacyConfigAliasVersions: Readonly<Record<string, readonly string[]>> = {
-  appcontainer: ['0.9.0-alpha'],
-  appContainer: ['0.9.0-alpha'],
-  macos_sandbox: ['0.9.0-alpha'],
-};
 
 /**
  * Concrete containment backend. Each value names a specific runner
@@ -151,12 +116,6 @@ export type ContainmentChoice =
   | 'seatbelt'
   | 'isolation_session'
   | 'bubblewrap';
-
-/**
- * Containment values (abstract intent or concrete backend) that require
- * the `--experimental` flag.
- */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight'];
 
 /**
  * Clipboard access policy levels
@@ -437,35 +396,6 @@ export interface ContainerConfig {
   ui?: UiConfig;
 }
 
-/** @internal Returns an actionable error when a raw config uses a retired alias. */
-export function legacyConfigAliasUnsupportedReason(config: ContainerConfig): string | undefined {
-  const rawContainment = config.containment as string | undefined;
-  if (
-    rawContainment !== undefined
-    && LegacyContainmentAliases[rawContainment] !== undefined
-    && !LegacyConfigAliasVersions[rawContainment]?.includes(config.version)
-  ) {
-    return `Schema ${config.version} does not support legacy containment alias '${rawContainment}'; use '${LegacyContainmentAliases[rawContainment]}' instead`;
-  }
-
-  if (
-    config.appContainer !== undefined
-    && !LegacyConfigAliasVersions.appContainer.includes(config.version)
-  ) {
-    return `Schema ${config.version} does not support legacy field 'appContainer'; use 'processContainer' instead`;
-  }
-
-  const legacySeatbelt = (config as ContainerConfig & { macos_sandbox?: unknown }).macos_sandbox;
-  if (
-    legacySeatbelt !== undefined
-    && !LegacyConfigAliasVersions.macos_sandbox.includes(config.version)
-  ) {
-    return `Schema ${config.version} does not support legacy field 'macos_sandbox'; use 'seatbelt' instead`;
-  }
-
-  return undefined;
-}
-
 /** Per-operation controls for the V1 in-process APIs. */
 export interface MxcOptions {
   /** Validate a lifecycle request without performing the operation. */
@@ -665,11 +595,9 @@ export interface SeatbeltConfig {
 export type SandboxingMethod = ContainmentType | ContainmentBackend;
 
 /**
- * Isolation tier selected by the runtime fallback detector.
- *
- * - `base-container`: full BaseContainer (process security environment)
- * - `appcontainer-bfs`: AppContainer + BFS filesystem isolation
- * - `appcontainer-dacl`: AppContainer + host DACL augmentation (last-resort fallback)
+ * Windows ProcessContainer tier reported by the runtime.
+ * Historical AppContainer values remain readable for V1 compatibility;
+ * current native ProcessContainer execution reports only `base-container`.
  */
 export type IsolationTier =
   | 'base-container'
@@ -756,8 +684,11 @@ export interface ProbeOutput {
 export interface ProbeFacts {
   baseContainerApiPresent: boolean;
   nativeCaptureAvailable: boolean;
+  /** Legacy result compatibility; current native code reports false. */
   guardedCaptureAvailable: boolean;
+  /** Legacy result compatibility; current native code reports false. */
   bfscfgPresent: boolean;
+  /** Legacy result compatibility; current native code reports false. */
   bfsCompiledIn: boolean;
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
@@ -807,19 +738,19 @@ export interface PlatformSupport {
   /** Available sandboxing methods on this platform */
   availableMethods: ContainmentBackend[];
   /**
-   * Why individual Linux backends are unavailable, whether or not another
-   * backend keeps Linux supported. Omitted on other platforms and when no
-   * Linux backend failures were observed.
+   * Individual Linux backend unavailability or Windows discovery failures,
+   * whether or not another backend keeps the platform supported.
+   * Omitted when no such diagnostics were observed.
    */
   unavailableReasons?: Partial<Record<ContainmentBackend, string>>;
   /**
-   * Tier that would be selected for an empty policy on this system.
+   * Present when the native Windows BaseContainer contract is available.
    * Omitted on non-Windows platforms or when the probe fails.
    */
   isolationTier?: IsolationTier;
   /**
-   * Tier degradation warnings (one per fall-through during selection).
-   * Omitted on non-Windows platforms or when the probe fails.
+   * Native probe warnings.
+   * Omitted on non-Windows platforms or when the probe reports none.
    */
   isolationWarnings?: string[];
   /**

@@ -444,26 +444,25 @@ for (const member of rustCapabilityMembers) {
   }
 }
 
-const rustTierLadder = read(
-  "src",
-  "mxc-sdk",
-  "src",
-  "backends",
-  "process_container",
-  "common",
-  "fallback_detector.rs"
+const tierMatch = /const CANONICAL_TIERS:[^=]+=\s*\[([^\]]+)\]/s.exec(
+  rustProbeFull
 );
-const tierMatch = /isolation_tiers!\s*\{(.*?)\n\}/s.exec(rustTierLadder);
 if (!tierMatch) {
-  errors.push("fallback_detector.rs: could not find the isolation_tiers! ladder");
+  errors.push("probe.rs: could not find CANONICAL_TIERS");
 } else {
-  const rustTiers = [...tierMatch[1].matchAll(/=>\s*"([^"]+)"/g)].map(
+  const rustTiers = [...tierMatch[1].matchAll(/"([^"]+)"/g)].map(
     (match) => match[1]
   );
   const managedTiers = [
     ...managedSandbox.matchAll(/"([^"]+)"\s*=>\s*IsolationTier\.\w+/g),
   ].map((match) => match[1]);
-  compare("isolation-tier wire names", managedTiers, rustTiers);
+  // The published V1 IsolationTier enums include these values; removing them
+  // requires a new V* API.
+  compare(
+    "isolation-tier wire names",
+    managedTiers,
+    [...rustTiers, "appcontainer-bfs", "appcontainer-dacl"]
+  );
 }
 
 const rustStateAware = read(

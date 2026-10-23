@@ -137,8 +137,8 @@ MXC inserts the run identifier even when `outputPath` names `denials.json`.
 `wxc-exec` prints a structured JSON pointer on stderr containing the actual
 `outputPath` and, when retained, `etlPath`. Derive the verbose JSON path from
 the actionable filename; it is intentionally not repeated in the pointer.
-Native and guarded-WPR capture use different managed ETL locations, so callers
-must use the reported `etlPath` rather than guessing it.
+Use the reported `etlPath` rather than guessing the native capture's managed
+ETL location.
 
 Streaming SDK callers must complete the process with `wait` or
 `wait_with_output`. Abandoning the process without a terminal wait discards the
@@ -168,7 +168,8 @@ the results into a per-run directory:
 ```
 
 If `%LOCALAPPDATA%` is unavailable, the equivalent directory is created under
-`%TEMP%`. A successful non-dry-run audit contains:
+`%TEMP%`. The directory name is retained for compatibility with existing audit
+consumers. A successful non-dry-run audit contains:
 
 - `denials.json` — actionable denials;
 - `denials.verbose.json` — bounded verbose diagnostics;
@@ -189,57 +190,16 @@ analysis writes the actionable and verbose JSON pair.
 > Learning Mode. Ungranted access checks are allowed for the duration of the
 > run, so deny-by-default is not enforced. Do not use it to validate production
 > containment. It cannot be combined with an explicit
-> `processContainer.captureDenials` section. Native PSEC/V2 capture runs without
-> UAC; a compatible legacy tier may use the guarded-WPR fallback, whose
-> fixed-operation guardian prompts for elevation.
+> `processContainer.captureDenials` section. Native ProcessContainer capture runs
+> without UAC and requires compatible native Learning Mode support. Unsupported
+> capture requests fail before a container is created.
 
-#### Recovering guarded-WPR state
+## Existing WPR recordings
 
-If the guarded-WPR fallback is interrupted before it can prove that WPR
-stopped, MXC preserves an administrator-protected recovery marker. MXC will not
-automatically stop or cancel the host-wide WPR recording because it may belong
-to another tool or user. A later successful PLM start clears a stale marker
-automatically. If start continues to fail, the error reports the exact marker
-path and an administrator must resolve WPR state before removing it.
-
-From an elevated PowerShell window:
-
-1. Inspect the active recording:
-
-   ```powershell
-   wpr -status profiles
-   wpr -status collectors -details
-   ```
-
-2. Determine whether the recording is valuable or belongs to another tool or
-   user. Preserve it when in doubt:
-
-   ```powershell
-   wpr -stop "$env:TEMP\recovered-wpr-trace.etl"
-   ```
-
-   If the recording is known to be disposable, deliberately discard it
-   instead:
-
-   ```powershell
-   wpr -cancel
-   ```
-
-3. Run `wpr -status` and confirm that WPR reports no active recording.
-4. Delete the exact recovery-marker path reported by MXC. Its normal location
-   is `%ProgramData%\Microsoft\MXC\PLM\active.marker`.
-
-   ```powershell
-   Remove-Item -LiteralPath "$env:ProgramData\Microsoft\MXC\PLM\active.marker"
-   ```
-
-5. Retry `captureDenials` or `wxc-exec.exe --audit`.
-
-> **Do not delete the marker first.** Removing it neither stops WPR nor proves
-> that the recording is safe to discard. It only removes MXC's durable warning
-> that host trace state could not be verified. This recovery procedure changes
-> only host-side WPR bookkeeping; it does not change sandbox policy or
-> enforcement.
+MXC does not invoke WPR or manage operator-owned WPR recordings.
+`captureDenials` and `wxc-exec --audit` use native ProcessContainer capture.
+Any existing host-wide recording must be inspected and managed separately
+with Windows tooling; MXC will not cancel it.
 
 ## What Gets Logged
 

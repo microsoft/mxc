@@ -55,6 +55,41 @@ fn proc_entry_exists(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
+fn run_terminal_fixture(mut command: std::process::Command) {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use mxc_sdk::mxc_common::sandbox_process::{group_kill, wait_with_timeout, WaitError};
+    use mxc_sdk::mxc_pty::{LivePty, PtySize};
+
+    let log = tempfile::NamedTempFile::new().expect("fixture log");
+    let _terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("fixture PTY");
+    command
+        .stdout(Stdio::from(
+            log.as_file().try_clone().expect("fixture stdout"),
+        ))
+        .stderr(Stdio::from(
+            log.as_file().try_clone().expect("fixture stderr"),
+        ));
+    let mut child = command.spawn().expect("spawn terminal fixture");
+    drop(command);
+
+    let outcome =
+        wait_with_timeout(&mut child, Some(Duration::from_secs(90))).map_err(|error| match error {
+            WaitError::Timeout => "terminal fixture timed out".to_string(),
+            WaitError::Io(error) => format!("waiting for terminal fixture failed: {error}"),
+        });
+    if outcome.is_err() {
+        group_kill(&mut child).expect("terminate terminal fixture");
+        child.wait().expect("reap terminal fixture");
+    }
+    let output = std::fs::read_to_string(log.path()).expect("read fixture log");
+    assert!(
+        matches!(&outcome, Ok(status) if status.success()),
+        "terminal fixture failed: {outcome:?}\n{output}"
+    );
+}
+
 #[test]
 fn streaming_bubblewrap_bidirectional_stdio() {
     if !bwrap_available() {
@@ -75,6 +110,224 @@ fn streaming_bubblewrap_bidirectional_stdio() {
     assert!(out.contains("ping-pong"), "got: {out:?}");
 
     assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
+}
+
+#[test]
+fn streaming_bubblewrap_isolates_controlling_terminal() {
+    if !bwrap_available() {
+        return;
+    }
+    use std::process::Command;
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_CONTROLLING_TERMINAL_FIXTURE";
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        let _host_terminal =
+            std::fs::File::open("/dev/tty").expect("fixture must have a controlling terminal");
+        let output = spawn(
+            bwrap_request(
+                r#"test -c /dev/tty || exit 1
+read -r pid comm state ppid pgrp session tty rest < /proc/self/stat
+test "$tty" = 0 || { echo "sandbox retained controlling terminal $tty" >&2; exit 1; }
+if (exec 3<>/dev/tty) 2>/dev/null; then
+    echo "sandbox can open the host controlling terminal" >&2
+    exit 1
+fi
+echo NO_CONTROLLING_TERMINAL"#,
+                30_000,
+            ),
+            Default::default(),
+        )
+        .expect("spawn with piped stdio")
+        .wait_with_output()
+        .expect("wait with piped stdio");
+        assert_eq!(
+            output.outcome,
+            WaitResult::Exited(0),
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("NO_CONTROLLING_TERMINAL"),
+            "terminal isolation probe did not complete"
+        );
+
+        unix_pty_contract::assert_round_trip(bwrap_request(
+            &format!(
+                "stty size < /dev/tty || exit 1; {}",
+                unix_pty_contract::ROUND_TRIP_COMMAND
+            ),
+            30_000,
+        ));
+        return;
+    }
+
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args([
+            "--exact",
+            "streaming_bubblewrap_isolates_controlling_terminal",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FIXTURE_ENV, "1");
+    run_terminal_fixture(command);
+}
+
+#[test]
+fn streaming_bubblewrap_cancels_without_parent_death_signal() {
+    if !bwrap_available() {
+        return;
+    }
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    use nix::sys::prctl::set_child_subreaper;
+    use nix::sys::signal::{kill, Signal};
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::unistd::Pid;
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_CANCELLATION_FIXTURE";
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        set_child_subreaper(true).expect("adopt namespace init after its monitor exits");
+
+        struct NamespaceInit(Option<Pid>);
+
+        impl NamespaceInit {
+            fn wait_for_exit(&mut self) -> bool {
+                let pid = self.0.expect("namespace init");
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match waitpid(pid, Some(WaitPidFlag::WNOHANG)).expect("wait for namespace init")
+                    {
+                        WaitStatus::StillAlive if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        WaitStatus::StillAlive => return false,
+                        WaitStatus::Exited(..) | WaitStatus::Signaled(..) => {
+                            self.0 = None;
+                            return true;
+                        }
+                        status => panic!("unexpected namespace init status: {status:?}"),
+                    }
+                }
+            }
+        }
+
+        impl Drop for NamespaceInit {
+            fn drop(&mut self) {
+                if let Some(pid) = self.0 {
+                    if let Err(error) = kill(pid, Signal::SIGKILL) {
+                        eprintln!("namespace init cleanup signal failed: {error}");
+                    }
+                    if let Err(error) = waitpid(pid, None) {
+                        eprintln!("namespace init cleanup wait failed: {error}");
+                    }
+                }
+            }
+        }
+
+        for termination in ["kill", "timeout", "drop"] {
+            let mut init = NamespaceInit(None);
+            let timeout = if termination == "timeout" {
+                1_000
+            } else {
+                30_000
+            };
+            let mut proc = spawn(
+                bwrap_request("sleep 30 & echo CANCELLATION_READY; wait", timeout),
+                Default::default(),
+            )
+            .expect("spawn cancellation fixture");
+            let mut line = String::new();
+            BufReader::new(proc.take_stdout().expect("fixture stdout"))
+                .read_line(&mut line)
+                .expect("read workload readiness");
+            assert_eq!(line.trim(), "CANCELLATION_READY");
+
+            let pid = proc.id();
+            let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+                .expect("read monitor children");
+            let children: Vec<_> = children
+                .split_whitespace()
+                .map(|pid| Pid::from_raw(pid.parse().expect("namespace init pid")))
+                .collect();
+            assert_eq!(
+                children.len(),
+                1,
+                "expected one namespace init: {children:?}"
+            );
+            init.0 = Some(children[0]);
+
+            match termination {
+                "kill" => {
+                    proc.kill().expect("cancel sandbox");
+                    assert_ne!(proc.wait().expect("wait after kill"), WaitResult::Exited(0));
+                }
+                "timeout" => assert_eq!(proc.wait().expect("wait"), WaitResult::TimedOut),
+                "drop" => drop(proc),
+                _ => unreachable!(),
+            }
+            assert!(
+                init.wait_for_exit(),
+                "{termination}: namespace init survived without a parent-death signal"
+            );
+        }
+        return;
+    }
+
+    let resolved = Command::new("/bin/sh")
+        .args(["-c", "command -v bwrap"])
+        .output()
+        .expect("resolve bwrap");
+    assert!(
+        resolved.status.success(),
+        "could not resolve the real bwrap"
+    );
+    let real_bwrap = std::fs::canonicalize(
+        String::from_utf8(resolved.stdout)
+            .expect("bwrap path is UTF-8")
+            .trim(),
+    )
+    .expect("absolute bwrap path");
+    let directory = tempfile::tempdir().expect("wrapper directory");
+    let wrapper = directory.path().join("bwrap");
+
+    // Omit parent-death cleanup to hold the startup condition without a timing race.
+    std::fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+for arg in "$@"; do
+    shift
+    if [ "$arg" != "--die-with-parent" ]; then
+        set -- "$@" "$arg"
+    fi
+done
+exec "$MXC_TEST_REAL_BWRAP" "$@"
+"#,
+    )
+    .expect("write bwrap wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))
+        .expect("make wrapper executable");
+    let path = std::env::var_os("PATH").expect("PATH");
+    let path = std::env::join_paths(
+        std::iter::once(directory.path().to_path_buf()).chain(std::env::split_paths(&path)),
+    )
+    .expect("fixture PATH");
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args([
+            "--exact",
+            "streaming_bubblewrap_cancels_without_parent_death_signal",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FIXTURE_ENV, "1")
+        .env("MXC_TEST_REAL_BWRAP", real_bwrap)
+        .env("PATH", path);
+    run_terminal_fixture(command);
 }
 
 #[test]

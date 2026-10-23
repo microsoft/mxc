@@ -10,9 +10,7 @@
 //! [`diagnose_create_process_failure`] or [`diagnose_process_exit`] to check
 //! for well-known conditions and produce an actionable message.
 //!
-//! This module is intentionally decoupled from the runner implementations
-//! so both `AppContainerScriptRunner` and `BaseContainerRunner` share the
-//! same detection logic.
+//! This module keeps launch diagnostics separate from native process creation.
 
 use std::path::Path;
 
@@ -32,7 +30,7 @@ pub struct LaunchDiagnostic {
 // -- Public API --------------------------------------------------------------
 
 /// Environment variable names Windows requires to be *present* in the child's
-/// environment block when creating a contained (AppContainer / PSEC) process.
+/// environment block when creating a contained Windows process.
 ///
 /// Determined empirically against `CreateProcessW` with
 /// `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`: with either name absent the
@@ -255,38 +253,26 @@ fn check_exe_heuristics(
 /// Produces a diagnostic when the API returns E_NOTIMPL/ERROR_CALL_NOT_IMPLEMENTED,
 /// indicating the feature is gated behind velocity keys.
 fn diagnose_api_not_implemented() -> LaunchDiagnostic {
-    let key_status = check_velocity_keys();
+    diagnose_api_not_implemented_with(&check_velocity_keys())
+}
 
-    let message = if key_status.is_empty() {
-        "CreateProcessSecurityEnvironment returned E_NOTIMPL. \
-         The process security environment feature is not enabled on this OS build. \
-         It may be possible to enable it through the Windows experimental \
-         features settings, or run on a host that supports the BaseContainer \
-         backend (MXC falls back to AppContainer automatically on builds \
-         without it)."
-            .to_string()
-    } else {
-        let disabled: Vec<_> = key_status.iter().filter(|(_, enabled)| !enabled).collect();
-        if disabled.is_empty() {
-            "CreateProcessSecurityEnvironment returned E_NOTIMPL. \
-             The process security environment feature is not enabled on this OS build; it may \
-             require additional enablement. MXC falls back to AppContainer \
-             automatically on builds without BaseContainer support."
-                .to_string()
-        } else {
-            let disabled_list: Vec<String> =
-                disabled.iter().map(|(id, _)| id.to_string()).collect();
-            format!(
-                "CreateProcessSecurityEnvironment returned E_NOTIMPL. \
-                 The process security environment feature is not enabled on this OS build \
-                 (disabled feature flags: {}). It may be possible to enable it \
-                 through the Windows experimental features settings, or run on a \
-                 host that supports the BaseContainer backend (MXC falls back to \
-                 AppContainer automatically on builds without it).",
-                disabled_list.join(", ")
-            )
-        }
-    };
+fn diagnose_api_not_implemented_with(key_status: &[(u32, bool)]) -> LaunchDiagnostic {
+    let mut message = "The native PSEC process-launch API returned E_NOTIMPL or \
+        ERROR_CALL_NOT_IMPLEMENTED. The process security environment feature is not enabled \
+        on this OS build. Windows ProcessContainer requires native PSEC support and cannot \
+        run this request. Use a host with PSEC enabled."
+        .to_string();
+    let disabled: Vec<String> = key_status
+        .iter()
+        .filter(|(_, enabled)| !enabled)
+        .map(|(id, _)| id.to_string())
+        .collect();
+    if !disabled.is_empty() {
+        message.push_str(&format!(
+            " Disabled feature flags: {}.",
+            disabled.join(", ")
+        ));
+    }
 
     LaunchDiagnostic {
         kind: "feature_not_enabled",
@@ -534,6 +520,24 @@ mod tests {
     fn e_notimpl_triggers_feature_diagnostic() {
         let diag = diagnose_create_process_failure(E_NOTIMPL.0 as u32, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
+    }
+
+    #[test]
+    fn native_feature_guidance_requires_psec_and_lists_disabled_flags() {
+        for key_status in [
+            &[][..],
+            &[(61389575, true), (61155944, true)],
+            &[(61389575, false), (61155944, true)],
+        ] {
+            let diag = diagnose_api_not_implemented_with(key_status);
+            assert_eq!(diag.kind, "feature_not_enabled");
+            assert!(diag.message.contains("requires native PSEC support"));
+            assert!(diag.message.contains("cannot run this request"));
+            assert_eq!(
+                diag.message.contains("Disabled feature flags: 61389575"),
+                key_status.iter().any(|(_, enabled)| !enabled)
+            );
+        }
     }
 
     #[test]
