@@ -47,11 +47,12 @@ pub(crate) fn resolve_through_symlinks(path: &Path) -> Option<SymlinkResolution>
     let mut result = PathBuf::new();
     let mut failure = None;
     let mut resolve_prefix = |prefix: &Path| {
-        // macOS realpath can fold `file/..` without checking that file is a directory.
+        // macOS realpath can fold `file/..` (also inside link targets) without
+        // checking that file is a directory, so let the kernel follow it first.
         let resolved = match std::fs::symlink_metadata(prefix) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
             Err(error) => Err(error),
-            Ok(_) => std::fs::canonicalize(prefix),
+            Ok(_) => std::fs::metadata(prefix).and_then(|_| std::fs::canonicalize(prefix)),
         };
         match resolved {
             Ok(real) => Some(real),
@@ -198,6 +199,19 @@ mod tests {
         let resolved = resolve_through_symlinks(&root.join("file/../secret")).unwrap();
         assert!(resolved.error.is_some(), "{resolved:?}");
         assert_eq!(resolved.path, root.join("secret"));
+    }
+
+    #[test]
+    fn a_link_target_cannot_treat_a_file_as_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = temp_root(&dir);
+        std::fs::write(root.join("file"), b"x").unwrap();
+        std::fs::write(root.join("secret"), b"x").unwrap();
+        std::os::unix::fs::symlink("file/../secret", root.join("link")).unwrap();
+        for path in [root.join("link"), root.join("link/child")] {
+            let resolved = resolve_through_symlinks(&path).unwrap();
+            assert!(resolved.error.is_some(), "{resolved:?}");
+        }
     }
 
     #[test]

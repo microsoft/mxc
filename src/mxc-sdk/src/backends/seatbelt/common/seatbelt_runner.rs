@@ -44,7 +44,9 @@ use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
 #[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
 use crate::seatbelt_common::profile_builder::build_profile_with_terminals;
-use crate::seatbelt_common::profile_preparation::{expand_tilde, prepare_profile};
+use crate::seatbelt_common::profile_preparation::{
+    expand_tilde, prepare_profile, resolve_policy_path,
+};
 
 #[link(name = "proc")]
 unsafe extern "C" {
@@ -286,6 +288,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .map_err(error_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
             .map_err(error_response)?;
+        // Dry runs never reach spawn, so reject unresolvable paths here too.
+        prepare_profile(request).map_err(error_response)?;
 
         Ok(())
     }
@@ -388,6 +392,9 @@ fn spawn_exec(
             )))
         }
     };
+    // Export the physical directory so PWD and HOME match the profile rules.
+    let cwd = resolve_policy_path(&cwd)
+        .map_err(|e| error_response(format!("Seatbelt working directory: {e}")))?;
     let home_dir = resolved_cwd.as_ref().map(|_| cwd.as_str());
     apply_clean_environment(&mut command, request, proxy_address, home_dir);
 
@@ -1620,9 +1627,8 @@ os.close(fd)
         );
     }
 
-    /// An absolute directory is passed through spelled exactly as written —
-    /// symlinks stay unresolved so `PWD` matches what `spawn_exec` exports —
-    /// and needs no launch directory. `chdir` accepts it even from a launcher
+    /// An absolute directory is passed through spelled exactly as written and
+    /// needs no launch directory. `chdir` accepts it even from a launcher
     /// whose own directory has been removed, so a failure to read that
     /// directory must not fail the request: the panicking closure asserts it is
     /// never consulted.

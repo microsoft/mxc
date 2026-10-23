@@ -34,7 +34,7 @@ pub(crate) fn prepare_profile(request: &ExecutionRequest) -> Result<ProfileInput
             "HOME environment variable not set; cannot expand '~/Library/Keychains' for keychainAccess"
                 .to_string()
         })?;
-        Some(format!("{home}/Library/Keychains"))
+        Some(user_keychains_dir(&home)?)
     } else {
         None
     };
@@ -52,8 +52,13 @@ fn resolve_all(paths: &[String]) -> Result<Vec<String>, String> {
     paths.iter().map(|p| resolve_policy_path(p)).collect()
 }
 
+/// Seatbelt matches real paths, so a symlinked HOME must be resolved.
+fn user_keychains_dir(home: &str) -> Result<String, String> {
+    resolve_policy_path(&format!("{home}/Library/Keychains"))
+}
+
 /// Follow symlinks before applying `..`, retaining missing trailing names.
-fn resolve_policy_path(path: &str) -> Result<String, String> {
+pub(crate) fn resolve_policy_path(path: &str) -> Result<String, String> {
     let expanded = expand_tilde(path)?;
     let resolution_error =
         |error| format!("Filesystem path '{path}' could not be resolved: {error}");
@@ -266,6 +271,19 @@ mod tests {
         let inputs = prepare_profile(&request).unwrap();
         let profile = build_profile_with_proxy(&request, None, &inputs).unwrap();
         assert_eq!(profile, "(version 1)\n(allow default)");
+    }
+
+    #[test]
+    fn keychains_under_a_symlinked_home_use_the_real_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(root.join("real-home")).unwrap();
+        let home = root.join("home");
+        std::os::unix::fs::symlink("real-home", &home).unwrap();
+        assert_eq!(
+            user_keychains_dir(home.to_str().unwrap()).unwrap(),
+            root.join("real-home/Library/Keychains").to_str().unwrap()
+        );
     }
 
     #[test]

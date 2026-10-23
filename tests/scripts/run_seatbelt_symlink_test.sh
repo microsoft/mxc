@@ -117,7 +117,7 @@ cases = [
      {"deniedPaths": [dir_link / "created-0.txt"]}, [], [real_dir], "deny"),
 ]
 
-def execute(filesystem, command):
+def execute(filesystem, command, cwd="/", extra_args=()):
     policy = {"readwritePaths": [root], "readonlyPaths": [], "deniedPaths": []}
     policy.update(filesystem)
     policy["readonlyPaths"] = [developer_dir] + policy["readonlyPaths"]
@@ -126,14 +126,14 @@ def execute(filesystem, command):
         "containment": "seatbelt",
         "process": {
             "commandLine": command,
-            "cwd": "/",
+            "cwd": str(cwd),
             "timeout": 20000,
         },
         "filesystem": {key: [str(path) for path in paths] for key, paths in policy.items()},
     }
     encoded = base64.b64encode(json.dumps(request).encode()).decode()
     return subprocess.run(
-        [binary, "--config-base64", encoded],
+        [binary, "--config-base64", encoded, *extra_args],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -183,6 +183,8 @@ dangling = root / "dangling"
 dangling.symlink_to("missing-target")
 loop = root / "loop"
 loop.symlink_to("loop")
+target_traversal = root / "target-traversal"
+target_traversal.symlink_to("real-file.txt/../secret.txt")
 unreadable = root / "unreadable"
 unreadable.mkdir()
 try:
@@ -209,17 +211,31 @@ try:
          real_file / ".." / "secret.txt"),
         ("parent traversal does not hide an inaccessible directory", "deniedPaths",
          unreadable / ".." / "real-file.txt"),
+        ("a link target cannot treat a file as a directory", "readwritePaths",
+         target_traversal),
     ]:
-        result = execute({field: [path]}, "echo SYMLINK_INVALID_POLICY_RAN")
-        output = result.stdout + result.stderr
-        if (result.returncode == 0 or "SYMLINK_INVALID_POLICY_RAN" in output
-                or "could not be resolved" not in output or str(path) not in output):
-            failures.append(label)
-            print(f"FAIL: {label}\nexit {result.returncode}\n{output}", flush=True)
-        else:
-            print(f"PASS: {label}", flush=True)
+        for extra_args in [(), ("--dry-run",)]:
+            result = execute({field: [path]}, "echo SYMLINK_INVALID_POLICY_RAN",
+                             extra_args=extra_args)
+            output = result.stdout + result.stderr
+            case = label + (" (dry run)" if extra_args else "")
+            if (result.returncode == 0 or "SYMLINK_INVALID_POLICY_RAN" in output
+                    or "could not be resolved" not in output or str(path) not in output):
+                failures.append(case)
+                print(f"FAIL: {case}\nexit {result.returncode}\n{output}", flush=True)
+            else:
+                print(f"PASS: {case}", flush=True)
 finally:
     unreadable.chmod(0o700)
+
+result = execute({}, 'printf "%s\\n" "$PWD" "$HOME"; pwd -P', cwd=traversal_link / "..")
+expected = [str(real_dir)] * 3
+if result.returncode != 0 or result.stdout.splitlines() != expected:
+    failures.append("working directory uses the physical path")
+    print(f"FAIL: working directory uses the physical path\nexpected {expected}\n"
+          f"exit {result.returncode}\n{result.stdout}\n{result.stderr}", flush=True)
+else:
+    print("PASS: working directory uses the physical path", flush=True)
 if failures:
     raise AssertionError(f"{len(failures)} symlink policy case(s) failed")
 PY

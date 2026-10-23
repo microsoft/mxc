@@ -455,7 +455,9 @@ adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
 
 `process.cwd`, if omitted, resolves to the first of: `readwritePaths[0]` →
 `readonlyPaths[0]` → `/`. A `~` default is tilde-expanded the same way policy
-paths are. `PWD` is exported to the resolved directory.
+paths are. The directory is then resolved through symlinks and `..`, and `PWD`
+and the default `HOME` use that physical path (for example, `/tmp` becomes
+`/private/tmp`).
 
 A relative `cwd` is resolved against the MXC process's directory.
 
