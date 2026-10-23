@@ -455,7 +455,9 @@ adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
 
 `process.cwd`, if omitted, resolves to the first of: `readwritePaths[0]` →
 `readonlyPaths[0]` → `/`. A `~` default is tilde-expanded the same way policy
-paths are. The directory is then resolved through symlinks and `..`, and `PWD`
+paths are. The directory must already exist; a missing path (including one
+hidden by `..`) fails before launch, even with `--dry-run`. It is then resolved
+through symlinks and `..`, and `PWD`
 and the default `HOME` use that physical path (for example, `/tmp` becomes
 `/private/tmp`).
 

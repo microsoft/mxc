@@ -236,6 +236,24 @@ if result.returncode != 0 or result.stdout.splitlines() != expected:
           f"exit {result.returncode}\n{result.stdout}\n{result.stderr}", flush=True)
 else:
     print("PASS: working directory uses the physical path", flush=True)
+
+(root / "project").mkdir()
+for label, cwd in [
+    ("a missing working directory fails", root / "missing"),
+    ("parent traversal cannot hide a missing working directory",
+     root / "missing" / ".." / "project"),
+    ("a dangling working directory fails", dangling),
+]:
+    for extra_args in [(), ("--dry-run",)]:
+        result = execute({}, "echo SYMLINK_INVALID_CWD_RAN", cwd=cwd, extra_args=extra_args)
+        output = result.stdout + result.stderr
+        case = label + (" (dry run)" if extra_args else "")
+        if (result.returncode == 0 or "SYMLINK_INVALID_CWD_RAN" in output
+                or "Seatbelt working directory" not in output):
+            failures.append(case)
+            print(f"FAIL: {case}\nexit {result.returncode}\n{output}", flush=True)
+        else:
+            print(f"PASS: {case}", flush=True)
 if failures:
     raise AssertionError(f"{len(failures)} symlink policy case(s) failed")
 PY
