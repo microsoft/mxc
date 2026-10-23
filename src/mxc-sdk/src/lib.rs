@@ -51,9 +51,9 @@
 //! [`v1::spawn_with_pty`] allocates a caller-controlled terminal.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
-//! requires the `isolation_session` build feature. A WSLC process reads
-//! end-of-file on stdin, and [`MxcProcess::take_stdin`] returns `None` for it,
-//! unless it was started in a provisioned container by
+//! requires the `isolation_session` build feature. A WSLC process in a
+//! provisioned container reads end-of-file on stdin, and
+//! [`MxcProcess::take_stdin`] returns `None` for it, unless it was started by
 //! [`v1::container::spawn_in_container_with_stdin`].
 //! IsolationSession is also available through the typed lifecycle API.
 //!
@@ -120,7 +120,8 @@
 //! [`v1::container::spawn_in_container_with_pty`]. [`v1::run`] captures both output streams. With
 //! [`v1::spawn`] or [`v1::container::spawn_in_container`], callers
 //! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
-//! stream they did not take. WSLC exposes stdin only for
+//! stream they did not take. For a WSLC process in a provisioned container,
+//! stdin is available only through
 //! [`v1::container::spawn_in_container_with_stdin`].
 //!
 //! [`v1::spawn_with_pty`] allocates a caller-controlled PTY for create-and-run
