@@ -897,19 +897,6 @@ pub(crate) fn prepare_request_with_procfs_policy(
             Containment::Process | Containment::Bubblewrap
         )
     {
-        if matches!(procfs_policy, ProcfsPolicy::Omit)
-            && !prepared
-                .inner
-                .policy
-                .denied_paths
-                .iter()
-                .any(|path| path == "/proc")
-        {
-            // Ordinary environment values are excluded from policy identity.
-            // Project procfs omission as a filesystem restriction too, so
-            // requests with different procfs exposure have different hashes.
-            prepared.inner.policy.denied_paths.push("/proc".to_string());
-        }
         if let Some(procfs_control) = procfs_control {
             if request.environment.is_none() {
                 prepared.inner.inherit_default_env = true;
@@ -1333,6 +1320,10 @@ mod tests {
     fn procfs_policy_controls_bubblewrap_without_changing_legacy_requests() {
         let mut request = super::ContainerRequest::new("/usr/bin/true");
         request.containment = super::Containment::Bubblewrap;
+        request.filesystem = Some(super::FilesystemPolicy {
+            readonly_paths: vec!["/proc".to_string()],
+            ..Default::default()
+        });
 
         let prepared = super::prepare_request_with_procfs_policy(
             &request,
@@ -1342,10 +1333,16 @@ mod tests {
         let environment = prepared.inner.env.as_ref().unwrap();
 
         assert!(prepared.inner.inherit_default_env);
-        assert!(prepared
+        assert!(!prepared
             .inner
             .policy
             .denied_paths
+            .iter()
+            .any(|path| path == "/proc"));
+        assert!(prepared
+            .inner
+            .policy
+            .readonly_paths
             .iter()
             .any(|path| path == "/proc"));
         assert!(environment.iter().any(|entry| {
@@ -1381,6 +1378,22 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| entry == "MXC_INTERNAL_MOUNT_PROCFS=on"));
+
+        // Omission is an independent procfs selection, not a filesystem
+        // denial: with no explicit grant, `/proc` remains absent from both
+        // filesystem lists instead of becoming an empty tmpfs mount.
+        let mut no_procfs_grant = super::ContainerRequest::new("/usr/bin/true");
+        no_procfs_grant.containment = super::Containment::Bubblewrap;
+        let omitted = super::prepare_request_with_procfs_policy(
+            &no_procfs_grant,
+            crate::options::ProcfsPolicy::Omit,
+        )
+        .unwrap();
+        assert!(!omitted.inner.policy.denied_paths.iter().any(|path| path == "/proc"));
+        assert!(!omitted.inner.policy.readonly_paths.iter().any(|path| path == "/proc"));
+        assert!(omitted.inner.env.as_ref().unwrap().iter().any(|entry| {
+            entry == "MXC_INTERNAL_MOUNT_PROCFS=off"
+        }));
 
         let mut spoofed = super::ContainerRequest::new("/usr/bin/true");
         spoofed.containment = super::Containment::Bubblewrap;
