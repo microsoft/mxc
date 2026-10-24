@@ -254,8 +254,9 @@ pub mod v1 {
         /// Host filesystem-policy discovery helpers and their options.
         pub mod filesystem {
             pub use crate::policy::{
-                available_tools_policy, temporary_files_policy, user_profile_policy,
-                FilesystemPolicyResult, ToolsPolicyContainerType, ToolsPolicyOptions,
+                available_tools_policy, available_tools_policy_with_powershell_drive_root_read,
+                temporary_files_policy, user_profile_policy, FilesystemPolicyResult,
+                ToolsPolicyContainerType, ToolsPolicyOptions,
             };
         }
 

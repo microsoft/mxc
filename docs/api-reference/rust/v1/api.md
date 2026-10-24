@@ -59,6 +59,14 @@ Discover tool and SDK directories from environment (defaults to the process envi
 pub fn available_tools_policy(environment: Option<&[(String, String)]>, options: ToolsPolicyOptions) -> FilesystemPolicyResult;
 ```
 
+## `mxc_sdk::v1::policy::filesystem::available_tools_policy_with_powershell_drive_root_read`
+
+Discover tool and SDK directories while opting into the legacy PowerShell system-drive compatibility grant.
+
+```rust
+pub fn available_tools_policy_with_powershell_drive_root_read(environment: Option<&[(String, String)]>, options: ToolsPolicyOptions) -> FilesystemPolicyResult;
+```
+
 
 ## `mxc_sdk::v1::container::deprovision_container`
 
