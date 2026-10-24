@@ -897,6 +897,19 @@ pub(crate) fn prepare_request_with_procfs_policy(
             Containment::Process | Containment::Bubblewrap
         )
     {
+        if matches!(procfs_policy, ProcfsPolicy::Omit)
+            && !prepared
+                .inner
+                .policy
+                .denied_paths
+                .iter()
+                .any(|path| path == "/proc")
+        {
+            // Ordinary environment values are excluded from policy identity.
+            // Project procfs omission as a filesystem restriction too, so
+            // requests with different procfs exposure have different hashes.
+            prepared.inner.policy.denied_paths.push("/proc".to_string());
+        }
         if let Some(procfs_control) = procfs_control {
             if request.environment.is_none() {
                 prepared.inner.inherit_default_env = true;
@@ -1329,6 +1342,12 @@ mod tests {
         let environment = prepared.inner.env.as_ref().unwrap();
 
         assert!(prepared.inner.inherit_default_env);
+        assert!(prepared
+            .inner
+            .policy
+            .denied_paths
+            .iter()
+            .any(|path| path == "/proc"));
         assert!(environment.iter().any(|entry| {
             entry
                 == &format!(
@@ -1350,6 +1369,12 @@ mod tests {
             crate::options::ProcfsPolicy::Mount,
         )
         .unwrap();
+        assert!(!explicit_mount
+            .inner
+            .policy
+            .denied_paths
+            .iter()
+            .any(|path| path == "/proc"));
         assert!(explicit_mount
             .inner
             .env
