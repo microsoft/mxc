@@ -467,19 +467,7 @@ pub(crate) fn build_args_classified_with_mode(
     // paths under /dev, /proc, or /tmp survive).
     args.extend(["--dev".into(), "/dev".into()]);
 
-    let procfs_policy = request.env.as_ref().and_then(|environment| {
-        environment.iter().find_map(|entry| {
-            entry
-                .strip_prefix(crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV)
-                .and_then(|value| value.strip_prefix('='))
-        })
-    });
-    let mount_procfs = match procfs_policy {
-        Some("off") => false,
-        Some("on") | None => true,
-        Some(_) => false,
-    };
-    if mount_procfs {
+    if request.mount_procfs.unwrap_or(true) {
         args.extend(["--proc".into(), "/proc".into()]);
     }
 
@@ -978,8 +966,9 @@ mod tests {
     #[test]
     fn explicit_procfs_omit_keeps_pid_namespace_and_hides_internal_marker() {
         let mut request = base_request();
+        request.mount_procfs = Some(false);
         request.env = Some(vec![format!(
-            "{}=off",
+            "{}=on",
             crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
         )]);
         request.inherit_default_env = true;
@@ -1003,8 +992,9 @@ mod tests {
     #[test]
     fn explicit_procfs_mount_and_legacy_default_keep_procfs_available() {
         let mut request = base_request();
+        request.mount_procfs = Some(true);
         request.env = Some(vec![format!(
-            "{}=on",
+            "{}=off",
             crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
         )]);
         request.inherit_default_env = true;
@@ -1015,10 +1005,57 @@ mod tests {
 
         request.env = None;
         request.inherit_default_env = false;
+        request.mount_procfs = None;
         let legacy_default = build_args(&request, None);
         assert!(legacy_default
             .windows(2)
             .any(|window| window == ["--proc", "/proc"]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prepared_procfs_omit_stays_separate_from_filesystem_mounts() {
+        let mut request = crate::policy::ContainerRequest::new("/usr/bin/true");
+        request.containment = crate::policy::Containment::Bubblewrap;
+        request.filesystem = Some(crate::policy::FilesystemPolicy {
+            readonly_paths: vec!["/proc".into()],
+            ..Default::default()
+        });
+
+        let prepared = crate::policy::prepare_request_with_procfs_policy(
+            &request,
+            crate::options::ProcfsPolicy::Omit,
+        )
+        .expect("typed Bubblewrap request should prepare");
+        assert_eq!(prepared.inner.mount_procfs, Some(false));
+        assert!(prepared.inner.policy.denied_paths.is_empty());
+        assert!(prepared
+            .inner
+            .policy
+            .readonly_paths
+            .iter()
+            .any(|path| path == "/proc"));
+
+        let args = build_args(&prepared.inner, None);
+        assert!(!args.windows(2).any(|window| window == ["--proc", "/proc"]));
+        assert!(args
+            .windows(3)
+            .any(|window| window == ["--ro-bind", "/proc", "/proc"]));
+        assert!(!args.windows(2).any(|window| window == ["--tmpfs", "/proc"]));
+
+        request.filesystem = None;
+        let omitted = crate::policy::prepare_request_with_procfs_policy(
+            &request,
+            crate::options::ProcfsPolicy::Omit,
+        )
+        .expect("typed Bubblewrap request without a grant should prepare");
+        let args = build_args(&omitted.inner, None);
+        assert!(!args
+            .windows(2)
+            .any(|window| window[1] == "/proc" && window[0] == "--proc"));
+        assert!(!args
+            .windows(2)
+            .any(|window| window[1] == "/proc" && window[0] == "--tmpfs"));
     }
 
     /// Dropping this flag silently reintroduces a real leak: a backgrounded

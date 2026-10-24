@@ -7,8 +7,8 @@ use std::net::IpAddr;
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::mxc_error::MxcErrorCode;
 
-/// Internal typed-SDK control consumed by the Linux Bubblewrap builder and
-/// never passed through to the sandboxed child environment.
+/// Reserved environment name rejected for caller-supplied values. Procfs
+/// selection travels separately on [`ExecutionRequest::mount_procfs`].
 pub(crate) const INTERNAL_MOUNT_PROCFS_ENV: &str = "MXC_INTERNAL_MOUNT_PROCFS";
 
 /// Selects which containment backend to use for script execution.
@@ -993,6 +993,10 @@ pub struct ExecutionRequest {
     pub script_timeout: u32,
     /// Which containment backend to use. Default: ProcessContainer.
     pub containment: ContainmentBackend,
+    /// Whether Bubblewrap should mount procfs. `None` preserves its backend default.
+    /// This is an internal typed-SDK setting and is not part of the wire contract.
+    #[serde(skip)]
+    pub mount_procfs: Option<bool>,
     /// Shared lifecycle settings.
     pub lifecycle: LifecycleConfig,
     /// ProcessContainer-specific policy (used when containment == ProcessContainer).

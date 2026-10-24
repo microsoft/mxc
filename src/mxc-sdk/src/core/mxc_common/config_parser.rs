@@ -1626,6 +1626,7 @@ fn normalize_common_request_ir(
         working_directory,
         script_timeout,
         containment,
+        mount_procfs: None,
         lifecycle,
         policy,
         lxc_config,

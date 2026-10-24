@@ -861,12 +861,12 @@ pub(crate) fn prepare_request_with_procfs_policy(
     request: &ContainerRequest,
     procfs_policy: ProcfsPolicy,
 ) -> Result<PreparedContainerRequest, crate::Error> {
-    let procfs_control = match procfs_policy {
-        ProcfsPolicy::Omit => Some("off"),
-        ProcfsPolicy::Mount => Some("on"),
+    let mount_procfs = match procfs_policy {
+        ProcfsPolicy::Omit => Some(false),
+        ProcfsPolicy::Mount => Some(true),
         ProcfsPolicy::LegacyBackendDefault => None,
     };
-    if procfs_control.is_some()
+    if mount_procfs.is_some()
         && !(cfg!(target_os = "linux")
             && matches!(
                 request.containment,
@@ -904,19 +904,7 @@ pub(crate) fn prepare_request_with_procfs_policy(
             .collect()
     });
     prepared.inner.inherit_default_env = request.inherit_default_environment.unwrap_or(false);
-    if let Some(procfs_control) = procfs_control {
-        if request.environment.is_none() {
-            prepared.inner.inherit_default_env = true;
-        }
-        prepared
-            .inner
-            .env
-            .get_or_insert_with(Vec::new)
-            .push(format!(
-                "{}={procfs_control}",
-                crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
-            ));
-    }
+    prepared.inner.mount_procfs = mount_procfs;
     Ok(prepared)
 }
 
@@ -1336,9 +1324,9 @@ mod tests {
             crate::options::ProcfsPolicy::default(),
         )
         .unwrap();
-        let environment = prepared.inner.env.as_ref().unwrap();
 
-        assert!(prepared.inner.inherit_default_env);
+        assert!(!prepared.inner.inherit_default_env);
+        assert_eq!(prepared.inner.mount_procfs, Some(false));
         assert!(!prepared
             .inner
             .policy
@@ -1351,39 +1339,24 @@ mod tests {
             .readonly_paths
             .iter()
             .any(|path| path == "/proc"));
-        assert!(environment.iter().any(|entry| {
-            entry
-                == &format!(
-                    "{}=off",
-                    crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
-                )
-        }));
+        assert!(prepared.inner.env.is_none());
 
         let legacy = super::prepare_request(&request).unwrap();
-        assert!(!legacy
-            .inner
-            .env
-            .unwrap_or_default()
-            .iter()
-            .any(|entry| entry == "MXC_INTERNAL_MOUNT_PROCFS=off"));
+        assert_eq!(legacy.inner.mount_procfs, None);
 
         let explicit_mount = super::prepare_request_with_procfs_policy(
             &request,
             crate::options::ProcfsPolicy::Mount,
         )
         .unwrap();
+        assert_eq!(explicit_mount.inner.mount_procfs, Some(true));
         assert!(!explicit_mount
             .inner
             .policy
             .denied_paths
             .iter()
             .any(|path| path == "/proc"));
-        assert!(explicit_mount
-            .inner
-            .env
-            .unwrap()
-            .iter()
-            .any(|entry| entry == "MXC_INTERNAL_MOUNT_PROCFS=on"));
+        assert!(explicit_mount.inner.env.is_none());
 
         // Omission is an independent procfs selection, not a filesystem
         // denial: with no explicit grant, `/proc` remains absent from both
@@ -1395,11 +1368,20 @@ mod tests {
             crate::options::ProcfsPolicy::Omit,
         )
         .unwrap();
-        assert!(!omitted.inner.policy.denied_paths.iter().any(|path| path == "/proc"));
-        assert!(!omitted.inner.policy.readonly_paths.iter().any(|path| path == "/proc"));
-        assert!(omitted.inner.env.as_ref().unwrap().iter().any(|entry| {
-            entry == "MXC_INTERNAL_MOUNT_PROCFS=off"
-        }));
+        assert_eq!(omitted.inner.mount_procfs, Some(false));
+        assert!(!omitted
+            .inner
+            .policy
+            .denied_paths
+            .iter()
+            .any(|path| path == "/proc"));
+        assert!(!omitted
+            .inner
+            .policy
+            .readonly_paths
+            .iter()
+            .any(|path| path == "/proc"));
+        assert!(omitted.inner.env.is_none());
 
         let mut spoofed = super::ContainerRequest::new("/usr/bin/true");
         spoofed.containment = super::Containment::Bubblewrap;

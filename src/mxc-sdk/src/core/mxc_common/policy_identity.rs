@@ -37,6 +37,7 @@
 //! |---|---|
 //! | `script_code` | The command line is *what runs*, not the policy under which it runs; it also routinely embeds credentials (`curl -H "Authorization: …"`). |
 //! | `env` | Environment variables are the classic secret carrier. |
+//! | `mount_procfs` | Effective Bubblewrap procfs behavior is projected separately as `mountProcfs`, without hashing unrelated environment variables. |
 //! | `telemetry`, internal `test_feature` | No enforcement effect. |
 //! | `network_proxy.original_url` | A proxy URL can embed `user:password@`. The host and port *are* hashed. |
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
@@ -211,6 +212,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         working_directory,
         script_timeout,
         containment,
+        mount_procfs,
         lifecycle,
         policy,
         lxc_config,
@@ -275,6 +277,12 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     }
     root.insert("policy".into(), policy_value);
     root.insert("proxy".into(), proxy_projection(request));
+    if *containment == crate::mxc_common::models::ContainmentBackend::Bubblewrap {
+        root.insert(
+            "mountProcfs".into(),
+            Value::Bool(mount_procfs.unwrap_or(true)),
+        );
+    }
     root.insert(
         "lxc".into(),
         serde_json::to_value(lxc_config).unwrap_or(Value::Null),
@@ -611,6 +619,26 @@ mod tests {
         let mut changed = request();
         changed.containment = ContainmentBackend::Lxc;
         assert_ne!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
+    fn effective_bubblewrap_procfs_selection_changes_the_hash() {
+        let mut legacy_default = request();
+        legacy_default.containment = ContainmentBackend::Bubblewrap;
+        let legacy_hash = policy_hash(&legacy_default);
+
+        let mut explicit_mount = legacy_default.clone();
+        explicit_mount.mount_procfs = Some(true);
+        assert_eq!(legacy_hash, policy_hash(&explicit_mount));
+
+        let mut omit = legacy_default;
+        omit.mount_procfs = Some(false);
+        assert_ne!(legacy_hash, policy_hash(&omit));
+
+        let Value::Object(projection) = policy_projection(&omit) else {
+            panic!("policy projection must be an object");
+        };
+        assert_eq!(projection.get("mountProcfs"), Some(&Value::Bool(false)));
     }
 
     #[test]
