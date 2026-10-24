@@ -91,6 +91,7 @@ $AreaScripts = [ordered]@{
     'NetworkRejections'        = 'run_processcontainer_network_rejections_test.ps1'
     'PathAliasing'             = 'run_processcontainer_path_aliasing_test.ps1'
     'ProcessPlumbing'          = 'run_processcontainer_process_plumbing_test.ps1'
+    'PolicyMutation'           = 'run_processcontainer_policy_mutation_test.ps1'
 }
 
 # Run children under the SAME PowerShell host as this process. Hardcoding

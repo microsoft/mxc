@@ -79,6 +79,8 @@ jobs:
       - name: Run backend tests
         timeout-minutes: 45
         shell: pwsh
+        env:
+          MXC_POLICY_MUTATION_FIXTURE: ${{ fromJSON(vars.MXC_POLICY_MUTATION_FIXTURES || '{}')[format('{0}/{1}', matrix.os, matrix.architecture)] || '' }}
         run: |
           & ./scripts/ci/run_backend_validation_tests.ps1 `
             -Backend '${{ matrix.backend }}' `

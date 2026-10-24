@@ -125,6 +125,11 @@ function Invoke-ProcessContainerTests {
     }
 
     $script = Join-Path $testScriptRoot 'run_processcontainer_all_tests.ps1'
+    $policyTest = Join-Path $binaryDirectoryPath 'mxc-policy-mutation-tests.exe'
+    if ($env:MXC_POLICY_MUTATION_FIXTURE) {
+        Assert-File -Path $policyTest
+    }
+    $env:MXC_POLICY_MUTATION_TEST_EXE = $policyTest
     # -KeepArtifacts stops the suite deleting its scratch tree on a clean run,
     # so a passing job still uploads its per-area logs, configs, and result
     # documents.

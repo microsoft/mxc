@@ -76,6 +76,46 @@ must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`
 publishes the suite context into the calling script's scope, which only works
 because dot-sourcing merges scopes.
 
+### Governed creation-policy mutation
+
+`PolicyMutation` is part of the scheduled process-container suite. It is
+explicitly skipped on ordinary hosts without a configured fixture; that skip
+is not evidence of policy-driven correction or cache reuse.
+
+On an isolated prepared host, first create fresh test data:
+
+```powershell
+tests\scripts\new_processcontainer_policy_mutation_fixture.ps1 -Directory C:\mxc-governed-fixture
+```
+
+The SDK creator must already be governed by a policy that permits read-write
+access to the fixture's `a`, `b` and `ledger` directories, read-only access to
+Windows and `certs`, and no access to `a\denied` or `b\denied`. It must permit
+the requested loopback proxy configuration. Policy deployment and process
+identity are the host setup's responsibility, not part of MXC.
+
+Set `MXC_POLICY_MUTATION_FIXTURE` to the generated `fixture.json` and
+`MXC_POLICY_MUTATION_TEST_EXE` to the built `mxc-policy-mutation-tests.exe`.
+Then run the suite with `-Areas PolicyMutation -RequireTier base-container`,
+or run `run_processcontainer_policy_mutation_test.ps1` with its
+`-FixtureManifest` and `-TestExecutable` arguments.
+The test process inherits the caller's governance context. An ungoverned caller
+fails the strict-refusal prerequisite; API availability alone is insufficient.
+
+The scenario exercises public `v1` strict execution and `v1_1::run`/`spawn`
+options in one process. It checks actual denied file access, nonzero workload
+exit preservation, fresh CA-file grants and proxy endpoints, silent warm hits,
+new correction text after adding a second conflicting grant, silent reuse of
+the combined restrictions, and continuing strict refusal. A fresh workload
+ledger detects execution on refusal or replay. The native injected runner
+tests separately check exact environment-attempt and owner/launch counts.
+
+Scheduled jobs obtain the manifest from `MXC_POLICY_MUTATION_FIXTURES`, keyed
+by platform and architecture; see the
+[validation runbook](../../docs/development/build-and-test/ci-validation-infrastructure.md).
+The host setup must restore its attributable temporary policy/identity changes
+after validation.
+
 The IsolationSession suites dot-source `tests/scripts/lib/LoopbackAnchor.ps1`
 for their positive network oracle: a host loopback listener an isolated session
 can reach, so the assertion covers the session's network posture rather than
