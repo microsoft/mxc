@@ -95,6 +95,31 @@ function Phase-ProcessPlumbing {
             -Pass ($ecRan -and $rEc.ExitCode -eq $code) -Detail "ran=$ecRan; got=$($rEc.ExitCode)"
     }
 
+    $mutationCfg = New-Config -Name 'plumb-policy-mutation' `
+        -CommandLine (New-ProbeCommand -Body 'echo MXC-MUTATION-RAN & exit 42') `
+        -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -TimeoutMs 20000
+    $mutationHash = (Get-FileHash -LiteralPath $mutationCfg -Algorithm SHA256).Hash
+    $mutationLog = Join-Path $ScratchRoot 'logs\plumb-policy-mutation.log'
+    $rMutation = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $mutationCfg -LogPath $mutationLog `
+        -TimeoutSec 40 -MutatePolicy
+    $mutationRan = Test-WorkloadRan $rMutation
+    if ($Script:ExpectedTier -eq 'base-container') {
+        $launchCount = [regex]::Matches($rMutation.Stdout, '(?m)^MXC-MUTATION-RAN[ \t]*\r?$').Count
+        Record-Result -Phase 'P11' -Name 'policy mutation launches once and preserves a nonzero workload exit' `
+            -Pass ($mutationRan -and $launchCount -eq 1 -and $rMutation.ExitCode -eq 42 -and
+                (Test-SelectedTier (Read-Log $mutationLog))) `
+            -Detail "ran=$mutationRan; markers=$launchCount; exit=$($rMutation.ExitCode)"
+    } else {
+        $mutationError = "$($rMutation.Stderr)`n$(Read-Log $mutationLog)"
+        Record-Result -Phase 'P11' -Name 'policy mutation rejects tier fallback before workload launch' `
+            -Pass (-not $rMutation.TimedOut -and -not $mutationRan -and $rMutation.ExitCode -ne 0 -and
+                $mutationError.Contains('creation-policy mutation requires a serviceable native BaseContainer backend')) `
+            -Detail "ran=$mutationRan; exit=$($rMutation.ExitCode); error=$(Format-Snippet $mutationError)"
+    }
+    Record-Result -Phase 'P11' -Name 'policy mutation does not rewrite the caller configuration file' `
+        -Pass ($mutationHash -eq (Get-FileHash -LiteralPath $mutationCfg -Algorithm SHA256).Hash) `
+        -Detail "config=$mutationCfg"
+
     # --- timeout enforcement plus the survivor check. The workload
     # backgrounds a uniquely-named sleep that far outlasts the deadline: if it
     # is still running afterwards, teardown left a survivor.
@@ -160,4 +185,3 @@ function Phase-ProcessPlumbing {
 
 Invoke-WpcPhase -Key 'ProcessPlumbing' -Body { Phase-ProcessPlumbing }
 Complete-WpcChild
-

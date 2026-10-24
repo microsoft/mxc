@@ -76,6 +76,25 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      - name: Stage governed policy SDK test runner
+        shell: pwsh
+        run: |
+          $records = @(cargo test --locked --release --target ${{ matrix.target }} `
+            -p mxc-sdk --test policy_mutation_processcontainer --no-run `
+            --no-default-features --features "${{ matrix.features }}" `
+            --message-format=json)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $artifacts = @($records | ForEach-Object { $_ | ConvertFrom-Json } |
+            Where-Object {
+              $_.reason -eq 'compiler-artifact' -and
+              $_.target.name -eq 'policy_mutation_processcontainer' -and $_.executable
+            })
+          if ($artifacts.Count -ne 1 -or !(Test-Path -LiteralPath $artifacts[0].executable)) {
+            throw 'Cargo did not identify exactly one governed policy SDK test executable.'
+          }
+          Copy-Item -LiteralPath $artifacts[0].executable `
+            -Destination 'target\${{ matrix.target }}\release\mxc-policy-mutation-tests.exe'
+
       - name: Build debug executor for isolated telemetry smoke tests
         run: cargo build --locked -p wxc --features test-support
 
@@ -115,6 +134,7 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/mxc_ffi.dll
+            src/target/${{ matrix.target }}/release/mxc-policy-mutation-tests.exe
             src/target/${{ matrix.target }}/release/wslcsdk.dll
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe

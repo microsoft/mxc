@@ -741,7 +741,8 @@ function Invoke-Wxc {
         [Parameter(Mandatory)] [string]$Wxc,
         [Parameter(Mandatory)] [string]$ConfigPath,
         [Parameter(Mandatory)] [string]$LogPath,
-        [int]$TimeoutSec     = 60
+        [int]$TimeoutSec     = 60,
+        [switch]$MutatePolicy
     )
     # Scrub MXC_FORCE_TIER defensively in case some other process in this
     # session set it. The env var is `#[cfg(test)]`-gated and has no
@@ -752,6 +753,7 @@ function Invoke-Wxc {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Wxc
     $psi.Arguments = "--config `"$ConfigPath`" --experimental --log-file `"$LogPath`""
+    if ($MutatePolicy) { $psi.Arguments += ' --mutate-policy' }
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.UseShellExecute = $false

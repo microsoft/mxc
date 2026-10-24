@@ -160,6 +160,26 @@ most policies but still exercises the AppContainer fallback tiers, and an
 unprepared host fails the launch outright rather than producing a policy result,
 so `process-t1` runs `prepare-system-drive` / `prepare-null-device` too.
 
+The `ProcessPlumbing` area checks `--mutate-policy`: T1 must launch the workload
+once and retain its nonzero exit code; T3 must reject the invocation before
+launch rather than fall back. Neither may rewrite the input configuration.
+These baseline hosts do not install an IT policy, so this case does not prove
+policy-driven corrections or cache reuse.
+
+The `PolicyMutation` area runs the public Rust SDK scenario on a prepared
+governed host. Windows build artifacts include `mxc-policy-mutation-tests.exe`;
+validation never rebuilds it. Set repository variable
+`MXC_POLICY_MUTATION_FIXTURES` to a JSON object mapping `<platform id>/<architecture>`
+to the prepared fixture manifest's absolute path. A configured entry requires
+the native tier, a real strict refusal, successful corrections, silent reuse,
+fresh certificate/proxy values, an additional restriction and caller immutability.
+Missing or invalid configured prerequisites fail rather than skip.
+
+An unconfigured host records an explicit skip and does not claim governed
+coverage. Governance and caller identity must already be established by the
+host's setup; the MXC suite does not install administrative policy or change
+process identity. See the [prepared-host instructions](../../../tests/scripts/README.md#governed-creation-policy-mutation).
+
 `process-t3` runs its two suites back to back and reports them together: a
 failure in the primitives suite does not skip the workloads suite, so one job
 run shows both results instead of costing a second run to triage.
