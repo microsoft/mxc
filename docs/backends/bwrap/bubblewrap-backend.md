@@ -194,11 +194,11 @@ process. Run a bounded campaign from the MXC repository root:
 
 ```bash
 cargo +nightly fuzz run procfs_policy --fuzz-dir src/testing/fuzz -- \
-  -max_total_time=30 -max_len=4096
+  -max_total_time=300 -max_len=4096
 ```
 
-The 2026-10-15 Linux run completed 2,276,062 executions in 31 seconds without a
-crash. Curated JSON inputs under
+The 2026-10-24 Linux rerun reached the 300-second time limit after more than
+16.4 million executions, without a crash. Curated JSON inputs under
 `src/testing/fuzz/corpus/procfs_policy/` cover ordinary environment values and
 the reserved variable with omit, mount, and unknown values; generated corpus
 entries and artifacts remain local.
