@@ -861,6 +861,24 @@ pub(crate) fn prepare_request_with_procfs_policy(
     request: &ContainerRequest,
     procfs_policy: ProcfsPolicy,
 ) -> Result<PreparedContainerRequest, crate::Error> {
+    let procfs_control = match procfs_policy {
+        ProcfsPolicy::Omit => Some("off"),
+        ProcfsPolicy::Mount => Some("on"),
+        ProcfsPolicy::LegacyBackendDefault => None,
+    };
+    if procfs_control.is_some()
+        && !(cfg!(target_os = "linux")
+            && matches!(
+                request.containment,
+                Containment::Process | Containment::Bubblewrap
+            ))
+    {
+        return Err(crate::mxc_common::mxc_error::MxcError::policy_validation(
+            "procfs policy is supported only on Linux Process or Bubblewrap containment",
+        )
+        .into());
+    }
+
     let policy = ContainerPolicy {
         filesystem: request.filesystem.clone(),
         network: request.network.clone(),
@@ -886,30 +904,18 @@ pub(crate) fn prepare_request_with_procfs_policy(
             .collect()
     });
     prepared.inner.inherit_default_env = request.inherit_default_environment.unwrap_or(false);
-    let procfs_control = match procfs_policy {
-        ProcfsPolicy::Omit => Some("off"),
-        ProcfsPolicy::Mount => Some("on"),
-        ProcfsPolicy::LegacyBackendDefault => None,
-    };
-    if cfg!(target_os = "linux")
-        && matches!(
-            request.containment,
-            Containment::Process | Containment::Bubblewrap
-        )
-    {
-        if let Some(procfs_control) = procfs_control {
-            if request.environment.is_none() {
-                prepared.inner.inherit_default_env = true;
-            }
-            prepared
-                .inner
-                .env
-                .get_or_insert_with(Vec::new)
-                .push(format!(
-                    "{}={procfs_control}",
-                    crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
-                ));
+    if let Some(procfs_control) = procfs_control {
+        if request.environment.is_none() {
+            prepared.inner.inherit_default_env = true;
         }
+        prepared
+            .inner
+            .env
+            .get_or_insert_with(Vec::new)
+            .push(format!(
+                "{}={procfs_control}",
+                crate::mxc_common::models::INTERNAL_MOUNT_PROCFS_ENV
+            ));
     }
     Ok(prepared)
 }
@@ -1412,6 +1418,36 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| entry == "MXC_INTERNAL_MOUNT_PROCFS=off"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_procfs_policy_rejects_lxc_but_legacy_default_proceeds() {
+        let mut request = super::ContainerRequest::new("/usr/bin/true");
+        request.containment = super::Containment::Lxc(crate::configs::LxcConfig::default());
+
+        for procfs_policy in [
+            crate::options::ProcfsPolicy::Omit,
+            crate::options::ProcfsPolicy::Mount,
+        ] {
+            let error = super::prepare_request_with_procfs_policy(&request, procfs_policy)
+                .err()
+                .expect("explicit procfs policy must be rejected for LXC");
+            assert_eq!(error.code, crate::mxc_engine::ErrorCode::PolicyValidation);
+            assert!(error.message.contains("Linux Process or Bubblewrap"));
+        }
+
+        let legacy = super::prepare_request_with_procfs_policy(
+            &request,
+            crate::options::ProcfsPolicy::LegacyBackendDefault,
+        )
+        .expect("legacy procfs behavior remains available for LXC");
+        assert!(!legacy
+            .inner
+            .env
+            .unwrap_or_default()
+            .iter()
+            .any(|entry| entry.starts_with("MXC_INTERNAL_MOUNT_PROCFS=")));
     }
 
     #[test]
