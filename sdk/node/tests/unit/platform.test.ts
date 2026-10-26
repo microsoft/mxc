@@ -18,6 +18,7 @@ import {
   _mapBwrapHelperResult,
   _bwrapProbeDeadlines,
   _runBwrapVersionCommand,
+  _setBwrapFallbackDirectories,
   _setBwrapProbeWorkerFactory,
   _setBwrapVersionRunner,
   _probeBubblewrapNetwork,
@@ -223,6 +224,37 @@ function directZombieChildren(): Set<number> {
     }
   }
   return zombies;
+}
+
+function writeFakeBwrap(directory: string, version: string, mode = 0o755): string {
+  const bwrap = path.join(directory, 'bwrap');
+  fs.writeFileSync(bwrap, `#!/bin/sh\necho 'bubblewrap ${version}'\n`);
+  fs.chmodSync(bwrap, mode);
+  return bwrap;
+}
+
+function withBwrapSearch<T>(
+  searchPath: string | undefined,
+  fallbackDirectories: readonly string[],
+  run: () => T,
+): T {
+  const originalPath = process.env.PATH;
+  if (searchPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = searchPath;
+  }
+  _setBwrapFallbackDirectories(fallbackDirectories);
+  try {
+    return run();
+  } finally {
+    _setBwrapFallbackDirectories(null);
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+  }
 }
 
 const allUiCapabilities = {
@@ -1005,6 +1037,7 @@ describe('bwrap subprocess helpers', () => {
     assert.deepStrictEqual(
       _mapBwrapHelperResult({
         kind: 'completed',
+        path: '/usr/bin/bwrap',
         status: 124,
         signal: null,
         stdout: '',
@@ -1015,12 +1048,24 @@ describe('bwrap subprocess helpers', () => {
     assert.deepStrictEqual(
       _mapBwrapHelperResult({
         kind: 'completed',
+        path: '/usr/bin/bwrap',
         status: 126,
         signal: null,
         stdout: '',
         stderr: '',
       }),
       { kind: 'failed', status: 126, detail: '' },
+    );
+    assert.deepStrictEqual(
+      _mapBwrapHelperResult({
+        kind: 'completed',
+        path: '/usr/bin/bwrap',
+        status: 0,
+        signal: null,
+        stdout: 'bubblewrap 0.5.0\n',
+        stderr: '',
+      }),
+      { kind: 'output', path: '/usr/bin/bwrap', stdout: 'bubblewrap 0.5.0\n' },
     );
   });
 
@@ -1033,6 +1078,7 @@ describe('bwrap subprocess helpers', () => {
       const existingZombies = directZombieChildren();
       try {
         process.env.PATH = dir;
+        _setBwrapFallbackDirectories([]);
         for (let i = 0; i < 5; i += 1) {
           assert.deepStrictEqual(_runBwrapVersionCommand(1000), { kind: 'notFound' });
         }
@@ -1051,6 +1097,7 @@ describe('bwrap subprocess helpers', () => {
         );
         assert.deepStrictEqual(newZombies, [], 'probe anchors must be reaped');
       } finally {
+        _setBwrapFallbackDirectories(null);
         if (originalPath === undefined) {
           delete process.env.PATH;
         } else {
@@ -1225,6 +1272,7 @@ describe('bwrap subprocess helpers', () => {
         const result = _runBwrapVersionCommand(1000);
         assert.deepStrictEqual(result, {
           kind: 'output',
+          path: wrapper,
           stdout: 'bubblewrap 0.5.0\n',
         });
         descendantPid = readPidFileEventually(pidFile);
@@ -1376,28 +1424,24 @@ describe('bwrap subprocess helpers', () => {
     { skip: os.platform() !== 'linux' },
     () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-missing-interpreter-'));
-      const originalPath = process.env.PATH;
+      const fallback = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-fallback-'));
       try {
         const wrapper = path.join(dir, 'bwrap');
         fs.writeFileSync(wrapper, '#!/this/interpreter/does/not/exist\n');
         fs.chmodSync(wrapper, 0o755);
-        // Keep execvp from falling through to a real system bwrap after the
-        // synthetic wrapper's missing shebang interpreter returns ENOENT.
-        process.env.PATH = dir;
 
-        const result = _runBwrapVersionCommand(1000);
+        // A working copy later in the search must not replace the broken one.
+        writeFakeBwrap(fallback, '0.9.0');
+
+        const result = withBwrapSearch(dir, [fallback], () => _runBwrapVersionCommand(1000));
         assert.strictEqual(result.kind, 'failed');
         if (result.kind === 'failed') {
           assert.strictEqual(result.status, null);
           assert.match(result.detail, /missing interpreter or loader/i);
         }
       } finally {
-        if (originalPath === undefined) {
-          delete process.env.PATH;
-        } else {
-          process.env.PATH = originalPath;
-        }
         fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(fallback, { recursive: true, force: true });
       }
     },
   );
@@ -1407,16 +1451,99 @@ describe('bwrap subprocess helpers', () => {
     { skip: os.platform() !== 'linux' },
     () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-missing-'));
-      const originalPath = process.env.PATH;
       try {
-        process.env.PATH = dir;
-        assert.deepStrictEqual(_runBwrapVersionCommand(1000), { kind: 'notFound' });
+        assert.deepStrictEqual(
+          withBwrapSearch(dir, [], () => _runBwrapVersionCommand(1000)),
+          { kind: 'notFound' },
+        );
       } finally {
-        if (originalPath === undefined) {
-          delete process.env.PATH;
-        } else {
-          process.env.PATH = originalPath;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'finds bwrap in a fallback directory that PATH leaves out',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-path-'));
+      const fallback = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-fallback-'));
+      try {
+        const bwrap = writeFakeBwrap(fallback, '0.9.0');
+        const expected = { kind: 'output', path: bwrap, stdout: 'bubblewrap 0.9.0\n' };
+
+        assert.deepStrictEqual(
+          withBwrapSearch(dir, [fallback], () => _runBwrapVersionCommand(3000)),
+          expected,
+        );
+        assert.deepStrictEqual(
+          withBwrapSearch(undefined, [fallback], () => _runBwrapVersionCommand(3000)),
+          expected,
+          'an unset PATH must still search the fallback directories',
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(fallback, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'prefers the bwrap on PATH over a fallback directory',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-path-'));
+      const fallback = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-fallback-'));
+      try {
+        const preferred = writeFakeBwrap(dir, '0.6.0');
+        writeFakeBwrap(fallback, '0.9.0');
+
+        assert.deepStrictEqual(
+          withBwrapSearch(dir, [fallback], () => _runBwrapVersionCommand(3000)),
+          { kind: 'output', path: preferred, stdout: 'bubblewrap 0.6.0\n' },
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(fallback, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'ignores a relative PATH entry',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-relative-'));
+      try {
+        writeFakeBwrap(dir, '0.9.0');
+
+        assert.deepStrictEqual(
+          withBwrapSearch(path.relative(process.cwd(), dir), [], () =>
+            _runBwrapVersionCommand(3000),
+          ),
+          { kind: 'notFound' },
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'reports a bwrap file that is not executable',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-unexecutable-'));
+      try {
+        writeFakeBwrap(dir, '0.9.0', 0o644);
+
+        const result = withBwrapSearch(dir, [], () => _runBwrapVersionCommand(3000));
+        assert.strictEqual(result.kind, 'failed');
+        if (result.kind === 'failed') {
+          assert.match(result.detail, /not executable/);
+          assert.ok(result.detail.includes(dir), result.detail);
         }
+      } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
     },
@@ -1510,7 +1637,7 @@ describe('bwrap minimum-version gate', () => {
   });
 
   const withVersion = (stdout: string) =>
-    _setBwrapVersionRunner(() => ({ kind: 'output', stdout }));
+    _setBwrapVersionRunner(() => ({ kind: 'output', path: '/usr/bin/bwrap', stdout }));
 
   it('accepts a version exactly at the floor', () => {
     withVersion('bubblewrap 0.5.0\n');
@@ -1529,7 +1656,7 @@ describe('bwrap minimum-version gate', () => {
     assert.strictEqual(probe.available, false);
     assert.strictEqual(
       probe.reason,
-      'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+      'Bubblewrap (bwrap) 0.4.1 at /usr/bin/bwrap is too old: version 0.5.0 or newer is required ' +
         '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
     );
   });
@@ -1545,7 +1672,7 @@ describe('bwrap minimum-version gate', () => {
     withVersion('bubblewrap 0.5.0+really0.4.1\n');
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
-    assert.match(probe.reason, /0\.4\.1 is too old/);
+    assert.match(probe.reason, /0\.4\.1 at \/usr\/bin\/bwrap is too old/);
   });
 
   it('fails closed on unparsable probe output', () => {
@@ -1572,7 +1699,8 @@ describe('bwrap minimum-version gate', () => {
     assert.strictEqual(probe.available, false);
     assert.strictEqual(
       probe.reason,
-      'Bubblewrap (bwrap) is not installed or not on PATH. ' +
+      'Bubblewrap (bwrap) is not installed: it was not found on PATH or in ' +
+        '/usr/local/sbin, /usr/local/bin, /usr/sbin, /usr/bin, /sbin, /bin. ' +
         'Install it via your package manager (e.g., apt install bubblewrap). ' +
         'Version 0.5.0 or newer is required.',
     );
@@ -1651,11 +1779,11 @@ describe('bwrap minimum-version gate', () => {
       assert.strictEqual(support.reason, '');
       assert.deepStrictEqual(support.unavailableReasons, {
         bubblewrap:
-          'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          'Bubblewrap (bwrap) 0.4.1 at /usr/bin/bwrap is too old: version 0.5.0 or newer is required ' +
           '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
       });
       assert.strictEqual(logs.length, 1);
-      assert.match(logs[0], /0\.4\.1 is too old/i);
+      assert.match(logs[0], /0\.4\.1 at \/usr\/bin\/bwrap is too old/i);
     },
   );
 
@@ -1673,13 +1801,13 @@ describe('bwrap minimum-version gate', () => {
       assert.deepStrictEqual(support.unavailableReasons, {
         lxc: 'LXC is not installed or not available on this system.',
         bubblewrap:
-          'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          'Bubblewrap (bwrap) 0.4.1 at /usr/bin/bwrap is too old: version 0.5.0 or newer is required ' +
           '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
       });
       assert.strictEqual(
         support.reason,
         'Neither LXC nor Bubblewrap is available on this system ' +
-          '(Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          '(Bubblewrap (bwrap) 0.4.1 at /usr/bin/bwrap is too old: version 0.5.0 or newer is required ' +
           '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.)',
       );
     },

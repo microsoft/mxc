@@ -28,7 +28,8 @@ requiring root privileges or a container runtime.
   compatibility on x86-64, and AArch32 compatibility on AArch64. Platform
   detection reports Bubblewrap as unavailable on architectures for which MXC
   cannot generate the required seccomp program.
-- **Bubblewrap** installed and on PATH:
+- **Bubblewrap** installed (see [Host tool lookup](#host-tool-lookup) for where
+  MXC looks for it):
   ```bash
   # Debian/Ubuntu
   sudo apt install bubblewrap
@@ -51,14 +52,15 @@ requiring root privileges or a container runtime.
   alive. Successful Rust-executor advisory results are cached for the process
   lifetime; Rust failures are not cached, and execution validation probes again
   before launch so a changed PATH target cannot reuse an advisory result. The
+  launch then runs the same `bwrap` file that validation checked. The
   Node SDK caches the complete `getPlatformSupport()` result, including
   failures, for the module lifetime; restart the Node process after remediating
   the host.
-- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed
-  and on PATH, plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
+- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed,
+  plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
   `--keep-caps`), `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
   `ip6tables-restore` for the in-namespace egress and ingress rules, a POSIX
-  `sh` (the supervisor runs as `sh -c`), and the
+  `sh` and `sleep` (the supervisor runs as `sh -c`), and the
   `nf_conntrack` kernel module loaded for the inbound chain's connection-state
   match (unprivileged Bubblewrap cannot load it on demand).
 
@@ -111,6 +113,28 @@ requiring root privileges or a container runtime.
   # Check: should print "1"
   cat /proc/sys/kernel/unprivileged_userns_clone
   ```
+
+### Host tool lookup
+
+MXC finds `bwrap` and the network tools above in this order, both for the
+availability checks (including the Node SDK's `getPlatformSupport()`) and for
+the launch:
+
+1. The directories on the calling process's `PATH`, in order.
+2. `/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, and
+   `/bin`, in that order.
+
+A desktop session or service whose `PATH` leaves out `/usr/sbin` therefore
+still finds `iptables` there. MXC uses the first executable file with the
+tool's name and launches it from the path its checks approved. If that file
+cannot start, is too old, or uses an iptables backend the sandbox cannot drive,
+the request fails with an error naming the file; MXC does not try another copy.
+Empty and relative `PATH` entries are ignored, so a tool is never taken from the
+current directory.
+
+The lookup applies only to the host programs that set up the sandbox. The
+command inside the sandbox gets its own `PATH`; see
+[Process environment](#process-environment).
 
 ## Quick Start
 
@@ -740,8 +764,9 @@ shared-host-network behavior.
 
 0. Before anything is launched, `validate` probes the host tools this mode
    depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
-   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`, and
-   `ip6tables-restore` — so a host that is
+   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`,
+   `ip6tables-restore`, and `sleep`, found as described in
+   [Host tool lookup](#host-tool-lookup) — so a host that is
    missing one fails immediately with a message naming it, rather than partway
    through supervisor startup. For the `iptables` family presence is not
    enough: the probe also reads the backend from the version banner and refuses
@@ -750,9 +775,11 @@ shared-host-network behavior.
    probe is bounded by a short timeout, and runs in its own process group so a
    backgrounded descendant that inherited the probe's output cannot outlive it:
    a wedged binary is reported as hung and named, instead of stalling every
-   proxy-mode execution on the host indefinitely. A successful probe is cached
-   for the life of the process; failures are not, so installing the missing
-   tool takes effect without a restart.
+   proxy-mode execution on the host indefinitely. A successful probe is reused
+   for the life of the process while the lookup keeps selecting the same paths;
+   a different path is probed again before it runs, and failures are not
+   reused, so installing the missing tool takes effect without a restart. The
+   supervisor runs each tool from the path the probe checked.
 1. The caller starts the proxy and names its loopback endpoint with
    `runtimeConfig.networkProxy`. The parser admits `localhost`, `127.0.0.1`,
    or `[::1]`; Bubblewrap rejects `[::1]` because its gateway reaches only
@@ -980,7 +1007,7 @@ Contract `0.9.0-alpha` provides no MXC-managed host-list policy for that proxy.
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
 | Startup | Create → Start → Attach | Single `bwrap` exec; proxy-only and firewall-enforced modes add a user/network-namespace supervisor, `slirp4netns`, and namespace-local firewall chains |
 | Network isolation | iptables + veth | `--unshare-net` for ruleless deny; private netns + slirp4netns and namespace-local iptables for proxy or firewall-enforced policies |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, iproute2 `ip`, a POSIX `sh`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, iproute2 `ip`, a POSIX `sh` and `sleep`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
