@@ -3,8 +3,9 @@
     "version": "1.0.0",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "echo PATH_DOTDOT_SHOULD_NOT_RUN",
+        "commandLine": "cat '{{TESTDIR}}/alias/secret.txt'",
+        "cwd": "/",
         "timeout": 10000
     },
-    "filesystem": { "readonlyPaths": ["/private/tmp/../etc"] }
+    "filesystem": { "readonlyPaths": ["{{TESTDIR}}/alias/../alias"] }
 }

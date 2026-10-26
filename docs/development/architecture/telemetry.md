@@ -462,7 +462,7 @@ logger routes them only to the explicitly configured auxiliary sinks.
 ### Format
 
 ```
-{"event":"mxc.ProcessExited","backend":"processcontainer","identity":"sandbox-a3f1c8e40029bd17","tier":"base-container","pid":1234,"exit_code":0}
+{"event":"mxc.ProcessExited","backend":"processcontainer","identity":"redacted","tier":"base-container","pid":1234,"exit_code":0}
 ```
 
 As it appears in a `--log-file` (the existing `[<unix-seconds>] ` stamp is
@@ -512,10 +512,10 @@ collected by a fleet log agent.
   a low-entropy identity could be recovered by dictionary attack. The cost is
   that these sandboxes have no MXC-side join key in the local log.
 * **No caller-supplied identifiers verbatim.** A sandbox identity derived from
-  configuration (the AppContainer profile name is the caller's `containerId`)
-  is retained only when it matches one of the closed set of shapes MXC itself
-  mints — the literal default `CLI`, `sandbox-<16 hex>`, or the state-aware
-  `iso:<token>` / `wsb:<token>` ids (≤64 chars, opaque token characters only).
+  configuration (the caller's `containerId`) is retained only when it matches
+  one of the closed set of shapes MXC itself mints — the literal default `CLI`
+  or the state-aware `iso:<token>` / `wsb:<token>` ids (≤64 chars, opaque token
+  characters only).
   Any other `containerId` the caller chose is replaced with `redacted`,
   regardless of how opaque it looks — character/length checks alone cannot
   prove a value wasn't caller-chosen.

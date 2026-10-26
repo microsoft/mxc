@@ -237,21 +237,6 @@ jobs:
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test wxc_e2e_tests_e2e_linux_microvm
              
-      # PLM (Permissive Learning Mode) is functionally Windows-only, but the
-      # crate builds cross-platform: the lib's helper modules compile on every
-      # target, and the binary has a no-op stub `fn main()` for non-Windows so
-      # the crate lives in the workspace `default-members` list. This gate
-      # keeps the cross-platform/Windows-only split a CI-enforced contract — if
-      # someone adds a `use windows::…` without a `#[cfg]` gate the Linux
-      # build fails fast rather than rotting silently.
-      - name: Build plm (cross-platform stub + lib)
-        working-directory: src
-        run: cargo build --locked --release --target ${{ matrix.target }} -p plm
-
-      - name: Test plm (cross-platform modules)
-        working-directory: src
-        run: cargo test --locked --release --target ${{ matrix.target }} -p plm
-
       # These are separate workspace members, not dependencies of lxc.
       - name: Build Node runtime dependencies
         working-directory: src

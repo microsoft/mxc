@@ -235,7 +235,7 @@ jobs:
       }
       Copy-Item $testNative (Join-Path $out 'mxc_ffi.dll') -Force
 
-      foreach ($name in @('Microsoft.Mxc.Sdk.Tests.exe', 'mxc_ffi.dll', 'plm.exe')) {
+      foreach ($name in @('Microsoft.Mxc.Sdk.Tests.exe', 'mxc_ffi.dll')) {
           $required = Join-Path $out $name
           if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
               throw "The self-contained .NET test payload is missing $name"

@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Pure builder that converts an [`ExecutionRequest`] into a TinyScheme sandbox
+//! Builder that converts an [`ExecutionRequest`] into a TinyScheme sandbox
 //! profile string suitable for `sandbox_init()` or `sandbox-exec -p <profile>`.
 //!
-//! This module is platform-agnostic — it is just string generation — so it
-//! is unit-tested on every host (Windows / Linux / macOS) in CI.
+//! Pure profile generation, unit-tested on every host. Filesystem and environment
+//! discovery happen before this module receives its inputs.
 //!
 //! # Profile shape
 //!
@@ -25,33 +25,42 @@
 //! operation), so trailing deny rules take precedence over earlier allow
 //! rules — the behavior callers expect from MXC's `denied_paths`.
 
-use std::fmt::Write as _;
-use std::fs;
-use std::path::{Path, PathBuf};
-
 use crate::mxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
 use crate::mxc_common::host_is_canonical_loopback;
 use crate::mxc_common::models::{ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress};
 use crate::seatbelt_common::seatbelt_policy;
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
+/// Prepared filesystem grants for profile generation.
+#[derive(Debug, Default)]
+pub struct ProfileInputs {
+    pub readonly_paths: Vec<String>,
+    pub readwrite_paths: Vec<String>,
+    pub denied_paths: Vec<String>,
+    pub developer_dir: Option<String>,
+    pub user_keychains: Option<String>,
+}
 
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
 /// reachability to the resolved address supplied by the runner.
 ///
-/// `pub` (not `pub(crate)`) so it stays a reachable API root: `profile_builder`
-/// is compiled and unit-tested on every host, but its only in-crate caller
-/// (`seatbelt_runner`) is `cfg(target_os = "macos")`, so on other targets a
-/// narrower visibility would make the whole profile-building chain dead code.
+/// Paths come from `inputs`; profile generation never inspects the host.
+///
+/// Public to keep profile generation reachable on hosts without the macOS runner.
 pub fn build_profile_with_proxy(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
+    inputs: &ProfileInputs,
 ) -> Result<String, String> {
-    build_profile_with_terminals(request, proxy_address, &[])
+    build_profile_with_terminals(request, proxy_address, inputs, &[])
 }
 
 /// Bind terminal paths discovered by the runner, never supplied by the workload.
 pub(crate) fn build_profile_with_terminals(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
+    inputs: &ProfileInputs,
     terminal_paths: &[PathBuf],
 ) -> Result<String, String> {
     if let Some(override_profile) = request
@@ -76,7 +85,7 @@ pub(crate) fn build_profile_with_terminals(
 
     // Filesystem — read-only system paths every process needs.
     out.push_str(SYSTEM_READ_ALLOW);
-    write_developer_dir_rule(&mut out);
+    write_developer_dir_rule(&mut out, inputs.developer_dir.as_deref());
 
     // Keep the controlling terminal usable without granting other host PTYs.
     out.push_str(TTY_ALLOW);
@@ -92,11 +101,11 @@ pub(crate) fn build_profile_with_terminals(
     }
 
     // Policy-derived allow rules.
-    let resolved = ResolvedPaths::from_policy(&request.policy)?;
+    let resolved = ResolvedPaths::from_inputs(inputs);
     write_filesystem_allow(&mut out, &resolved);
     write_network_rules(&mut out, request, proxy_address);
     write_nested_pty_rules(&mut out, request);
-    write_keychain_rules(&mut out, request)?;
+    write_keychain_rules(&mut out, request, inputs.user_keychains.as_deref())?;
     write_extra_seatbelt_rules(&mut out, request);
     write_ui_rules(&mut out, request);
 
@@ -158,107 +167,9 @@ const SYSTEM_READ_ALLOW: &str = "\
     (literal \"/dev/urandom\"))
 ";
 
-/// Where `xcode-select` records the active developer directory. The second
-/// entry is the older path some releases still populate.
-const DEVELOPER_DIR_LINKS: [&str; 2] = [
-    "/private/var/db/xcode_select_link",
-    "/private/var/select/developer_dir",
-];
-
-/// Resolve the active Xcode / Command Line Tools developer directory.
-///
-/// The `/usr/bin` stubs (`python3`, `git`) are `xcrun` shims that `dlopen`
-/// `libxcrun.dylib` from here, so they cannot start unless it is readable.
-/// `SYSTEM_READ_ALLOW` reaches a Command Line Tools install through its
-/// `/Library` grant, but an Xcode-selected host puts it under `/Applications`.
-///
-/// `DEVELOPER_DIR` is ignored because any caller can set it. An untrusted link
-/// is skipped, so resolution continues to the legacy one.
-fn active_developer_dir() -> Option<PathBuf> {
-    DEVELOPER_DIR_LINKS
-        .iter()
-        .map(Path::new)
-        .filter(|link| link_is_root_controlled(link))
-        .filter_map(|link| fs::read_link(link).ok())
-        .find(|target| target.is_absolute() && target.is_dir())
-}
-
-/// Whether root alone decides what `link` resolves to.
-///
-/// Requires both a root-owned symlink and root-owned, non-group/world-writable
-/// directories above it: replacing a symlink is a directory operation, so the
-/// link's own ownership settles nothing by itself.
-#[cfg(unix)]
-fn link_is_root_controlled(link: &Path) -> bool {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
-    let Ok(link_meta) = fs::symlink_metadata(link) else {
-        return false;
-    };
-    if !link_meta.file_type().is_symlink() || link_meta.uid() != 0 {
-        return false;
-    }
-    // `ancestors()` starts at the link itself; the directories follow.
-    link.ancestors().skip(1).all(|dir| {
-        fs::metadata(dir)
-            .is_ok_and(|meta| dir_is_root_controlled(meta.uid(), meta.permissions().mode()))
-    })
-}
-
-/// Windows only: this module compiles everywhere but `std::os::unix` does not.
-/// There is no `xcode-select` there, so nothing to trust.
-#[cfg(not(unix))]
-fn link_is_root_controlled(_link: &Path) -> bool {
-    false
-}
-
-/// Pure so the rule is testable without a root-owned fixture. Sticky
-/// world-writable directories are rejected too — none of the real
-/// `xcode-select` locations are sticky, so refusing costs nothing.
-#[cfg(unix)]
-fn dir_is_root_controlled(uid: u32, mode: u32) -> bool {
-    const NON_OWNER_WRITE: u32 = 0o022;
-
-    uid == 0 && mode & NON_OWNER_WRITE == 0
-}
-
-/// Emit the read-only grant for the active developer directory.
-fn write_developer_dir_rule(out: &mut String) {
-    if let Some(dir) = active_developer_dir() {
-        push_developer_dir_rule(out, &developer_dir_grant_root(&dir));
-    }
-}
-
-/// Widen a developer directory to the `.app` bundle containing it, if any.
-///
-/// The tools `xcrun` dispatches load frameworks from
-/// `<Xcode.app>/Contents/SharedFrameworks`, outside `Contents/Developer`, so
-/// the bundle root is the smallest subtree that lets them run. A Command Line
-/// Tools install has no `.app` ancestor and is returned as-is.
-fn developer_dir_grant_root(dir: &Path) -> PathBuf {
-    enclosing_app_bundle(dir).map_or_else(|| dir.to_path_buf(), Path::to_path_buf)
-}
-
-/// The bundle for which `dir` is exactly `<bundle>.app/Contents/Developer`.
-fn enclosing_app_bundle(dir: &Path) -> Option<&Path> {
-    if dir.file_name()? != "Developer" {
-        return None;
-    }
-    let contents = dir.parent()?;
-    if contents.file_name()? != "Contents" {
-        return None;
-    }
-    let bundle = contents.parent()?;
-    bundle
-        .extension()?
-        .eq_ignore_ascii_case("app")
-        .then_some(bundle)
-}
-
-/// Emit the grant for an already-resolved path. Split out so it can be tested
-/// independently of what is installed on the test host.
-fn push_developer_dir_rule(out: &mut String, dir: &Path) {
-    let Some(path) = dir.to_str() else {
+/// Emit the read-only grant for the prepared developer directory.
+fn write_developer_dir_rule(out: &mut String, developer_dir: Option<&str>) {
+    let Some(path) = developer_dir else {
         return;
     };
     out.push_str(";; --- active developer directory (xcrun shims in /usr/bin) ---\n");
@@ -276,17 +187,7 @@ const TTY_ALLOW: &str = "\
 (allow file-read* (subpath \"/dev/fd\"))
 ";
 
-/// The policy path lists resolved into the form Seatbelt matches, with the
-/// most-restrictive-wins precedence (`deny` > `readonly` > `readwrite`)
-/// re-applied.
-///
-/// The shared parser applies that precedence to the *raw* strings, which is not
-/// enough once paths are resolved: two spellings of the same path
-/// (`readonlyPaths: ["/private/tmp/x"]` and `readwritePaths: ["/tmp/x"]`)
-/// differ as strings, so both survive the parser, then resolve to the same
-/// filter here. Seatbelt is last-match-wins and the read-write rule is emitted
-/// after the read-only one, so without this the *weaker* grant would win and
-/// silently make a read-only path writable.
+/// Prepared paths with `deny` > `readonly` > `readwrite` precedence applied.
 struct ResolvedPaths {
     readonly: Vec<String>,
     readwrite: Vec<String>,
@@ -294,28 +195,23 @@ struct ResolvedPaths {
 }
 
 impl ResolvedPaths {
-    fn from_policy(policy: &ContainerPolicy) -> Result<Self, String> {
-        let denied = resolve_all(&policy.denied_paths)?;
-        let readonly = resolve_all(&policy.readonly_paths)?;
-        let mut readwrite = resolve_all(&policy.readwrite_paths)?;
+    fn from_inputs(inputs: &ProfileInputs) -> Self {
+        let denied = inputs.denied_paths.clone();
+        let mut readonly = inputs.readonly_paths.clone();
+        let mut readwrite = inputs.readwrite_paths.clone();
 
         // `denied` is emitted last and would override either allow anyway, but
         // dropping the path keeps the emitted profile an honest description of
         // the effective policy.
-        let mut readonly: Vec<String> = readonly;
         readonly.retain(|p| !denied.contains(p));
         readwrite.retain(|p| !denied.contains(p) && !readonly.contains(p));
 
-        Ok(Self {
+        Self {
             readonly,
             readwrite,
             denied,
-        })
+        }
     }
-}
-
-fn resolve_all(paths: &[String]) -> Result<Vec<String>, String> {
-    paths.iter().map(|p| resolve_policy_path(p)).collect()
 }
 
 fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
@@ -644,17 +540,17 @@ fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
 /// stores under `/Library/Keychains` and `/System/Library/Keychains`
 /// are already covered by the baseline `/Library` and `/System`
 /// read-only allows, so we don't re-add them here.
-fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
+fn write_keychain_rules(
+    out: &mut String,
+    request: &ExecutionRequest,
+    user_keychains: Option<&str>,
+) -> Result<(), String> {
     let enabled = request.seatbelt.as_ref().is_some_and(|c| c.keychain_access);
     if !enabled {
         return Ok(());
     }
-    // Seatbelt only applies on macOS. On other hosts the option is a
-    // no-op so workspace clippy / cross-platform tests don't have to
-    // care about `$HOME` (Windows CI doesn't set it).
-    if !cfg!(target_os = "macos") {
-        return Ok(());
-    }
+    let user_keychains = user_keychains
+        .ok_or_else(|| "User keychain directory was not prepared for keychainAccess".to_string())?;
 
     out.push_str(";; --- keychainAccess: Mach IPC for Keychain (securityd, prefs, XPC, LS) ---\n");
     out.push_str("(allow mach-lookup\n");
@@ -680,14 +576,9 @@ fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<
     out.push_str("    (subpath \"/private/var/protected/trustd\")\n");
     out.push_str("    (subpath \"/private/var/db/mds\"))\n");
 
-    let home = std::env::var("HOME").map_err(|_| {
-        "HOME environment variable not set; cannot expand '~/Library/Keychains' for keychainAccess"
-            .to_string()
-    })?;
-    let user_keychains = format!("{home}/Library/Keychains");
     out.push_str(";; --- keychainAccess: user keychain DB + XPC/folder caches (read+write) ---\n");
     out.push_str("(allow file-read* file-write*\n");
-    let _ = writeln!(out, "    (subpath {})", quote_scheme(&user_keychains));
+    let _ = writeln!(out, "    (subpath {})", quote_scheme(user_keychains));
     out.push_str("    (subpath \"/private/var/folders\"))\n");
     Ok(())
 }
@@ -708,107 +599,6 @@ fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
         let _ = writeln!(out, "    (global-name {})", quote_scheme(name));
     }
     out.push_str(")\n");
-}
-
-/// Resolve a caller-supplied policy path into the form Seatbelt matches:
-/// expand a leading `~`, normalize redundant lexical segments, then rewrite the
-/// symlinked macOS root directories.
-///
-/// All three steps are required. See [`expand_tilde`], [`normalize_lexical`]
-/// and [`resolve_macos_root_symlinks`].
-pub(crate) fn resolve_policy_path(path: &str) -> Result<String, String> {
-    let expanded = expand_tilde(path)?;
-    Ok(resolve_macos_root_symlinks(&normalize_lexical(&expanded)?))
-}
-
-/// Collapse the lexical spellings of a path that leave a Seatbelt rule dead:
-/// repeated separators (`//tmp`), `.` segments (`/./tmp`), and a trailing `/`.
-///
-/// The kernel canonicalizes an accessed path before matching it against a
-/// profile filter, but it does not canonicalize the filter, so `(subpath
-/// "//tmp/secret")` never matches anything. For `deniedPaths` that fails
-/// **open**, so these spellings have to be folded away rather than passed
-/// through.
-///
-/// A `..` segment is rejected instead of being resolved. macOS resolves `..`
-/// *physically* — after following symlinks — so resolving it lexically can move
-/// the rule somewhere else entirely: `/tmp/..` is `/private`, not `/`. Silently
-/// widening an allow rule to `/` would be worse than the dead rule, and leaving
-/// it in place keeps the deny fail-open, so an unresolvable path is a config
-/// error the caller must fix by passing the resolved path.
-fn normalize_lexical(path: &str) -> Result<String, String> {
-    if path.split('/').any(|seg| seg == "..") {
-        return Err(format!(
-            "Filesystem path '{path}' contains a '..' segment. macOS resolves '..' after \
-             following symlinks, so the generated sandbox rule could not be matched \
-             reliably; specify the fully resolved path instead."
-        ));
-    }
-
-    let joined = path
-        .split('/')
-        .filter(|seg| !seg.is_empty() && *seg != ".")
-        .collect::<Vec<_>>()
-        .join("/");
-
-    Ok(if path.starts_with('/') {
-        format!("/{joined}")
-    } else {
-        joined
-    })
-}
-
-/// The macOS root directories that are symlinks, and their targets.
-///
-/// `/etc`, `/tmp`, and `/var` point into `/private`; `/home` points at the
-/// data volume. `/Users` is deliberately absent — it is a *firmlink*, not a
-/// symlink, so `/Users/...` is already the canonical path the kernel matches.
-const MACOS_SYMLINKED_ROOTS: [(&str, &str); 4] = [
-    ("/etc", "/private/etc"),
-    ("/tmp", "/private/tmp"),
-    ("/var", "/private/var"),
-    ("/home", "/System/Volumes/Data/home"),
-];
-
-/// Rewrite a leading symlinked macOS root directory to its real target.
-///
-/// The kernel resolves a path fully before matching it against a profile's
-/// `subpath` / `literal` filters, so a rule written against the unresolved
-/// path is dead: `(subpath "/tmp/work")` never matches, because the kernel
-/// only ever sees `/private/tmp/work`. That silently voided every policy path
-/// under these roots — including the automatic `$TMPDIR` grant, which resolves
-/// to `/var/folders/...` on macOS.
-///
-/// Only a whole leading path segment is rewritten, so `/variable` is left
-/// alone. Paths already written against the real target pass through
-/// unchanged, because none of the targets is itself under a symlinked root.
-fn resolve_macos_root_symlinks(path: &str) -> String {
-    for (root, target) in MACOS_SYMLINKED_ROOTS {
-        let Some(rest) = path.strip_prefix(root) else {
-            continue;
-        };
-        if rest.is_empty() || rest.starts_with('/') {
-            return format!("{target}{rest}");
-        }
-    }
-    path.to_string()
-}
-
-/// Expand a leading `~` or `~/` to the current user's home directory.
-/// Returns an error if `HOME` is not set and the path requires expansion.
-pub(crate) fn expand_tilde(path: &str) -> Result<String, String> {
-    if path == "~" || path.starts_with("~/") {
-        let home = std::env::var("HOME").map_err(|_| {
-            format!("HOME environment variable not set; cannot expand '{path}' in seatbelt profile")
-        })?;
-        if path == "~" {
-            Ok(home)
-        } else {
-            Ok(format!("{home}/{}", &path[2..]))
-        }
-    } else {
-        Ok(path.to_string())
-    }
 }
 
 /// Quote a string for use as a TinyScheme string literal, escaping
@@ -842,6 +632,24 @@ mod tests {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
     }
 
+    fn build_profile_with_proxy(
+        request: &ExecutionRequest,
+        proxy_address: Option<&ProxyAddress>,
+    ) -> Result<String, String> {
+        let inputs = ProfileInputs {
+            readonly_paths: request.policy.readonly_paths.clone(),
+            readwrite_paths: request.policy.readwrite_paths.clone(),
+            denied_paths: request.policy.denied_paths.clone(),
+            user_keychains: request
+                .seatbelt
+                .as_ref()
+                .is_some_and(|config| config.keychain_access)
+                .then(|| "/Users/profile-test/Library/Keychains".into()),
+            ..Default::default()
+        };
+        super::build_profile_with_proxy(request, proxy_address, &inputs)
+    }
+
     fn req() -> ExecutionRequest {
         ExecutionRequest {
             script_code: "echo hi".to_string(),
@@ -867,7 +675,7 @@ mod tests {
     #[test]
     fn readonly_paths_emit_subpath_allows() {
         let mut r = req();
-        r.policy.readonly_paths = vec!["/opt/tools".into(), "/var/data".into()];
+        r.policy.readonly_paths = vec!["/opt/tools".into(), "/private/var/data".into()];
         let p = build_profile(&r).unwrap();
         assert!(p.contains("policy.readonlyPaths"));
         assert!(p.contains("(allow file-read*"));
@@ -879,7 +687,7 @@ mod tests {
     #[test]
     fn readwrite_paths_emit_read_and_write_allows() {
         let mut r = req();
-        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/output".into()];
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow file-read* file-write*"));
         assert!(p.contains("(subpath \"/private/tmp/output\")"));
@@ -888,8 +696,8 @@ mod tests {
     #[test]
     fn denied_paths_appear_after_allows_to_override() {
         let mut r = req();
-        r.policy.readwrite_paths = vec!["/tmp".into()];
-        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp".into()];
+        r.policy.denied_paths = vec!["/private/tmp/secret".into()];
         let p = build_profile(&r).unwrap();
         let allow_idx = p.find("(allow file-read* file-write*").unwrap();
         let deny_idx = p
@@ -1387,7 +1195,7 @@ mod tests {
         let mut r = req();
         // Hypothetical adversarial input — we never want a path to break out
         // of the quoted string and inject Scheme.
-        r.policy.readonly_paths = vec!["/tmp/a\"b\\c".into()];
+        r.policy.readonly_paths = vec!["/private/tmp/a\"b\\c".into()];
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(subpath \"/private/tmp/a\\\"b\\\\c\")"));
     }
@@ -1411,7 +1219,7 @@ mod tests {
     #[test]
     fn readwrite_paths_emit_unix_socket_ops() {
         let mut r = req();
-        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/output".into()];
         let p = build_profile(&r).unwrap();
         let idx = p.find(RW_RULE).expect("readwrite rule");
         assert!(p[idx..].contains("(subpath \"/private/tmp/output\")"));
@@ -1422,7 +1230,7 @@ mod tests {
         // AF_UNIX bind/connect follow the filesystem policy, so a default-deny
         // network policy with denied ingress must still permit them.
         let mut r = req();
-        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/output".into()];
         r.policy.network_egress = Some(egress(NetworkAction::Deny));
         let p = build_profile(&r).unwrap();
         assert!(p.contains(RW_RULE));
@@ -1443,7 +1251,7 @@ mod tests {
         // `denied_paths_deny_unix_socket_ops_after_allows`.
         let mut r = req();
         r.policy.network_egress = Some(egress(NetworkAction::Allow));
-        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        r.policy.denied_paths = vec!["/private/tmp/secret".into()];
         let p = build_profile(&r).unwrap();
         let deny_idx = p.find(DENY_RULE).expect("deny must cover network-outbound");
         assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
@@ -1452,7 +1260,7 @@ mod tests {
     #[test]
     fn readonly_paths_do_not_get_unix_socket_ops() {
         let mut r = req();
-        r.policy.readonly_paths = vec!["/tmp/input".into()];
+        r.policy.readonly_paths = vec!["/private/tmp/input".into()];
         let p = build_profile(&r).unwrap();
         assert!(!p.contains(RW_RULE));
         // The only socket mention for a read-only path is the explicit removal.
@@ -1463,8 +1271,8 @@ mod tests {
     #[test]
     fn denied_paths_deny_unix_socket_ops_after_allows() {
         let mut r = req();
-        r.policy.readwrite_paths = vec!["/tmp".into()];
-        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp".into()];
+        r.policy.denied_paths = vec!["/private/tmp/secret".into()];
         let p = build_profile(&r).unwrap();
         let deny_idx = p.find(DENY_RULE).expect("deny must cover socket ops");
         let allow_idx = p.find(RW_RULE).expect("allow rule");
@@ -1482,8 +1290,8 @@ mod tests {
         // reaches it through `file-read*`, so the deny has to name it too or a
         // denied path still answers `stat()`.
         let mut r = req();
-        r.policy.readwrite_paths = vec!["/tmp".into()];
-        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp".into()];
+        r.policy.denied_paths = vec!["/private/tmp/secret".into()];
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow file-read-metadata)"));
         let deny_idx = p
@@ -1493,68 +1301,10 @@ mod tests {
     }
 
     #[test]
-    fn lexical_spellings_normalize_to_the_same_rule() {
-        // Each of these accesses `/private/tmp/secret` at the kernel level, so
-        // each must produce the same filter — otherwise a deny written with a
-        // redundant spelling is dead and fails open.
-        for spelling in [
-            "/tmp/secret",
-            "//tmp/secret",
-            "/./tmp/secret",
-            "/tmp//secret",
-            "/tmp/./secret/",
-            "///tmp/secret//",
-        ] {
-            assert_eq!(
-                resolve_policy_path(spelling).unwrap(),
-                "/private/tmp/secret",
-                "spelling {spelling} must normalize"
-            );
-        }
-    }
-
-    #[test]
-    fn lexical_normalization_is_idempotent_and_preserves_root() {
-        assert_eq!(resolve_policy_path("/").unwrap(), "/");
-        assert_eq!(resolve_policy_path("//").unwrap(), "/");
-        let once = resolve_policy_path("//tmp/./secret/").unwrap();
-        assert_eq!(resolve_policy_path(&once).unwrap(), once);
-    }
-
-    #[test]
-    fn parent_segments_are_rejected_rather_than_resolved() {
-        // `/tmp/..` is `/private` on macOS, not `/`, so resolving lexically
-        // would silently widen an allow and leave a deny dead.
-        for path in ["/private/var/../tmp", "/tmp/..", "/..", "/a/b/../c"] {
-            let err = resolve_policy_path(path).unwrap_err();
-            assert!(err.contains(".."), "{path} must be rejected, got {err}");
-        }
-        // A path merely *containing* dots in a segment name is fine.
-        assert_eq!(
-            resolve_policy_path("/tmp/..secret").unwrap(),
-            "/private/tmp/..secret"
-        );
-    }
-
-    #[test]
-    fn denied_path_with_redundant_spelling_still_denies() {
-        let mut r = req();
-        r.policy.readwrite_paths = vec!["/tmp".into()];
-        r.policy.denied_paths = vec!["//tmp/./secret/".into()];
-        let p = build_profile(&r).unwrap();
-        let deny_idx = p.find(DENY_RULE).expect("deny rule");
-        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
-    }
-
-    #[test]
     fn nested_readonly_keeps_write_away_from_broader_readwrite() {
-        // `/tmp` resolves to `/private/tmp`, which is an ancestor of the
-        // read-only entry. The read-only `allow` names only `file-read*`, so
-        // it says nothing about write or socket ops and cannot displace the
-        // broader grant on its own — hence the explicit removal, emitted
-        // *after* the read-write allow.
+        // The nested read-only rule must remove the broader write grant.
         let mut r = req();
-        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp".into()];
         r.policy.readonly_paths = vec!["/private/tmp/secret".into()];
         let p = build_profile(&r).unwrap();
 
@@ -1572,7 +1322,7 @@ mod tests {
         // The mirror case: the deeper read-write entry must survive, otherwise
         // depth ordering would have simply inverted the bug.
         let mut r = req();
-        r.policy.readonly_paths = vec!["/tmp".into()];
+        r.policy.readonly_paths = vec!["/private/tmp".into()];
         r.policy.readwrite_paths = vec!["/private/tmp/build".into()];
         let p = build_profile(&r).unwrap();
 
@@ -1599,7 +1349,7 @@ mod tests {
         // asserted — it has no bearing on the outcome.
         let mut r = req();
         r.policy.network_egress = Some(egress(NetworkAction::Allow));
-        r.policy.readonly_paths = vec!["/tmp/ro".into()];
+        r.policy.readonly_paths = vec!["/private/tmp/ro".into()];
         let p = build_profile(&r).unwrap();
 
         let strip_idx = p.find(RO_STRIP).expect("read-only strip");
@@ -1607,14 +1357,10 @@ mod tests {
     }
 
     #[test]
-    fn readonly_wins_over_readwrite_for_aliased_spellings() {
-        // The parser's most-restrictive-wins pass compares raw strings, so
-        // these two spellings both survive it and only collide once resolved.
-        // Seatbelt is last-match-wins and readwrite is emitted second, so
-        // without resolved-path precedence the read-only intent would be lost.
+    fn readonly_wins_over_readwrite_for_the_same_prepared_path() {
         let mut r = req();
         r.policy.readonly_paths = vec!["/private/tmp/x".into()];
-        r.policy.readwrite_paths = vec!["/tmp/x".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/x".into()];
         let p = build_profile(&r).unwrap();
 
         assert!(fs_section(&p).contains("(subpath \"/private/tmp/x\")"));
@@ -1625,11 +1371,11 @@ mod tests {
     }
 
     #[test]
-    fn denied_wins_over_aliased_readonly_and_readwrite() {
+    fn denied_wins_over_the_same_prepared_readonly_and_readwrite() {
         let mut r = req();
         r.policy.denied_paths = vec!["/private/tmp/x".into()];
-        r.policy.readonly_paths = vec!["/tmp/x".into()];
-        r.policy.readwrite_paths = vec!["//tmp/./x".into()];
+        r.policy.readonly_paths = vec!["/private/tmp/x".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/x".into()];
         let p = build_profile(&r).unwrap();
 
         assert!(!p.contains(FS_SECTION), "profile:\n{p}");
@@ -1641,53 +1387,13 @@ mod tests {
     #[test]
     fn distinct_paths_survive_resolved_precedence() {
         let mut r = req();
-        r.policy.readonly_paths = vec!["/tmp/ro".into()];
-        r.policy.readwrite_paths = vec!["/tmp/rw".into()];
+        r.policy.readonly_paths = vec!["/private/tmp/ro".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/rw".into()];
         let p = build_profile(&r).unwrap();
 
         assert!(fs_section(&p).contains("(subpath \"/private/tmp/ro\")"));
         let rw_idx = p.find(RW_RULE).expect("readwrite rule");
         assert!(p[rw_idx..].contains("(subpath \"/private/tmp/rw\")"));
-    }
-
-    #[test]
-    fn macos_root_symlinks_are_resolved() {
-        assert_eq!(resolve_macos_root_symlinks("/tmp"), "/private/tmp");
-        assert_eq!(resolve_macos_root_symlinks("/var"), "/private/var");
-        assert_eq!(resolve_macos_root_symlinks("/etc"), "/private/etc");
-        assert_eq!(
-            resolve_macos_root_symlinks("/var/folders/qj/T"),
-            "/private/var/folders/qj/T"
-        );
-        assert_eq!(
-            resolve_macos_root_symlinks("/home/me"),
-            "/System/Volumes/Data/home/me"
-        );
-    }
-
-    #[test]
-    fn macos_root_resolution_only_matches_whole_segments() {
-        // A prefix that merely starts with the same letters is not a match.
-        assert_eq!(resolve_macos_root_symlinks("/variable"), "/variable");
-        assert_eq!(resolve_macos_root_symlinks("/tmpfs/x"), "/tmpfs/x");
-        assert_eq!(resolve_macos_root_symlinks("/etcd"), "/etcd");
-        assert_eq!(resolve_macos_root_symlinks("/homebrew"), "/homebrew");
-        // Already-resolved and unrelated paths pass through untouched.
-        assert_eq!(
-            resolve_macos_root_symlinks("/private/tmp/x"),
-            "/private/tmp/x"
-        );
-        assert_eq!(resolve_macos_root_symlinks("/Users/me/w"), "/Users/me/w");
-        assert_eq!(resolve_macos_root_symlinks(""), "");
-    }
-
-    #[test]
-    fn macos_root_resolution_is_idempotent() {
-        // Re-resolving a resolved path must be a no-op — no target is itself
-        // under a symlinked root.
-        for (_, target) in MACOS_SYMLINKED_ROOTS {
-            assert_eq!(resolve_macos_root_symlinks(target), target);
-        }
     }
 
     #[test]
@@ -1869,11 +1575,6 @@ mod tests {
         assert!(!p.contains("/private/var/db/mds"));
     }
 
-    // Keychain rules expand `~/Library/Keychains` from $HOME at build
-    // time, so the tests that exercise `keychain_access: true` are gated
-    // to macOS (the only OS where this code path is actually used and
-    // where $HOME is reliably set in CI).
-    #[cfg(target_os = "macos")]
     #[test]
     fn keychain_access_true_allows_securityd_mach_services() {
         let mut r = req();
@@ -1891,7 +1592,6 @@ mod tests {
         assert!(p.contains("(global-name-regex #\"^com\\.apple\\.lsd\\.\")"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn keychain_access_true_allows_filesystem_paths() {
         let mut r = req();
@@ -1905,10 +1605,8 @@ mod tests {
         // re-emit them here.
         assert!(p.contains("(subpath \"/private/var/db/mds\")"));
         // Read+write surfaces
-        let home = std::env::var("HOME").expect("HOME must be set in test env");
-        let user_keychains = format!("{home}/Library/Keychains");
         assert!(
-            p.contains(&format!("(subpath \"{user_keychains}\")")),
+            p.contains("(subpath \"/Users/profile-test/Library/Keychains\")"),
             "missing user keychain subpath"
         );
         assert!(p.contains("(subpath \"/private/var/folders\")"));
@@ -1951,13 +1649,8 @@ mod tests {
     #[test]
     fn developer_dir_rule_grants_read_only_subpath() {
         let mut out = String::new();
-        push_developer_dir_rule(
-            &mut out,
-            Path::new("/Applications/Xcode.app/Contents/Developer"),
-        );
-        assert!(out.contains(
-            "(allow file-read* (subpath \"/Applications/Xcode.app/Contents/Developer\"))"
-        ));
+        write_developer_dir_rule(&mut out, Some("/Applications/Xcode.app"));
+        assert!(out.contains("(allow file-read* (subpath \"/Applications/Xcode.app\"))"));
         // The xcrun shims only need to read it; a write grant would widen the
         // sandbox for no benefit.
         assert!(!out.contains("file-write"));
@@ -1966,155 +1659,57 @@ mod tests {
     #[test]
     fn developer_dir_rule_escapes_embedded_quotes() {
         let mut out = String::new();
-        push_developer_dir_rule(&mut out, Path::new("/tmp/we\"ird/Developer"));
+        write_developer_dir_rule(&mut out, Some("/tmp/we\"ird/Developer"));
         assert!(out.contains("(subpath \"/tmp/we\\\"ird/Developer\")"));
-    }
-
-    #[test]
-    fn xcode_developer_dir_widens_to_the_app_bundle() {
-        let root =
-            developer_dir_grant_root(Path::new("/Applications/Xcode_26.6.app/Contents/Developer"));
-        assert_eq!(root, Path::new("/Applications/Xcode_26.6.app"));
-    }
-
-    #[test]
-    fn command_line_tools_dir_is_not_widened() {
-        let dir = Path::new("/Library/Developer/CommandLineTools");
-        assert_eq!(developer_dir_grant_root(dir), dir);
-    }
-
-    #[test]
-    fn developer_dir_widening_is_case_insensitive_on_the_extension() {
-        let root =
-            developer_dir_grant_root(Path::new("/Applications/Xcode.APP/Contents/Developer"));
-        assert_eq!(root, Path::new("/Applications/Xcode.APP"));
-    }
-
-    #[test]
-    fn widening_accepts_any_bundle_name_and_install_location() {
-        // xcode-select fixes the Contents/Developer suffix, never the prefix.
-        for (dir, want) in [
-            (
-                "/Applications/Xcode-beta.app/Contents/Developer",
-                "/Applications/Xcode-beta.app",
-            ),
-            (
-                "/Applications/Xcode_26.6.app/Contents/Developer",
-                "/Applications/Xcode_26.6.app",
-            ),
-            (
-                "/Volumes/Build/Xcode.app/Contents/Developer",
-                "/Volumes/Build/Xcode.app",
-            ),
-        ] {
-            assert_eq!(developer_dir_grant_root(Path::new(dir)), Path::new(want));
-        }
-    }
-
-    #[test]
-    fn a_dir_deeper_inside_a_bundle_is_not_widened_to_it() {
-        // Only the exact Contents/Developer layout widens.
-        for dir in [
-            "/Applications/Evil.app/Contents/Developer/usr/bin",
-            "/Applications/Evil.app/a/b/Developer",
-            "/Applications/Evil.app/Contents/Developer2",
-        ] {
-            assert_eq!(developer_dir_grant_root(Path::new(dir)), Path::new(dir));
-        }
-    }
-
-    #[test]
-    fn widening_handles_non_normalized_paths_without_overreaching() {
-        // These all normalize to the same directory, so they still widen.
-        for dir in [
-            "/Applications/Xcode.app/Contents/Developer/",
-            "/Applications/Xcode.app/Contents//Developer",
-            "/Applications/Xcode.app/Contents/./Developer",
-        ] {
-            assert_eq!(
-                developer_dir_grant_root(Path::new(dir)),
-                Path::new("/Applications/Xcode.app")
-            );
-        }
-        // `..` is not normalized away, so it fails the layout match.
-        let parent_ref = "/Applications/Xcode.app/Contents/Developer/..";
-        assert_eq!(
-            developer_dir_grant_root(Path::new(parent_ref)),
-            Path::new(parent_ref)
-        );
     }
 
     #[test]
     fn developer_dir_absent_emits_nothing() {
         let mut out = String::new();
-        if active_developer_dir().is_none() {
-            write_developer_dir_rule(&mut out);
-            assert!(out.is_empty());
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn only_a_root_owned_unwritable_dir_is_trusted() {
-        assert!(dir_is_root_controlled(0, 0o755));
-        assert!(dir_is_root_controlled(0, 0o700));
-        for mode in [0o775, 0o757, 0o777, 0o1777] {
-            assert!(!dir_is_root_controlled(0, mode), "mode {mode:o}");
-        }
-        for uid in [1, 501, 1000] {
-            assert!(!dir_is_root_controlled(uid, 0o755), "uid {uid}");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_link_the_caller_controls_is_not_trusted() {
-        use std::os::unix::fs::{symlink, MetadataExt as _};
-
-        let dir = std::env::temp_dir().join(format!("mxc-devdir-trust-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("target")).expect("fixture dir");
-
-        let link = dir.join("link");
-        symlink(dir.join("target"), &link).expect("fixture symlink");
-        // Only decisive when the test user is not root.
-        if fs::metadata(&dir).expect("fixture metadata").uid() != 0 {
-            assert!(!link_is_root_controlled(&link));
-        }
-
-        // True for any user: `xcode-select` writes a symlink, nothing else.
-        let plain = dir.join("plain");
-        fs::write(&plain, "").expect("fixture file");
-        assert!(!link_is_root_controlled(&plain));
-        assert!(!link_is_root_controlled(&dir.join("missing")));
-
-        fs::remove_dir_all(&dir).expect("fixture cleanup");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_real_xcode_select_links_are_trusted_when_present() {
-        // The check must accept a stock host, or the grant silently vanishes.
-        for link in DEVELOPER_DIR_LINKS.iter().map(Path::new) {
-            if fs::symlink_metadata(link).is_ok() {
-                assert!(
-                    link_is_root_controlled(link),
-                    "rejected a stock link: {}",
-                    link.display()
-                );
-            }
-        }
+        write_developer_dir_rule(&mut out, None);
+        assert!(out.is_empty());
     }
 
     #[test]
-    fn baseline_profile_grants_the_active_developer_dir() {
-        // The documented baseline promise is that standard tools work, and
-        // the /usr/bin xcrun shims cannot start without this directory.
-        let Some(dir) = active_developer_dir() else {
-            return;
+    fn profile_uses_prepared_paths_instead_of_host_discovery() {
+        let mut request = req();
+        request.policy.readonly_paths = vec!["/unprepared/path".into()];
+        request.seatbelt = Some(SeatbeltConfig {
+            keychain_access: true,
+            ..Default::default()
+        });
+        let inputs = ProfileInputs {
+            readonly_paths: vec!["/prepared/readonly".into()],
+            readwrite_paths: vec!["/prepared/readwrite".into()],
+            denied_paths: vec!["/prepared/denied".into()],
+            developer_dir: Some("/Applications/ProfileTest.app".into()),
+            user_keychains: Some("/Users/prepared/Library/Keychains".into()),
         };
-        let granted = developer_dir_grant_root(&dir);
-        let p = build_profile(&req()).unwrap();
-        assert!(p.contains(&format!("(subpath \"{}\")", granted.display())));
+        let profile = super::build_profile_with_proxy(&request, None, &inputs).unwrap();
+        for path in [
+            "/prepared/readonly",
+            "/prepared/readwrite",
+            "/prepared/denied",
+            "/Applications/ProfileTest.app",
+            "/Users/prepared/Library/Keychains",
+        ] {
+            assert!(
+                profile.contains(&format!("(subpath \"{path}\")")),
+                "{profile}"
+            );
+        }
+        assert!(!profile.contains("/unprepared/path"), "{profile}");
+    }
+
+    #[test]
+    fn keychain_access_requires_a_prepared_user_directory() {
+        let mut request = req();
+        request.seatbelt = Some(SeatbeltConfig {
+            keychain_access: true,
+            ..Default::default()
+        });
+        let error =
+            super::build_profile_with_proxy(&request, None, &ProfileInputs::default()).unwrap_err();
+        assert!(error.contains("not prepared for keychainAccess"), "{error}");
     }
 }

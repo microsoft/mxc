@@ -465,7 +465,7 @@ pub const ENTRA_UPN_MARKER: &str = "entra-upn";
 /// Whether `identity` looks like a UPN (or a `<prefix>:<upn>` sandbox id).
 ///
 /// An `@` is the discriminator: none of the identity shapes MXC mints itself
-/// (`sandbox-<hex>`, `wxc-<token>`, `wsb:<hex>`) contains one, and every UPN
+/// (`wxc-<token>`, `wsb:<hex>`) contains one, and every UPN
 /// does.
 fn is_upn_shaped(identity: &str) -> bool {
     identity.contains('@')
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn mxc_minted_identities_pass_through_unredacted() {
-        for id in ["sandbox-a3f1c8e40029bd17", "wsb:deadbeef", "CLI", ""] {
+        for id in ["wsb:deadbeef", "CLI", ""] {
             assert_eq!(redact_identity(id), id);
         }
     }

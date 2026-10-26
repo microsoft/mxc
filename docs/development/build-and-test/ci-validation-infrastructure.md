@@ -38,7 +38,7 @@ the individual local test scripts are documented in
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter inventory. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
-| `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
+| `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at the directory CI passes as `-TempDirectory`, so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
 ### Flow
@@ -440,20 +440,20 @@ Every job uploads its logs whether it passed or failed, as
 
 The catch is that `$env:TEMP` is not `$RUNNER_TEMP`. The Windows suites write their
 scratch trees, transcripts, and results files under the user's temp directory
-(`C:\Users\<user>\AppData\Local\Temp`), but `upload-artifact` reads
+(`C:\Users\<user>\AppData\Local\Temp`), but `upload-artifact` reads from
 `${{ runner.temp }}` (`C:\a\_work\_temp`). Anything left in the former is simply
 never collected, which is why the artifact used to arrive nearly empty.
 
-So `run_backend_validation_tests.ps1` points `TEMP` and `TMP` at `$RUNNER_TEMP` before
-it dispatches. Parameter defaults, `[System.IO.Path]::GetTempPath()`, and child
-processes all read those variables, so everything temp-rooted lands in the
-upload directory without CI having to know a single filename.
+So the Windows run step passes `-TempDirectory $RUNNER_TEMP/mxc-test-temp` to
+`run_backend_validation_tests.ps1`, which points `TEMP` and `TMP` there before it
+dispatches. Parameter defaults, `[System.IO.Path]::GetTempPath()`, and child
+processes all read those variables, so everything temp-rooted lands in the upload
+directory without CI having to know a single filename. The upload takes that folder
+and `mxc-ci.log`, not all of `$RUNNER_TEMP`, which the runner and the job's actions
+also use.
 
 Linux and macOS need none of this — those suites log to stdout, and the run
 step tees that into `$RUNNER_TEMP/mxc-ci.log`.
-
-The IsolationSession test bundle downloads under `artifacts/bin`, outside
-`$RUNNER_TEMP`, so it is not uploaded again with the logs.
 
 ## Runbook
 

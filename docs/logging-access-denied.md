@@ -102,7 +102,7 @@ stays enforced:
    `captureDenials.mode: "allow"` for permissive application-driven capture.
    It is a compatibility wrapper over `captureDenials.mode: "allow"` with ETL
    retention forced on, and injects `permissiveLearningMode`. Native
-   ProcessContainer capture owns the trace lifecycle without PLM or UAC.
+   ProcessContainer capture owns the native trace lifecycle without UAC.
    Hosts without compatible native capture fail before the workload starts.
    The CLI consumes the returned JSON and ETL paths,
    relocates the policy output, its verbose logging sibling, and the trace to

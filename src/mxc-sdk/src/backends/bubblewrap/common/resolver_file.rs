@@ -94,7 +94,7 @@ impl ResolverFile {
 
         let in_baseline = BASELINE_RO_BIND_PATHS.iter().any(|root| {
             resolve_through_symlinks(Path::new(root))
-                .is_some_and(|root| destination.starts_with(root))
+                .is_some_and(|root| root.error.is_none() && destination.starts_with(root.path))
         });
         let snapshot = if supplied || in_baseline {
             None
@@ -255,14 +255,17 @@ fn implicit_source_paths(target: &Path) -> Vec<PathBuf> {
         .iter()
         .chain(RESOLVER_DIRS)
         .filter_map(|root| {
-            let resolved = resolve_through_symlinks(Path::new(root))?;
+            let resolved = resolve_through_symlinks(Path::new(root))
+                .filter(|resolved| resolved.error.is_none())?;
             target
-                .strip_prefix(resolved)
+                .strip_prefix(resolved.path)
                 .ok()
                 .map(|suffix| Path::new(root).join(suffix))
         })
         .collect();
-    if resolve_through_symlinks(Path::new(WSL_RESOLV_CONF)).is_some_and(|file| target == file) {
+    if resolve_through_symlinks(Path::new(WSL_RESOLV_CONF))
+        .is_some_and(|file| file.error.is_none() && target == file.path)
+    {
         paths.push(PathBuf::from(WSL_RESOLV_CONF));
     }
     paths

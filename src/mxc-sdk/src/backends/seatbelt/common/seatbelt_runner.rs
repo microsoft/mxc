@@ -44,6 +44,9 @@ use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
 #[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
 use crate::seatbelt_common::profile_builder::build_profile_with_terminals;
+use crate::seatbelt_common::profile_preparation::{
+    expand_tilde, prepare_profile, resolve_policy_path,
+};
 
 #[link(name = "proc")]
 unsafe extern "C" {
@@ -285,6 +288,9 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .map_err(error_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
             .map_err(error_response)?;
+        // Dry runs never reach spawn, so reject unresolvable paths here too.
+        prepare_profile(request).map_err(error_response)?;
+        resolved_working_directory_opt(request).map_err(error_response)?;
 
         Ok(())
     }
@@ -372,30 +378,21 @@ fn spawn_exec(
     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
     // vars are injected here (and caller-supplied proxy vars stripped).
     //
-    // The cwd is anchored first: `current_dir` resolves a relative value against
-    // the launching process, so `HOME` must name that same absolute path.
-    let resolved_cwd = resolved_working_directory_opt(request);
-    let cwd = match absolute_working_directory(
-        resolved_cwd
-            .as_deref()
-            .unwrap_or(UNRESOLVED_WORKING_DIRECTORY),
-    ) {
-        Ok(cwd) => cwd,
-        Err(e) => {
-            return Err(error_response(format!(
-                "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
-            )))
-        }
-    };
-    let home_dir = resolved_cwd.as_ref().map(|_| cwd.as_str());
+    // The cwd is anchored and resolved to its physical path so `PWD` and the
+    // default `HOME` match the directory the child actually starts in.
+    let resolved_cwd = resolved_working_directory_opt(request).map_err(error_response)?;
+    let cwd = resolved_cwd
+        .as_deref()
+        .unwrap_or(UNRESOLVED_WORKING_DIRECTORY);
+    let home_dir = resolved_cwd.as_deref();
     apply_clean_environment(&mut command, request, proxy_address, home_dir);
 
     // Also export `PWD` so the child's `getcwd()` uses its
     // fast `$PWD` path (a single stat) instead of walking parent directories
     // the sandbox may not let it read — which otherwise leaks
     // "getcwd: ... Operation not permitted" to stderr.
-    command.current_dir(&cwd);
-    command.env("PWD", &cwd);
+    command.current_dir(cwd);
+    command.env("PWD", cwd);
 
     match stdio {
         StdioMode::Pipes => {
@@ -847,7 +844,8 @@ fn build_sandbox_command(
         })?,
         None => Vec::new(),
     };
-    let profile = build_profile_with_terminals(request, proxy_address, &terminal_paths)
+    let inputs = prepare_profile(request).map_err(error_response)?;
+    let profile = build_profile_with_terminals(request, proxy_address, &inputs, &terminal_paths)
         .map_err(error_response)?;
     log_generated_profile(&profile, logger);
     let profile_cstr = CString::new(profile)
@@ -953,14 +951,36 @@ const UNRESOLVED_WORKING_DIRECTORY: &str = "/";
 ///
 /// The same value feeds the environment, so the default `HOME` cannot name a
 /// directory the child never entered.
-fn resolved_working_directory_opt(request: &ExecutionRequest) -> Option<String> {
-    let expand = |path: &str| {
-        crate::seatbelt_common::profile_builder::expand_tilde(path)
-            .unwrap_or_else(|_| path.to_string())
-    };
-    request
+fn resolved_working_directory_opt(request: &ExecutionRequest) -> Result<Option<String>, String> {
+    let expand = |path: &str| expand_tilde(path).unwrap_or_else(|_| path.to_string());
+    let Some(selected) = request
         .resolved_working_directory_with(|path| Path::new(&expand(path)).is_dir())
         .map(|resolved| expand(resolved.path))
+    else {
+        return Ok(None);
+    };
+    let absolute = absolute_working_directory(&selected).map_err(|e| {
+        format!(
+            "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
+        )
+    })?;
+    // Let the kernel walk the original path so `missing/..` cannot be folded away.
+    match std::fs::metadata(&absolute) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(format!(
+                "Seatbelt working directory '{absolute}' is not a directory"
+            ))
+        }
+        Err(e) => {
+            return Err(format!(
+                "Seatbelt working directory '{absolute}' is not usable: {e}"
+            ))
+        }
+    }
+    resolve_policy_path(&absolute)
+        .map(Some)
+        .map_err(|e| format!("Seatbelt working directory: {e}"))
 }
 
 /// Anchor a resolved working directory to the launcher's directory when it is
@@ -1307,7 +1327,8 @@ os.close(fd)
         // Guards the seam: a re-derived or stale profile must not be logged.
         let mut request = base_request();
         request.policy.readonly_paths = vec!["/tmp/mxc-profile-log-probe".into()];
-        let profile = build_profile_with_proxy(&request, None).expect("profile builds");
+        let inputs = prepare_profile(&request).expect("profile inputs resolve");
+        let profile = build_profile_with_proxy(&request, None, &inputs).expect("profile builds");
 
         assert_eq!(
             extract_profile(&logged_profile(&profile)),
@@ -1567,21 +1588,49 @@ os.close(fd)
     }
 
     /// An explicit directory wins; otherwise the first policy grant is used.
+    /// Either is reported as its physical path.
     #[test]
     fn working_directory_resolves_explicit_then_policy_grant() {
+        let dir = tempfile::tempdir().unwrap();
         let mut explicit = base_request();
-        explicit.working_directory = "/tmp/explicit".into();
+        explicit.working_directory = dir.path().to_str().unwrap().into();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
         assert_eq!(
-            resolved_working_directory_opt(&explicit).as_deref(),
-            Some("/tmp/explicit")
+            resolved_working_directory_opt(&explicit)
+                .unwrap()
+                .as_deref(),
+            real.to_str()
         );
 
         let mut policy_fallback = base_request();
         policy_fallback.policy.readwrite_paths = vec!["/tmp".into()];
         assert_eq!(
-            resolved_working_directory_opt(&policy_fallback).as_deref(),
-            Some("/tmp")
+            resolved_working_directory_opt(&policy_fallback)
+                .unwrap()
+                .as_deref(),
+            Some("/private/tmp")
         );
+    }
+
+    #[test]
+    fn a_broken_working_directory_fails_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("project")).unwrap();
+        std::fs::write(dir.path().join("file"), b"x").unwrap();
+        std::os::unix::fs::symlink("missing", dir.path().join("dangling")).unwrap();
+        std::os::unix::fs::symlink("loop", dir.path().join("loop")).unwrap();
+        for cwd in ["dangling", "loop", "missing", "missing/../project", "file"] {
+            let mut request = base_request();
+            request.working_directory = dir.path().join(cwd).to_str().unwrap().into();
+            let error = SeatbeltScriptRunner::new()
+                .validate(&request)
+                .expect_err("dry runs must reject an unusable cwd")
+                .error_message;
+            assert!(
+                error.contains("Seatbelt working directory"),
+                "{cwd}: {error}"
+            );
+        }
     }
 
     /// With nothing to resolve, the child still has to start somewhere, but
@@ -1589,7 +1638,7 @@ os.close(fd)
     #[test]
     fn an_unresolved_working_directory_does_not_become_home() {
         let request = base_request();
-        assert_eq!(resolved_working_directory_opt(&request), None);
+        assert_eq!(resolved_working_directory_opt(&request), Ok(None));
         assert_eq!(UNRESOLVED_WORKING_DIRECTORY, "/");
 
         let pairs = resolve_environment(&request, None, None);
@@ -1620,9 +1669,8 @@ os.close(fd)
         );
     }
 
-    /// An absolute directory is passed through spelled exactly as written —
-    /// symlinks stay unresolved so `PWD` matches what `spawn_exec` exports —
-    /// and needs no launch directory. `chdir` accepts it even from a launcher
+    /// An absolute directory is passed through spelled exactly as written and
+    /// needs no launch directory. `chdir` accepts it even from a launcher
     /// whose own directory has been removed, so a failure to read that
     /// directory must not fail the request: the panicking closure asserts it is
     /// never consulted.

@@ -10,8 +10,8 @@
 //! build on).
 //!
 //! Only the backends with a streaming path are handled here: ProcessContainer
-//! (native PSEC, shared with the run-to-completion path via
-//! `crate::process_container_common::dispatcher`), Bubblewrap
+//! (native PSEC, constructed through `BaseContainerRunner::for_request` as on
+//! the run-to-completion path), Bubblewrap
 //! and LXC (Linux), Seatbelt (macOS), WSLC, and IsolationSession (Windows,
 //! behind the `wslc` and `isolation_session` features). Every other backend —
 //! including the remaining experimental ones (Windows Sandbox, MicroVM,
@@ -273,16 +273,14 @@ fn spawn_process_container(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::mxc_common::sandbox_process::StdioMode;
-    use crate::process_container_common::dispatcher::{self, SpawnDispatchError};
+    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-    match dispatcher::spawn(request, logger, StdioMode::Pipes) {
-        Ok(process) => Ok(process),
-        Err(SpawnDispatchError::Dispatch(error)) => {
-            Err(MxcError::backend_unavailable(error.to_string()))
-        }
-        Err(SpawnDispatchError::Spawn(response)) => Err(map_spawn_error(*response)),
-    }
+    let mut backend =
+        BaseContainerRunner::for_request(request).map_err(MxcError::backend_unavailable)?;
+    backend
+        .spawn(request, logger, StdioMode::Pipes)
+        .map_err(map_spawn_error)
 }
 
 #[cfg(not(target_os = "windows"))]

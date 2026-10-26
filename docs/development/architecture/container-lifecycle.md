@@ -512,11 +512,11 @@ Provision and session JSON still contains `containment`; sandbox-addressed opera
 than overriding the command-line routing. Without `--operation`, `wxc-exec` accepts
 only one-shot JSON.
 
-`--operation` cannot be combined with delete or maintenance routing, including
-`--delete`, its `--containername` option, setup modes, probing, force-reclaim, or
-audit modes. Lifecycle identity comes only from `--container-id` or `--session-id`,
-which are mutually exclusive; an operation supplied the wrong one is told which it
-wanted. Conflicting options are rejected rather than ignored.
+`--operation` cannot be combined with maintenance routing, including setup modes,
+probing, force-reclaim, or audit modes. Lifecycle identity comes only from
+`--container-id` or `--session-id`, which are mutually exclusive; an operation
+supplied the wrong one is told which it wanted. Conflicting options are rejected
+rather than ignored.
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
 declare which phases honor them, see §10.3):

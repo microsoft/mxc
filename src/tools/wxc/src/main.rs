@@ -21,7 +21,6 @@ use mxc_sdk::mxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use mxc_sdk::mxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use mxc_sdk::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use mxc_sdk::mxc_common::telemetry;
-use mxc_sdk::process_container_common::sandbox_tracking::delete_app_container_profile;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -42,14 +41,6 @@ struct Cli {
     #[arg(long)]
     debug: bool,
 
-    /// Delete container profile mode
-    #[arg(long)]
-    delete: bool,
-
-    /// Container name (required with --delete)
-    #[arg(long = "containername")]
-    containername: Option<String>,
-
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
@@ -64,8 +55,6 @@ struct Cli {
         long,
         value_enum,
         conflicts_with_all = [
-            "delete",
-            "containername",
             "setup_hyperlight",
             "force",
             "setup_wslc",
@@ -172,8 +161,6 @@ struct Cli {
             "config",
             "config_base64",
             "command",
-            "delete",
-            "containername",
             "experimental",
             "dry_run",
             "setup_hyperlight",
@@ -1079,13 +1066,11 @@ fn main() {
         logger.enable_diagnostics(&diag_config);
     }
 
-    // Determine config input. In delete mode the config is optional; every
-    // other path requires it. `decoded_config` above already read the source
-    // once — if it's populated, unpack the decoded JSON (or surface the
-    // decode error). If it's absent, either accept the empty state for
-    // delete mode or report the missing-config error.
-    let config_json: Option<String> = match decoded_config {
-        Some(Ok(json)) => Some(json),
+    // Determine config input. `decoded_config` above already read the source
+    // once — if it's populated, unpack the decoded JSON (or surface the decode
+    // error); if it's absent, report the missing-config error.
+    let config_json: String = match decoded_config {
+        Some(Ok(json)) => json,
         Some(Err(error)) => match cli.operation {
             Some(operation) => {
                 let error = lifecycle_input_error(operation, &mut logger, error);
@@ -1100,43 +1085,21 @@ fn main() {
             }
         },
         None => {
-            if !cli.delete {
-                let message =
-                    "No config provided. Use a positional path, --config, or --config-base64";
-                if let Some(operation) = cli.operation {
-                    let error = lifecycle_input_error(
-                        operation,
-                        &mut logger,
-                        RequestInputError::Source(WxcError::ConfigParse(message.to_string())),
-                    );
-                    print_error_envelope(&error);
-                    eprint!("{}", logger.get_buffer());
-                    process::exit(1);
-                }
-                eprintln!("Error: {message}");
+            let message = "No config provided. Use a positional path, --config, or --config-base64";
+            if let Some(operation) = cli.operation {
+                let error = lifecycle_input_error(
+                    operation,
+                    &mut logger,
+                    RequestInputError::Source(WxcError::ConfigParse(message.to_string())),
+                );
+                print_error_envelope(&error);
+                eprint!("{}", logger.get_buffer());
                 process::exit(1);
             }
-            None
+            eprintln!("Error: {message}");
+            process::exit(1);
         }
     };
-
-    // Delete mode
-    if cli.delete {
-        let name = match cli.containername {
-            Some(ref n) => n.as_str(),
-            None => {
-                eprintln!("Error: --containername is required with --delete");
-                process::exit(1);
-            }
-        };
-        let success = delete_app_container_profile(name, &mut logger);
-        print!("{}", logger.get_buffer());
-        process::exit(if success { 0 } else { 1 });
-    }
-
-    // Non-delete paths always have a config JSON at this point (or exited
-    // above with the missing-config error).
-    let config_json = config_json.expect("config_json is Some on non-delete paths");
     if let Some(operation) = cli.operation {
         let phase = operation.into();
         let target_id = cli
@@ -1706,7 +1669,6 @@ mod tests {
     #[test]
     fn cli_rejects_lifecycle_operation_with_utility_modes() {
         for utility_mode in [
-            "--delete",
             "--setup-hyperlight",
             "--setup-wslc",
             "--probe",
@@ -1728,21 +1690,6 @@ mod tests {
                 "{utility_mode}"
             );
         }
-
-        let error = match Cli::try_parse_from([
-            "wxc-exec",
-            "policy.json",
-            "--operation",
-            "deprovision",
-            "--container-id",
-            "iso:abc",
-            "--containername",
-            "legacy-profile",
-        ]) {
-            Err(error) => error,
-            Ok(_) => panic!("--operation must conflict with --containername"),
-        };
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     fn test_logger() -> Logger {

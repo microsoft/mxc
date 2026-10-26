@@ -340,8 +340,8 @@ ancestor) would abort. A `deniedPaths` entry is therefore rewritten to its real
 filesystem path before mounting — canonicalizing the deepest existing ancestor
 (following symlinks at every level) and re-appending any not-yet-created trailing
 components — so the mask lands on the real object and its file/directory type is
-classified from that target. Fully unresolvable paths are left as-is — there is
-nothing behind them to leak.
+classified from that target. Dangling links, loops, and other paths that cannot
+be resolved fail before the sandbox starts.
 
 Example:
 ```json

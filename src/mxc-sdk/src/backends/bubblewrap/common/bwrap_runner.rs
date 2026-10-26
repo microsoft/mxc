@@ -1181,9 +1181,8 @@ struct DeniedPlan {
 /// arg pipeline can't represent it faithfully, and a lossy replacement would mask
 /// the wrong path and leave the target exposed.
 ///
-/// An entry still a symlink after resolution (dangling/unresolvable) is kept and
-/// file-masked with `/dev/null` — nothing resolvable is behind it to leak, and
-/// bwrap tolerates `/dev/null` over a symlink node (whereas `--tmpfs` aborts).
+/// Also fails closed on dangling links, loops, and other resolution errors. A
+/// later `..` could otherwise move the mask onto an unrelated path.
 fn resolve_denied_paths(
     policy: &crate::mxc_common::models::ContainerPolicy,
     logger: &mut Logger,
@@ -1193,7 +1192,13 @@ fn resolve_denied_paths(
     let mut files = HashSet::new();
     for p in &policy.denied_paths {
         if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
-            let resolved = resolved.to_str().ok_or_else(|| {
+            if let Some(error) = resolved.error {
+                return Err(format!(
+                    "Bubblewrap: deniedPaths entry '{p}' could not be resolved ({error}); \
+                     refusing to start."
+                ));
+            }
+            let resolved = resolved.path.to_str().ok_or_else(|| {
                 format!(
                     "Bubblewrap: deniedPaths entry '{p}' resolves to a non-UTF-8 host path that \
                      cannot be safely masked; refusing to start."
@@ -1213,8 +1218,7 @@ fn resolve_denied_paths(
                 continue;
             }
         }
-        // Not rewritten: a real path, a rooted not-yet-existing path, or a
-        // dangling symlink. Classify by stat'ing the entry itself.
+        // Not rewritten: a real path or a rooted not-yet-existing path.
         if is_file_mask_target(p) {
             files.insert(p.clone());
         }
@@ -2316,29 +2320,32 @@ mod tests {
         assert!(!plan.files.contains(&subdir.to_string_lossy().into_owned()));
     }
 
-    /// A **dangling** symlink cannot be resolved to a real target, so it is kept
-    /// as-is and file-masked (`/dev/null`), which bwrap tolerates over a symlink
-    /// node. It must not be dropped and must not be directory-masked.
+    /// Broken links fail before `..` can redirect the mask to another path.
     #[cfg(unix)]
     #[test]
-    fn resolve_denied_paths_masks_dangling_symlink_as_file() {
+    fn resolve_denied_paths_rejects_broken_links() {
         use crate::mxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
-        let link = base.join("dangling");
-        std::os::unix::fs::symlink(base.join("nonexistent_target"), &link).unwrap();
+        std::fs::write(base.join("secret"), b"x").unwrap();
+        std::os::unix::fs::symlink(base.join("nonexistent_target"), base.join("dangling")).unwrap();
+        std::os::unix::fs::symlink("loop", base.join("loop")).unwrap();
 
-        let policy = crate::mxc_common::models::ContainerPolicy {
-            denied_paths: vec![link.to_string_lossy().into_owned()],
-            ..Default::default()
-        };
-
-        let mut logger = Logger::new(Mode::Buffer);
-        let plan = resolve_denied_paths(&policy, &mut logger).expect("must not fail closed");
-        // Nothing was rewritten (the target does not exist).
-        assert!(plan.paths.is_none());
-        // The dangling link is still masked, as a file.
-        assert!(plan.files.contains(&link.to_string_lossy().into_owned()));
+        for denied in [
+            base.join("dangling"),
+            base.join("dangling/../secret"),
+            base.join("loop"),
+        ] {
+            let policy = crate::mxc_common::models::ContainerPolicy {
+                denied_paths: vec![denied.to_string_lossy().into_owned()],
+                ..Default::default()
+            };
+            let mut logger = Logger::new(Mode::Buffer);
+            let error = resolve_denied_paths(&policy, &mut logger)
+                .err()
+                .unwrap_or_else(|| panic!("{} must fail closed", denied.display()));
+            assert!(error.contains("could not be resolved"), "{error}");
+        }
     }
 
     /// A denied path that traverses `..` under a symlinked ancestor with a

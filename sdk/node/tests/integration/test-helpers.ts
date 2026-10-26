@@ -115,7 +115,6 @@ export function getSdkBinDir(): string {
 export const EXPECTED_WINDOWS_BINARIES = [
   'mxc_ffi.dll',
   'wxc-exec.exe',
-  'plm.exe',
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
   'wxc-windows-sandbox-guest.exe',
@@ -142,8 +141,6 @@ const OPTIONAL_BINARIES = [
   'nanvixd.exe',           // Only built with --with-microvm
   'nanvix_rootfs.img',     // Only built with --with-microvm
   'python3.initrd',        // Only built with --with-microvm
-  'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
-                   // only when the plm crate is included in the build.
   // Test-only binaries. The GitHub build artifact carries them so the
   // validation matrix can run the Windows suites from a downloaded artifact,
   // and the npm packager copies that whole artifact into bin/ — so they show

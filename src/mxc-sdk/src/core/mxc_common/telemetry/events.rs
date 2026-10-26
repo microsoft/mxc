@@ -215,46 +215,6 @@ pub fn log_process_event(identity: &str, process_id: u32, event: ProcessEvent<'_
     test_sink::record_process(identity, process_id, event);
 }
 
-pub fn log_enforcement_degraded(
-    identity: &str,
-    tier: &str,
-    needs_dacl_augmentation: bool,
-    degradation_reasons: &str,
-    effective_enforcement_level: &str,
-) {
-    if !requirement_emission_allowed() {
-        return;
-    }
-
-    crate::mxc_telemetry::log_enforcement_degraded(
-        identity,
-        tier,
-        needs_dacl_augmentation,
-        degradation_reasons,
-        effective_enforcement_level,
-    );
-    #[cfg(test)]
-    test_sink::record_requirement(
-        "MXC.EnforcementDegraded",
-        vec![
-            ("identity".to_owned(), identity.to_owned()),
-            ("tier".to_owned(), tier.to_owned()),
-            (
-                "needs_dacl_augmentation".to_owned(),
-                needs_dacl_augmentation.to_string(),
-            ),
-            (
-                "degradation_reasons".to_owned(),
-                degradation_reasons.to_owned(),
-            ),
-            (
-                "effective_enforcement_level".to_owned(),
-                effective_enforcement_level.to_owned(),
-            ),
-        ],
-    );
-}
-
 pub fn log_policy_hash(identity: &str, policy_hash: &str, config_schema_version: &str) {
     if !requirement_emission_allowed() {
         return;
@@ -649,7 +609,6 @@ mod tests {
         log_process_event("opaque", 42, ProcessEvent::Exited(0));
         log_process_event("opaque", 42, ProcessEvent::TimedOut(1000));
         log_process_event("opaque", 42, ProcessEvent::KillFailed("terminate", 5));
-        log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
         log_policy_hash("opaque", "sha256:abc", "0.9.0-alpha");
         log_network_policy_applied("opaque", "proxy", "deny", 8080);
         log_sandbox_torn_down("opaque", "success", "released");
@@ -732,40 +691,6 @@ mod tests {
                 .iter()
                 .any(|(n, v)| n == "mxc.error_code" && v == "5"),
             "ProcessKillFailed must include mxc.error_code field"
-        );
-
-        // Validate EnforcementDegraded payload
-        let enforcement = events
-            .iter()
-            .find(|e| e.name == "MXC.EnforcementDegraded")
-            .expect("enforcement event");
-        assert!(enforcement
-            .fields
-            .iter()
-            .any(|(n, v)| n == "identity" && v == "opaque"));
-        assert!(
-            enforcement
-                .fields
-                .iter()
-                .any(|(n, v)| n == "tier" && v == "base_container"),
-            "EnforcementDegraded must include tier field with correct value"
-        );
-        assert!(enforcement
-            .fields
-            .contains(&("needs_dacl_augmentation".to_owned(), "true".to_owned())));
-        assert!(
-            enforcement
-                .fields
-                .iter()
-                .any(|(n, v)| !n.starts_with("degradation_reasons") || !v.is_empty()),
-            "EnforcementDegraded must include non-empty degradation_reasons"
-        );
-        assert!(
-            enforcement
-                .fields
-                .iter()
-                .any(|(n, v)| !n.starts_with("effective_enforcement_level") || !v.is_empty()),
-            "EnforcementDegraded must include non-empty effective_enforcement_level"
         );
 
         // Validate PolicyHash payload
@@ -858,7 +783,6 @@ mod tests {
         test_sink::install();
 
         log_process_event("opaque", 42, ProcessEvent::Exited(0));
-        log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
         log_policy_hash("opaque", "sha256:abc", "0.9.0-alpha");
         log_network_policy_applied("opaque", "proxy", "deny", 8080);
         log_sandbox_torn_down("opaque", "success", "released");
