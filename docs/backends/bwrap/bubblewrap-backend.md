@@ -241,6 +241,8 @@ Common consequences of this default:
   Filesystem-policy mounts still take precedence, including explicit grants
   to custom resolver targets. An ancestor denial still applies when a resolver
   directory is a symlink to another location.
+  Grants through resolver symlinks and sibling-file grants retain their declared
+  access; the read-only resolver copy does not make writable siblings read-only.
 
   Resolver snapshots use sealed, anonymous file descriptors rather than
   temporary host pathnames. Bubblewrap copies them into private read-only

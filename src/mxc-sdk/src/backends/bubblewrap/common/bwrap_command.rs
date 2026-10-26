@@ -10,7 +10,6 @@
 use std::collections::HashSet;
 
 use crate::mxc_common::filesystem_resolve::FsIntent;
-#[cfg(any(target_os = "linux", test))]
 use crate::mxc_common::models::ContainerPolicy;
 use crate::mxc_common::models::{ExecutionRequest, NetworkAction, ProxyAddress};
 use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
@@ -21,6 +20,24 @@ use crate::mxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 /// options end -- unlike a bare `--` token, which a caller-supplied
 /// environment value can also be. Shared so the two cannot drift apart.
 pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyMount {
+    pub source: String,
+    pub destination: String,
+    pub intent: FsIntent,
+}
+
+pub(crate) fn policy_mounts(policy: &ContainerPolicy) -> Vec<PolicyMount> {
+    crate::mxc_common::filesystem_resolve::resolve_mount_order(policy)
+        .into_iter()
+        .map(|mount| PolicyMount {
+            destination: mount.path.clone(),
+            source: mount.path,
+            intent: mount.intent,
+        })
+        .collect()
+}
 
 pub(crate) const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/bin",
@@ -379,6 +396,7 @@ pub fn build_args_classified(
         network_mode,
         None,
         &[],
+        &policy_mounts(&request.policy),
     )
 }
 
@@ -389,6 +407,7 @@ pub(crate) fn build_args_classified_with_mode(
     network_mode: ResolvedNetworkMode,
     seccomp_fd: Option<i32>,
     resolver_args: &[String],
+    mounts: &[PolicyMount],
 ) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
     let mut args = Vec::new();
@@ -456,22 +475,34 @@ pub(crate) fn build_args_classified_with_mode(
     // precedence. `resolve_mount_order` assumes object normalization already ran
     // (it does, in the runner before `build_args`), so exact same-path conflicts
     // are already collapsed to the strictest intent.
-    for mount in crate::mxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
+    for mount in mounts {
         match mount.intent {
             // Read-write: override the base ro-bind and any standard mount.
             FsIntent::ReadWrite => {
-                args.extend(["--bind".into(), mount.path.clone(), mount.path.clone()]);
+                args.extend([
+                    "--bind".into(),
+                    mount.source.clone(),
+                    mount.destination.clone(),
+                ]);
             }
             // Read-only: already covered by the base ro-bind, but listed
             // explicitly so the intent is clear and it overrides any rw parent.
             FsIntent::ReadOnly => {
-                args.extend(["--ro-bind".into(), mount.path.clone(), mount.path.clone()]);
+                args.extend([
+                    "--ro-bind".into(),
+                    mount.source.clone(),
+                    mount.destination.clone(),
+                ]);
             }
             FsIntent::Denied => {
-                if denied_files.contains(&mount.path) {
-                    args.extend(["--ro-bind".into(), "/dev/null".into(), mount.path.clone()]);
+                if denied_files.contains(&mount.source) {
+                    args.extend([
+                        "--ro-bind".into(),
+                        "/dev/null".into(),
+                        mount.destination.clone(),
+                    ]);
                 } else {
-                    args.extend(["--tmpfs".into(), mount.path.clone()]);
+                    args.extend(["--tmpfs".into(), mount.destination.clone()]);
                 }
             }
         }
@@ -550,6 +581,7 @@ mod tests {
                 mode,
                 Some(17),
                 &[],
+                &policy_mounts(&request.policy),
             );
             assert_eq!(
                 &args[args.len() - 6..],
@@ -581,6 +613,7 @@ mod tests {
             ResolvedNetworkMode::Isolated,
             None,
             &resolver,
+            &policy_mounts(&request.policy),
         );
         let temporary = args
             .windows(2)
@@ -623,6 +656,7 @@ mod tests {
             ResolvedNetworkMode::Isolated,
             Some(17),
             &[],
+            &policy_mounts(&request.policy),
         );
         assert_eq!(args, expected);
         for (key, value) in [

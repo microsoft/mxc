@@ -452,6 +452,13 @@ impl BubblewrapScriptRunner {
 
         let network_mode = ResolvedNetworkMode::from_request(request, configured_proxy.is_some());
         let resolver_file = ResolverFile::for_host(&request.policy, logger);
+        let mut mounts = bwrap_command::policy_mounts(&request.policy);
+        let resolver_args = match &resolver_file {
+            Some(resolver) => resolver
+                .mount_args(&mut mounts, denied_files)
+                .map_err(|error| ScriptResponse::error(&format!("Bubblewrap: {error}")))?,
+            None => Vec::new(),
+        };
         let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             let address = configured_proxy.ok_or_else(|| {
                 ScriptResponse::error(
@@ -530,9 +537,6 @@ impl BubblewrapScriptRunner {
                 return Err(ScriptResponse::error(&error));
             }
         };
-        let resolver_args = resolver_file
-            .as_ref()
-            .map_or_else(Vec::new, ResolverFile::mount_args);
         let mut args = bwrap_command::build_args_classified_with_mode(
             request,
             proxy_address,
@@ -540,6 +544,7 @@ impl BubblewrapScriptRunner {
             network_mode,
             Some(seccomp_filter.as_raw_fd()),
             &resolver_args,
+            &mounts,
         );
 
         if stdio == StdioMode::Inherit {

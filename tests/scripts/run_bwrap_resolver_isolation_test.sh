@@ -74,6 +74,12 @@ done
 ln -s /run/NetworkManager/resolv.conf /run/systemd/resolve/alias.conf
 ln -s /run/resolvconf /run/systemd/resolve/linked
 ln -s /run/resolvconf/sub /run/systemd/resolve/nested-link
+for root in /run/systemd/resolve /run/resolvconf; do
+    printf 'READ_ONLY\n' >"$root/readonly-sibling.conf"
+    printf 'WRITABLE\n' >"$root/writable-sibling.conf"
+    mkdir -p "$root/writable-child" "$root/blocked/subtree"
+    printf 'HIDDEN\n' >"$root/blocked/subtree/secret"
+done
 
 # Serve private stand-ins for host IPC, with a control connection before each run.
 python3 - "$WORK_DIR" >"$WORK_DIR/peer.log" 2>&1 <<'PY' &
@@ -136,7 +142,10 @@ for path in ['/run/systemd/resolve/io.systemd.Resolve',
         try:
             client.connect(path)
         except OSError as error:
-            if error.errno not in (errno.ENOENT, errno.ENOTDIR):
+            allowed = {errno.ENOENT, errno.ENOTDIR}
+            if MASK_SOCKET and path.endswith('/io.systemd.Resolve'):
+                allowed.update({errno.ECONNREFUSED, errno.EACCES})
+            if error.errno not in allowed:
                 raise
         else:
             raise SystemExit('FAIL: sandbox reached host resolver IPC at ' + path)
@@ -166,22 +175,26 @@ else:
         if not WRITABLE:
             raise SystemExit('FAIL: resolver snapshot is writable')
 socket.getaddrinfo('localhost', 80)
+EXTRA_CHECKS
 print('RESOLVER_ISOLATION_OK')
 """
 for mode in ("deny", "allow", "filtered", "proxy", "pinned", "denied-directory",
              "denied-file", "denied-with-scratch", "readonly-file", "ungranted-target",
              "custom-resolver", "readwrite-file", "denied-ancestor", "ancestor-with-grant",
-             "invalid-resolver", "staging-swap"):
+             "invalid-resolver", "staging-swap", "sibling-denial", "sibling-grants",
+             "alias-readonly", "alias-readwrite", "alias-siblings"):
     denied = mode.startswith("denied-") or mode in ("ungranted-target", "invalid-resolver")
     nameserver = "10.0.2.3" if mode == "pinned" else "192.0.2.53"
+    workload = (
+        script.replace("DENIED", str(denied)).replace("NAMESERVER", nameserver)
+              .replace("SCRATCH", repr(str(work / "scratch")))
+              .replace("WRITABLE", str(mode in ("readwrite-file", "alias-readwrite")))
+              .replace("MASK_SOCKET", str(mode == "sibling-denial"))
+    )
     config = {
         "version": "0.9.0-alpha",
         "containerId": "Resolver-Isolation-" + mode,
         "containment": "bubblewrap",
-        "process": {"commandLine": "python3 -c " + shlex.quote(
-            script.replace("DENIED", str(denied)).replace("NAMESERVER", nameserver)
-                  .replace("SCRATCH", repr(str(work / "scratch")))
-                  .replace("WRITABLE", str(mode == "readwrite-file")))},
         "network": {"egress": {"default": "allow" if mode in ("allow", "pinned") else "deny"}},
     }
     if mode == "filtered":
@@ -210,6 +223,40 @@ for mode in ("deny", "allow", "filtered", "proxy", "pinned", "denied-directory",
         }
     if mode == "staging-swap":
         config["filesystem"] = {"readwritePaths": [str(work / "scratch")]}
+    extra = ""
+    if mode == "sibling-denial":
+        config["filesystem"] = {"deniedPaths": [
+            "/run/systemd/resolve/io.systemd.Resolve",
+            "/run/systemd/resolve/blocked/subtree",
+        ]}
+        extra = "assert not pathlib.Path('/run/systemd/resolve/blocked/subtree/secret').exists()"
+    if mode in ("alias-readonly", "alias-readwrite"):
+        key = "readonlyPaths" if mode == "alias-readonly" else "readwritePaths"
+        config["filesystem"] = {key: ["/run/resolvconf/resolv.conf"]}
+    if mode in ("sibling-grants", "alias-siblings"):
+        root = "/run/resolvconf" if mode == "alias-siblings" else "/run/systemd/resolve"
+        config["filesystem"] = {
+            "readonlyPaths": [root + "/readonly-sibling.conf"],
+            "readwritePaths": [root + "/writable-sibling.conf", root + "/writable-child"],
+        }
+        extra = f"""
+root = pathlib.Path({root!r})
+readonly = root / 'readonly-sibling.conf'
+assert readonly.read_text() == 'READ_ONLY\\n'
+try:
+    readonly.write_text('NOT_ALLOWED')
+except OSError as error:
+    if error.errno not in (errno.EROFS, errno.EACCES):
+        raise
+else:
+    raise SystemExit('FAIL: readonly sibling accepted a write')
+for path in (root / 'writable-sibling.conf', root / 'writable-child' / 'new-file'):
+    path.write_text('UPDATED')
+    assert path.read_text() == 'UPDATED'
+"""
+    config["process"] = {
+        "commandLine": "python3 -c " + shlex.quote(workload.replace("EXTRA_CHECKS", extra))
+    }
     (work / (mode + ".json")).write_text(json.dumps(config))
 
 wrapper = work / "bin/bwrap"
@@ -273,7 +320,7 @@ PY
 }
 
 for mode in deny allow filtered proxy denied-directory denied-file denied-with-scratch \
-    readonly-file readwrite-file; do
+    readonly-file readwrite-file sibling-denial sibling-grants; do
     run_case "$mode"
 done
 for target in ../run/NetworkManager/resolv.conf /var/run/resolvconf/resolv.conf \
@@ -307,6 +354,9 @@ rm /run/resolvconf
 mkdir -p /var/lib
 mv "$WORK_DIR/resolver-state" "$WORK_DIR/var/lib/resolvconf"
 ln -s /var/lib/resolvconf /run/resolvconf
+run_case alias-readonly
+run_case alias-readwrite
+run_case alias-siblings
 run_case denied-ancestor
 run_case ancestor-with-grant
 

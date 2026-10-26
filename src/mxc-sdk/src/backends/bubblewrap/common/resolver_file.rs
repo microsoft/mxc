@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Seek};
 use std::os::fd::{AsRawFd, RawFd};
@@ -17,8 +17,8 @@ use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::ContainerPolicy;
 
 use super::bwrap_command::{
-    path_intent, path_is_denied, BASELINE_RO_BIND_PATHS, COMPAT_RUN_LINK, COMPAT_RUN_TARGET,
-    RESOLVER_DIRS, WSL_RESOLV_CONF,
+    path_intent, path_is_denied, PolicyMount, BASELINE_RO_BIND_PATHS, COMPAT_RUN_LINK,
+    COMPAT_RUN_TARGET, RESOLVER_DIRS, WSL_RESOLV_CONF,
 };
 use super::proxy_network::above_stdio;
 
@@ -30,6 +30,20 @@ pub(crate) struct ResolverFile {
     snapshot: Option<File>,
     destination: String,
     layout_args: Vec<String>,
+    links: Vec<SandboxLink>,
+}
+
+#[derive(Debug)]
+struct SandboxLink {
+    path: PathBuf,
+    target: PathBuf,
+    host_symlink: bool,
+}
+
+struct ResolverLayout {
+    destination: PathBuf,
+    args: Vec<String>,
+    links: Vec<SandboxLink>,
 }
 
 impl ResolverFile {
@@ -70,8 +84,8 @@ impl ResolverFile {
             return Ok(None);
         }
 
-        let (resolved, layout_args) = resolver_layout(path)?;
-        if resolved != destination {
+        let layout = resolver_layout(path)?;
+        if layout.destination != destination {
             return Err(format!(
                 "{} changed while preparing its resolver mount",
                 path.display()
@@ -90,13 +104,19 @@ impl ResolverFile {
         Ok(Some(Self {
             snapshot,
             destination: path_text(&destination)?.to_owned(),
-            layout_args,
+            layout_args: layout.args,
+            links: layout.links,
         }))
     }
 
-    pub(crate) fn mount_args(&self) -> Vec<String> {
+    pub(crate) fn mount_args(
+        &self,
+        mounts: &mut [PolicyMount],
+        denied_files: &HashSet<String>,
+    ) -> Result<Vec<String>, String> {
+        self.translate_policy_mounts(mounts)?;
         let Some(file) = &self.snapshot else {
-            return self.layout_args.clone();
+            return Ok(self.layout_args.clone());
         };
         let destination = sandbox_mount_path(&self.destination);
         let parent = Path::new(&destination)
@@ -111,11 +131,77 @@ impl ResolverFile {
         args.extend([
             "--file".into(),
             file.as_raw_fd().to_string(),
-            destination,
-            "--remount-ro".into(),
-            parent,
+            destination.clone(),
         ]);
-        args
+        for (index, mount) in mounts.iter().enumerate() {
+            let target = Path::new(&mount.destination);
+            if target == Path::new(&parent)
+                || target == Path::new(&destination)
+                || !target.starts_with(&parent)
+                || mounts[..index]
+                    .iter()
+                    .any(|previous| target.starts_with(&previous.destination))
+            {
+                continue;
+            }
+            let is_dir = match mount.intent {
+                FsIntent::Denied => !denied_files.contains(&mount.source),
+                _ => fs::metadata(&mount.source)
+                    .map_err(|error| {
+                        format!("could not inspect policy path {}: {error}", mount.source)
+                    })?
+                    .is_dir(),
+            };
+            if is_dir {
+                args.extend(["--dir".into(), mount.destination.clone()]);
+            } else {
+                args.extend([
+                    "--ro-bind".into(),
+                    "/dev/null".into(),
+                    mount.destination.clone(),
+                ]);
+            }
+        }
+        args.extend(["--remount-ro".into(), parent]);
+        Ok(args)
+    }
+
+    fn translate_policy_mounts(&self, mounts: &mut [PolicyMount]) -> Result<(), String> {
+        let mut active = vec![true; self.links.len()];
+        for mount in mounts {
+            let mut destination = PathBuf::from(&mount.destination);
+            let mut followed = 0;
+            while let Some(link) = self
+                .links
+                .iter()
+                .enumerate()
+                .filter(|(index, link)| active[*index] && destination.starts_with(&link.path))
+                .max_by_key(|(_, link)| link.path.components().count())
+                .map(|(_, link)| link)
+            {
+                followed += 1;
+                if followed > MAX_SYMLINKS {
+                    return Err(format!(
+                        "too many sandbox resolver symlinks in {}",
+                        mount.source
+                    ));
+                }
+                destination = link
+                    .target
+                    .join(destination.strip_prefix(&link.path).map_err(|error| {
+                        format!("could not translate policy path {}: {error}", mount.source)
+                    })?);
+            }
+            mount.destination = path_text(&destination)?.to_owned();
+            for (index, link) in self.links.iter().enumerate() {
+                if link.path == destination {
+                    active[index] = false;
+                } else if link.path.starts_with(&destination) {
+                    active[index] = mount.intent != FsIntent::Denied && link.host_symlink;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn snapshot_fd(&self) -> Option<RawFd> {
@@ -195,13 +281,23 @@ fn path_text(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("{} is not a UTF-8 resolver path", path.display()))
 }
 
-fn resolver_layout(path: &Path) -> Result<(PathBuf, Vec<String>), String> {
+fn resolver_layout(path: &Path) -> Result<ResolverLayout, String> {
     let mut pending: VecDeque<_> = path
         .components()
         .map(|component| component.as_os_str().to_owned())
         .collect();
     let mut current = PathBuf::new();
     let mut args = Vec::new();
+    let host_symlink = match fs::symlink_metadata(COMPAT_RUN_LINK) {
+        Ok(metadata) => metadata.file_type().is_symlink(),
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("could not inspect {COMPAT_RUN_LINK}: {error}")),
+    };
+    let mut links = vec![SandboxLink {
+        path: PathBuf::from(COMPAT_RUN_LINK),
+        target: PathBuf::from(COMPAT_RUN_TARGET),
+        host_symlink,
+    }];
     let mut followed = 0;
     while let Some(component) = pending.pop_front() {
         if component == ".." {
@@ -234,6 +330,11 @@ fn resolver_layout(path: &Path) -> Result<(PathBuf, Vec<String>), String> {
             let link = sandbox_mount_path(path_text(&current)?);
             let destination = sandbox_mount_path(path_text(&resolved)?);
             if link != destination {
+                links.push(SandboxLink {
+                    path: PathBuf::from(&link),
+                    target: PathBuf::from(&destination),
+                    host_symlink: true,
+                });
                 args.extend(["--symlink".into(), destination, link]);
             }
         }
@@ -242,7 +343,11 @@ fn resolver_layout(path: &Path) -> Result<(PathBuf, Vec<String>), String> {
             pending.push_front(component.as_os_str().to_owned());
         }
     }
-    Ok((current, args))
+    Ok(ResolverLayout {
+        destination: current,
+        args,
+        links,
+    })
 }
 
 // Bubblewrap cannot create mount points through the sandbox's /var/run symlink.
@@ -289,7 +394,7 @@ mod tests {
         assert!(resolver.layout_args.windows(2).any(|args| {
             args[0] == "--dir" && Path::new(&args[1]) == root.join("run/real/sub")
         }));
-        let args = resolver.mount_args();
+        let args = resolver.mount_args(&mut [], &HashSet::new()).unwrap();
         assert!(args.windows(3).any(|args| args
             == [
                 "--file",
@@ -318,7 +423,11 @@ mod tests {
         assert!(snapshot.write_all(b"changed").is_err());
         assert!(snapshot.set_len(0).is_err());
         assert!(snapshot.as_raw_fd() > libc::STDERR_FILENO);
-        assert!(resolver.mount_args().iter().all(|arg| arg != "--ro-bind"));
+        assert!(resolver
+            .mount_args(&mut [], &HashSet::new())
+            .unwrap()
+            .iter()
+            .all(|arg| arg != "--ro-bind"));
     }
 
     #[test]
@@ -384,8 +493,63 @@ mod tests {
             .unwrap();
         assert!(mount.snapshot.is_none());
         assert!(mount
-            .mount_args()
+            .mount_args(&mut [], &HashSet::new())
+            .unwrap()
             .windows(3)
             .any(|args| { args[0] == "--symlink" && Path::new(&args[2]) == intermediate }));
+    }
+
+    #[test]
+    fn policy_translation_respects_masks_and_restored_ancestor_grants() {
+        let resolver = ResolverFile {
+            snapshot: None,
+            destination: "/var/lib/resolvconf/resolv.conf".into(),
+            layout_args: Vec::new(),
+            links: vec![SandboxLink {
+                path: PathBuf::from("/run/systemd/resolve"),
+                target: PathBuf::from("/var/lib/resolvconf"),
+                host_symlink: true,
+            }],
+        };
+        let file = "/run/systemd/resolve/resolv.conf";
+        for (denied, parent, expected) in [
+            (false, None, "/var/lib/resolvconf/resolv.conf"),
+            (true, None, file),
+            (
+                true,
+                Some("/run/systemd"),
+                "/var/lib/resolvconf/resolv.conf",
+            ),
+            (true, Some("/run/systemd/resolve"), file),
+        ] {
+            let mut policy = ContainerPolicy {
+                readonly_paths: vec![file.into()],
+                ..Default::default()
+            };
+            if denied {
+                policy.denied_paths.push("/run".into());
+            }
+            if let Some(parent) = parent {
+                policy.readwrite_paths.push(parent.into());
+            }
+            let original = super::super::bwrap_command::policy_mounts(&policy);
+            let mut translated = original.clone();
+            resolver.translate_policy_mounts(&mut translated).unwrap();
+            assert!(
+                original.iter().zip(&translated).all(|(before, after)| {
+                    before.source == after.source && before.intent == after.intent
+                }),
+                "translation must preserve policy order, sources, and access modes"
+            );
+            assert_eq!(
+                translated
+                    .iter()
+                    .find(|mount| mount.source == file)
+                    .unwrap()
+                    .destination,
+                expected,
+                "denied={denied}, parent={parent:?}"
+            );
+        }
     }
 }
