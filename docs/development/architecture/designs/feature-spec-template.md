@@ -35,11 +35,24 @@ https://github.com/microsoft/mxc/blob/main/docs/development/guides/authoring-a-n
 ## Proposed behavior
 
 - What does the caller provide, and what result do they receive?
-- Which operations change: create-and-run, stdio streaming (stdin/stdout/stderr),
-  PTY, container lifecycle operations, discovery, or validation?
-  Mark the others unchanged.
+- Which execution, container lifecycle, discovery, or validation operations
+  change? Mark the others unchanged.
 - What are the defaults? What happens when a value is omitted or empty?
-- What happens on unsupported requests, errors, or cancellation? What is cleaned up?
+- What happens on unsupported requests, errors, or cancellation?
+
+## Execution and container lifecycle support
+
+- How will the feature work with run-to-completion execution and buffered
+  output, live stdio streaming (stdin/stdout/stderr), and interactive PTY
+  sessions? State support and explain any limitations or exclusions for each
+  affected backend, both for create-and-run execution and execution in an
+  existing container.
+- Will container lifecycle operations be supported: provision, start, execute,
+  stop, and deprovision? Describe supported operations, valid call order,
+  and what state persists between calls. Explain any unsupported operations
+  or operations that do nothing.
+- How does create-and-run execution relate to those lifecycle operations?
+  Explain any differences in behavior or cleanup.
 
 ## Backend applicability and availability
 
@@ -90,6 +103,32 @@ to these fields. See
 Report vulnerabilities through
 [SECURITY.md](https://github.com/microsoft/mxc/blob/main/SECURITY.md), not a public spec.
 
+## Resource ownership and failure recovery
+
+The **MXC backend adapter** may rely on a runtime, OS service, cloud service,
+or device to create and manage containers. Name the systems involved and
+distinguish their responsibilities from MXC's and the caller's. Cover both
+local and remote state and resources where applicable.
+
+- Who owns container state and resources at each lifecycle stage, and who
+  releases them? Include processes, storage, mounts, network configuration,
+  and temporary files where applicable.
+- If an operation fails, times out, or is cancelled partway through, what state
+  remains? What cleanup does MXC attempt, and what cleanup or recovery mechanism
+  do those systems provide? Address caller or MXC process exit, loss of
+  connectivity, and an unavailable service or device where applicable.
+- If cleanup also fails, what can remain on the host, in the cloud service,
+  or on the device? How does the caller learn
+  about both the original failure and the cleanup failure, identify leftover
+  resources, and retry cleanup or remove them manually?
+- What happens on the next attempt to create a container of the same backend
+  type after cleanup failed? Explain whether creation proceeds independently,
+  retries cleanup, or fails with an actionable error. How are leftover state,
+  identifiers, and shared resources kept from affecting the new container?
+- For an existing container left partially changed, can the caller retry the
+  operation or continue using it? Explain how its state is determined and
+  when it must be stopped or deprovisioned.
+
 ## Acceptance criteria and validation plan
 
 A **host** is the machine running MXC: name its OS/build, architecture, and
@@ -101,6 +140,9 @@ test script or test group and the workflow/job that runs it.
   backends, hosts, and CI suites that will run them.
 - How will tests cover unsupported hosts, probes, policy interactions,
   omitted/empty values, errors, and cleanup? Mark cases that do not apply.
+- Which scenarios cover the claimed execution modes and lifecycle operations,
+  partial failures, cleanup failure, and a subsequent container creation?
+  Include any recovery steps and leftover resources the tests will check.
 - Are any CI checks being removed or replaced? Yes/No. If yes, explain how
   coverage is preserved. List anything that cannot be tested.
 
@@ -131,6 +173,8 @@ Resolve questions that affect the design before approval.
 - [ ] The issue has maintainer-applied `feature-accepted`; scope and contributor are agreed.
 - [ ] One or two meaningful usage examples, non-goals, defaults, and failure behavior are clear.
 - [ ] Every backend is considered, with explicit capability checks and probe/availability behavior.
+- [ ] Execution modes and container lifecycle support are explicit; exclusions are explained.
+- [ ] Resource ownership, partial failures, failed cleanup, and subsequent container creation are addressed.
 - [ ] Security, contract/API compatibility, and any breaking changes are addressed.
 - [ ] A separate API proposal is linked when public APIs change.
 - [ ] Acceptance criteria and the CI plan cover observable behavior.

@@ -70,6 +70,10 @@ For each new or changed result:
 - What does it report?
 - What does the caller receive on failure, timeout, or cancellation?
 - Must the caller close or release anything? Yes/No. If yes, show how.
+- How does the caller identify and recover from a partially completed operation
+  or failed cleanup? Link the feature design spec's ownership and recovery
+  behavior, and show any identifiers, errors, or cleanup operations exposed
+  by the API.
 
 Does any behavior differ between Rust, .NET, and Node? Yes/No.
 If yes, list the differences and why they are needed.
@@ -86,6 +90,11 @@ operation options.
 
 - Which backends support the API? Link the feature design spec's backend table.
   Backend support may differ; that is separate from SDK feature parity.
+- How do callers use run-to-completion execution with buffered output, live
+  stdio streaming, PTY sessions, and container lifecycle operations? Link the
+  feature design spec's support decisions and explain unsupported combinations.
+  Show the corresponding SDK operations and who closes each returned session
+  or process handle.
 - Do discovery, capability, or availability APIs change? Yes/No. If yes, show
   results for supported hosts, unsupported hosts, and when support cannot be determined.
 - What happens if a backend is available but cannot enforce the requested policy?
