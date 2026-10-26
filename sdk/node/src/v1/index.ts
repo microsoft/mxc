@@ -56,6 +56,7 @@ export type {
 
 export {
   spawn,
+  spawnWithStdin,
   spawnWithPty,
   run,
 } from './container.js';

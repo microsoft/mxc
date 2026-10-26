@@ -86,6 +86,13 @@ export interface StreamingNativeFacade extends LifecycleNativeFacade {
     error: AbiErrorDetail,
     completion: NativeSpawnCompletion,
   ): void;
+  spawnWithStdin(
+    request: string,
+    experimental: number,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+    completion: NativeSpawnCompletion,
+  ): void;
   stateAwareExec(
     request: string,
     experimental: number,
@@ -136,6 +143,22 @@ function bindStreamingNativeFacade(
     error: AbiErrorDetail,
   ) => number>>(handle, {
     symbol: 'mxc_spawn_json',
+    result: 'int32_t',
+    parameters: [
+      'const char *',
+      'int32_t',
+      koffi.out(koffi.pointer(AbiSandbox, 2)),
+      koffi.out(koffi.pointer(AbiErrorDetailType)),
+    ],
+  });
+
+  const spawnWithStdinBinding = bindNativeFunction<KoffiFunc<(
+    request: string,
+    experimental: number,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ) => number>>(handle, {
+    symbol: 'mxc_spawn_with_stdin_json',
     result: 'int32_t',
     parameters: [
       'const char *',
@@ -200,6 +223,10 @@ function bindStreamingNativeFacade(
       spawnAsyncBinding.async(request, experimental, outHandle, error, completion);
     },
 
+    spawnWithStdin(request, experimental, outHandle, error, completion) {
+      spawnWithStdinBinding.async(request, experimental, outHandle, error, completion);
+    },
+
     stateAwareExec: stateAwareExecBinding,
     stateAwareExecAsync(request, experimental, outHandle, error, completion) {
       stateAwareExecBinding.async(request, experimental, outHandle, error, completion);
@@ -261,16 +288,18 @@ function bindStreamingNativeFacade(
       parameters: [sandboxPointer],
     }),
 
+    // Owned strings stay opaque pointers: Koffi would otherwise convert them to
+    // JavaScript strings and mxc_string_free would receive a temporary copy.
     warningsJson: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_warnings_json',
       result: 'int32_t',
-      parameters: [sandboxPointer, koffi.out(koffi.pointer('char', 2))],
+      parameters: [sandboxPointer, koffi.out(koffi.pointer('void *'))],
     }),
 
     outputMetadataJson: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_output_metadata_json',
       result: 'int32_t',
-      parameters: [sandboxPointer, koffi.out(koffi.pointer('char', 2))],
+      parameters: [sandboxPointer, koffi.out(koffi.pointer('void *'))],
     }),
 
     free(sandbox, completion) {
@@ -286,7 +315,7 @@ function bindStreamingNativeFacade(
     freeString: bindNativeFunction(handle, {
       symbol: 'mxc_string_free',
       result: 'void',
-      parameters: ['char *'],
+      parameters: ['void *'],
     }),
   };
 
@@ -306,7 +335,11 @@ let oneShotSyncProcessFactory:
   | ((request: OneShotRequest, experimental: boolean) => MxcProcess)
   | undefined;
 let oneShotAsyncProcessFactory:
-  | ((request: OneShotRequest, experimental: boolean) => Promise<MxcProcess>)
+  | ((
+      request: OneShotRequest,
+      experimental: boolean,
+      stdin: boolean,
+    ) => Promise<MxcProcess>)
   | undefined;
 
 export function getStreamingNative(): StreamingNativeFacade {
@@ -503,12 +536,14 @@ export async function createStreamingDriver(
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
   experimental = false,
+  stdin = false,
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
   const requestJson = JSON.stringify(request);
+  const spawn = stdin ? native.spawnWithStdin.bind(native) : native.spawn.bind(native);
   const status = await new Promise<number>((resolve, reject) => {
-    native.spawn(
+    spawn(
       requestJson,
       experimental ? 1 : 0,
       outHandle,
@@ -569,6 +604,7 @@ function ensureSupportedNodeVersion(): void {
 function spawnDriver(
   request: OneShotRequest,
   experimental: boolean,
+  stdin: boolean,
 ): Promise<NativeLifecycleDriver> {
   ensureSupportedNodeVersion();
   return createStreamingDriver(
@@ -576,17 +612,19 @@ function spawnDriver(
     getStreamingNative(),
     nodeStreamFactory,
     experimental,
+    stdin,
   );
 }
 
 export async function spawnBindingSandboxProcess(
   request: OneShotRequest,
   experimental = false,
+  stdin = false,
 ): Promise<MxcProcess> {
   if (oneShotAsyncProcessFactory !== undefined) {
-    return oneShotAsyncProcessFactory(request, experimental);
+    return oneShotAsyncProcessFactory(request, experimental, stdin);
   }
-  const driver = await spawnDriver(request, experimental);
+  const driver = await spawnDriver(request, experimental, stdin);
   return createSandboxProcess(driver, request.process.timeout);
 }
 
@@ -616,6 +654,7 @@ export function _setBindingSandboxProcessFactories(
   asyncFactory?: (
     request: OneShotRequest,
     experimental: boolean,
+    stdin: boolean,
   ) => Promise<MxcProcess>,
 ): void {
   oneShotSyncProcessFactory = syncFactory;

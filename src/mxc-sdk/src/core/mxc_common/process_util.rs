@@ -960,7 +960,10 @@ mod tests {
         let (mut reader, writer) = file_pipe();
         let mut writer = InterruptiblePipeWriter::new(writer);
         let canceller = writer.canceller();
-        let writing = std::thread::spawn(move || writer.write_all(&vec![7; 8 * 1024 * 1024]));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(writer.write_all(&vec![7; 8 * 1024 * 1024]));
+        });
         let mut first = [0u8; 1];
         reader
             .read_exact(&mut first)
@@ -968,7 +971,12 @@ mod tests {
 
         canceller.close();
 
-        let error = writing.join().unwrap().unwrap_err();
+        let Ok(result) = done_rx.recv_timeout(Duration::from_secs(10)) else {
+            // Closing the read end unblocks the abandoned writer thread.
+            drop(reader);
+            panic!("closing the writer did not abandon the blocked write");
+        };
+        let error = result.unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
         assert!(read_to_end_within(reader).len() < 8 * 1024 * 1024);
     }

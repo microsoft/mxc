@@ -325,8 +325,8 @@ result. There is no `dryRun` execution option or public attached-exec API.
 Captured and streaming execution are asynchronous. Live processes own wait,
 kill, and disposal.
 IsolationSession provides stdin, stdout, and stderr. WSLC provides stdout and
-stderr; only `spawnInContainerWithStdin` also gives it a writable stdin, and its
-create-and-run `spawn` never does.
+stderr; only `spawnInContainerWithStdin` also gives it a writable stdin, as
+`spawnWithStdin` does for create-and-run execution.
 
 ### 6.3 Example
 

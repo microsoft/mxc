@@ -165,7 +165,7 @@ called by the native policy suite.
 
 `isolation-session` and `wslc` run every suite and report each one. For
 `wslc` that is the command-line suite from the build artifact plus the .NET and
-Node lifecycle suites from the SDK bundle. The SDK suites skip unless
+Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites skip unless
 `MXC_ENABLE_WSLC_TESTS=1`, which the dispatcher sets, and a suite that executed
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.

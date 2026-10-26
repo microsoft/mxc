@@ -521,14 +521,22 @@ function Close-WslcStdin {
     try { $Handle.Stdin.Close() } catch { }
 }
 
-# Wait for a Start-WslcStdinRun handle, killing it after $Seconds. Returns
-# @{ Exited; ExitCode; Stdout; Stderr; Seconds }.
+# Wait for a Start-WslcStdinRun handle, killing its whole process tree after
+# $Seconds. Returns @{ Exited; ExitCode; Stdout; Stderr; Seconds }, or throws
+# if the kill or the output streams do not finish within a bounded time.
 function Wait-WslcStdinRun {
     param([hashtable]$Handle, [int]$Seconds = 120)
     $exited = $Handle.Process.WaitForExit($Seconds * 1000)
-    if (-not $exited) { try { $Handle.Process.Kill() } catch { } }
-    $Handle.Process.WaitForExit()
+    if (-not $exited) {
+        try { $Handle.Process.Kill($true) } catch { throw "could not kill the timed-out run: $_" }
+        if (-not $Handle.Process.WaitForExit(30000)) {
+            throw "the run was still alive 30 s after it was killed"
+        }
+    }
     $Handle.Watch.Stop()
+    if (-not [System.Threading.Tasks.Task]::WaitAll(@($Handle.StdoutTask, $Handle.StderrTask), 30000)) {
+        throw "the run's output streams were still open 30 s after it exited"
+    }
     @{
         Exited   = $exited
         ExitCode = $Handle.Process.ExitCode

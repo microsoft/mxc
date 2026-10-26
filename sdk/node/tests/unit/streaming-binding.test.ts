@@ -54,6 +54,7 @@ class FakeNative implements StreamingNativeFacade {
   stateAwareRequest: string | undefined;
   stateAwareExperimental: number | undefined;
   stateAwareWithStdin = false;
+  spawnWithStdinCount = 0;
 
   spawnSync(
     _request: string,
@@ -97,6 +98,17 @@ class FakeNative implements StreamingNativeFacade {
     this.pendingSpawns.splice(index, 1);
     pending.outHandle[0] = handle;
     pending.completion(null, this.spawnStatus);
+  }
+
+  spawnWithStdin(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.spawnWithStdinCount += 1;
+    this.spawn(request, experimental, outHandle, error, completion);
   }
 
   stateAwareExecAsync(
@@ -334,6 +346,30 @@ describe('native streaming binding ownership', () => {
     assert.strictEqual(native.spawnRequest, JSON.stringify(request));
     assert.strictEqual(native.spawnExperimental, 0);
     assert.strictEqual(native.spawnCount, 1);
+    assert.strictEqual(native.spawnWithStdinCount, 0);
+    await driver.free();
+  });
+
+  it('dispatches a one-shot spawn with stdin through its own native entry point', async () => {
+    const native = new FakeNative();
+    const request = {
+      version: '1.0.0' as const,
+      containment: 'wslc' as const,
+      sandboxId: 'node-exact-spawn-stdin',
+      process: { commandLine: 'cat' },
+    };
+
+    const driver = await createStreamingDriver(
+      request,
+      native,
+      new FakeStreams(),
+      false,
+      true,
+    );
+
+    assert.strictEqual(native.spawnWithStdinCount, 1);
+    assert.strictEqual(native.spawnRequest, JSON.stringify(request));
+    assert.strictEqual(native.spawnExperimental, 0);
     await driver.free();
   });
 

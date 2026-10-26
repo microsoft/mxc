@@ -313,7 +313,7 @@ function Invoke-NamedSuites {
 
 function Invoke-WslcSuites {
     $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
-    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js') {
+    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js', 'sdk-integration\dist\wslc-e2e.test.js') {
         Assert-File -Path (Join-Path $bundle $file)
     }
 
@@ -328,7 +328,8 @@ function Invoke-WslcSuites {
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
         'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' }
-        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests' }
+        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' }
+        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' }
     })
 }
 

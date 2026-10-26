@@ -33,7 +33,7 @@ public class MxcContainerWslcE2ETests
     };
 
     [Fact]
-    public async Task Spawn_ForwardsEveryByteAndClosingStdinEndsInput()
+    public async Task SpawnWithStdin_ForwardsEveryByteAndClosingStdinEndsInput()
     {
         RequireWslc();
         var payload = new byte[64 * 1024];
@@ -42,7 +42,7 @@ public class MxcContainerWslcE2ETests
             payload[i] = (byte)(i % 256);
         }
 
-        using var proc = MxcContainer.Spawn(Request("cat"));
+        using var proc = MxcContainer.SpawnWithStdin(Request("cat"));
         var stdin = proc.StandardInput;
         Assert.NotNull(stdin);
         var output = proc.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
@@ -56,11 +56,11 @@ public class MxcContainerWslcE2ETests
     }
 
     [Fact]
-    public async Task Spawn_WaitClosesAnUntakenStdin()
+    public async Task SpawnWithStdin_WaitClosesAnUntakenStdin()
     {
         RequireWslc();
 
-        using var proc = MxcContainer.Spawn(Request("sh -c 'cat; echo WAIT-SAW-EOF'"));
+        using var proc = MxcContainer.SpawnWithStdin(Request("sh -c 'cat; echo WAIT-SAW-EOF'"));
         var (result, stdout, _) =
             await proc.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
 
@@ -70,7 +70,7 @@ public class MxcContainerWslcE2ETests
     }
 
     [Fact]
-    public async Task Spawn_ACommandThatLeavesStdinUnreadFinishesWithoutTimingOut()
+    public async Task SpawnWithStdin_ACommandThatLeavesStdinUnreadFinishesWithoutTimingOut()
     {
         RequireWslc();
 
@@ -81,7 +81,7 @@ public class MxcContainerWslcE2ETests
             TimeoutMs = 40_000,
             Containment = new Containment.Wslc(),
         };
-        using var proc = MxcContainer.Spawn(request);
+        using var proc = MxcContainer.SpawnWithStdin(request);
         var stdin = proc.StandardInput;
         Assert.NotNull(stdin);
         var flood = stdin.WriteAsync(new byte[4 * 1024 * 1024], TestContext.Current.CancellationToken).AsTask();
@@ -98,6 +98,124 @@ public class MxcContainerWslcE2ETests
         Assert.Same(flood, finished);
         Assert.True(flood.IsFaulted, "input the command never read must not be reported as delivered");
         stdin.Dispose();
+    }
+
+    // Starts a write too large for the WSLc SDK to buffer to a command that
+    // never reads stdin, and checks that it stays blocked.
+    private static async Task<Task> StartBlockedWriteAsync(Stream stdin)
+    {
+        var write = Task.Run(() => stdin.Write(new byte[16 * 1024 * 1024]), TestContext.Current.CancellationToken);
+        var finished = await Task.WhenAny(
+            write,
+            Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+        Assert.NotSame(write, finished);
+        return write;
+    }
+
+    private static async Task AssertFinishesWithinAsync(Task task, TimeSpan limit, string message)
+    {
+        var finished = await Task.WhenAny(
+            task,
+            Task.Delay(limit, TestContext.Current.CancellationToken));
+        Assert.True(finished == task, message);
+    }
+
+    [Fact]
+    public async Task SpawnWithStdin_ACommandExitingReleasesAWriteStartedBeforeAnyWait()
+    {
+        RequireWslc();
+
+        using var proc = MxcContainer.SpawnWithStdin(Request("sh -c 'sleep 5'"));
+        var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+        var write = await StartBlockedWriteAsync(stdin);
+
+        await AssertFinishesWithinAsync(write, TimeSpan.FromSeconds(60), "the command's exit did not release the write");
+        Assert.True(write.IsFaulted, "input the command never read must not be reported as delivered");
+        var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
+        await AssertFinishesWithinAsync(wait, TimeSpan.FromSeconds(150), "the command never finished");
+        stdin.Dispose();
+    }
+
+    [Fact]
+    public async Task SpawnWithStdin_KillDoesNotWaitForTheCleanupOfAnExitedCommand()
+    {
+        RequireWslc();
+
+        // Unread stdin makes the WSLc SDK report the exit about 50 seconds
+        // late, and the wait spends that time inside its native cleanup.
+        using var proc = MxcContainer.SpawnWithStdin(Request("sh -c 'head -c 1 >/dev/null'"));
+        var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+        var flood = stdin.WriteAsync(new byte[4 * 1024 * 1024], TestContext.Current.CancellationToken).AsTask();
+        var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
+        await AssertFinishesWithinAsync(flood, TimeSpan.FromSeconds(30), "the command's exit did not release the write");
+        await Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        await AssertFinishesWithinAsync(Task.Run(proc.Kill, TestContext.Current.CancellationToken), TimeSpan.FromSeconds(5), "Kill waited for the cleanup");
+        await AssertFinishesWithinAsync(wait, TimeSpan.FromSeconds(150), "the command never finished");
+        Assert.False((await wait).TimedOut);
+        stdin.Dispose();
+    }
+
+    [Fact]
+    public async Task SpawnWithStdin_KillReleasesAWriteBlockedOnStdin()
+    {
+        RequireWslc();
+
+        using var proc = MxcContainer.SpawnWithStdin(Request("sleep 300"));
+        var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+        var write = await StartBlockedWriteAsync(stdin);
+
+        proc.Kill();
+
+        await AssertFinishesWithinAsync(write, TimeSpan.FromSeconds(10), "the kill did not release the write");
+        Assert.True(write.IsFaulted, "input the command never read must not be reported as delivered");
+        var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
+        await AssertFinishesWithinAsync(wait, TimeSpan.FromSeconds(150), "the killed command never finished");
+        stdin.Dispose();
+    }
+
+    [Fact]
+    public async Task SpawnWithStdin_DisposeReleasesAWriteBlockedOnStdin()
+    {
+        RequireWslc();
+
+        var proc = MxcContainer.SpawnWithStdin(Request("sleep 300"));
+        var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+        var write = await StartBlockedWriteAsync(stdin);
+
+        var dispose = Task.Run(proc.Dispose, TestContext.Current.CancellationToken);
+
+        await AssertFinishesWithinAsync(write, TimeSpan.FromSeconds(10), "disposing did not release the write");
+        Assert.True(write.IsFaulted, "input the command never read must not be reported as delivered");
+        await AssertFinishesWithinAsync(dispose, TimeSpan.FromSeconds(150), "disposing never finished");
+    }
+
+    [Fact]
+    public async Task Spawn_GivesACommandEndOfFileSoReadingOutputBeforeWaitingFinishes()
+    {
+        RequireWslc();
+
+        using var proc = MxcContainer.Spawn(Request("sh -c 'cat; echo SPAWN-SAW-EOF'"));
+        Assert.Null(proc.StandardInput);
+        using var reader = new StreamReader(proc.StandardOutput!, Encoding.UTF8);
+        var reading = reader.ReadToEndAsync(TestContext.Current.CancellationToken);
+        var finished = await Task.WhenAny(
+            reading,
+            Task.Delay(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken));
+        if (finished != reading)
+        {
+            proc.Kill();
+        }
+        var result = await proc.WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.Same(reading, finished);
+        Assert.False(result.TimedOut);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("SPAWN-SAW-EOF", (await reading).Trim());
     }
 
     [Fact]

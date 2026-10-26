@@ -281,9 +281,10 @@ try {
 }
 ```
 
-Create-and-run WSLC execution uses separate stdin, stdout, and stderr pipes and
-does not expose a caller-controlled PTY. See [Sending input (stdin)](#sending-input-stdin)
-for how to give a command input.
+Create-and-run WSLC execution uses separate stdout and stderr pipes, and a stdin
+pipe only when started with stdin, and does not expose a caller-controlled PTY.
+See [Sending input (stdin)](#sending-input-stdin) for how to give a command
+input.
 
 ### Rust SDK
 
@@ -328,9 +329,9 @@ Notes and limits:
 
 - **Windows only.** Selecting `Containment::Wslc` on Linux/macOS, or without the
   `wslc` feature, fails with `ErrorCode::UnsupportedContainment`.
-- **Stdin.** `v1::spawn` returns a writable stdin through
+- **Stdin.** `v1::spawn_with_stdin` returns a writable stdin through
   `MxcProcess::take_stdin()`; drop it to give the command end-of-file.
-  `v1::run` gives the command end-of-file at once. See
+  `v1::spawn` and `v1::run` give the command end-of-file at once. See
   [Sending input (stdin)](#sending-input-stdin).
 - **No host pid.** The process runs inside the WSL VM, so `Sandbox::id()` is `0`;
   use `kill()` (which stops the container and everything in it) to terminate it.
@@ -346,7 +347,8 @@ provisioned container (container lifecycle operations).
 | Flow | Stdin |
 |---|---|
 | CLI: `wxc-exec` with a `wslc` config, or `wxc-exec --operation exec` | The executor's own stdin is forwarded when it is a pipe, a file, or `NUL`, for example `type input.txt \| wxc-exec.exe config.json` or `wxc-exec.exe config.json < input.txt`. A terminal is not forwarded: the command sees end-of-file at once, and the executor prints a warning to stderr. |
-| Create-and-run from an SDK: `spawn` (Rust), `MxcContainer.Spawn` (.NET), `spawn` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. Waiting on the process closes a stdin the caller did not take. |
+| Create-and-run from an SDK: `spawn_with_stdin` (Rust), `MxcContainer.SpawnWithStdin` (.NET), `spawnWithStdin` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. Waiting on the process closes a stdin the caller did not take. Once the command exits, or is killed, its stdin is closed, so a pending write fails rather than hangs. If forwarding written input fails for any other reason, `wait` reports the failure. |
+| Create-and-run from an SDK: `spawn` (Rust), `MxcContainer.Spawn` (.NET), `spawn` (Node) | Not forwarded. |
 | Lifecycle exec from an SDK: `spawn_in_container_with_stdin` (Rust), `MxcLifecycle.SpawnInContainerWithStdin` (.NET), `spawnInContainerWithStdin` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. |
 | Lifecycle exec from an SDK: `spawn_in_container` (Rust), `MxcLifecycle.SpawnInContainer` (.NET), `spawnInContainer` (Node) | Not forwarded. |
 
@@ -357,8 +359,8 @@ stdin sees end-of-file at once.
 The executor reads its own stdin on a background thread as the command runs,
 so a stdin that never closes does not delay a command that does not read it.
 A command that exits before reading all its input is not an error. If reading
-the executor's stdin fails, the command sees end-of-file early and the run is
-reported as failed.
+the executor's stdin fails while the command runs, the executor stops the
+container and reports the run as failed, even when the run also timed out.
 
 A command that exits while a large amount of its input is still unread (more
 than the few hundred KiB the WSLc SDK buffers) completes late: the SDK reports

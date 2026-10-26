@@ -302,7 +302,7 @@ pub struct LifecycleResult {
 
 ## `mxc_sdk::v1::MxcProcess`
 
-A live container process, returned by `v1::spawn`,
+A live container process, returned by `v1::spawn`, `v1::spawn_with_stdin`,
 `v1::container::spawn_in_container`, and
 `v1::container::spawn_in_container_with_stdin`.
 

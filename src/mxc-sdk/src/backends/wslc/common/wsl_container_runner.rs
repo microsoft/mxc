@@ -420,12 +420,23 @@ unsafe extern "C" fn exit_callback(_exit_code: i32, context: *mut c_void) {
 /// WSL Container script runner using the WSLC SDK.
 pub struct WSLContainerRunner {
     config: WslcConfig,
+    pub(crate) piped_stdin: bool,
 }
 
 impl WSLContainerRunner {
     pub fn new(config: &WslcConfig) -> Self {
         Self {
             config: config.clone(),
+            piped_stdin: false,
+        }
+    }
+
+    /// A runner whose piped spawns give the process a writable stdin rather
+    /// than end-of-file.
+    pub fn with_piped_stdin(config: &WslcConfig) -> Self {
+        Self {
+            piped_stdin: true,
+            ..Self::new(config)
         }
     }
 }
@@ -1244,12 +1255,12 @@ impl WSLContainerRunner {
             io_ctx,
             sdk,
             pipes: io_wiring.pipes,
-            stdin_closers: Mutex::new(
+            stdin_closers: Arc::new(Mutex::new(
                 stdin
                     .iter()
                     .map(|writer| Box::new(writer.canceller()) as Box<dyn StreamCloser>)
                     .collect(),
-            ),
+            )),
             exit_event: Mutex::new(None),
             stdin,
             pumps: Mutex::new(io_wiring.pumps),
@@ -1368,21 +1379,28 @@ impl WSLContainerRunner {
                 Err(response) => return response,
             };
         let forwarding = match (host_stdin, started.stdin.take()) {
-            (Some(input), Some(pipe)) => match HostStdinForwarding::start(input, pipe) {
-                Ok(forwarding) => Some(forwarding),
-                Err(error) => {
-                    started.quiesce(logger);
-                    return WslcError::Runtime(format!(
-                        "could not start forwarding stdin to the WSL container: {error}"
-                    ))
-                    .into_response();
+            (Some(input), Some(pipe)) => {
+                // SAFETY: the stopper is used only while the run is not over,
+                // and every path below ends the run before tearing down.
+                let stopper = unsafe { started.stopper() };
+                match HostStdinForwarding::start(input, pipe, move || stopper.stop()) {
+                    Ok(forwarding) => Some(forwarding),
+                    Err(error) => {
+                        started.quiesce(logger);
+                        return WslcError::Runtime(format!(
+                            "could not start forwarding stdin to the WSL container: {error}"
+                        ))
+                        .into_response();
+                    }
                 }
-            },
+            }
             _ => None,
         };
 
         // -- Wait for exit --
-        let (exit_code, outcome) = match started.wait_for_exit(logger) {
+        let waited = started.wait_for_exit(logger);
+        let stdin_failure = forwarding.and_then(|forwarding| forwarding.end_run());
+        let (exit_code, outcome) = match waited {
             Ok(r) => r,
             Err(e) => {
                 // `wait_for_exit` can fail while the container is still running
@@ -1407,9 +1425,9 @@ impl WSLContainerRunner {
             started.timeout_ms,
             logger,
         );
-        match forwarding.and_then(|forwarding| forwarding.failure()) {
-            Some(reason) if !outcome.timed_out() => stdin_forwarding_failed(response, &reason),
-            _ => response,
+        match stdin_failure {
+            Some(reason) => stdin_forwarding_failed(response, &reason),
+            None => response,
         }
     }
 }
@@ -1431,15 +1449,25 @@ fn host_stdin_to_forward() -> Option<std::io::Stdin> {
 }
 
 /// Copies host stdin into a container's stdin, closing it at end-of-file.
-struct HostStdinForwarding(Arc<Mutex<Option<String>>>);
+struct HostStdinForwarding(Arc<Mutex<ForwardingState>>);
+
+#[derive(Default)]
+struct ForwardingState {
+    failure: Option<String>,
+    run_over: bool,
+}
 
 impl HostStdinForwarding {
+    /// Start copying `input` into `pipe`, calling `stop_run` if forwarding
+    /// fails before [`end_run`](Self::end_run) so the command does not carry
+    /// on with truncated input.
     fn start(
         mut input: impl Read + Send + 'static,
         mut pipe: impl std::io::Write + Send + 'static,
+        stop_run: impl FnOnce() + Send + 'static,
     ) -> std::io::Result<Self> {
-        let failure = Arc::new(Mutex::new(None));
-        let pump_failure = Arc::clone(&failure);
+        let state = Arc::new(Mutex::new(ForwardingState::default()));
+        let pump_state = Arc::clone(&state);
 
         // Never joined: a host stdin that never closes keeps this thread
         // blocked, and the executor exits once the run is over regardless.
@@ -1447,15 +1475,26 @@ impl HostStdinForwarding {
             .name("wslc-host-stdin".to_string())
             .spawn(move || {
                 if let Err(error) = forward_stdin(&mut input, &mut pipe) {
-                    *lock(&pump_failure) = Some(error.to_string());
+                    let mut state = lock(&pump_state);
+                    if !state.run_over {
+                        state.failure = Some(error.to_string());
+
+                        // Stopped before the pipe closes, so the command never
+                        // reads the early end-of-file as the end of its input.
+                        stop_run();
+                    }
                 }
                 drop(pipe);
             })?;
-        Ok(Self(failure))
+        Ok(Self(state))
     }
 
-    fn failure(&self) -> Option<String> {
-        lock(&self.0).clone()
+    /// Mark the run as over and return any failure from before that point;
+    /// later failures are ignored.
+    fn end_run(&self) -> Option<String> {
+        let mut state = lock(&self.0);
+        state.run_over = true;
+        state.failure.clone()
     }
 }
 
@@ -1487,12 +1526,12 @@ fn forward_stdin(input: &mut impl Read, pipe: &mut impl std::io::Write) -> std::
     }
 }
 
-/// Report a run whose stdin was cut short as failed, since the command may
-/// have finished on the partial input.
+/// Report a run whose stdin forwarding failed as failed, since the command did
+/// not receive all of its input.
 fn stdin_forwarding_failed(response: ScriptResponse, reason: &str) -> ScriptResponse {
     let failed = WslcError::Runtime(format!(
-        "forwarding stdin to the WSL container failed, so the command saw end-of-file early: \
-         {reason}"
+        "forwarding stdin to the WSL container failed, so the command was stopped before it \
+         received all of its input: {reason}"
     ))
     .into_response();
     ScriptResponse {
@@ -1510,6 +1549,61 @@ fn wait_timeout_ms(request: &ExecutionRequest) -> u32 {
         request.script_timeout
     } else {
         u32::MAX
+    }
+}
+
+/// Signal a container's processes; `timeout_secs` is how long the SDK waits for
+/// a graceful stop.
+///
+/// # Safety
+/// `container` must be a live container handle from `sdk`.
+unsafe fn stop_container(
+    sdk: &WslcSdk,
+    container: WslcContainer,
+    signal: WslcSignal,
+    timeout_secs: u32,
+) -> Result<(), String> {
+    let _com = ComApartment::enter()?;
+    let mut err_msg = CoTaskMemPWSTR::null();
+    let hr = sdk.WslcStopContainer(container, signal, timeout_secs, err_msg.as_mut_ptr());
+    if hr != S_OK {
+        let msg = err_msg.to_string_lossy();
+        return Err(format!(
+            "WslcStopContainer failed: {msg} (HRESULT 0x{:08X})",
+            hr as u32
+        ));
+    }
+    Ok(())
+}
+
+/// Force-stops a container from a thread that does not own it; see
+/// [`StartedContainer::stopper`].
+struct ContainerStopper {
+    sdk: &'static WslcSdk,
+    container: WslcContainer,
+}
+
+// SAFETY: the SDK is apartment-affine, not thread-affine, as `image::PullJob`
+// relies on: `stop_container` joins the MTA, where a handle may be used from any
+// member thread. `StartedContainer::stopper` makes the caller keep it alive.
+unsafe impl Send for ContainerStopper {}
+
+impl ContainerStopper {
+    fn stop(self) {
+        // SAFETY: `StartedContainer::stopper`'s caller keeps the container alive.
+        let _ =
+            unsafe { stop_container(self.sdk, self.container, WslcSignal::WSLC_SIGNAL_SIGKILL, 0) };
+    }
+}
+
+/// Closes every carrier of a process's stdin registered so far.
+struct SharedStdinClosers(Arc<Mutex<Vec<Box<dyn StreamCloser>>>>);
+
+impl StreamCloser for SharedStdinClosers {
+    fn close(&self) {
+        for closer in lock(&self.0).iter() {
+            closer.close();
+        }
     }
 }
 
@@ -1542,7 +1636,7 @@ pub(crate) struct StartedContainer {
     pub(crate) stdin: Option<InterruptiblePipeWriter>,
 
     /// Close whatever carries the process's stdin, wherever it was taken to.
-    stdin_closers: Mutex<Vec<Box<dyn StreamCloser>>>,
+    stdin_closers: Arc<Mutex<Vec<Box<dyn StreamCloser>>>>,
 
     /// The process's exit event, fetched once because the SDK does not say
     /// whether each fetch hands back a new handle.
@@ -1605,9 +1699,48 @@ impl StartedContainer {
 
     /// Close the process's stdin, ending any write blocked on it.
     pub(crate) fn close_stdin(&self) {
-        for closer in lock(&self.stdin_closers).iter() {
-            closer.close();
+        self.stdin_closer().close();
+    }
+
+    /// A closer for the process's stdin that also closes whatever is
+    /// registered with [`add_stdin_closer`](Self::add_stdin_closer) later.
+    pub(crate) fn stdin_closer(&self) -> Box<dyn StreamCloser> {
+        Box::new(SharedStdinClosers(Arc::clone(&self.stdin_closers)))
+    }
+
+    /// A copy of the process's exit event that stays valid after this
+    /// container is dropped, or `None` if the SDK has no exit event.
+    pub(crate) fn duplicate_exit_event(
+        &self,
+    ) -> Result<Option<std::os::windows::io::OwnedHandle>, String> {
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+        use windows::Win32::System::Threading::GetCurrentProcess;
+
+        let event = self.exit_event()?;
+        if event.is_null() {
+            return Ok(None);
         }
+        let mut copy = windows::Win32::Foundation::HANDLE::default();
+
+        // SAFETY: the SDK keeps the event valid while the process handle lives.
+        unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                windows::Win32::Foundation::HANDLE(event),
+                GetCurrentProcess(),
+                &mut copy,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )
+        }
+        .map_err(|error| format!("duplicating the WSLC process exit event failed: {error}"))?;
+
+        // SAFETY: `DuplicateHandle` returned a new handle that nothing else owns.
+        Ok(Some(unsafe {
+            std::os::windows::io::OwnedHandle::from_raw_handle(copy.0)
+        }))
     }
 
     /// The process's exit event, or a null handle if the SDK has none.
@@ -1817,25 +1950,26 @@ impl StartedContainer {
     /// [`SandboxProcess::kill`](crate::mxc_common::sandbox_process::SandboxProcess::kill).
     /// `timeout_secs` is how long the SDK waits for a graceful stop.
     pub(crate) fn stop(&self, signal: WslcSignal, timeout_secs: u32) -> Result<(), String> {
-        let _com = ComApartment::enter()?;
         // SAFETY: as `destroy` — live container handle, live SDK.
         unsafe {
-            let mut err_msg = CoTaskMemPWSTR::null();
-            let hr = self.sdk.WslcStopContainer(
+            stop_container(
+                self.sdk,
                 self.container_guard.as_raw(),
                 signal,
                 timeout_secs,
-                err_msg.as_mut_ptr(),
-            );
-            if hr != S_OK {
-                let msg = err_msg.to_string_lossy();
-                return Err(format!(
-                    "WslcStopContainer failed: {msg} (HRESULT 0x{:08X})",
-                    hr as u32
-                ));
-            }
+            )
         }
-        Ok(())
+    }
+
+    /// A handle that force-stops this container from another thread.
+    ///
+    /// # Safety
+    /// The caller must not use the stopper once this container is dropped.
+    unsafe fn stopper(&self) -> ContainerStopper {
+        ContainerStopper {
+            sdk: self.sdk,
+            container: self.container_guard.as_raw(),
+        }
     }
 
     /// Whether the SDK's exit callback has fired (the process is gone and all
@@ -2517,20 +2651,60 @@ mod tests {
     }
 
     #[test]
-    fn a_host_stdin_read_failure_is_reported_and_still_closes_the_pipe() {
+    fn a_host_stdin_read_failure_stops_the_run_then_closes_the_pipe() {
         let (reader, writer) = crate::mxc_common::process_util::create_local_pipe().unwrap();
         let mut reader = std::fs::File::from(reader.try_into_std_owned_handle().unwrap());
         let writer = std::fs::File::from(writer.try_into_std_owned_handle().unwrap());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopped);
 
-        let forwarding = HostStdinForwarding::start(BrokenInput, writer).unwrap();
+        let forwarding = HostStdinForwarding::start(BrokenInput, writer, move || {
+            stop.store(true, Ordering::SeqCst)
+        })
+        .unwrap();
         let mut received = Vec::new();
         reader.read_to_end(&mut received).unwrap();
 
         assert!(received.is_empty());
+        assert!(stopped.load(Ordering::SeqCst), "the run was not stopped");
         assert_eq!(
-            forwarding.failure().as_deref(),
+            forwarding.end_run().as_deref(),
             Some("reading host stdin: input broke")
         );
+    }
+
+    #[test]
+    fn a_host_stdin_failure_after_the_run_is_over_is_ignored() {
+        struct FailsWhenTold(std::sync::mpsc::Receiver<()>);
+
+        impl Read for FailsWhenTold {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                let _ = self.0.recv();
+                Err(std::io::Error::other("input broke"))
+            }
+        }
+
+        let (reader, writer) = crate::mxc_common::process_util::create_local_pipe().unwrap();
+        let mut reader = std::fs::File::from(reader.try_into_std_owned_handle().unwrap());
+        let writer = std::fs::File::from(writer.try_into_std_owned_handle().unwrap());
+        let (fail, told) = std::sync::mpsc::channel();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopped);
+
+        let forwarding = HostStdinForwarding::start(FailsWhenTold(told), writer, move || {
+            stop.store(true, Ordering::SeqCst)
+        })
+        .unwrap();
+        assert_eq!(forwarding.end_run(), None);
+        fail.send(()).unwrap();
+        let mut received = Vec::new();
+        reader.read_to_end(&mut received).unwrap();
+
+        assert!(
+            !stopped.load(Ordering::SeqCst),
+            "a finished run was stopped"
+        );
+        assert_eq!(forwarding.end_run(), None);
     }
 
     #[test]

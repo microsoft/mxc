@@ -16,10 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `standardInput`. For a WSLC container, ending it gives the command
   end-of-file; `spawnInContainer` still gives a WSLC command end-of-file at
   once.
-- `spawn` exposes `standardInput` for a WSLC request. Ending it gives the
-  command end-of-file; a command that reads stdin now waits for that instead of
-  seeing end-of-file at once. `run` still gives the command end-of-file at
-  once.
+- `spawnWithStdin` creates a container with a writable `standardInput`. For a
+  WSLC request, ending it gives the command end-of-file; `spawn` and `run` still
+  give a WSLC command end-of-file at once.
 
 ### Changed
 
@@ -37,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry consent uses `getTelemetryConsentStatus`,
   `requestTelemetryConsent`, and `withdrawTelemetryConsent`.
   Status queries return `TelemetryConsentStatus`.
+
+### Fixed
+
+- Reading a process's `warnings` or output metadata no longer corrupts the
+  native heap and crashes Node when the native side returns a value.
 
 Entries below describe historical release APIs, not the current V1 surface.
 

@@ -118,6 +118,11 @@ public class MxcProcess : IMxcProcess
     private readonly MxcSandboxHandle _handle;
     private bool _disposed;
 
+    // Set while a wait that has already seen the process exit is finishing
+    // inside the native wait, which holds _controlLock and can take up to a
+    // minute on WSLC.
+    private volatile bool _finishingExitedWait;
+
     // Tracks whether each readable standard stream is still available, has been
     // handed to the caller, or is being consumed by an internal drain task. A
     // draining stream must never be handed back out (see TakeReadStream), or the
@@ -504,7 +509,7 @@ public class MxcProcess : IMxcProcess
                 // Complete the native wait so a cached timeout is translated
                 // into TimedOut and all backend finalization finishes before
                 // the managed Wait/WaitAsync contract returns.
-                return WaitBlocking();
+                return FinishExitedWait();
             }
 
             // On the spawn path try_wait reports only exited / still-running and
@@ -539,7 +544,7 @@ public class MxcProcess : IMxcProcess
         // to completion, so surface its real status rather than a timeout.
         if (TryGetTerminalStatus(out _, out _))
         {
-            return WaitBlocking();
+            return FinishExitedWait();
         }
 
         // Safe to call after an exit that races this check: every backend
@@ -553,6 +558,19 @@ public class MxcProcess : IMxcProcess
     // and the tree was killed. It holds the control lock across the native wait
     // and must not be public: callers need Wait/WaitAsync so concurrent Kill and
     // Dispose stay responsive.
+    private WaitResult FinishExitedWait()
+    {
+        _finishingExitedWait = true;
+        try
+        {
+            return WaitBlocking();
+        }
+        finally
+        {
+            _finishingExitedWait = false;
+        }
+    }
+
     private WaitResult WaitBlocking()
     {
         EnsureDrainUntaken();
@@ -687,9 +705,21 @@ public class MxcProcess : IMxcProcess
     }
 
     /// <summary>Kill the child and its whole process tree.</summary>
+    /// <remarks>
+    /// Returns at once without killing anything if a wait has already seen the
+    /// process exit and is finishing its cleanup; that wait completes the
+    /// teardown.
+    /// </remarks>
     /// <exception cref="MxcException">The kill failed.</exception>
     public void Kill()
     {
+        // Every backend ignores a kill once the process has exited, so do not
+        // queue behind a wait that is already finishing.
+        if (_finishingExitedWait)
+        {
+            ThrowIfDisposed();
+            return;
+        }
         lock (_controlLock)
         {
             ThrowIfDisposed();

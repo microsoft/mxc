@@ -558,6 +558,13 @@ public static class MxcContainer
         SpawnOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    public static MxcProcess SpawnWithStdin(ContainerRequest request, SpawnOptions? options = null);
+
+    public static Task<MxcProcess> SpawnWithStdinAsync(
+        ContainerRequest request,
+        SpawnOptions? options = null,
+        CancellationToken cancellationToken = default);
+
     public static MxcPtyProcess SpawnWithPty(
         ContainerRequest request,
         SpawnWithPtyOptions? options = null);

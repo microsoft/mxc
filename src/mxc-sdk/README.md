@@ -41,7 +41,9 @@ println!("{}", String::from_utf8_lossy(&output.stdout));
 ```
 
 `spawn` returns an `MxcProcess` with separate standard streams, wait and
-termination methods. `run` captures stdout and stderr and returns an
+termination methods. A WSLC command started by `spawn` reads end-of-file on
+stdin; `spawn_with_stdin` gives it a writable stdin. `run` captures stdout and
+stderr and returns an
 `ExecutionResult` with its `WaitResult`, warnings, and optional output metadata. Both use the
 same in-process native engine; neither launches an MXC executor binary.
 Captured execution drains both streams concurrently. Output-read failures are
