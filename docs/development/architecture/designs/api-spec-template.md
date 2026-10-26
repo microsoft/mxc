@@ -21,19 +21,42 @@ https://github.com/microsoft/mxc/blob/main/docs/development/guides/authoring-a-n
 - **Issue:** Link the tracking issue.
 - **Feature design spec:** Link the feature's `README.md`.
 
+Describe how callers use the feature through Rust, .NET, and Node here.
+Keep backend support, execution-mode support, lifecycle behavior, resource
+ownership, and recovery decisions in the feature design spec. Link the
+relevant sections rather than repeating their answers.
+
 ## Caller scenario
 
-- What task will the caller complete? Reuse the feature design spec's scenarios.
+- Link the feature design spec's usage scenarios; do not restate the problem
+  or expected feature behavior.
 - Show a short example for Rust, .NET, and Node: call, result, and cleanup.
   If an SDK needs no API change, show how its existing API supports the feature.
 - Show a second example only where it uses the API differently. One is enough
   if there is only one meaningful scenario; say so.
 - Would a diagram make the call order, state changes, or ownership clearer?
   If yes, use a small Mermaid diagram. Prefer sequence, data-flow, or state
-  diagrams. Link a diagram from the feature design spec instead if it already
-  shows the behavior.
+  diagrams showing the SDK calls. Link an existing feature design diagram
+  instead if it already shows what the caller needs.
 
 ## Proposed signatures and types
+
+### Design guidance
+
+Apply these rules to the declarations and examples in this proposal; they
+do not need a separate written response.
+
+- Let callers perform the same tasks through Rust, .NET, and Node, such as
+  creating a container, running a command, or stopping a container.
+  Explain any necessary SDK differences in **Inputs, results, and SDK
+  differences** below.
+- Follow each SDK's existing naming, types, and construction patterns.
+  The SDKs do not need identical spelling or syntax.
+- Put command, environment, and containment policy settings in request types.
+  Put controls for an individual API call, such as cancellation, in that
+  function's options type or SDK-standard cancellation parameter.
+
+### Declarations to include
 
 For each SDK (Rust, .NET, and Node):
 
@@ -46,58 +69,72 @@ Example entry-point formats: Rust `mxc_sdk::v<N>`, .NET
 `Microsoft.Mxc.Sdk.V<N>`, Node `@microsoft/mxc-sdk/v<N>`.
 Replace `<N>` with the proposed API major version.
 
-Show only the proposed signatures, types, fields, and imports. For each operation:
+Show the proposed API shape in a code block for each SDK, not just a prose
+description or table. For each public API function or method added or changed:
 
-- What are the inputs, their order, and the result type?
-- Is it synchronous or asynchronous? How does the caller cancel it?
+- Write its signature, including parameter names, types, order, optional
+  parameters or defaults, and return type.
+- Include declarations for new or changed request, options, and result types,
+  with their public fields or variants, plus any required imports.
+- Make synchronous or asynchronous behavior clear. Show cancellation in the
+  signature or options type when supported; otherwise say it is not supported.
 
-Do not include implementation bodies.
+For example, a hypothetical Node API might be declared as:
+
+```typescript
+export interface ContainerStatusOptions {
+  signal?: AbortSignal;
+}
+
+export declare function getContainerStatus(
+  containerId: ContainerId,
+  options?: ContainerStatusOptions,
+): Promise<ContainerStatus>;
+```
+
+This illustrates the declaration format, not an existing or required API.
+A complete proposal would also show any new or changed `ContainerId` and
+`ContainerStatus` declarations. Use the equivalent declaration syntax for
+Rust and .NET. Do not include implementation bodies; caller usage examples
+belong in **Caller scenario** above.
 
 ## Inputs, results, and SDK differences
 
+Use short bullets or a table to explain the declarations above.
+For inputs that map to MXC request fields, link the feature design spec's
+allowed values and defaults. Describe only SDK-specific details here, such
+as how optional or null values are represented and passed to the engine.
 For each new or changed input, name it and answer:
 
 - What does it control? What values are allowed? For measurements, specify
   the unit, such as seconds or bytes.
 - Is it required? Yes/No. If not, what default applies?
 - Can the caller leave it out, pass an empty value, or pass null?
-  Describe the behavior or error for each case. If an SDK input type cannot
-  represent a case, say so.
+  Describe the behavior or error for each case. If the declared type does not
+  allow a case, mark it "Not applicable" and explain briefly. For example,
+  a required Rust `bool` cannot be omitted, empty, or null.
 - Which values are rejected, and with what error?
 
 For each new or changed result:
 
-- What does it report?
+- What value does the function return, and what does each returned field or
+  enum variant mean? For example, does an exit code describe the command's
+  outcome or the success of container cleanup?
 - What does the caller receive on failure, timeout, or cancellation?
 - Must the caller close or release anything? Yes/No. If yes, show how.
-- How does the caller identify and recover from a partially completed operation
-  or failed cleanup? Link the feature design spec's ownership and recovery
-  behavior, and show any identifiers, errors, or cleanup operations exposed
-  by the API.
+- How does the SDK expose the recovery behavior defined in the feature design
+  spec? Name the error types or fields and any container or session IDs the
+  caller receives. Show the SDK calls needed to check state, retry, or clean
+  up in **Caller scenario**; link manual recovery steps from the feature spec
+  rather than repeating them.
+- If discovery, capability, or availability APIs change, what functions and
+  result types expose the feature spec's support decisions? Include their
+  declarations above and explain how results distinguish supported,
+  unsupported, and undetermined support.
 
-Does any behavior differ between Rust, .NET, and Node? Yes/No.
-If yes, list the differences and why they are needed.
-
-Provide equivalent feature and operation support across Rust, .NET, and Node.
-Use each language's naming conventions and idiomatic types and syntax.
-Follow existing SDK patterns rather than forcing identical spelling or
-construction across Rust, .NET, and Node.
-
-Put workload and policy settings in request types; put per-call controls in
-operation options.
-
-## Backend support and discovery
-
-- Which backends support the API? Link the feature design spec's backend table.
-  Backend support may differ; that is separate from SDK feature parity.
-- How do callers use run-to-completion execution with buffered output, live
-  stdio streaming, PTY sessions, and container lifecycle operations? Link the
-  feature design spec's support decisions and explain unsupported combinations.
-  Show the corresponding SDK operations and who closes each returned session
-  or process handle.
-- Do discovery, capability, or availability APIs change? Yes/No. If yes, show
-  results for supported hosts, unsupported hosts, and when support cannot be determined.
-- What happens if a backend is available but cannot enforce the requested policy?
+Does any behavior differ between Rust, .NET, and Node? Write "No" if not.
+Otherwise, use bullets or a table here to name the affected functions or
+types, describe each SDK's behavior, and explain why the difference is needed.
 
 ## Compatibility and request mapping
 
@@ -108,22 +145,25 @@ for the format and field reference.
 
 - Will existing callers still compile and behave the same? Yes/No.
   Identify source, binary, or behavior breaks prominently. Put breaking changes
-  in a new API version; keep published versions working.
-- Does this API use existing MXC request fields, or require new or changed
-  fields? List the field names and request version. If it uses no request
+  in a new API version; keep published versions working. Link runtime behavior
+  changes from the feature design spec and explain their effect on SDK callers.
+- Map SDK inputs to MXC request fields using bullets or a table: SDK field,
+  request field, and request version. Link contract changes from the feature
+  design spec rather than defining them again. If the API uses no request
   fields, say so.
 - For optional inputs, explain how the SDK preserves "not provided" versus
   an explicitly supplied value.
-- Which backend, host, or option combinations are unsupported, and what error
-  will the caller receive? Reject restrictions the backend cannot enforce;
-  do not silently ignore them.
+- Link the feature design spec's backend and execution-mode support decisions.
+  Name the SDK errors for unsupported combinations or unenforceable policy
+  in **Inputs, results, and SDK differences**; do not redefine support here.
 
 ## Validation and documentation
 
-- Which tests will check request mapping, execution, discovery, errors, and cleanup
-  through each SDK? Link the feature design spec's validation plan and name
-  any SDK-specific tests to add or extend.
-- Which versioned API references and examples need updates?
+- Link the feature design spec's validation plan. Name additional SDK-specific
+  tests for declarations, request mapping, error conversion, and caller-owned
+  resource disposal. Keep shared functional scenarios and CI hosts in that plan.
+- Which versioned API references and SDK examples need updates? Link this list
+  from the feature design spec's documentation plan.
 
 ## Review checklist
 
@@ -132,7 +172,7 @@ for the format and field reference.
 - [ ] Defaults, optional values, errors, and cancellation are explicit.
 - [ ] Rust, .NET, and Node offer equivalent feature support through idiomatic APIs.
 - [ ] SDK behavior differences are intentional and documented; naming and syntax follow each language's conventions.
-- [ ] Backend support, capability probes, and availability results are clear.
+- [ ] Backend and execution-mode support decisions are linked; SDK discovery results and errors reflect them.
 - [ ] Compatibility and request mapping are addressed; breaking changes are prominent.
 - [ ] Public API validation and consumer documentation updates are planned.
 - [ ] Answers and examples are concise; shared design details are linked, not repeated.

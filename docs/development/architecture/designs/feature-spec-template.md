@@ -23,13 +23,18 @@ https://github.com/microsoft/mxc/blob/main/docs/development/guides/authoring-a-n
 - **Contributor:** GitHub username(s), for example `@username`.
 - **Implementation PRs:** Not started.
 
+Describe feature behavior, backend support, architecture, request contracts,
+and recovery here. Put SDK signatures, types, and caller code examples in
+`api.md` when public APIs change; link those details rather than repeating them.
+
 ## Problem and scope
 
 - Who has the problem, and what can they not do today?
 - How does this feature solve that problem?
 - Give two distinct usage examples with concrete inputs, expected outcomes,
   and cleanup where needed. If only one meaningful scenario exists, give one
-  and say so; do not invent a second.
+  and say so; do not invent a second. Describe the scenarios here; put
+  language-specific SDK code in the API proposal.
 - What will this feature not cover?
 
 ## Proposed behavior
@@ -38,7 +43,8 @@ https://github.com/microsoft/mxc/blob/main/docs/development/guides/authoring-a-n
 - Which execution, container lifecycle, discovery, or validation operations
   change? Mark the others unchanged.
 - What are the defaults? What happens when a value is omitted or empty?
-- What happens on unsupported requests, errors, or cancellation?
+- What happens on unsupported requests? Describe partial failures and
+  cancellation in **Resource ownership and failure recovery** below.
 
 ## Execution and container lifecycle support
 
@@ -84,9 +90,10 @@ to these fields. See
   [API proposal](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/designs/api-spec-template.md)
   template in the feature folder and link it here.
   Split proposals only for distinct API areas; review them in the same spec PR.
-- Does this break existing callers or change their behavior? Yes/No.
-  If yes, identify the break and the new version or migration needed.
-  Keep supported published API versions working.
+- Does this change existing request compatibility or runtime behavior? Yes/No.
+  If yes, identify the break and the contract version or migration needed.
+  Describe SDK source and binary compatibility in the API proposal.
+  Keep supported published contracts and API versions working.
 
 ## Design and security
 
@@ -95,7 +102,8 @@ to these fields. See
   it is clearer than text. Prefer sequence, data-flow, or state diagrams.
   Do not draw every function.
 - Does this change isolation, permissions, trust, or resource ownership?
-  Yes/No. If yes, explain the change, enforcement, and cleanup.
+  Yes/No. If yes, explain the change and enforcement. Describe ownership
+  and cleanup in **Resource ownership and failure recovery** below.
 - Is a large refactor or new crate proposed? Yes/No. If yes, explain why.
   Internal engine and backend code must stay in `mxc-sdk` modules.
 - What is the main alternative, and why was it not chosen?
@@ -118,9 +126,9 @@ local and remote state and resources where applicable.
   do those systems provide? Address caller or MXC process exit, loss of
   connectivity, and an unavailable service or device where applicable.
 - If cleanup also fails, what can remain on the host, in the cloud service,
-  or on the device? How does the caller learn
-  about both the original failure and the cleanup failure, identify leftover
-  resources, and retry cleanup or remove them manually?
+  or on the device? How does the caller learn about both the original failure
+  and the cleanup failure, identify leftover resources, and retry cleanup or
+  remove them manually?
 - What happens on the next attempt to create a container of the same backend
   type after cleanup failed? Explain whether creation proceeds independently,
   retries cleanup, or fails with an actionable error. How are leftover state,
@@ -160,7 +168,8 @@ to find the relevant backend suite and CI hosts.
 - Which schema, backend, and SDK PRs are needed, and in what order?
   List contract publication and experimental authorization changes separately.
 - Which consumer guides, API references, and examples need updates?
-  Keep implementation details in developer docs.
+  Link the SDK reference and example updates listed in the API proposal
+  rather than listing them again. Keep implementation details in developer docs.
 - Link API proposals and other supporting documents in this folder.
 
 ## Open questions
