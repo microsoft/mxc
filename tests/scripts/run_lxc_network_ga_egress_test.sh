@@ -421,7 +421,8 @@ PY
 run_case "io_uring case: peer allowed on protocol icmp, echo sent from raw and packet sockets opened through io_uring" "$IO_URING_CONFIG"
 # Hosts such as RHEL refuse io_uring_setup with EPERM, which leaves the workload
 # no io_uring sockets to escape with. Any other setup error is a broken probe.
-if echo "$CASE_OUTPUT" | grep -Fxq "MXC_IO_URING_SETUP_FAILED errno=1"; then
+# The workload runs on a pty, so its lines end in \r\n.
+if grep -Fxq "MXC_IO_URING_SETUP_FAILED errno=1" <<<"${CASE_OUTPUT//$'\r'/}"; then
     log_io_uring_host_state
     echo "io_uring case: the workload cannot open io_uring (EPERM), so there are no io_uring sockets to test."
 else
