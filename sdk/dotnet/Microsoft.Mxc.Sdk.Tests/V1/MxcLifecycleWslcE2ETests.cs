@@ -130,6 +130,84 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
+    public void SpawnInContainerWithStdin_WaitGivesEndOfFileToStdinNobodyTook()
+    {
+        RequireWslc();
+        using var container = new StartedContainer();
+
+        using var proc = MxcLifecycle.SpawnInContainerWithStdin(
+            container.Id,
+            new ExecutionRequest("sh -c 'cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 });
+        var result = proc.Wait();
+
+        Assert.False(result.TimedOut, "waiting must give an untaken stdin end-of-file");
+        Assert.Equal(0, result.ExitCode);
+        Assert.Null(proc.StandardInput);
+    }
+
+    [Fact]
+    public async Task SpawnInContainerWithStdin_WaitAsyncGivesEndOfFileToStdinNobodyTook()
+    {
+        RequireWslc();
+        using var container = new StartedContainer();
+
+        using var proc = await MxcLifecycle.SpawnInContainerWithStdinAsync(
+            container.Id,
+            new ExecutionRequest("sh -c 'cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 },
+            cancellationToken: TestContext.Current.CancellationToken);
+        var result = await proc.WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(result.TimedOut, "waiting must give an untaken stdin end-of-file");
+        Assert.Equal(0, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task SpawnInContainerWithStdin_AKilledCommandNeverActsOnInputClosedAfterTheKill()
+    {
+        RequireWslc();
+        using var container = new StartedContainer();
+        var ct = TestContext.Current.CancellationToken;
+
+        using (var proc = MxcLifecycle.SpawnInContainerWithStdin(
+            container.Id,
+            new ExecutionRequest("sh -c 'cat > /tmp/staged && mv /tmp/staged /tmp/published'")))
+        {
+            var stdin = proc.StandardInput!;
+            await stdin.WriteAsync(Encoding.UTF8.GetBytes("PARTIAL-INPUT\n"), ct);
+            await stdin.FlushAsync(ct);
+            await Task.Delay(2_000, ct);
+            proc.Kill();
+            stdin.Dispose();
+            try
+            {
+                await proc.WaitAsync(ct);
+            }
+            catch (MxcException)
+            {
+                // A killed process that reads forwarded stdin is never confirmed
+                // stopped, so its run ends with its container quarantined.
+            }
+        }
+
+        try
+        {
+            var probe = MxcLifecycle.RunInContainer(
+                container.Id,
+                new ExecutionRequest("sh -c 'test -e /tmp/published && echo PUBLISHED || echo NOT-PUBLISHED'")
+                {
+                    TimeoutMs = 60_000,
+                });
+            Assert.Equal("NOT-PUBLISHED", probe.Stdout.Trim());
+        }
+        catch (MxcException)
+        {
+            // Its container was deleted before anything could publish.
+            var gone = Assert.Throws<MxcException>(() => MxcLifecycle.StopContainer(container.Id));
+            Assert.Equal(ErrorCode.NotProvisioned, gone.Code);
+        }
+    }
+
+    [Fact]
     public void SpawnInContainer_GivesACommandThatReadsStdinEndOfFile()
     {
         RequireWslc();

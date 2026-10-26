@@ -745,13 +745,13 @@ async fn forward_stdin_frames<S: AsyncRead + Unpin>(
 /// separate [`DaemonRequest::ExecStdin`] connection, because the client cannot
 /// write to this one while it is blocked reading output from it.
 async fn handle_exec<S>(
-    mut pipe: S,
+    pipe: S,
     session: SessionHandle,
     config: mxc_sdk::wslc_common::daemon_protocol::ExecConfig,
     exec_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     let exec_id = config.exec_id.clone();
     let run_token = config.run_token.clone();
@@ -760,16 +760,45 @@ where
     // Await the worker's admission decision before writing anything: a rejected
     // exec is a pre-admission typed error, never a post-admission stream frame.
     let admission = session.exec(config, Some(slot.clone())).await;
-    let delivered = write_exec_result(&mut pipe, admission).await;
 
-    if delivered.is_err() {
-        // The run outlives this handler on a thread of its own, so without a
-        // kill a client could disconnect in a loop and leave runs going.
-        session.cancel_exec(&exec_id, &run_token);
-    }
+    // The run outlives this handler on a thread of its own, so without a kill a
+    // client could disconnect in a loop and leave runs going.
+    let delivered = deliver_exec(pipe, admission, || {
+        session.cancel_exec(&exec_id, &run_token)
+    })
+    .await;
 
     drop(slot);
     delivered
+}
+
+/// Stream an exec's result to its client, calling `abort` if the client goes
+/// before the result is delivered.
+async fn deliver_exec<S>(
+    pipe: S,
+    admission: Result<ExecStream, WorkerError>,
+    abort: impl FnOnce(),
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut reader, mut writer) = tokio::io::split(pipe);
+    let delivered = tokio::select! {
+        biased;
+        delivered = write_exec_result(&mut writer, admission) => delivered,
+        () = client_gone(&mut reader) => Err(anyhow::anyhow!("the client disconnected during the exec")),
+    };
+    if delivered.is_err() {
+        abort();
+    }
+    delivered
+}
+
+/// Wait until the client of an exec connection has gone, which is the only way
+/// the connection can yield anything after the client's request.
+async fn client_gone<R: AsyncRead + Unpin>(reader: &mut R) {
+    let mut byte = [0u8; 1];
+    let _ = reader.read(&mut byte).await;
 }
 
 /// Turn an exec **admission** outcome into the client's frame sequence, generic
@@ -1557,6 +1586,16 @@ mod tests {
     /// A writer that always fails, standing in for a client that has gone.
     struct BrokenPipe;
 
+    impl AsyncRead for BrokenPipe {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
     impl AsyncWrite for BrokenPipe {
         fn poll_write(
             self: std::pin::Pin<&mut Self>,
@@ -2127,6 +2166,97 @@ mod tests {
             overflowed: Arc::new(AtomicBool::new(false)),
             registration: test_registration(),
         })
+    }
+
+    /// The senders that keep an admitted exec running and silent.
+    type SilentRun = (
+        oneshot::Sender<Result<ExecTerminal, WorkerError>>,
+        mpsc::Sender<crate::session_manager::OutputChunk>,
+    );
+
+    /// An admitted exec that has written nothing and not finished, and the
+    /// senders that keep it that way.
+    fn admitted_silent() -> (Result<ExecStream, WorkerError>, SilentRun) {
+        let (done_tx, done) = oneshot::channel();
+        let (output_tx, output) = mpsc::channel(16);
+        let stream = ExecStream {
+            done,
+            output,
+            overflowed: Arc::new(AtomicBool::new(false)),
+            registration: test_registration(),
+        };
+        (Ok(stream), (done_tx, output_tx))
+    }
+
+    /// Deliver `admission` to a client that reads the admission and then
+    /// disconnects, returning the delivery result.
+    async fn deliver_to_a_client_that_leaves(
+        admission: Result<ExecStream, WorkerError>,
+        abort: impl FnOnce(),
+    ) -> Result<()> {
+        let (server, mut client) = duplex(64 * 1024);
+        let leaving = async move {
+            let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+            assert_eq!(response, DaemonResponse::Ok);
+        };
+        let (delivered, ()) = timeout(Duration::from_secs(5), async {
+            tokio::join!(deliver_exec(server, admission, abort), leaving)
+        })
+        .await
+        .expect("a client that has gone must end the delivery");
+        delivered
+    }
+
+    #[tokio::test]
+    async fn a_silent_exec_is_cancelled_when_its_client_goes() {
+        let (admission, _running) = admitted_silent();
+        let aborted = AtomicBool::new(false);
+
+        let delivered =
+            deliver_to_a_client_that_leaves(admission, || aborted.store(true, Ordering::Release))
+                .await;
+
+        assert!(delivered.is_err());
+        assert!(
+            aborted.load(Ordering::Acquire),
+            "a run with no output and no timeout must not outlive its client"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exec_whose_stdin_is_backed_up_is_cancelled_when_its_client_goes() {
+        let session = spawn().unwrap();
+        let (_registration, cancellation, source) = register_stdin_exec(&session, "exec-1");
+        let (mut stdin_client, stdin_server) = duplex(4 * 1024 * 1024);
+        write_frame(&mut stdin_client, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        for _ in 0..64 {
+            write_frame(&mut stdin_client, &stdin_frame(&[0; 1024]))
+                .await
+                .unwrap();
+        }
+        let relay = tokio::spawn(handle_client(
+            stdin_server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        ));
+        let (admission, _running) = admitted_silent();
+
+        let delivered =
+            deliver_to_a_client_that_leaves(admission, || session.cancel_exec("exec-1", "run"))
+                .await;
+
+        assert!(delivered.is_err());
+        assert!(
+            cancellation.load(Ordering::Acquire),
+            "a run whose stdin nobody drains must not outlive its client"
+        );
+        drop(source);
+        let _ = timeout(Duration::from_secs(5), relay).await;
+        drop(stdin_client);
+        session.shutdown().await.unwrap();
     }
 
     /// A rejected admission (unknown sandbox) round-trips as a single typed

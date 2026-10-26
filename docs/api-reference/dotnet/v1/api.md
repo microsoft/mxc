@@ -222,7 +222,9 @@ public static Task<MxcProcess> SpawnInContainerAsync(
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle` — SpawnInContainerWithStdin
 
 Run a command in a started container and return live stdio streams, including a
-writable `StandardInput`. Disposing it gives the command end-of-file.
+writable `StandardInput`. Disposing it gives the command end-of-file, as does
+`Wait`, `WaitAsync`, or `WaitForExitWithOutputAsync` if `StandardInput` was never
+taken.
 
 ```csharp
 public static MxcProcess SpawnInContainerWithStdin(

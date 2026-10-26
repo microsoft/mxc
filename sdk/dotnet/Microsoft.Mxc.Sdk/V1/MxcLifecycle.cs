@@ -197,7 +197,8 @@ public static class MxcLifecycle
     /// <summary>
     /// Run a command in a started container and return live stdio streams,
     /// including a writable <see cref="MxcProcess.StandardInput"/> whose
-    /// disposal gives the command end-of-file.
+    /// disposal, or a wait that starts before it is taken, gives the command
+    /// end-of-file.
     /// </summary>
     public static MxcProcess SpawnInContainerWithStdin(
         ContainerId id,
@@ -239,7 +240,8 @@ public static class MxcLifecycle
                 }
                 return new MxcProcess(
                     MxcSandboxHandle.FromRaw(handle),
-                    MxcProcess.NormalizeTimeout(request.TimeoutMs));
+                    MxcProcess.NormalizeTimeout(request.TimeoutMs),
+                    waitClosesUntakenStdin: stdin);
             }
         }
     }

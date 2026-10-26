@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `MxcLifecycle.SpawnInContainerWithStdin` and
   `SpawnInContainerWithStdinAsync` start a command in a container with a
-  writable `StandardInput`. For a WSLC container, disposing it gives the
-  command end-of-file; `SpawnInContainer` still gives a WSLC command
-  end-of-file at once.
+  writable `StandardInput`. For a WSLC container, disposing it, or waiting
+  before taking it, gives the command end-of-file; `SpawnInContainer` still
+  gives a WSLC command end-of-file at once.
 
 ### Changed
 

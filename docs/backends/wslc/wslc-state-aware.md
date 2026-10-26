@@ -532,10 +532,12 @@ exited, its stdin is closed and input not yet written is dropped.
 
 When an exec that forwards stdin times out or is cancelled before the client
 sends end-of-file, its process's stdin stays open, so the process never takes a
-cut-short input as complete. The daemon does not signal that process, because
-the WSLc SDK closes a process's stdin when it is signalled. The process is
-therefore never confirmed gone, and its stdin stays open until its container is
-quarantined and deleted, about a minute after the timeout or cancellation.
+cut-short input as complete. From that point the daemon passes on no more input
+and no end-of-file, even if the client sends them. The daemon does not signal
+that process, because the WSLc SDK closes a process's stdin when it is
+signalled. The process is therefore never confirmed gone, and its stdin stays
+open until its container is quarantined and deleted, about a minute after the
+timeout or cancellation.
 
 A process that exits while a large amount of its input is still unread (more
 than the few hundred KiB the WSLc SDK buffers) completes late: the SDK reports
@@ -569,9 +571,10 @@ before any admission reaches the client; the outward SDK error is
 lives only in its bounded live-output queue, so the persistent per-user daemon
 stays near 128 MB of live output even against clients that never drain. An
 exec's slot is held until the run has reported back and its client has been
-written to, so a client that disconnects mid-run keeps counting against that
-bound while its process is still going, and one that drains slowly keeps
-counting while its output is still queued. A run whose termination could not be
+written to. A client that disconnects mid-run cancels its exec, whether or not
+the run is producing output, and keeps counting against that bound until the
+run ends; one that drains slowly keeps counting while its output is still
+queued. A run whose termination could not be
 confirmed leaves its sandbox quarantined and keeps the slot until that sandbox
 is deprovisioned, because the process may still be alive.
 

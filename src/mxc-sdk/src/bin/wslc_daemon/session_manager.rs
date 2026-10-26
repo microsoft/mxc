@@ -425,13 +425,20 @@ fn run_exec(job: ExecJob, logger: &mut Logger) -> ExecReport {
         }) => {
             let failure = Arc::clone(&stdin_failure);
             let cancel = Arc::clone(&cancellation);
+            let cancelled = Arc::clone(&cancellation);
             let consumer: StdinConsumer = Box::new(move |stdin| {
-                let stop = crate::stdin_writer::spawn(stdin, chunks, wake, move |error| {
-                    *failure.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(format!("writing the process's stdin failed: {error}"));
-                    cancel.store(true, Ordering::Release);
-                })?;
-                Ok(Box::new(move || stop.stop()))
+                let stop = crate::stdin_writer::spawn(
+                    stdin,
+                    chunks,
+                    wake,
+                    move || cancelled.load(Ordering::Acquire),
+                    move |error| {
+                        *failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(format!("writing the process's stdin failed: {error}"));
+                        cancel.store(true, Ordering::Release);
+                    },
+                )?;
+                Ok(Box::new(stop) as Box<dyn container_steps::StdinControl>)
             });
             (Some(consumer), Some(run_alive))
         }

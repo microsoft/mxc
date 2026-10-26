@@ -230,10 +230,19 @@ pub enum OutStream {
 /// the leaf primitives ([`OutStream`], [`IoContext`]).
 pub type OutputSink = Box<dyn Fn(OutStream, &[u8]) + Send + Sync>;
 
-/// Takes a process's stdin write end once the process exists and returns a
-/// closer that ends it early.
+/// Takes a process's stdin write end once the process exists and returns
+/// control over it.
 pub type StdinConsumer =
-    Box<dyn FnOnce(std::fs::File) -> std::io::Result<Box<dyn FnOnce() + Send>> + Send>;
+    Box<dyn FnOnce(std::fs::File) -> std::io::Result<Box<dyn StdinControl>> + Send>;
+
+/// Control over a process's stdin after a [`StdinConsumer`] has taken it.
+pub trait StdinControl: Send {
+    /// Stop giving the process input or end-of-file, leaving stdin open.
+    fn freeze(&self);
+
+    /// Close stdin now, dropping input not yet written.
+    fn close(self: Box<Self>);
+}
 
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are
 /// `pub(crate)` so the one-shot runner's wait/collect helpers can read the
@@ -1438,6 +1447,8 @@ pub unsafe fn exec_in_container(
     };
     if let Some(interruption) = interruption {
         if forwards_stdin {
+            stdin_guard.freeze();
+
             // Signalling the process closes its stdin even when the signal is
             // not delivered, which would let it act on input that was cut short.
             let _ = writeln!(
@@ -1566,23 +1577,34 @@ pub unsafe fn exec_in_container(
 
 /// A process's stdin, closed when this is dropped.
 #[derive(Default)]
-pub struct StdinHold(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+pub struct StdinHold(Mutex<Option<Box<dyn StdinControl>>>);
 
 impl StdinHold {
-    fn new(close: Box<dyn FnOnce() + Send>) -> Self {
-        Self(Mutex::new(Some(close)))
+    fn new(control: Box<dyn StdinControl>) -> Self {
+        Self(Mutex::new(Some(control)))
+    }
+
+    fn freeze(&self) {
+        if let Some(control) = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            control.freeze();
+        }
     }
 }
 
 impl Drop for StdinHold {
     fn drop(&mut self) {
-        let close = self
+        let control = self
             .0
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        if let Some(close) = close {
-            close();
+        if let Some(control) = control {
+            control.close();
         }
     }
 }
@@ -1602,7 +1624,7 @@ unsafe fn attach_stdin(
     sdk: &WslcSdk,
     process: WslcProcess,
     consumer: StdinConsumer,
-) -> Result<Box<dyn FnOnce() + Send>, ScriptResponse> {
+) -> Result<Box<dyn StdinControl>, ScriptResponse> {
     use std::os::windows::io::FromRawHandle;
 
     let mut handle: HANDLE = ptr::null_mut();

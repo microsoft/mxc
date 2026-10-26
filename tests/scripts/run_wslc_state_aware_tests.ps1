@@ -2210,6 +2210,25 @@ try {
         }
     } | Out-Null
 
+    Run-StateAwareTest "S: a reader whose executor is killed before sending any input does not hold the sandbox" {
+        $id = New-StartedStdinSandbox
+        if ($null -eq $id) { return }
+        try {
+            $req = @{ phase = 'exec'; sandboxId = $id; process = @{ commandLine = "sh -c 'cat; touch /tmp/saw-eof'" } }
+            $h = Start-StateAware -Request $req -WriteStdin
+            Start-Sleep -Seconds 3
+
+            # No input has been sent, so no stdin connection exists yet.
+            try { $h.Process.Kill() } catch { }
+            $null = $h.Process.WaitForExit(30000)
+            Close-StateAwareStdin $h
+            $null = Wait-StateAware $h
+            Assert-StdinCutShortNeverSeen $id 'saw-eof'
+        } finally {
+            Remove-StdinSandbox $id
+        }
+    } | Out-Null
+
     foreach ($entry in @(
         @{ Name = 'stdin'; Id = $script:inSandbox; Var = 'inDeprovisionedOk' },
         @{ Name = 'peer'; Id = $script:inPeer; Var = 'inPeerDeprovisionedOk' }

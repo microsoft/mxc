@@ -144,11 +144,13 @@ public class MxcProcess : IMxcProcess
     // would be silently ignored on Wait()/WaitAsync().
     private readonly uint? _timeoutMs;
     private readonly long _startTimestamp = Stopwatch.GetTimestamp();
+    private readonly bool _waitClosesUntakenStdin;
 
-    internal MxcProcess(MxcSandboxHandle handle, uint? timeoutMs = null)
+    internal MxcProcess(MxcSandboxHandle handle, uint? timeoutMs = null, bool waitClosesUntakenStdin = false)
     {
         _handle = handle;
         _timeoutMs = NormalizeTimeout(timeoutMs);
+        _waitClosesUntakenStdin = waitClosesUntakenStdin;
     }
 
     internal static uint? NormalizeTimeout(uint? timeoutMs) =>
@@ -181,7 +183,8 @@ public class MxcProcess : IMxcProcess
     /// The child's stdin as a writable <see cref="Stream"/>. Returns the same
     /// stream on repeated access; <see cref="Stream.Dispose()"/> (or disposing
     /// this process) closes stdin, sending EOF to the child. Returns
-    /// <see langword="null"/> if stdin was not piped.
+    /// <see langword="null"/> if stdin was not piped, or was closed by a wait
+    /// that started before it was taken.
     /// </summary>
     public Stream? StandardInput
     {
@@ -461,8 +464,33 @@ public class MxcProcess : IMxcProcess
         }
     }
 
+    private void CloseUntakenStdin()
+    {
+        lock (_controlLock)
+        {
+            ThrowIfDisposed();
+            if (_stdinTaken)
+            {
+                return;
+            }
+            _stdinTaken = true;
+            unsafe
+            {
+                var s = NativeMethods.mxc_sandbox_take_stdin(_handle.Ptr);
+                if (s is not null)
+                {
+                    new MxcStdinStream(MxcWriteStreamHandle.FromRaw(s)).Dispose();
+                }
+            }
+        }
+    }
+
     private WaitResult WaitCore(CancellationToken cancellationToken)
     {
+        if (_waitClosesUntakenStdin)
+        {
+            CloseUntakenStdin();
+        }
         EnsureDrainUntaken();
 
         var poll = MinPollInterval;
