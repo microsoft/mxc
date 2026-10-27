@@ -21,7 +21,7 @@ use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchDiagnostic {
     /// Machine-readable discriminator (e.g. `"packaged_app"`,
-    /// `"missing_filesystem_access"`).
+    /// `"feature_not_enabled"`).
     pub kind: &'static str,
     /// Human-readable explanation of the failure including remediation guidance.
     pub message: String,
@@ -129,11 +129,7 @@ pub fn diagnose_missing_required_env(
 ///
 /// Always returns a `LaunchDiagnostic` -- if no specific heuristic matches,
 /// a generic message is produced from the raw error code.
-pub fn diagnose_create_process_failure(
-    win32_error: u32,
-    command_line: &str,
-    readonly_paths: &[String],
-) -> LaunchDiagnostic {
+pub fn diagnose_create_process_failure(win32_error: u32, command_line: &str) -> LaunchDiagnostic {
     if win32_error == ERROR_ACCESS_DISABLED_BY_POLICY.0 {
         return LaunchDiagnostic {
             kind: "launch_blocked_by_policy",
@@ -154,7 +150,7 @@ pub fn diagnose_create_process_failure(
     let bare_exe = Path::new(extract_exe_from_command_line(command_line));
     let resolved_exe = resolve_exe_on_path(bare_exe);
 
-    if let Some(diag) = check_exe_heuristics(&resolved_exe, readonly_paths, None) {
+    if let Some(diag) = check_exe_heuristics(&resolved_exe, None) {
         return diag;
     }
 
@@ -169,18 +165,10 @@ pub fn diagnose_create_process_failure(
 
 /// Diagnose a process that launched successfully but exited with a non-zero
 /// code. Returns `None` when no recognized condition matches.
-pub fn diagnose_process_exit(
-    command_line: &str,
-    readonly_paths: &[String],
-    _readwrite_paths: &[String],
-    exit_code: u32,
-) -> Option<LaunchDiagnostic> {
+pub fn diagnose_process_exit(command_line: &str, exit_code: u32) -> Option<LaunchDiagnostic> {
     let bare_exe = Path::new(extract_exe_from_command_line(command_line));
     let resolved_exe = resolve_exe_on_path(bare_exe);
-    if let Some(diag) = check_exe_heuristics(&resolved_exe, readonly_paths, Some(exit_code)) {
-        return Some(diag);
-    }
-    None
+    check_exe_heuristics(&resolved_exe, Some(exit_code))
 }
 
 // -- Constants ---------------------------------------------------------------
@@ -202,13 +190,8 @@ use windows::Win32::Foundation::{
 
 // -- Internal heuristics -----------------------------------------------------
 
-/// Checks exe-path-based heuristics (packaged app, DLL init failure, missing
-/// root access). Returns `None` if nothing matches.
-fn check_exe_heuristics(
-    exe_path: &Path,
-    readonly_paths: &[String],
-    exit_code: Option<u32>,
-) -> Option<LaunchDiagnostic> {
+/// Checks for packaged applications and DLL initialization failures.
+fn check_exe_heuristics(exe_path: &Path, exit_code: Option<u32>) -> Option<LaunchDiagnostic> {
     if is_packaged_app(exe_path) {
         return Some(LaunchDiagnostic {
             kind: "packaged_app",
@@ -231,19 +214,6 @@ fn check_exe_heuristics(
                       in the JSON config, or `ui.allowWindows: true` if you are using \
                       the SDK's SandboxPolicy."
                 .to_string(),
-        });
-    }
-
-    if missing_root_readonly(exe_path, readonly_paths) {
-        let root = drive_root(exe_path);
-        return Some(LaunchDiagnostic {
-            kind: "missing_filesystem_access",
-            message: format!(
-                "pwsh.exe versions before 7.7 require read-only access to the \
-                 root drive ({root}) to start. The current sandbox policy does \
-                 not grant this access. Add \"{root}\" to `readonlyPaths` in your \
-                 sandbox policy, or upgrade to pwsh 7.7+."
-            ),
         });
     }
 
@@ -352,30 +322,6 @@ pub fn extract_exe_from_command_line(command_line: &str) -> &str {
 fn is_packaged_app(exe_path: &Path) -> bool {
     let normalized = exe_path.to_string_lossy().to_lowercase();
     normalized.contains("\\windowsapps\\") || normalized.contains("/windowsapps/")
-}
-
-fn missing_root_readonly(exe_path: &Path, readonly_paths: &[String]) -> bool {
-    let filename = exe_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-    if filename != "pwsh.exe" {
-        return false;
-    }
-    let root = drive_root(exe_path);
-    !readonly_paths
-        .iter()
-        .any(|p| p.eq_ignore_ascii_case(&root) || p == "\\")
-}
-
-fn drive_root(exe_path: &Path) -> String {
-    let s = exe_path.to_string_lossy();
-    if s.len() >= 3 && s.as_bytes()[1] == b':' {
-        format!("{}\\", &s[..2])
-    } else {
-        "C:\\".to_string()
-    }
 }
 
 // -- Tests -------------------------------------------------------------------
@@ -509,7 +455,7 @@ mod tests {
 
     #[test]
     fn api_not_implemented_triggers_feature_diagnostic() {
-        let diag = diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED.0, "pwsh.exe", &[]);
+        let diag = diagnose_create_process_failure(ERROR_CALL_NOT_IMPLEMENTED.0, "pwsh.exe");
         assert_eq!(diag.kind, "feature_not_enabled");
         assert!(diag
             .message
@@ -518,7 +464,7 @@ mod tests {
 
     #[test]
     fn e_notimpl_triggers_feature_diagnostic() {
-        let diag = diagnose_create_process_failure(E_NOTIMPL.0 as u32, "pwsh.exe", &[]);
+        let diag = diagnose_create_process_failure(E_NOTIMPL.0 as u32, "pwsh.exe");
         assert_eq!(diag.kind, "feature_not_enabled");
     }
 
@@ -545,7 +491,6 @@ mod tests {
         let diag = diagnose_create_process_failure(
             ERROR_ACCESS_DISABLED_BY_POLICY.0,
             r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
-            &[],
         );
         assert_eq!(diag.kind, "launch_blocked_by_policy");
         assert!(diag.message.contains("IT-managed"));
@@ -558,16 +503,28 @@ mod tests {
     fn packaged_app_detected_from_command_line() {
         let cmd =
             r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe" -NoProfile"#;
-        let diag = diagnose_create_process_failure(87, cmd, &[]);
+        let diag = diagnose_create_process_failure(87, cmd);
         assert_eq!(diag.kind, "packaged_app");
         assert!(diag.message.contains("packaged"));
     }
 
     #[test]
     fn generic_fallback_for_unknown_error() {
-        let diag = diagnose_create_process_failure(5, "cmd.exe", &["C:\\".to_string()]);
+        let diag = diagnose_create_process_failure(5, "cmd.exe");
         assert_eq!(diag.kind, "create_process_failed");
         assert!(diag.message.contains("5"));
+    }
+
+    #[test]
+    fn pwsh_creation_failure_preserves_win32_error() {
+        for error in [2, 267] {
+            let diag = diagnose_create_process_failure(
+                error,
+                r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
+            );
+            assert_eq!(diag.kind, "create_process_failed");
+            assert!(diag.message.contains(&format!("error code {error} ")));
+        }
     }
 
     // -- diagnose_process_exit tests --
@@ -576,8 +533,6 @@ mod tests {
     fn dll_init_failed_pwsh_triggers_ui_diagnostic() {
         let diag = diagnose_process_exit(
             r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
-            &["C:\\".to_string()],
-            &[],
             STATUS_DLL_INIT_FAILED.0 as u32,
         );
         assert!(diag.is_some());
@@ -591,8 +546,6 @@ mod tests {
     fn dll_init_failed_powershell_exe_triggers_ui_diagnostic() {
         let diag = diagnose_process_exit(
             r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe""#,
-            &["C:\\".to_string()],
-            &[],
             STATUS_DLL_INIT_FAILED.0 as u32,
         );
         assert!(diag.is_some());
@@ -600,39 +553,15 @@ mod tests {
     }
 
     #[test]
-    fn different_exit_code_pwsh_does_not_trigger_ui_diagnostic() {
-        let diag = diagnose_process_exit(
-            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
-            &["C:\\".to_string()],
-            &[],
-            1,
-        );
+    fn pwsh_nonzero_exit_has_no_filesystem_diagnostic() {
+        let diag = diagnose_process_exit(r#""C:\Program Files\PowerShell\7\pwsh.exe""#, 1);
         assert!(diag.is_none());
     }
 
     #[test]
-    fn missing_root_readonly_from_exit() {
-        let diag =
-            diagnose_process_exit(r#""C:\Program Files\PowerShell\7\pwsh.exe""#, &[], &[], 1);
-        assert!(diag.is_some());
-        assert_eq!(diag.unwrap().kind, "missing_filesystem_access");
-    }
-
-    #[test]
-    fn pwsh_with_root_readonly_no_diagnostic() {
-        let diag = diagnose_process_exit(
-            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
-            &["C:\\".to_string()],
-            &[],
-            1,
-        );
-        assert!(diag.is_none());
-    }
-
-    #[test]
-    fn packaged_app_takes_priority_over_missing_access() {
+    fn packaged_app_exit_has_packaged_app_diagnostic() {
         let cmd = r#""C:\Program Files\WindowsApps\Microsoft.PowerShell_7.4.0\pwsh.exe""#;
-        let diag = diagnose_process_exit(cmd, &[], &[], 1);
+        let diag = diagnose_process_exit(cmd, 1);
         assert!(diag.is_some());
         assert_eq!(diag.unwrap().kind, "packaged_app");
     }
@@ -669,29 +598,5 @@ mod tests {
     #[test]
     fn extract_exe_empty() {
         assert_eq!(extract_exe_from_command_line(""), "");
-    }
-
-    // -- case sensitivity / edge cases --
-
-    #[test]
-    fn case_insensitive_root_path_match() {
-        let diag = diagnose_process_exit(
-            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
-            &["c:\\".to_string()],
-            &[],
-            1,
-        );
-        assert!(diag.is_none());
-    }
-
-    #[test]
-    fn backslash_only_matches_as_root() {
-        let diag = diagnose_process_exit(
-            r#""C:\Program Files\PowerShell\7\pwsh.exe""#,
-            &["\\".to_string()],
-            &[],
-            1,
-        );
-        assert!(diag.is_none());
     }
 }

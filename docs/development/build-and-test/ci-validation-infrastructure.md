@@ -235,10 +235,15 @@ compile or restore SDK dependencies.
 
 The dispatcher explicitly runs the ignored Rust bidirectional-stdio test,
 enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET `MxcProcessTests`, and runs the
-Node public `run` and `spawn` integration cases. The .NET suite checks stdin,
+Node public `run`, `spawn`, and tool-discovery filesystem integration cases.
+The tool-discovery case uses a private fixture alongside the packaged Node
+tests rather than under the host temporary directory. It uses a fake
+`pwsh.exe`, applies the discovered policy through public `run`, and checks that
+tool files are readable while a sibling private sentinel remains denied. It
+also checks host readability and denial without a grant. The .NET suite checks stdin,
 stdout, stderr, large output, cancellation, kill, and timeout behavior.
 Required test names and methods must pass; empty selections and skipped
-streaming cases fail the job even when the runner exits successfully.
+required cases fail the job even when the runner exits successfully.
 
 ### IsolationSession Rust test concurrency
 
@@ -319,7 +324,9 @@ compatibility-consent workloads pause at a ready/release handshake so their
 SDDL can also be checked while they are alive. It covers
 learning-mode enforcement, explicit capture paths and warnings, multiple
 capabilities, environment/cwd/exit propagation, and timeout cleanup of a
-ready-signalled grandchild. UI checks cover all four isolation values and use
+ready-signalled grandchild. A copy of `cmd.exe` named `pwsh.exe` checks that an
+intentional nonzero workload exit preserves its stderr without recommending
+drive-root read grants. UI checks cover all four isolation values and use
 uncontained positive controls for clipboard, desktop creation, and a no-op
 mouse-speed setter. Clipboard tests run only for text-only clipboards; non-text
 formats or an unavailable clipboard produce an explicit skip before any change.

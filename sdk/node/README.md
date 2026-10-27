@@ -285,3 +285,12 @@ is bounded to five seconds per directory; failures retain the directory and
 emit a diagnostic warning. `getUserProfilePolicy` uses the supplied environment,
 and `getTemporaryFilesPolicy` returns existing temporary storage without creating
 directories.
+
+On Windows, finding `pwsh.exe` on `PATH` adds the PSReadLine history directory
+as read-write. Discovery does not implicitly grant read access to a drive root.
+
+PowerShell startup may fail on hosts that require root enumeration. Use a
+PowerShell version that does not require it, or explicitly configure the minimum
+required permissions supported by the selected backend. Avoid full-drive reads
+as a general startup workaround. See the
+[PowerShell security-servicing exception](../../docs/development/architecture/versioning.md#security-servicing-exception-powershell-tool-discovery).

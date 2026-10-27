@@ -216,7 +216,8 @@ function Invoke-ProcessContainerStreamingTests {
         if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
         $requiredNodeTests = @(
             'public run captures output and the workload exit code',
-            'public spawn returns an SDK process with live standard streams'
+            'public spawn returns an SDK process with live standard streams',
+            'public tool discovery allows tool reads but denies sibling private files'
         )
         Push-Location $nodeSuiteRoot
         try {

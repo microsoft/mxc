@@ -402,8 +402,8 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
 
 // Temp directory helpers
 
-export function createTempDir(prefix: string = 'mxc-test'): string {
-  const tmpBase = fs.realpathSync.native(os.tmpdir());
+export function createTempDir(prefix: string = 'mxc-test', parentDirectory: string = os.tmpdir()): string {
+  const tmpBase = fs.realpathSync.native(parentDirectory);
   const dir = path.join(tmpBase, `${prefix}-${Date.now()}`);
   fs.mkdirSync(dir);
   return dir;

@@ -925,13 +925,8 @@ impl BaseContainerRunner {
             } else {
                 request.env.as_deref()
             };
-            let diag = diagnose_missing_required_env(err.0, diagnostic_env).unwrap_or_else(|| {
-                diagnose_create_process_failure(
-                    err.0,
-                    &request.script_code,
-                    &request.policy.readonly_paths,
-                )
-            });
+            let diag = diagnose_missing_required_env(err.0, diagnostic_env)
+                .unwrap_or_else(|| diagnose_create_process_failure(err.0, &request.script_code));
 
             let mut extended_error = format!(
                 "{CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API} failed: {err:?} (working directory: {})",
@@ -1222,13 +1217,7 @@ impl SandboxBackend for BaseContainerRunner {
     }
 
     fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
-        diagnose_process_exit(
-            &request.script_code,
-            &request.policy.readonly_paths,
-            &request.policy.readwrite_paths,
-            exit_code as u32,
-        )
-        .map(|diag| diag.message)
+        diagnose_process_exit(&request.script_code, exit_code as u32).map(|diag| diag.message)
     }
 }
 

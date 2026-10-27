@@ -242,6 +242,21 @@ if ($facts.baseContainerSupportsDenyPaths) {
 foreach ($code in @(0, 1, 42)) {
     Invoke-PolicyCase -Name "exit-code-$code" -Request (New-PolicyRequest -Mode 'exit' -ProbeArguments @("$code")) -ExpectedExitCode $code
 }
+$renamedCmd = Join-Path $ScratchRoot 'launcher\pwsh.exe'
+Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\cmd.exe') -Destination $renamedCmd
+$pwshExit = New-PolicyRequest -Mode 'exit'
+$pwshExit.process.commandLine = '"' + $renamedCmd + '" /d /c "echo NATIVE_PWSH_EXIT_OK & echo NATIVE_PWSH_ERROR 1>&2 & exit /b 7"'
+$pwshExit.filesystem.readonlyPaths += Split-Path $renamedCmd -Parent
+Invoke-PolicyCase -Name 'pwsh-nonzero-exit-keeps-workload-error' -Request $pwshExit `
+    -ExpectedExitCode 7 -ExpectedOutput 'NATIVE_PWSH_EXIT_OK' -ValidateResult {
+        param($Result)
+        if ($Result.Stderr -notmatch 'NATIVE_PWSH_ERROR' -or
+            "$($Result.Stderr)`n$($Result.Log)" -match 'missing_filesystem_access|root drive') {
+            throw 'PowerShell-named workload failure was replaced with filesystem advice.'
+        }
+        return $true
+    }
+
 function ConvertTo-ProbeArgument {
     param([hashtable]$Value)
     [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Value | ConvertTo-Json -Depth 8 -Compress)))

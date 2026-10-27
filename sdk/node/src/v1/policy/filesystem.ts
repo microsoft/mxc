@@ -204,10 +204,8 @@ function deduplicatePaths(paths: string[]): string[] {
  * Check whether PowerShell (pwsh.exe) is available on the machine by scanning
  * the supplied PATH directories for a `pwsh.exe` binary.
  *
- * When PowerShell is found, return a policy fragment with:
- * - `C:\` in `readonlyPaths` — pwsh.exe enumerates the drive root on startup.
- * - The PSReadLine history directory in `readwritePaths` so the PSReadLine
- *   module can persist command history.
+ * When PowerShell is found, add the PSReadLine history directory to
+ * `readwritePaths` so the module can persist command history.
  *
  * On non-Windows platforms or when pwsh.exe is not found on PATH, returns an
  * empty policy.
@@ -235,9 +233,6 @@ function getPowerShellPolicy(
         return { readonlyPaths: [], readwritePaths: [] };
     }
 
-    const systemDrive = environmentValue(environment, 'SystemDrive') || 'C:';
-    const systemRoot = systemDrive + "\\";
-    const readonlyPaths: string[] = [systemRoot];
     const readwritePaths: string[] = [];
 
     const userProfile = environmentValue(environment, 'USERPROFILE');
@@ -248,7 +243,7 @@ function getPowerShellPolicy(
         readwritePaths.push(psReadLineDir);
     }
 
-    return { readonlyPaths, readwritePaths };
+    return { readonlyPaths: [], readwritePaths };
 }
 
 // ---------------------------------------------------------------------------
@@ -268,10 +263,9 @@ function getPowerShellPolicy(
  *    already grant access to `ALL_APPLICATION_PACKAGES` are removed because
  *    AppContainer processes can see them without explicit brokering.
  *
- * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the drive root
- * (`C:\`) is added to `readonlyPaths` and the PSReadLine history directory
- * is added to `readwritePaths` so that interactive PowerShell sessions work
- * correctly inside the container.
+ * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the PSReadLine
+ * history directory is added to `readwritePaths`. Discovery does not
+ * implicitly grant read access to a drive root.
  *
  * ACL inspection failures retain the directory and emit a diagnostic warning.
  *

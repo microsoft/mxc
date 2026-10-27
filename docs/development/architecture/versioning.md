@@ -301,6 +301,24 @@ left unchanged so the release contract stays auditable; newer schemas
 document the corrected default. Consumers that need the legacy behavior
 must set the field explicitly.
 
+### Security-servicing exception: PowerShell tool discovery
+
+On Windows, the Rust V1
+`mxc_sdk::v1::policy::filesystem::available_tools_policy` and Node V1
+`policy.filesystem.getAvailableToolsPolicy` helpers must not implicitly grant
+recursive read access to the system-drive root when discovering `pwsh.exe`.
+Such a grant can expose host files beyond the discovered tool directories.
+Discovery grants access to tool directories and the PSReadLine history
+directory.
+
+This specific security-servicing exception applies within V1 and does not
+require a new versioned API surface.
+
+PowerShell startup may fail on hosts where it requires root enumeration.
+Use a PowerShell version that does not require root enumeration or explicitly
+configure the minimum permissions required by the workload and supported by
+the selected backend. Avoid full-drive reads as a general startup workaround.
+
 ### Shipped vs Experimental
 
 Development features use their intended permanent top-level locations in the
