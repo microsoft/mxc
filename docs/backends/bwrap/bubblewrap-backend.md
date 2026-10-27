@@ -243,6 +243,8 @@ Common consequences of this default:
   directory is a symlink to another location.
   Grants through resolver symlinks and sibling-file grants retain their declared
   access; the read-only resolver copy does not make writable siblings read-only.
+  Child denials and read-only restrictions also take precedence when a writable
+  parent is named through an alias and the child uses its physical path.
 
   Resolver snapshots use sealed, anonymous file descriptors rather than
   temporary host pathnames. Bubblewrap copies them into private read-only
@@ -429,6 +431,7 @@ A policy that names `/etc/resolv.conf` (or the path its symlink chain ends at)
 in `readonlyPaths` / `readwritePaths` is supplying its own resolver, and the
 sandbox keeps that one — with a warning, because a resolver naming only
 loopback nameservers is unreachable from the sandbox whoever mounted it.
+This includes file grants through intermediate resolver-directory symlinks.
 Listing an ancestor such as `/etc` is not treated as a choice about the
 resolver.
 

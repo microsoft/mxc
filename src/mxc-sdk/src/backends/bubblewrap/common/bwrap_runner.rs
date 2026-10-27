@@ -511,7 +511,8 @@ impl BubblewrapScriptRunner {
                         Err(error) => return Err(ScriptResponse::error(&error)),
                     },
                 };
-                let resolver = proxy_network::ResolverPin::for_host(&request.policy, logger);
+                let resolver =
+                    proxy_network::ResolverPin::for_host(&request.policy, &mounts, logger);
                 match proxy_network::ProxyNetworkNamespace::start(
                     &plan,
                     &network_rules::IngressPlan::for_policy(&request.policy),

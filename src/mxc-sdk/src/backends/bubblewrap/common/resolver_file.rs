@@ -114,7 +114,7 @@ impl ResolverFile {
         mounts: &mut [PolicyMount],
         denied_files: &HashSet<String>,
     ) -> Result<Vec<String>, String> {
-        self.translate_policy_mounts(mounts)?;
+        self.resolve_policy_mounts(mounts)?;
         let Some(file) = &self.snapshot else {
             return Ok(self.layout_args.clone());
         };
@@ -166,10 +166,31 @@ impl ResolverFile {
         Ok(args)
     }
 
+    fn resolve_policy_mounts(&self, mounts: &mut [PolicyMount]) -> Result<(), String> {
+        for _ in 0..=mounts.len() + self.links.len() {
+            let previous = mounts.to_vec();
+            self.translate_policy_mounts(mounts)?;
+            mounts.sort_by_key(|mount| {
+                (
+                    Path::new(&mount.destination).components().count(),
+                    mount.intent,
+                )
+            });
+            if mounts == previous {
+                return Ok(());
+            }
+        }
+        Err(
+            "resolver aliases prevent a stable parent-before-child mount order; \
+             remove conflicting alias paths from the filesystem policy"
+                .into(),
+        )
+    }
+
     fn translate_policy_mounts(&self, mounts: &mut [PolicyMount]) -> Result<(), String> {
         let mut active = vec![true; self.links.len()];
         for mount in mounts {
-            let mut destination = PathBuf::from(&mount.destination);
+            let mut destination = PathBuf::from(&mount.source);
             let mut followed = 0;
             while let Some(link) = self
                 .links
@@ -186,11 +207,14 @@ impl ResolverFile {
                         mount.source
                     ));
                 }
-                destination = link
-                    .target
-                    .join(destination.strip_prefix(&link.path).map_err(|error| {
-                        format!("could not translate policy path {}: {error}", mount.source)
-                    })?);
+                let suffix = destination.strip_prefix(&link.path).map_err(|error| {
+                    format!("could not translate policy path {}: {error}", mount.source)
+                })?;
+                destination = if suffix.as_os_str().is_empty() {
+                    link.target.clone()
+                } else {
+                    link.target.join(suffix)
+                };
             }
             mount.destination = path_text(&destination)?.to_owned();
             for (index, link) in self.links.iter().enumerate() {
@@ -503,7 +527,44 @@ mod tests {
     }
 
     #[test]
-    fn policy_translation_respects_masks_and_restored_ancestor_grants() {
+    fn translated_parents_precede_denied_and_readonly_children() {
+        let resolver = ResolverFile {
+            snapshot: None,
+            destination: "/tmp/resolv.conf".into(),
+            layout_args: Vec::new(),
+            links: vec![SandboxLink {
+                path: PathBuf::from("/run/systemd/resolve"),
+                target: PathBuf::from("/tmp"),
+                host_symlink: true,
+            }],
+        };
+        for intent in [FsIntent::Denied, FsIntent::ReadOnly] {
+            let mut policy = ContainerPolicy {
+                readwrite_paths: vec!["/run/systemd/resolve".into()],
+                ..Default::default()
+            };
+            if intent == FsIntent::Denied {
+                policy.denied_paths.push("/tmp/secret".into());
+            } else {
+                policy.readonly_paths.push("/tmp/secret".into());
+            }
+            let mut mounts = super::super::bwrap_command::policy_mounts(&policy);
+            resolver.mount_args(&mut mounts, &HashSet::new()).unwrap();
+            assert_eq!(
+                Path::new(&mounts[0].destination),
+                Path::new("/tmp"),
+                "translated parent must be mounted first"
+            );
+            assert_eq!(mounts[1].destination, "/tmp/secret");
+            assert_eq!(
+                mounts[1].intent, intent,
+                "child restriction must remain authoritative"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_resolution_respects_masks_and_restored_ancestor_grants() {
         let resolver = ResolverFile {
             snapshot: None,
             destination: "/var/lib/resolvconf/resolv.conf".into(),
@@ -537,12 +598,14 @@ mod tests {
             }
             let original = super::super::bwrap_command::policy_mounts(&policy);
             let mut translated = original.clone();
-            resolver.translate_policy_mounts(&mut translated).unwrap();
+            resolver.resolve_policy_mounts(&mut translated).unwrap();
             assert!(
-                original.iter().zip(&translated).all(|(before, after)| {
-                    before.source == after.source && before.intent == after.intent
+                original.iter().all(|before| {
+                    translated
+                        .iter()
+                        .any(|after| before.source == after.source && before.intent == after.intent)
                 }),
-                "translation must preserve policy order, sources, and access modes"
+                "resolving mount order must preserve sources and access modes"
             );
             assert_eq!(
                 translated

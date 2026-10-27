@@ -15,7 +15,7 @@ use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::mxc_common::filesystem_resolve::resolve_mount_order;
+use crate::mxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
 use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
@@ -27,7 +27,7 @@ use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
 use nix::unistd::{access, dup2, pipe2, AccessFlags, Pid};
 use tempfile::TempDir;
 
-use crate::bwrap_common::bwrap_command::{path_is_denied, COMMAND_TAIL};
+use crate::bwrap_common::bwrap_command::{path_is_denied, PolicyMount, COMMAND_TAIL};
 use crate::bwrap_common::network_rules::{
     payload_file_name, render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
 };
@@ -1449,22 +1449,18 @@ pub(crate) struct ResolverPin {
 }
 
 impl ResolverPin {
-    /// The pin this host needs, or `None` when its resolvers already work
-    /// inside a private namespace.
-    pub(crate) fn for_host(policy: &ContainerPolicy, logger: &mut Logger) -> Option<Self> {
-        Self::from_resolver(Path::new(SANDBOX_RESOLV_CONF_PATH), policy, logger)
+    pub(crate) fn for_host(
+        policy: &ContainerPolicy,
+        mounts: &[PolicyMount],
+        logger: &mut Logger,
+    ) -> Option<Self> {
+        Self::from_resolver(Path::new(SANDBOX_RESOLV_CONF_PATH), policy, mounts, logger)
     }
 
-    /// The pin a sandbox reading `resolver_path` needs.
-    ///
-    /// Returning `None` leaves the sandbox exactly as it is today, so every
-    /// case this cannot read confidently declines rather than guessing.
-    ///
-    /// Takes the path rather than reading the host's so the decision can be
-    /// exercised against a fixture.
     pub(crate) fn from_resolver(
         resolver_path: &Path,
         policy: &ContainerPolicy,
+        mounts: &[PolicyMount],
         logger: &mut Logger,
     ) -> Option<Self> {
         let shown = resolver_path.display();
@@ -1509,7 +1505,13 @@ impl ResolverPin {
                 return None;
             }
         };
-        if resolver_target_is_denied(policy, &destination) {
+        let sandbox_destination = sandbox_mount_path(&destination_text);
+        let covering_mount = mounts
+            .iter()
+            .rfind(|mount| Path::new(&sandbox_destination).starts_with(&mount.destination));
+        if resolver_target_is_denied(policy, &destination)
+            || covering_mount.is_some_and(|mount| mount.intent == FsIntent::Denied)
+        {
             logger.warning_line(&format!(
                 "WARNING: Bubblewrap: the host resolves through a loopback nameserver, but the \
                  filesystem policy denies {destination_text}, so the sandbox keeps the host's \
@@ -1519,10 +1521,11 @@ impl ResolverPin {
             return None;
         }
 
-        // Naming the resolver itself is the caller supplying their own, which
-        // the pin would otherwise mount over.
         if policy_names_path(policy, &resolver_path.to_string_lossy())
             || policy_names_path(policy, &destination_text)
+            || covering_mount.is_some_and(|mount| {
+                Path::new(&mount.destination) == Path::new(&sandbox_destination)
+            })
         {
             logger.warning_line(&format!(
                 "WARNING: Bubblewrap: the filesystem policy mounts its own resolver, so the \
@@ -3088,8 +3091,9 @@ mod tests {
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
 
-        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
-            .expect("a loopback stub is pinned");
+        let pin =
+            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
+                .expect("a loopback stub is pinned");
 
         assert_eq!(pin.destination, resolver);
         assert!(pin.contents.contains("nameserver 10.0.2.3"));
@@ -3104,10 +3108,13 @@ mod tests {
         let resolver = host_with_resolver(&dir, "nameserver 8.8.8.8\n");
         let mut logger = buffer_logger();
 
-        assert!(
-            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
-                .is_none()
-        );
+        assert!(ResolverPin::from_resolver(
+            &resolver,
+            &ContainerPolicy::default(),
+            &[],
+            &mut logger
+        )
+        .is_none());
         assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
     }
 
@@ -3120,7 +3127,8 @@ mod tests {
         let mut logger = buffer_logger();
 
         assert!(
-            ResolverPin::from_resolver(&absent, &ContainerPolicy::default(), &mut logger).is_none()
+            ResolverPin::from_resolver(&absent, &ContainerPolicy::default(), &[], &mut logger)
+                .is_none()
         );
         assert!(logger.warnings().is_empty(), "{:?}", logger.warnings());
     }
@@ -3137,9 +3145,50 @@ mod tests {
         };
         let mut logger = buffer_logger();
 
-        assert!(ResolverPin::from_resolver(&resolver, &policy, &mut logger).is_none());
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], &mut logger).is_none());
         let out = logger.warnings().join("\n");
         assert!(out.contains("deniedPaths"), "must name the remedy: {out}");
+    }
+
+    #[test]
+    fn resolver_pins_respect_translated_file_grants_and_masks() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
+        let file = resolver.to_string_lossy().into_owned();
+        let parent = resolver.parent().unwrap().to_string_lossy().into_owned();
+        for (intent, destination, pinned, warning) in [
+            (
+                FsIntent::ReadWrite,
+                file.clone(),
+                false,
+                "mounts its own resolver",
+            ),
+            (FsIntent::ReadOnly, file, false, "mounts its own resolver"),
+            (
+                FsIntent::Denied,
+                parent.clone(),
+                false,
+                "filesystem policy denies",
+            ),
+            (FsIntent::ReadOnly, parent, true, ""),
+        ] {
+            let mounts = vec![PolicyMount {
+                source: "/run/resolvconf/resolv.conf".into(),
+                destination,
+                intent,
+            }];
+            let mut logger = buffer_logger();
+            let pin = ResolverPin::from_resolver(
+                &resolver,
+                &ContainerPolicy::default(),
+                &mounts,
+                &mut logger,
+            );
+            assert_eq!(pin.is_some(), pinned, "{mounts:?}");
+            if !pinned {
+                assert!(logger.warnings().join("\n").contains(warning));
+            }
+        }
     }
 
     #[test]
@@ -3152,7 +3201,7 @@ mod tests {
         };
         let mut logger = buffer_logger();
 
-        assert!(ResolverPin::from_resolver(&resolver, &policy, &mut logger).is_none());
+        assert!(ResolverPin::from_resolver(&resolver, &policy, &[], &mut logger).is_none());
         let out = logger.warnings().join("\n");
         assert!(
             out.contains("loopback"),
@@ -3188,7 +3237,7 @@ mod tests {
             ] {
                 let mut logger = buffer_logger();
                 assert!(
-                    ResolverPin::from_resolver(&link, &policy, &mut logger).is_none(),
+                    ResolverPin::from_resolver(&link, &policy, &[], &mut logger).is_none(),
                     "a grant on {} is the caller claiming the resolver",
                     grant.display()
                 );
@@ -3209,7 +3258,8 @@ mod tests {
         let mut logger = buffer_logger();
 
         assert!(
-            ResolverPin::from_resolver(&first, &ContainerPolicy::default(), &mut logger).is_none()
+            ResolverPin::from_resolver(&first, &ContainerPolicy::default(), &[], &mut logger)
+                .is_none()
         );
         let out = logger.warnings().join("\n");
         assert!(out.contains("could not be read"), "got: {out}");
@@ -3235,7 +3285,7 @@ mod tests {
         let mut logger = buffer_logger();
 
         assert!(
-            ResolverPin::from_resolver(&root.join("link/stub.conf"), &policy, &mut logger)
+            ResolverPin::from_resolver(&root.join("link/stub.conf"), &policy, &[], &mut logger)
                 .is_none(),
             "a denial of the canonical directory must stop the pin reached by an alias"
         );
@@ -3251,8 +3301,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
-        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
-            .expect("a loopback stub is pinned");
+        let pin =
+            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
+                .expect("a loopback stub is pinned");
 
         let staged = stage_resolver(
             Some(&pin),
@@ -3280,8 +3331,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let resolver = host_with_resolver(&dir, SYSTEMD_RESOLVED_STUB);
         let mut logger = buffer_logger();
-        let pin = ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &mut logger)
-            .expect("a loopback stub is pinned");
+        let pin =
+            ResolverPin::from_resolver(&resolver, &ContainerPolicy::default(), &[], &mut logger)
+                .expect("a loopback stub is pinned");
 
         let staging = tempfile::tempdir().unwrap();
         let (source, destination) = stage_resolver(Some(&pin), staging.path(), &mut logger)

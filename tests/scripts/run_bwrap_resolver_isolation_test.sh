@@ -182,20 +182,27 @@ for mode in ("deny", "allow", "filtered", "proxy", "pinned", "denied-directory",
              "denied-file", "denied-with-scratch", "readonly-file", "ungranted-target",
              "custom-resolver", "readwrite-file", "denied-ancestor", "ancestor-with-grant",
              "invalid-resolver", "staging-swap", "sibling-denial", "sibling-grants",
-             "alias-readonly", "alias-readwrite", "alias-siblings"):
+             "alias-readonly", "alias-readwrite", "alias-siblings",
+             "alias-loopback-readonly", "alias-loopback-readwrite", "alias-loopback-leaf-readonly",
+             "translated-denied-child", "translated-readonly-child"):
     denied = mode.startswith("denied-") or mode in ("ungranted-target", "invalid-resolver")
-    nameserver = "10.0.2.3" if mode == "pinned" else "192.0.2.53"
+    loopback_grant = mode.startswith("alias-loopback-")
+    nameserver = "127.0.0.53" if loopback_grant else "10.0.2.3" if mode == "pinned" else "192.0.2.53"
+    writable = mode in ("readwrite-file", "alias-readwrite", "alias-loopback-readwrite") \
+        or mode.startswith("translated-")
     workload = (
         script.replace("DENIED", str(denied)).replace("NAMESERVER", nameserver)
               .replace("SCRATCH", repr(str(work / "scratch")))
-              .replace("WRITABLE", str(mode in ("readwrite-file", "alias-readwrite")))
+              .replace("WRITABLE", str(writable))
               .replace("MASK_SOCKET", str(mode == "sibling-denial"))
     )
     config = {
         "version": "0.9.0-alpha",
         "containerId": "Resolver-Isolation-" + mode,
         "containment": "bubblewrap",
-        "network": {"egress": {"default": "allow" if mode in ("allow", "pinned") else "deny"}},
+        "network": {"egress": {
+            "default": "allow" if mode in ("allow", "pinned") or loopback_grant else "deny"
+        }},
     }
     if mode == "filtered":
         config["network"]["egress"]["allow"] = [{"to": [{"cidr": "192.0.2.0/24"}]}]
@@ -230,9 +237,11 @@ for mode in ("deny", "allow", "filtered", "proxy", "pinned", "denied-directory",
             "/run/systemd/resolve/blocked/subtree",
         ]}
         extra = "assert not pathlib.Path('/run/systemd/resolve/blocked/subtree/secret').exists()"
-    if mode in ("alias-readonly", "alias-readwrite"):
-        key = "readonlyPaths" if mode == "alias-readonly" else "readwritePaths"
-        config["filesystem"] = {key: ["/run/resolvconf/resolv.conf"]}
+    if mode in ("alias-readonly", "alias-readwrite") or loopback_grant:
+        key = "readonlyPaths" if mode.endswith("readonly") else "readwritePaths"
+        path = "/run/systemd/resolve/alias.conf" if mode == "alias-loopback-leaf-readonly" \
+            else "/run/resolvconf/resolv.conf"
+        config["filesystem"] = {key: [path]}
     if mode in ("sibling-grants", "alias-siblings"):
         root = "/run/resolvconf" if mode == "alias-siblings" else "/run/systemd/resolve"
         config["filesystem"] = {
@@ -253,6 +262,37 @@ else:
 for path in (root / 'writable-sibling.conf', root / 'writable-child' / 'new-file'):
     path.write_text('UPDATED')
     assert path.read_text() == 'UPDATED'
+"""
+    if mode.startswith("translated-"):
+        root = "/var/lib/resolvconf/policy-root"
+        key = "deniedPaths" if mode == "translated-denied-child" else "readonlyPaths"
+        config["filesystem"] = {
+            "readwritePaths": ["/run/resolvconf/nested/deeper/alias/root"],
+            key: [root + "/secret"],
+        }
+        extra = f"""
+root = pathlib.Path({root!r})
+control = root / 'control'
+control.write_text('UPDATED')
+assert control.read_text() == 'UPDATED'
+secret = root / 'secret'
+if {mode == 'translated-denied-child'}:
+    try:
+        contents = secret.read_bytes()
+    except (FileNotFoundError, PermissionError):
+        pass
+    else:
+        if contents:
+            raise SystemExit('FAIL: translated parent exposed a denied child')
+else:
+    assert secret.read_text() == 'PROTECTED\\n'
+    try:
+        secret.write_text('NOT_ALLOWED')
+    except OSError as error:
+        if error.errno not in (errno.EROFS, errno.EACCES):
+            raise
+    else:
+        raise SystemExit('FAIL: translated parent made a readonly child writable')
 """
     config["process"] = {
         "commandLine": "python3 -c " + shlex.quote(workload.replace("EXTRA_CHECKS", extra))
@@ -331,6 +371,9 @@ for target in ../run/NetworkManager/resolv.conf /var/run/resolvconf/resolv.conf 
     run_case deny
     printf 'nameserver 127.0.0.53\nsearch mxc-test.invalid\n' >"$(readlink -f /etc/resolv.conf)"
     run_case pinned
+    if [ "$target" = /run/systemd/resolve/alias.conf ]; then
+        run_case alias-loopback-leaf-readonly
+    fi
     printf 'nameserver 192.0.2.53\nsearch mxc-test.invalid\n' >"$(readlink -f /etc/resolv.conf)"
 done
 
@@ -357,8 +400,20 @@ ln -s /var/lib/resolvconf /run/resolvconf
 run_case alias-readonly
 run_case alias-readwrite
 run_case alias-siblings
+printf 'nameserver 127.0.0.53\nsearch mxc-test.invalid\n' >/var/lib/resolvconf/resolv.conf
+run_case alias-loopback-readonly
+run_case alias-loopback-readwrite
+printf 'nameserver 192.0.2.53\nsearch mxc-test.invalid\n' >/var/lib/resolvconf/resolv.conf
 run_case denied-ancestor
 run_case ancestor-with-grant
+
+mkdir -p /var/lib/resolvconf/policy-root /var/lib/resolvconf/nested/deeper/alias
+ln -s /var/lib/resolvconf/policy-root /var/lib/resolvconf/nested/deeper/alias/root
+printf 'nameserver 192.0.2.53\nsearch mxc-test.invalid\n' >/var/lib/resolvconf/policy-root/resolv.conf
+printf 'PROTECTED\n' >/var/lib/resolvconf/policy-root/secret
+ln -sfn /run/resolvconf/nested/deeper/alias/root/resolv.conf /etc/resolv.conf
+run_case translated-denied-child
+run_case translated-readonly-child
 
 ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 PATH="$WORK_DIR/bin:$PATH" run_case staging-swap
