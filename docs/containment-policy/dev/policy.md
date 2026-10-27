@@ -42,7 +42,7 @@ sandbox.
 | `filesystem`, `network`, `ui` | Cross-cutting policy sections (below). An omitted section is not proof that every backend enforces a restriction. |
 | `runtimeConfig` | Runtime settings, including a caller-managed network proxy. |
 | `lifecycle` | Optional `destroyOnExit` (default `true`) and `preservePolicy` (default `false`) booleans. |
-| `fallback` | Optional `allowDaclMutation` boolean (default `true`); `false` refuses the Windows host-DACL fallback. |
+| `fallback` | Optional `allowDaclMutation` boolean accepted for 1.x compatibility and ignored. Removing this accepted field requires a new major contract. |
 | `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent and a permitting administrative policy. |
 | `processContainer`, `lxc`, `seatbelt`, `wslc`, `windowsSandbox`, `hyperlight` | Backend-specific settings; only the section matching the selected backend is accepted. |
 | `test` | Optional development-only placeholder with an optional string `message`; it has no policy enforcement effect. |
@@ -51,8 +51,8 @@ sandbox.
 
 | Field | Type and meaning |
 |---|---|
-| `process.commandLine` | Required non-empty string; command to run (guest source code for Hyperlight/MicroVM). |
-| `process.cwd` | Optional string; explicit working directory. An unusable path fails rather than falling back. If omitted, each backend chooses its own usable default, not necessarily the caller's directory. Hyperlight and MicroVM reject an explicit working directory. |
+| `process.commandLine` | Required non-empty string; command to run (guest source code for Hyperlight, a guest shell command for NVX MicroVM). |
+| `process.cwd` | Optional string; explicit working directory. An unusable path fails rather than falling back. If omitted, each backend chooses its own usable default, not necessarily the caller's directory. Hyperlight rejects an explicit working directory; MicroVM uses a guest path, as described in the [NVX guide](../../backends/nvx/nvx.md#working-directory-and-environment). |
 | `process.timeout` | Optional integer milliseconds, `0` to `4294967295`; `0` means no timeout. |
 | `process.env` | Optional array of `KEY=VALUE` strings. Omitted uses the backend default; supplied entries replace it unless `inheritDefaultEnv` is `true`. |
 | `process.inheritDefaultEnv` | Optional boolean (default `false`); layers supplied `env` entries over the backend default, with caller entries winning. |
@@ -64,8 +64,10 @@ With `env: []` and `inheritDefaultEnv: false`, the request asks for an empty
 environment. Windows ProcessContainer refuses a supplied environment missing
 `SYSTEMROOT` or `LOCALAPPDATA`; IsolationSession cannot replace its user's
 default environment and requires `inheritDefaultEnv: true` for supplied `env`.
-MicroVM rejects `deniedPaths`; Hyperlight checks denied paths against its
-mounted grants. Path strings use the selected host/backend's conventions.
+Hyperlight checks denied paths against its mounted grants. See the
+[NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy)
+for MicroVM filesystem and environment support. Path strings use the selected
+host/backend's conventions.
 
 ### Network and UI
 
@@ -137,7 +139,7 @@ experimental authorization and suitable host/build support.
 |---|---|
 | `processContainer` | `leastPrivilege` (boolean), `capabilities` (array of single capability names, no commas), `learningMode` (boolean), `captureDenials` (`mode`: `block` or `allow`, default `block`; optional `outputPath` and `retainEtl`), `filesystem.enumeratePaths` (array of paths), `network.allowedProxyPeer` (proxy peer identity), and `ui` (below). `enumeratePaths` needs host support and cannot combine with `leastPrivilege`. `captureDenials.mode: "allow"` permits and records otherwise denied access. |
 | `processContainer.ui` | Optional `isolation` (`container`, `desktop`, `handles`, `atoms`), `desktopSystemControl` and `ime` booleans, and `systemSettings` (`none`, `parameters`, `display`, `all`). |
-| `lxc` | `distribution` and `release` strings, both required if this section is present. LXC rejects `runtimeConfig.networkProxy`. |
+| `lxc` | `distribution` and `release` strings, both required if this section is present. |
 | `seatbelt` | Optional `profileOverride` (raw profile), `guiAccess`, `nestedPty`, `keychainAccess` (booleans), and `extraMachLookups` (string array). |
 | `wslc` | Optional `image`, `imageTarPath`, `storagePath`, `targetOs` (strings), `cpuCount` and `memoryMb` (non-negative integers), `gpu` (boolean), and `portMappings` (array of `windowsPort` / `containerPort`, 1-65535, optional `protocol`: TCP only). These are create-and-run settings. |
 | `windowsSandbox` | Optional `idleTimeoutMs` (non-negative integer milliseconds), legacy `idleTimeout` (non-negative integer), and `daemonPipeName` (string). Compatibility fields, not live controls of the current execution path. |
@@ -153,10 +155,10 @@ WSLc networking supports only all-deny isolated or all-allow bridged
 rejects mixed postures and per-destination rules. IsolationSession cannot
 restrict networking: its request must explicitly set **all three** actions to
 `"allow"` and cannot carry rules or a proxy. An empty or absent `network`
-section is rejected for IsolationSession. MicroVM permits all-deny isolated
-or explicitly all-allow unrestricted host networking; mixed postures and
-per-destination rules are rejected. Hyperlight rejects a supplied `network`
-section. Windows Sandbox create-and-run execution blocks networking when
+section is rejected for IsolationSession. MicroVM networking support is
+described in the [NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy).
+Hyperlight rejects a supplied `network` section. Windows Sandbox
+create-and-run execution blocks networking when
 `network` is omitted; it rejects supplied `network.egress` or
 `network.ingress` sections (even empty or deny-only), host filters, and
 proxies. Backend support is not implied by a field appearing in this

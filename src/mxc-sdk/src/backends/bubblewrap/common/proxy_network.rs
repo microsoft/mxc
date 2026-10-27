@@ -1675,10 +1675,14 @@ fn is_nameserver_line(line: &str) -> bool {
 fn resolver_target_of(start: &Path) -> Result<PathBuf, String> {
     let resolved = resolve_through_symlinks(start)
         .ok_or_else(|| format!("{} is not a resolvable path", start.display()))?;
+    if let Some(error) = resolved.error {
+        return Err(format!(
+            "{} could not be resolved ({error})",
+            start.display()
+        ));
+    }
+    let resolved = resolved.path;
 
-    // A chain that loops or dangles leaves canonicalization unfinished, so the
-    // walk hands back path text that is still a link. Binding there aborts the
-    // sandbox, which is worse than the broken DNS being fixed.
     let metadata = fs::symlink_metadata(&resolved)
         .map_err(|error| format!("{} could not be read ({error})", resolved.display()))?;
     if !metadata.file_type().is_file() {
@@ -2327,7 +2331,7 @@ fn wait_for_file(
 /// receives it in argv (`--info-fd N`) and parses it as an integer. A child
 /// that must *redirect* to the descriptor from a shell needs
 /// [`remap_descriptors`] instead.
-fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
+pub(crate) fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
     // SAFETY: `pre_exec` runs between fork and exec, where only
     // async-signal-safe work is permitted. `fcntl` is async-signal-safe and
     // this closure allocates nothing -- `fds` is captured by move and holds
@@ -3483,8 +3487,7 @@ mod tests {
         assert!(resolver_target_of(&dangling).is_err());
     }
 
-    /// A link loop leaves canonicalization unfinished, so the walk hands back a
-    /// path that is still a link; binding there would abort the sandbox.
+    /// Reject a link loop before attempting to mount the resolver file.
     #[test]
     fn the_resolver_target_gives_up_on_a_link_loop() {
         let dir = tempfile::tempdir().unwrap();
@@ -3495,7 +3498,7 @@ mod tests {
         std::os::unix::fs::symlink(&first, &second).unwrap();
 
         let error = resolver_target_of(&first).expect_err("a loop has no target");
-        assert!(error.contains("regular file"), "got: {error}");
+        assert!(error.contains("could not be resolved"), "got: {error}");
     }
 
     /// A directory would be mounted over as if it were the resolver file.

@@ -4,6 +4,16 @@
 
 Below is our guidance for how to report issues, propose new features, and submit contributions via Pull Requests (PRs).
 
+Ideas, questions, bug reports, and code contributions are all welcome. You
+do not need a finished design to join the discussion. Sharing your use case
+helps us understand what matters to you and find a useful path forward together.
+
+**Proposing a feature?** Start with
+[planning it together](#plan-features-together).
+
+**Maintaining the project?** See [MAINTAINERS.md](MAINTAINERS.md) for feature
+discussion, review, and follow-through responsibilities.
+
 ## Open Development Workflow
 
 The MXC team carries out development in the open. When the team finds issues we file them in this repository. When we propose new ideas or think up new features, we file new feature requests. When we work on fixes or features, we create branches and work on those improvements. And when PRs are reviewed, we review them in public.
@@ -12,9 +22,26 @@ The point of doing all this work in public is to ensure that we are holding ours
 
 ### Issue Triage
 
-The team triages new issues regularly. During triage, the team uses labels to categorize, manage, and drive the project workflow. Issues are categorized into one of four types — **Bug**, **Feature**, **Documentation**, or **Task** — and all new issues receive the `Needs-Triage` label until a team member has reviewed them.
+The team triages new issues daily through a shared developer and PM rotation.
+During triage, the team uses labels to categorize, manage, and drive the project
+workflow. Issues are categorized into one of four types — **Bug**, **Feature**,
+**Documentation**, or **Task** — and all new issues receive the `Needs-Triage`
+label until an area label is applied and a response records the next step.
+Remove `Needs-Triage` then, including when the response asks for more information;
+use `Needs-Author-Feedback` while awaiting the author's reply.
+Assignment is separate: work is assigned when its scope is clear and someone
+is ready to take it.
 
-If you file issues or create PRs, please keep an eye on your GitHub notifications. Issues and PRs that remain unanswered for several days after a request for information may be closed.
+See [How MXC is managed](./docs/repository-management.md) for area ownership,
+release milestones, community prioritization, and SDK versioning.
+
+Maintainers record feature decisions and requests for more information in
+the GitHub issue.
+
+Please keep an eye on GitHub notifications so we can work through questions
+together. If you need more time, let us know. When a discussion becomes inactive,
+maintainers may close it with an explanation; you are welcome to return with
+more information.
 
 ### Maintainer issue investigation
 
@@ -47,11 +74,11 @@ Do not use `/investigate` for a security report. Follow
 
 ---
 
-## Before you start, file an issue
+## Start a conversation
 
-Please follow this simple rule to help us eliminate any unnecessary wasted effort and ensure an efficient use of everyone's time:
-
-> 👉 If you have a question, think you've discovered an issue, would like to propose a new feature, etc., then find or file an issue **BEFORE** starting work to fix or implement it.
+An issue is a place to ask questions, share a problem, or explore an idea with
+the team. Before investing in an implementation, find or open an issue so we
+can connect related work, discuss the approach, and help you focus your effort.
 
 ### Search existing issues first
 
@@ -79,23 +106,39 @@ We provide four issue templates under [`.github/ISSUE_TEMPLATE/`](./.github/ISSU
 * Prefer pasted text (command output, error messages, JSON snippets) over screenshots.
 * **If you intend to implement the fix or feature yourself, say so in the issue!** Otherwise we may pick it up or label it `Help-Wanted`.
 
-### Do not post "+1" comments
+### Show support for an issue
 
-> ⚠️ Do not post "+1", "me too", or similar comments — they add noise to an issue.
-
-If you're affected by an issue but don't have new information to add, upvote the original issue by hitting its 👍 reaction. That way we can measure impact.
+If you're affected by an issue, use the original issue's 👍 reaction to help us
+understand its impact. Comments with additional use cases or reproduction
+details are welcome; reactions work well when you have no new information to add.
 
 ---
 
 ## Contributing fixes and features
 
-For those willing to help fix issues or implement features:
+Thank you for considering a contribution. Early discussion helps contributors
+and maintainers build a shared understanding before committing to larger work.
 
-### To spec or not to spec
+### Plan features together
 
-Some issues are quick and simple to describe. Once a team member has agreed with your approach, skip ahead to "Fork, Clone, Branch, and Create your PR" below.
+Follow the [feature authoring guide](./docs/development/guides/authoring-a-new-feature.md):
 
-Some changes require careful thought and a written design before implementation. For these, we'll request a short design document — typically a markdown file under `docs/` or a detailed comment on the issue describing the proposed configuration schema changes, runner behavior, or SDK API surface. Driving towards agreement in writing, before any code is written, often results in simpler code and less wasted effort.
+1. Share the problem and desired outcome in an issue. If you would like to
+   contribute, say so. Work with maintainers on scope; they record the shared
+   plan with `feature-accepted`.
+2. For changes needing a design/API spec, develop and review it together in a
+   documentation PR. Approval and merge come before implementation, including
+   draft implementation PRs, so contributors can build on an agreed design.
+3. Implement the agreed design with functional tests and documentation. Use
+   the issue to coordinate progress until the agreed work is complete.
+
+Maintainers will help clarify the next step, explain tradeoffs and decisions,
+and work through review feedback with you. Not every proposal can be included,
+but each deserves a thoughtful response.
+
+The guide defines [when a spec is required](./docs/development/guides/authoring-a-new-feature.md#when-a-spec-is-required),
+templates and file layout, approval labels, and the schema, backend, and SDK
+implementation stages. It applies to human and agent-authored contributions.
 
 ### Documentation audiences
 
@@ -114,14 +157,10 @@ they describe.
 
 ### Experimental features
 
-New, in-development features use their permanent JSON locations in the mutable
-development contract. They may still require the binary's `--experimental`
-runtime authorization until graduation; that gate is independent of JSON
-placement. If you're adding a new feature, follow the step-by-step checklist in
-[`docs/development/guides/authoring-a-new-feature.md`](./docs/development/guides/authoring-a-new-feature.md), which
-walks through the schema, Rust, and test-config changes required. The schema
-versioning model and promotion path from experimental to stable are described
-in [`docs/development/architecture/versioning.md`](./docs/development/architecture/versioning.md).
+Follow the [feature guide](./docs/development/guides/authoring-a-new-feature.md)
+for implementation order and the
+[versioning design](./docs/development/architecture/versioning.md) for development
+contracts, publication, and experimental authorization.
 
 ### Help Wanted
 
@@ -137,7 +176,9 @@ This project requires contributors to sign the [Microsoft Contributor License Ag
 
 ### Fork, Clone, Branch, and Create your PR
 
-Once you've discussed your proposed change with a team member and agreed on an approach:
+Start with the approach discussed in your issue. For features, the
+[feature guide](./docs/development/guides/authoring-a-new-feature.md) explains
+how to agree on scope and complete any design review before implementation.
 
 1. Fork the repository if you haven't already.
 2. Clone your fork locally.
@@ -211,7 +252,6 @@ and `npm audit fix` may change one of these lockfiles:
 - `sdk/node/package-lock.json`
 - `sdk/node/tests/integration/package-lock.json`
 - `scripts/versioning/package-lock.json`
-- `tests/playground/package-lock.json`
 
 Microsoft developers resolve npm packages through an internal 1ES feed. That
 feed can write internal `ms-feed-*` tarball URLs and SHA-1 integrity values into
@@ -298,6 +338,20 @@ Reviewers will look for:
 * Code style consistent with the rest of the repo.
 
 It may take several review cycles. The result should be solid, testable, conformant code that is safe to merge.
+
+### Preserve PR review history
+
+Once a PR is open, including a draft, its commit history helps reviewers track
+what changed between reviews. This applies to feature design specs, API
+proposals, and implementation PRs.
+
+- Push focused follow-up commits for review feedback.
+- Rebasing, squashing, amending published commits, and force-pushing are highly
+  discouraged unless a maintainer explicitly requests them.
+- If conflicts with `main` arise, merge `main` into the PR branch and resolve
+  them in the merge commit instead of rebasing.
+
+Clean up commit history before opening the PR, not during review.
 
 ### Merge
 

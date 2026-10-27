@@ -132,6 +132,25 @@ jobs:
             exit 1
           fi
 
+      - name: Test Bubblewrap seccomp and argument-builder modules
+        working-directory: src
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$(mktemp)"
+          for module in seccomp_filter bwrap_command; do
+            cargo test --locked --release --target "${{ matrix.target }}" \
+              -p mxc-sdk --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              exit "$status"
+            fi
+            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+              echo "::error::Bubblewrap $module module filter ran no tests."
+              exit 1
+            fi
+          done
+
       # The job defaults working-directory to src/tools/lxc, so the `Test lxc`
       # step above covers only the lxc package. This streaming suite must follow
       # the install. Strict mode makes a failed availability probe fail this
@@ -204,8 +223,12 @@ jobs:
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
+      # Strict mode fails a test whose Bubblewrap or python3 prerequisite is
+      # missing instead of letting it pass without running.
       - name: Test Bubblewrap executor characterization
         working-directory: src
+        env:
+          MXC_BWRAP_TESTS_REQUIRE_EXECUTION: "1"
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test wxc_e2e_tests_e2e_bubblewrap_characterization
 
@@ -214,21 +237,6 @@ jobs:
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test wxc_e2e_tests_e2e_linux_microvm
              
-      # PLM (Permissive Learning Mode) is functionally Windows-only, but the
-      # crate builds cross-platform: the lib's helper modules compile on every
-      # target, and the binary has a no-op stub `fn main()` for non-Windows so
-      # the crate lives in the workspace `default-members` list. This gate
-      # keeps the cross-platform/Windows-only split a CI-enforced contract — if
-      # someone adds a `use windows::…` without a `#[cfg]` gate the Linux
-      # build fails fast rather than rotting silently.
-      - name: Build plm (cross-platform stub + lib)
-        working-directory: src
-        run: cargo build --locked --release --target ${{ matrix.target }} -p plm
-
-      - name: Test plm (cross-platform modules)
-        working-directory: src
-        run: cargo test --locked --release --target ${{ matrix.target }} -p plm
-
       # These are separate workspace members, not dependencies of lxc.
       - name: Build Node runtime dependencies
         working-directory: src

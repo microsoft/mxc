@@ -60,9 +60,6 @@ function Invoke-ClipboardCase {
     "filesystem": {
         "readwritePaths": $((ConvertTo-Json -InputObject @($WorkDirectory) -Compress))
     },
-    "fallback": {
-        "allowDaclMutation": false
-    },
     "ui": {
         "disable": false,
         "clipboard": "$Clipboard",

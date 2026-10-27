@@ -401,10 +401,10 @@
     },
     "Fallback": {
       "additionalProperties": false,
-      "description": "Operator consent for containment fallback behavior.",
+      "description": "Fallback settings accepted for 1.x compatibility and ignored.",
       "properties": {
         "allowDaclMutation": {
-          "description": "Whether the runtime may mutate host filesystem DACLs as a fallback.",
+          "description": "Accepted for compatibility and ignored.",
           "type": "boolean"
         }
       },
@@ -926,7 +926,7 @@
         },
         "fallback": {
           "$ref": "#/definitions/Fallback",
-          "description": "Optional fallback consent."
+          "description": "Legacy settings accepted for 1.x compatibility and ignored."
         },
         "filesystem": {
           "$ref": "#/definitions/Filesystem",

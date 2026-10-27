@@ -159,9 +159,10 @@ function isWindowsSandboxAvailable(): boolean {
  * populate `bubblewrapNetwork`. macOS currently does not expose native probe
  * data. `uiCapabilities` is omitted outside Windows.
  *
- * **Synchronous, and cached for the module's lifetime.** The first call blocks
+ * **Synchronous; successful discovery is cached for the module's lifetime.** The first call blocks
  * on the native probes above, which on Linux spawn subprocesses and can take
- * seconds on a slow host; later calls return that same first answer.
+ * seconds on a slow host; later calls reuse a successfully read answer.
+ * Failed Windows probes are reported in `unavailableReasons` and retried.
  *
  * `bubblewrapNetwork` is the one field whose subject can change under a
  * running process, so a cached `proxyEnforcement: 'supported'` can go stale.
@@ -174,9 +175,15 @@ export function getPlatformSupport(): PlatformSupport {
   if (cachedSupport !== null) {
     return cachedSupport;
   }
-  const support = computeSupport();
-  cachedSupport = support;
+  const { support, transientFailure } = computeSupport();
+  if (!transientFailure) cachedSupport = support;
   return support;
+}
+
+/** @internal Probe the selected CLI executor without changing global discovery cache. */
+export function getPlatformSupportForExecutable(executablePath?: string): PlatformSupport {
+  if (!executablePath || os.platform() !== 'win32') return getPlatformSupport();
+  return computeSupport(() => probeRunner(executablePath)).support;
 }
 
 let cachedSupport: PlatformSupport | null = null;
@@ -190,7 +197,7 @@ export function _resetPlatformSupportCache(): void {
  * Probe runner injection seam. Spawns `wxc-exec --probe` and returns
  * its stdout. Replaceable in unit tests via {@link _setProbeRunner}.
  */
-type ProbeRunner = () => string;
+type ProbeRunner = (executablePath?: string) => string;
 
 let probeRunner: ProbeRunner = defaultProbeRunner;
 
@@ -199,8 +206,8 @@ export function _setProbeRunner(runner: ProbeRunner | null): void {
   probeRunner = runner ?? defaultProbeRunner;
 }
 
-function defaultProbeRunner(): string {
-  const wxcPath = findWxcExecutable();
+function defaultProbeRunner(executablePath?: string): string {
+  const wxcPath = executablePath ?? findWxcExecutable();
   if (!wxcPath) {
     throw new Error('wxc-exec not found');
   }
@@ -212,7 +219,9 @@ function defaultProbeRunner(): string {
 }
 
 function isValidTier(s: unknown): s is IsolationTier {
-  return s === 'base-container' || s === 'appcontainer-bfs' || s === 'appcontainer-dacl';
+  return s === 'base-container'
+    || s === 'appcontainer-bfs'
+    || s === 'appcontainer-dacl';
 }
 
 const UI_CAPABILITY_FIELDS: readonly (keyof UiCapabilitySupport)[] = [
@@ -240,40 +249,44 @@ function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
  * Run the probe binary and merge its results into `support`: the isolation
  * tier, any warnings, portable UI capabilities, and the `isolation_session`
  * and `hyperlight` methods when the probe reports them available. On any
- * failure (binary missing, timeout, malformed JSON), the function
- * silently leaves those fields unset, so callers see the same contract as
- * pre-probe SDKs.
+ * failure, return the diagnostic so callers can report it without caching
+ * the transient failure as a permanent lack of host support.
  */
-function populateIsolationFromProbe(support: PlatformSupport): void {
+function populateIsolationFromProbe(support: PlatformSupport, runner: ProbeRunner): string | undefined {
   try {
-    const stdout = probeRunner();
-    const probe = JSON.parse(stdout);
-    if (probe && typeof probe === 'object') {
-      if (isValidTier(probe.tier)) {
-        support.isolationTier = probe.tier;
-      }
-      if (Array.isArray(probe.warnings) && probe.warnings.length > 0) {
-        const warnings = probe.warnings.filter((w: unknown): w is string => typeof w === 'string');
-        if (warnings.length > 0) {
-          support.isolationWarnings = warnings;
-        }
-      }
-      const facts = probe.probes;
-      if (facts && typeof facts === 'object') {
-        if (isUiCapabilitySupport(facts.uiCapabilities)) {
-          support.uiCapabilities = facts.uiCapabilities;
-        }
-        if (facts.isolationSessionAvailable === true) {
-          support.availableMethods.push('isolation_session');
-        }
-        if (facts.hyperlightAvailable === true) {
-          support.availableMethods.push('hyperlight');
-        }
+    const stdout = runner();
+    const value: unknown = JSON.parse(stdout);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Windows capability probe returned a non-object payload');
+    }
+    const probe = value as Record<string, unknown>;
+    const factsValue = probe.probes;
+    if (factsValue !== undefined &&
+        (!factsValue || typeof factsValue !== 'object' || Array.isArray(factsValue))) {
+      throw new Error('Windows capability probe returned malformed facts');
+    }
+    const facts = factsValue as Record<string, unknown> | undefined;
+    for (const name of ['baseContainerApiPresent', 'isolationSessionAvailable', 'hyperlightAvailable']) {
+      if (facts?.[name] !== undefined && typeof facts[name] !== 'boolean') {
+        throw new Error(`Windows capability probe returned invalid ${name}`);
       }
     }
-  } catch {
-    // Graceful degradation: leave isolation fields unset.
+    if (isValidTier(probe.tier)) support.isolationTier = probe.tier;
+    if (Array.isArray(probe.warnings)) {
+      const warnings = probe.warnings.filter((warning: unknown): warning is string => typeof warning === 'string');
+      if (warnings.length > 0) support.isolationWarnings = warnings;
+    }
+    if (facts?.baseContainerApiPresent === true) support.availableMethods.push('processcontainer');
+    if (isUiCapabilitySupport(facts?.uiCapabilities)) support.uiCapabilities = facts.uiCapabilities;
+    if (facts?.isolationSessionAvailable === true) support.availableMethods.push('isolation_session');
+    if (facts?.hyperlightAvailable === true) support.availableMethods.push('hyperlight');
+  } catch (error) {
+    const message = `Windows capability probe failed: ${error instanceof Error ? error.message : String(error)}`;
+    platformDiagnosticLogger(message);
+    support.unavailableReasons = { ...support.unavailableReasons, processcontainer: message };
+    return message;
   }
+  return undefined;
 }
 
 /**
@@ -415,7 +428,7 @@ export function _probeBubblewrapNetwork(): BubblewrapNetworkSupport {
   };
 }
 
-function computeSupport(): PlatformSupport {
+function computeSupport(windowsProbe: ProbeRunner = probeRunner): { support: PlatformSupport; transientFailure: boolean } {
   const platform = os.platform();
   const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
 
@@ -429,7 +442,7 @@ function computeSupport(): PlatformSupport {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       support.reason = `Seatbelt availability could not be read from the native probe: ${message}`;
-      return support;
+      return { support, transientFailure: false };
     }
     if (backends.some((entry) => entry.backend === 'seatbelt')) {
       support.isSupported = true;
@@ -437,7 +450,7 @@ function computeSupport(): PlatformSupport {
     } else {
       support.reason = 'Seatbelt could not be found on this installation of macOS. Your macOS install might be incomplete. (sandbox_init not found)';
     }
-    return support;
+    return { support, transientFailure: false };
   }
 
   if (platform === 'linux') {
@@ -473,21 +486,50 @@ function computeSupport(): PlatformSupport {
       support.isSupported = true;
       support.availableMethods = methods;
     }
-    return support;
+    return { support, transientFailure: false };
   }
 
   if (platform !== 'win32') {
     support.reason = 'MXC is not supported on this platform';
-    return support;
+    return { support, transientFailure: false };
   }
 
-  support.isSupported = true;
-  support.availableMethods = ['processcontainer'];
-  if (isWindowsSandboxAvailable()) {
+  if (windowsSandboxAvailabilityProbe()) {
     support.availableMethods.push('windows_sandbox');
   }
-  populateIsolationFromProbe(support);
-  return support;
+  const probeFailure = populateIsolationFromProbe(support, windowsProbe);
+  const probeFailures = probeFailure === undefined ? [] : [probeFailure];
+  let transientFailure = probeFailure !== undefined;
+  try {
+    if (windowsBackendsReader().some((backend) => backend.backend === 'wslc')) {
+      support.availableMethods.push('wslc');
+    }
+  } catch (error) {
+    transientFailure = true;
+    const message = `WSLC availability probe failed: ${error instanceof Error ? error.message : String(error)}`;
+    probeFailures.push(message);
+    platformDiagnosticLogger(message);
+    support.unavailableReasons = { ...support.unavailableReasons, wslc: message };
+  }
+  support.isSupported = support.availableMethods.length > 0;
+  if (!support.isSupported) {
+    support.reason = probeFailures.length > 0
+      ? probeFailures.join('; ')
+      : 'No supported Windows containment backend is available; ProcessContainer requires PSEC';
+  }
+  return { support, transientFailure };
+}
+
+let windowsBackendsReader: () => AvailableBackend[] = getAvailableBackends;
+let windowsSandboxAvailabilityProbe = isWindowsSandboxAvailable;
+
+/** @internal Test-only: replace independent Windows backend detectors. */
+export function _setWindowsBackendDetectors(
+  reader?: () => AvailableBackend[],
+  sandboxProbe?: () => boolean,
+): void {
+  windowsBackendsReader = reader ?? getAvailableBackends;
+  windowsSandboxAvailabilityProbe = sandboxProbe ?? isWindowsSandboxAvailable;
 }
 
 /**
@@ -950,14 +992,6 @@ function getLinuxRustTargetTriple(): string {
 }
 
 /**
- * Get the Rust target triple for the current macOS machine architecture.
- */
-function getDarwinRustTargetTriple(): string {
-  const arch = os.arch();
-  return arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
-}
-
-/**
  * Find the wxc-exec executable
  * Searches in common locations relative to the SDK package,
  * selecting the build matching the current machine architecture.
@@ -1093,46 +1127,6 @@ export function findLxcExecutable(): string | null {
   for (const lxcPath of possiblePaths) {
     if (verifyExecutable(lxcPath)) {
       return lxcPath;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Find the mxc-exec-mac executable on macOS.
- * Searches in the SDK bin directory (npm install path) and Cargo build
- * output directories (monorepo dev path).
- * @returns Path to mxc-exec-mac if found, null otherwise
- */
-export function findSeatbeltExecutable(): string | null {
-  // Allow override for bundled deployments (debugging/testing)
-  if (process.env.MXC_BIN_DIR) {
-    const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'mxc-exec-mac');
-    if (verifyExecutable(overridePath)) {
-      return overridePath;
-    }
-  }
-
-  const targetTriple = getDarwinRustTargetTriple();
-  const targetDir = path.join(__dirname, '..', '..', '..', 'src', 'target');
-
-  const possiblePaths = [
-    // Bundled in the SDK package
-    path.join(__dirname, '..', 'bin', getSdkArch(), 'mxc-exec-mac'),
-    // Architecture-specific release build
-    path.join(targetDir, targetTriple, 'release', 'mxc-exec-mac'),
-    // Architecture-specific debug build
-    path.join(targetDir, targetTriple, 'debug', 'mxc-exec-mac'),
-    // Default Cargo release build
-    path.join(targetDir, 'release', 'mxc-exec-mac'),
-    // Default Cargo debug build
-    path.join(targetDir, 'debug', 'mxc-exec-mac'),
-  ];
-
-  for (const darwinPath of possiblePaths) {
-    if (verifyExecutable(darwinPath)) {
-      return darwinPath;
     }
   }
 

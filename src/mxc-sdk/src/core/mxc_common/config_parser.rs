@@ -1371,11 +1371,10 @@ fn normalize_common_request_ir(
 
     let source_contract = cfg.source_contract;
     let container_id = cfg.container_id.unwrap_or_default();
-    // JSON may legally carry `\u0000`. `string_util::to_wide` then truncates at
-    // that NUL, and ProcessContainer uses the result as the AppContainer profile
-    // name. Distinct ids would derive one SID and share host-file ACEs. This is
-    // the single funnel for every entry point, so reject the value before any
-    // backend sees it. Do not echo the raw id; the NUL would also truncate logs.
+    // JSON may legally carry `\u0000`. `string_util::to_wide` truncates at that
+    // NUL, so a value used as a session or profile name would collapse to its
+    // prefix. This is the single funnel for every entry point. Do not echo the
+    // raw id; the NUL would also truncate logs.
     if container_id.contains('\0') {
         return Err(WxcError::ConfigParse(
             "containerId must not contain null bytes".to_string(),
@@ -1585,13 +1584,6 @@ fn normalize_common_request_ir(
     }
     validate_filesystem_paths(&policy)?;
     normalize_filesystem_paths(&mut policy, logger);
-
-    // Fallback section
-    if let Some(fbcfg) = cfg.fallback {
-        if let Some(v) = fbcfg.allow_dacl_mutation {
-            policy.fallback.allow_dacl_mutation = v;
-        }
-    }
 
     parse_network_policy(
         &mut policy,
@@ -1846,6 +1838,74 @@ mod tests {
 
         let parsed = parse_exact_mxc_request_json(json, &mut test_logger()).unwrap();
         assert!(matches!(parsed, MxcRequest::OneShot(_)));
+    }
+
+    #[test]
+    fn microvm_rejects_process_container_sections_but_accepts_a_minimal_request() {
+        const ERROR: &str = "Configuration parse error: Multiple containment backends configured: \
+            'containment' is 'microvm' (no per-backend section is defined for this backend), but \
+            the config includes backend section(s): processContainer. Only one backend section is \
+            allowed; remove the unused section(s).";
+
+        for process_container in [r#"{}"#, r#"{"leastPrivilege":false}"#] {
+            let json = format!(
+                r#"{{"version":"1.1.0-alpha","containment":"microvm","process":{{"commandLine":"echo hello"}},"processContainer":{process_container}}}"#
+            );
+            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)), "{error:?}");
+            assert_eq!(error.message(), ERROR);
+        }
+
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "microvm",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.containment, ContainmentBackend::MicroVm);
+    }
+
+    #[test]
+    fn legacy_fallback_settings_do_not_change_runtime_policy() {
+        for (version, containment) in [
+            ("0.9.0-alpha", "processcontainer"),
+            ("1.0.0", "processcontainer"),
+            ("1.1.0-alpha", "processcontainer"),
+            ("1.1.0-alpha", "microvm"),
+        ] {
+            let mut expected = None;
+            for fallback in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({"allowDaclMutation": true})),
+                Some(serde_json::json!({"allowDaclMutation": false})),
+            ] {
+                let mut json = serde_json::json!({
+                    "version": version,
+                    "containment": containment,
+                    "process": {"commandLine": "echo hello"}
+                });
+                if let Some(fallback) = fallback {
+                    json["fallback"] = fallback;
+                }
+                let MxcRequest::OneShot(request) =
+                    load_mxc_request_from_json(&json.to_string(), &mut test_logger()).unwrap()
+                else {
+                    panic!("expected a create-and-run request");
+                };
+                let serialized = serde_json::to_value(request.policy).unwrap();
+                assert!(serialized.get("fallback").is_none());
+                if let Some(expected) = &expected {
+                    assert_eq!(&serialized, expected);
+                } else {
+                    expected = Some(serialized);
+                }
+            }
+        }
     }
 
     fn parse_exact_for_test(json: &str) -> Result<MxcRequest, ParseError> {
@@ -2167,6 +2227,10 @@ mod tests {
             "0.9.0",
             "0.9.1-alpha",
             "0.10.1-alpha",
+            "0.10.0-alpha",
+            "0.5.0-alpha",
+            "1.2.0-alpha",
+            "not-a-version",
         ] {
             let json = format!(
                 r#"{{
@@ -2205,6 +2269,32 @@ mod tests {
             );
             assert!(error.message().contains("Unsupported contract version"));
         }
+    }
+
+    #[test]
+    fn capture_output_path_requires_an_absolute_file_with_an_existing_parent() {
+        let directory = tempfile::tempdir().expect("temporary capture directory");
+        let missing = directory.path().join("missing").join("capture.json");
+        let root = directory.path().ancestors().last().unwrap();
+        for (path, message) in [
+            (
+                std::path::Path::new("capture.json"),
+                "must be an absolute path",
+            ),
+            (root, "directory root"),
+            (missing.as_path(), "parent directory does not exist"),
+            (directory.path(), "existing directory"),
+        ] {
+            let error =
+                validate_capture_denials_output_path(&path.to_string_lossy(), &mut test_logger())
+                    .unwrap_err();
+            assert!(error.to_string().contains(message), "{path:?}: {error}");
+        }
+        validate_capture_denials_output_path(
+            &directory.path().join("capture.json").to_string_lossy(),
+            &mut test_logger(),
+        )
+        .expect("valid absolute output file");
     }
 
     #[test]

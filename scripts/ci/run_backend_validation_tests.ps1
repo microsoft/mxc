@@ -10,8 +10,7 @@ id-to-command mapping to keep in sync.
 param(
     [Parameter(Mandatory)]
     [ValidateSet(
-        'process-t1',
-        'process-t3',
+        'process',
         'isolation-session',
         'windows-sandbox',
         'wslc',
@@ -24,12 +23,15 @@ param(
 
     [Parameter(Mandatory)]
     [ValidateSet('x64', 'arm64')]
-    [string]$Architecture
+    [string]$Architecture,
+
+    [string]$TempDirectory
 )
 
 $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptRoot 'lib\TestSuiteResults.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
 $testScriptRoot = Join-Path $repoRoot 'tests\scripts'
 $binaryDirectoryPath = (Resolve-Path -LiteralPath $BinaryDirectory).Path
@@ -48,20 +50,15 @@ function Assert-File {
 # artifact and copy it afterwards, point TEMP at the upload directory for the
 # duration of the run: parameter defaults, .NET GetTempPath(), and child
 # processes all follow it, so anything temp-rooted lands where CI collects it.
-#
-# The suites' scratch-root guards compare against $env:TEMP, so they stay
-# satisfied — this redirects what TEMP means rather than pointing a path
-# outside it.
-function Redirect-TempToRunnerTemp {
-    if (-not $env:RUNNER_TEMP) {
+# CI passes the upload directory as -TempDirectory.
+function Redirect-Temp {
+    if (-not $TempDirectory) {
         return
     }
-    if (-not (Test-Path -LiteralPath $env:RUNNER_TEMP)) {
-        New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP | Out-Null
-    }
-    $env:TEMP = $env:RUNNER_TEMP
-    $env:TMP  = $env:RUNNER_TEMP
-    Write-Host "Redirected TEMP to $env:RUNNER_TEMP so test logs are collected."
+    $directory = (New-Item -ItemType Directory -Force -Path $TempDirectory).FullName
+    $env:TEMP = $directory
+    $env:TMP  = $directory
+    Write-Host "Redirected TEMP to $directory so test logs are collected."
 }
 
 function Invoke-TestScript {
@@ -85,76 +82,42 @@ function Invoke-TestScript {
 Assert-File -Path $wxc
 
 function Invoke-ProcessContainerTests {
-    # Returns the harness exit code rather than throwing, so a caller running
-    # more than one suite can report both results instead of stopping at the
-    # first failure. The suite talks to the operator through Write-Host (which
-    # Out-Null does not touch), so discarding the success stream keeps the
-    # return value a scalar even if a phase leaks a stray object.
-    [OutputType([int])]
-    param(
-        # The tier this matrix entry exists to exercise. Passed through to the
-        # harness, which aborts when the host selects a different one. Without
-        # it a mis-provisioned process-t1 runner would silently run the T3
-        # assertions and report green, proving nothing about BaseContainer.
-        [Parameter(Mandatory)]
-        [ValidateSet('base-container', 'appcontainer-dacl')]
-        [string]$RequireTier
-    )
-
-    # The existing harness expects separate debug and release layouts. CI
-    # intentionally tests one release artifact, so stage it in both slots.
-    $debugDirectory = Join-Path $binaryDirectoryPath 'debug'
-    $releaseDirectory = Join-Path $binaryDirectoryPath 'release'
-    New-Item -ItemType Directory -Force -Path $debugDirectory, $releaseDirectory | Out-Null
-    Copy-Item -LiteralPath $wxc -Destination (Join-Path $debugDirectory 'wxc-exec.exe') -Force
-    Copy-Item -LiteralPath $wxc -Destination (Join-Path $releaseDirectory 'wxc-exec.exe') -Force
-
-    $uiProbe = Join-Path $binaryDirectoryPath 'wxc-ui-probe.exe'
-    Assert-File -Path $uiProbe
-    Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
-    Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
-
-    # wxc-exec resolves these next to its own image: plm.exe backs the guarded-WPR
-    # captureDenials fallback and winhttp-proxy-shim.exe backs the legacy proxy
-    # path. Absent, those areas fail as launch errors instead of policy results.
-    foreach ($sidecar in 'plm.exe', 'winhttp-proxy-shim.exe') {
-        $source = Join-Path $binaryDirectoryPath $sidecar
-        Assert-File -Path $source
-        Copy-Item -LiteralPath $source -Destination (Join-Path $debugDirectory $sidecar) -Force
-        Copy-Item -LiteralPath $source -Destination (Join-Path $releaseDirectory $sidecar) -Force
+    $probe = & $wxc --probe | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) {
+        throw "ProcessContainer probe failed with exit code $LASTEXITCODE."
+    }
+    if (-not $probe.probes.baseContainerApiPresent -or $probe.tier -ne 'base-container') {
+        throw 'ProcessContainer CI requires an enabled native PSEC contract.'
     }
 
-    $script = Join-Path $testScriptRoot 'run_processcontainer_all_tests.ps1'
-    # -KeepArtifacts stops the suite deleting its scratch tree on a clean run,
-    # so a passing job still uploads its per-area logs, configs, and result
-    # documents.
-    $global:LASTEXITCODE = 0
-    & $script `
-        -SkipBuild `
-        -RequireTier $RequireTier `
-        -WxcDebug (Join-Path $debugDirectory 'wxc-exec.exe') `
-        -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
-        -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
-        -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
-        -KeepArtifacts | Out-Null
-    return $LASTEXITCODE
-}
+    $scratch = Join-Path $env:TEMP ("mxc-native-process-container-ci-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+    $configPath = Join-Path $scratch 'config.json'
+    @{
+        version = '1.0.0'
+        containment = 'processcontainer'
+        process = @{
+            commandLine = 'cmd.exe /d /s /c "echo native-process-container-ok>native-smoke.txt && type native-smoke.txt"'
+            cwd = $scratch
+        }
+        filesystem = @{
+            readwritePaths = @($scratch)
+        }
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath
 
-function Invoke-T3WorkloadTests {
-    [OutputType([int])]
-    param()
-
-    $script = Join-Path $testScriptRoot 'T3-Workloads.ps1'
-    # -Wxc is required: the script's default points at a debug build that does
-    # not exist in a CI artifact. -KeepArtifacts preserves the per-workload
-    # logs and configs on a clean run so a passing job still uploads them.
-    # -GrantDriveRoot lets the pwsh/git workloads resolve their working
-    # directory's ancestor chain; it rewrites ACLs across the system drive,
-    # which is why the script leaves it off by default and only a disposable
-    # CI runner opts in. Temporary until pwsh 7.7 leaves preview.
-    $global:LASTEXITCODE = 0
-    & $script -Wxc $wxc -KeepArtifacts -GrantDriveRoot | Out-Null
-    return $LASTEXITCODE
+    $output = (& $wxc $configPath | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $output -cne 'native-process-container-ok' -or
+        (Get-Content -LiteralPath (Join-Path $scratch 'native-smoke.txt') -Raw).Trim() -cne $output) {
+        throw "Native ProcessContainer read/write smoke failed: exit=$LASTEXITCODE; output=$output"
+    }
+    Write-Host $output
+    Invoke-ProcessContainerStreamingTests
+    Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_base_container_network_tests.ps1') `
+        -Arguments @{ BinDir = $binaryDirectoryPath }
+    $finalPathProbe = Join-Path $binaryDirectoryPath 'windows-sdk-bundle\inproc\mxc-final-path-probe.exe'
+    Assert-File -Path $finalPathProbe
+    Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_processcontainer_policy_tests.ps1') `
+        -Arguments @{ BinDir = $binaryDirectoryPath; FinalPathProbe = $finalPathProbe }
 }
 
 # stderr is read apart from stdout: wxc-exec can report host cleanup there
@@ -217,60 +180,166 @@ function Invoke-ScriptSuite {
     $skipped
 }
 
-function Get-LibtestFailure {
-    param([Parameter(Mandatory)][hashtable]$Run)
-
-    if ($Run.ExitCode -ne 0) {
-        return "exited $($Run.ExitCode)"
-    }
-    $summary = Select-String -LiteralPath $Run.Log -Pattern '^test result: \w+\. (\d+) passed; (\d+) failed;' |
-        Select-Object -Last 1
-    if (-not $summary -or ([int]$summary.Matches[0].Groups[1].Value + [int]$summary.Matches[0].Groups[2].Value) -eq 0) {
-        return 'executed no tests'
-    }
-}
-
-# Node reports a skipped describe block as a top-level skipped testcase.
-function Get-NodeSuiteFailure {
-    param([Parameter(Mandatory)][string]$JunitPath)
-
-    [xml]$report = Get-Content -LiteralPath $JunitPath -Raw
-    $blocks = @($report.testsuites.ChildNodes | Where-Object { $_.NodeType -eq 'Element' })
-    if ($blocks.Count -eq 0) {
-        return 'executed no tests'
-    }
-    $failures = foreach ($block in $blocks) {
-        if (@($block.SelectNodes('descendant-or-self::testcase[not(skipped)]')).Count -eq 0) {
-            "'$($block.name)' executed no tests"
-        }
-    }
-    $failures -join '; '
-}
-
-function Get-XunitSuiteFailure {
-    param(
-        [Parameter(Mandatory)][string]$ResultXml,
-        [Parameter(Mandatory)][string[]]$Classes
-    )
-
-    $tests = @(([xml](Get-Content -LiteralPath $ResultXml -Raw)).SelectNodes("//test[@result='Pass' or @result='Fail']"))
-    $failures = foreach ($class in $Classes) {
-        if (@($tests | Where-Object { $_.type -like "*.$class" }).Count -eq 0) {
-            "'$class' executed no tests"
-        }
-    }
-    $failures -join '; '
-}
-
-function Invoke-IsolationSessionSuites {
-    $bundle = Join-Path $binaryDirectoryPath 'isolation-session-bundle'
-    $inProcTests = Join-Path $bundle 'inproc\mxc-sdk-isolation-session-tests.exe'
-    $helperTests = Join-Path $bundle 'inproc\mxc-sdk-helpers-tests.exe'
-    $staProbe = Join-Path $bundle 'inproc\sta_probe.exe'
+function Invoke-ProcessContainerStreamingTests {
+    $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
+    $rustTests = Join-Path $bundle 'inproc\mxc-sdk-process-container-streaming-tests.exe'
     $dotnetTests = Join-Path $bundle 'dotnet\Microsoft.Mxc.Sdk.Tests.exe'
     $node = Join-Path $bundle 'node\node.exe'
     $nodeSuiteRoot = Join-Path $bundle 'sdk-integration'
-    foreach ($file in $inProcTests, $helperTests, $staProbe, $dotnetTests, $node, (Join-Path $nodeSuiteRoot 'dist\isolation-session-state-aware.test.js')) {
+    foreach ($file in $rustTests, $dotnetTests, $node, (Join-Path $nodeSuiteRoot 'dist\windows-process-container.test.js')) {
+        Assert-File -Path $file
+    }
+
+    $rustCase = 'streaming_processcontainer_bidirectional_stdio'
+    $run = Invoke-LoggedNative -FilePath $rustTests -LogName 'process-container-rust-streaming.log' `
+        -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
+    $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
+    if ($failure) { throw "Rust ProcessContainer streaming: $failure" }
+
+    $previousPsec = $env:MXC_E2E_PSEC_CAPABLE_HOST
+    $previousSkip = $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS
+    try {
+        $env:MXC_E2E_PSEC_CAPABLE_HOST = '1'
+        $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '0'
+        $resultXml = Join-Path $env:TEMP 'process-container-dotnet-streaming.xml'
+        if (Test-Path -LiteralPath $resultXml) { Remove-Item -LiteralPath $resultXml }
+        $run = Invoke-LoggedNative -FilePath $dotnetTests -LogName 'process-container-dotnet-streaming.log' `
+            -ArgumentList @('-class', '*.MxcProcessTests', '-result-xml', $resultXml)
+        if ($run.ExitCode -ne 0) { throw ".NET ProcessContainer streaming exited $($run.ExitCode)." }
+        $failure = Get-XunitSuiteFailure -ResultXml $resultXml -Classes 'MxcProcessTests' -RejectSkipped `
+            -RequiredMethods @('Streaming_WritesStdin_AndReadsEchoedStdout', 'OutputHeavyChild_DoesNotDeadlock',
+                'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
+                'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock')
+        if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
+
+        $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
+        if (Test-Path -LiteralPath $junit) { Remove-Item -LiteralPath $junit }
+        $requiredNodeTests = @(
+            'public run captures output and the workload exit code',
+            'public spawn returns an SDK process with live standard streams',
+            'public tool discovery allows tool reads but denies sibling private files'
+        )
+        Push-Location $nodeSuiteRoot
+        try {
+            $run = Invoke-LoggedNative -FilePath $node -LogName 'process-container-node-streaming.log' `
+                -ArgumentList @('--test', '--test-force-exit',
+                    '--test-name-pattern', ($requiredNodeTests -join '|'),
+                    '--test-reporter=spec', '--test-reporter-destination=stdout',
+                    '--test-reporter=junit', "--test-reporter-destination=$junit",
+                    'dist/windows-process-container.test.js')
+        } finally {
+            Pop-Location
+        }
+        if ($run.ExitCode -ne 0) { throw "Node ProcessContainer streaming exited $($run.ExitCode)." }
+        $failure = Get-NodeSuiteFailure -JunitPath $junit -RequiredTests $requiredNodeTests
+        if ($failure) { throw "Node ProcessContainer streaming: $failure" }
+    } finally {
+        [Environment]::SetEnvironmentVariable('MXC_E2E_PSEC_CAPABLE_HOST', $previousPsec)
+        [Environment]::SetEnvironmentVariable('MXC_SKIP_OS_BUILD_DEPENDENT_TESTS', $previousSkip)
+    }
+}
+
+function Invoke-NodeIntegrationSuite {
+    param(
+        [Parameter(Mandatory)][string]$Bundle,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$TestFile
+    )
+
+    $junit = Join-Path $env:TEMP "$Name-node.junit.xml"
+    Push-Location (Join-Path $Bundle 'sdk-integration')
+    try {
+        $run = Invoke-LoggedNative -FilePath (Join-Path $Bundle 'node\node.exe') -LogName "$Name-node.log" -ArgumentList @(
+            '--test', '--test-force-exit',
+            '--test-reporter=spec', '--test-reporter-destination=stdout',
+            '--test-reporter=junit', "--test-reporter-destination=$junit",
+            "dist/$TestFile")
+    }
+    finally {
+        Pop-Location
+    }
+    if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-NodeSuiteFailure -JunitPath $junit }
+}
+
+function Invoke-XunitClasses {
+    param(
+        [Parameter(Mandatory)][string]$Bundle,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string[]]$Classes
+    )
+
+    $resultXml = Join-Path $env:TEMP "$Name-dotnet.xml"
+    $run = Invoke-LoggedNative -FilePath (Join-Path $Bundle 'dotnet\Microsoft.Mxc.Sdk.Tests.exe') -LogName "$Name-dotnet.log" -ArgumentList @(
+        $Classes | ForEach-Object { '-class', "*.$_" }
+        '-result-xml', $resultXml)
+    if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-XunitSuiteFailure -ResultXml $resultXml -Classes $Classes }
+}
+
+# Run each named suite, report every result, then fail if any suite did.
+function Invoke-NamedSuites {
+    param(
+        [Parameter(Mandatory)][string]$Backend,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Suites,
+        [System.Collections.IDictionary]$Results = [ordered]@{},
+        [scriptblock]$Finally = {}
+    )
+
+    try {
+        foreach ($name in $Suites.Keys) {
+            Write-Host "=== ${Backend}: $name ==="
+            try {
+                $Results[$name] = "$(& $Suites[$name])"
+            }
+            catch {
+                $Results[$name] = $_.Exception.Message
+            }
+        }
+    }
+    finally {
+        & $Finally $Results
+    }
+
+    foreach ($name in $Results.Keys) {
+        if ($Results[$name]) {
+            Write-Host "FAIL  $name`: $($Results[$name])" -ForegroundColor Red
+        }
+        else {
+            Write-Host "PASS  $name" -ForegroundColor Green
+        }
+    }
+    if (@($Results.Values | Where-Object { $_ }).Count -gt 0) {
+        throw "$Backend validation failed; see the results above."
+    }
+}
+
+function Invoke-WslcSuites {
+    $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
+    foreach ($file in 'dotnet\Microsoft.Mxc.Sdk.Tests.exe', 'node\node.exe', 'sdk-integration\dist\wslc-state-aware.test.js', 'sdk-integration\dist\wslc-e2e.test.js') {
+        Assert-File -Path (Join-Path $bundle $file)
+    }
+
+    # The SDK suites skip unless asked to run, and a skip is reported as a
+    # failure below.
+    $env:MXC_ENABLE_WSLC_TESTS = '1'
+
+    Invoke-NamedSuites -Backend 'wslc' -Suites ([ordered]@{
+        'command line' = {
+            $global:LASTEXITCODE = 0
+            & (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -WxcExecPath $wxc | Out-Host
+            if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
+        }
+        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' }
+        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' }
+        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' }
+    })
+}
+
+function Invoke-IsolationSessionSuites {
+    $bundle = Join-Path $binaryDirectoryPath 'windows-sdk-bundle'
+    $inProcTests = Join-Path $bundle 'inproc\mxc-sdk-isolation-session-tests.exe'
+    $helperTests = Join-Path $bundle 'inproc\mxc-sdk-helpers-tests.exe'
+    $staProbe = Join-Path $bundle 'inproc\sta_probe.exe'
+    foreach ($file in $inProcTests, $helperTests, $staProbe, (Join-Path $bundle 'dotnet\Microsoft.Mxc.Sdk.Tests.exe'), (Join-Path $bundle 'node\node.exe'), (Join-Path $bundle 'sdk-integration\dist\isolation-session-state-aware.test.js')) {
         Assert-File -Path $file
     }
 
@@ -288,35 +357,14 @@ function Invoke-IsolationSessionSuites {
     $suites = [ordered]@{
         'one-shot' = { Invoke-ScriptSuite 'run_isolation_session_tests.ps1' }
         'state-aware' = { Invoke-ScriptSuite 'run_isolation_session_state_aware_tests.ps1' }
-        'Node' = {
-            $junit = Join-Path $env:TEMP 'isolation-session-node.junit.xml'
-            Push-Location $nodeSuiteRoot
-            try {
-                $run = Invoke-LoggedNative -FilePath $node -LogName 'isolation-session-node.log' -ArgumentList @(
-                    '--test', '--test-force-exit',
-                    '--test-reporter=spec', '--test-reporter-destination=stdout',
-                    '--test-reporter=junit', "--test-reporter-destination=$junit",
-                    'dist/isolation-session-state-aware.test.js')
-            }
-            finally {
-                Pop-Location
-            }
-            if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-NodeSuiteFailure -JunitPath $junit }
-        }
+        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'isolation-session' -TestFile 'isolation-session-state-aware.test.js' }
         'Rust' = {
             Get-LibtestFailure (Invoke-LoggedNative -FilePath $inProcTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust.log')
         }
         'Rust SDK helpers' = {
             Get-LibtestFailure (Invoke-LoggedNative -FilePath $helperTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust-helpers.log')
         }
-        'C#' = {
-            $classes = 'MxcContainerIsolationSessionE2ETests', 'MxcLifecycleE2ETests'
-            $resultXml = Join-Path $env:TEMP 'isolation-session-dotnet.xml'
-            $run = Invoke-LoggedNative -FilePath $dotnetTests -LogName 'isolation-session-dotnet.log' -ArgumentList @(
-                $classes | ForEach-Object { '-class', "*.$_" }
-                '-result-xml', $resultXml)
-            if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-XunitSuiteFailure -ResultXml $resultXml -Classes $classes }
-        }
+        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'isolation-session' -Classes 'MxcContainerIsolationSessionE2ETests', 'MxcLifecycleE2ETests' }
         'apartment probe' = {
             $modes = [ordered]@{
                 'sta' = 'RESULT: COMPLETED'
@@ -338,19 +386,8 @@ function Invoke-IsolationSessionSuites {
 
     # Account names stay in memory; they must not reach the log.
     $accountsBefore = @((Get-LocalUser).Name)
-    $results = [ordered]@{}
-    try {
-        foreach ($name in $suites.Keys) {
-            Write-Host "=== isolation-session: $name ==="
-            try {
-                $results[$name] = "$(& $suites[$name])"
-            }
-            catch {
-                $results[$name] = $_.Exception.Message
-            }
-        }
-    }
-    finally {
+    Invoke-NamedSuites -Backend 'isolation-session' -Suites $suites -Finally {
+        param($results)
         $accountsAfter = @((Get-LocalUser).Name)
         $added = @($accountsAfter | Where-Object { $accountsBefore -notcontains $_ }).Count
         $removed = @($accountsBefore | Where-Object { $accountsAfter -notcontains $_ }).Count
@@ -360,41 +397,44 @@ function Invoke-IsolationSessionSuites {
             $results['local accounts'] = ''
         }
     }
+}
 
-    foreach ($name in $results.Keys) {
-        if ($results[$name]) {
-            Write-Host "FAIL  $name`: $($results[$name])" -ForegroundColor Red
-        }
-        else {
-            Write-Host "PASS  $name" -ForegroundColor Green
-        }
+function Invoke-MicroVmTests {
+    if ($Architecture -ne 'x64') {
+        throw 'MicroVM validation requires x64.'
     }
-    if (@($results.Values | Where-Object { $_ }).Count -gt 0) {
-        throw 'isolation-session validation failed; see the results above.'
+    $tests = Join-Path $binaryDirectoryPath 'nvx-e2e-tests.exe'
+    Assert-File -Path $tests
+    $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = Join-Path $binaryDirectoryPath 'aci-edge-sandboxes'
+    $run = Invoke-LoggedNative -FilePath $tests -LogName 'microvm-nvx.log' -ArgumentList @(
+        '--include-ignored', '--nocapture', '--test-threads=1'
+    )
+    $failure = Get-LibtestFailure -Run $run
+    if ($failure) {
+        throw "MicroVM SDK tests $failure."
+    }
+    $output = Get-Content -LiteralPath $run.Log -Raw
+    if ($output -match '\bSKIP(?:PED)?:' -or
+        $output -notmatch '(?m)^test result: ok\. \d+ passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+        throw 'MicroVM SDK validation skipped or filtered tests.'
+    }
+    $scenarios = [ordered]@{
+        'facade' = 'VM_EXECUTED facade sequential '
+        'executor' = 'VM_EXECUTED executor sequential '
+        'executor configs' = 'VM_EXECUTED executor configs '
+        'executor interruption' = 'VM_EXECUTED executor console interruption '
+    }
+    foreach ($scenario in $scenarios.Keys) {
+        if (-not $output.Contains($scenarios[$scenario])) {
+            throw "MicroVM SDK validation did not execute the $scenario VM scenario."
+        }
     }
 }
 
-Redirect-TempToRunnerTemp
+Redirect-Temp
 
-# The matrix entry names the tier the job exists to exercise, but the host picks
-# the tier at run time. -RequireTier makes the suite abort instead of testing
-# whichever tier it landed on and reporting green for the wrong entry.
 switch ($Backend) {
-    'process-t1' {
-        $primitives = Invoke-ProcessContainerTests -RequireTier 'base-container'
-        if ($primitives -ne 0) {
-            throw "Process Container tests failed with exit code $primitives."
-        }
-    }
-    'process-t3' {
-        # Run both suites before reporting. Stopping at the first failure would
-        # hide the other suite's result, costing an extra nightly run to triage.
-        $primitives = Invoke-ProcessContainerTests -RequireTier 'appcontainer-dacl'
-        $workloads = Invoke-T3WorkloadTests
-        if ($primitives -ne 0 -or $workloads -ne 0) {
-            throw "process-t3 tests failed (primitives exit=$primitives, workloads exit=$workloads)."
-        }
-    }
+    'process' { Invoke-ProcessContainerTests }
     'isolation-session' {
         Invoke-IsolationSessionSuites
     }
@@ -404,13 +444,9 @@ switch ($Backend) {
         }
     }
     'wslc' {
-        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
-            WxcExecPath = $wxc
-        }
+        Invoke-WslcSuites
     }
     'microvm' {
-        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_microvm_tests.ps1') -Arguments @{
-            BinDir = $binaryDirectoryPath
-        }
+        Invoke-MicroVmTests
     }
 }

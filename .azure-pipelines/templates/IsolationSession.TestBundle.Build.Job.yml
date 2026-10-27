@@ -72,6 +72,10 @@ jobs:
   - checkout: ${{ parameters.checkoutRepo }}
     path: s
 
+  - powershell: |
+      & "$(Pipeline.Workspace)/lock-check/scripts/ci/test-isolation-session-test-helpers.ps1"
+    displayName: 'Validate test script helper staging'
+
   - task: UseNode@1
     displayName: Use Node.js 24.21
     inputs:
@@ -231,7 +235,7 @@ jobs:
       }
       Copy-Item $testNative (Join-Path $out 'mxc_ffi.dll') -Force
 
-      foreach ($name in @('Microsoft.Mxc.Sdk.Tests.exe', 'mxc_ffi.dll', 'plm.exe')) {
+      foreach ($name in @('Microsoft.Mxc.Sdk.Tests.exe', 'mxc_ffi.dll')) {
           $required = Join-Path $out $name
           if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
               throw "The self-contained .NET test payload is missing $name"
@@ -299,6 +303,12 @@ jobs:
           Copy-Item $src "$out/test_scripts/"
           Write-Host "  -> test_scripts/$s"
       }
+
+      # Use self's staging logic even when the selected source branch predates the helper.
+      & "$(Pipeline.Workspace)/lock-check/scripts/ci/stage-isolation-session-test-helpers.ps1" `
+          -SourceDirectory "$(Build.SourcesDirectory)/tests/scripts" `
+          -ScriptsDirectory "$out/test_scripts" |
+          ForEach-Object { Write-Host "  -> test_scripts/$_" }
 
       # SDK integration tests (Node E2E suite)
       $sdkInteg = "$out/sdk-integration"

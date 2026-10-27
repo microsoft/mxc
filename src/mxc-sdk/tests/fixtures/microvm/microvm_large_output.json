@@ -1,0 +1,9 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/mxc/main/schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "process": {
+        "commandLine": "i=0; while [ \"$i\" -lt 1000 ]; do printf 'line %d: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i + 1)); done",
+        "timeout": 30000
+    },
+    "containment": "microvm"
+}

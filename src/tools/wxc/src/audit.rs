@@ -3,6 +3,10 @@
 
 //! `wxc-exec --audit` compatibility artifacts built on `captureDenials`.
 
+mod compatibility;
+mod config;
+mod config_inputs;
+
 use std::path::{Path, PathBuf};
 
 use mxc_sdk::mxc_common::models::{
@@ -19,7 +23,7 @@ pub fn prepare_request(
     request: &mut ExecutionRequest,
     config_path: Option<PathBuf>,
 ) -> Result<AuditContext, String> {
-    prepare_request_in(request, config_path, mxc_sdk::plm::stop::default_log_dir())
+    prepare_request_in(request, config_path, compatibility::default_log_dir())
 }
 
 fn prepare_request_in(
@@ -145,11 +149,10 @@ pub fn finalize(
     )?;
     remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
 
-    mxc_sdk::plm::stop::postprocess_denials(
+    compatibility::postprocess_denials(
         &document,
-        &mxc_sdk::plm::stop::PostProcessOptions {
+        &compatibility::PostProcessOptions {
             log_dir: context.log_dir.clone(),
-            bin_path: None,
             config_path: context.config_path.clone(),
             trace_path: final_etl.clone(),
             denials_path: final_denials.clone(),
@@ -371,6 +374,64 @@ mod tests {
         assert_eq!(
             capture.etl_path.as_deref().map(Path::new),
             Some(log_dir.join("trace.etl").as_path())
+        );
+    }
+
+    #[test]
+    fn native_audit_preserves_config_suggestions_without_plm() {
+        use mxc_sdk::learning_mode_core::{AccessType, DeniedResource, ResourceType};
+
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir(&log_dir).unwrap();
+        let config_path = directory.path().join("policy.json");
+        let original = r#"{"version":"1.0.0","process":{"commandLine":"cmd.exe /c exit 0"},"processContainer":{"capabilities":[]}}"#;
+        std::fs::write(&config_path, original).unwrap();
+        let source_denials = log_dir.join("capture.denials.json");
+        let source_etl = log_dir.join("capture.etl");
+        let document = DenialsDocument::new(
+            vec![DeniedResource {
+                resource: "internetClient".to_string(),
+                resource_type: ResourceType::Capability,
+                access_type: AccessType::Unknown,
+                pid: 42,
+                filetime: 1,
+            }],
+            DenialSummary::new(7, 1, false),
+        );
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"native etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 7);
+        response
+            .output_metadata
+            .as_mut()
+            .unwrap()
+            .capture_denials
+            .as_mut()
+            .unwrap()
+            .total_denials = 1;
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: Some(config_path.clone()),
+        };
+
+        finalize(&mut response, &context, directory.path(), false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(log_dir.join("policy.json")).unwrap(),
+            original
+        );
+        let adjusted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(log_dir.join("Adjusted_policy.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            adjusted["processContainer"]["capabilities"],
+            serde_json::json!(["internetClient"])
+        );
+        assert_eq!(
+            std::fs::read(log_dir.join("trace.etl")).unwrap(),
+            b"native etl"
         );
     }
 

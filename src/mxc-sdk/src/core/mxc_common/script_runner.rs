@@ -3,9 +3,57 @@
 
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
+
+/// Executor-owned cooperative cancellation. It owns no native handles and installs no handlers.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct RunCancellation(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl RunCancellation {
+    const REQUESTED: u8 = 1;
+    const OBSERVED: u8 = 2;
+    const COMPLETE: u8 = 4;
+
+    /// Returns false once the execution owner has finished cleanup.
+    pub fn request(&self) -> bool {
+        self.0
+            .fetch_or(Self::REQUESTED, std::sync::atomic::Ordering::AcqRel)
+            & Self::COMPLETE
+            == 0
+    }
+
+    pub fn was_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) & Self::OBSERVED != 0
+    }
+
+    pub fn begin(&self) {
+        // Preserve a request that arrived before a new run, but reset a reused runner.
+        let _ = self.0.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |state| (state & Self::COMPLETE != 0).then_some(0),
+        );
+    }
+
+    pub fn complete(&self) {
+        self.0
+            .fetch_or(Self::COMPLETE, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    pub fn check(&self) -> Result<(), MxcError> {
+        if self.0.load(std::sync::atomic::Ordering::Acquire) & Self::REQUESTED != 0 {
+            self.0
+                .fetch_or(Self::OBSERVED, std::sync::atomic::Ordering::AcqRel);
+            Err(MxcError::backend_error("execution cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// Trait for executing scripts within a containment backend.
 ///
@@ -17,6 +65,11 @@ use crate::mxc_common::validator::{
 /// [`run`](ScriptRunner::run) method handles validation, dry-run mode,
 /// and delegates to [`execute`](ScriptRunner::execute).
 pub trait ScriptRunner {
+    /// A cancellation signal only when this runner can cooperatively tear down its run.
+    fn cancellation(&self) -> Option<RunCancellation> {
+        None
+    }
+
     /// Validate shared network support and runner-specific constraints.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, NetworkPolicySupport::default())?;

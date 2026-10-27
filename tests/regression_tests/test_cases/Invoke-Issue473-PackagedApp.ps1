@@ -31,9 +31,6 @@ $configJson = @"
     "filesystem": {
         "readonlyPaths": $((ConvertTo-Json -InputObject @($package.InstallLocation) -Compress))
     },
-    "fallback": {
-        "allowDaclMutation": true
-    },
     "ui": {
         "disable": false,
         "clipboard": "none",

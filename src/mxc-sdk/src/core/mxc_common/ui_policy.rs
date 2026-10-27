@@ -230,4 +230,148 @@ mod tests {
             EffectiveUiRestrictions::default()
         );
     }
+
+    #[test]
+    fn enabled_ui_attributes_each_knob_independently() {
+        let ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::All,
+            injection: true,
+        };
+        let bp = BaseProcessUiConfig {
+            isolation: "desktop".into(),
+            desktop_system_control: true,
+            system_settings: "all".into(),
+            ime: true,
+        };
+        for (clipboard, read, write) in [
+            (ClipboardPolicy::None, true, true),
+            (ClipboardPolicy::Read, false, true),
+            (ClipboardPolicy::Write, true, false),
+            (ClipboardPolicy::All, false, false),
+        ] {
+            let actual = resolve_ui_restrictions(
+                &UiPolicy {
+                    clipboard,
+                    ..ui.clone()
+                },
+                &bp,
+            );
+            assert_eq!(
+                actual,
+                EffectiveUiRestrictions {
+                    block_clipboard_read: read,
+                    block_clipboard_write: write,
+                    ..Default::default()
+                }
+            );
+        }
+        for allowed in [false, true] {
+            assert_eq!(
+                resolve_ui_restrictions(
+                    &UiPolicy {
+                        injection: allowed,
+                        ..ui.clone()
+                    },
+                    &bp
+                ),
+                EffectiveUiRestrictions {
+                    block_input_injection: !allowed,
+                    ..Default::default()
+                }
+            );
+            assert_eq!(
+                resolve_ui_restrictions(
+                    &ui,
+                    &BaseProcessUiConfig {
+                        desktop_system_control: allowed,
+                        ..bp.clone()
+                    }
+                ),
+                EffectiveUiRestrictions {
+                    block_desktop_switching: !allowed,
+                    block_logoff_or_shutdown: !allowed,
+                    ..Default::default()
+                }
+            );
+            assert_eq!(
+                resolve_ui_restrictions(
+                    &ui,
+                    &BaseProcessUiConfig {
+                        ime: allowed,
+                        ..bp.clone()
+                    }
+                ),
+                EffectiveUiRestrictions {
+                    block_input_method_changes: !allowed,
+                    ..Default::default()
+                }
+            );
+        }
+        for (isolation, objects, atoms) in [
+            ("container", true, true),
+            ("handles", true, false),
+            ("atoms", false, true),
+            ("desktop", false, false),
+            ("unrecognized", true, true),
+        ] {
+            assert_eq!(
+                resolve_ui_restrictions(
+                    &ui,
+                    &BaseProcessUiConfig {
+                        isolation: isolation.into(),
+                        ..bp.clone()
+                    }
+                ),
+                EffectiveUiRestrictions {
+                    block_external_ui_objects: objects,
+                    block_global_ui_namespace: atoms,
+                    ..Default::default()
+                }
+            );
+        }
+        for (settings, parameters, display) in [
+            ("parameters", false, true),
+            ("display", true, false),
+            ("all", false, false),
+            ("none", true, true),
+            ("unrecognized", true, true),
+        ] {
+            assert_eq!(
+                resolve_ui_restrictions(
+                    &ui,
+                    &BaseProcessUiConfig {
+                        system_settings: settings.into(),
+                        ..bp.clone()
+                    }
+                ),
+                EffectiveUiRestrictions {
+                    block_system_parameter_changes: parameters,
+                    block_display_settings_changes: display,
+                    ..Default::default()
+                }
+            );
+        }
+        assert_eq!(
+            resolve_ui_restrictions(
+                &UiPolicy {
+                    disable: true,
+                    ..ui
+                },
+                &bp
+            ),
+            EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_external_ui_objects: true,
+                block_global_ui_namespace: true,
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
+                block_input_method_changes: false,
+            }
+        );
+    }
 }

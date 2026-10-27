@@ -79,6 +79,10 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/Invoke-CratePackage.ps1 -ValidateOnly
 
+      - name: Smoke-test mxc-sdk crate packaging
+        shell: pwsh
+        run: ./scripts/ci/Invoke-CratePackage.ps1 -OutDir (Join-Path $env:RUNNER_TEMP 'crates')
+
       - name: Check dotnet ErrorCode parity (C# enum == native MXC_STATUS_*)
         run: node scripts/check-dotnet-errorcode-parity.js
 

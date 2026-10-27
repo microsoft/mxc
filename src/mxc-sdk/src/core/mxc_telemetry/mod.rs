@@ -423,40 +423,6 @@ mod provider {
         );
     }
 
-    pub fn log_enforcement_degraded(
-        identity: &str,
-        tier: &str,
-        needs_dacl_augmentation: bool,
-        degradation_reasons: &str,
-        effective_enforcement_level: &str,
-    ) {
-        let Some(state) = STATE.get() else { return };
-        let (version, channel, debugging, app_session) = common_params(state);
-        tracelogging::write_event!(
-            MXC_PROVIDER,
-            "MXC.EnforcementDegraded",
-            level(Warning),
-            keyword(MXC_EVENT_KEYWORD),
-            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
-            u16(
-                "PartA_PrivacyDataCategory",
-                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
-            ),
-            u64("PartA_PrivTags", &MXC_PRIVACY_TAG),
-            struct("COMMON_MXC_PARAMS", {
-                str8("Version", version),
-                str8("Channel", channel),
-                bool8("IsDebugging", &debugging),
-                bool8("UTCReplace_AppSessionGuid", &app_session),
-            }),
-            str8("mxc.identity", identity),
-            str8("mxc.tier", tier),
-            bool8("mxc.needs_dacl_augmentation", &needs_dacl_augmentation),
-            str8("mxc.degradation_reasons", degradation_reasons),
-            str8("mxc.effective_enforcement_level", effective_enforcement_level),
-        );
-    }
-
     pub fn log_policy_hash(identity: &str, policy_hash: &str, config_schema_version: &str) {
         let Some(state) = STATE.get() else { return };
         let (version, channel, debugging, app_session) = common_params(state);
@@ -643,14 +609,6 @@ mod provider {
         _error_code: i32,
     ) {
     }
-    pub fn log_enforcement_degraded(
-        _identity: &str,
-        _tier: &str,
-        _needs_dacl_augmentation: bool,
-        _degradation_reasons: &str,
-        _effective_enforcement_level: &str,
-    ) {
-    }
     pub fn log_policy_hash(_identity: &str, _policy_hash: &str, _config_schema_version: &str) {}
     pub fn log_network_policy_applied(
         _identity: &str,
@@ -733,28 +691,28 @@ mod tests {
             provider_source
                 .matches("u16(\"PartA_PrivacyProduct\", &PRIVACY_PRODUCT_MXC)")
                 .count(),
-            11,
+            10,
             "every MXC event must carry privacy product 11"
         );
         assert_eq!(
             provider_source
                 .matches("\"PartA_PrivacyDataCategory\"")
                 .count(),
-            11,
+            10,
             "every MXC event must carry a privacy data category"
         );
         assert_eq!(
             provider_source
                 .matches("&PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA")
                 .count(),
-            11,
+            10,
             "every MXC event must use Client Diagnostic Data category 1"
         );
         assert_eq!(
             provider_source
                 .matches("u64(\"PartA_PrivTags\", &MXC_PRIVACY_TAG)")
                 .count(),
-            11,
+            10,
             "every MXC event must retain its approved privacy tag"
         );
     }

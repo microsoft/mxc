@@ -11,15 +11,14 @@
     Directory holding the downloaded build artifact.
 
 .EXAMPLE
-    ./scripts/ci/prepare-windows-host.ps1 -Backend process-t3 -BinaryDirectory artifacts/bin
+    ./scripts/ci/prepare-windows-host.ps1 -Backend process -BinaryDirectory artifacts/bin
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
     [ValidateSet(
-        'process-t1',
-        'process-t3',
+        'process',
         'isolation-session',
         'wslc',
         'windows-sandbox',
@@ -169,32 +168,6 @@ function Write-HostOsVersion {
     $architecture = if ($archKey) { $archKey.PROCESSOR_ARCHITECTURE } else { $env:PROCESSOR_ARCHITECTURE }
 
     Write-Host "Host OS edition: $($values['EditionID']); architecture: $architecture"
-}
-
-function Initialize-ProcessContainerHost {
-    $hostPrep = Join-Path $BinaryDirectory 'wxc-host-prep.exe'
-    if (-not (Test-Path $hostPrep)) {
-        Exit-WithError "wxc-host-prep.exe not found in $BinaryDirectory"
-    }
-
-    # The AppContainer tier needs the system-drive ACEs and the \Device\Null
-    # security descriptor. --no-sacl keeps the descriptor within what a CI host
-    # can grant without SeSecurityPrivilege.
-    #
-    # This runs for process-t1 as well as process-t3. A T1 host selects
-    # BaseContainer for most policies, but the suite deliberately drives the
-    # AppContainer fallback tiers too (and an unprepared host fails the launch
-    # with WIN32_ERROR(5) rather than reporting a policy result), so the T1 job
-    # needs the same preparation to test anything beyond config validation.
-    & $hostPrep prepare-system-drive
-    if ($LASTEXITCODE -ne 0) {
-        Exit-WithError "wxc-host-prep prepare-system-drive failed with exit code $LASTEXITCODE"
-    }
-
-    & $hostPrep prepare-null-device --no-sacl
-    if ($LASTEXITCODE -ne 0) {
-        Exit-WithError "wxc-host-prep prepare-null-device failed with exit code $LASTEXITCODE"
-    }
 }
 
 # Inventory the interpreters test suites drive inside the sandbox, after
@@ -577,19 +550,20 @@ function Install-WorkloadTooling {
 }
 
 function Initialize-MicroVmHost {
-    # Staged next to wxc-exec.exe by the --features microvm build, so their
-    # absence means a broken artifact rather than a host problem. Snapshots are
-    # excluded: they are a warm-start cache the runner regenerates on demand.
     Assert-RequiredFile @(
         'wxc-exec.exe',
-        'nanvixd.exe',
-        'nanvix_rootfs.img',
-        'python3.initrd',
-        'bin\kernel.elf'
+        'nvx-e2e-tests.exe',
+        'aci-edge-sandboxes\bundle-manifest.json',
+        'aci-edge-sandboxes\SOURCE-MANIFEST.json',
+        'aci-edge-sandboxes\SHA256SUMS',
+        'aci-edge-sandboxes\bin\aci_edge_agent.dll',
+        'aci-edge-sandboxes\bin\direct-images.exe',
+        'aci-edge-sandboxes\bin\openvmm.exe',
+        'aci-edge-sandboxes\guest\vmlinux',
+        'aci-edge-sandboxes\guest\initramfs-edge.cpio.gz'
     )
 
-    # NanVix boots a VM from these images on every invocation; Defender scanning
-    # them can push boot past its timeout.
+    # Scanning the signed runtime and guest images can push VM boot past its timeout.
     Add-MpPreference -ExclusionPath $BinaryDirectory
     Write-Host "Added Defender exclusion for $BinaryDirectory"
 
@@ -645,9 +619,9 @@ function Initialize-WslcHost {
        
     }
 
-    # WSLC needs a runtime at least as new as the pinned WSLC SDK, and those
-    # builds ship only on the pre-release ring -- the stable ring lands well
-    # behind it. Without this the SDK fails at run time with
+    # WSLC needs a runtime at least as new as the pinned WSLC SDK. A new SDK can
+    # ship on the pre-release ring before the stable ring, so update from there.
+    # Without this the SDK fails at run time with
     # "WSLC runtime unavailable. Missing components: WslPackage".
     $required = Get-RequiredWslVersion
     $installed = Get-InstalledWslVersion
@@ -753,8 +727,6 @@ Install-WorkloadTooling
 Assert-WorkloadInterpreters
 
 switch ($Backend) {
-    'process-t1' { Initialize-ProcessContainerHost }
-    'process-t3' { Initialize-ProcessContainerHost }
     'microvm' { Initialize-MicroVmHost }
     'wslc' { Initialize-WslcHost }
     default { Write-Host "$Backend has no artifact-only Windows test prerequisites yet." }

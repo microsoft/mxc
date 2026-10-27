@@ -44,20 +44,13 @@ jobs:
         CARGO_TARGET_DIR: c:/t/target
         artifactPrefix: wxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src
-        # Explicit feature set (no --all-features): tier2_bfs must NOT ship
-        # on Win 11 25H2 (bfscfg.exe risks an OS hang).
         ${{ if eq(item.arch, 'x64') }}:
-          # Generate the C# P/Invoke source once. The dotnetsdk feature only
-          # enables csbindgen; it does not alter the native runtime surface.
           cargoFeatures: hyperlight isolation_session microvm wslc dotnetsdk
           dotnetTestSupportTargetDir: c:/t/dotnet-test-support
         ${{ else }}:
           cargoFeatures: hyperlight isolation_session microvm wslc
         signPattern: |
             wxc-exec.exe
-            plm.exe
-            wxc-host-prep.exe
-            winhttp-proxy-shim.exe
             wxc-windows-sandbox-daemon.exe
             wxc-windows-sandbox-guest.exe
             wxc-wslc-daemon.exe
@@ -151,15 +144,6 @@ jobs:
         workingDirectory: $(Build.SourcesDirectory)/src
         condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
-      # plm (Permissive Learning Mode) is functionally Windows-only, but it
-      # builds cross-platform via a no-op stub `fn main()` so it sits in the
-      # workspace default-members. Tests run on x64 only (arm64 emulation in
-      # 1ES windows-11-arm is too slow for the WPR-touching helpers).
-      - script: |
-          cargo test --release --target $(triplet) -p plm --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
-        displayName: Test plm
-        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
-
       - script: |
           set -euo pipefail
           cargo test --locked --release --target $(triplet) -p mxc-sdk --lib mxc_common::
@@ -225,6 +209,18 @@ jobs:
           sourceFolder: $(targetTripleDir)
           contents: wslcsdk.dll
           targetFolder: $(outputDirectory)/$(targetTriple)
+
+      # The NVX release is already signed and hash-pinned; copy it without re-signing.
+      - pwsh: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = Join-Path '$(targetTripleDir)' 'aci-edge-sandboxes'
+          if (-not (Test-Path -LiteralPath (Join-Path $bundle 'SOURCE-MANIFEST.json') -PathType Leaf)) {
+              throw "The Windows x64 build is missing the signed NVX bundle: $bundle"
+          }
+          $artifact = Join-Path '$(outputDirectory)' '$(targetTriple)'
+          Copy-Item -LiteralPath $bundle -Destination $artifact -Recurse
+        displayName: Copy signed NVX runtime bundle
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
       # Copy symbol files into a sibling `symbols/` subdir, NOT alongside the
       # binaries. Workaround for BinSkim BA2007: when the pdb is co-located,

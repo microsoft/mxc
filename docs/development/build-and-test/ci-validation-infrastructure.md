@@ -15,9 +15,9 @@ the individual local test scripts are documented in
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
-  `Build.MacOS.Job.yml`, and for IsolationSession the test bundle from
-  `Package.IsolationSession.TestBundle.Job.yml`, in the same workflow run, so
-  what gets tested is exactly what got built.
+  `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, and WSLC the
+  Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`, in the same
+  workflow run, so what gets tested is exactly what got built.
 - The matrix is **declarative**. `scripts/ci/validation-test-matrix.json` is the
   only file you edit to change *what runs where*;
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
@@ -30,14 +30,17 @@ the individual local test scripts are documented in
 |------|------|
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
-| `.github/workflows/Package.IsolationSession.TestBundle.Job.yml` | `workflow_call`-only. Builds the IsolationSession test bundle natively on x64 and arm64 and uploads it as `isolation-session-test-bundle-<target>`. |
-| `scripts/ci/build-isolation-session-test-bundle.ps1` | Builds and assembles the IsolationSession test bundle, and checks that each payload discovers its tests. |
+| `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
+| `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
+| `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
+| `scripts/ci/stage-nvx-validation-tests.ps1` | Stages the compiled Windows x64 SDK MicroVM tests in the existing Windows artifact and checks required test discovery. |
+| `scripts/ci/Invoke-CratePackage.ps1 -VerifyMicrovmTests` | Extracts the `mxc-sdk` archive, requires its seven MicroVM fixtures, and compiles `nvx_e2e` with `microvm` on Windows x64 without running a VM. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter inventory. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
-| `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
+| `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at the directory CI passes as `-TempDirectory`, so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
 ### Flow
@@ -46,10 +49,10 @@ the individual local test scripts are documented in
 Validation.Tests.Scheduled.yml
   └─ dependency-feed-check
       ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
-      ├─ isolation-session-bundle   →  Package.IsolationSession.TestBundle.Job.yml  (upload bundle)
+      ├─ windows-sdk-bundle         →  Package.WindowsSdk.TestBundle.Job.yml  (upload bundle)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
-                 ├─ windows job (matrix) → download artifact (+ bundle for isolation-session) → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
+                 ├─ windows job (matrix) → download artifact (+ SDK bundle for process/isolation-session/wslc) → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
                  ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_backend_validation_tests.sh
                  └─ macos   job (matrix) → download artifact → prepare-macos-host.sh  → run_backend_validation_tests.sh
 ```
@@ -64,29 +67,32 @@ test jobs only ever `download-artifact`.
 | Job | What it does |
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
-| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
+| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. The x64 artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp and argument generation, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
-| `isolation-session-bundle` | `Package.IsolationSession.TestBundle.Job.yml` — uploads `isolation-session-test-bundle-<target>` for x64 + arm64. |
+| `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |
 
+Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
+
 Build artifacts are kept for 1 day — they exist only to feed these jobs. The
-test jobs need the three builds; a failed bundle fails only the IsolationSession
-jobs, at their bundle download.
+test jobs need the three builds; a failed SDK bundle fails the ProcessContainer,
+IsolationSession, and WSLC jobs at their bundle download.
 
 ### `Validation.Tests.Matrix.Job.yml` — "Create Validation Test Matrix"
 
 | Job | Runner | What it does |
 |-----|--------|--------------|
 | `resolve` | `ubuntu-latest` | Runs the resolver, emits one matrix per OS family plus `has_<family>` flags so an empty family is skipped rather than failing on an empty matrix. |
-| `windows` | `A self-hosted 1ES Pool` | Download artifact (plus the test bundle for `isolation-session`) → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
+| `windows` | `A self-hosted 1ES Pool` | Download artifact (plus the SDK bundle for `process`, `isolation-session`, and `wslc`) → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
 | `linux` | `A self-hosted 1ES Pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `prepare-macos-host.sh <backend id>` → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
-the architecture). Job timeout 180 min; host prep 15 min; the test step 45 min
-(60 on macOS), so a hung backend fails while the log is still useful. Logs are
+the architecture). Job timeout 180 min; host prep 15 min (20 on Windows); the
+test step 45 min on Linux and 60 on Windows and macOS, so a hung backend fails
+while the log is still useful. Logs are
 uploaded either way — see [Log collection](#log-collection).
 
 ## The catalog
@@ -114,15 +120,15 @@ Current platforms:
 
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) | Declared backends (arm64) |
 |-------------|--------|----------|------------|--------------------------|------------|
-| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm | process-t1, isolation-session |
+| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
 | `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | `1es-mxc-e2e-win-prerelease-isolationsesh-arm64` | same as above | same as above |
-| `windows-26h2` | windows | `1es-mxc-windows-26h2-pro-x64` | `1es-mxc-windows-26h2-pro-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1, isolation-session |
-| `windows-prerelease-26h1` | windows | `1es-mxc-windows-prerelease-26h1-x64` | `1es-mxc-windows-prerelease-26h1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm | process-t1, isolation-session |
-| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1, isolation-session |
-| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1, isolation-session |
-| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm | — |
+| `windows-26h2` | windows | `1es-mxc-windows-26h2-pro-x64` | `1es-mxc-windows-26h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-prerelease-26h1` | windows | `1es-mxc-windows-prerelease-26h1-x64` | `1es-mxc-windows-prerelease-26h1-arm64` | process, isolation-session, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
+| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | wslc, windows-sandbox, microvm | — |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc | — |
-| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, lxc | — |
+| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `macos-27` | macos | — | runner `xcode-27` (public preview) | — | seatbelt |
@@ -135,49 +141,36 @@ virtualization on ARM CPUs yet, so only backends that don't require virtualizati
 ### Backend ids
 
 A backend id is passed straight through: the matrix job hands it to the host-prep
-script and then to the dispatcher, which has one `switch`/`case` per id. Ids that
-share a suite each keep their own case so they can diverge later without a
-mapping table — `process-t1` and `process-t3` both run
-`run_processcontainer_all_tests.ps1`, and `process-t3` additionally runs
-`T3-Workloads.ps1`.
+script and then to the dispatcher, which has one `switch`/`case` per id. The
+`process` case requires `wxc-exec --probe` to report an enabled native PSEC
+contract, then runs a filesystem smoke test, public SDK streaming tests, and
+the native network and policy suites against the downloaded artifacts.
+The network and policy suites delegate their focused loopback and enumeration
+checks to standalone native runners. These retain the host controls and
+enforcement assertions; enumeration also checks live request-probe agreement
+and fixture security on supported and unsupported hosts.
 
-The two ids no longer run an identical command. The suite derives every
-expectation from the tier the host actually selects, which makes it
-self-consistent anywhere — and therefore silently useless on a host that was
-supposed to be T1 and fell back to T3, since it would run the T3 expectations
-and report green. The dispatcher now passes `-RequireTier base-container` for
-`process-t1` and `-RequireTier appcontainer-dacl` for `process-t3`; the suite
-resolves the tier once at startup and aborts on a mismatch instead of scoring
-the run. Tier selection follows from the host's Windows build, so without the
-check a pool that quietly fell back to AppContainer would run the suite and
-report green while proving nothing about T1.
+The policy suite also runs the native CLI contract boundary cases, including
+the six network-policy rejection shapes and a launched valid control for each
+minimum/stable/development contract, and issue #694's DOS/NT final-path
+regression. The SDK bundle builder compiles the
+final-path fixture into `inproc/mxc-final-path-probe.exe`; validation passes it
+explicitly and does not compile it on test hosts. Native UI coverage includes
+permissive contained controls and policy permutations for clipboard, input
+injection, system parameters, display-settings validation, and desktop control,
+alongside the existing handle and atom isolation cases. Inconclusive host
+operations are reported as skips, not passing policy assertions.
 
-Both ids also get the same host preparation. A T1 host selects BaseContainer for
-most policies but still exercises the AppContainer fallback tiers, and an
-unprepared host fails the launch outright rather than producing a policy result,
-so `process-t1` runs `prepare-system-drive` / `prepare-null-device` too.
+`tests/scripts/run_processcontainer_workload_tests.ps1` restores the application
+workloads for manual native-PSEC use only. It is not included in this matrix or
+called by the native policy suite.
 
-`process-t3` runs its two suites back to back and reports them together: a
-failure in the primitives suite does not skip the workloads suite, so one job
-run shows both results instead of costing a second run to triage.
-
-The dispatcher passes `T3-Workloads.ps1` its `-GrantDriveRoot` switch. The
-pwsh- and git-driven workloads resolve the whole ancestor chain of their working
-directory at startup, so granting only the scratch leaf leaves them failing
-before they reach the behaviour under test. Granting the drive root covers the
-chain, but at T3 a policy path becomes an inheritable ACE, so it rewrites ACLs
-across the system drive on every run and again on teardown — acceptable on a
-disposable runner, which is why the switch is off by default and only CI opts
-in. Temporary until pwsh 7.7 leaves preview.
-
-The suite's git workloads also restamp the ownership of the repo they build.
-The 1ES agent runs elevated, and an elevated token's *default owner* is
-`BUILTIN\Administrators`, so a fixture created there is Administrators-owned;
-git refuses such a repo ("detected dubious ownership") unless the caller is
-itself an elevated administrator, which a contained process never is. That is a
-property of the agent rather than of containment — the identical fixture is
-user-owned on a dev box — so the suite reowns it to the current user and keeps
-the two environments testing the same thing.
+`isolation-session` and `wslc` run every suite and report each one. For
+`wslc` that is the command-line suite from the build artifact plus the .NET and
+Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites skip unless
+`MXC_ENABLE_WSLC_TESTS=1`, which the dispatcher sets, and a suite that executed
+no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
+tests.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -226,15 +219,45 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite, tier-gated to `base-container`. Includes supported directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface). Host-loopback checks cover both ingress defaults; proxy checks verify IPv4 and IPv6 endpoint isolation without requiring native ingress support. Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Windows 23H2 only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd) on top of the T3 primitives. The directional networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
-| Bubblewrap | ✅ Good | |
+| ProcessContainer | ✅ Good | Requires native PSEC; verifies public SDK streaming, filesystem policy and aliases, CLI contract boundaries, DOS/NT final paths, egress/loopback/proxy rules, the functional UI matrix, HANDLES, and global atoms. Unsupported host capabilities must reject requests. Privilege removal uses a host-token control. Application workload tests remain manual-only. |
+| Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. The Linux build job also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
 | IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
-| MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
+| MicroVM | Experimental | Windows 25H2 x64 nightly runs the prebuilt `mxc-sdk/tests/nvx_e2e.rs` suite, including executor config scenarios, captured JSON execution, and real console interruption during startup and execution with VM/state cleanup assertions. Host-only and extracted-crate compilation checks remain in normal Windows x64 PR builds. |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
+
+### ProcessContainer SDK streaming
+
+Every scheduled `process` job downloads the architecture-matched Windows SDK
+test bundle. The bundle contains native test executables, self-contained .NET
+tests, and the Node SDK with its Node 24.21.0 runtime; validation hosts do not
+compile or restore SDK dependencies.
+
+The dispatcher explicitly runs the ignored Rust bidirectional-stdio test,
+enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET `MxcProcessTests`, and runs the
+Node public `run`, `spawn`, and tool-discovery filesystem integration cases.
+The tool-discovery case uses a private fixture alongside the packaged Node
+tests rather than under the host temporary directory. It uses a fake
+`pwsh.exe`, applies the discovered policy through public `run`, and checks that
+tool files are readable while a sibling private sentinel remains denied. It
+also checks host readability and denial without a grant. The .NET suite checks stdin,
+stdout, stderr, large output, cancellation, kill, and timeout behavior.
+Required test names and methods must pass; empty selections and skipped
+required cases fail the job even when the runner exits successfully.
+
+### IsolationSession Rust test concurrency
+
+Tests in `src/mxc-sdk/tests/isolation_session.rs` that create sessions use
+`#[serial_test::serial(isolation_session)]` to prevent independent tests from
+overlapping, including under ordinary `cargo test`. Apply the same attribute to
+new tests that create sessions. Policy-only tests remain parallel.
+
+The lock is local to the test process. Cargo and the validation bundle run test
+executables sequentially. The `concurrent_one_shot_runs_stay_isolated` test still
+checks concurrent sessions within its own test; the lock keeps other tests out
+while it runs.
 
 ## Host preparation
 
@@ -244,13 +267,13 @@ every entry.
 
 `prepare-windows-host.ps1`:
 
-- `process-t1`, `process-t3` — run `wxc-host-prep.exe prepare-system-drive` and
-  `prepare-null-device --no-sacl`. T1 needs them too: the suite deliberately
-  drives the AppContainer fallback tiers, and an unprepared host fails those
-  launches with `WIN32_ERROR(5)` instead of reporting a policy result.
-- `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
-  exclusion for the binary directory, and requires the Windows Hypervisor
-  Platform feature *and* a running hypervisor.
+- `process` — no host mutation; the test requires the native probe to report
+  PSEC.
+- `microvm` — asserts the SDK test executable and signed NVX runtime files are
+  in the artifact, adds a Defender exclusion for the binary directory, and
+  requires the Windows Hypervisor Platform feature *and* a running hypervisor.
+  The dispatcher runs the prebuilt SDK tests without Cargo and fails on missing
+  VM completion markers, empty suites, skipped tests, or filtered tests.
 - `wslc` — asserts `wslcsdk.dll` shipped, requires the WSL and
   VirtualMachinePlatform optional features to be baked into the image, then
   installs/updates the WSL runtime (including the pre-release ring) up to the
@@ -270,8 +293,62 @@ one: `Repair-Winget` re-registers the App Installer package when `winget` is on
 
 Every run also opens with the host's Windows caption, release, build, and
 edition. The matrix schedules by pool name, so that banner is the only evidence
-in the log that a pool really booted the release it advertises — and which tier
-a process-container job selects follows from that build.
+in the log that a pool really booted the release it advertises. ProcessContainer
+jobs require native PSEC and run `run_base_container_network_tests.ps1` after
+the checked filesystem write/read smoke. Network cases verify omitted and explicit host-loopback
+deny, allow with either ingress default, and successful proxy access paired with
+denied direct access to other IPv4/IPv6 loopback endpoints. It retains stdout,
+stderr, request JSON, and diagnostic logs under the job's temporary directory.
+`run_processcontainer_policy_tests.ps1` also runs allowed and forbidden filesystem
+operations, canonical/extended/available-8.3 aliases, unsupported-policy rejection
+before workload execution, Win32k on/off controls, bidirectional atom isolation
+with a shared-namespace control, and HANDLES access using the published UI probe
+with an uncontained host-window control. Forbidden token privileges must be
+absent, not merely disabled; that case reports an explicit skip if the host
+token has none of the tested privileges. Denied paths, native enumeration, and
+denial capture verify enforcement when advertised and fail-closed rejection
+otherwise. Deterministic Rust tests also force each unsupported-capability
+decision through selection, dispatch, and probing under the shared test lock.
+
+The two native suites use Windows PowerShell 5.1 from
+`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` for their contained
+workloads, always with `-NoProfile -NonInteractive -ExecutionPolicy Bypass`.
+They share `tests/scripts/lib/processcontainer_policy_probe.ps1`; Python and
+Node are not prerequisites for either suite. The timeout grandchild is a
+uniquely named copy of Windows PowerShell with its matching configuration.
+Global-atom calls use the shipped `wxc-ui-probe` rather than compiling C# inside
+the container. Win32k-disabled cases launch that native probe directly, without
+a shell; `WIN32K --win32k-query=true` reads the process mitigation policy instead
+of running the potentially blocking GUI-message probe.
+
+The native policy suite snapshots fixture owner/DACL SDDL around every
+container run, including rejected requests. It also covers overlapping path
+grants with a deny-free sibling control. The main filesystem and
+compatibility-consent workloads pause at a ready/release handshake so their
+SDDL can also be checked while they are alive. It covers
+learning-mode enforcement, explicit capture paths and warnings, multiple
+capabilities, environment/cwd/exit propagation, and timeout cleanup of a
+ready-signalled grandchild. A copy of `cmd.exe` named `pwsh.exe` checks that an
+intentional nonzero workload exit preserves its stderr without recommending
+drive-root read grants. UI checks cover all four isolation values and use
+uncontained positive controls for clipboard, desktop creation, and a no-op
+mouse-speed setter. Clipboard tests run only for text-only clipboards; non-text
+formats or an unavailable clipboard produce an explicit skip before any change.
+Text is saved with `Get-Clipboard -Raw`, restored (or cleared when originally
+empty) in `finally`, and read back for equality. Display-mode
+changes, input injection, logoff, and IME behavioral controls remain deferred
+because they lack safe, reliable runner controls.
+
+Network cases additionally cover all three no-network spellings, the
+deny/allow and allow/allow capability rows, proxy environment variables and
+external bypass prevention, UDP/53 allow rules, and ICMP denial. External host
+controls precede negative cases. Paired direct UDP/53 queries check DNS packet
+enforcement without relying on the Windows resolver cache; they first require
+a successful query to the same resolver from the host. Curl name resolution
+without a UDP/53 rule is not used as a denial oracle or diagnostic gate because
+host DNS Client behavior and address rotation cannot be attributed to the
+contained process's UDP policy. The successful curl case with TCP/443 and
+UDP/53 rules remains required.
 
 `prepare-linux-host.sh`:
 
@@ -284,7 +361,9 @@ a process-container job selects follows from that build.
   LXC after RHEL 7 and ships no replacement. Without the zone assignment the
   default zone rejects the container's IPv4 DHCP, and a container holding only
   an IPv6 address fails every network test.
-- `microvm` — asserts the NanVix payload exists.
+
+The historical Linux `microvm` preparation branch is not scheduled. The
+Phase 1 NVX runtime supports only Windows x64.
 
 Every install above goes through two shared helpers rather than its own
 package-manager chain: `resolve_package_manager` picks the first of `apt-get`,
@@ -336,8 +415,7 @@ since Python publishes no LTS line of its own.
 
 The list is **suite-agnostic by design** and is checked for every backend, not
 only the ones whose suites need it today: it describes what a validation *host*
-provides, not what any one suite consumes. `T3-Workloads.ps1` is simply the
-first caller, and wiring up the next one needs no change here.
+provides, not what any one suite consumes.
 
 Each script carries its own copy — `Assert-WorkloadInterpreters` in
 `prepare-windows-host.ps1`, `assert_workload_interpreters` in the two `.sh`
@@ -383,20 +461,29 @@ Every job uploads its logs whether it passed or failed, as
 
 The catch is that `$env:TEMP` is not `$RUNNER_TEMP`. The Windows suites write their
 scratch trees, transcripts, and results files under the user's temp directory
-(`C:\Users\<user>\AppData\Local\Temp`), but `upload-artifact` reads
+(`C:\Users\<user>\AppData\Local\Temp`), but `upload-artifact` reads from
 `${{ runner.temp }}` (`C:\a\_work\_temp`). Anything left in the former is simply
 never collected, which is why the artifact used to arrive nearly empty.
 
-So `run_backend_validation_tests.ps1` points `TEMP` and `TMP` at `$RUNNER_TEMP` before
-it dispatches. Parameter defaults, `[System.IO.Path]::GetTempPath()`, and child
-processes all read those variables, so everything temp-rooted lands in the
-upload directory without CI having to know a single filename.
+So the Windows run step passes `-TempDirectory $RUNNER_TEMP/mxc-test-temp` to
+`run_backend_validation_tests.ps1`, which points `TEMP` and `TMP` there before it
+dispatches. Parameter defaults, `[System.IO.Path]::GetTempPath()`, and child
+processes all read those variables, so everything temp-rooted lands in the upload
+directory without CI having to know a single filename. The upload takes that folder
+and `mxc-ci.log`, not all of `$RUNNER_TEMP`, which the runner and the job's actions
+also use.
 
 Linux and macOS need none of this — those suites log to stdout, and the run
 step tees that into `$RUNNER_TEMP/mxc-ci.log`.
 
-The IsolationSession test bundle downloads under `artifacts/bin`, outside
+The Windows SDK test bundle downloads under `artifacts/bin`, outside
 `$RUNNER_TEMP`, so it is not uploaded again with the logs.
+
+MicroVM validation writes `microvm-nvx.log` and `microvm-perf-results.json`
+under the redirected temporary directory, so the normal Windows log upload
+collects both. The signed NVX bundle stays under `artifacts/bin` and is not
+uploaded again. The former standalone `microvm-e2e.yml` workflow is retired;
+real VM execution is scheduled rather than run on each PR.
 
 ## Runbook
 
@@ -446,10 +533,8 @@ test runner is allocated.
    enables the backend's cargo feature.
 5. **Trigger:** add the OS/backend pair to a plan.
 
-If two ids should run the same suite, give each its own `case` and have both call
-the shared function — that is how `process-t1` and `process-t3` are wired. Keep
-that split in the dispatcher, not in the workflow YAML, so a case can start
-passing a distinguishing argument later without touching the matrix.
+If two ids should run the same suite, give each its own `case` and have both
+call a shared function so they can diverge later without workflow changes.
 
 ### Add a new OS image
 
@@ -547,12 +632,12 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
-  isolation-session-bundle:
+  windows-sdk-bundle:
     needs: dependency-feed-check
-    uses: ./.github/workflows/Package.IsolationSession.TestBundle.Job.yml
+    uses: ./.github/workflows/Package.WindowsSdk.TestBundle.Job.yml
 
   test:
-    needs: [windows, linux, macos, isolation-session-bundle]
+    needs: [windows, linux, macos, windows-sdk-bundle]
     if: >-
       ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success'
       && needs.macos.result == 'success' }}

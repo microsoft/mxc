@@ -39,6 +39,19 @@ internal interface IContainerRunner
         SpawnOptions? options = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Spawn a complete request with live standard streams and a writable stdin.</summary>
+    IMxcProcess SpawnWithStdin(ContainerRequest request, SpawnOptions? options = null) =>
+        throw new NotSupportedException(
+            "This container runner does not support forwarding stdin.");
+
+    /// <summary>Asynchronous form of <see cref="SpawnWithStdin"/>.</summary>
+    Task<IMxcProcess> SpawnWithStdinAsync(
+        ContainerRequest request,
+        SpawnOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException(
+            "This container runner does not support forwarding stdin.");
+
     /// <summary>Spawn a complete request attached to a caller-controlled PTY.</summary>
     MxcPtyProcess SpawnWithPty(
         ContainerRequest request,
@@ -87,6 +100,18 @@ internal sealed class MxcContainerRunner : IContainerRunner
         await MxcContainer.SpawnAsync(request, options, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc/>
+    public IMxcProcess SpawnWithStdin(ContainerRequest request, SpawnOptions? options = null) =>
+        MxcContainer.SpawnWithStdin(request, options);
+
+    /// <inheritdoc/>
+    public async Task<IMxcProcess> SpawnWithStdinAsync(
+        ContainerRequest request,
+        SpawnOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        await MxcContainer.SpawnWithStdinAsync(request, options, cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <inheritdoc/>
     public MxcPtyProcess SpawnWithPty(
         ContainerRequest request,
         SpawnWithPtyOptions? options = null) =>
@@ -129,6 +154,23 @@ internal interface IContainerLifecycle
         SpawnInContainerWithPtyOptions? options = null) =>
         throw new NotSupportedException(
             "This lifecycle implementation does not support PTY processes.");
+
+    /// <summary>Spawn an execution request with live standard streams and a writable stdin.</summary>
+    IMxcProcess SpawnInContainerWithStdin(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null) =>
+        throw new NotSupportedException(
+            "This lifecycle implementation does not support forwarding stdin.");
+
+    /// <summary>Asynchronous form of <see cref="SpawnInContainerWithStdin"/>.</summary>
+    Task<IMxcProcess> SpawnInContainerWithStdinAsync(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException(
+            "This lifecycle implementation does not support forwarding stdin.");
 
     /// <summary>Validate an execution request without starting a process.</summary>
     ValidationResult ValidateProcess(
@@ -213,6 +255,22 @@ internal sealed class MxcContainerLifecycle : IContainerLifecycle
         ExecutionRequest request,
         SpawnInContainerWithPtyOptions? options = null) =>
         MxcLifecycle.SpawnInContainerWithPty(id, request, options);
+
+    /// <inheritdoc/>
+    public IMxcProcess SpawnInContainerWithStdin(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null) =>
+        MxcLifecycle.SpawnInContainerWithStdin(id, request, options);
+
+    /// <inheritdoc/>
+    public async Task<IMxcProcess> SpawnInContainerWithStdinAsync(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        await MxcLifecycle.SpawnInContainerWithStdinAsync(id, request, options, cancellationToken)
+            .ConfigureAwait(false);
 
     /// <inheritdoc/>
     public ValidationResult ValidateProcess(

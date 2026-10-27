@@ -122,6 +122,9 @@ identity-less host proxies omit `allowedProxyPeer` and require
 deployment: it opens both host-loopback directions without restricting access
 to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
 
+For MicroVM networking and proxy support, see the
+[NVX backend capability table](backends/nvx/nvx.md#supported-operations-and-policy).
+
 ```json
 {
     "version": "0.9.0-alpha",
@@ -188,6 +191,8 @@ that can be executed independently.
     "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Optional externally assigned container ID.
                                            //  Omit it to use backend-defined internal naming.
+                                           //  Must not contain an embedded NUL (`\u0000`);
+                                           //  the executor rejects it rather than truncating.
     "containment": "processcontainer",     // Backend (see table below)
 
     "lifecycle": {
@@ -210,10 +215,6 @@ that can be executed independently.
         "readwritePaths": ["C:\\temp"],     // Read-write access
         "readonlyPaths": ["C:\\data"],      // Read-only access
         "deniedPaths": ["C:\\Windows"]      // Blocked paths
-    },
-
-    "fallback": {
-        "allowDaclMutation": true          // Allow Tier 3 DACL fallback (default true)
     },
 
     "network": {
@@ -241,7 +242,7 @@ that can be executed independently.
     },
 
     "processContainer": {                  // Process-based container-specific
-        "leastPrivilege": false,
+        "leastPrivilege": false,           // true is rejected: PSEC has no LPAC token option
         "capabilities": ["internetClient"],
         "filesystem": {
             "enumeratePaths": ["C:\\tools"] // Query/list entries without reading file contents
@@ -258,18 +259,13 @@ that can be executed independently.
                                            // path in output metadata. Defaults to false.
                                            // Retention requires a terminal wait; abandoning the
                                            // process handle deletes the internal trace.
-                                           // Supported by native PSEC and guarded-WPR capture.
-                                           // Guarded WPR retains only a workload-process-filtered
-                                           // ETL, never its host-wide source trace.
+                                           // Requires compatible native PSEC capture support.
         }
                                            // Omit outputPath for a managed JSON output file.
                                            // Native PSEC capture supports runtimeConfig.networkProxy
                                            // without adding the direct-egress capture capability.
-                                           // leastPrivilege and other proxy policies use a compatible
-                                           // AppContainer tier with guarded WPR. Hosts without compatible
-                                           // native capture exports also use that fallback.
-                                           // If guarded-WPR prerequisites are unavailable, the request
-                                           // fails before MXC creates the sandbox.
+                                           // Missing native capture exports or required PSEC
+                                           // capabilities fail before MXC creates the container.
     },
 
     "lxc": {                               // LXC-specific
@@ -308,6 +304,12 @@ that can be executed independently.
 }
 ```
 
+> **Compatibility settings.** Create-and-run contracts `0.9.0-alpha`, `1.0.0`,
+> and `1.1.0-alpha` accept `fallback.allowDaclMutation` as an optional boolean
+> for compatibility and ignore it. It does not enable host-DACL mutation or
+> change native enforcement. Removing this accepted field from the 1.x line
+> requires a new major contract.
+
 > **Lifecycle operation fields.** The `phase` top-level field selects a
 > container lifecycle operation: JSON that includes it is parsed as input for
 > that operation (see below), *not* the create-and-run configuration above. The `sandboxId`
@@ -331,11 +333,12 @@ use:
 
 | Backend | Default when `process.cwd` is omitted |
 |---------|----------------------------------------|
-| Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
+| Windows ProcessContainer (PSEC) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
-| MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
+| MicroVM | The guest default; see [NVX working-directory behaviour](backends/nvx/nvx.md#working-directory-and-environment). |
+| Hyperlight | Not applicable — this backend rejects a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
@@ -372,10 +375,17 @@ from the agent user's default environment and cannot replace or empty it, so
 `process.env` without `inheritDefaultEnv` — including `[]` — is rejected before
 launch.
 
+Native Windows PSEC can replace `LOCALAPPDATA` with a container-profile path
+after MXC supplies the environment block. Supplying the required entry does
+not guarantee that the contained process observes the host profile path.
+
 What the default block contains is backend-specific; see the backend's guide.
 On the WSL Container backend it is the container image's own `ENV`, which MXC
 neither authors nor enumerates — see
 [`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md#environment).
+
+For MicroVM environment support and limits, see
+[NVX working directory and environment](backends/nvx/nvx.md#working-directory-and-environment).
 
 ### Filesystem Policy
 
@@ -387,25 +397,33 @@ The `filesystem` section defines path access policy shared across backends:
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
 
+Backend support for filesystem policy is described in each backend guide; see
+the [NVX capability table](backends/nvx/nvx.md#supported-operations-and-policy)
+for MicroVM. Backend-specific sections, including
+`processContainer.filesystem.enumeratePaths`, can only accompany their matching
+`containment` selection.
+
 The ProcessContainer-only `processContainer.filesystem` section contains:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. It cannot be combined with `processContainer.leastPrivilege`; that combination fails rather than falling back. |
+| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. |
 
-On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
-containment tier selected at runtime:
+On Windows, `deniedPaths` is enforced natively when PSEC advertises
+`PSE_SUPPORT_FS_DENY`; on a host without it, a request with `deniedPaths` is
+rejected before execution.
 
-- **BaseContainer (Tier 1):** enforced natively by the OS when PSEC advertises
-  `PSE_SUPPORT_FS_DENY`. No host filesystem changes are made.
-- **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
-  the run and removed on exit. This path is gated by `allowDaclMutation`, requires
-  `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
-  Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
-  runs sharing the same `containerId` can revoke each other's ACEs — use distinct
-  `containerId` values for parallel runs. `containerId` must not contain an embedded
-  NUL. JSON can legally carry `\u0000`, and a truncating UTF-16 conversion would
-  otherwise turn visually different ids into the same AppContainer SID.
+#### Overlapping paths for Windows BaseContainer
+
+When paths overlap across `readwritePaths` and `deniedPaths`:
+
+- The same directory in both `readwritePaths` and `deniedPaths` is denied.
+- An explicitly granted readwrite child of a denied parent remains readable
+  and writable. A sibling without that child grant remains denied, even when
+  the denied parent is beneath a broader readwrite grant.
+
+Denying a parent does not cancel a more specific child grant. To block the
+child, remove its grant or add the child itself to `deniedPaths`.
 
 #### Path grants and root directories for Windows BaseContainer
 
@@ -457,14 +475,6 @@ fields `isolation`, `desktopSystemControl`, `systemSettings`, and `ime`.
 `processContainer.filesystem` carries `enumeratePaths`. Both sub-blocks are
 valid only when `containment` is `processcontainer`.
 
-### Fallback Policy
-
-The `fallback` section gates the runner's host-impacting fallbacks. Each flag is an explicit operator consent for a specific mechanism the runner may otherwise pick when the preferred primitive is unavailable. Defaults preserve the pre-fallback-section behavior (all permitted).
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `allowDaclMutation` | boolean | `true` | When the BaseContainer feature and the OS-side filesystem broker helper are both unavailable, allow MXC to apply DACL ACEs on policy paths (Tier 3 fallback). **⚠️ This modifies host filesystem security descriptors**; original DACLs are restored on exit. Set to `false` to refuse this fallback; the run will then fail on machines that require Tier 3. |
-
 ### Containment Backends
 
 The `containment` field accepts both **abstract intent values** (which the
@@ -478,17 +488,17 @@ force a particular backend.
 |-------|------------|
 | `"process"` | `processcontainer` on Windows, `bubblewrap` on Linux, `seatbelt` on macOS |
 | `"vm"` | Full hardware-virtualised VM isolation. Resolves to `windows_sandbox` on Windows. |
-| `"microvm"` | MicroVM on Windows (NanVix via the Windows Hypervisor Platform). Experimental. |
+| `"microvm"` | MicroVM on Windows x64 (NVX via the Windows Hypervisor Platform). Experimental. |
 
 #### Concrete backends
 
 | Value | Description |
 |-------|-------------|
-| `"processcontainer"` | (Default) Windows process-level isolation. Resolves to AppContainer (legacy) or BaseContainer (newer OS sandbox API) at run time depending on host capabilities and the `--experimental` flag. |
+| `"processcontainer"` | Windows process-level isolation through native PSEC (BaseContainer). Requests the host cannot fully enforce are rejected before container creation; schema version and `--experimental` do not enable an AppContainer fallback. |
 | `"windows_sandbox"` | Windows Sandbox VM isolation. Supports create-and-run execution with a fresh disposable VM per execution, and container lifecycle operations backed by a long-lived per-container daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
-| `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
+| `"microvm"` | MicroVM isolation via NVX on Windows x64 |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session: create-and-run execution uses a freshly provisioned isolated user account in its own OS-managed session. Container lifecycle operations can retain the session between executions. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |

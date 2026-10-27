@@ -1,0 +1,10 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/mxc/main/schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "_comment": "Timeout test for the signed NVX agent workload guest.",
+    "process": {
+        "commandLine": "sleep 120; printf 'should not reach here\\n'",
+        "timeout": 5000
+    },
+    "containment": "microvm"
+}

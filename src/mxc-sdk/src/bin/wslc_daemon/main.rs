@@ -24,6 +24,8 @@
 mod control_server;
 #[cfg(windows)]
 mod session_manager;
+#[cfg(windows)]
+mod stdin_writer;
 
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

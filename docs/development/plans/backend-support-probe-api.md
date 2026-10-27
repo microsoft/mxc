@@ -23,10 +23,8 @@ to choose a backend without attempting an execution.
 pub struct AvailableBackend {
     /// Canonical wire name, e.g. "processcontainer", "seatbelt".
     pub backend: String,
-    /// The highest-isolation tier the host supports for this backend, if the
-    /// backend has a tier ladder. `None` for backends with no tiers. The string
-    /// values are the canonical `IsolationTier::as_str()` names (not free-form),
-    /// and the field is omitted from JSON when `None`.
+    /// Native ProcessContainer reports "base-container". Other backends use
+    /// `None`, which is omitted from JSON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
     /// Optional backend features usable on this host. Omitted when empty.
@@ -63,15 +61,14 @@ This keeps §2's "absence means unusable" rule intact while still letting a
 caller pre-flight a policy that depends on an optional capability.
 
 Example results:
-> **"Stock Windows"** here means a clean Windows install with only the default
-> optional features enabled (no BaseContainer, Windows Sandbox, etc.), so the
-> process-container backend falls to its `appcontainer-dacl` floor. See
+> See
 > [`docs/backends/process-container/os-version-support.md`](../../backends/process-container/os-version-support.md)
-> for the per-release policy-support matrix that determines the reachable tier.
+> for which Windows releases provide native PSEC. Runtime capability probing
+> determines availability and request-specific policy support.
 
 | Host | Result |
 | --- | --- |
-| Stock Windows | `[{ backend: "processcontainer", tier: Some("appcontainer-dacl") }]` |
+| Windows without PSEC | `[]` |
 | Windows w/ BaseContainer | `[{ backend: "processcontainer", tier: Some("base-container") }]` |
 | macOS | `[{ backend: "seatbelt", tier: None }]` |
 | Linux w/ bwrap + lxc | `[{ backend: "bubblewrap", tier: None }, { backend: "lxc", tier: None }]` |
@@ -85,6 +82,13 @@ matrix of this machine?".
 - A missing capability is unavailable or could not be detected.
 - For per-backend **diagnostics and reasons**, the tool is `wxc-exec --probe`
 - Each capability is **detected once, in Rust**, and the TypeScript SDK projects that result rather than re-checking.
+
+Without a config, `wxc-exec --probe` returns host diagnostics with exit code 0
+even when PSEC is unavailable, so callers can inspect independent backend facts.
+With a config, it also checks native ProcessContainer policy compatibility and
+returns exit code 1 when the request cannot be served, while retaining the JSON
+diagnostics.
+
 ## 3. Detection & isolation tiers
 
 ### 3.1 Detection methods used today (and their risks)
@@ -103,17 +107,10 @@ ones.
 | `isolation_session` | `IsoSessionOps` activates and reports a `LocalAgentUser` feature level above zero. Queries API-class registration rather than a build number (#761); a `CLASS_E_CLASSNOTAVAILABLE` / `REGDB_E_CLASSNOTREG` activation failure means unavailable. | Rust | |
 | `hyperlight` | Has a hypervisor check on each supported host — `is_whp_available()` on Windows, `is_kvm_available()` on Linux — neither of which boots a VM. | Rust | |
 
-### 3.2 Isolation tiers (process-container only)
+### 3.2 Windows ProcessContainer
 
-Only the Windows process-container backend has a within-backend tier ladder. The
-three tiers, and the **policy-free** checks that decide whether each is
-reachable, already exist in `process_container_common`:
-
-| Tier | Reachable when | Detector |
-| --- | --- | --- |
-| `base-container` | BaseContainer API is **usable** (not merely symbol-present) | `fallback_detector::is_base_container_usable()` (the cached wrapper) |
-| `appcontainer-bfs` | built with the `tier2_bfs` feature | `cfg!(feature = "tier2_bfs")` |
-| `appcontainer-dacl` | always (universal Windows floor) | — |
+The backend is returned only when PSEC is usable. There is no within-backend
+fallback ladder and no universal Windows floor.
 
 
 ## 4. The probe gap today
@@ -133,25 +130,26 @@ result rather than compute its own.
 | Step | What | Why it gives parity |
 | --- | --- | --- |
 | 1. Consolidate detectors in Rust — **landed** | The `windows_sandbox` and `lxc` checks live in Rust<br>(`windows_sandbox_lifecycle::availability`, `lxc_common::availability`), so `available_backends()` covers every backend with a detector. | Each backend has exactly one detector. |
-| 2. TypeScript stops probing itself | `getPlatformSupport()` reads the native backend-availability result instead of running its own `dism`/`lxc-ls`.<br>The transport must be **side-effect-free**: `wxc-exec --probe` runs *after* `recover_orphaned_state()` (which can restore/prune DACL state on the host), so it cannot be extended unchanged without violating the read-only contract.<br>Instead, expose backend availability via a dedicated mode handled **before** DACL recovery (e.g. `wxc-exec --available-backends`), or directly through `mxc_ffi`. | TypeScript becomes a pure projection of the Rust result, without triggering host mutation. |
-| 3. Names flow from serde | Backend names (`Containment`) and tier strings (`IsolationTier::as_str()`) are already Rust-serialized;<br>TypeScript consumes them as-is instead of hand-re-encoding. | Removes the wire-name drift class structurally. |
+| 2. TypeScript stops probing itself | `getPlatformSupport()` reads the native backend-availability result instead of running its own `dism`/`lxc-ls`.<br>The transport must remain **side-effect-free**. Expose the backend-availability array through a dedicated mode (e.g. `wxc-exec --available-backends`) or directly through `mxc_ffi`; `wxc-exec --probe` reports a ProcessContainer-specific diagnostics object instead. | TypeScript becomes a pure projection of the Rust result, without triggering host mutation. |
+| 3. Names flow from serde | Backend names (`Containment`) and the native ProcessContainer tier (`base-container`) are Rust-serialized;<br>TypeScript consumes them as-is instead of hand-re-encoding. | Removes the wire-name drift class structurally. |
 
 See §7.9 for why the canonical probe stays in Rust rather than moving into the TypeScript layer.
 
 ## 5. Testing
 - Every returned `backend` is a valid
   `mxc_common::models::ContainmentBackend::wire_name()` value.
-- On Windows the result contains `processcontainer` with a `tier` of one of the three known strings;
-`appcontainer-dacl` is the floor when nothing higher is reachable.
+- On Windows, `processcontainer` appears only when native PSEC is usable,
+  with `tier: "base-container"`.
 - On non-Windows, `processcontainer` never appears.
 - On macOS, `seatbelt` appears with `tier: None` when `sandbox_init` resolves.
 - A serde snapshot pins the camelCase JSON shape
 (`{"backend":"…","tier":"…"}`) and verifies that `tier` is **omitted** when `None`
 (`#[serde(skip_serializing_if = "Option::is_none")]`), never serialized as `null`.
-- Every non-`None` `tier` is one of the canonical `IsolationTier::as_str()` strings,
-guarding against drift between this API and the tier ladder. The canonical list is derived from
-`IsolationTier::ALL`, and a further test asserts every tier is reachable from `select_tier`, so a
-new tier cannot land without probe coverage.
+- Every non-`None` `tier` is `base-container`, checked against `CANONICAL_TIERS`
+in the probe tests. Tests exercise PSEC availability both ways: ProcessContainer
+is absent when PSEC is unavailable, and each optional Windows backend is reported
+independently of PSEC availability. The C# parity gate checks the same canonical
+list while preserving published V1 parser cases for older native tier results.
 - On Linux, `bubblewrap` and `lxc` each appear when their check passes (`bwrap --version` / `lxc-ls --version`).
 - On Linux, `bubblewrap` carries the `proxyEnforcement` capability when the private-namespace
 dependencies are present, and a `warnings` entry naming the missing dependency when they are not;
@@ -179,12 +177,12 @@ and are registered as `ProbeCoverage::Detected`.
 1. `microvm` - hypervisor-presence probe. `hyperlight` has one per host
 (`is_whp_available()` / `is_kvm_available()`); `microvm`
 is registered as `ProbeCoverage::NotDetected` until its detector lands.
-2. TypeScript projection - make `getPlatformSupport()` read the native backend availability via a
-side-effect-free transport (e.g. a new `wxc-exec --available-backends` mode handled **before**
-`recover_orphaned_state()`, or `mxc_ffi`) instead of running its own `dism`/`lxc-ls`, so the two
-layers can't drift (§4.2, step 2). Do **not** extend the existing `--probe` flag: it runs after
-`recover_orphaned_state()`, which can restore/prune DACL state and would violate the read-only
-contract of this API.
+2. TypeScript projection - make `getPlatformSupport()` read the native backend
+availability via a side-effect-free transport (e.g. a new
+`wxc-exec --available-backends` mode or `mxc_ffi`) instead of running its own
+`dism`/`lxc-ls`, so the two layers can't drift (§4.2, step 2). Keep the
+backend-availability array separate from the ProcessContainer-specific diagnostics
+object returned by `--probe`.
 
    **Partially landed (Linux).** `lxc-exec --available-backends` serializes
    `available_backends()` and exits, handled immediately after argument parsing so it stays
@@ -212,29 +210,27 @@ a separate function.
 
 ### 7.2 Single `tier: Option<String>`
 
-The fallback detector selects exactly **one** tier, so a per-tier availability
-vector is overkill for a menu. 
+ProcessContainer reports `base-container` when native PSEC is available; other
+backends omit the field. A per-tier availability vector is unnecessary because
+there is no ProcessContainer fallback ladder.
 
-### 7.3 Effective tier is a ceiling, not a guarantee
+### 7.3 Effective tier
 
-The named tier is  the strongest isolation the host is capable
-of. A real request can still end up **lower**: some policy options force a
-weaker tier (e.g. `deniedPaths` on a host without `PSE_SUPPORT_FS_DENY`
-support, or `preferBaseContainer=false`). 
+ProcessContainer reports `base-container` only when the native PSEC contract is
+usable. Request-specific policy validation still occurs before launch and may
+reject a policy that requires unavailable PSEC capabilities.
 
-### 7.4 Which tier gets named is based on precedence, not policy
+### 7.4 Availability is not policy compatibility
 
-A host can support several tiers at once. Rather than run your request to see
-which one it would pick, the API just names the **strongest** tier the host can
-do, by a fixed ranking. Because it never takes a request, it performs none of the
-policy-dependent host permission checks that `fallback_detector::detect()` does
-(and none of the later `DaclManager` ACE writes that real dispatch performs). It
-is purely a reachability walk over the tier ladder.
+The availability probe does not promise that every request is representable.
+Dispatch validates the complete policy and fails closed when a required PSEC
+capability is unavailable.
 
-### 7.5 The `base-container` tier uses `is_base_container_usable()`
+### 7.5 The `base-container` tier uses `is_base_container_api_present()`
 
-This loads `processmodel.dll` and calls an OS capability/create API but it
-never launches a process or VM to check.
+This calls `IsApiSetImplemented` for the process security-environment API set.
+It does not load `processmodel.dll`, create a security environment, or launch a
+process or VM. Request-specific PSEC capabilities are checked separately.
 
 ### 7.6 `process` and `vm` are deliberately excluded
 
@@ -242,11 +238,9 @@ They are *abstract intents*, not backends with their own runner.
 
 ### 7.7 `base-container` detection caching
 
-`fallback_detector::is_base_container_usable()` caches its result in a
-`OnceLock`. So "fresh detection on every call" is not fully achievable for the
-`base-container` tier, and a cached `true` can go **stale** if BaseContainer
-enablement changes mid-process. Both are accepted and documented rather than
-worked around.
+`BaseContainerRunner::is_base_container_api_present()` caches API-set presence in
+a `OnceLock`. Repeated probes reuse that process-local result; they do not create
+security environments to revalidate availability.
 
 ### 7.8 Ordering
 
@@ -263,9 +257,9 @@ is Rust-only either way.
 | Aspect | TS layer | Rust core |
 | --- | --- | --- |
 | Cheap CLI/feature checks (`lxc-ls`, `bwrap`, `dism`, build number) | Already present; ergonomic `execSync` | Equally cheap as `platform_support()` already<br>shells `bwrap --version` |
-| Windows isolation **tier** | Cannot compute it:<br>`populateIsolationFromProbe()` shells out to `wxc-exec --probe`<br>and parses its JSON `tier` | Native — `is_base_container_usable()` loads<br>`processmodel.dll` and calls the OS API directly |
+| Windows ProcessContainer availability | Reads the native `wxc-exec --probe` result and its optional `tier` | Native — `is_base_container_api_present()` checks the PSEC API set |
 | Non-Node consumers (`mxc-sdk`, `mxc_ffi` → C# SDK, executor/CLI) | Must shell out to Node or duplicate the logic | First-class; call the API directly |
-| Source of truth for wire names / tier strings | Hand-re-encoded from Rust → drift | Owns `Containment` and `IsolationTier::as_str()` |
+| Source of truth for backend names / tier strings | Hand-re-encoded from Rust → drift | Owns `Containment` serialization and the native `base-container` tier |
 | Existing drift | Widens it since TS reports `[lxc, bubblewrap]`, Rust reports `[bubblewrap]` | A single probe eliminates the disagreement |
 | Stated architectural goal | Reverses the `platform.rs` goal of *"stop depending on the*<br>*TypeScript SDK for platform discovery"* | Advances it |
 

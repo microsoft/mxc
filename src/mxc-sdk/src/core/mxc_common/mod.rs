@@ -51,16 +51,13 @@ pub(crate) mod wire;
 // Adapters that map specific JSON contracts into the internal config input.
 pub(crate) mod config_contract_adapters;
 
-// Thin Windows-only helpers that are not backend-specific. Backend
-// runners live in dedicated crates under `backends/`; only utilities
-// shared across host tools (e.g. wxc_host_prep, mxc_diagnostic_console)
-// and ≥1 backend stay here.
+// Thin Windows-only helpers that are not backend-specific.
 #[cfg(target_os = "windows")]
 pub mod api_set;
 #[cfg(target_os = "windows")]
 pub mod diagnostic;
 #[cfg(target_os = "windows")]
-pub mod filesystem_dacl;
+pub mod filesystem_security;
 #[cfg(target_os = "windows")]
 pub mod process_util;
 #[cfg(target_os = "windows")]
@@ -72,9 +69,8 @@ pub mod system_dir;
 #[cfg(unix)]
 pub mod interruptible_reader;
 
-// Linux-only: used by the backends that realise filesystem policy as bind
-// mounts, which must resolve a destination before mounting over it.
-#[cfg(target_os = "linux")]
+// Host-path resolution shared by Linux backends and Seatbelt.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod filesystem_symlink;
 
 /// Crate-wide lock and guards for tests that mutate process environment.

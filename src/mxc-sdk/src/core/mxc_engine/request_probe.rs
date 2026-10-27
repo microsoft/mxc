@@ -41,10 +41,7 @@ pub fn probe_execution_request(request: Option<&ExecutionRequest>) -> Result<Pro
         ));
     }
 
-    let output = crate::process_container_common::probe::run_probe(
-        request,
-        crate::mxc_engine::guarded_capture::is_available(),
-    );
+    let output = crate::process_container_common::probe::run_probe(request);
 
     #[cfg(feature = "isolation_session")]
     let output = {

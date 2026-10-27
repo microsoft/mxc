@@ -6,7 +6,8 @@ mod audit;
 #[cfg(target_os = "windows")]
 use std::fmt::Write;
 use std::process;
-use std::sync::{Mutex, OnceLock};
+#[cfg(target_os = "windows")]
+use std::sync::Mutex;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
@@ -18,11 +19,12 @@ use mxc_sdk::mxc_common::error::WxcError;
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use mxc_sdk::mxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
+#[cfg(target_os = "windows")]
+use mxc_sdk::mxc_common::script_runner::RunCancellation;
 use mxc_sdk::mxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use mxc_sdk::mxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use mxc_sdk::mxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use mxc_sdk::mxc_common::telemetry;
-use mxc_sdk::process_container_common::appcontainer_runner::delete_app_container_profile;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -43,14 +45,6 @@ struct Cli {
     #[arg(long)]
     debug: bool,
 
-    /// Delete container profile mode
-    #[arg(long)]
-    delete: bool,
-
-    /// Container name (required with --delete)
-    #[arg(long = "containername")]
-    containername: Option<String>,
-
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
@@ -65,8 +59,6 @@ struct Cli {
         long,
         value_enum,
         conflicts_with_all = [
-            "delete",
-            "containername",
             "setup_hyperlight",
             "force",
             "setup_wslc",
@@ -159,7 +151,8 @@ struct Cli {
     )]
     wslc_daemon_slots: Option<u16>,
 
-    /// Run the fallback detector and emit JSON, without spawning a sandbox.
+    /// Probe native ProcessContainer support and emit JSON without spawning.
+    /// With a config, exit 1 if native ProcessContainer cannot enforce the request.
     #[arg(long)]
     probe: bool,
 
@@ -172,8 +165,6 @@ struct Cli {
             "config",
             "config_base64",
             "command",
-            "delete",
-            "containername",
             "experimental",
             "dry_run",
             "setup_hyperlight",
@@ -850,190 +841,85 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-// ---------------------------------------------------------------------------
-// Graceful-exit DACL cleanup
-// ---------------------------------------------------------------------------
-//
-// `DaclManager`'s `Drop` is the only thing that restores host ACEs we
-// applied during a Tier 2 / Tier 3 run. We need that `Drop` to fire on
-// every code path that can leave main, including the abnormal ones.
-// There are three:
-//
-// 1. **Normal exit / `process::exit`** — destructors of stack-owned
-//    values run on the former and are SKIPPED on the latter. We deal
-//    with this by explicitly `drop(take_parked_dacl())`-ing before any
-//    `process::exit` site below.
-// 2. **Panic unwind** — destructors of stack-owned values run; the
-//    release profile uses the default `unwind` strategy (see
-//    `src/Cargo.toml`). But the `DaclManager` we extract from
-//    `Dispatched` lives inside a process-global static (so the Ctrl-C
-//    handler can reach it), and statics are NOT touched by unwinding.
-//    To restore on panic we install a stack-owned `ParkedDaclGuard` in
-//    `main` whose `Drop` calls `take_parked_dacl()` and drops the
-//    manager. The guard sits at function scope so the unwind path
-//    threads through it.
-// 3. **Ctrl-C / Ctrl-Break / console close / logoff / shutdown** — the
-//    default Windows handler calls `ExitProcess` directly, skipping
-//    every Rust destructor. We install a `SetConsoleCtrlHandler` that
-//    takes-and-drops the parked manager before yielding to the
-//    default handler.
-//
-// The mutex in the slot serializes the Ctrl-C handler and the guard
-// against each other, so the manager is taken (and therefore
-// `Drop`'d) at most once.
-//
-// Parent-process kill (`TerminateProcess`) still bypasses every
-// handler; any leak there is reaped by `recover_orphaned_state` on
-// the next wxc-exec startup (which we already run at the top of
-// `main`).
+#[cfg(target_os = "windows")]
+static RUN_CANCELLATION_SLOT: Mutex<Option<RunCancellation>> = Mutex::new(None);
 
 #[cfg(target_os = "windows")]
-static DACL_CLEANUP_SLOT: OnceLock<
-    Mutex<Option<mxc_sdk::mxc_common::filesystem_dacl::DaclManager>>,
-> = OnceLock::new();
-
-#[cfg(target_os = "windows")]
-fn dacl_cleanup_slot() -> &'static Mutex<Option<mxc_sdk::mxc_common::filesystem_dacl::DaclManager>>
-{
-    DACL_CLEANUP_SLOT.get_or_init(|| Mutex::new(None))
+struct ConsoleRunGuard {
+    cancellation: Option<RunCancellation>,
 }
 
-/// Park the DACL manager in the global slot so the Ctrl-C handler can
-/// drop it if a signal arrives before the normal-exit path runs.
 #[cfg(target_os = "windows")]
-fn park_dacl_for_cleanup(mgr: mxc_sdk::mxc_common::filesystem_dacl::DaclManager) {
-    let slot = dacl_cleanup_slot();
-    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
-    *guard = Some(mgr);
-}
+impl ConsoleRunGuard {
+    fn new(cancellation: Option<RunCancellation>) -> Self {
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = cancellation.clone();
+        Self { cancellation }
+    }
 
-/// Take the parked DACL manager (if any) so the caller can drop it,
-/// triggering ACE restore. Returns `None` if either nothing was parked
-/// or another path (the Ctrl-C handler) already took it.
-///
-/// Recovers from `PoisonError` the same way [`park_dacl_for_cleanup`]
-/// does (`into_inner`): a poisoned mutex must NOT silently swallow a
-/// parked manager — that would leak ACEs until the next-startup
-/// recovery scan reaps them.
-#[cfg(target_os = "windows")]
-fn take_parked_dacl() -> Option<mxc_sdk::mxc_common::filesystem_dacl::DaclManager> {
-    DACL_CLEANUP_SLOT.get().and_then(|slot| {
-        let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
-        guard.take()
-    })
-}
-
-/// Stack-owned witness that ensures `take_parked_dacl()` runs on every
-/// path out of `main`, including panic unwind. The parked
-/// `DaclManager` lives in a process-global static (so the Ctrl-C
-/// handler can reach it), and Rust's unwinder doesn't touch statics —
-/// without this guard, a panic between `park_dacl_for_cleanup` and
-/// the explicit `drop(take_parked_dacl())` near the end of `main`
-/// would leave host ACEs in place until the next startup's recovery
-/// scan.
-///
-/// `Drop` is a no-op if nothing was ever parked or if the Ctrl-C
-/// handler already drained the slot.
-#[cfg(target_os = "windows")]
-struct ParkedDaclGuard;
-
-#[cfg(target_os = "windows")]
-impl Drop for ParkedDaclGuard {
-    fn drop(&mut self) {
-        drop(take_parked_dacl());
+    fn finish(mut self) -> bool {
+        // Clear the handler's signal only after backend cleanup has finished.
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        self.cancellation
+            .take()
+            .is_some_and(|signal| signal.was_cancelled())
     }
 }
 
-/// Windows console-control handler. Called by the OS on Ctrl-C, Ctrl-Break,
-/// console close, logoff, and shutdown. Takes the parked DACL manager and
-/// drops it — `Drop` runs `restore()` which removes the ACEs we applied.
-/// Returns `FALSE` so the default handler still runs (which terminates
-/// the process).
-///
-/// Acquires the slot with a bounded wait
-/// (`plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT`), not `try_lock`.
-/// If the main thread is mid-`Drop` on the same manager — which can be
-/// doing a `SetNamedSecurityInfoW` — returning FALSE immediately lets
-/// the default handler call `ExitProcess`, terminating that drop mid-
-/// Win32 and leaving the host DACL in an inconsistent state. The
-/// bounded wait blocks the default handler until either main finishes
-/// (lock released) or the shared timeout elapses — whichever comes
-/// first. On timeout we proceed anyway; the recovery scan on the next
-/// `wxc-exec` startup reaps anything left behind.
 #[cfg(target_os = "windows")]
-unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
-    // Ordering guarantee: best-effort cancellation telemetry runs STRICTLY
-    // BEFORE the up-to-5s DACL cleanup loop, which can consume the OS
-    // shutdown-handler budget. Factored through `cancel_then_cleanup` so a
-    // future edit that reorders these two would fail a unit test rather than
-    // silently drop cancellation telemetry when the cleanup times out.
-    cancel_then_cleanup(
-        // Emit first. No-op unless telemetry is active; emits no message text
-        // and does not shut the provider down (the OS reclaims it at exit).
-        telemetry::emit_cancellation,
-        // Then the security-critical host DACL cleanup.
-        || {
-            if let Some(slot) = DACL_CLEANUP_SLOT.get() {
-                use std::time::{Duration, Instant};
-                // CTRL_CLOSE_EVENT / CTRL_LOGOFF / CTRL_SHUTDOWN have a hard
-                // ~5s OS-imposed kill budget. The persistent elevated PLM
-                // child handles trace cleanup after this owner terminates.
-                let deadline =
-                    Instant::now() + mxc_sdk::plm::coordination::CTRL_HANDLER_DRAIN_TIMEOUT;
-                loop {
-                    if let Ok(mut guard) = slot.try_lock() {
-                        // Either main already took the manager (guard is None)
-                        // or it never parked one; dropping `Option::take` is
-                        // a no-op in both cases. Either way, the contract — no
-                        // restore thread running concurrently with the default
-                        // handler's ExitProcess — is satisfied.
-                        drop(guard.take());
-                        break;
-                    }
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
-        },
-    );
-    // FALSE = "I did not fully handle this; run the next handler in the
-    // chain (i.e. the default handler that calls ExitProcess)".
+impl Drop for ConsoleRunGuard {
+    fn drop(&mut self) {
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn request_console_cancellation(ctrl_type: u32, cancellation: Option<&RunCancellation>) -> bool {
+    use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    if matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+        if let Some(cancellation) = cancellation {
+            return cancellation.request();
+        }
+    }
+    false
+}
+
+/// Claim cooperative interrupts; otherwise emit telemetry before default termination.
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn executor_ctrl_handler(ctrl_type: u32) -> windows::core::BOOL {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_console_control(ctrl_type)
+    }))
+    .unwrap_or(windows::core::BOOL(0))
+}
+
+#[cfg(target_os = "windows")]
+fn handle_console_control(ctrl_type: u32) -> windows::core::BOOL {
+    {
+        let cancellation = RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if request_console_cancellation(ctrl_type, cancellation.as_ref()) {
+            // The execution owner wakes its bounded native wait and runs teardown.
+            // Never call native lifecycle APIs on this handler thread.
+            return windows::core::BOOL(1);
+        }
+    }
+    telemetry::emit_cancellation();
     windows::core::BOOL(0)
 }
 
-/// Runs the cancellation `emit` strictly before the (possibly slow,
-/// security-critical) `cleanup`, and guarantees `cleanup` runs even if `emit`
-/// panics. Factored out of [`dacl_ctrl_handler`] so both invariants are lockable
-/// by a unit test:
-///
-/// 1. **Ordering** — `emit` runs before `cleanup`. The cleanup can burn the OS
-///    shutdown-handler budget and never return, so emitting first ensures the
-///    cancellation telemetry is not lost.
-/// 2. **Cleanup-always** — `emit` is wrapped in [`catch_unwind`] so a panic in
-///    telemetry can never skip the DACL restore (which would leave host ACEs in
-///    place) and can never unwind across the `extern "system"` `dacl_ctrl_handler`
-///    boundary (which is undefined behaviour).
-///
-/// A caught panic is intentionally swallowed: this runs on the OS
-/// shutdown-handler path where there is nothing left to propagate it to, and the
-/// security-critical `cleanup` is what must not be skipped.
 #[cfg(target_os = "windows")]
-fn cancel_then_cleanup(emit: impl FnOnce(), cleanup: impl FnOnce()) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(emit));
-    cleanup();
-}
-
-/// Install the console-control handler. Idempotent — calling twice
-/// registers the same handler twice, which is harmless because the
-/// take-and-drop is `Option::take`-based.
-#[cfg(target_os = "windows")]
-fn install_dacl_ctrl_handler() {
+fn install_executor_ctrl_handler() -> windows::core::Result<()> {
     use windows::Win32::System::Console::SetConsoleCtrlHandler;
-    // SAFETY: `dacl_ctrl_handler` has the correct ABI; the `Add=TRUE`
+    // SAFETY: `executor_ctrl_handler` has the correct ABI; the `Add=TRUE`
     // call merely appends to the OS handler chain.
-    let _ = unsafe { SetConsoleCtrlHandler(Some(dacl_ctrl_handler), true) };
+    unsafe { SetConsoleCtrlHandler(Some(executor_ctrl_handler), true) }
 }
 
 fn main() {
@@ -1056,38 +942,16 @@ fn main() {
         std::env::set_var("WXC_WSB_FORCE_RECLAIM", "1");
     }
 
-    // Best-effort: reap any orphaned DACL state files left behind by
-    // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
-    // `wxc-exec --probe` is the canonical recovery trigger consumers
-    // (run_processcontainer_crash_recovery_test.ps1, SDK warm-start) rely on. Errors
-    // here are non-fatal and only surface via stderr. On a healthy host
-    // with zero state files this is sub-millisecond.
-    match mxc_sdk::mxc_common::filesystem_dacl::recover_orphaned_state() {
-        Ok(report) => {
-            if report.files_processed > 0 || !report.errors.is_empty() {
-                eprintln!(
-                    "DACL recovery: {} file(s), {} ACE(s) restored, {} pruned (missing), {} error(s)",
-                    report.files_processed,
-                    report.aces_restored,
-                    report.aces_pruned_missing,
-                    report.errors.len()
-                );
-                for e in &report.errors {
-                    eprintln!("  {e}");
-                }
-            }
-        }
-        Err(e) => eprintln!("DACL recovery failed: {e}"),
-    }
-
     // --probe is a detection-only fast path used by SDK
     // `getPlatformSupport()` on every first call. It does not spawn a
-    // sandbox and never parks a DaclManager.
+    // sandbox.
     //
-    // Run it AFTER recovery (so consumers that rely on `--probe`-as-
-    // reaper still get it) but BEFORE COM init / SetConsoleCtrlHandler
-    // (which probe doesn't need; deferring them shaves cold-start cost
-    // off the SDK warm path).
+    // It does activate WinRT: `isolation_session_available()` resolves the
+    // IsolationSession activation factory. That probe owns and releases its
+    // own COM apartment, so it neither needs nor disturbs the process-wide
+    // init below — this ordering is not a claim that the probe is COM-free.
+    //
+    // Run before COM initialization and console-handler installation.
     if cli.probe {
         let request = if let Some(decoded) = decoded_config.as_ref() {
             // Parse using the existing pipeline but route logger output to
@@ -1129,6 +993,9 @@ fn main() {
                 process::exit(1);
             }
         }
+        if decoded_config.is_some() && output.error.is_some() {
+            process::exit(1);
+        }
         return;
     }
 
@@ -1146,19 +1013,11 @@ fn main() {
         )
     };
 
-    // Install the Ctrl-C / Ctrl-Break handler that drops any parked
-    // DaclManager on signal. Cheap and idempotent. Windows-only: the parked
-    // DACL manager it drains lives behind `#[cfg(target_os = "windows")]`.
     #[cfg(target_os = "windows")]
-    install_dacl_ctrl_handler();
-
-    // Stack-owned witness so a panic anywhere below — between
-    // `park_dacl_for_cleanup` and the explicit `drop(take_parked_dacl())`
-    // near the end of `main` — still drains the slot and runs
-    // `restore()` during unwind. Without it the manager is parked in
-    // a static and unwinding skips destructors of static-owned values.
-    #[cfg(target_os = "windows")]
-    let _dacl_guard = ParkedDaclGuard;
+    if let Err(error) = install_executor_ctrl_handler() {
+        eprintln!("cannot install executor console-control handler: {error}");
+        process::exit(1);
+    }
 
     // --setup-hyperlight: warm up the snapshot and exit. Runs before
     // config parsing so the user doesn't need a JSON file on disk
@@ -1281,13 +1140,11 @@ fn main() {
         logger.enable_diagnostics(&diag_config);
     }
 
-    // Determine config input. In delete mode the config is optional; every
-    // other path requires it. `decoded_config` above already read the source
-    // once — if it's populated, unpack the decoded JSON (or surface the
-    // decode error). If it's absent, either accept the empty state for
-    // delete mode or report the missing-config error.
-    let config_json: Option<String> = match decoded_config {
-        Some(Ok(json)) => Some(json),
+    // Determine config input. `decoded_config` above already read the source
+    // once — if it's populated, unpack the decoded JSON (or surface the decode
+    // error); if it's absent, report the missing-config error.
+    let config_json: String = match decoded_config {
+        Some(Ok(json)) => json,
         Some(Err(error)) => match cli.operation {
             Some(operation) => {
                 let error = lifecycle_input_error(operation, &mut logger, error);
@@ -1302,43 +1159,21 @@ fn main() {
             }
         },
         None => {
-            if !cli.delete {
-                let message =
-                    "No config provided. Use a positional path, --config, or --config-base64";
-                if let Some(operation) = cli.operation {
-                    let error = lifecycle_input_error(
-                        operation,
-                        &mut logger,
-                        RequestInputError::Source(WxcError::ConfigParse(message.to_string())),
-                    );
-                    print_error_envelope(&error);
-                    eprint!("{}", logger.get_buffer());
-                    process::exit(1);
-                }
-                eprintln!("Error: {message}");
+            let message = "No config provided. Use a positional path, --config, or --config-base64";
+            if let Some(operation) = cli.operation {
+                let error = lifecycle_input_error(
+                    operation,
+                    &mut logger,
+                    RequestInputError::Source(WxcError::ConfigParse(message.to_string())),
+                );
+                print_error_envelope(&error);
+                eprint!("{}", logger.get_buffer());
                 process::exit(1);
             }
-            None
+            eprintln!("Error: {message}");
+            process::exit(1);
         }
     };
-
-    // Delete mode
-    if cli.delete {
-        let name = match cli.containername {
-            Some(ref n) => n.as_str(),
-            None => {
-                eprintln!("Error: --containername is required with --delete");
-                process::exit(1);
-            }
-        };
-        let success = delete_app_container_profile(name, &mut logger);
-        print!("{}", logger.get_buffer());
-        process::exit(if success { 0 } else { 1 });
-    }
-
-    // Non-delete paths always have a config JSON at this point (or exited
-    // above with the missing-config error).
-    let config_json = config_json.expect("config_json is Some on non-delete paths");
     if let Some(operation) = cli.operation {
         let phase = operation.into();
         let target_id = cli
@@ -1613,23 +1448,13 @@ fn main() {
     }
 
     // Run script in the selected containment backend. Backend selection and
-    // runner construction — including the ProcessContainer BaseContainer /
-    // AppContainer (BFS / DACL) fallback tiers and every experimental backend —
+    // runner construction — including native ProcessContainer and every
+    // experimental backend —
     // live in `mxc_sdk::mxc_engine::resolve_runner`, the single home for one-shot backend
-    // dispatch. The DACL guard it returns for the fallback tiers is parked into
-    // the global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler can drop
-    // it on signal as well as the normal-exit path below; it is `None` when no
-    // DACL augmentation was required. Tier-selection warnings and the selected
-    // tier are logged to `logger` by the engine.
+    // dispatch.
     let resolved_runner = mxc_sdk::mxc_engine::resolve_runner(&request, &mut logger);
     let mut runner: Box<dyn ScriptRunner> = match resolved_runner {
-        Ok(resolved) => {
-            #[cfg(target_os = "windows")]
-            if let Some(mgr) = resolved.dacl_manager {
-                park_dacl_for_cleanup(mgr);
-            }
-            resolved.runner
-        }
+        Ok(resolved) => resolved.runner,
         Err(e) => {
             log_config_rejected(
                 &mut logger,
@@ -1656,6 +1481,8 @@ fn main() {
         .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    #[cfg(target_os = "windows")]
+    let console_run = ConsoleRunGuard::new(runner.cancellation());
     let run_start = Instant::now();
     let mut response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
@@ -1687,20 +1514,11 @@ fn main() {
         }
     }
 
-    // Explicitly drop the runner before retrieving the parked DACL
-    // manager so any runner-internal resources holding child handles
-    // release first; then drop the manager so its `restore()` runs.
-    // (process::exit below skips destructors, so we must do this
-    // manually for prompt cleanup on the normal path. The Ctrl-C
-    // handler covers the abnormal path; recover_orphaned_state on the
-    // next startup covers everything else.)
-    //
-    // The parked-DACL machinery is Windows-only: `DaclManager` lives behind
-    // `#[cfg(target_os = "windows")]` in `mxc_sdk::mxc_common::filesystem_dacl`, so the
-    // whole extract/park/take/cleanup lifecycle is gated to match.
     drop(runner);
     #[cfg(target_os = "windows")]
-    drop(take_parked_dacl());
+    let cancelled = console_run.finish();
+    #[cfg(not(target_os = "windows"))]
+    let cancelled = false;
 
     // Surface security warnings (e.g. permissiveLearningMode relaxing
     // deny-by-default under --audit). The logger only records these rather than
@@ -1724,13 +1542,25 @@ fn main() {
         ));
     }
 
-    telemetry::emit_completion_with_kind(
-        telemetry_active,
-        &request.containment,
-        requested_sandbox_kind,
-        &response,
-        run_elapsed,
-    );
+    if cancelled {
+        telemetry::emit_early_exit_with_kind(
+            telemetry_active,
+            &request.containment,
+            requested_sandbox_kind,
+            telemetry::FailureReason::Cancelled,
+        );
+        if response.exit_code != 0 {
+            response.exit_code = 130;
+        }
+    } else {
+        telemetry::emit_completion_with_kind(
+            telemetry_active,
+            &request.containment,
+            requested_sandbox_kind,
+            &response,
+            run_elapsed,
+        );
+    }
 
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
@@ -1931,7 +1761,6 @@ mod tests {
     #[test]
     fn cli_rejects_lifecycle_operation_with_utility_modes() {
         for utility_mode in [
-            "--delete",
             "--setup-hyperlight",
             "--setup-wslc",
             "--probe",
@@ -1953,21 +1782,6 @@ mod tests {
                 "{utility_mode}"
             );
         }
-
-        let error = match Cli::try_parse_from([
-            "wxc-exec",
-            "policy.json",
-            "--operation",
-            "deprovision",
-            "--container-id",
-            "iso:abc",
-            "--containername",
-            "legacy-profile",
-        ]) {
-            Err(error) => error,
-            Ok(_) => panic!("--operation must conflict with --containername"),
-        };
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     fn test_logger() -> Logger {
@@ -3128,48 +2942,34 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn cancel_then_cleanup_emits_before_cleanup() {
-        // Locks in the dacl_ctrl_handler ordering guarantee: cancellation
-        // telemetry must be emitted BEFORE the (up-to-5s, security-critical)
-        // DACL cleanup, so a cleanup that burns the OS shutdown budget can't
-        // swallow the telemetry. Drive the extracted helper with two spies that
-        // record their call order into a shared vec.
-        use std::sync::Mutex;
-
-        let order: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
-        cancel_then_cleanup(
-            || order.lock().unwrap().push("emit"),
-            || order.lock().unwrap().push("cleanup"),
-        );
-
-        assert_eq!(*order.lock().unwrap(), vec!["emit", "cleanup"]);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn cancel_then_cleanup_runs_cleanup_even_if_emit_panics() {
-        // Locks in the cleanup-always guarantee: a panic in the cancellation
-        // emit (telemetry) must NEVER skip the security-critical DACL cleanup,
-        // and must not unwind across the extern "system" ctrl-handler boundary.
-        // Without the catch_unwind in cancel_then_cleanup, `cleanup` would never
-        // run and the panic would escape the handler (UB in production).
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        static CLEANED: AtomicBool = AtomicBool::new(false);
-        // Suppress the default panic hook's stderr backtrace for this
-        // intentional panic so the test output stays clean.
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        cancel_then_cleanup(
-            || panic!("telemetry emit blew up"),
-            || CLEANED.store(true, Ordering::SeqCst),
-        );
-        std::panic::set_hook(prev);
-
-        assert!(
-            CLEANED.load(Ordering::SeqCst),
-            "cleanup must run even when emit panics"
-        );
+    fn console_handler_claims_only_cooperatively_cancellable_interrupts() {
+        use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT};
+        for event in [CTRL_C_EVENT, CTRL_BREAK_EVENT] {
+            let cancellation = RunCancellation::default();
+            let guard = ConsoleRunGuard::new(Some(cancellation.clone()));
+            assert!(unsafe { executor_ctrl_handler(event) }.as_bool());
+            assert!(
+                !cancellation.was_cancelled(),
+                "requesting must not pretend cleanup completed"
+            );
+            assert!(
+                !guard.finish(),
+                "a completed run wins over an unobserved cancellation"
+            );
+        }
+        let cancellation = RunCancellation::default();
+        assert!(!request_console_cancellation(
+            CTRL_CLOSE_EVENT,
+            Some(&cancellation)
+        ));
+        assert!(!request_console_cancellation(CTRL_C_EVENT, None));
+        assert!(!request_console_cancellation(CTRL_BREAK_EVENT, None));
+        cancellation.complete();
+        assert!(!request_console_cancellation(
+            CTRL_C_EVENT,
+            Some(&cancellation)
+        ));
+        assert!(RUN_CANCELLATION_SLOT.lock().unwrap().is_none());
     }
 
     #[test]

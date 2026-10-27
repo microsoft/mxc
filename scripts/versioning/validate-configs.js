@@ -42,6 +42,7 @@ for (const required of [schemaVer.min, schemaVer.maxSupported]) {
 const CONFIG_DIRS = [
   join("tests", "examples"),
   join("tests", "configs"),
+  join("src", "mxc-sdk", "tests", "fixtures", "microvm"),
   join("tests", "policy", "sdk-v1", "expected"),
 ];
 

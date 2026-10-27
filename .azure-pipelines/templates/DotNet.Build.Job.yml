@@ -171,7 +171,6 @@ jobs:
       sourceFolder: $(x64NativeDir)
       contents: |
         mxc_ffi.dll
-        plm.exe
         wxc-wslc-daemon.exe
         wslcsdk.dll
       targetFolder: $(packageRoot)\runtimes\win-x64\native
@@ -182,7 +181,6 @@ jobs:
       sourceFolder: $(arm64NativeDir)
       contents: |
         mxc_ffi.dll
-        plm.exe
         wxc-wslc-daemon.exe
         wslcsdk.dll
       targetFolder: $(packageRoot)\runtimes\win-arm64\native

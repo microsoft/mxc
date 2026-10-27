@@ -317,9 +317,14 @@ pub trait StatefulSandboxBackend {
     ///   that blocks on exit and a terminator that kills, and does not touch the
     ///   host console. Under `Relayed` it relays internally and returns null
     ///   handles.
-    /// - **Windows Sandbox** and **WSLc** honor `Relayed` only. They relay
-    ///   internally and return null handles; a `Piped` request is refused
-    ///   without running the workload.
+    /// - **WSLc** honors both variants. Under `Piped` it returns stdout and
+    ///   stderr pipes it bridges to the daemon's stream, and a stdin pipe only
+    ///   if the runner asked for one. Under `Relayed` it relays internally,
+    ///   forwarding this process's stdin unless it is a terminal, and returns
+    ///   null handles.
+    /// - **Windows Sandbox** honors `Relayed` only. It relays internally and
+    ///   returns null handles; a `Piped` request is refused without running the
+    ///   workload.
     ///
     /// Reaching any of this from an in-process caller additionally requires the
     /// experimental opt-in, which the state-aware entry points expose as an

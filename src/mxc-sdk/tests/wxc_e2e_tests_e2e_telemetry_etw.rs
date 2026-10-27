@@ -137,8 +137,6 @@ fn build_instrumented_wxc_exec() -> PathBuf {
             "build",
             "-p",
             "wxc",
-            "-p",
-            "plm",
             // `test-support` is what makes `MXC_TEST_LOCALAPPDATA_OVERRIDE`
             // observable to the child; without it the consent store is the real
             // per-user one and this test would mutate developer state.

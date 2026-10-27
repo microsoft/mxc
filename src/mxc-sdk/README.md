@@ -10,6 +10,13 @@ configures the backend.
 
 See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
+On Windows, ProcessContainer requires an enabled native PSEC contract.
+Platform discovery reports ProcessContainer only when native PSEC is available;
+other backends are detected independently. `mxc_sdk::v1::probe(Some(&request))`
+checks request compatibility without creating a container. An incompatible
+request has no selected tier and an explanatory error, while host facts remain
+available.
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or
@@ -34,7 +41,9 @@ println!("{}", String::from_utf8_lossy(&output.stdout));
 ```
 
 `spawn` returns an `MxcProcess` with separate standard streams, wait and
-termination methods. `run` captures stdout and stderr and returns an
+termination methods. A WSLC command started by `spawn` reads end-of-file on
+stdin; `spawn_with_stdin` gives it a writable stdin. `run` captures stdout and
+stderr and returns an
 `ExecutionResult` with its `WaitResult`, warnings, and optional output metadata. Both use the
 same in-process native engine; neither launches an MXC executor binary.
 Captured execution drains both streams concurrently. Output-read failures are
@@ -102,7 +111,9 @@ v1::container::deprovision_container(&id, Default::default())?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Use `v1::container::spawn_in_container` for live piped execution.
+Use `v1::container::spawn_in_container` for live piped execution. A WSLC
+command started this way reads end-of-file on stdin;
+`v1::container::spawn_in_container_with_stdin` gives it a writable stdin.
 `v1::container::spawn_in_container_with_pty` returns an `MxcPtyProcess` for a caller-driven
 terminal; PTY support is currently available for IsolationSession.
 Attached execution is not exposed by the Rust SDK. Lifecycle operations and
@@ -175,7 +186,22 @@ the configured diagnostic sink. `user_profile_policy` discovers standard
 per-user tool locations, and `temporary_files_policy` returns existing
 temporary storage without creating directories.
 
+On Windows, finding `pwsh.exe` on `PATH` adds the PSReadLine history directory
+as read-write. Discovery does not implicitly grant read access to a drive root.
+
+For PowerShell startup failures, see
+[troubleshooting](https://github.com/microsoft/mxc/blob/main/docs/troubleshooting.md#powershell-startup).
+
 ## Internal modules and executor binaries
+
+### Experimental MicroVM support
+
+Enable the `microvm` Cargo feature to build experimental MicroVM support on
+Windows x64. Execution also requires runtime experimental opt-in. This phase
+supports development JSON create-and-run requests, not MicroVM targeting through
+the typed V1 SDK APIs, streaming, PTY, or container lifecycle operations. See the
+[NVX backend guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md)
+for prerequisites and usage.
 
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes

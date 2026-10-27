@@ -230,6 +230,20 @@ pub enum OutStream {
 /// the leaf primitives ([`OutStream`], [`IoContext`]).
 pub type OutputSink = Box<dyn Fn(OutStream, &[u8]) + Send + Sync>;
 
+/// Takes a process's stdin write end once the process exists and returns
+/// control over it.
+pub type StdinConsumer =
+    Box<dyn FnOnce(std::fs::File) -> std::io::Result<Box<dyn StdinControl>> + Send>;
+
+/// Control over a process's stdin after a [`StdinConsumer`] has taken it.
+pub trait StdinControl: Send {
+    /// Stop giving the process input or end-of-file, leaving stdin open.
+    fn freeze(&self);
+
+    /// Close stdin now, dropping input not yet written.
+    fn close(self: Box<Self>);
+}
+
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are
 /// `pub(crate)` so the one-shot runner's wait/collect helpers can read the
 /// captured bytes and exit signal.
@@ -1309,12 +1323,18 @@ pub struct ExecOutcome {
     /// Specific post-process-creation failure that made termination
     /// unobservable. The daemon uses this context when quarantining.
     pub post_launch_error: Option<ScriptResponse>,
+
+    /// The process's stdin, still open because its termination was not
+    /// confirmed.
+    pub held_stdin: Option<StdinHold>,
 }
 
 /// Run `script_code` (under `/bin/sh -c`) as a fresh process inside a started
 /// daemon container and wait for it to complete. On timeout the *process* is
 /// killed (SIGKILL) — NOT the container — so the keepalive init survives for
 /// subsequent execs.
+///
+/// Without `stdin`, the process reads end-of-file immediately.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and `container` must be a live,
@@ -1333,6 +1353,7 @@ pub unsafe fn exec_in_container(
     timeout_ms: u32,
     cancellation: &AtomicBool,
     sink: Option<OutputSink>,
+    stdin: Option<StdinConsumer>,
     logger: &mut Logger,
 ) -> Result<ExecOutcome, ScriptResponse> {
     // `process_settings` owns every buffer the SDK reads at
@@ -1340,6 +1361,15 @@ pub unsafe fn exec_in_container(
     // as a stationary local until after the process exits below.
     let mut process_settings =
         ProcessSettings::build(sdk, script_code, env, scope, working_directory, sink)?;
+    if stdin.is_some() {
+        let hr = sdk.WslcSetProcessSettingsFlags(
+            process_settings.raw_mut(),
+            WslcProcessFlags::WSLC_PROCESS_FLAG_STDIN,
+        );
+        if hr != S_OK {
+            return Err(sdk_error("WslcSetProcessSettingsFlags failed", hr, ""));
+        }
+    }
 
     let mut process: WslcProcess = ptr::null_mut();
     let mut err_msg = CoTaskMemPWSTR::null();
@@ -1358,6 +1388,30 @@ pub unsafe fn exec_in_container(
     // reclaim it. Disarm the settings guard so it is not freed underneath the SDK.
     process_settings.mark_process_created();
 
+    let mut stdin_guard = StdinHold::default();
+    let forwards_stdin = stdin.is_some();
+    if let Some(consumer) = stdin {
+        match attach_stdin(sdk, process_guard.as_raw(), consumer) {
+            Ok(close) => stdin_guard = StdinHold::new(close),
+            Err(error) => {
+                // A process holding a stdin nobody writes or closes would never
+                // see end-of-file, so it is killed rather than left to run.
+                let _ =
+                    sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
+                if wait_for_exit_callback(process_settings.io_ctx()) {
+                    return Err(error);
+                }
+                return Ok(ExecOutcome {
+                    completion: ProcessCompletion::TerminationUnconfirmed,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    post_launch_error: Some(error),
+                    held_stdin: None,
+                });
+            }
+        }
+    }
+
     let mut exit_event: HANDLE = ptr::null_mut();
     let hr = sdk.WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
     if hr != S_OK {
@@ -1366,6 +1420,7 @@ pub unsafe fn exec_in_container(
             stdout: Vec::new(),
             stderr: Vec::new(),
             post_launch_error: Some(sdk_error("WslcGetProcessExitEvent failed", hr, "")),
+            held_stdin: Some(stdin_guard),
         });
     }
 
@@ -1391,21 +1446,35 @@ pub unsafe fn exec_in_container(
         _ => None,
     };
     if let Some(interruption) = interruption {
-        let _ = writeln!(
-            logger,
-            "[WSLC][daemon] exec {} — killing process",
-            interruption.get_interruption_word()
-        );
-        // Kill only this process; the keepalive init keeps the container up.
-        let kill_hr =
-            sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
-        if kill_hr != S_OK {
+        if forwards_stdin {
+            stdin_guard.freeze();
+
+            // Signalling the process closes its stdin even when the signal is
+            // not delivered, which would let it act on input that was cut short.
             let _ = writeln!(
                 logger,
-                "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
-                 process may still be running",
-                kill_hr as u32
+                "[WSLC][daemon] exec {} — not signalling a process that reads forwarded \
+                 stdin; it is stopped with its container",
+                interruption.get_interruption_word()
             );
+        } else {
+            let _ = writeln!(
+                logger,
+                "[WSLC][daemon] exec {} — killing process",
+                interruption.get_interruption_word()
+            );
+
+            // Kill only this process; the keepalive init keeps the container up.
+            let kill_hr =
+                sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
+            if kill_hr != S_OK {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
+                     process may still be running",
+                    kill_hr as u32
+                );
+            }
         }
     }
 
@@ -1487,11 +1556,91 @@ pub unsafe fn exec_in_container(
         ProcessCompletion::TerminationUnconfirmed => {}
     }
 
+    // A process that may still be running keeps its stdin open, so it cannot
+    // take a cut-short input as complete before it is stopped.
+    let held_stdin = match completion {
+        ProcessCompletion::Confirmed(_) => {
+            drop(stdin_guard);
+            None
+        }
+        ProcessCompletion::TerminationUnconfirmed => Some(stdin_guard),
+    };
+
     Ok(ExecOutcome {
         completion,
         stdout,
         stderr,
         post_launch_error: None,
+        held_stdin,
+    })
+}
+
+/// A process's stdin, closed when this is dropped.
+#[derive(Default)]
+pub struct StdinHold(Mutex<Option<Box<dyn StdinControl>>>);
+
+impl StdinHold {
+    fn new(control: Box<dyn StdinControl>) -> Self {
+        Self(Mutex::new(Some(control)))
+    }
+
+    fn freeze(&self) {
+        if let Some(control) = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            control.freeze();
+        }
+    }
+}
+
+impl Drop for StdinHold {
+    fn drop(&mut self) {
+        let control = self
+            .0
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(control) = control {
+            control.close();
+        }
+    }
+}
+
+impl std::fmt::Debug for StdinHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StdinHold")
+    }
+}
+
+/// Hand `process`'s stdin write end to `consumer`.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `process` must be a live handle
+/// created with `WSLC_PROCESS_FLAG_STDIN`.
+unsafe fn attach_stdin(
+    sdk: &WslcSdk,
+    process: WslcProcess,
+    consumer: StdinConsumer,
+) -> Result<Box<dyn StdinControl>, ScriptResponse> {
+    use std::os::windows::io::FromRawHandle;
+
+    let mut handle: HANDLE = ptr::null_mut();
+    let hr = sdk.WslcGetProcessIOHandle(
+        process,
+        WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDIN,
+        &mut handle,
+    );
+    if hr != S_OK || handle.is_null() {
+        return Err(sdk_error("WslcGetProcessIOHandle(stdin) failed", hr, ""));
+    }
+
+    // SAFETY: the SDK transfers ownership of the returned handle to the caller.
+    let stdin = std::fs::File::from_raw_handle(handle);
+    consumer(stdin).map_err(|error| {
+        WslcError::Runtime(format!("could not start forwarding stdin: {error}")).into_response()
     })
 }
 

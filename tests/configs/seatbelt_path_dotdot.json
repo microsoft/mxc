@@ -1,0 +1,11 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat '{{TESTDIR}}/alias/secret.txt'",
+        "cwd": "/",
+        "timeout": 10000
+    },
+    "filesystem": { "readonlyPaths": ["{{TESTDIR}}/alias/../alias"] }
+}

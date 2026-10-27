@@ -468,6 +468,212 @@ $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false_rejected.json" `
     -ExpectedExit -1 `
     -OutputContains "destroyOnExit=false"))
 
+Write-Host "`n--- Stdin Tests ---" -ForegroundColor Cyan
+# wxc-exec forwards its own stdin to the container unless it is a terminal.
+# Each case runs wslc_stdin.json with its command line replaced.
+
+# Launch wxc-exec on wslc_stdin.json running $Command, without waiting. With
+# -WriteStdin the handle's Stdin is a writable stream the caller writes and
+# closes; with -StdinFile, cmd.exe redirects that file (or NUL) onto stdin.
+function Start-WslcStdinRun {
+    param(
+        [string]$Command,
+        [int]$TimeoutMs = 60000,
+        [switch]$WriteStdin,
+        [string]$StdinFile
+    )
+
+    $config = Get-Content (Join-Path $TestConfigs "wslc_stdin.json") -Raw | ConvertFrom-Json
+    $config.process.commandLine = $Command
+    $config.process.timeout = $TimeoutMs
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($config | ConvertTo-Json -Depth 10)))
+    $argList = @()
+    if ($Debug) { $argList += "--debug" }
+    $argList += @("--config-base64", $encoded)
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    if ($StdinFile) {
+        $psi.FileName = $env:ComSpec
+        $quoted = ($argList | ForEach-Object { "`"$_`"" }) -join ' '
+        $psi.Arguments = "/d /s /c `"`"$WxcExec`" $quoted < `"$StdinFile`"`""
+    } else {
+        $psi.FileName = $WxcExec
+        foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
+        $psi.RedirectStandardInput = [bool]$WriteStdin
+    }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    @{
+        Process    = $proc
+        Stdin      = if ($WriteStdin) { $proc.StandardInput.BaseStream } else { $null }
+        StdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        StderrTask = $proc.StandardError.ReadToEndAsync()
+        Watch      = [System.Diagnostics.Stopwatch]::StartNew()
+    }
+}
+
+# Close a Start-WslcStdinRun handle's stdin, tolerating a pipe wxc-exec already
+# closed by exiting.
+function Close-WslcStdin {
+    param([hashtable]$Handle)
+    try { $Handle.Stdin.Close() } catch { }
+}
+
+# Wait for a Start-WslcStdinRun handle, killing its whole process tree after
+# $Seconds. Returns @{ Exited; ExitCode; Stdout; Stderr; Seconds }, or throws
+# if the kill or the output streams do not finish within a bounded time.
+function Wait-WslcStdinRun {
+    param([hashtable]$Handle, [int]$Seconds = 120)
+    $exited = $Handle.Process.WaitForExit($Seconds * 1000)
+    if (-not $exited) {
+        try { $Handle.Process.Kill($true) } catch { throw "could not kill the timed-out run: $_" }
+        if (-not $Handle.Process.WaitForExit(30000)) {
+            throw "the run was still alive 30 s after it was killed"
+        }
+    }
+    $Handle.Watch.Stop()
+    if (-not [System.Threading.Tasks.Task]::WaitAll(@($Handle.StdoutTask, $Handle.StderrTask), 30000)) {
+        throw "the run's output streams were still open 30 s after it exited"
+    }
+    @{
+        Exited   = $exited
+        ExitCode = $Handle.Process.ExitCode
+        Stdout   = $Handle.StdoutTask.Result
+        Stderr   = $Handle.StderrTask.Result
+        Seconds  = $Handle.Watch.Elapsed.TotalSeconds
+    }
+}
+
+# Run one stdin case. $Body returns a failure reason, or nothing on success.
+function Invoke-WslcStdinTest {
+    param([string]$Name, [scriptblock]$Body)
+    Write-Host "  $Name ... " -NoNewline
+    $reason = $null
+    try { $reason = & $Body } catch { $reason = "threw: $_" }
+    $pass = -not $reason
+    if ($pass) {
+        Write-Host "PASS" -ForegroundColor Green
+    } else {
+        Write-Host "FAIL" -ForegroundColor Red
+        Write-Host "    Reason: $reason" -ForegroundColor Red
+    }
+    Start-Sleep 2
+    return @{ Name = "stdin: $Name"; Pass = $pass; Skipped = $false; Reason = "$reason" }
+}
+
+$stdinRoot = Join-Path $env:TEMP "mxc_wslc_stdin_$PID"
+$null = New-Item -ItemType Directory -Force -Path $stdinRoot
+try {
+    $null = $results.Add((Invoke-WslcStdinTest "piped host stdin reaches the command" {
+        $h = Start-WslcStdinRun -Command 'cat' -WriteStdin
+        $payload = [Text.Encoding]::UTF8.GetBytes("PIPED-STDIN-LINE`n")
+        $h.Stdin.Write($payload, 0, $payload.Length)
+        Close-WslcStdin $h
+        $r = Wait-WslcStdinRun $h
+        if ($r.ExitCode -ne 0) { return "exit $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -notmatch 'PIPED-STDIN-LINE') { return "cat did not echo the input (got '$($r.Stdout.Trim())')" }
+    }))
+
+    $null = $results.Add((Invoke-WslcStdinTest "a redirected file reaches the command" {
+        $file = Join-Path $stdinRoot 'input.txt'
+        [IO.File]::WriteAllText($file, "FILE-STDIN-LINE-1`nFILE-STDIN-LINE-2`n")
+        $r = Wait-WslcStdinRun (Start-WslcStdinRun -Command 'wc -l' -StdinFile $file)
+        if ($r.ExitCode -ne 0) { return "exit $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -notmatch '(?m)^\s*2\s*$') { return "wc did not count two lines (got '$($r.Stdout.Trim())')" }
+    }))
+
+    $null = $results.Add((Invoke-WslcStdinTest "every byte value arrives unchanged" {
+        $bytes = [byte[]]::new(1024 * 1024)
+        for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [byte]($i % 256) }
+        $expected = ([Security.Cryptography.SHA256]::HashData($bytes) |
+            ForEach-Object { $_.ToString('x2') }) -join ''
+        $h = Start-WslcStdinRun -Command 'sha256sum' -WriteStdin
+        $h.Stdin.Write($bytes, 0, $bytes.Length)
+        Close-WslcStdin $h
+        $r = Wait-WslcStdinRun $h
+        if ($r.ExitCode -ne 0) { return "exit $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -notmatch $expected) { return "hash mismatch: expected $expected, got '$($r.Stdout.Trim())'" }
+    }))
+
+    $null = $results.Add((Invoke-WslcStdinTest "the command sees end-of-file only once host stdin closes" {
+        $h = Start-WslcStdinRun -Command "sh -c 'cat; echo CAT-SAW-EOF'" -WriteStdin
+        $payload = [Text.Encoding]::UTF8.GetBytes("BEFORE-EOF`n")
+        $h.Stdin.Write($payload, 0, $payload.Length)
+        $h.Stdin.Flush()
+        $exitedEarly = $h.Process.WaitForExit(15000)
+        Close-WslcStdin $h
+        $r = Wait-WslcStdinRun $h
+        if ($exitedEarly) { return "wxc-exec exited while host stdin was still open (stdout: '$($r.Stdout.Trim())')" }
+        if ($r.ExitCode -ne 0) { return "exit $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -notmatch '(?s)BEFORE-EOF.*CAT-SAW-EOF') { return "missing input or end-of-file marker (got '$($r.Stdout.Trim())')" }
+    }))
+
+    $null = $results.Add((Invoke-WslcStdinTest "an empty stdin ends the command cleanly" {
+        $r = Wait-WslcStdinRun (Start-WslcStdinRun -Command 'wc -c' -StdinFile 'NUL')
+        if ($r.ExitCode -ne 0) { return "exit $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -notmatch '(?m)^\s*0\s*$') { return "wc read bytes from an empty stdin (got '$($r.Stdout.Trim())')" }
+    }))
+
+    $null = $results.Add((Invoke-WslcStdinTest "a host stdin that never closes does not hold up a command that ignores it" {
+        $h = Start-WslcStdinRun -Command 'echo IGNORES-STDIN' -WriteStdin
+        $r = Wait-WslcStdinRun $h -Seconds 60
+        Close-WslcStdin $h
+        if (-not $r.Exited) { return "wxc-exec did not exit within 60s while its stdin was open" }
+        if ($r.ExitCode -ne 0) { return "exit $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -notmatch 'IGNORES-STDIN') { return "the command did not run (got '$($r.Stdout.Trim())')" }
+    }))
+
+    $null = $results.Add((Invoke-WslcStdinTest "a reader waiting on a stdin that never closes still times out" {
+        $h = Start-WslcStdinRun -Command 'cat' -TimeoutMs 3000 -WriteStdin
+        $r = Wait-WslcStdinRun $h -Seconds 120
+        Close-WslcStdin $h
+        Write-Host ("(took {0:N1}s) " -f $r.Seconds) -NoNewline -ForegroundColor Gray
+        if (-not $r.Exited) { return "wxc-exec did not exit within 120s of a 3s timeout" }
+        if ($r.ExitCode -ne -1) { return "expected exit -1, got $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if (($r.Stdout + $r.Stderr) -notmatch 'timed out') { return "the timeout was not reported (stderr: $($r.Stderr.Trim()))" }
+    }))
+
+    # The WSLc SDK reports the exit of a command that left a lot of input unread
+    # late, and may drop output the command wrote after its input backed up.
+    $null = $results.Add((Invoke-WslcStdinTest "a stdin flood into a command that ignores it finishes without losing output silently" {
+        $h = Start-WslcStdinRun -Command "sh -c 'sleep 3; echo FLOODED-DONE'" -WriteStdin
+        $flood = [byte[]]::new(32 * 1024 * 1024)
+        $null = $h.Stdin.WriteAsync($flood, 0, $flood.Length)
+        $r = Wait-WslcStdinRun $h -Seconds 300
+        Close-WslcStdin $h
+        $warned = $r.Stderr -match 'reported the command''s exit late'
+        Write-Host ("(took {0:N1}s, late-exit warning: {1}) " -f $r.Seconds, $warned) -NoNewline -ForegroundColor Gray
+        if (-not $r.Exited) { return "wxc-exec did not exit within 300s" }
+        if ($r.ExitCode -ne 0) { return "exit $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -notmatch 'FLOODED-DONE' -and -not $warned) { return "output was lost without a warning (stderr: $($r.Stderr.Trim()))" }
+    }))
+
+    # A terminal needs a console of its own: the runner's stdin may be a pipe.
+    # cmd.exe in a new hidden console hands wxc-exec that console's input.
+    $null = $results.Add((Invoke-WslcStdinTest "a terminal stdin is not forwarded and says so" {
+        $config = Get-Content (Join-Path $TestConfigs "wslc_stdin.json") -Raw | ConvertFrom-Json
+        $config.process.commandLine = "sh -c 'cat; echo TTY-SAW-EOF'"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($config | ConvertTo-Json -Depth 10)))
+        $out = Join-Path $stdinRoot 'tty.out'
+        $err = Join-Path $stdinRoot 'tty.err'
+        $cmdLine = "/d /s /c `"`"$WxcExec`" --config-base64 $encoded > `"$out`" 2> `"$err`"`""
+        $proc = Start-Process -FilePath $env:ComSpec -ArgumentList $cmdLine -WindowStyle Hidden -PassThru
+        if (-not $proc.WaitForExit(120000)) {
+            try { $proc.Kill($true) } catch { }
+            return "wxc-exec did not exit within 120s with a terminal stdin"
+        }
+        $stdout = Get-Content $out -Raw -ErrorAction SilentlyContinue
+        $stderr = Get-Content $err -Raw -ErrorAction SilentlyContinue
+        if ($proc.ExitCode -ne 0) { return "exit $($proc.ExitCode) (stderr: $stderr)" }
+        if ($stderr -notmatch 'stdin is a terminal') { return "no terminal warning (stderr: $stderr)" }
+        if ($stdout -notmatch 'TTY-SAW-EOF') { return "the command did not see end-of-file (stdout: $stdout)" }
+    }))
+} finally {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stdinRoot
+}
+
 Write-Host "`n--- State-Aware Lifecycle Tests ---" -ForegroundColor Cyan
 $saScript = Join-Path $PSScriptRoot "run_wslc_state_aware_tests.ps1"
 $saArgs = @{ WxcExecPath = $WxcExec; SkipSetup = $true }

@@ -35,16 +35,12 @@
 
 use thiserror::Error;
 
-pub mod guarded_wpr_protocol;
-
 #[cfg(target_os = "windows")]
 mod capability_dacl;
 #[cfg(target_os = "windows")]
 mod capability_names;
 #[cfg(target_os = "windows")]
 mod etl_decode;
-#[cfg(target_os = "windows")]
-mod etl_filter;
 #[cfg(target_os = "windows")]
 mod extractors;
 #[cfg(target_os = "windows")]
@@ -54,8 +50,6 @@ mod network_extractors;
 #[cfg(target_os = "windows")]
 mod path_norm;
 #[cfg(target_os = "windows")]
-mod process_lifetime;
-#[cfg(target_os = "windows")]
 mod tdh_decode;
 #[cfg(target_os = "windows")]
 mod ui;
@@ -63,17 +57,11 @@ mod ui;
 #[cfg(target_os = "windows")]
 pub use etl_decode::{visit_raw_events, EtlDenialAnalyzer};
 #[cfg(target_os = "windows")]
-pub use etl_filter::filter_trace_for_job_membership;
-#[cfg(target_os = "windows")]
 pub use extractors::DecodedEventParts;
 #[cfg(target_os = "windows")]
 pub use ffi::{
     is_learning_mode_api_available, start_trace, LearningModeApi, LearningModeTraceHandle,
     LearningModeTraceSources, LEARNING_MODE_API_SET,
-};
-#[cfg(target_os = "windows")]
-pub use process_lifetime::{
-    JobMembershipSnapshot, JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
 };
 
 /// Errors surfaced while loading or invoking the Learning Mode trace API.

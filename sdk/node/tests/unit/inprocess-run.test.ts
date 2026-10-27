@@ -27,10 +27,12 @@ describe('public SDK namespace exports', () => {
   it('keeps V1 operations and types in the versioned entry point', () => {
     for (const name of [
       'spawn',
+      'spawnWithStdin',
       'run',
       'provisionContainer',
       'startContainer',
       'spawnInContainer',
+      'spawnInContainerWithStdin',
       'runInContainer',
       'stopContainer',
       'deprovisionContainer',
@@ -146,6 +148,7 @@ describe('in-process asynchronous run routing', () => {
   it('routes spawn through the asynchronous native process binding with options', async () => {
     let bindingRequest: OneShotRequest | undefined;
     let bindingExperimental = false;
+    let bindingStdin: boolean | undefined;
     const createProcess = () => {
       const driver: NativeLifecycleDriver = {
         id: 17,
@@ -164,9 +167,10 @@ describe('in-process asynchronous run routing', () => {
     };
     _setBindingSandboxProcessFactories(
       () => assert.fail('the public V1 API must not use the synchronous binding'),
-      async (request, experimental) => {
+      async (request, experimental, stdin) => {
         bindingRequest = request;
         bindingExperimental = experimental;
+        bindingStdin = stdin;
         return createProcess();
       },
     );
@@ -180,8 +184,14 @@ describe('in-process asynchronous run routing', () => {
     assert.strictEqual(bindingRequest?.process.commandLine, 'echo spawn');
     assert.strictEqual(bindingRequest?.version, '1.0.0');
     assert.strictEqual(bindingExperimental, false);
+    assert.strictEqual(bindingStdin, false);
     assert.deepStrictEqual(bindingRequest?.telemetry, { enabled: true });
     await processHandle.wait();
+
+    const withStdin = await v1Sdk.spawnWithStdin({ command: 'cat' });
+    assert.strictEqual(bindingStdin, true);
+    assert.strictEqual(bindingRequest?.process.commandLine, 'cat');
+    await withStdin.wait();
   });
 
   it('rejects invalid requests at the SDK boundary', async () => {

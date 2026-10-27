@@ -295,12 +295,6 @@ impl UiJobObject {
             .map_err(|e| WxcError::Process(format!("AssignProcessToJobObject: {e}")))
     }
 
-    /// Returns this process's numeric HANDLE value for authenticated
-    /// cross-process duplication by the elevated guarded-WPR guardian.
-    pub fn handle_value(&self) -> usize {
-        self.handle.0 as usize
-    }
-
     /// Terminates every process currently assigned to this job (the sandboxed
     /// child and all of its descendants) with the given exit code.
     pub fn terminate(&self, exit_code: u32) -> Result<(), WxcError> {
@@ -369,8 +363,7 @@ impl UiJobObject {
     /// This is the **strict** drain: a failure to observe the job reach zero
     /// active processes within [`JOB_EMPTY_WAIT_TIMEOUT`] is returned as an
     /// error. Use it only where full drain certainty is a correctness
-    /// requirement — notably the guarded-WPR `captureDenials` paths, where ETL
-    /// scoping is only sound if nothing can still be running unobserved.
+    /// requirement, including native capture finalization after workload teardown.
     /// Ordinary (non-capture) teardown should prefer
     /// [`Self::terminate_best_effort`], which does not fail an otherwise-valid
     /// run just because the kernel had not finished tearing the tree down

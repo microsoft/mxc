@@ -22,6 +22,7 @@ import {
 import {
   deprovisionContainer,
   spawnInContainer,
+  spawnInContainerWithStdin,
   runInContainer,
   provisionContainer,
   startContainer,
@@ -57,13 +58,28 @@ function collect(
   });
 }
 
+function collectBytes(stream: NodeJS.ReadableStream | null): Promise<Buffer> {
+  if (stream === null) {
+    return Promise.resolve(Buffer.alloc(0));
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer | string) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    stream.once('end', () => resolve(Buffer.concat(chunks)));
+    stream.once('error', reject);
+  });
+}
+
 describe('WSLC state-aware lifecycle E2E', {
   skip: !isWslcAvailable
     ? 'WSLC tests require MXC_ENABLE_WSLC_TESTS=1 on Windows with WSL2 and WSLC SDK'
     : undefined,
 }, () => {
   it(
-    'preserves lifecycle, streaming, timeout, and stale-id behavior',
+    'preserves lifecycle, streaming, stdin, timeout, and stale-id behavior',
     { timeout: 180_000 },
     async () => {
       const { containerId } = await provisionContainer({ containment: 'wslc', image: wslcImage });
@@ -96,7 +112,7 @@ describe('WSLC state-aware lifecycle E2E', {
           assert.equal(
             streamed.standardInput,
             null,
-            'WSLC must explicitly expose no stdin',
+            'spawnInContainer gives a WSLC command no stdin',
           );
           const stdoutPromise = collect(streamed.standardOutput, (chunk) => {
             if (
@@ -127,6 +143,28 @@ describe('WSLC state-aware lifecycle E2E', {
         } finally {
           streamed.dispose();
         }
+
+        const payload = Buffer.alloc(64 * 1024);
+        for (let i = 0; i < payload.length; i++) payload[i] = i % 256;
+        const echoed = await spawnInContainerWithStdin(containerId, { command: 'cat', timeoutMs: 60_000 });
+        try {
+          const stdin = echoed.standardInput;
+          assert.ok(stdin !== null, 'spawnInContainerWithStdin exposes stdin');
+          const stdoutPromise = collectBytes(echoed.standardOutput);
+          stdin.end(payload);
+          const [result, stdout] = await Promise.all([echoed.wait(), stdoutPromise]);
+          assert.equal(result.timedOut, false, 'cat must end once stdin is closed');
+          assert.equal(result.exitCode, 0);
+          assert.ok(stdout.equals(payload), 'every byte value reaches the command unchanged');
+        } finally {
+          echoed.dispose();
+        }
+
+        const readsStdin = await runInContainer(containerId, { command: "sh -c 'cat; echo RUN_SAW_EOF'",
+          timeoutMs: 60_000 });
+        assert.equal(readsStdin.timedOut, false, 'a captured run has no input to wait for');
+        assert.equal(readsStdin.exitCode, 0);
+        assert.equal(readsStdin.stdout.trim(), 'RUN_SAW_EOF');
 
         const timeoutStart = performance.now();
         const timed = await spawnInContainer(containerId, { command: 'sleep 10',

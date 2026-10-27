@@ -380,10 +380,15 @@ export interface IsolationSessionProvisionMetadata {
 
 ## `@microsoft/mxc-sdk/v1::IsolationTier`
 
-Isolation tier selected by the runtime fallback detector.
+Windows ProcessContainer tier reported by the runtime. Historical AppContainer
+values remain readable for V1 compatibility; current native ProcessContainer
+execution reports only `base-container`.
 
 ```typescript
-export type IsolationTier = 'base-container' | 'appcontainer-bfs' | 'appcontainer-dacl';
+export type IsolationTier =
+  | 'base-container'
+  | 'appcontainer-bfs'
+  | 'appcontainer-dacl';
 ```
 
 
@@ -554,7 +559,9 @@ export interface NetworkRuleConfig {
 
 ## `@microsoft/mxc-sdk/v1::PlatformSupport`
 
-Platform support information.
+Platform support information. `unavailableReasons` includes individual Linux
+backend diagnostics and Windows discovery failures, even when another backend
+keeps the platform supported. Transient Windows failures are retried.
 
 ```typescript
 export interface PlatformSupport {
@@ -572,7 +579,11 @@ export interface PlatformSupport {
 
 ## `@microsoft/mxc-sdk/v1::ProbeFacts`
 
-Raw host facts gathered before request tier selection.
+`guardedCaptureAvailable`, `bfscfgPresent`, and `bfsCompiledIn` are retained
+for V1 result compatibility. Current native ProcessContainer reports all
+three as `false`; they do not describe alternative execution paths.
+
+Host capability facts, returned even when the supplied request is incompatible.
 
 ```typescript
 export interface ProbeFacts {
@@ -600,6 +611,10 @@ export interface ProbeFacts {
 ## `@microsoft/mxc-sdk/v1::ProbeOutput`
 
 Result of probing which Windows ProcessContainer tier can serve a config.
+
+When native ProcessContainer cannot serve the request, `tier` and
+`needsDaclAugmentation` are omitted and `error` explains why. `probes` still
+contains host capability facts.
 
 ```typescript
 export interface ProbeOutput {

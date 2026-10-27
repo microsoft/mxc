@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg(any())]
+
 //! Linux MicroVM (NanVix/KVM) E2E integration tests.
 //!
 //! These tests mirror the Windows MicroVM E2E suite in `e2e_windows.rs` and

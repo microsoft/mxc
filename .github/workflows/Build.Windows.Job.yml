@@ -13,7 +13,6 @@ jobs:
           - arch: x64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
-            # tier2_bfs must NOT ship on Win 11 25H2 (bfscfg.exe hangs the host).
             features: hyperlight isolation_session microvm wslc
           - arch: arm64
             runner: windows-11-arm
@@ -26,6 +25,22 @@ jobs:
         working-directory: src
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test loopback command quoting
+        shell: pwsh
+        run: ..\tests\scripts\test_loopback_anchor_command.ps1
+
+      - name: Test bounded native output capture
+        shell: pwsh
+        run: ..\tests\scripts\test_native_process_container_capture.ps1
+
+      - name: Test native policy result oracles
+        shell: pwsh
+        run: ..\tests\scripts\test_native_policy_results.ps1
+
+      - name: Test SDK suite execution gates
+        shell: pwsh
+        run: ..\tests\scripts\test_sdk_suite_results.ps1
 
       # actions-rust-lang/setup-rust-toolchain auto-reads rust-toolchain.toml
       # from the repo root only. Surface src/rust-toolchain.toml there so the
@@ -76,6 +91,38 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      - name: Test NVX host-only executor matrix
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p mxc-sdk --no-default-features --features microvm
+             --test nvx_e2e windows_x64::host_only_executor_request_matrix
+             -- --ignored --exact
+
+      - name: Test MicroVM validation infrastructure
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        working-directory: ${{ github.workspace }}
+        run: node --test scripts/tests/microvm-validation.test.js
+
+      - name: Verify packaged MicroVM tests
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        env:
+          ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR: ${{ github.workspace }}\src\target\${{ matrix.target }}\release\aci-edge-sandboxes
+        run: |
+          & ./scripts/ci/Invoke-CratePackage.ps1 `
+            -OutDir (Join-Path $env:RUNNER_TEMP 'microvm-crate') `
+            -VerifyMicrovmTests
+
+      - name: Stage SDK MicroVM tests for scheduled validation
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          & ./scripts/ci/stage-nvx-validation-tests.ps1 `
+            -BinaryDirectory 'src/target/${{ matrix.target }}/release' `
+            -Features '${{ matrix.features }}'
+
       - name: Build debug executor for isolated telemetry smoke tests
         run: cargo build --locked -p wxc --features test-support
 
@@ -106,9 +153,6 @@ jobs:
           name: wxc-binaries-${{ matrix.target }}
           path: |
             src/target/${{ matrix.target }}/release/wxc-exec.exe
-            src/target/${{ matrix.target }}/release/plm.exe
-            src/target/${{ matrix.target }}/release/wxc-host-prep.exe
-            src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-daemon.exe
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-guest.exe
             src/target/${{ matrix.target }}/release/wxc-wslc-daemon.exe
@@ -118,5 +162,7 @@ jobs:
             src/target/${{ matrix.target }}/release/wslcsdk.dll
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
+            src/target/${{ matrix.target }}/release/nvx-e2e-tests.exe
+            src/target/${{ matrix.target }}/release/aci-edge-sandboxes/
           if-no-files-found: error
           retention-days: 1

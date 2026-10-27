@@ -10,12 +10,12 @@ namespace Microsoft.Mxc.Sdk.Tests;
 
 public class MxcProcessTests
 {
-    // Real spawn requires a host able to launch a sandboxed process (an
-    // elevated, host-prepped Windows host, or a capable Linux/macOS host). CI
-    // lanes that provide one set MXC_E2E_HOST_PREPPED=1 to opt in; elsewhere the
-    // gated tests skip.
+    // Real spawn needs a host that can enforce the default backend. On Windows
+    // that is ProcessContainer, which needs a PSEC-capable host; lanes that
+    // provide one set MXC_E2E_PSEC_CAPABLE_HOST=1 to opt in. The same switch
+    // enables these tests on capable Linux and macOS hosts; elsewhere they skip.
     private static bool HostCanSpawn =>
-        Environment.GetEnvironmentVariable("MXC_E2E_HOST_PREPPED") == "1";
+        Environment.GetEnvironmentVariable("MXC_E2E_PSEC_CAPABLE_HOST") == "1";
 
     [Theory]
     [InlineData(null, null)]

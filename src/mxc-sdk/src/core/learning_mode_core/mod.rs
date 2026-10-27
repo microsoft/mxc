@@ -40,7 +40,7 @@ pub mod paired_output;
 pub mod summary;
 pub mod verbose_logging;
 
-pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer, ProcessLifetime};
+pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer};
 pub use emit::{write_document, DenialsDocument, DenialsOutputPointer};
 pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};
 pub use paired_output::{
