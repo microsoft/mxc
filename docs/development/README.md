@@ -14,6 +14,8 @@ terms, plain-English alternatives, and guidance on naming specific types.
 - [Repository architecture](architecture/repository-architecture.md)
 - [Container lifecycle architecture](architecture/container-lifecycle.md)
 - [Versioning design](architecture/versioning.md)
+- [Feature spec and review template](architecture/designs/feature-spec-template.md)
+- [API proposal and review template](architecture/designs/api-spec-template.md)
 - [Telemetry architecture](architecture/telemetry.md)
 - [Telemetry consent design](architecture/telemetry-consent-design.md)
 - [IsolationSession one-shot architecture](architecture/backends/isolation-session/oneshot.md)
@@ -35,6 +37,10 @@ terms, plain-English alternatives, and guidance on naming specific types.
 - [Authoring a new feature](guides/authoring-a-new-feature.md)
 - [Diagnostics](guides/diagnostics.md)
 - [Adding ProcessContainer OS features](guides/process-container-adding-os-features.md)
+
+## Maintainer guides
+
+- [Feature acceptance and approval](../../MAINTAINERS.md)
 
 ## Plans
 

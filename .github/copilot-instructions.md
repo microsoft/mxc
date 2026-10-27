@@ -158,7 +158,7 @@ Do not fabricate missing required issue fields. For security issues or BSODs, do
 
 ## Engineering and review guidance
 
-Follow the additional [design, communication, and validation standards](../AGENTS.md#design-for-the-codebase-not-just-the-feature)
+Follow the additional [design, staged delivery, communication, and validation standards](../AGENTS.md#design-for-the-codebase-not-just-the-feature)
 in `AGENTS.md`. Use the [MXC review skill](skills/mxc-code-review/SKILL.md)
 when reviewing changes, including its requirements for functional CI validation
 and bug regression coverage.
