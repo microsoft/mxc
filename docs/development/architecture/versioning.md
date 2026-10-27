@@ -314,10 +314,8 @@ directory.
 This specific security-servicing exception applies within V1 and does not
 require a new versioned API surface.
 
-PowerShell startup may fail on hosts where it requires root enumeration.
-Use a PowerShell version that does not require root enumeration or explicitly
-configure the minimum permissions required by the workload and supported by
-the selected backend. Avoid full-drive reads as a general startup workaround.
+For PowerShell startup failures, see
+[troubleshooting](../../troubleshooting.md#powershell-startup).
 
 ### Shipped vs Experimental
 
