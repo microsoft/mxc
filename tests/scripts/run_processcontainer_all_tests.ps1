@@ -89,6 +89,7 @@ $AreaScripts = [ordered]@{
     'NetworkDirectHostLoopback' = 'run_processcontainer_network_loopback_test.ps1'
     'NetworkProxy'             = 'run_processcontainer_network_proxy_test.ps1'
     'NetworkRejections'        = 'run_processcontainer_network_rejections_test.ps1'
+    'ConfigRejections'         = 'run_processcontainer_config_rejections_test.ps1'
     'PathAliasing'             = 'run_processcontainer_path_aliasing_test.ps1'
     'ProcessPlumbing'          = 'run_processcontainer_process_plumbing_test.ps1'
 }
@@ -143,7 +144,7 @@ try {
     $ctx['ResultsJson'] = $ResultsJson
     Initialize-WpcContext -Fresh @ctx
 
-    # Hand the probed capabilities down so nineteen children do not each re-run
+    # Hand the probed capabilities down so child areas do not each re-run
     # --probe, and — more importantly — so they cannot disagree about the tier
     # mid-suite if the host changes underneath them.
     $capsPath = Join-Path $Script:ScratchRoot 'results\host-capabilities.json'
