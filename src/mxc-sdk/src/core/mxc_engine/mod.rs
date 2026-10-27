@@ -74,6 +74,15 @@ use crate::mxc_common::sandbox_process::{
 use crate::mxc_common::state_aware_request::MxcRequest;
 use crate::mxc_common::telemetry;
 
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+pub(crate) use crate::nvx_runner::{CapturedOutcome, CapturedRun as CapturedExecutionResult};
+
+pub(crate) enum OneShotExecution {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+    Captured(CapturedExecutionResult),
+    Streaming(Box<dyn SandboxProcess>),
+}
+
 /// Spawn a streaming [`SandboxProcess`] handle for a normalized
 /// [`ExecutionRequest`].
 ///
@@ -121,6 +130,46 @@ pub fn spawn_one_shot_json(
     spawn_execution_request_with_logger(&request, logger, stdin)
 }
 
+#[doc(hidden)]
+pub(crate) fn execute_one_shot_json(
+    request_json: &str,
+    experimental: bool,
+) -> Result<OneShotExecution, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+
+    if request.containment == ContainmentBackend::MicroVm {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        {
+            experimental::require_experimental_optin(
+                &request.containment,
+                request.experimental_enabled,
+            )?;
+            return invoke_execution_request(&request, logger, |request, logger| {
+                run::log_policy_hash(request, logger);
+                crate::mxc_common::validator::validate_common(request).map_err(|response| {
+                    if request.script_code.is_empty() {
+                        MxcError::malformed_request(response.error_message)
+                    } else {
+                        MxcError::policy_validation(response.error_message)
+                    }
+                })?;
+                crate::nvx_runner::NvxRunner::new()
+                    .run_captured(request, logger)
+                    .map(OneShotExecution::Captured)
+            });
+        }
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
+        {
+            return Err(Error::from(MxcError::backend_unavailable(
+                "MicroVM requires Windows x64 and a build with the microvm feature",
+            )));
+        }
+    }
+
+    spawn_execution_request_with_logger(&request, logger, false).map(OneShotExecution::Streaming)
+}
+
 fn parse_one_shot_json(
     request_json: &str,
     experimental: bool,
@@ -156,9 +205,25 @@ fn spawn_execution_request_with_logger(
 
 fn spawn_execution_request_with_logger_and(
     request: &ExecutionRequest,
-    mut logger: Logger,
+    logger: Logger,
     spawn: impl FnOnce(&ExecutionRequest, &mut Logger) -> Result<Box<dyn SandboxProcess>, MxcError>,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
+    match invoke_execution_request(request, logger, |request, logger| {
+        spawn(request, logger).map(OneShotExecution::Streaming)
+    })? {
+        OneShotExecution::Streaming(process) => Ok(process),
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        OneShotExecution::Captured(_) => {
+            unreachable!("streaming invocation returned captured output")
+        }
+    }
+}
+
+fn invoke_execution_request(
+    request: &ExecutionRequest,
+    mut logger: Logger,
+    execute: impl FnOnce(&ExecutionRequest, &mut Logger) -> Result<OneShotExecution, MxcError>,
+) -> Result<OneShotExecution, Error> {
     let telemetry_active = request
         .telemetry
         .as_ref()
@@ -171,8 +236,8 @@ fn spawn_execution_request_with_logger_and(
         .and_then(|config| config.requested_sandbox_kind);
     let containment = request.containment.clone();
     let started = std::time::Instant::now();
-    let process = match spawn(request, &mut logger) {
-        Ok(process) => process,
+    let execution = match execute(request, &mut logger) {
+        Ok(execution) => execution,
         Err(error) => {
             // Preserve the actual error category so bounded telemetry
             // categorises malformed requests, unsupported containment, and
@@ -189,19 +254,36 @@ fn spawn_execution_request_with_logger_and(
         }
     };
     let extra_warnings = logger.take_warnings();
-    let process: Box<dyn SandboxProcess> = ProcessWithWarnings::wrap(process, extra_warnings);
-    if telemetry_registration.active() {
-        Ok(Box::new(TelemetryProcess::new(
-            process,
-            telemetry_registration.transfer(),
-            TelemetryMode::OneShot {
-                containment,
+    match execution {
+        OneShotExecution::Streaming(process) => {
+            let process = ProcessWithWarnings::wrap(process, extra_warnings);
+            let process: Box<dyn SandboxProcess> = if telemetry_registration.active() {
+                Box::new(TelemetryProcess::new(
+                    process,
+                    telemetry_registration.transfer(),
+                    TelemetryMode::OneShot {
+                        containment,
+                        requested_sandbox_kind,
+                    },
+                    started,
+                ))
+            } else {
+                process
+            };
+            Ok(OneShotExecution::Streaming(process))
+        }
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+        OneShotExecution::Captured(mut result) => {
+            telemetry::emit_sdk_completion_with_kind(
+                telemetry_registration.transfer(),
+                &containment,
                 requested_sandbox_kind,
-            },
-            started,
-        )))
-    } else {
-        Ok(process)
+                &result.response(),
+                started.elapsed(),
+            );
+            result.warnings = extra_warnings.into_iter().chain(result.warnings).collect();
+            Ok(OneShotExecution::Captured(result))
+        }
     }
 }
 
@@ -1102,6 +1184,52 @@ mod telemetry_process_tests {
         .expect("alternate dispatcher should spawn");
 
         assert_eq!(process.warnings(), ["PTY spawn warning"]);
+    }
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+    #[test]
+    fn shared_invocation_preserves_captured_results_warnings_and_errors() {
+        for outcome in [CapturedOutcome::Exited(42), CapturedOutcome::TimedOut] {
+            let mut calls = 0;
+            let result = invoke_execution_request(
+                &ExecutionRequest::default(),
+                Logger::new(Mode::Buffer),
+                |_, logger| {
+                    calls += 1;
+                    logger.warning_line("invocation warning");
+                    Ok(OneShotExecution::Captured(CapturedExecutionResult {
+                        outcome,
+                        warnings: vec!["backend warning".to_owned()],
+                        stdout: b"\xff\0\xfe".to_vec(),
+                        stderr: b"\x80\0\x81".to_vec(),
+                    }))
+                },
+            )
+            .unwrap();
+            assert_eq!(calls, 1);
+            let OneShotExecution::Captured(result) = result else {
+                panic!("captured invocation must stay captured");
+            };
+            assert_eq!(result.outcome, outcome);
+            assert_eq!(result.warnings, ["invocation warning", "backend warning"]);
+            assert_eq!(result.stdout, b"\xff\0\xfe");
+            assert_eq!(result.stderr, b"\x80\0\x81");
+        }
+        for primary in [
+            MxcError::malformed_request("malformed"),
+            MxcError::policy_validation("policy"),
+            MxcError::backend_unavailable("unavailable"),
+            MxcError::backend_error("execution"),
+        ] {
+            let error = invoke_execution_request(
+                &ExecutionRequest::default(),
+                Logger::new(Mode::Buffer),
+                |_, _| Err(primary.clone()),
+            )
+            .err()
+            .expect("invocation failure");
+            assert_eq!(error, Error::from(primary));
+        }
     }
 
     #[test]

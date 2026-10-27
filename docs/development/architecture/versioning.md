@@ -112,10 +112,28 @@ caller-declared versions, and executor-backed raw config APIs.
 
 ### Versioning follows Semver
 
-Per [semver.org](https://semver.org/):
-- **Patch** (x.y.Z) — bug fixes only
-- **Minor** (x.Y.0) — new features, backward compatible
-- **Major** (X.0.0) — breaking changes
+SDK releases follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html):
+
+- **Major** (X.0.0): breaking public API or incompatible documented behavior changes.
+- **Minor** (x.Y.0): backward-compatible API additions, newly exposed schema
+  capabilities, or new behavior. Public API deprecations require at least a
+  minor release.
+- **Patch** (x.y.Z): backward-compatible bug fixes and internal refactoring,
+  without new public APIs, schema capabilities, or feature behavior.
+
+Correcting behavior to match the documented contract can be a patch; introducing
+an incompatible contract requires a major version. The highest required change
+determines the release version, including urgent out-of-cycle releases.
+
+Features and fixes ship in new releases on the current release line; they are
+not backported to older release lines. Dependent projects must update to an SDK
+version that includes the change to receive it.
+
+SDK package versions and schema versions are independent. Evaluate compatibility
+on each axis separately: changing a schema does not automatically bump an SDK
+package, and releasing an SDK does not automatically bump a schema. Published
+contracts remain immutable. See [How MXC is managed](../../repository-management.md)
+for release cadence and milestone policy.
 
 A development prerelease for the next minor must retain accepted fields from
 the published major line. Retired settings such as `fallback.allowDaclMutation`

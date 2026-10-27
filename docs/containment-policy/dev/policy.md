@@ -51,8 +51,8 @@ sandbox.
 
 | Field | Type and meaning |
 |---|---|
-| `process.commandLine` | Required non-empty string; command to run (guest source code for Hyperlight/MicroVM). |
-| `process.cwd` | Optional string; explicit working directory. An unusable path fails rather than falling back. If omitted, each backend chooses its own usable default, not necessarily the caller's directory. Hyperlight and MicroVM reject an explicit working directory. |
+| `process.commandLine` | Required non-empty string; command to run (guest source code for Hyperlight, a guest shell command for NVX MicroVM). |
+| `process.cwd` | Optional string; explicit working directory. An unusable path fails rather than falling back. If omitted, each backend chooses its own usable default, not necessarily the caller's directory. Hyperlight rejects an explicit working directory; MicroVM uses a guest path, as described in the [NVX guide](../../backends/nvx/nvx.md#working-directory-and-environment). |
 | `process.timeout` | Optional integer milliseconds, `0` to `4294967295`; `0` means no timeout. |
 | `process.env` | Optional array of `KEY=VALUE` strings. Omitted uses the backend default; supplied entries replace it unless `inheritDefaultEnv` is `true`. |
 | `process.inheritDefaultEnv` | Optional boolean (default `false`); layers supplied `env` entries over the backend default, with caller entries winning. |
@@ -64,8 +64,10 @@ With `env: []` and `inheritDefaultEnv: false`, the request asks for an empty
 environment. Windows ProcessContainer refuses a supplied environment missing
 `SYSTEMROOT` or `LOCALAPPDATA`; IsolationSession cannot replace its user's
 default environment and requires `inheritDefaultEnv: true` for supplied `env`.
-MicroVM rejects `deniedPaths`; Hyperlight checks denied paths against its
-mounted grants. Path strings use the selected host/backend's conventions.
+Hyperlight checks denied paths against its mounted grants. See the
+[NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy)
+for MicroVM filesystem and environment support. Path strings use the selected
+host/backend's conventions.
 
 ### Network and UI
 
@@ -153,10 +155,10 @@ WSLc networking supports only all-deny isolated or all-allow bridged
 rejects mixed postures and per-destination rules. IsolationSession cannot
 restrict networking: its request must explicitly set **all three** actions to
 `"allow"` and cannot carry rules or a proxy. An empty or absent `network`
-section is rejected for IsolationSession. MicroVM permits all-deny isolated
-or explicitly all-allow unrestricted host networking; mixed postures and
-per-destination rules are rejected. Hyperlight rejects a supplied `network`
-section. Windows Sandbox create-and-run execution blocks networking when
+section is rejected for IsolationSession. MicroVM networking support is
+described in the [NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy).
+Hyperlight rejects a supplied `network` section. Windows Sandbox
+create-and-run execution blocks networking when
 `network` is omitted; it rejects supplied `network.egress` or
 `network.ingress` sections (even empty or deny-only), host filters, and
 proxies. Backend support is not implied by a field appearing in this

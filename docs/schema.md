@@ -122,6 +122,9 @@ identity-less host proxies omit `allowedProxyPeer` and require
 deployment: it opens both host-loopback directions without restricting access
 to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
 
+For MicroVM networking and proxy support, see the
+[NVX backend capability table](backends/nvx/nvx.md#supported-operations-and-policy).
+
 ```json
 {
     "version": "0.9.0-alpha",
@@ -332,7 +335,8 @@ use:
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
-| MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
+| MicroVM | The guest default; see [NVX working-directory behaviour](backends/nvx/nvx.md#working-directory-and-environment). |
+| Hyperlight | Not applicable — this backend rejects a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
@@ -378,6 +382,9 @@ On the WSL Container backend it is the container image's own `ENV`, which MXC
 neither authors nor enumerates — see
 [`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md#environment).
 
+For MicroVM environment support and limits, see
+[NVX working directory and environment](backends/nvx/nvx.md#working-directory-and-environment).
+
 ### Filesystem Policy
 
 The `filesystem` section defines path access policy shared across backends:
@@ -387,6 +394,12 @@ The `filesystem` section defines path access policy shared across backends:
 | `readwritePaths` | string[] | `[]` | Paths the process can read and write. |
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
+
+Backend support for filesystem policy is described in each backend guide; see
+the [NVX capability table](backends/nvx/nvx.md#supported-operations-and-policy)
+for MicroVM. Backend-specific sections, including
+`processContainer.filesystem.enumeratePaths`, can only accompany their matching
+`containment` selection.
 
 The ProcessContainer-only `processContainer.filesystem` section contains:
 
@@ -473,7 +486,7 @@ force a particular backend.
 |-------|------------|
 | `"process"` | `processcontainer` on Windows, `bubblewrap` on Linux, `seatbelt` on macOS |
 | `"vm"` | Full hardware-virtualised VM isolation. Resolves to `windows_sandbox` on Windows. |
-| `"microvm"` | MicroVM on Windows (NanVix via the Windows Hypervisor Platform). Experimental. |
+| `"microvm"` | MicroVM on Windows x64 (NVX via the Windows Hypervisor Platform). Experimental. |
 
 #### Concrete backends
 
@@ -483,7 +496,7 @@ force a particular backend.
 | `"windows_sandbox"` | Windows Sandbox VM isolation. Supports create-and-run execution with a fresh disposable VM per execution, and container lifecycle operations backed by a long-lived per-container daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
-| `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
+| `"microvm"` | MicroVM isolation via NVX on Windows x64 |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session: create-and-run execution uses a freshly provisioned isolated user account in its own OS-managed session. Container lifecycle operations can retain the session between executions. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |

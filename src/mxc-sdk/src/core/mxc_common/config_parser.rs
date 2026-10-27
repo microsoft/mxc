@@ -1849,6 +1849,74 @@ mod tests {
         assert!(matches!(parsed, MxcRequest::OneShot(_)));
     }
 
+    #[test]
+    fn microvm_rejects_process_container_sections_but_accepts_a_minimal_request() {
+        const ERROR: &str = "Configuration parse error: Multiple containment backends configured: \
+            'containment' is 'microvm' (no per-backend section is defined for this backend), but \
+            the config includes backend section(s): processContainer. Only one backend section is \
+            allowed; remove the unused section(s).";
+
+        for process_container in [r#"{}"#, r#"{"leastPrivilege":false}"#] {
+            let json = format!(
+                r#"{{"version":"1.1.0-alpha","containment":"microvm","process":{{"commandLine":"echo hello"}},"processContainer":{process_container}}}"#
+            );
+            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)), "{error:?}");
+            assert_eq!(error.message(), ERROR);
+        }
+
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "microvm",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.containment, ContainmentBackend::MicroVm);
+    }
+
+    #[test]
+    fn legacy_fallback_settings_do_not_change_runtime_policy() {
+        for (version, containment) in [
+            ("0.9.0-alpha", "processcontainer"),
+            ("1.0.0", "processcontainer"),
+            ("1.1.0-alpha", "processcontainer"),
+            ("1.1.0-alpha", "microvm"),
+        ] {
+            let mut expected = None;
+            for fallback in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({"allowDaclMutation": true})),
+                Some(serde_json::json!({"allowDaclMutation": false})),
+            ] {
+                let mut json = serde_json::json!({
+                    "version": version,
+                    "containment": containment,
+                    "process": {"commandLine": "echo hello"}
+                });
+                if let Some(fallback) = fallback {
+                    json["fallback"] = fallback;
+                }
+                let MxcRequest::OneShot(request) =
+                    load_mxc_request_from_json(&json.to_string(), &mut test_logger()).unwrap()
+                else {
+                    panic!("expected a create-and-run request");
+                };
+                let serialized = serde_json::to_value(request.policy).unwrap();
+                assert!(serialized.get("fallback").is_none());
+                if let Some(expected) = &expected {
+                    assert_eq!(&serialized, expected);
+                } else {
+                    expected = Some(serialized);
+                }
+            }
+        }
+    }
+
     fn parse_exact_for_test(json: &str) -> Result<MxcRequest, ParseError> {
         parse_exact_mxc_request_json(json, &mut test_logger())
     }

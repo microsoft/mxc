@@ -398,6 +398,38 @@ function Invoke-IsolationSessionSuites {
     }
 }
 
+function Invoke-MicroVmTests {
+    if ($Architecture -ne 'x64') {
+        throw 'MicroVM validation requires x64.'
+    }
+    $tests = Join-Path $binaryDirectoryPath 'nvx-e2e-tests.exe'
+    Assert-File -Path $tests
+    $env:ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR = Join-Path $binaryDirectoryPath 'aci-edge-sandboxes'
+    $run = Invoke-LoggedNative -FilePath $tests -LogName 'microvm-nvx.log' -ArgumentList @(
+        '--include-ignored', '--nocapture', '--test-threads=1'
+    )
+    $failure = Get-LibtestFailure -Run $run
+    if ($failure) {
+        throw "MicroVM SDK tests $failure."
+    }
+    $output = Get-Content -LiteralPath $run.Log -Raw
+    if ($output -match '\bSKIP(?:PED)?:' -or
+        $output -notmatch '(?m)^test result: ok\. \d+ passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;') {
+        throw 'MicroVM SDK validation skipped or filtered tests.'
+    }
+    $scenarios = [ordered]@{
+        'facade' = 'VM_EXECUTED facade sequential '
+        'executor' = 'VM_EXECUTED executor sequential '
+        'executor configs' = 'VM_EXECUTED executor configs '
+        'executor interruption' = 'VM_EXECUTED executor console interruption '
+    }
+    foreach ($scenario in $scenarios.Keys) {
+        if (-not $output.Contains($scenarios[$scenario])) {
+            throw "MicroVM SDK validation did not execute the $scenario VM scenario."
+        }
+    }
+}
+
 Redirect-Temp
 
 switch ($Backend) {
@@ -414,8 +446,6 @@ switch ($Backend) {
         Invoke-WslcSuites
     }
     'microvm' {
-        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_microvm_tests.ps1') -Arguments @{
-            BinDir = $binaryDirectoryPath
-        }
+        Invoke-MicroVmTests
     }
 }

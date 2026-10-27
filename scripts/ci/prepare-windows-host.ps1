@@ -550,19 +550,20 @@ function Install-WorkloadTooling {
 }
 
 function Initialize-MicroVmHost {
-    # Staged next to wxc-exec.exe by the --features microvm build, so their
-    # absence means a broken artifact rather than a host problem. Snapshots are
-    # excluded: they are a warm-start cache the runner regenerates on demand.
     Assert-RequiredFile @(
         'wxc-exec.exe',
-        'nanvixd.exe',
-        'nanvix_rootfs.img',
-        'python3.initrd',
-        'bin\kernel.elf'
+        'nvx-e2e-tests.exe',
+        'aci-edge-sandboxes\bundle-manifest.json',
+        'aci-edge-sandboxes\SOURCE-MANIFEST.json',
+        'aci-edge-sandboxes\SHA256SUMS',
+        'aci-edge-sandboxes\bin\aci_edge_agent.dll',
+        'aci-edge-sandboxes\bin\direct-images.exe',
+        'aci-edge-sandboxes\bin\openvmm.exe',
+        'aci-edge-sandboxes\guest\vmlinux',
+        'aci-edge-sandboxes\guest\initramfs-edge.cpio.gz'
     )
 
-    # NanVix boots a VM from these images on every invocation; Defender scanning
-    # them can push boot past its timeout.
+    # Scanning the signed runtime and guest images can push VM boot past its timeout.
     Add-MpPreference -ExclusionPath $BinaryDirectory
     Write-Host "Added Defender exclusion for $BinaryDirectory"
 

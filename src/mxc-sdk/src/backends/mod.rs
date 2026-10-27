@@ -21,15 +21,8 @@ pub mod lxc {
     pub mod common;
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub mod nanvix {
-    #[cfg(feature = "microvm")]
-    pub mod binaries;
-    #[cfg(feature = "microvm")]
-    pub mod common;
-    #[cfg(feature = "microvm")]
-    pub mod runner;
-}
+#[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
+pub mod nvx;
 
 #[cfg(target_os = "windows")]
 pub mod process_container {

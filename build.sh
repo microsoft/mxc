@@ -13,7 +13,6 @@ BUILD_TYPE="release"
 BUILD_SDK=true
 
 WITH_HYPERLIGHT=false
-WITH_MICROVM=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -30,8 +29,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --with-microvm)
-            WITH_MICROVM=true
-            shift
+            echo "error: --with-microvm is currently supported only by build.bat on Windows x64" >&2
+            exit 1
             ;;
         --help|-h)
             echo "Usage: build.sh [OPTIONS]"
@@ -40,7 +39,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --debug             Build in debug mode (default: release)"
             echo "  --rust-only         Only build Rust binaries, skip SDK"
             echo "  --with-hyperlight   Build with Hyperlight (micro-VM) backend (x86_64 only)"
-            echo "  --with-microvm      Build with NanVix MicroVM backend (KVM required at runtime)"
             echo "  -h, --help          Show this help message"
             exit 0
             ;;
@@ -78,9 +76,6 @@ CARGO_FEATURES=()
 FEATURES_LIST=()
 if [ "$WITH_HYPERLIGHT" = true ]; then
     FEATURES_LIST+=(hyperlight)
-fi
-if [ "$WITH_MICROVM" = true ]; then
-    FEATURES_LIST+=(microvm)
 fi
 if [ ${#FEATURES_LIST[@]} -gt 0 ]; then
     CARGO_FEATURES=(--features "$(IFS=,; echo "${FEATURES_LIST[*]}")")

@@ -6,6 +6,8 @@ mod audit;
 #[cfg(target_os = "windows")]
 use std::fmt::Write;
 use std::process;
+#[cfg(target_os = "windows")]
+use std::sync::Mutex;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
@@ -17,6 +19,8 @@ use mxc_sdk::mxc_common::error::WxcError;
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use mxc_sdk::mxc_common::mxc_error::{MxcError, MxcErrorCode};
+#[cfg(target_os = "windows")]
+use mxc_sdk::mxc_common::script_runner::RunCancellation;
 use mxc_sdk::mxc_common::script_runner::{
     emit_mxc_error_exit, emit_warning_envelopes, handle_dry_run_exit, ScriptRunner,
 };
@@ -832,18 +836,85 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-/// Emit cancellation telemetry before the default Windows handler terminates
-/// the process.
 #[cfg(target_os = "windows")]
-unsafe extern "system" fn telemetry_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
-    let _ = std::panic::catch_unwind(telemetry::emit_cancellation);
+static RUN_CANCELLATION_SLOT: Mutex<Option<RunCancellation>> = Mutex::new(None);
+
+#[cfg(target_os = "windows")]
+struct ConsoleRunGuard {
+    cancellation: Option<RunCancellation>,
+}
+
+#[cfg(target_os = "windows")]
+impl ConsoleRunGuard {
+    fn new(cancellation: Option<RunCancellation>) -> Self {
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = cancellation.clone();
+        Self { cancellation }
+    }
+
+    fn finish(mut self) -> bool {
+        // Clear the handler's signal only after backend cleanup has finished.
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        self.cancellation
+            .take()
+            .is_some_and(|signal| signal.was_cancelled())
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ConsoleRunGuard {
+    fn drop(&mut self) {
+        *RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn request_console_cancellation(ctrl_type: u32, cancellation: Option<&RunCancellation>) -> bool {
+    use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    if matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT) {
+        if let Some(cancellation) = cancellation {
+            return cancellation.request();
+        }
+    }
+    false
+}
+
+/// Claim cooperative interrupts; otherwise emit telemetry before default termination.
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn executor_ctrl_handler(ctrl_type: u32) -> windows::core::BOOL {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_console_control(ctrl_type)
+    }))
+    .unwrap_or(windows::core::BOOL(0))
+}
+
+#[cfg(target_os = "windows")]
+fn handle_console_control(ctrl_type: u32) -> windows::core::BOOL {
+    {
+        let cancellation = RUN_CANCELLATION_SLOT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if request_console_cancellation(ctrl_type, cancellation.as_ref()) {
+            // The execution owner wakes its bounded native wait and runs teardown.
+            // Never call native lifecycle APIs on this handler thread.
+            return windows::core::BOOL(1);
+        }
+    }
+    telemetry::emit_cancellation();
     windows::core::BOOL(0)
 }
 
 #[cfg(target_os = "windows")]
-fn install_telemetry_ctrl_handler() {
+fn install_executor_ctrl_handler() -> windows::core::Result<()> {
     use windows::Win32::System::Console::SetConsoleCtrlHandler;
-    let _ = unsafe { SetConsoleCtrlHandler(Some(telemetry_ctrl_handler), true) };
+    // SAFETY: `executor_ctrl_handler` has the correct ABI; the `Add=TRUE`
+    // call merely appends to the OS handler chain.
+    unsafe { SetConsoleCtrlHandler(Some(executor_ctrl_handler), true) }
 }
 
 fn main() {
@@ -936,7 +1007,11 @@ fn main() {
     };
 
     #[cfg(target_os = "windows")]
-    install_telemetry_ctrl_handler();
+    if let Err(error) = install_executor_ctrl_handler() {
+        emit_mxc_error_exit(&MxcError::backend_error(format!(
+            "cannot install executor console-control handler: {error}"
+        )));
+    }
 
     // --setup-hyperlight: warm up the snapshot and exit. Runs before
     // config parsing so the user doesn't need a JSON file on disk
@@ -1391,6 +1466,8 @@ fn main() {
         .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    #[cfg(target_os = "windows")]
+    let console_run = ConsoleRunGuard::new(runner.cancellation());
     let run_start = Instant::now();
     let mut response = runner.run(&request, &mut logger);
     let run_elapsed = run_start.elapsed();
@@ -1429,6 +1506,10 @@ fn main() {
     }
 
     drop(runner);
+    #[cfg(target_os = "windows")]
+    let cancelled = console_run.finish();
+    #[cfg(not(target_os = "windows"))]
+    let cancelled = false;
 
     // Surface security warnings (e.g. permissiveLearningMode relaxing
     // deny-by-default under --audit). The logger only records these rather than
@@ -1452,13 +1533,25 @@ fn main() {
         ));
     }
 
-    telemetry::emit_completion_with_kind(
-        telemetry_active,
-        &request.containment,
-        requested_sandbox_kind,
-        &response,
-        run_elapsed,
-    );
+    if cancelled {
+        telemetry::emit_early_exit_with_kind(
+            telemetry_active,
+            &request.containment,
+            requested_sandbox_kind,
+            telemetry::FailureReason::Cancelled,
+        );
+        if response.exit_code != 0 {
+            response.exit_code = 130;
+        }
+    } else {
+        telemetry::emit_completion_with_kind(
+            telemetry_active,
+            &request.containment,
+            requested_sandbox_kind,
+            &response,
+            run_elapsed,
+        );
+    }
 
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
@@ -2841,6 +2934,38 @@ mod tests {
             "state-aware command-rendering failures emit an envelope on stdout"
         );
         assert!(err.message.contains("invalid CLI command override"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn console_handler_claims_only_cooperatively_cancellable_interrupts() {
+        use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT};
+        for event in [CTRL_C_EVENT, CTRL_BREAK_EVENT] {
+            let cancellation = RunCancellation::default();
+            let guard = ConsoleRunGuard::new(Some(cancellation.clone()));
+            assert!(unsafe { executor_ctrl_handler(event) }.as_bool());
+            assert!(
+                !cancellation.was_cancelled(),
+                "requesting must not pretend cleanup completed"
+            );
+            assert!(
+                !guard.finish(),
+                "a completed run wins over an unobserved cancellation"
+            );
+        }
+        let cancellation = RunCancellation::default();
+        assert!(!request_console_cancellation(
+            CTRL_CLOSE_EVENT,
+            Some(&cancellation)
+        ));
+        assert!(!request_console_cancellation(CTRL_C_EVENT, None));
+        assert!(!request_console_cancellation(CTRL_BREAK_EVENT, None));
+        cancellation.complete();
+        assert!(!request_console_cancellation(
+            CTRL_C_EVENT,
+            Some(&cancellation)
+        ));
+        assert!(RUN_CANCELLATION_SLOT.lock().unwrap().is_none());
     }
 
     #[test]

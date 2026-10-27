@@ -10,6 +10,9 @@ of shelling through these scripts.
 Arguments and build-profile defaults vary by suite. Use the script's help or
 header comment for its supported parameters.
 
+The MicroVM scripts use the packaged fixtures under
+`src/mxc-sdk/tests/fixtures/microvm`, not `tests/configs`.
+
 ## Prerequisites
 
 Shared:
@@ -46,8 +49,8 @@ Linux / macOS (`.sh`):
 | `run_pwsh_test.ps1` | PowerShell Set-Location test | `wxc-exec.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
-| `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, NanVix binaries |
-| `run_microvm_tests.ps1` | Full MicroVM E2E suite | WHP enabled, NanVix binaries |
+| `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, build with `microvm`, complete signed bundle |
+| `run_microvm_tests.ps1` | Windows signed NVX command, output, exit, and timeout E2E suite | WHP enabled, build with `microvm`, complete signed bundle |
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
 | `run_isolation_session_tests.ps1` | IsolationSession one-shot E2E suite | Interactive local session; OS-side IsolationSession service |
@@ -314,15 +317,23 @@ Run them explicitly on a capable machine with
 
 ```powershell
 cd src
-cargo build --features microvm --target x86_64-pc-windows-msvc
+cargo build --locked -p wxc --features microvm --target x86_64-pc-windows-msvc
 ```
 
 ### Run
 
 ```powershell
 cd src
-cargo test -p wxc_e2e_tests --target x86_64-pc-windows-msvc test_microvm_suite -- --nocapture
+cargo test --locked -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc -- --include-ignored --nocapture --test-threads=1
 ```
 
-The MicroVM suite runs 6 functional tests + 1 timeout behavior test.
-It generates `microvm-perf-results.json` with per-test timing and status data (uploaded as CI artifact).
+The SDK suite runs the seven MicroVM config scenarios plus executor and
+captured JSON checks for output, environment, working directory, timeout,
+capture limits, and cleanup. VM scenarios require a prepared Windows x64
+host and the complete signed bundle. The config scenarios write
+`microvm-perf-results.json` under the temporary directory.
+
+The unified Windows 25H2 x64 nightly job runs the prebuilt SDK suite and
+collects its logs and performance JSON. `run_microvm_tests.ps1` remains a
+local config-only helper; it is not the scheduled CI entry point. See the
+[NVX backend guide](../../docs/backends/nvx/nvx.md).

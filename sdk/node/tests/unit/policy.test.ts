@@ -23,9 +23,15 @@ describe('filesystem helper environment and options', () => {
         skip: process.platform !== 'win32',
     }, () => {
         const hostWindows = process.env['WINDIR'] || process.env['windir'] || 'C:\\Windows';
+        const system32 = path.join(hostWindows, 'System32');
+        assert.ok(fs.statSync(system32).isDirectory());
         for (const WINDIR of [undefined, '', 'C:\\SpoofedWindows']) {
             assert.deepStrictEqual(
                 getAvailableToolsPolicy({ PATH: hostWindows, WINDIR }).readonlyPaths,
+                [],
+            );
+            assert.deepStrictEqual(
+                getAvailableToolsPolicy({ JAVA_HOME: system32, WINDIR }).readonlyPaths,
                 [],
             );
         }
@@ -34,6 +40,57 @@ describe('filesystem helper environment and options', () => {
     it('does not substitute the host environment for an empty map', () => {
         assert.deepStrictEqual(getAvailableToolsPolicy({}), { readonlyPaths: [], readwritePaths: [] });
         assert.deepStrictEqual(getUserProfilePolicy({}), { readonlyPaths: [], readwritePaths: [] });
+    });
+
+    it('filters missing PATH entries and deduplicates existing directories', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-tools-'));
+        try {
+            const tools = path.join(root, 'tools');
+            const missing = path.join(root, 'missing');
+            fs.mkdirSync(tools);
+            for (const PATH of [undefined, '', missing]) {
+                assert.deepStrictEqual(getAvailableToolsPolicy({ PATH }), {
+                    readonlyPaths: [], readwritePaths: [],
+                });
+            }
+            const duplicate = process.platform === 'win32' ? tools.toUpperCase() : tools;
+            const PATH = ['', tools, missing, duplicate, path.join(tools, '.'), ''].join(path.delimiter);
+            assert.deepStrictEqual(getAvailableToolsPolicy({ PATH }), {
+                readonlyPaths: [tools], readwritePaths: [],
+            });
+        } finally {
+            fs.rmSync(root, { recursive: true });
+        }
+    });
+
+    it('discovers JAVA_HOME without PATH and ignores a missing installation', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-java-'));
+        try {
+            assert.deepStrictEqual(getAvailableToolsPolicy({ JAVA_HOME: root }), {
+                readonlyPaths: [root], readwritePaths: [],
+            });
+            assert.deepStrictEqual(getAvailableToolsPolicy({ JAVA_HOME: path.join(root, 'missing') }), {
+                readonlyPaths: [], readwritePaths: [],
+            });
+        } finally {
+            fs.rmSync(root, { recursive: true });
+        }
+    });
+
+    it('splits PSModulePath without PATH and filters missing and duplicate directories', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-modules-'));
+        try {
+            const first = path.join(root, 'first');
+            const second = path.join(root, 'second');
+            fs.mkdirSync(first);
+            fs.mkdirSync(second);
+            const PSModulePath = [first, path.join(root, 'missing'), second, first].join(path.delimiter);
+            assert.deepStrictEqual(getAvailableToolsPolicy({ PSModulePath }), {
+                readonlyPaths: [first, second], readwritePaths: [],
+            });
+        } finally {
+            fs.rmSync(root, { recursive: true });
+        }
     });
 
     it('discovers profile directories from the supplied environment', () => {
@@ -59,6 +116,47 @@ describe('filesystem helper environment and options', () => {
                 readonlyPaths: [], readwritePaths: [root],
             });
             assert.deepStrictEqual(fs.readdirSync(root), []);
+        } finally {
+            fs.rmSync(root, { recursive: true });
+        }
+    });
+
+    it('returns an empty Windows temp policy when TEMP and TMP are absent', {
+        skip: process.platform !== 'win32',
+    }, () => {
+        assert.deepStrictEqual(getTemporaryFilesPolicy({}), {
+            readonlyPaths: [], readwritePaths: [],
+        });
+    });
+
+    it('does not create a missing TEMP directory or fall back to TMP', {
+        skip: process.platform !== 'win32',
+    }, () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-temp-'));
+        try {
+            const TEMP = path.join(root, 'missing');
+            assert.deepStrictEqual(getTemporaryFilesPolicy({ TEMP, TMP: root }), {
+                readonlyPaths: [], readwritePaths: [],
+            });
+            assert.deepStrictEqual(fs.readdirSync(root), []);
+        } finally {
+            fs.rmSync(root, { recursive: true });
+        }
+    });
+
+    it('uses TMP when TEMP is absent and prefers TEMP when both exist', {
+        skip: process.platform !== 'win32',
+    }, () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-temp-'));
+        try {
+            const preferred = path.join(root, 'preferred');
+            fs.mkdirSync(preferred);
+            assert.deepStrictEqual(getTemporaryFilesPolicy({ TMP: root }), {
+                readonlyPaths: [], readwritePaths: [root],
+            });
+            assert.deepStrictEqual(getTemporaryFilesPolicy({ TEMP: preferred, TMP: root }), {
+                readonlyPaths: [], readwritePaths: [preferred],
+            });
         } finally {
             fs.rmSync(root, { recursive: true });
         }

@@ -188,6 +188,15 @@ temporary storage without creating directories.
 
 ## Internal modules and executor binaries
 
+### Experimental MicroVM support
+
+Enable the `microvm` Cargo feature to build experimental MicroVM support on
+Windows x64. Execution also requires runtime experimental opt-in. This phase
+supports development JSON create-and-run requests, not MicroVM targeting through
+the typed V1 SDK APIs, streaming, PTY, or container lifecycle operations. See the
+[NVX backend guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md)
+for prerequisites and usage.
+
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes
 only the versioned public SDK and explicitly hidden compatibility surfaces used

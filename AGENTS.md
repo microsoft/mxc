@@ -33,6 +33,13 @@ security, build, and SDK rules. The expectations below apply in addition.
   prerequisite refactoring from behavior changes; keep each step buildable
   and preserve existing behavior. Do not attempt the whole rewrite at once.
 
+## Follow the contribution process
+
+Read and follow [CONTRIBUTING.md](CONTRIBUTING.md), including its
+[PR review-history guidance](CONTRIBUTING.md#preserve-pr-review-history).
+For feature work, also follow the
+[feature authoring guide](docs/development/guides/authoring-a-new-feature.md).
+
 ## Write for everyday developers
 
 Use plain, precise language in code reviews, comments, documentation, and
