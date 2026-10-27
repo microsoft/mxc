@@ -29,7 +29,7 @@ The primary contact is not automatically the implementation assignee.
 | `Area-DotNet-SDK`, `Area-Node-SDK`, `Area-Rust-SDK` | SDK APIs and types | @bbonaby | @mgudgin, @jsidewhite |
 | `Area-Schema`, `Area-Execution` | Schema, executor binaries, FFI, and core behavior | @mgudgin | @bbonaby, @jsidewhite |
 | `Area-Build`, `Area-Test` | General MXC infrastructure and tests | @bbonaby | @theelliotm, @dhoehna |
-| `Area-Telemetry` | Telemetry | @RamonArjona4 | @richiemsft |
+| `Area-Telemetry` | Telemetry | @richiemsft | - |
 | `Backend-Bubblewrap` | Bubblewrap | @sohamdas2021 | @dhoehna |
 | `Backend-WSLC` | WSLC | @sohamdas2021 | - |
 | `Backend-LXC` | LXC | @dhoehna | - |
