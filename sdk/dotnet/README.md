@@ -47,7 +47,9 @@ Console.WriteLine($"exit={result.ExitCode}");
 ```
 
 `Spawn` / `SpawnAsync` return a live `MxcProcess` with separate stdin, stdout,
-and stderr streams, plus wait, termination, and disposal operations. Shared filesystem,
+and stderr streams, plus wait, termination, and disposal operations. A WSLC
+command started this way reads end-of-file on stdin; use `SpawnWithStdin` or
+`SpawnWithStdinAsync` to give it a writable `StandardInput`. Shared filesystem,
 network, and UI restrictions are authored directly on `ContainerRequest`,
 alongside the selected backend configuration. The SDK selects the contract
 version; `ContainerRequest` does not accept a caller-selected schema version.
@@ -154,7 +156,11 @@ finally
 }
 ```
 
-Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. The
+Use `SpawnInContainer` or `SpawnInContainerAsync` for live piped execution. A
+WSLC command started this way reads end-of-file on stdin; use
+`SpawnInContainerWithStdin` or `SpawnInContainerWithStdinAsync` to give it a
+writable `StandardInput`; waiting on such a process before taking
+`StandardInput` gives the command end-of-file. The
 asynchronous methods are convenience wrappers over native operations and
 support cancellation. Backend and phase-specific policy requirements are
 described in the

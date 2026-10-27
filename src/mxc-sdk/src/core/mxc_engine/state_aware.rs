@@ -337,10 +337,18 @@ fn run_state_aware_typed(
 /// caller's stdio. The streaming counterpart of the exec arm of
 /// [`run_state_aware`].
 ///
+/// `stdin` gives a WSLc process a writable stdin rather than end-of-file;
+/// IsolationSession always provides one.
+///
 /// Backends without a state-aware impl return an [`MxcError`] with
 /// `unsupported_phase`.
 pub fn exec_state_aware(
     parsed: ParsedStateAwareRequest,
+    #[cfg_attr(
+        not(all(target_os = "windows", feature = "wslc")),
+        expect(unused_variables, reason = "only WSLc stdin is optional")
+    )]
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let backend = resolve_backend(&parsed)?;
     crate::mxc_engine::experimental::require_experimental_optin(
@@ -376,7 +384,11 @@ pub fn exec_state_aware(
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         crate::mxc_common::models::ContainmentBackend::Wslc => {
             let bound = crate::mxc_common::state_aware_binding::bind_wslc(parsed)?;
-            let mut runner = crate::wslc_common::WslcStateAwareRunner::new();
+            let mut runner = if stdin {
+                crate::wslc_common::WslcStateAwareRunner::with_piped_stdin()
+            } else {
+                crate::wslc_common::WslcStateAwareRunner::new()
+            };
             let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
                 &mut runner,
                 bound,
@@ -726,8 +738,9 @@ fn run_state_aware_envelope(
 fn exec_state_aware_parsed(
     parsed: ParsedStateAwareRequest,
     logger: &mut Logger,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    exec_state_aware_process_parsed(parsed, logger, exec_state_aware)
+    exec_state_aware_process_parsed(parsed, logger, |parsed| exec_state_aware(parsed, stdin))
 }
 
 fn exec_state_aware_pty_parsed(
@@ -882,14 +895,15 @@ pub fn run_typed_state_aware_request(
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
-/// model as a live streaming process.
+/// model as a live streaming process, with a writable WSLc stdin if `stdin`.
 pub fn exec_typed_state_aware_request(
     input: SdkStateAwareInput,
     experimental: bool,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger)
+    exec_state_aware_parsed(parsed, &mut logger, stdin)
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
@@ -951,14 +965,15 @@ pub fn run_state_aware_json(
 /// streaming process, returning a [`SandboxProcess`] handle.
 ///
 /// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`].
+/// [`run_state_aware_json`]; `stdin` is as for [`exec_state_aware`].
 pub fn exec_state_aware_json(
     request_json: &str,
     experimental: bool,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    exec_state_aware_parsed(parsed, &mut logger)
+    exec_state_aware_parsed(parsed, &mut logger, stdin)
 }
 
 /// Run a raw state-aware exec request with a caller-controlled PTY.
@@ -1879,7 +1894,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = match exec_state_aware(parsed) {
+        let error = match exec_state_aware(parsed, false) {
             Ok(_) => panic!("expected the backend to reject the synthetic sandbox id"),
             Err(error) => error,
         };
@@ -1957,7 +1972,7 @@ mod tests {
                         "{backend} {phase}"
                     );
                     assert!(error.message.contains("experimental"));
-                    let error = exec_state_aware(parsed)
+                    let error = exec_state_aware(parsed, false)
                         .err()
                         .expect("opt-in must be required");
                     assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
@@ -1978,7 +1993,7 @@ mod tests {
                         "{backend} {phase}"
                     );
                     assert_eq!(
-                        exec_state_aware(parsed)
+                        exec_state_aware(parsed, false)
                             .err()
                             .expect("backend unavailable")
                             .code,
@@ -2013,7 +2028,9 @@ mod tests {
                 };
                 assert_eq!(envelope, serde_json::json!({"result": {}}));
                 if phase != Phase::Exec {
-                    let error = exec_state_aware(parsed).err().expect("requires exec");
+                    let error = exec_state_aware(parsed, false)
+                        .err()
+                        .expect("requires exec");
                     assert_eq!(error.code, MxcErrorCode::MalformedRequest);
                     assert_eq!(
                         error.message,
@@ -2043,7 +2060,10 @@ mod tests {
                 );
                 if phase == Phase::Exec {
                     assert_eq!(
-                        exec_state_aware(parsed).err().expect("malformed ID").code,
+                        exec_state_aware(parsed, false)
+                            .err()
+                            .expect("malformed ID")
+                            .code,
                         MxcErrorCode::MalformedId,
                         "{backend} {phase}"
                     );
@@ -2060,7 +2080,7 @@ mod tests {
             }
             let json = lifecycle_fixture(backend, id, Phase::Exec);
             let parsed = parse_state_aware(&json, true, &mut Logger::new(Mode::Buffer)).unwrap();
-            let error = exec_state_aware(parsed)
+            let error = exec_state_aware(parsed, false)
                 .err()
                 .expect("cannot return streams");
             assert_eq!(error.code, MxcErrorCode::BackendError);

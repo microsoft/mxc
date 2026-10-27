@@ -35,8 +35,9 @@
 //! it; `exec` runs a fresh `WslcCreateContainerProcess` to completion on a
 //! thread of its own, streaming its stdout/stderr live to the pipe handler via
 //! an [`OutputSink`]; `stop` / `deprovision` stop + delete. The completion reply
-//! carries the exit code; output flows over the sink. (Client `Stdin` forwarding
-//! is a later fill-in.)
+//! carries the exit code; output flows over the sink. An exec that asks for
+//! stdin gets it from a separate `exec_stdin` connection through the
+//! [`StdinRelay`] its registration holds.
 
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -50,7 +51,7 @@ use tokio::sync::{mpsc, oneshot};
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::{FailurePhase, ScriptResponse};
 use mxc_sdk::wslc_common::container_steps::{
-    self, OutStream, OutputSink, ProcessSettings, SessionSizing,
+    self, OutStream, OutputSink, ProcessSettings, SessionSizing, StdinConsumer,
 };
 use mxc_sdk::wslc_common::daemon_protocol::{
     DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode,
@@ -298,6 +299,9 @@ pub struct ExecRequest {
     /// SDK's stdout/stderr chunks to the pipe handler as bytes arrive.
     pub sink: OutputSink,
     pub cancellation: Arc<AtomicBool>,
+
+    /// The run's end of the process stdin, present when the exec asked for it.
+    pub stdin: Option<Box<StdinSource>>,
     pub(crate) registration: Arc<ExecRegistration>,
     pub admit: oneshot::Sender<Result<(), WorkerError>>,
     pub done: oneshot::Sender<Result<ExecTerminal, WorkerError>>,
@@ -316,7 +320,9 @@ pub struct ExecRequest {
 #[derive(Debug)]
 pub enum ExecReport {
     Finished(Result<ExecTerminal, WorkerError>),
-    Unconfirmed(String),
+
+    /// The detail, and the process's stdin if it is still open.
+    Unconfirmed(String, Option<container_steps::StdinHold>),
 }
 
 /// Everything an off-worker exec needs, in a form that can cross a thread.
@@ -326,6 +332,7 @@ struct ExecJob {
     config: ExecConfig,
     sink: OutputSink,
     cancellation: Arc<AtomicBool>,
+    stdin: Option<StdinSource>,
 }
 
 // SAFETY: the SDK is apartment-affine, not thread-affine. Both the worker and
@@ -385,7 +392,7 @@ fn start_exec(
             // A panic leaves the process's fate unknown, which is what
             // `Unconfirmed` already means.
             let report = std::panic::catch_unwind(run).unwrap_or_else(|_| {
-                ExecReport::Unconfirmed("the exec thread panicked".to_string())
+                ExecReport::Unconfirmed("the exec thread panicked".to_string(), None)
             });
 
             let _ = worker.send(WorkerCommand::ExecFinished { sandbox_id, report });
@@ -404,7 +411,39 @@ fn run_exec(job: ExecJob, logger: &mut Logger) -> ExecReport {
         config,
         sink,
         cancellation,
+        stdin,
     } = job;
+
+    // `_run_alive` is held until this run returns, which is what tells an
+    // attached stdin relay to stop.
+    let stdin_failure = Arc::new(Mutex::new(None::<String>));
+    let (stdin, _run_alive) = match stdin {
+        Some(StdinSource {
+            chunks,
+            wake,
+            run_alive,
+        }) => {
+            let failure = Arc::clone(&stdin_failure);
+            let cancel = Arc::clone(&cancellation);
+            let cancelled = Arc::clone(&cancellation);
+            let consumer: StdinConsumer = Box::new(move |stdin| {
+                let stop = crate::stdin_writer::spawn(
+                    stdin,
+                    chunks,
+                    wake,
+                    move || cancelled.load(Ordering::Acquire),
+                    move |error| {
+                        *failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(format!("writing the process's stdin failed: {error}"));
+                        cancel.store(true, Ordering::Release);
+                    },
+                )?;
+                Ok(Box::new(stop) as Box<dyn container_steps::StdinControl>)
+            });
+            (Some(consumer), Some(run_alive))
+        }
+        None => (None, None),
+    };
 
     // ProcessSettings::build expects `NAME=VALUE` env entries.
     let env: Vec<String> = config
@@ -426,6 +465,7 @@ fn run_exec(job: ExecJob, logger: &mut Logger) -> ExecReport {
             config.timeout_ms,
             &cancellation,
             Some(sink),
+            stdin,
             logger,
         )
     };
@@ -441,9 +481,19 @@ fn run_exec(job: ExecJob, logger: &mut Logger) -> ExecReport {
                 .post_launch_error
                 .map(|error| error.error_message)
                 .unwrap_or_else(|| "process termination could not be confirmed".to_string()),
+            outcome.held_stdin,
         ),
         container_steps::ProcessCompletion::Confirmed(terminal) => {
-            ExecReport::Finished(Ok(terminal))
+            match stdin_failure
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                Some(failure) => {
+                    ExecReport::Finished(Err(WorkerError::Backend(anyhow::anyhow!(failure))))
+                }
+                None => ExecReport::Finished(Ok(terminal)),
+            }
         }
     }
 }
@@ -528,6 +578,54 @@ pub(crate) type ActiveExecs = Arc<Mutex<HashMap<String, ActiveExec>>>;
 pub(crate) struct ActiveExec {
     run_token: String,
     cancellation: Weak<AtomicBool>,
+    stdin: StdinSlot,
+}
+
+/// Where an exec's stdin relay is until an `exec_stdin` connection claims it.
+#[derive(Debug)]
+pub(crate) enum StdinSlot {
+    NotRequested,
+    Waiting(StdinRelay),
+    Claimed,
+}
+
+/// Stdin chunks queued for a process that has not read them, past which the
+/// daemon stops reading the client's stdin connection.
+pub(crate) const STDIN_CHANNEL_CAPACITY: usize = 16;
+
+/// The connection side of an exec's stdin.
+#[derive(Debug)]
+pub struct StdinRelay {
+    pub chunks: mpsc::Sender<Vec<u8>>,
+
+    /// Resolves once the run is over, so nothing is forwarded to a process
+    /// that is gone.
+    pub run_over: oneshot::Receiver<()>,
+}
+
+/// The run side of an exec's stdin.
+#[derive(Debug)]
+pub struct StdinSource {
+    pub(crate) chunks: mpsc::Receiver<Vec<u8>>,
+    pub(crate) wake: mpsc::WeakSender<Vec<u8>>,
+    pub(crate) run_alive: oneshot::Sender<()>,
+}
+
+pub(crate) fn stdin_channel() -> (StdinRelay, StdinSource) {
+    let (chunks_tx, chunks_rx) = mpsc::channel(STDIN_CHANNEL_CAPACITY);
+    let (run_alive, run_over) = oneshot::channel();
+    let wake = chunks_tx.downgrade();
+    (
+        StdinRelay {
+            chunks: chunks_tx,
+            run_over,
+        },
+        StdinSource {
+            chunks: chunks_rx,
+            wake,
+            run_alive,
+        },
+    )
 }
 
 #[derive(Debug)]
@@ -560,10 +658,12 @@ pub(crate) fn register_exec(
     exec_id: &str,
     run_token: &str,
     cancellation: &Arc<AtomicBool>,
+    stdin: Option<StdinRelay>,
 ) -> Result<ExecRegistration, WorkerError> {
     let active_exec = ActiveExec {
         run_token: run_token.to_string(),
         cancellation: Arc::downgrade(cancellation),
+        stdin: stdin.map_or(StdinSlot::NotRequested, StdinSlot::Waiting),
     };
     let mut active_execs_guard = active_execs
         .lock()
@@ -675,16 +775,24 @@ impl SessionHandle {
             enqueue_output(&stream_tx, &sink_overflowed, kind, bytes);
         });
         let cancellation = Arc::new(AtomicBool::new(false));
+        let (stdin_relay, stdin) = if config.stdin {
+            let (relay, source) = stdin_channel();
+            (Some(relay), Some(Box::new(source)))
+        } else {
+            (None, None)
+        };
         let registration = Arc::new(register_exec(
             &self.active_execs,
             &config.exec_id,
             &config.run_token,
             &cancellation,
+            stdin_relay,
         )?);
         self.send(WorkerCommand::Container(ContainerWork::Exec(ExecRequest {
             config,
             sink,
             cancellation,
+            stdin,
             registration: Arc::clone(&registration),
             admit,
             done,
@@ -711,6 +819,40 @@ impl SessionHandle {
             .and_then(|current| current.cancellation.upgrade())
         {
             cancellation.store(true, Ordering::Release);
+        }
+    }
+
+    /// Claim, at most once, the stdin relay of a running exec that asked for
+    /// stdin.
+    pub fn take_exec_stdin(
+        &self,
+        exec_id: &str,
+        run_token: &str,
+    ) -> Result<StdinRelay, WorkerError> {
+        let rejected = |reason: &str| {
+            Err(WorkerError::Rejected(anyhow::anyhow!(
+                "cannot attach stdin to exec {exec_id:?}: {reason}"
+            )))
+        };
+        let mut active_execs = self
+            .active_execs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = active_execs.get_mut(exec_id).filter(|current| {
+            current.run_token == run_token && current.cancellation.upgrade().is_some()
+        }) else {
+            return rejected("no running exec has that id and run token");
+        };
+        match std::mem::replace(&mut current.stdin, StdinSlot::Claimed) {
+            StdinSlot::Waiting(mut relay) => match relay.run_over.try_recv() {
+                Err(oneshot::error::TryRecvError::Empty) => Ok(relay),
+                _ => rejected("the run is already over"),
+            },
+            StdinSlot::Claimed => rejected("its stdin is already attached"),
+            StdinSlot::NotRequested => {
+                current.stdin = StdinSlot::NotRequested;
+                rejected("it was started without stdin")
+            }
         }
     }
 
@@ -870,6 +1012,7 @@ type RunStarter = fn(
     WslcContainer,
     OutputSink,
     Arc<AtomicBool>,
+    Option<StdinSource>,
     &mpsc::UnboundedSender<WorkerCommand>,
 ) -> Result<(), WorkerError>;
 
@@ -880,6 +1023,7 @@ fn start_run_on_sdk(
     container: WslcContainer,
     sink: OutputSink,
     cancellation: Arc<AtomicBool>,
+    stdin: Option<StdinSource>,
     worker: &mpsc::UnboundedSender<WorkerCommand>,
 ) -> Result<(), WorkerError> {
     let Some(sdk) = state.sdk.as_ref() else {
@@ -897,6 +1041,7 @@ fn start_run_on_sdk(
         config,
         sink,
         cancellation,
+        stdin,
     };
 
     start_exec(job, worker.clone(), &state.execs_in_flight).map_err(|e| {
@@ -2288,6 +2433,7 @@ impl Worker {
             config,
             sink,
             cancellation,
+            stdin,
             registration,
             admit,
             done,
@@ -2322,7 +2468,8 @@ impl Worker {
 
         let sandbox_id = config.sandbox_id.clone();
         let start_run = self.start_run;
-        if let Err(e) = start_run(self, config, container, sink, cancellation, worker) {
+        let stdin = stdin.map(|stdin| *stdin);
+        if let Err(e) = start_run(self, config, container, sink, cancellation, stdin, worker) {
             let _ = done.send(Err(e));
             return;
         }
@@ -2365,9 +2512,13 @@ impl Worker {
 
         let outcome = match report {
             ExecReport::Finished(outcome) => outcome,
-            ExecReport::Unconfirmed(detail) => {
-                Err(self.quarantine(sandbox_id, in_flight.container, &detail, in_flight.slot))
-            }
+            ExecReport::Unconfirmed(detail, held_stdin) => Err(self.quarantine(
+                sandbox_id,
+                in_flight.container,
+                &detail,
+                in_flight.slot,
+                held_stdin,
+            )),
         };
 
         if let Err(orphaned) = in_flight.done.send(outcome) {
@@ -2389,12 +2540,20 @@ impl Worker {
         container: WslcContainer,
         detail: &str,
         slot: Option<ExecSlotGuard>,
+        held_stdin: Option<container_steps::StdinHold>,
     ) -> WorkerError {
         let delete_result = self.sdk.as_ref().map(|sdk| {
             // SAFETY: `sdk` is valid and `container` is the live handle stored
             // for `sandbox_id`.
             unsafe { container_steps::delete_daemon_container(sdk, container, &mut self.logger) }
         });
+
+        // Until the container is gone its process may still be running, so it
+        // keeps its stdin open for as long as it keeps its slot.
+        let slot = match (slot, held_stdin) {
+            (slot, None) => slot,
+            (slot, Some(held_stdin)) => Some(Arc::new((slot, held_stdin)) as ExecSlotGuard),
+        };
 
         match delete_result {
             Some(Ok(())) => {
@@ -5043,6 +5202,7 @@ mod tests {
                     env: Vec::new(),
                     env_scope: EnvScope::Merge,
                     timeout_ms: 0,
+                    stdin: false,
                 },
                 None,
             )
@@ -5106,6 +5266,7 @@ mod tests {
                     env: Vec::new(),
                     env_scope: EnvScope::Merge,
                     timeout_ms: 0,
+                    stdin: false,
                 },
                 None,
             )
@@ -5124,6 +5285,7 @@ mod tests {
             ActiveExec {
                 run_token: "run-1".to_string(),
                 cancellation: Arc::downgrade(&cancellation),
+                stdin: StdinSlot::NotRequested,
             },
         )])));
         let handle = SessionHandle { tx, active_execs };
@@ -5134,12 +5296,37 @@ mod tests {
     }
 
     #[test]
+    fn an_unclaimed_stdin_closes_when_its_exec_is_released() {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let active_execs = Arc::new(Mutex::new(HashMap::new()));
+        let (relay, mut source) = stdin_channel();
+        let registration =
+            register_exec(&active_execs, "exec-1", "run-1", &cancellation, Some(relay)).unwrap();
+
+        drop(registration);
+
+        assert!(
+            matches!(
+                source.chunks.try_recv(),
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ),
+            "a stdin writer waiting on an exec nobody attached to must end with it"
+        );
+    }
+
+    #[test]
     fn delayed_cancellation_does_not_target_reused_exec_id() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cancellation = Arc::new(AtomicBool::new(false));
         let active_execs = Arc::new(Mutex::new(HashMap::new()));
-        let registration =
-            register_exec(&active_execs, "exec-1", "replacement-run", &cancellation).unwrap();
+        let registration = register_exec(
+            &active_execs,
+            "exec-1",
+            "replacement-run",
+            &cancellation,
+            None,
+        )
+        .unwrap();
         let handle = SessionHandle { tx, active_execs };
 
         handle.cancel_exec("exec-1", "completed-run");
@@ -5155,9 +5342,9 @@ mod tests {
         let active_execs = Arc::new(Mutex::new(HashMap::new()));
         let first = Arc::new(AtomicBool::new(false));
         let second = Arc::new(AtomicBool::new(false));
-        let registration = register_exec(&active_execs, "exec-1", "run-1", &first).unwrap();
+        let registration = register_exec(&active_execs, "exec-1", "run-1", &first, None).unwrap();
 
-        let error = register_exec(&active_execs, "exec-1", "run-2", &second).unwrap_err();
+        let error = register_exec(&active_execs, "exec-1", "run-2", &second, None).unwrap_err();
 
         assert_eq!(error.kind(), ErrKind::Rejected);
         let registered = active_execs
@@ -5178,13 +5365,20 @@ mod tests {
             ActiveExec {
                 run_token: "stale-run".to_string(),
                 cancellation: Arc::downgrade(&stale),
+                stdin: StdinSlot::NotRequested,
             },
         )])));
         drop(stale);
         let cancellation = Arc::new(AtomicBool::new(false));
 
-        let registration =
-            register_exec(&active_execs, "exec-1", "replacement-run", &cancellation).unwrap();
+        let registration = register_exec(
+            &active_execs,
+            "exec-1",
+            "replacement-run",
+            &cancellation,
+            None,
+        )
+        .unwrap();
 
         let registered = active_execs
             .lock()
@@ -5201,13 +5395,15 @@ mod tests {
     fn older_registration_does_not_remove_replacement() {
         let active_execs = Arc::new(Mutex::new(HashMap::new()));
         let first = Arc::new(AtomicBool::new(false));
-        let first_registration = register_exec(&active_execs, "exec-1", "run-1", &first).unwrap();
+        let first_registration =
+            register_exec(&active_execs, "exec-1", "run-1", &first, None).unwrap();
         let second = Arc::new(AtomicBool::new(false));
         active_execs.lock().unwrap().insert(
             "exec-1".to_string(),
             ActiveExec {
                 run_token: "run-2".to_string(),
                 cancellation: Arc::downgrade(&second),
+                stdin: StdinSlot::NotRequested,
             },
         );
 
@@ -5231,6 +5427,7 @@ mod tests {
             ActiveExec {
                 run_token: "stale-run".to_string(),
                 cancellation: Arc::downgrade(&stale),
+                stdin: StdinSlot::NotRequested,
             },
         )])));
         drop(stale);
@@ -5313,7 +5510,7 @@ mod tests {
         let active_execs: ActiveExecs = Arc::new(Mutex::new(HashMap::new()));
         let cancellation = Arc::new(AtomicBool::new(false));
         let registration =
-            Arc::new(register_exec(&active_execs, exec_id, "run", &cancellation).unwrap());
+            Arc::new(register_exec(&active_execs, exec_id, "run", &cancellation, None).unwrap());
         (
             InFlightExec {
                 container: std::ptr::dangling_mut(),
@@ -5349,7 +5546,7 @@ mod tests {
         let active_execs: ActiveExecs = Arc::new(Mutex::new(HashMap::new()));
         let cancellation = Arc::new(AtomicBool::new(false));
         let registration =
-            Arc::new(register_exec(&active_execs, exec_id, "run", &cancellation).unwrap());
+            Arc::new(register_exec(&active_execs, exec_id, "run", &cancellation, None).unwrap());
         let sink: OutputSink = Box::new(|_, _| {});
         TestExec {
             work: ContainerWork::Exec(ExecRequest {
@@ -5362,9 +5559,11 @@ mod tests {
                     env: Vec::new(),
                     env_scope: EnvScope::Merge,
                     timeout_ms: 0,
+                    stdin: false,
                 },
                 sink,
                 cancellation: Arc::clone(&cancellation),
+                stdin: None,
                 registration,
                 admit,
                 done,
@@ -5399,6 +5598,7 @@ mod tests {
             _: WslcContainer,
             _: OutputSink,
             _: Arc<AtomicBool>,
+            _: Option<StdinSource>,
             _: &mpsc::UnboundedSender<WorkerCommand>,
         ) -> Result<(), WorkerError> {
             Ok(())
@@ -5555,6 +5755,7 @@ mod tests {
                         env: Vec::new(),
                         env_scope: EnvScope::Merge,
                         timeout_ms: 0,
+                        stdin: false,
                     },
                     Some(Arc::new(permit)),
                 )
@@ -5727,6 +5928,7 @@ mod tests {
             _: WslcContainer,
             _: OutputSink,
             _: Arc<AtomicBool>,
+            _: Option<StdinSource>,
             _: &mpsc::UnboundedSender<WorkerCommand>,
         ) -> Result<(), WorkerError> {
             STARTED.store(true, Ordering::SeqCst);
@@ -5761,7 +5963,7 @@ mod tests {
 
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string()),
+            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
             &tx,
         );
 
@@ -5781,7 +5983,7 @@ mod tests {
         worker.exec_in_flight.get_mut("wslc:busy").unwrap().slot = Some(Arc::new(permit));
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string()),
+            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
             &tx,
         );
         assert_eq!(
@@ -5810,7 +6012,7 @@ mod tests {
 
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string()),
+            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
             &tx,
         );
 
@@ -6176,6 +6378,7 @@ mod tests {
                         env: Vec::new(),
                         env_scope: EnvScope::Merge,
                         timeout_ms: 30_000,
+                        stdin: false,
                     },
                     None,
                 )
@@ -6437,6 +6640,7 @@ mod tests {
                     env: Vec::new(),
                     env_scope: EnvScope::Merge,
                     timeout_ms: 30_000,
+                    stdin: false,
                 },
                 None,
             )
@@ -6728,6 +6932,7 @@ mod tests {
             env: Vec::new(),
             env_scope: EnvScope::Merge,
             timeout_ms: 30_000,
+            stdin: false,
         }
     }
 
@@ -6805,6 +7010,7 @@ mod tests {
                     env: Vec::new(),
                     env_scope: EnvScope::Merge,
                     timeout_ms: 30_000,
+                    stdin: false,
                 },
                 None,
             )
@@ -6876,6 +7082,7 @@ mod tests {
                         env: Vec::new(),
                         env_scope: EnvScope::Merge,
                         timeout_ms: 30_000,
+                        stdin: false,
                     },
                     None,
                 )
@@ -6918,6 +7125,7 @@ mod tests {
                     env: Vec::new(),
                     env_scope: EnvScope::Merge,
                     timeout_ms: 30_000,
+                    stdin: false,
                 },
                 None,
             )
@@ -6962,6 +7170,7 @@ mod tests {
                     env: Vec::new(),
                     env_scope: EnvScope::Merge,
                     timeout_ms: 30_000,
+                    stdin: false,
                 },
                 None,
             )
@@ -7045,6 +7254,7 @@ mod tests {
                     env: Vec::new(),
                     env_scope: EnvScope::Merge,
                     timeout_ms: 30_000,
+                    stdin: false,
                 },
                 None,
             )

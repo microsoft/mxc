@@ -26,7 +26,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use windows::core::{PCWSTR, PWSTR};
@@ -43,10 +43,10 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use mxc_sdk::wslc_common::container_steps::OutStream;
 use mxc_sdk::wslc_common::daemon_protocol::{
     encode_frame, DaemonRequest, DaemonResponse, DeprovisionConfig, DeprovisionSessionConfig,
-    ExecTerminal, StreamFrame, MAX_EXEC_ID_BYTES, MAX_FRAME_SIZE,
+    ExecTerminal, StreamFrame, MAX_EXEC_ID_BYTES, MAX_FRAME_SIZE, MAX_STDIN_CHUNK_BYTES,
 };
 
-use crate::session_manager::{ExecSlotGuard, ExecStream, SessionHandle, WorkerError};
+use crate::session_manager::{ExecSlotGuard, ExecStream, SessionHandle, StdinRelay, WorkerError};
 
 /// Exec streams admitted at once; a further request is refused rather than
 /// queued behind a workload of unknown duration.
@@ -66,17 +66,14 @@ const MAX_CONCURRENT_EXECS: usize = 8;
 /// waits can be outstanding.
 const CONTROL_CLIENT_HEADROOM: usize = 8;
 
-/// Upper bound on concurrently-serviced client connections. Connections beyond
+/// Upper bound on concurrently-serviced client connections, with room for each
+/// exec's stdin connection on top of the lifecycle headroom. Connections beyond
 /// this bound are refused without blocking the accept loop.
-const MAX_CONCURRENT_CLIENTS: usize = MAX_CONCURRENT_EXECS + CONTROL_CLIENT_HEADROOM;
+const MAX_CONCURRENT_CLIENTS: usize = 2 * MAX_CONCURRENT_EXECS + CONTROL_CLIENT_HEADROOM;
 
-/// Connections admitted for cancellation alone once [`MAX_CONCURRENT_CLIENTS`]
-/// is reached, one per exec that could need cancelling.
-///
-/// Cancellation is the only way to end a run with no timeout, and the one
-/// request that never waits on the worker, so it keeps capacity that lifecycle
-/// work cannot consume.
-const CANCEL_LANE_SLOTS: usize = MAX_CONCURRENT_EXECS;
+/// Connections admitted once [`MAX_CONCURRENT_CLIENTS`] is reached, only to
+/// cancel an exec or carry its stdin: room for one of each per exec.
+const CANCEL_LANE_SLOTS: usize = 2 * MAX_CONCURRENT_EXECS;
 
 /// Deadline for a freshly-connected client to send its first (request) frame. A
 /// client that connects and then stalls must not pin a handler task — and a
@@ -88,13 +85,18 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const LANE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Upper bound on a cancel-lane request frame, large enough for every
-/// `cancel_exec` the protocol admits: [`MAX_EXEC_ID_BYTES`] caps an
-/// identifier's decoded length, not the escaped length it occupies on the wire.
+/// `cancel_exec` and `exec_stdin` the protocol admits: [`MAX_EXEC_ID_BYTES`]
+/// caps an identifier's decoded length, not the escaped length it occupies on
+/// the wire.
 const LANE_MAX_FRAME_BYTES: usize = 2 * MAX_EXEC_ID_BYTES * JSON_MAX_ESCAPE_BYTES + 256;
 
 /// Longest JSON escape a single byte of an identifier can produce, a control
 /// character with no short form becoming `\u00XX`.
 const JSON_MAX_ESCAPE_BYTES: usize = 6;
+
+/// Upper bound on one frame of an `exec_stdin` connection: a full chunk in
+/// base64, plus the JSON around it.
+const STDIN_MAX_FRAME_BYTES: usize = MAX_STDIN_CHUNK_BYTES.div_ceil(3) * 4 + 64;
 
 /// Bound on how long shutdown waits for in-flight handlers to finish before
 /// abandoning them, so a wedged handler cannot block daemon exit forever.
@@ -240,7 +242,7 @@ pub async fn run(
 ///
 /// A connection that arrives once the general bound is reached is admitted into
 /// the cancellation lane instead, where it is serviced only if it carries a
-/// [`DaemonRequest::CancelExec`].
+/// [`DaemonRequest::CancelExec`] or [`DaemonRequest::ExecStdin`].
 fn spawn_client_handler(
     clients: &mut JoinSet<()>,
     client_limiter: &Arc<Semaphore>,
@@ -541,8 +543,8 @@ where
 ///
 /// `cancel_only` marks a connection admitted into the cancellation lane because
 /// the general client bound was reached; anything other than a
-/// [`DaemonRequest::CancelExec`] is refused there, and its request frame is held
-/// to a lane-sized bound and deadline.
+/// [`DaemonRequest::CancelExec`] or [`DaemonRequest::ExecStdin`] is refused
+/// there, and its request frame is held to a lane-sized bound and deadline.
 async fn handle_client<S>(
     mut pipe: S,
     session: SessionHandle,
@@ -562,7 +564,12 @@ where
     let request: DaemonRequest = timeout(deadline, read_frame_capped(&mut pipe, max_frame))
         .await
         .context("timed out waiting for the client's first frame")??;
-    if cancel_only && !matches!(request, DaemonRequest::CancelExec(_)) {
+    if cancel_only
+        && !matches!(
+            request,
+            DaemonRequest::CancelExec(_) | DaemonRequest::ExecStdin(_)
+        )
+    {
         write_frame(
             &mut pipe,
             &DaemonResponse::Err {
@@ -633,8 +640,89 @@ where
             session.cancel_exec(&config.exec_id, &config.run_token);
             write_frame(&mut pipe, &DaemonResponse::Ok).await?;
         }
+        DaemonRequest::ExecStdin(config) => {
+            match session.take_exec_stdin(&config.exec_id, &config.run_token) {
+                Ok(relay) => {
+                    let abort = || session.cancel_exec(&config.exec_id, &config.run_token);
+                    if let Err(error) = write_frame(&mut pipe, &DaemonResponse::Ok).await {
+                        abort();
+                        return Err(error);
+                    }
+                    relay_stdin(&mut pipe, relay, abort).await?;
+                }
+                Err(e) => write_frame(&mut pipe, &worker_err_response(e)).await?,
+            }
+        }
     }
     Ok(())
+}
+
+/// Forward an exec's stdin frames until the client sends end-of-file or the run
+/// is over, calling `abort` if the connection ends any other way.
+async fn relay_stdin<S: AsyncRead + Unpin>(
+    pipe: &mut S,
+    relay: StdinRelay,
+    abort: impl FnOnce(),
+) -> Result<()> {
+    let StdinRelay {
+        chunks,
+        mut run_over,
+    } = relay;
+    let relayed = forward_stdin_frames(pipe, &chunks, &mut run_over).await;
+    if relayed.is_err() {
+        abort();
+
+        // Closing stdin now would let the process finish on truncated input
+        // before the cancellation lands, so it stays open until the run ends.
+        let _ = run_over.await;
+    }
+    relayed
+}
+
+async fn forward_stdin_frames<S: AsyncRead + Unpin>(
+    pipe: &mut S,
+    chunks: &mpsc::Sender<Vec<u8>>,
+    run_over: &mut oneshot::Receiver<()>,
+) -> Result<()> {
+    let mut reader_gone = false;
+    loop {
+        let frame = tokio::select! {
+            _ = &mut *run_over => return Ok(()),
+            frame = read_frame_capped::<_, StreamFrame>(pipe, STDIN_MAX_FRAME_BYTES) => {
+                frame.context("stdin connection ended without end-of-file")?
+            }
+        };
+        let data = match frame {
+            StreamFrame::Stdin { data } if data.is_empty() => {
+                if !reader_gone {
+                    tokio::select! {
+                        _ = &mut *run_over => {}
+                        _ = chunks.send(Vec::new()) => {}
+                    }
+                }
+                return Ok(());
+            }
+            StreamFrame::Stdin { data } if data.len() > MAX_STDIN_CHUNK_BYTES => {
+                bail!(
+                    "stdin chunk of {} bytes exceeds {MAX_STDIN_CHUNK_BYTES}",
+                    data.len()
+                )
+            }
+            StreamFrame::Stdin { data } => data,
+            other => bail!("expected a stdin frame on an exec_stdin connection, got {other:?}"),
+        };
+        if reader_gone {
+            continue;
+        }
+
+        // A process may close its stdin and keep working. Input it will never
+        // read is discarded rather than refused, since refusing it would make
+        // the client cancel the exec.
+        tokio::select! {
+            _ = &mut *run_over => return Ok(()),
+            sent = chunks.send(data) => reader_gone = sent.is_err(),
+        }
+    }
 }
 
 /// Exec: validate-then-admit, then stream the run's stdout/stderr live as
@@ -653,21 +741,17 @@ where
 /// The exec permit is shared with the run, so capacity frees only once the run
 /// has reported back and this handler has finished writing.
 ///
-/// Output streaming (process -> `Stdout`/`Stderr`) is live. Client `Stdin`
-/// frames are NOT forwarded: the WSLc SDK consumes all process IO handles once
-/// any `WslcSetProcessSettingsCallbacks` is registered (the callback path this
-/// live output streaming depends on), so `WslcGetProcessIOHandle(STDIN)` is
-/// unavailable. Piped stdin would require a handle-mode rearchitecture (no
-/// callbacks; `ReadFile` threads for stdout/stderr + `WriteFile` for stdin) and
-/// is deferred; stdin forwarding is tracked in issue #804.
+/// Output streaming (process -> `Stdout`/`Stderr`) is live. Stdin travels on a
+/// separate [`DaemonRequest::ExecStdin`] connection, because the client cannot
+/// write to this one while it is blocked reading output from it.
 async fn handle_exec<S>(
-    mut pipe: S,
+    pipe: S,
     session: SessionHandle,
     config: mxc_sdk::wslc_common::daemon_protocol::ExecConfig,
     exec_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     let exec_id = config.exec_id.clone();
     let run_token = config.run_token.clone();
@@ -676,16 +760,45 @@ where
     // Await the worker's admission decision before writing anything: a rejected
     // exec is a pre-admission typed error, never a post-admission stream frame.
     let admission = session.exec(config, Some(slot.clone())).await;
-    let delivered = write_exec_result(&mut pipe, admission).await;
 
-    if delivered.is_err() {
-        // The run outlives this handler on a thread of its own, so without a
-        // kill a client could disconnect in a loop and leave runs going.
-        session.cancel_exec(&exec_id, &run_token);
-    }
+    // The run outlives this handler on a thread of its own, so without a kill a
+    // client could disconnect in a loop and leave runs going.
+    let delivered = deliver_exec(pipe, admission, || {
+        session.cancel_exec(&exec_id, &run_token)
+    })
+    .await;
 
     drop(slot);
     delivered
+}
+
+/// Stream an exec's result to its client, calling `abort` if the client goes
+/// before the result is delivered.
+async fn deliver_exec<S>(
+    pipe: S,
+    admission: Result<ExecStream, WorkerError>,
+    abort: impl FnOnce(),
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut reader, mut writer) = tokio::io::split(pipe);
+    let delivered = tokio::select! {
+        biased;
+        delivered = write_exec_result(&mut writer, admission) => delivered,
+        () = client_gone(&mut reader) => Err(anyhow::anyhow!("the client disconnected during the exec")),
+    };
+    if delivered.is_err() {
+        abort();
+    }
+    delivered
+}
+
+/// Wait until the client of an exec connection has gone, which is the only way
+/// the connection can yield anything after the client's request.
+async fn client_gone<R: AsyncRead + Unpin>(reader: &mut R) {
+    let mut byte = [0u8; 1];
+    let _ = reader.read(&mut byte).await;
 }
 
 /// Turn an exec **admission** outcome into the client's frame sequence, generic
@@ -861,7 +974,9 @@ mod tests {
     fn test_registration() -> Arc<crate::session_manager::ExecRegistration> {
         let active_execs = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let cancellation = Arc::new(AtomicBool::new(false));
-        Arc::new(register_exec(&active_execs, "test-exec", "test-run", &cancellation).unwrap())
+        Arc::new(
+            register_exec(&active_execs, "test-exec", "test-run", &cancellation, None).unwrap(),
+        )
     }
 
     /// A streaming exec's output memory is its live-output queue alone, so the
@@ -873,7 +988,7 @@ mod tests {
 
         assert_eq!(per_exec, 16 * 1024 * 1024);
         assert_eq!(worst_case, 128 * 1024 * 1024);
-        assert_eq!(MAX_CONCURRENT_CLIENTS, 16);
+        assert_eq!(MAX_CONCURRENT_CLIENTS, 24);
     }
 
     /// Cancellation is the only way to end a run with no timeout, so it must
@@ -975,6 +1090,7 @@ mod tests {
                 env: Vec::new(),
                 env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
+                stdin: false,
             }),
         )
         .await
@@ -1006,6 +1122,7 @@ mod tests {
             "orphan-1",
             "orphan-run-1",
             &cancellation,
+            None,
         )
         .unwrap();
 
@@ -1023,6 +1140,7 @@ mod tests {
                 env: Vec::new(),
                 env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
+                stdin: false,
             },
             permit,
         )
@@ -1058,6 +1176,7 @@ mod tests {
                 env: Vec::new(),
                 env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
+                stdin: false,
             },
             permit,
         ));
@@ -1101,6 +1220,19 @@ mod tests {
         clients: &mut JoinSet<()>,
         cancel_limiter: &Arc<Semaphore>,
     ) -> tokio::net::windows::named_pipe::NamedPipeClient {
+        let client_limiter = Arc::new(Semaphore::new(1));
+        let _held = client_limiter.clone().try_acquire_owned().unwrap();
+        connection_through(session, clients, &client_limiter, cancel_limiter).await
+    }
+
+    /// Route one accepted connection through the router with the given limits,
+    /// and hand back the client end of it.
+    async fn connection_through(
+        session: &SessionHandle,
+        clients: &mut JoinSet<()>,
+        client_limiter: &Arc<Semaphore>,
+        cancel_limiter: &Arc<Semaphore>,
+    ) -> tokio::net::windows::named_pipe::NamedPipeClient {
         let name = test_pipe_name();
         let server = ServerOptions::new()
             .first_pipe_instance(true)
@@ -1111,11 +1243,9 @@ mod tests {
             .unwrap();
         server.connect().await.unwrap();
 
-        let client_limiter = Arc::new(Semaphore::new(1));
-        let _held = client_limiter.clone().try_acquire_owned().unwrap();
         spawn_client_handler(
             clients,
-            &client_limiter,
+            client_limiter,
             cancel_limiter,
             &Arc::new(Semaphore::new(MAX_CONCURRENT_EXECS)),
             session,
@@ -1123,6 +1253,35 @@ mod tests {
             server,
         );
         client
+    }
+
+    #[tokio::test]
+    async fn lifecycle_work_is_served_while_every_exec_streams_stdin() {
+        let session = spawn().unwrap();
+        let client_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+        let cancel_limiter = Arc::new(Semaphore::new(CANCEL_LANE_SLOTS));
+        let mut clients = JoinSet::new();
+
+        // Each exec connection and its stdin connection take a general slot
+        // whenever one is free.
+        let _execs_and_stdin: Vec<_> = (0..2 * MAX_CONCURRENT_EXECS)
+            .map(|_| client_limiter.clone().try_acquire_owned().unwrap())
+            .collect();
+
+        let mut client =
+            connection_through(&session, &mut clients, &client_limiter, &cancel_limiter).await;
+        write_frame(&mut client, &DaemonRequest::Ping)
+            .await
+            .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(
+            response,
+            DaemonResponse::Pong,
+            "lifecycle work must keep its headroom while every exec streams stdin"
+        );
+        clients.shutdown().await;
+        session.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1193,6 +1352,12 @@ mod tests {
             "a {} byte cancellation does not fit the lane's {LANE_MAX_FRAME_BYTES} byte bound",
             frame.len() - 4
         );
+        let stdin_frame = encode_frame(&exec_stdin_request(&escaped, &escaped)).unwrap();
+        assert!(
+            stdin_frame.len() - 4 <= LANE_MAX_FRAME_BYTES,
+            "a {} byte exec_stdin does not fit the lane's {LANE_MAX_FRAME_BYTES} byte bound",
+            stdin_frame.len() - 4
+        );
 
         let session = spawn().unwrap();
         let cancel_limiter = Arc::new(Semaphore::new(1));
@@ -1239,6 +1404,7 @@ mod tests {
                 env: Vec::new(),
                 env_scope: mxc_sdk::wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
+                stdin: false,
             }),
         )
         .await
@@ -1277,6 +1443,59 @@ mod tests {
 
         let response: DaemonResponse = read_frame(&mut client).await.unwrap();
         assert_eq!(response, DaemonResponse::Ok);
+        clients.shutdown().await;
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_exec_keeps_its_stdin_and_cancellation_past_general_capacity() {
+        let session = spawn().unwrap();
+        let cancel_limiter = Arc::new(Semaphore::new(CANCEL_LANE_SLOTS));
+        let mut clients = JoinSet::new();
+
+        let mut execs = Vec::new();
+        for index in 0..MAX_CONCURRENT_EXECS {
+            let exec_id = format!("exec-{index}");
+            let (registration, _cancellation, source) = register_stdin_exec(&session, &exec_id);
+            let mut client =
+                connection_past_general_capacity(&session, &mut clients, &cancel_limiter).await;
+            write_frame(&mut client, &exec_stdin_request(&exec_id, "run"))
+                .await
+                .unwrap();
+            let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+            assert_eq!(
+                response,
+                DaemonResponse::Ok,
+                "{exec_id}'s stdin was refused"
+            );
+            write_frame(&mut client, &stdin_frame(exec_id.as_bytes()))
+                .await
+                .unwrap();
+            execs.push((registration, source, client, exec_id));
+        }
+
+        for (_, source, _, exec_id) in &mut execs {
+            let chunk = timeout(Duration::from_secs(5), source.chunks.recv())
+                .await
+                .expect("stdin must reach the process");
+            assert_eq!(chunk, Some(exec_id.as_bytes().to_vec()));
+        }
+
+        let mut client =
+            connection_past_general_capacity(&session, &mut clients, &cancel_limiter).await;
+        write_frame(
+            &mut client,
+            &DaemonRequest::CancelExec(CancelExecConfig {
+                exec_id: "exec-0".to_string(),
+                run_token: "run".to_string(),
+            }),
+        )
+        .await
+        .expect("an exec with stdin attached must still be cancellable");
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+
+        drop(execs);
         clients.shutdown().await;
         session.shutdown().await.unwrap();
     }
@@ -1366,6 +1585,16 @@ mod tests {
 
     /// A writer that always fails, standing in for a client that has gone.
     struct BrokenPipe;
+
+    impl AsyncRead for BrokenPipe {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
 
     impl AsyncWrite for BrokenPipe {
         fn poll_write(
@@ -1570,6 +1799,360 @@ mod tests {
         session.shutdown().await.unwrap();
     }
 
+    /// An exec registered with a stdin relay, as `SessionHandle::exec` does
+    /// for a client that asked for stdin.
+    fn register_stdin_exec(
+        session: &SessionHandle,
+        exec_id: &str,
+    ) -> (
+        crate::session_manager::ExecRegistration,
+        Arc<AtomicBool>,
+        crate::session_manager::StdinSource,
+    ) {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let (relay, source) = crate::session_manager::stdin_channel();
+        let registration = register_exec(
+            session.active_execs(),
+            exec_id,
+            "run",
+            &cancellation,
+            Some(relay),
+        )
+        .unwrap();
+        (registration, cancellation, source)
+    }
+
+    fn exec_stdin_request(exec_id: &str, run_token: &str) -> DaemonRequest {
+        DaemonRequest::ExecStdin(mxc_sdk::wslc_common::daemon_protocol::ExecStdinConfig {
+            exec_id: exec_id.to_string(),
+            run_token: run_token.to_string(),
+        })
+    }
+
+    fn stdin_frame(data: &[u8]) -> StreamFrame {
+        StreamFrame::Stdin {
+            data: data.to_vec(),
+        }
+    }
+
+    /// Everything still queued for the process, once the relay has let go.
+    async fn delivered(source: &mut crate::session_manager::StdinSource) -> Vec<Vec<u8>> {
+        let mut chunks = Vec::new();
+        while let Some(chunk) = timeout(Duration::from_secs(5), source.chunks.recv())
+            .await
+            .expect("the relay must let go of the process's stdin")
+        {
+            chunks.push(chunk);
+        }
+        chunks
+    }
+
+    async fn rejection(client: &mut tokio::io::DuplexStream) -> ErrKind {
+        match read_frame::<_, DaemonResponse>(client).await.unwrap() {
+            DaemonResponse::Err { kind, .. } => kind,
+            other => panic!("expected the stdin connection to be refused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stdin_frames_reach_the_process_in_order_and_end_of_file_closes_it() {
+        let session = spawn().unwrap();
+        let (_registration, _cancellation, mut source) = register_stdin_exec(&session, "exec-1");
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(&mut client, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        for frame in [
+            stdin_frame(b"hello "),
+            stdin_frame(b"world"),
+            stdin_frame(b""),
+        ] {
+            write_frame(&mut client, &frame).await.unwrap();
+        }
+
+        handle_client(server, session.clone(), Arc::new(Semaphore::new(0)), false)
+            .await
+            .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+        assert_eq!(
+            delivered(&mut source).await,
+            vec![b"hello ".to_vec(), b"world".to_vec(), Vec::new()],
+            "end-of-file reaches the writer as an empty chunk"
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stdin_is_refused_for_a_wrong_run_token_without_spending_the_relay() {
+        let session = spawn().unwrap();
+        let (_registration, _cancellation, _source) = register_stdin_exec(&session, "exec-1");
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(&mut client, &exec_stdin_request("exec-1", "another-run"))
+            .await
+            .unwrap();
+
+        handle_client(server, session.clone(), Arc::new(Semaphore::new(0)), false)
+            .await
+            .unwrap();
+
+        assert_eq!(rejection(&mut client).await, ErrKind::Rejected);
+        assert!(
+            session.take_exec_stdin("exec-1", "run").is_ok(),
+            "a wrong token must not use up the real client's stdin"
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stdin_is_refused_for_an_unknown_exec_or_one_started_without_it() {
+        let session = spawn().unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let _without_stdin = register_exec(
+            session.active_execs(),
+            "no-stdin",
+            "run",
+            &cancellation,
+            None,
+        )
+        .unwrap();
+
+        for exec_id in ["unknown", "no-stdin"] {
+            let (mut client, server) = duplex(64 * 1024);
+            write_frame(&mut client, &exec_stdin_request(exec_id, "run"))
+                .await
+                .unwrap();
+            handle_client(server, session.clone(), Arc::new(Semaphore::new(0)), false)
+                .await
+                .unwrap();
+            assert_eq!(rejection(&mut client).await, ErrKind::Rejected, "{exec_id}");
+        }
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_stdin_connection_for_the_same_exec_is_refused() {
+        let session = spawn().unwrap();
+        let (_registration, _cancellation, mut source) = register_stdin_exec(&session, "exec-1");
+
+        let (mut first, first_server) = duplex(64 * 1024);
+        write_frame(&mut first, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        let first_handler = tokio::spawn(handle_client(
+            first_server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        ));
+        let response: DaemonResponse = read_frame(&mut first).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+
+        let (mut second, second_server) = duplex(64 * 1024);
+        write_frame(&mut second, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        write_frame(&mut second, &stdin_frame(b"intruder"))
+            .await
+            .unwrap();
+        handle_client(
+            second_server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rejection(&mut second).await, ErrKind::Rejected);
+
+        write_frame(&mut first, &stdin_frame(b"owner"))
+            .await
+            .unwrap();
+        write_frame(&mut first, &stdin_frame(b"")).await.unwrap();
+        first_handler.await.unwrap().unwrap();
+        assert_eq!(
+            delivered(&mut source).await,
+            vec![b"owner".to_vec(), Vec::new()]
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    /// Send `bytes` once the stdin connection is admitted, then check that the
+    /// exec is cancelled and its stdin held open until the run ends, returning
+    /// what reached the process.
+    async fn end_stdin_without_end_of_file(bytes: Vec<u8>, disconnect: bool) -> Vec<Vec<u8>> {
+        let session = spawn().unwrap();
+        let (_registration, cancellation, source) = register_stdin_exec(&session, "exec-1");
+        let crate::session_manager::StdinSource {
+            mut chunks,
+            run_alive,
+            ..
+        } = source;
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(&mut client, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        let handler = tokio::spawn(handle_client(
+            server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        ));
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+        client.write_all(&bytes).await.unwrap();
+        let client = (!disconnect).then_some(client);
+
+        timeout(Duration::from_secs(5), async {
+            while !cancellation.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a stdin connection that ends without end-of-file must cancel the exec");
+        let mut received = Vec::new();
+        while let Ok(chunk) = chunks.try_recv() {
+            received.push(chunk);
+        }
+        assert!(
+            matches!(chunks.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "the process's stdin must stay open until the run ends"
+        );
+        assert!(!handler.is_finished());
+
+        drop(run_alive);
+        let handled = timeout(Duration::from_secs(5), handler)
+            .await
+            .expect("the relay must let go once the run ends")
+            .unwrap();
+        assert!(handled.is_err(), "a stream with no end-of-file is reported");
+        assert!(chunks.recv().await.is_none());
+        drop(client);
+        session.shutdown().await.unwrap();
+        received
+    }
+
+    #[tokio::test]
+    async fn an_oversized_stdin_frame_is_refused_before_it_is_allocated() {
+        let length_only = ((STDIN_MAX_FRAME_BYTES + 1) as u32).to_le_bytes().to_vec();
+
+        assert!(end_stdin_without_end_of_file(length_only, false)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_client_that_disconnects_mid_stream_cancels_the_exec() {
+        let partial = encode_frame(&stdin_frame(b"partial")).unwrap();
+
+        assert_eq!(
+            end_stdin_without_end_of_file(partial, true).await,
+            vec![b"partial".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_is_not_stdin_cancels_the_exec() {
+        let output = encode_frame(&StreamFrame::Stdout {
+            data: b"wrong way".to_vec(),
+        })
+        .unwrap();
+
+        assert!(end_stdin_without_end_of_file(output, false)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn input_sent_after_the_process_stops_reading_is_discarded_without_cancelling() {
+        let session = spawn().unwrap();
+        let (_registration, cancellation, source) = register_stdin_exec(&session, "exec-1");
+        drop(source.chunks);
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(&mut client, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        let handler = tokio::spawn(handle_client(
+            server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        ));
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+
+        for _ in 0..64 {
+            write_frame(&mut client, &stdin_frame(&[7; 16 * 1024]))
+                .await
+                .expect("input the process no longer reads must still be accepted");
+        }
+        write_frame(&mut client, &stdin_frame(b"")).await.unwrap();
+
+        timeout(Duration::from_secs(5), handler)
+            .await
+            .expect("end-of-file ends the connection")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !cancellation.load(Ordering::Acquire),
+            "a process that stops reading must not be cancelled"
+        );
+        drop(source.run_alive);
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_idle_stdin_connection_ends_when_the_run_is_over() {
+        let session = spawn().unwrap();
+        let (_registration, _cancellation, source) = register_stdin_exec(&session, "exec-1");
+        let crate::session_manager::StdinSource {
+            mut chunks,
+            run_alive,
+            ..
+        } = source;
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(&mut client, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        let handler = tokio::spawn(handle_client(
+            server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        ));
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+
+        drop(run_alive);
+
+        timeout(Duration::from_secs(5), handler)
+            .await
+            .expect("a host stdin that never closes must not outlive the run")
+            .unwrap()
+            .unwrap();
+        assert!(chunks.recv().await.is_none());
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stdin_is_refused_once_the_run_is_over() {
+        let session = spawn().unwrap();
+        let (_registration, _cancellation, source) = register_stdin_exec(&session, "exec-1");
+        drop(source);
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(&mut client, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+
+        handle_client(server, session.clone(), Arc::new(Semaphore::new(0)), false)
+            .await
+            .unwrap();
+
+        assert_eq!(rejection(&mut client).await, ErrKind::Rejected);
+        session.shutdown().await.unwrap();
+    }
+
     /// Admit an exec whose output channel is already closed (no live output),
     /// so `write_exec_result` goes straight from `Ok` to the terminal frame.
     fn admitted_no_output(
@@ -1583,6 +2166,97 @@ mod tests {
             overflowed: Arc::new(AtomicBool::new(false)),
             registration: test_registration(),
         })
+    }
+
+    /// The senders that keep an admitted exec running and silent.
+    type SilentRun = (
+        oneshot::Sender<Result<ExecTerminal, WorkerError>>,
+        mpsc::Sender<crate::session_manager::OutputChunk>,
+    );
+
+    /// An admitted exec that has written nothing and not finished, and the
+    /// senders that keep it that way.
+    fn admitted_silent() -> (Result<ExecStream, WorkerError>, SilentRun) {
+        let (done_tx, done) = oneshot::channel();
+        let (output_tx, output) = mpsc::channel(16);
+        let stream = ExecStream {
+            done,
+            output,
+            overflowed: Arc::new(AtomicBool::new(false)),
+            registration: test_registration(),
+        };
+        (Ok(stream), (done_tx, output_tx))
+    }
+
+    /// Deliver `admission` to a client that reads the admission and then
+    /// disconnects, returning the delivery result.
+    async fn deliver_to_a_client_that_leaves(
+        admission: Result<ExecStream, WorkerError>,
+        abort: impl FnOnce(),
+    ) -> Result<()> {
+        let (server, mut client) = duplex(64 * 1024);
+        let leaving = async move {
+            let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+            assert_eq!(response, DaemonResponse::Ok);
+        };
+        let (delivered, ()) = timeout(Duration::from_secs(5), async {
+            tokio::join!(deliver_exec(server, admission, abort), leaving)
+        })
+        .await
+        .expect("a client that has gone must end the delivery");
+        delivered
+    }
+
+    #[tokio::test]
+    async fn a_silent_exec_is_cancelled_when_its_client_goes() {
+        let (admission, _running) = admitted_silent();
+        let aborted = AtomicBool::new(false);
+
+        let delivered =
+            deliver_to_a_client_that_leaves(admission, || aborted.store(true, Ordering::Release))
+                .await;
+
+        assert!(delivered.is_err());
+        assert!(
+            aborted.load(Ordering::Acquire),
+            "a run with no output and no timeout must not outlive its client"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exec_whose_stdin_is_backed_up_is_cancelled_when_its_client_goes() {
+        let session = spawn().unwrap();
+        let (_registration, cancellation, source) = register_stdin_exec(&session, "exec-1");
+        let (mut stdin_client, stdin_server) = duplex(4 * 1024 * 1024);
+        write_frame(&mut stdin_client, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        for _ in 0..64 {
+            write_frame(&mut stdin_client, &stdin_frame(&[0; 1024]))
+                .await
+                .unwrap();
+        }
+        let relay = tokio::spawn(handle_client(
+            stdin_server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        ));
+        let (admission, _running) = admitted_silent();
+
+        let delivered =
+            deliver_to_a_client_that_leaves(admission, || session.cancel_exec("exec-1", "run"))
+                .await;
+
+        assert!(delivered.is_err());
+        assert!(
+            cancellation.load(Ordering::Acquire),
+            "a run whose stdin nobody drains must not outlive its client"
+        );
+        drop(source);
+        let _ = timeout(Duration::from_secs(5), relay).await;
+        drop(stdin_client);
+        session.shutdown().await.unwrap();
     }
 
     /// A rejected admission (unknown sandbox) round-trips as a single typed
@@ -1682,7 +2356,7 @@ mod tests {
         let active_execs = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let cancellation = Arc::new(AtomicBool::new(false));
         let registration =
-            Arc::new(register_exec(&active_execs, "exec-1", "run-1", &cancellation).unwrap());
+            Arc::new(register_exec(&active_execs, "exec-1", "run-1", &cancellation, None).unwrap());
         let worker_registration = Arc::clone(&registration);
         let (mut server, mut client) = duplex(1);
         let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
@@ -1711,7 +2385,8 @@ mod tests {
         tokio::task::yield_now().await;
 
         let replacement = Arc::new(AtomicBool::new(false));
-        let error = register_exec(&active_execs, "exec-1", "run-2", &replacement).unwrap_err();
+        let error =
+            register_exec(&active_execs, "exec-1", "run-2", &replacement, None).unwrap_err();
         assert_eq!(error.kind(), ErrKind::Rejected);
 
         assert_eq!(
@@ -1721,7 +2396,7 @@ mod tests {
         writer.await.unwrap().unwrap();
 
         let replacement_registration =
-            register_exec(&active_execs, "exec-1", "run-2", &replacement).unwrap();
+            register_exec(&active_execs, "exec-1", "run-2", &replacement, None).unwrap();
         drop(replacement_registration);
     }
 

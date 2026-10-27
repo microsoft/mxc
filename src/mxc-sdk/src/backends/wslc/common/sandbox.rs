@@ -22,8 +22,10 @@
 //!   than pipe handles. Each exposed output needs its own blocking pump because
 //!   the SDK offers no waitable or overlapped read primitive; the cost is
 //!   therefore bounded at two threads per native-streaming sandbox.
-//! - **stdin** — not forwarded to the container, so
-//!   [`take_stdin`](SandboxProcess::take_stdin) always returns `None`.
+//! - **stdin** — [`take_stdin`](SandboxProcess::take_stdin) returns the write
+//!   end of the container process's stdin pipe. [`wait`](SandboxProcess::wait)
+//!   closes it if the caller never took it, so a command reading stdin sees
+//!   end-of-file.
 //! - **[`id`](SandboxProcess::id)** — the process lives inside the WSL VM and
 //!   has no host process id, so this is always `0`.
 
@@ -33,21 +35,29 @@ use std::sync::OnceLock;
 
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
-use crate::mxc_common::process_util::{create_local_pipe, PipeWriter};
+use crate::mxc_common::process_util::{
+    create_local_pipe, InterruptiblePipeReader, InterruptiblePipeWriter, PipeWriteCanceller,
+    PipeWriter,
+};
 use crate::mxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, NativeStdio, OwnedPipe,
-    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
+    NativeStdio, OwnedPipe, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::validator::validate_common;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle as StdOwnedHandle};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Foundation::{HANDLE, HMODULE, WAIT_OBJECT_0};
 use windows::Win32::System::LibraryLoader::{
     GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
 };
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
+use crate::wslc_common::error::WslcError;
 use crate::wslc_common::stream_buffer::{StreamCanceller, StreamReader};
-use crate::wslc_common::wsl_container_runner::{OutputMode, StartedContainer, WSLContainerRunner};
+use crate::wslc_common::wsl_container_runner::{
+    InitStdin, OutputMode, StartedContainer, WSLContainerRunner,
+};
 use crate::wslc_common::wslc_bindings::WslcSignal;
 
 impl SandboxBackend for WSLContainerRunner {
@@ -77,8 +87,67 @@ impl SandboxBackend for WSLContainerRunner {
         // SAFETY: `start_container` drives the WSLC SDK over raw FFI; it owns
         // every buffer it passes in and returns RAII guards for every handle it
         // opens, so the returned value is self-contained.
-        let started = unsafe { self.start_container(request, logger, OutputMode::Stream(stdio)) }?;
-        Ok(Box::new(WslcSandboxProcess::new(started)))
+        let stdin = match stdio {
+            StdioMode::Pipes if self.piped_stdin => InitStdin::Piped,
+            _ => InitStdin::Closed,
+        };
+        let started =
+            unsafe { self.start_container(request, logger, OutputMode::Stream(stdio), stdin) }?;
+        let mut process = WslcSandboxProcess::new(started);
+        process.watch_exit().map_err(|error| {
+            WslcError::Runtime(format!(
+                "could not watch the WSL container process for exit: {error}"
+            ))
+            .into_response()
+        })?;
+        Ok(Box::new(process))
+    }
+}
+
+/// Closes a process's stdin when its exit event signals, so a write started
+/// before any wait is released as soon as the process exits.
+struct ExitWatch {
+    stop: StdOwnedHandle,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ExitWatch {
+    fn start(exit_event: StdOwnedHandle, stdin: Box<dyn StreamCloser>) -> std::io::Result<Self> {
+        // SAFETY: creates a new unnamed manual-reset event.
+        let stop = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .map_err(std::io::Error::other)?;
+
+        // SAFETY: `CreateEventW` returned a new handle that nothing else owns.
+        let stop = unsafe { StdOwnedHandle::from_raw_handle(stop.0) };
+        let watched_stop = stop.try_clone()?;
+        let thread = std::thread::Builder::new()
+            .name("mxc-wslc-exit-watch".to_string())
+            .spawn(move || {
+                let events = [
+                    HANDLE(exit_event.as_raw_handle()),
+                    HANDLE(watched_stop.as_raw_handle()),
+                ];
+
+                // SAFETY: this thread owns both handles for the whole wait.
+                let signalled = unsafe { WaitForMultipleObjects(&events, false, u32::MAX) };
+                if signalled == WAIT_OBJECT_0 {
+                    stdin.close();
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for ExitWatch {
+    fn drop(&mut self) {
+        // SAFETY: `stop` is a live event handle.
+        let _ = unsafe { SetEvent(HANDLE(self.stop.as_raw_handle())) };
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -110,6 +179,8 @@ fn unconfirmed_termination_error(timeout_ms: u32) -> std::io::Error {
 /// A running WSL container's init process.
 struct WslcSandboxProcess {
     started: StartedContainer,
+    stdin: Option<InterruptiblePipeWriter>,
+    stdin_canceller: Option<PipeWriteCanceller>,
     stdout: Option<StreamReader>,
     stderr: Option<StreamReader>,
     stdout_canceller: Option<StreamCanceller>,
@@ -118,6 +189,14 @@ struct WslcSandboxProcess {
     /// exit they may still be delivering queued bytes to caller-owned pipes,
     /// and joining would block if the caller left a full pipe unread.
     native_output_pumps: Vec<std::thread::JoinHandle<()>>,
+    /// Copies the caller's native stdin pipe into the process; joined by `wait`
+    /// once the process has exited and its stdin is closed.
+    native_stdin_pump: Option<StdinPump>,
+    /// Closes stdin when the process exits; present only when stdin is piped.
+    exit_watch: Option<ExitWatch>,
+    /// A stdin forwarding failure found by `wait`, reported by every later
+    /// `wait` and `try_wait` in place of the exit code.
+    stdin_failure: Option<String>,
     /// Exit code cached by the first successful wait, so repeat waits are
     /// idempotent (and don't re-run teardown).
     exit: Option<i32>,
@@ -137,10 +216,8 @@ struct WslcSandboxProcess {
     /// only ever polls [`try_wait`](SandboxProcess::try_wait) learns the exit
     /// code without any teardown having run.
     torn_down: bool,
-    /// Diagnostics from the SDK calls this handle makes after the spawn
-    /// returned. The streaming contract has nowhere to flush them — the spawn
-    /// itself already logged through the caller's logger — so they are
-    /// buffered and dropped with the handle.
+    /// Diagnostics from the SDK calls made after the spawn returned; only its
+    /// warnings reach the caller.
     logger: Logger,
 }
 
@@ -213,12 +290,18 @@ impl WslcSandboxProcess {
             Some(pipes) => (Some(pipes.stdout), Some(pipes.stderr)),
             None => (None, None),
         };
+        let stdin = started.stdin.take();
         Self {
+            stdin_canceller: stdin.as_ref().map(InterruptiblePipeWriter::canceller),
+            stdin,
             stdout_canceller: stdout.as_ref().map(|r| r.canceller()),
             stderr_canceller: stderr.as_ref().map(|r| r.canceller()),
             stdout,
             stderr,
             native_output_pumps: Vec::new(),
+            native_stdin_pump: None,
+            exit_watch: None,
+            stdin_failure: None,
             started,
             exit: None,
             timed_out: false,
@@ -231,6 +314,30 @@ impl WslcSandboxProcess {
     /// This handle's [`Settled`] outcome so far.
     fn settled(&self) -> Settled {
         settled_outcome(self.timed_out, self.deadline_elapsed, self.exit)
+    }
+
+    /// Start closing stdin when the process exits, if it has a stdin to close.
+    fn watch_exit(&mut self) -> std::io::Result<()> {
+        if self.stdin.is_none() {
+            return Ok(());
+        }
+        if let Some(event) = self
+            .started
+            .duplicate_exit_event()
+            .map_err(std::io::Error::other)?
+        {
+            self.exit_watch = Some(ExitWatch::start(event, self.started.stdin_closer())?);
+        }
+        Ok(())
+    }
+
+    /// The result for a process that exited with `code`, unless its stdin
+    /// forwarding failed.
+    fn exited(&self, code: i32) -> std::io::Result<i32> {
+        match &self.stdin_failure {
+            Some(failure) => Err(std::io::Error::other(failure.clone())),
+            None => Ok(code),
+        }
     }
 
     /// Complete the timeout path: confirm the sandboxed process is really gone,
@@ -325,8 +432,7 @@ fn pin_output_pump_module() -> std::io::Result<()> {
 ///
 /// WSLC exposes stdout and stderr as callback-backed streams rather than
 /// transferable OS handles. The pump copies each stream into a local pipe so
-/// FFI consumers can adopt its native read endpoint. WSLC does not currently
-/// expose a corresponding native stdin endpoint.
+/// FFI consumers can adopt its native read endpoint.
 ///
 /// A shared worker cannot safely drain both callback streams: each read may
 /// block independently, and failing to drain either stream can stall the
@@ -355,9 +461,51 @@ pub(crate) fn prepare_native_output() -> std::io::Result<PreparedNativeOutput> {
     })
 }
 
+/// Hand the caller the write end of a local pipe that a pump copies into
+/// `stdin`, registering a closer that ends the pump so the caller's next write
+/// fails once the process is gone. The pump returns any failure other than
+/// the process's stdin closing.
+fn bridge_native_stdin(
+    mut stdin: impl Write + Send + 'static,
+    register_closer: impl FnOnce(Box<dyn StreamCloser>),
+) -> std::io::Result<(OwnedPipe, StdinPump)> {
+    pin_output_pump_module()?;
+    let (read, write) = create_local_pipe().map_err(std::io::Error::other)?;
+    let mut reader = InterruptiblePipeReader::new(read);
+    let caller_end = write.try_into_std_owned_handle()?;
+    register_closer(Box::new(reader.canceller()));
+    let pump = std::thread::Builder::new()
+        .name("mxc-wslc-stdin-pump".to_string())
+        .spawn(move || match std::io::copy(&mut reader, &mut stdin) {
+            Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(error),
+            _ => Ok(()),
+        })?;
+    Ok((caller_end, pump))
+}
+
+type StdinPump = std::thread::JoinHandle<std::io::Result<()>>;
+
+/// Wait for a stdin pump whose pipes are already closed, describing any
+/// failure it hit.
+fn stdin_pump_failure(pump: StdinPump) -> Option<String> {
+    let error = match pump.join() {
+        Ok(Ok(())) => return None,
+        Ok(Err(error)) => error.to_string(),
+        Err(_) => "the stdin pump panicked".to_string(),
+    };
+    Some(format!(
+        "forwarding stdin to the WSL container failed, so the command may not have received \
+         all of its input: {error}"
+    ))
+}
+
 impl SandboxProcess for WslcSandboxProcess {
+    fn warnings(&self) -> Vec<String> {
+        self.logger.warnings().to_vec()
+    }
+
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
-        if self.stdout.is_none() && self.stderr.is_none() {
+        if self.stdin.is_none() && self.stdout.is_none() && self.stderr.is_none() {
             return Ok(None);
         }
 
@@ -373,6 +521,19 @@ impl SandboxProcess for WslcSandboxProcess {
             .as_ref()
             .map(|_| prepare_native_output())
             .transpose()?;
+
+        // Bridge stdin first: it is the step that can fail after taking a
+        // stream, and the output streams are still untouched if it does.
+        let stdin = match self.stdin.take() {
+            Some(writer) => {
+                let (caller_end, pump) =
+                    bridge_native_stdin(writer, |closer| self.started.add_stdin_closer(closer))?;
+                self.native_stdin_pump = Some(pump);
+                Some(caller_end)
+            }
+            None => None,
+        };
+        self.stdin_canceller.take();
 
         let stdout = match (self.stdout.take(), stdout_pipe) {
             (Some(source), Some(pipe)) => {
@@ -395,15 +556,18 @@ impl SandboxProcess for WslcSandboxProcess {
         self.stderr_canceller.take();
 
         Ok(Some(NativeStdio {
-            stdin: None,
+            stdin,
             stdout,
             stderr,
         }))
     }
 
-    /// Always `None`: stdin is not forwarded to the container process.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
-        None
+        take_boxed_write(&mut self.stdin)
+    }
+
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdin_canceller)
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
@@ -429,11 +593,16 @@ impl SandboxProcess for WslcSandboxProcess {
                 return Err(unconfirmed_termination_error(self.started.timeout_ms))
             }
             // A cached code means `wait` already ran the full teardown.
-            Settled::Exited(code) => return Ok(Some(code)),
+            Settled::Exited(code) => return self.exited(code).map(Some),
             Settled::Pending => {}
         }
         if !self.started.has_exited() {
-            return Ok(None);
+            // The exit event can signal long before the SDK's exit callback,
+            // and a poller must not wait out that gap.
+            if !self.started.exit_signalled() {
+                return Ok(None);
+            }
+            self.started.close_stdin();
         }
         // Deliberately *not* cached into `self.exit`: `wait` treats a cached
         // code as proof that it already drained the streams, destroyed the
@@ -457,9 +626,12 @@ impl SandboxProcess for WslcSandboxProcess {
         // WSLC has no per-process signal API: stopping the container terminates
         // the init process and everything it spawned — the tree kill the trait
         // asks for. `0` means "don't wait for a graceful stop".
-        self.started
+        let stopped = self
+            .started
             .stop(WslcSignal::WSLC_SIGNAL_SIGKILL, 0)
-            .map_err(std::io::Error::other)
+            .map_err(std::io::Error::other);
+        self.started.close_stdin();
+        stopped
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -467,7 +639,7 @@ impl SandboxProcess for WslcSandboxProcess {
             // Sticky: a confirmed timeout must keep being reported as one,
             // never as a later-observed exit code.
             Settled::TimedOut => return Err(timeout_error(self.started.timeout_ms)),
-            Settled::Exited(code) => return Ok(code),
+            Settled::Exited(code) => return self.exited(code),
             // An earlier call already burned the deadline but could not confirm
             // the kill. Resume at the confirmation step: re-entering
             // `wait_for_exit` would block for another full deadline, while
@@ -476,6 +648,10 @@ impl SandboxProcess for WslcSandboxProcess {
             Settled::DeadlineUnconfirmed => return self.finish_timed_out(),
             Settled::Pending => {}
         }
+
+        // A command reading a stdin the caller never took would otherwise wait
+        // for input that cannot arrive.
+        self.stdin.take();
 
         // Drain the streams the caller did not take, concurrently with the
         // wait, so unread output can't accumulate for the life of the process
@@ -528,7 +704,10 @@ impl SandboxProcess for WslcSandboxProcess {
         // teardown actually succeeded, leaving `Drop` to retry it if not.
         self.torn_down = self.started.destroy(&mut self.logger).is_ok();
         self.exit = Some(exit_code);
-        Ok(exit_code)
+
+        // Bounded: the wait closed both pipes the pump uses.
+        self.stdin_failure = self.native_stdin_pump.take().and_then(stdin_pump_failure);
+        self.exited(exit_code)
     }
 
     fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
@@ -548,6 +727,7 @@ impl Drop for WslcSandboxProcess {
         if self.torn_down {
             return;
         }
+        self.stdin.take();
         // Settles the container and blocks on the exit callback before the
         // fields it owns are released — the SDK must have stopped calling back
         // before the `IoContext` is freed and the DLL unloaded.
@@ -787,5 +967,167 @@ mod tests {
     fn dropping_unactivated_native_output_joins_idle_pump() {
         let pipe = prepare_native_output().expect("prepare native output");
         drop(pipe);
+    }
+
+    fn file_pipe() -> (File, File) {
+        let (read, write) = create_local_pipe().expect("create pipe");
+        (
+            File::from(read.try_into_std_owned_handle().unwrap()),
+            File::from(write.try_into_std_owned_handle().unwrap()),
+        )
+    }
+
+    fn read_to_end_within(mut reader: File) -> Vec<u8> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut received = Vec::new();
+            let _ = reader.read_to_end(&mut received);
+            let _ = done_tx.send(received);
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reader never saw end-of-file")
+    }
+
+    #[test]
+    fn bridged_stdin_delivers_bytes_and_eof_when_the_caller_closes_it() {
+        let (process_reader, process_writer) = file_pipe();
+        let mut closers = Vec::new();
+        let (caller, _pump) =
+            bridge_native_stdin(InterruptiblePipeWriter::new(process_writer), |closer| {
+                closers.push(closer)
+            })
+            .expect("bridge stdin");
+        let mut caller = File::from(caller);
+
+        caller.write_all(b"through the bridge").unwrap();
+        drop(caller);
+
+        assert_eq!(read_to_end_within(process_reader), b"through the bridge");
+        assert_eq!(closers.len(), 1);
+    }
+
+    #[test]
+    fn closing_bridged_stdin_ends_a_caller_write_blocked_on_a_full_pipe() {
+        let (_process_reader, process_writer) = file_pipe();
+        let process_stdin = InterruptiblePipeWriter::new(process_writer);
+        let mut closers: Vec<Box<dyn StreamCloser>> = vec![Box::new(process_stdin.canceller())];
+        let (caller, _pump) = bridge_native_stdin(process_stdin, |closer| closers.push(closer))
+            .expect("bridge stdin");
+        let mut caller = File::from(caller);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(caller.write_all(&vec![0; 16 * 1024 * 1024]));
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the write should be blocked behind a process that is not reading"
+        );
+
+        for closer in &closers {
+            closer.close();
+        }
+
+        let written = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the caller's write was never released");
+        assert!(
+            written.is_err(),
+            "the abandoned input must not be reported as delivered"
+        );
+    }
+
+    #[test]
+    fn closing_an_idle_bridged_stdin_closes_the_process_stdin() {
+        let (process_reader, process_writer) = file_pipe();
+        let process_stdin = InterruptiblePipeWriter::new(process_writer);
+        let mut closers: Vec<Box<dyn StreamCloser>> = vec![Box::new(process_stdin.canceller())];
+        let (_caller, _pump) = bridge_native_stdin(process_stdin, |closer| closers.push(closer))
+            .expect("bridge stdin");
+
+        for closer in &closers {
+            closer.close();
+        }
+
+        assert!(read_to_end_within(process_reader).is_empty());
+    }
+
+    struct FailingStdin(std::io::ErrorKind);
+
+    impl Write for FailingStdin {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0, "stdin broke"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn bridged_write_failure(kind: std::io::ErrorKind) -> Option<String> {
+        let (caller, pump) = bridge_native_stdin(FailingStdin(kind), |_| {}).expect("bridge stdin");
+        let mut caller = File::from(caller);
+        let _ = caller.write_all(b"lost input");
+        drop(caller);
+        stdin_pump_failure(pump)
+    }
+
+    #[test]
+    fn a_failed_write_through_bridged_stdin_is_reported() {
+        let failure = bridged_write_failure(std::io::ErrorKind::Other).expect("a failure");
+
+        assert!(
+            failure.contains("forwarding stdin to the WSL container failed")
+                && failure.contains("stdin broke"),
+            "{failure}"
+        );
+    }
+
+    #[test]
+    fn a_process_stdin_that_closed_is_not_a_bridged_stdin_failure() {
+        assert_eq!(bridged_write_failure(std::io::ErrorKind::BrokenPipe), None);
+    }
+
+    struct RecordingCloser(std::sync::mpsc::Sender<()>);
+
+    impl StreamCloser for RecordingCloser {
+        fn close(&self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    fn manual_event() -> StdOwnedHandle {
+        let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }.unwrap();
+        unsafe { StdOwnedHandle::from_raw_handle(event.0) }
+    }
+
+    #[test]
+    fn an_exit_watch_closes_stdin_when_the_process_exits() {
+        let exit_event = manual_event();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let _watch = ExitWatch::start(
+            exit_event.try_clone().unwrap(),
+            Box::new(RecordingCloser(closed_tx)),
+        )
+        .unwrap();
+
+        unsafe { SetEvent(HANDLE(exit_event.as_raw_handle())) }.unwrap();
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stdin was not closed when the process exited");
+    }
+
+    #[test]
+    fn dropping_an_exit_watch_ends_it_without_closing_stdin() {
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let watch = ExitWatch::start(manual_event(), Box::new(RecordingCloser(closed_tx))).unwrap();
+
+        drop(watch);
+
+        assert!(
+            closed_rx.try_recv().is_err(),
+            "stdin was closed without an exit"
+        );
     }
 }

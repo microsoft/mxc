@@ -80,7 +80,8 @@ use crate::mxc_common::telemetry;
 /// Selects the containment backend for the host, spawns the sandboxed process
 /// with piped stdio, and returns the handle. No pty is allocated. Backends
 /// without a streaming implementation return an [`Error`] with
-/// [`ErrorCode::UnsupportedContainment`].
+/// [`ErrorCode::UnsupportedContainment`]. `stdin` is as for
+/// [`spawn_one_shot_json`].
 ///
 /// # Safety / lifetime contract for library-context callers
 ///
@@ -99,22 +100,25 @@ use crate::mxc_common::telemetry;
 /// spawns from the same load are safe as long as the library outlives them.
 pub fn spawn_execution_request(
     request: &ExecutionRequest,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer))
+    spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer), stdin)
 }
 
 /// Spawn a raw exact-version one-shot JSON request as a streaming process.
 ///
 /// `experimental` is the caller's runtime opt-in. It is a parameter rather than
 /// a JSON field so that a configuration cannot grant itself experimental access.
-/// The same library-lifetime contract as [`spawn_execution_request`] applies.
+/// `stdin` gives a WSLc process a writable stdin rather than end-of-file. The
+/// same library-lifetime contract as [`spawn_execution_request`] applies.
 pub fn spawn_one_shot_json(
     request_json: &str,
     experimental: bool,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
-    spawn_execution_request_with_logger(&request, logger)
+    spawn_execution_request_with_logger(&request, logger, stdin)
 }
 
 fn parse_one_shot_json(
@@ -143,8 +147,11 @@ fn parse_one_shot_json(
 fn spawn_execution_request_with_logger(
     request: &ExecutionRequest,
     logger: Logger,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    spawn_execution_request_with_logger_and(request, logger, dispatch::spawn_runner)
+    spawn_execution_request_with_logger_and(request, logger, |request, logger| {
+        dispatch::spawn_runner(request, logger, stdin)
+    })
 }
 
 fn spawn_execution_request_with_logger_and(

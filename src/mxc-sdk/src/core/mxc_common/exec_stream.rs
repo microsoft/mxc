@@ -23,12 +23,11 @@
 //! The adapter closes only its duplicates on drop; the backend's originals (and
 //! its `waiter`/`terminator`, which may also reference them) are untouched — so
 //! there is no double-close even for a backend that keeps and closes its own
-//! pipe ends. IsolationSession is exactly that case under
-//! [`ExecStdio::Piped`]: it is the only state-aware backend that returns
-//! real pipe handles, and it closes its own ends when its process object drops.
-//! Under [`ExecStdio::Relayed`] it relays internally and returns null
-//! handles, as do Windows Sandbox and WSLc — which under [`ExecStdio::Piped`]
-//! return no handle at all, refusing it up front. A handle with *all three*
+//! pipe ends. IsolationSession and WSLc return real pipe handles under
+//! [`ExecStdio::Piped`]; IsolationSession closes its own ends when its process
+//! object drops. Under [`ExecStdio::Relayed`] both relay internally and return
+//! null handles, as does Windows Sandbox — which under [`ExecStdio::Piped`]
+//! returns no handle at all, refusing it up front. A handle with *all three*
 //! streams null is refused here rather than wrapped: it means the backend has
 //! not implemented the `Piped` contract, and a stream-less `SandboxProcess`
 //! would hide that.

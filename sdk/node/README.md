@@ -76,8 +76,10 @@ try {
 ```
 
 `spawn` returns a `Promise<MxcProcess>` with standard pipes, wait, termination,
-and disposal operations. Access output streams before awaiting completion; any
-untaken streams are drained internally to avoid pipe-buffer deadlocks.
+and disposal operations. A WSLC command started by `spawn` reads end-of-file on
+stdin; `spawnWithStdin` gives it a writable `standardInput`. Access output
+streams before awaiting completion; any untaken streams are drained internally
+to avoid pipe-buffer deadlocks.
 Each operation accepts its own optional options type: `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`.
 Execution options do not support `dryRun`.
@@ -166,6 +168,8 @@ try {
 
 `spawnInContainer` returns a `Promise<MxcProcess>` with live standard pipes;
 `runInContainer` returns a `Promise<ExecutionResult>` with captured output.
+A WSLC command started by `spawnInContainer` reads end-of-file on stdin;
+`spawnInContainerWithStdin` gives it a writable `standardInput`.
 `spawnInContainerWithPty(containerId, request, options?)` starts an
 IsolationSession exec with a caller-driven terminal and returns a
 `Promise<MxcPtyProcess>`. Set `options.size` for initial dimensions; it defaults

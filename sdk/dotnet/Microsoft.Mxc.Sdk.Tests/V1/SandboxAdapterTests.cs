@@ -51,6 +51,16 @@ public class SandboxAdapterTests
     }
 
     [Fact]
+    public async Task RunnerStdinSpawnHasDefaultImplementation()
+    {
+        IContainerRunner runner = new ExistingRunnerFake();
+        var request = new ContainerRequest("echo fake");
+
+        Assert.Throws<NotSupportedException>(() => runner.SpawnWithStdin(request));
+        await Assert.ThrowsAsync<NotSupportedException>(() => runner.SpawnWithStdinAsync(request, cancellationToken: TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public void LifecyclePtyCapabilityHasDefaultImplementation()
     {
         var method = typeof(IContainerLifecycle).GetMethod(

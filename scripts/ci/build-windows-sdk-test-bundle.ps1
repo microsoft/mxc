@@ -4,8 +4,9 @@ Builds the Windows SDK test bundle for one Windows architecture.
 
 .DESCRIPTION
 Builds the IsolationSession and ProcessContainer streaming test payloads for
-Rust, .NET, and Node, stages the native dependencies and PowerShell suites,
-and checks that every payload discovers its tests.
+Rust, .NET, and Node, and the WSLC create-and-run and lifecycle payloads for
+.NET and Node, stages the native dependencies and PowerShell suites, and checks
+that every payload discovers its tests.
 #>
 [CmdletBinding()]
 param(
@@ -106,7 +107,7 @@ $testArtifacts = Invoke-CargoBuild (@('test') + $sdkPackage + @(
     '--test', 'isolation_session', '--test', 'sdk_helpers',
     '--test', 'streaming_processcontainer', '--no-run'))
 $probeArtifacts = Invoke-CargoBuild (@('build') + $sdkPackage + @('--example', 'sta_probe'))
-$nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', 'isolation_session') |
+$nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', 'isolation_session,wslc') |
     Where-Object { $_.target.name -eq 'mxc_ffi' } |
     ForEach-Object { $_.filenames } |
     Where-Object { [IO.Path]::GetExtension($_) -eq '.dll' } |
@@ -114,11 +115,15 @@ $nativeLibrary = Invoke-CargoBuild @('build', '-p', 'mxc_ffi', '--features', 'is
 if (-not $nativeLibrary) {
     throw 'cargo reported no mxc_ffi.dll.'
 }
+$wslcDaemon = Get-CargoExecutable (Invoke-CargoBuild @('build', '-p', 'mxc-sdk', '--features', 'wslc', '--bin', 'wxc-wslc-daemon')) 'wxc-wslc-daemon'
+
+# The wslc build feature stages the WSLC SDK library beside mxc_ffi.
+$wslcSdk = Join-Path (Split-Path -Parent $nativeLibrary) 'wslcsdk.dll'
 
 $sdkBin = New-Directory (Join-Path $nodeSdkRoot "bin\$Architecture")
 $retiredPlm = Join-Path $sdkBin 'plm.exe'
 if (Test-Path -LiteralPath $retiredPlm) { Remove-Item -LiteralPath $retiredPlm }
-Copy-Item -LiteralPath $WxcExecPath, $nativeLibrary -Destination $sdkBin -Force
+Copy-Item -LiteralPath $WxcExecPath, $nativeLibrary, $wslcDaemon, $wslcSdk -Destination $sdkBin -Force
 foreach ($project in $nodeSdkRoot, $integrationRoot) {
     Push-Location $project
     try {
@@ -133,7 +138,7 @@ foreach ($project in $nodeSdkRoot, $integrationRoot) {
 $dotnetOut = Join-Path $OutputDirectory 'dotnet'
 $publish = @(
     'publish', (Join-Path $repoRoot 'sdk\dotnet\Microsoft.Mxc.Sdk.Tests\Microsoft.Mxc.Sdk.Tests.csproj'),
-    '-c', 'Release', '-r', "win-$Architecture", '-p:MxcWithIsolationSession=true',
+    '-c', 'Release', '-r', "win-$Architecture", '-p:MxcWithIsolationSession=true', '-p:MxcWithWslc=true',
     '--self-contained', 'true', '-o', $dotnetOut, '--nologo'
 )
 if ($NuGetSource) {
@@ -170,7 +175,7 @@ $helperPaths = @(& (Join-Path $PSScriptRoot 'stage-isolation-session-test-helper
     -SourceDirectory (Join-Path $repoRoot 'tests\scripts') -ScriptsDirectory $scriptsOut)
 
 $integrationOut = New-Directory (Join-Path $OutputDirectory 'sdk-integration')
-Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\windows-process-container.test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
+Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\windows-process-container.test.js'), (Join-Path $integrationRoot 'dist\wslc-state-aware.test.js'), (Join-Path $integrationRoot 'dist\wslc-e2e.test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
 Copy-Item -LiteralPath (Join-Path $integrationRoot 'package.json'), (Join-Path $integrationRoot 'run-tests.js') -Destination $integrationOut
 # Stages the SDK built above in place of the installed copy.
 $modulesOut = New-Directory (Join-Path $integrationOut 'node_modules')
@@ -194,7 +199,7 @@ $manifest = [ordered]@{
     build_id       = $BuildId
     pipeline       = $Pipeline
     triplet        = $triple
-    features       = @('isolation_session', 'dotnetsdk', 'node-sdk-integration')
+    features       = @('isolation_session', 'wslc', 'dotnetsdk', 'node-sdk-integration')
 }
 if ($Package) {
     $manifest['package'] = $Package
@@ -211,12 +216,18 @@ $required = @(
     'inproc\sta_probe.exe',
     'dotnet\Microsoft.Mxc.Sdk.Tests.exe',
     'dotnet\mxc_ffi.dll',
+    'dotnet\wxc-wslc-daemon.exe',
+    'dotnet\wslcsdk.dll',
     'node\node.exe',
     'node\LICENSE',
     'sdk-integration\package.json',
     'sdk-integration\run-tests.js',
     'sdk-integration\dist\isolation-session-state-aware.test.js',
     'sdk-integration\dist\windows-process-container.test.js',
+    'sdk-integration\dist\wslc-state-aware.test.js',
+    'sdk-integration\dist\wslc-e2e.test.js',
+    "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wxc-wslc-daemon.exe",
+    "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wslcsdk.dll",
     'test_scripts\run_isolation_session_tests.ps1',
     'test_scripts\run_isolation_session_state_aware_tests.ps1',
     'test_scripts\run_isolation_session_resize_smoke.ps1'
@@ -260,6 +271,12 @@ Assert-Discovery '.NET tests' 'Microsoft\.Mxc\.Sdk\.Tests' {
 Assert-Discovery '.NET streaming tests' 'MxcProcessTests\.Streaming_WritesStdin_AndReadsEchoedStdout' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcProcessTests'
 }
+Assert-Discovery '.NET WSLC lifecycle tests' 'MxcLifecycleWslcE2ETests\.' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleWslcE2ETests'
+}
+Assert-Discovery '.NET WSLC create-and-run tests' 'MxcContainerWslcE2ETests\.' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcContainerWslcE2ETests'
+}
 Push-Location $integrationOut
 $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '1'
 try {
@@ -268,6 +285,12 @@ try {
     }
     Assert-Discovery 'Node ProcessContainer suite' '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/windows-process-container.test.js
+    }
+    Assert-Discovery 'Node WSLC lifecycle suite' 'WSLC state-aware lifecycle E2E' {
+        & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/wslc-state-aware.test.js
+    }
+    Assert-Discovery 'Node WSLC create-and-run suite' 'WSLC SDK E2E' {
+        & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/wslc-e2e.test.js
     }
 }
 finally {

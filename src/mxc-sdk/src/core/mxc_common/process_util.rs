@@ -292,6 +292,124 @@ impl std::io::Write for PipeWriter {
     }
 }
 
+/// A pipe write end that a [`PipeWriteCanceller`] can close while a write to it
+/// is blocked.
+pub struct InterruptiblePipeWriter(Arc<CancelableWritePipe>);
+
+/// Closes an [`InterruptiblePipeWriter`] on demand.
+#[derive(Clone)]
+pub struct PipeWriteCanceller(Arc<CancelableWritePipe>);
+
+struct CancelableWritePipe {
+    gate: Mutex<WriteGate>,
+    write_done: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct WriteGate {
+    /// `None` once closed; a write holds its own clone, so a cancelled write
+    /// returns before the handle closes.
+    pipe: Option<Arc<std::fs::File>>,
+
+    writing: bool,
+}
+
+/// How long [`PipeWriteCanceller::close`] keeps cancelling a write that has not
+/// returned before leaving the writer to close the handle once it does.
+const CLOSE_WRITE_WAIT: Duration = Duration::from_secs(5);
+
+impl CancelableWritePipe {
+    fn lock(&self) -> std::sync::MutexGuard<'_, WriteGate> {
+        self.gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn close(&self) {
+        let mut gate = self.lock();
+        let Some(pipe) = gate.pipe.take() else {
+            return;
+        };
+        let handle = HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(&*pipe));
+        let deadline = std::time::Instant::now() + CLOSE_WRITE_WAIT;
+        while gate.writing {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return;
+            }
+            // SAFETY: `pipe` keeps the handle open for this call; cancelling
+            // another thread's synchronous write on it is supported.
+            unsafe {
+                let _ = CancelIoEx(handle, None);
+            }
+
+            // A cancellation issued before the write reaches the kernel finds
+            // nothing to cancel, so it is repeated until the write returns.
+            gate = self
+                .write_done
+                .wait_timeout(gate, Duration::from_millis(10).min(deadline - now))
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+    }
+}
+
+impl InterruptiblePipeWriter {
+    pub fn new(pipe: std::fs::File) -> Self {
+        Self(Arc::new(CancelableWritePipe {
+            gate: Mutex::new(WriteGate {
+                pipe: Some(Arc::new(pipe)),
+                writing: false,
+            }),
+            write_done: std::sync::Condvar::new(),
+        }))
+    }
+
+    pub fn canceller(&self) -> PipeWriteCanceller {
+        PipeWriteCanceller(Arc::clone(&self.0))
+    }
+}
+
+impl std::io::Write for InterruptiblePipeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let pipe = {
+            let mut gate = self.0.lock();
+            let Some(pipe) = gate.pipe.clone() else {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            };
+            gate.writing = true;
+            pipe
+        };
+        let written = std::io::Write::write(&mut &*pipe, buf);
+        let closed = {
+            let mut gate = self.0.lock();
+            gate.writing = false;
+            self.0.write_done.notify_all();
+            gate.pipe.is_none()
+        };
+        if closed {
+            return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        }
+        written
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for InterruptiblePipeWriter {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+impl StreamCloser for PipeWriteCanceller {
+    fn close(&self) {
+        self.0.close();
+    }
+}
+
 const BUFFER_SIZE: u32 = 4096;
 const MAX_OUTPUT_CHARS: usize = 1024 * 1024;
 
@@ -784,5 +902,82 @@ mod tests {
         let mut stderr = "Normal error output".to_string();
         suppress_python_location_error(&mut stderr);
         assert_eq!(stderr, "Normal error output");
+    }
+
+    fn file_pipe() -> (std::fs::File, std::fs::File) {
+        let (read, write) = create_local_pipe().expect("create pipe");
+        (
+            std::fs::File::from(read.try_into_std_owned_handle().unwrap()),
+            std::fs::File::from(write.try_into_std_owned_handle().unwrap()),
+        )
+    }
+
+    fn read_to_end_within(mut reader: std::fs::File) -> Vec<u8> {
+        use std::io::Read;
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut received = Vec::new();
+            let _ = reader.read_to_end(&mut received);
+            let _ = done_tx.send(received);
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the reader never saw end-of-file")
+    }
+
+    #[test]
+    fn interruptible_writer_delivers_bytes_and_eof_on_drop() {
+        use std::io::Write;
+
+        let (reader, writer) = file_pipe();
+        let mut writer = InterruptiblePipeWriter::new(writer);
+        writer.write_all(b"through the pipe").unwrap();
+        drop(writer);
+
+        assert_eq!(read_to_end_within(reader), b"through the pipe");
+    }
+
+    #[test]
+    fn closing_a_held_writer_gives_the_reader_eof_and_fails_later_writes() {
+        use std::io::Write;
+
+        let (reader, writer) = file_pipe();
+        let mut writer = InterruptiblePipeWriter::new(writer);
+        writer.write_all(b"before").unwrap();
+
+        writer.canceller().close();
+
+        assert_eq!(read_to_end_within(reader), b"before");
+        let error = writer.write(b"after").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn closing_a_writer_blocked_on_a_full_pipe_abandons_the_write() {
+        use std::io::{Read, Write};
+
+        let (mut reader, writer) = file_pipe();
+        let mut writer = InterruptiblePipeWriter::new(writer);
+        let canceller = writer.canceller();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(writer.write_all(&vec![7; 8 * 1024 * 1024]));
+        });
+        let mut first = [0u8; 1];
+        reader
+            .read_exact(&mut first)
+            .expect("the write has started");
+
+        canceller.close();
+
+        let Ok(result) = done_rx.recv_timeout(Duration::from_secs(10)) else {
+            // Closing the read end unblocks the abandoned writer thread.
+            drop(reader);
+            panic!("closing the writer did not abandon the blocked write");
+        };
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(read_to_end_within(reader).len() < 8 * 1024 * 1024);
     }
 }

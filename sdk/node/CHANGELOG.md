@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `spawnWithPty` supports ProcessContainer requests.
+- `spawnInContainerWithStdin` starts a command in a container with a writable
+  `standardInput`. For a WSLC container, ending it gives the command
+  end-of-file; `spawnInContainer` still gives a WSLC command end-of-file at
+  once.
+- `spawnWithStdin` creates a container with a writable `standardInput`. For a
+  WSLC request, ending it gives the command end-of-file; `spawn` and `run` still
+  give a WSLC command end-of-file at once.
 
 ### Changed
 
@@ -29,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telemetry consent uses `getTelemetryConsentStatus`,
   `requestTelemetryConsent`, and `withdrawTelemetryConsent`.
   Status queries return `TelemetryConsentStatus`.
+
+### Fixed
+
+- Reading a process's `warnings` or output metadata no longer corrupts the
+  native heap and crashes Node when the native side returns a value.
 
 Entries below describe historical release APIs, not the current V1 surface.
 

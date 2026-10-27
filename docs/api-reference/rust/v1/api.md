@@ -15,6 +15,7 @@ Attached execution is not exposed by the V1 SDK.
 |---|---|---|---|
 | Capture stdout and stderr | `v1::run` | `v1::container::run_in_container` | `ExecutionResult` |
 | Live standard pipes | `v1::spawn` | `v1::container::spawn_in_container` | `MxcProcess` |
+| Live standard pipes with a writable WSLC stdin | `v1::spawn_with_stdin` | `v1::container::spawn_in_container_with_stdin` | `MxcProcess` |
 | Interactive terminal | `v1::spawn_with_pty` | `v1::container::spawn_in_container_with_pty` | `MxcPtyProcess` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
@@ -221,19 +222,45 @@ options: RunInContainerOptions,
 
 ## `mxc_sdk::v1::spawn`
 
-Spawn a [ContainerRequest] and return its live process.
+Spawn a [ContainerRequest] and return its live process. A WSLC workload reads
+end-of-file on stdin.
 
 ```rust
 pub fn spawn(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProcess, Error>;
 ```
 
 
+## `mxc_sdk::v1::spawn_with_stdin`
+
+Spawn a [ContainerRequest] with a writable stdin, which `MxcProcess::take_stdin`
+returns.
+
+```rust
+pub fn spawn_with_stdin(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProcess, Error>;
+```
+
+
 ## `mxc_sdk::v1::container::spawn_in_container`
 
-Spawn a workload in an existing container and return its live process.
+Spawn a workload in an existing container and return its live process. A WSLC
+workload reads end-of-file on stdin.
 
 ```rust
 pub fn spawn_in_container(
+container_id: &ContainerId,
+request: ExecutionRequest,
+options: SpawnInContainerOptions,
+) -> Result<MxcProcess, Error>;
+```
+
+
+## `mxc_sdk::v1::container::spawn_in_container_with_stdin`
+
+Spawn a workload in an existing container with a writable stdin, which
+`MxcProcess::take_stdin` returns.
+
+```rust
+pub fn spawn_in_container_with_stdin(
 container_id: &ContainerId,
 request: ExecutionRequest,
 options: SpawnInContainerOptions,
