@@ -1225,7 +1225,7 @@ const STILL_ACTIVE: i32 = windows::Win32::Foundation::STATUS_PENDING.0;
 /// What `WaitForExit` returns when the deadline elapses before the process
 /// exits. Like [`STILL_ACTIVE`] this is a legal exit code in its own right, so
 /// it is never used alone to conclude a timeout.
-const WAIT_FOR_EXIT_TIMEOUT: i32 = -1;
+pub(super) const WAIT_FOR_EXIT_TIMEOUT: i32 = -1;
 
 /// How long [`StartedProcess::terminate`] waits for a kill to land before
 /// reporting success anyway. Bounded so a failed `Terminate` cannot wedge that

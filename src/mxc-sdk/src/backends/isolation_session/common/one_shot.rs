@@ -35,13 +35,15 @@ use super::IsolationSessionRunner;
 ///   anything applied — so there is nothing to retain.
 fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if !request.lifecycle.destroy_on_exit {
-        return Err(ScriptResponse::rejected(
+        // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+        return Err(ScriptResponse::error(
             "lifecycle.destroyOnExit=false is not supported by the isolation session backend; \
              the session is always stopped and the agent user removed",
         ));
     }
     if request.lifecycle.preserve_policy {
-        return Err(ScriptResponse::rejected(
+        // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+        return Err(ScriptResponse::error(
             "lifecycle.preservePolicy=true is not supported by the isolation session backend; \
              it installs no persistent filesystem or network enforcement, so there is none \
              to preserve",
@@ -281,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_one_shot_lifecycle_refusals_blame_the_request() {
+    fn validate_runner_refuses_an_unsupported_one_shot_lifecycle() {
         let runner = IsolationSessionRunner::new();
         for lifecycle in [
             LifecycleConfig {
@@ -298,8 +300,7 @@ mod tests {
                 ..canonical_request()
             };
             let resp = runner.validate_runner(&req).unwrap_err();
-            assert_eq!(resp.failure_phase, FailurePhase::Rejected);
-            assert_eq!(resp.exit_code, 1);
+            assert_eq!(resp.exit_code, -1);
         }
     }
 

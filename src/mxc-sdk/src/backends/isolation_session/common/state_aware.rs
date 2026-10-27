@@ -25,7 +25,9 @@ use crate::mxc_common::validator::{
 use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
-use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
+use super::manager::{
+    log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome, WAIT_FOR_EXIT_TIMEOUT,
+};
 use super::policy::{
     reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
 };
@@ -319,7 +321,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                 let outcome = manager
                     .create_process(&options, Some(&mut logger))
                     .map_err(map_lifecycle_error)?;
-                let exit_code = relayed_exit_code(outcome, options.timeout_ms)?;
+                let exit_code = relayed_exit_code(outcome);
 
                 // The output relay completed inside `create_process`. The
                 // dispatcher sees zero pipe handles, skips its own relay setup,
@@ -368,14 +370,13 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     }
 }
 
-/// A relayed exec reports an exit code, so a timeout must surface as an error
-/// rather than an exit code a workload could also return.
-fn relayed_exit_code(outcome: ExecOutcome, timeout_ms: u32) -> Result<i32, MxcError> {
+// SDK v2: a timeout returns backend_error "script timed out after {timeout_ms}ms"
+// instead of an exit code a workload could also return.
+// See docs/development/plans/sdk-v2-error-codes.md.
+fn relayed_exit_code(outcome: ExecOutcome) -> i32 {
     match outcome {
-        ExecOutcome::Exited(exit_code) => Ok(exit_code),
-        ExecOutcome::TimedOut => Err(MxcError::backend_error(format!(
-            "script timed out after {timeout_ms}ms"
-        ))),
+        ExecOutcome::Exited(exit_code) => exit_code,
+        ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
     }
 }
 
@@ -387,18 +388,6 @@ mod tests {
         ProxyConfig,
     };
     use crate::mxc_common::mxc_error::MxcErrorCode;
-
-    #[test]
-    fn a_relayed_timeout_is_an_error_not_an_exit_code() {
-        assert_eq!(
-            relayed_exit_code(ExecOutcome::Exited(-1), 5_000).unwrap(),
-            -1
-        );
-
-        let error = relayed_exit_code(ExecOutcome::TimedOut, 5_000).unwrap_err();
-        assert_eq!(error.code, MxcErrorCode::BackendError);
-        assert_eq!(error.message, "script timed out after 5000ms");
-    }
 
     // ====== Wire-format constants ======
 

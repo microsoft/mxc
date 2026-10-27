@@ -324,7 +324,8 @@ fn spawn_wslc(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::backend_unavailable(
+        // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+        Err(MxcError::unsupported_containment(
             "WSLC backend not compiled. Rebuild with --features wslc.",
         ))
     }
@@ -378,7 +379,8 @@ fn spawn_isolation_session(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::backend_unavailable(
+        // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+        Err(MxcError::unsupported_containment(
             "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
         ))
     }
@@ -398,7 +400,8 @@ fn spawn_isolation_session_pty(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
-        Err(MxcError::backend_unavailable(
+        // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+        Err(MxcError::unsupported_containment(
             "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
         ))
     }
@@ -562,10 +565,7 @@ mod tests {
 
     #[cfg(all(target_os = "windows", not(feature = "wslc")))]
     #[test]
-    fn streaming_reports_a_backend_this_build_omits_as_unavailable() {
-        // Run-to-completion resolution calls the same build/host pair
-        // `backend_unavailable`, so streaming must not hand the caller a
-        // different code for it.
+    fn streaming_matches_run_to_completion_for_a_backend_this_build_omits() {
         let mut request = minimal_request();
         request.containment = ContainmentBackend::Wslc;
         let mut logger = Logger::new(Mode::Buffer);
@@ -573,7 +573,7 @@ mod tests {
             Ok(_) => panic!("a backend this build omits must not spawn"),
             Err(e) => e,
         };
-        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
     }
 
     #[cfg(not(target_os = "linux"))]

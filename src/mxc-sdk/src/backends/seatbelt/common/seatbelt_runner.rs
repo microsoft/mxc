@@ -911,10 +911,10 @@ fn log_generated_profile(profile: &str, logger: &mut Logger) {
     let _ = writeln!(logger, "{PROFILE_LOG_END}");
 }
 
-/// A request this backend refuses: the host is fine, so only a changed request
-/// can succeed.
+/// A request this backend refuses.
+// SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
 fn rejected_response(message: String) -> ScriptResponse {
-    ScriptResponse::rejected(&message)
+    ScriptResponse::failed(FailurePhase::None, &message)
 }
 
 /// A fault while bringing the sandboxed child up, after the request was
@@ -1261,8 +1261,8 @@ os.close(fd)
         .err()
         .expect("guiAccess PTY must be rejected");
         assert!(error.error_message.contains("caller-owned PTY"));
-        assert_eq!(error.failure_phase, FailurePhase::Rejected);
-        assert_eq!(error.exit_code, FailurePhase::Rejected.failure_exit_code());
+        assert_eq!(error.failure_phase, FailurePhase::None);
+        assert_eq!(error.exit_code, FailurePhase::None.failure_exit_code());
     }
 
     #[test]
@@ -1457,11 +1457,8 @@ os.close(fd)
         assert!(response.error_message.contains("hostLoopback='allow'"));
         assert!(response.error_message.contains("default='deny'"));
         assert!(!response.error_message.contains("inherit 'default'"));
-        assert_eq!(response.failure_phase, FailurePhase::Rejected);
-        assert_eq!(
-            response.exit_code,
-            FailurePhase::Rejected.failure_exit_code()
-        );
+        assert_eq!(response.failure_phase, FailurePhase::None);
+        assert_eq!(response.exit_code, FailurePhase::None.failure_exit_code());
     }
 
     /// The other divergent pair is expressible and must be accepted: it is the
@@ -1665,7 +1662,7 @@ os.close(fd)
             let response = SeatbeltScriptRunner::new()
                 .validate(&request)
                 .expect_err("dry runs must reject an unusable cwd");
-            assert_eq!(response.failure_phase, FailurePhase::Rejected, "{cwd}");
+            assert_eq!(response.failure_phase, FailurePhase::None, "{cwd}");
             let error = response.error_message;
             assert!(
                 error.contains("Seatbelt working directory"),

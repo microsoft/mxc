@@ -23,7 +23,6 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse, WslcConfig};
 use crate::mxc_common::mxc_error::MxcError;
@@ -885,11 +884,9 @@ impl WSLContainerRunner {
             Ok(None) => request,
             Err(error) => {
                 let _ = writeln!(logger, "[WSLC] {}", error.message());
-                return Err(match error {
-                    FilesystemPolicyError::Policy(message) => WslcError::Rejected(message),
-                    FilesystemPolicyError::Host(message) => WslcError::Host(message),
-                }
-                .into_response());
+                // SDK v2: FilesystemPolicyError::Host maps to WslcError::Host (backend_error).
+                // See docs/development/plans/sdk-v2-error-codes.md.
+                return Err(WslcError::Rejected(error.message().to_string()).into_response());
             }
         };
 

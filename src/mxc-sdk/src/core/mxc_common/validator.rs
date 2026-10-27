@@ -147,15 +147,15 @@ pub fn validate_state_aware_network_policy_support(
 /// Validates non-backend-specific parts of the request (e.g. non-empty script).
 pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if request.script_code.is_empty() {
-        return Err(ScriptResponse::rejected(
-            "Script content must not be empty.",
-        ));
+        // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+        return Err(ScriptResponse::error("Script content must not be empty."));
     }
 
     if !request.policy.enumerate_paths.is_empty()
         && request.containment != crate::mxc_common::models::ContainmentBackend::ProcessContainer
     {
-        return Err(ScriptResponse::rejected(
+        // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+        return Err(ScriptResponse::error(
             "processContainer.filesystem.enumeratePaths is supported only by the Windows \
              ProcessContainer backend",
         ));

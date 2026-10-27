@@ -281,20 +281,12 @@ impl BaseContainerRequestDecision {
         }
     }
 
-    /// The typed error for a request native PSEC cannot service: a missing
-    /// host capability is `backend_unavailable`, a field PSEC cannot enforce is
-    /// `policy_validation`.
+    /// The typed error for a request native PSEC cannot service.
+    // SDK v2: PolicyIncompatible, DeniedPathsUnsupported and
+    // EnumeratePathsUnsupported report policy_validation.
+    // See docs/development/plans/sdk-v2-error-codes.md.
     pub(crate) fn rejection_error(self) -> Option<MxcError> {
-        let message = self.rejection_message()?;
-        Some(match self {
-            Self::Serviceable => return None,
-            Self::Unavailable | Self::NativeCaptureUnavailable => {
-                MxcError::backend_unavailable(message)
-            }
-            Self::PolicyIncompatible
-            | Self::DeniedPathsUnsupported
-            | Self::EnumeratePathsUnsupported => MxcError::policy_validation(message),
-        })
+        self.rejection_message().map(MxcError::backend_unavailable)
     }
 }
 
@@ -455,7 +447,8 @@ impl BaseContainerRunner {
         psec_version: SecurityEnvironmentVersion,
     ) -> ScriptResponse {
         if psec_version == SecurityEnvironmentVersion::V1_0 {
-            return ScriptResponse::unavailable(PSEC_BASELINE_UNSUPPORTED_MSG);
+            // SDK v2: unavailable (backend_unavailable). See docs/development/plans/sdk-v2-error-codes.md.
+            return ScriptResponse::rejected(PSEC_BASELINE_UNSUPPORTED_MSG);
         }
         ScriptResponse::rejected(if !request.policy.enumerate_paths.is_empty() {
             PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
@@ -2063,17 +2056,14 @@ mod tests {
     /// A host that does not implement the baseline contract cannot be fixed by
     /// rewriting the request; a version raised by a requested feature can.
     #[test]
-    fn an_unsupported_psec_baseline_is_unavailable_not_rejected() {
+    fn an_unsupported_psec_version_is_rejected() {
         let plain = ExecutionRequest::default();
         let baseline = BaseContainerRunner::unsupported_psec_version_response(
             &plain,
             SecurityEnvironmentVersion::V1_0,
         );
-        assert_eq!(baseline.failure_phase, FailurePhase::BackendUnavailable);
-        assert_eq!(
-            baseline.exit_code,
-            FailurePhase::BackendUnavailable.failure_exit_code()
-        );
+        assert_eq!(baseline.failure_phase, FailurePhase::Rejected);
+        assert_eq!(baseline.error_message, PSEC_BASELINE_UNSUPPORTED_MSG);
 
         let enumerate = ExecutionRequest {
             policy: ContainerPolicy {
@@ -3759,7 +3749,7 @@ mod tests {
         let error = BaseContainerRunner::for_request(&request)
             .err()
             .expect("LPAC must be rejected");
-        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
         assert_eq!(
             error.message,
             "Windows ProcessContainer cannot enforce the requested LPAC or legacy network.proxy policy"
@@ -3778,12 +3768,12 @@ mod tests {
             (
                 DeniedPathsUnsupported,
                 "Windows ProcessContainer requires native PSEC denied-path support for this request",
-                MxcErrorCode::PolicyValidation,
+                MxcErrorCode::BackendUnavailable,
             ),
             (
                 EnumeratePathsUnsupported,
                 "Windows ProcessContainer requires native PSEC enumeration-only access support for this request",
-                MxcErrorCode::PolicyValidation,
+                MxcErrorCode::BackendUnavailable,
             ),
             (
                 NativeCaptureUnavailable,

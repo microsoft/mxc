@@ -37,7 +37,7 @@
 //! and the backend actually building its mounts.
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ContainerPolicy, FailurePhase, ScriptResponse};
+use crate::mxc_common::models::{ContainerPolicy, ScriptResponse};
 use std::path::Path;
 
 /// Intent class for a policy path, ordered least → most restrictive so that
@@ -114,11 +114,10 @@ impl FilesystemPolicyError {
         }
     }
 
+    // SDK v2: Policy -> rejected (policy_validation), Host -> failed(LaunchFailed).
+    // See docs/development/plans/sdk-v2-error-codes.md.
     pub fn into_response(self) -> ScriptResponse {
-        match self {
-            Self::Policy(message) => ScriptResponse::rejected(&message),
-            Self::Host(message) => ScriptResponse::failed(FailurePhase::LaunchFailed, &message),
-        }
+        ScriptResponse::error(self.message())
     }
 }
 
@@ -478,17 +477,6 @@ fn unresolvable_message(path: &str, intent: Intent, cause: &str, remedy: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_unexaminable_path_is_a_host_fault_but_denied_access_is_a_rejection() {
-        let host = FilesystemPolicyError::Host("stale mount".into()).into_response();
-        assert_eq!(host.failure_phase, FailurePhase::LaunchFailed);
-        assert_eq!(host.exit_code, -1);
-
-        let policy = FilesystemPolicyError::Policy("permission denied".into()).into_response();
-        assert_eq!(policy.failure_phase, FailurePhase::Rejected);
-        assert_eq!(policy.exit_code, 1);
-    }
 
     #[test]
     fn unknown_resolution_takes_precedence_over_absent() {

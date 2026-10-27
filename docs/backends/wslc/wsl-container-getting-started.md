@@ -327,9 +327,8 @@ request is validated by the same native engine as executor requests.
 
 Notes and limits:
 
-- **Windows only.** Selecting `Containment::Wslc` on Linux/macOS fails with
-  `ErrorCode::UnsupportedContainment`; on Windows without the `wslc` feature it
-  fails with `ErrorCode::BackendUnavailable`.
+- **Windows only.** Selecting `Containment::Wslc` on Linux/macOS, or without the
+  `wslc` feature, fails with `ErrorCode::UnsupportedContainment`.
 - **Stdin.** `v1::spawn_with_stdin` returns a writable stdin through
   `MxcProcess::take_stdin()`; drop it to give the command end-of-file.
   `v1::spawn` and `v1::run` give the command end-of-file at once. See

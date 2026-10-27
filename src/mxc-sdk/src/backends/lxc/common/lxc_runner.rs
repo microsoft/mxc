@@ -443,7 +443,8 @@ impl LxcScriptRunner {
             .map_err(|error| error.into_response())?;
 
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
-            return Err(ScriptResponse::rejected(
+            // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+            return Err(ScriptResponse::error(
                 "LXC distribution and release are required \
                  (e.g., \"distribution\": \"alpine\", \"release\": \"3.23\")",
             ));
@@ -455,13 +456,15 @@ impl LxcScriptRunner {
         // The policy lowers to the same rules with or without a container, so
         // one that cannot be programmed is refused before a container exists.
         if let Err(msg) = NetworkIptablesManager::validate_egress_lowering(&request.policy) {
-            return Err(ScriptResponse::rejected(&msg));
+            // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+            return Err(ScriptResponse::error(&msg));
         }
 
         match crate::lxc_common::availability::lxc_tooling_for_execution() {
             LxcTooling::Available => {}
             LxcTooling::Unavailable => {
-                return Err(ScriptResponse::unavailable(LXC_TOOLING_UNAVAILABLE));
+                // SDK v2: unavailable (backend_unavailable). See docs/development/plans/sdk-v2-error-codes.md.
+                return Err(ScriptResponse::error(LXC_TOOLING_UNAVAILABLE));
             }
             LxcTooling::ProbeFailed => {
                 return Err(ScriptResponse::failed(
@@ -1032,7 +1035,8 @@ impl LxcScriptRunner {
     fn validate_runtime_proxy(&self, policy: &ContainerPolicy) -> Result<(), ScriptResponse> {
         if let Some(address) = &policy.network_proxy.address {
             if !host_is_canonical_loopback(address.host()) {
-                return Err(ScriptResponse::rejected(&format!(
+                // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+                return Err(ScriptResponse::error(&format!(
                     "LXC: runtimeConfig.networkProxy host '{}' must be localhost, 127.0.0.1, or \
                      ::1. The proxy is relayed into the container at the same loopback address \
                      and port.",
@@ -1041,7 +1045,8 @@ impl LxcScriptRunner {
             }
             let url = address.to_url();
             if proxy_url_has_credentials(&url) {
-                return Err(ScriptResponse::rejected(&format!(
+                // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+                return Err(ScriptResponse::error(&format!(
                     "LXC: runtimeConfig.networkProxy must not carry credentials ('{}'). LXC \
                      passes the proxy URL to lxc-attach as a --set-var command-line argument, \
                      and process arguments are world-readable through /proc/<pid>/cmdline.",
@@ -1054,7 +1059,8 @@ impl LxcScriptRunner {
                 || !egress.allow.is_empty()
                 || !egress.deny.is_empty()
         }) {
-            return Err(ScriptResponse::rejected(
+            // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+            return Err(ScriptResponse::error(
                 "LXC: runtimeConfig.networkProxy cannot be combined with network.egress rules or \
                  default='allow'. The relayed proxy port is the container's only outbound path. \
                  Use network.egress.default='deny' with no rules, or remove the proxy.",
@@ -1070,7 +1076,8 @@ impl ScriptRunner for LxcScriptRunner {
             self.validate_runtime_proxy(&request.policy)?;
         }
         if let Some(field) = unsupported_network_proxy(&request.policy) {
-            return Err(ScriptResponse::rejected(&format!(
+            // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+            return Err(ScriptResponse::error(&format!(
                 "LXC: {field} is not supported and cannot be enforced; \
                  remove the proxy request."
             )));
@@ -1129,7 +1136,8 @@ impl LxcScriptRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         match stdio {
             StdioMode::Inherit => {
-                return Err(ScriptResponse::rejected(LXC_INHERIT_STDIO_UNSUPPORTED));
+                // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+                return Err(ScriptResponse::error(LXC_INHERIT_STDIO_UNSUPPORTED));
             }
             StdioMode::Pty(_) | StdioMode::Pipes => {}
         }
@@ -1256,7 +1264,8 @@ impl LxcScriptRunner {
         _logger: &mut Logger,
         _stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        Err(ScriptResponse::unavailable(LXC_STREAMING_LINUX_ONLY))
+        // SDK v2: unavailable (backend_unavailable). See docs/development/plans/sdk-v2-error-codes.md.
+        Err(ScriptResponse::error(LXC_STREAMING_LINUX_ONLY))
     }
 }
 
@@ -2768,7 +2777,6 @@ mod tests {
                 .validate_runner(&runtime_proxy_request(host))
                 .expect_err("a wildcard host is not a loopback endpoint the relay can serve");
 
-            assert_eq!(response.failure_phase, FailurePhase::Rejected);
             assert!(
                 response
                     .error_message
@@ -2809,7 +2817,6 @@ mod tests {
             "with a runtime proxy, the relayed port is the container's only outbound path",
         );
 
-        assert_eq!(response.failure_phase, FailurePhase::Rejected);
         assert!(
             response.error_message.contains("network.egress"),
             "got: {}",
@@ -2854,7 +2861,6 @@ mod tests {
             .validate_runner(&request)
             .expect_err("credentials would be visible in /proc/<pid>/cmdline");
 
-        assert_eq!(response.failure_phase, FailurePhase::Rejected);
         assert!(
             response.error_message.contains("credentials")
                 && !response.error_message.contains("secret"),
@@ -3220,80 +3226,50 @@ mod tests {
                 .contains("Script content must not be empty"),
             "expected the shared refusal, got: {refusal:?}"
         );
-        // The shared checks judge the request, so they have to reach the
-        // caller as a rejection on the launch path too, not only through a
-        // standalone `validate`.
-        assert_eq!(refusal.failure_phase, FailurePhase::Rejected);
-        assert_eq!(
-            refusal.exit_code,
-            FailurePhase::Rejected.failure_exit_code()
-        );
     }
 
-    /// A caller can only act on a failure it can attribute: a refused policy is
-    /// worth rewriting, a host that cannot run LXC at all is not.
+    // SDK v2: refusals report policy_validation. See docs/development/plans/sdk-v2-error-codes.md.
     #[test]
-    fn a_policy_this_backend_cannot_enforce_is_blamed_on_the_request() {
+    fn a_policy_this_backend_cannot_enforce_reports_backend_error() {
+        use crate::mxc_common::mxc_error::MxcErrorCode;
+
         let mut runtime_proxy = runtime_proxy_request("10.0.0.1");
         runtime_proxy.script_code = "echo hello".to_string();
 
-        for (what, request) in [
-            ("runtimeConfig.networkProxy", runtime_proxy),
+        for (what, runner, request) in [
+            (
+                "runtimeConfig.networkProxy",
+                runner_for_guard_tests("refusal-phase"),
+                runtime_proxy,
+            ),
             (
                 "network.proxy",
+                runner_for_guard_tests("refusal-phase"),
                 request_with_proxy_url("http://proxy.example.com:8080"),
             ),
             (
                 "unlowerable network.egress",
+                runner_for_guard_tests("refusal-phase"),
                 request_with_unlowerable_egress(),
             ),
+            (
+                "no distribution or release",
+                validating_runner(),
+                ExecutionRequest::default(),
+            ),
         ] {
-            let refusal = runner_for_guard_tests("refusal-phase")
+            let refusal = runner
                 .prepare(&request, &mut Logger::new(Mode::Buffer))
                 .err()
                 .unwrap_or_else(|| panic!("input={what}; expected a refusal"));
 
             assert_eq!(
-                refusal.failure_phase,
-                FailurePhase::Rejected,
-                "input={what}; expected a refusal of the request; output={refusal:?}"
-            );
-            assert_eq!(
-                refusal.exit_code, 1,
-                "input={what}; a refusal exits 1; output={refusal:?}"
+                refusal.failure_phase.error_code(),
+                MxcErrorCode::BackendError,
+                "input={what}; output={refusal:?}"
             );
         }
     }
-
-    #[test]
-    fn an_image_the_config_never_named_is_blamed_on_the_request() {
-        let refusal = validating_runner()
-            .prepare(&ExecutionRequest::default(), &mut Logger::new(Mode::Buffer))
-            .err()
-            .expect("an empty distribution and release cannot name an image to create");
-
-        assert_eq!(refusal.failure_phase, FailurePhase::Rejected);
-        assert_eq!(refusal.exit_code, 1);
-    }
-
-    #[test]
-    fn inherited_stdio_is_refused_as_a_request_fault() {
-        let refusal = validating_runner()
-            .spawn(
-                &streamable_request(),
-                &mut Logger::new(Mode::Buffer),
-                StdioMode::Inherit,
-            )
-            .err()
-            .expect("the library path has no pty to hand a workload");
-
-        assert_eq!(
-            refusal.failure_phase,
-            FailurePhase::Rejected,
-            "pipes and a caller-owned PTY are both reachable, so only the request has to change"
-        );
-    }
-
     /// A container another live sandbox holds is contention, not a refusal: the
     /// same request succeeds once the first run finishes.
     #[test]
@@ -3336,7 +3312,6 @@ mod tests {
             .err()
             .expect("LXC sandboxes only launch on Linux");
 
-        assert_eq!(refusal.failure_phase, FailurePhase::BackendUnavailable);
         assert_eq!(refusal.exit_code, -1);
         assert_eq!(refusal.error_message, LXC_STREAMING_LINUX_ONLY);
     }

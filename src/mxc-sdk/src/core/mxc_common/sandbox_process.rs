@@ -934,13 +934,7 @@ mod runner_tests {
 
         let response = runner.execute(&request, &mut logger);
 
-        // An empty script is a fault of the request, so the shared checks
-        // refuse it before the backend is engaged at all.
-        assert_eq!(response.failure_phase, FailurePhase::Rejected);
-        assert_eq!(
-            response.exit_code,
-            FailurePhase::Rejected.failure_exit_code()
-        );
+        assert_eq!(response.exit_code, -1);
         assert_eq!(validations.load(Ordering::Relaxed), 0);
         assert_eq!(direct_spawns.load(Ordering::Relaxed), 0);
     }

@@ -707,17 +707,20 @@ Common cases:
 
 | Failure | Wire code |
 |---|---|
-| Policy field the backend cannot enforce (e.g. ProcessContainer `enumeratePaths`, `deniedPaths`, LPAC) | `policy_validation` |
-| Policy path the invoking user cannot access | `policy_validation` |
+| Policy field the backend cannot enforce (e.g. ProcessContainer `enumeratePaths`, `deniedPaths`, LPAC) | `backend_unavailable`¹ |
+| Policy path the invoking user cannot access | `backend_error`¹ |
 | Host fault while checking a policy path (I/O error, unresolvable path) | `backend_error` |
 | Missing host capability (e.g. no native PSEC, no denial-capture provider) | `backend_unavailable` |
-| Backend not compiled into this build | `backend_unavailable` |
+| Backend not compiled into this build | `unsupported_containment`¹ |
 | Experimental backend without the experimental opt-in | `backend_unavailable` |
 | Backend for another OS: create-and-run / container lifecycle operations | `unsupported_containment` / `backend_unavailable` |
 
 Unsupported policy is never silently dropped, and no failure above starts the
 run. The phase-specific codes `malformed_request`, `unsupported_containment`,
 `unsupported_phase`, and `malformed_id` also exit `1`.
+
+¹ Kept for SDK v1 compatibility, as are some backend refusals that still report
+`backend_error`. See the [SDK v2 error codes plan](../plans/sdk-v2-error-codes.md).
 
 Envelope lines share stderr with the workload's own output, so a workload can
 print text that looks like an envelope. Treat stderr envelopes as diagnostics,

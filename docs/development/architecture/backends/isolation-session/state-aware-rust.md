@@ -341,13 +341,10 @@ as `malformed_request`. Requests that pass the exact structural contract but
 violate a backend semantic invariant surface as `policy_validation`; a
 structurally valid but oversized `appId` is one such case.
 
-On the **one-shot** surface the backend's typed policy variant becomes
-`ScriptResponse::rejected`, so the envelope carries `error.code =
-"policy_validation"` and exits 1, matching the state-aware mapping. A supplied
-`network.proxy` is also structurally refused as `malformed_request`. An
-activation failure of the runtime API becomes `ScriptResponse::unavailable`
-(`backend_unavailable`, exit -1); every other lifecycle failure stays
-`backend_error`.
+On the **one-shot** surface the backend's typed policy variant is discarded
+(`ScriptResponse::error`) and the envelope carries `error.code =
+"backend_error"` with the reason in the message. A supplied `network.proxy` is
+also structurally refused as `malformed_request`.
 
 ## Mode-specific fields
 
@@ -551,8 +548,7 @@ An exited process is never routed through the shutdown ladder, which reads only 
 and so cannot tell a `259` exit from a live process. The adapter maps
 `TimedOut` onto `ErrorKind::TimedOut`, which is what
 `mxc_sdk::v1::MxcProcess::wait` reads as `WaitResult::TimedOut`. That outcome
-is reachable only under `Piped`; the `Relayed` arm reports a timeout as a
-`backend_error` instead.
+is reachable only under `Piped`; the `Relayed` arm reports `Exited`.
 
 Teardown is bounded only insofar as the kill is: the streaming adapter's
 `Drop` joins the waiter when the kill was accepted, and abandons the

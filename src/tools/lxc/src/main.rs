@@ -52,10 +52,7 @@ fn main() {
                 eprintln!("{message}");
                 process::exit(0);
             }
-            Err(message) => {
-                eprintln!("{message}");
-                process::exit(1);
-            }
+            Err(error) => emit_mxc_error_exit(&error),
         }
     } else if arguments.does_user_want_to_delete_a_container() {
         let success = arguments.delete_container(&mut logger);

@@ -53,12 +53,9 @@ impl ResolvedRunner {
 /// Experimental backends, classified by the engine's backend registry, require
 /// `request.experimental_enabled`; without it they return a
 /// [`backend_unavailable`](MxcError::backend_unavailable) error before any
-/// host-specific resolution. A backend that this build did not compile in
-/// reports the same code, since only a rebuilt executor can serve it. A
-/// backend that belongs to a different operating system, or one that does not
-/// exist yet, reports
-/// [`unsupported_containment`](MxcError::unsupported_containment) instead,
-/// because naming a backend this host does support will succeed.
+/// host-specific resolution. Backends that are not available on this host /
+/// not compiled in return an
+/// [`unsupported_containment`](MxcError::unsupported_containment) error.
 pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
@@ -213,7 +210,8 @@ fn resolve_runner_inner_windows(
             #[cfg(not(feature = "wslc"))]
             {
                 let _ = logger;
-                Err(MxcError::backend_unavailable(
+                // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+                Err(MxcError::unsupported_containment(
                     "WSLC backend not compiled. Rebuild with --features wslc.",
                 ))
             }
@@ -239,7 +237,8 @@ fn resolve_runner_inner_windows(
             }
             #[cfg(not(feature = "microvm"))]
             {
-                Err(MxcError::backend_unavailable(
+                // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+                Err(MxcError::unsupported_containment(
                     "MicroVM backend not compiled in (build with --features microvm)",
                 ))
             }
@@ -270,7 +269,8 @@ fn resolve_runner_inner_windows(
             }
             #[cfg(not(feature = "isolation_session"))]
             {
-                Err(MxcError::backend_unavailable(
+                // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+                Err(MxcError::unsupported_containment(
                     "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
                 ))
             }
@@ -301,7 +301,8 @@ fn resolve_runner_inner(
             }
             #[cfg(not(feature = "microvm"))]
             {
-                Err(MxcError::backend_unavailable(
+                // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+                Err(MxcError::unsupported_containment(
                     "MicroVM backend not compiled in (build with --features microvm)",
                 ))
             }
@@ -443,7 +444,8 @@ fn resolve_hyperlight() -> Result<ResolvedRunner, MxcError> {
     }
     #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
     {
-        Err(MxcError::backend_unavailable(
+        // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+        Err(MxcError::unsupported_containment(
             "Hyperlight backend not compiled in; it requires x86_64 and --features hyperlight \
              (Hyperlight needs KVM or WHP).",
         ))
@@ -554,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unenforceable_process_container_field_is_a_policy_validation_error() {
+    fn an_unenforceable_process_container_field_is_backend_unavailable() {
         let _guard = crate::process_container_common::test_env::PolicyCapabilityGuard::set(
             true, false, true,
         );
@@ -566,12 +568,12 @@ mod tests {
 
         let error = resolve_error(&request);
 
-        assert_eq!(error.code, crate::ErrorCode::PolicyValidation, "{error}");
+        assert_eq!(error.code, crate::ErrorCode::BackendUnavailable, "{error}");
     }
 
     #[cfg(not(feature = "microvm"))]
     #[test]
-    fn a_backend_not_compiled_in_is_unavailable() {
+    fn a_backend_not_compiled_in_is_unsupported() {
         let request = ExecutionRequest {
             containment: ContainmentBackend::MicroVm,
             experimental_enabled: true,
@@ -580,7 +582,11 @@ mod tests {
 
         let error = resolve_error(&request);
 
-        assert_eq!(error.code, crate::ErrorCode::BackendUnavailable, "{error}");
+        assert_eq!(
+            error.code,
+            crate::ErrorCode::UnsupportedContainment,
+            "{error}"
+        );
     }
 }
 

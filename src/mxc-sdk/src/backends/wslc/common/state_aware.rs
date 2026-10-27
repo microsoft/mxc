@@ -20,7 +20,6 @@ use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{
     ContainerPolicy, ExecutionRequest, WslcProvisionConfig, WslcProvisionSessionConfig,
@@ -878,7 +877,7 @@ fn build_provision_config(
 /// three-step gate (D6 normalization → D3 delegation → denied-path overlap),
 /// buffering normalization diagnostics and surfacing them on stderr (stdout
 /// carries the phase envelope), and maps a gate failure to a `policy_validation`
-/// or, for a path that could not be examined, a `backend_error` [`MxcError`].
+/// [`MxcError`].
 /// Returns the tightened policy when normalization changed something, else
 /// `None`.
 fn normalize_and_check_delegation(
@@ -893,10 +892,9 @@ fn normalize_and_check_delegation(
     if !notes.is_empty() {
         eprint!("{notes}");
     }
-    result.map_err(|error| match error {
-        FilesystemPolicyError::Policy(message) => MxcError::policy_validation(message),
-        FilesystemPolicyError::Host(message) => MxcError::backend_error(message),
-    })
+    // SDK v2: FilesystemPolicyError::Host reports backend_error.
+    // See docs/development/plans/sdk-v2-error-codes.md.
+    result.map_err(|error| MxcError::policy_validation(error.message()))
 }
 
 /// Build daemon volume mounts from the request's filesystem policy. Overlapping

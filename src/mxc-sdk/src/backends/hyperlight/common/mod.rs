@@ -498,6 +498,14 @@ impl HyperlightScriptRunner {
                              unenforced deny."
                         )));
                     }
+                    PathRelationship::Inaccessible(reason) => {
+                        return Err(RunnerError::Policy(format!(
+                            "Hyperlight: cannot verify deniedPaths against allow lists because \
+                             the invoking user cannot access {allowed:?} or {denied:?} \
+                             ({reason}). Grant access to both paths, or remove the deniedPaths \
+                             entry."
+                        )));
+                    }
                     #[cfg(target_os = "windows")]
                     PathRelationship::Ambiguous => {
                         return Err(RunnerError::Policy(format!(
@@ -1328,7 +1336,27 @@ fn path_relationship(allowed: &str, denied: &str) -> PathRelationship {
         (Ok(allowed), Ok(denied)) => PathRelationship::from_overlaps(
             denied.starts_with(&allowed) || allowed.starts_with(&denied),
         ),
-        _ => path_relationship_fallback(&allowed.to_string_lossy(), &denied.to_string_lossy()),
+        (allowed_lookup, denied_lookup) => classify_unresolvable(
+            path_relationship_fallback(&allowed.to_string_lossy(), &denied.to_string_lossy()),
+            [&allowed_lookup, &denied_lookup],
+        ),
+    }
+}
+
+/// A path the invoking user may not access is the caller's to correct; any
+/// other failure to resolve it is a host fault.
+fn classify_unresolvable(
+    relationship: PathRelationship,
+    lookups: [&std::io::Result<PathBuf>; 2],
+) -> PathRelationship {
+    let access_denied = lookups
+        .iter()
+        .any(|lookup| matches!(lookup, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied));
+    match relationship {
+        PathRelationship::Unresolvable(reason) if access_denied => {
+            PathRelationship::Inaccessible(reason)
+        }
+        other => other,
     }
 }
 
@@ -1350,6 +1378,8 @@ enum PathRelationship {
     Ambiguous,
     /// The host could not resolve a path.
     Unresolvable(String),
+    /// The invoking user may not access a path.
+    Inaccessible(String),
 }
 
 impl PathRelationship {
@@ -1965,7 +1995,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_unresolvable_host_path_is_a_setup_failure_not_a_policy_error() {
+    fn an_inaccessible_host_path_is_a_policy_rejection() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = fresh_tmp("deny-unresolvable");
@@ -1994,16 +2024,33 @@ mod tests {
         let resp = runner().run(&request, &mut Logger::new(Mode::Buffer));
         restore();
 
-        assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
-        assert_eq!(
-            resp.exit_code,
-            FailurePhase::LaunchFailed.failure_exit_code()
-        );
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        assert_eq!(resp.exit_code, FailurePhase::Rejected.failure_exit_code());
         assert!(
             resp.error_message
-                .contains("cannot verify deniedPaths against allow lists"),
+                .contains("the invoking user cannot access"),
             "got: {}",
             resp.error_message
+        );
+    }
+
+    #[test]
+    fn only_permission_denied_makes_an_unresolvable_path_a_policy_fault() {
+        use std::io::{Error, ErrorKind};
+
+        let classify = |kind: ErrorKind| {
+            classify_unresolvable(
+                PathRelationship::Unresolvable("x".to_string()),
+                [&Ok(PathBuf::new()), &Err(Error::from(kind))],
+            )
+        };
+        assert_eq!(
+            classify(ErrorKind::PermissionDenied),
+            PathRelationship::Inaccessible("x".to_string())
+        );
+        assert_eq!(
+            classify(ErrorKind::Other),
+            PathRelationship::Unresolvable("x".to_string())
         );
     }
 

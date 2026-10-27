@@ -993,18 +993,15 @@ parent-death protection during startup without relying on a scheduling race.
 
 ## Troubleshooting
 
-Failures carry an error code: `policy_validation` (exit 1) when the request
-asks for something the backend refuses, `backend_unavailable` (exit -1) when
-the host cannot provide the backend at all, and `backend_error` (exit -1) for
-setup and runtime faults.
+These failures carry the `backend_error` code and exit `-1`.
 
 | Message | Meaning |
 |---|---|
-| `Bubblewrap (bwrap) is not installed or not on PATH` / version too old | The host has no usable Bubblewrap (`backend_unavailable`); install `bubblewrap` 0.5+ |
-| `requires 'slirp4netns' on PATH` / `requires unprivileged user and network namespaces` | The host cannot provide the sandbox network (`backend_unavailable`) |
-| `script_code is empty` / `must not carry credentials` / an egress or proxy refusal | The request is at fault (`policy_validation`); change it and retry |
-| `failed to spawn bwrap` / `failed to allocate PTY` / proxy namespace start failure | The request was accepted but the launch faulted (`backend_error`) |
-| `failed to wrap stdio pipes` | The sandbox started and then faulted (`backend_error`) |
+| `Bubblewrap (bwrap) is not installed or not on PATH` / version too old | The host has no usable Bubblewrap; install `bubblewrap` 0.5+ |
+| `requires 'slirp4netns' on PATH` / `requires unprivileged user and network namespaces` | The host cannot provide the sandbox network |
+| `script_code is empty` / `must not carry credentials` / an egress or proxy refusal | The request is at fault; change it and retry |
+| `failed to spawn bwrap` / `failed to allocate PTY` / proxy namespace start failure | The request was accepted but the launch faulted |
+| `failed to wrap stdio pipes` | The sandbox started and then faulted |
 
 ## Limitations
 

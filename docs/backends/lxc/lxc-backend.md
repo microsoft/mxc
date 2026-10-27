@@ -326,18 +326,15 @@ sudo lxc-checkconfig
 
 ## Troubleshooting
 
-Failures carry an error code: `policy_validation` (exit 1) when the request
-asks for something the backend refuses, `backend_unavailable` (exit -1) when
-the host cannot provide the backend at all, and `backend_error` (exit -1) for
-setup and runtime faults.
+These failures carry the `backend_error` code and exit `-1`.
 
 | Message | Meaning |
 |---|---|
-| `the LXC runtime is not available on this host` | `lxc-ls --version` did not run (`backend_unavailable`); install the LXC tools |
-| `sandboxes can only be launched on Linux` | Wrong OS for the backend (`backend_unavailable`) |
-| `distribution and release are required` / a proxy, egress or inherited-stdio refusal | The request is at fault (`policy_validation`); change it and retry |
-| `Failed to create container` / `Failed to start container` / `container '…' is already in use` | The request was accepted but the launch faulted (`backend_error`) |
-| `did not receive an IPv4 address` / `Failed to discover the container init PID` | The container started and then faulted before the script ran (`backend_error`) |
+| `the LXC runtime is not available on this host` | `lxc-ls --version` did not run; install the LXC tools |
+| `sandboxes can only be launched on Linux` | Wrong OS for the backend |
+| `distribution and release are required` / a proxy, egress or inherited-stdio refusal | The request is at fault; change it and retry |
+| `Failed to create container` / `Failed to start container` / `container '…' is already in use` | The request was accepted but the launch faulted |
+| `did not receive an IPv4 address` / `Failed to discover the container init PID` | The container started and then faulted before the script ran |
 
 ## Limitations
 
