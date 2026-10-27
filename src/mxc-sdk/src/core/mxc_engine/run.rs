@@ -558,11 +558,11 @@ mod tests {
         assert_eq!(error.code, crate::ErrorCode::BackendUnavailable, "{error}");
     }
 
-    #[cfg(not(feature = "microvm"))]
+    #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
     #[test]
     fn a_backend_not_compiled_in_is_unsupported() {
         let request = ExecutionRequest {
-            containment: ContainmentBackend::MicroVm,
+            containment: ContainmentBackend::Hyperlight,
             experimental_enabled: true,
             ..Default::default()
         };
