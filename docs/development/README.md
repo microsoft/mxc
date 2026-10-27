@@ -31,6 +31,7 @@ terms, plain-English alternatives, and guidance on naming specific types.
 
 ## Contributor guides
 
+- [How MXC is managed](../repository-management.md)
 - [Authoring a new feature](guides/authoring-a-new-feature.md)
 - [Diagnostics](guides/diagnostics.md)
 - [Adding ProcessContainer OS features](guides/process-container-adding-os-features.md)

@@ -12,7 +12,18 @@ The point of doing all this work in public is to ensure that we are holding ours
 
 ### Issue Triage
 
-The team triages new issues regularly. During triage, the team uses labels to categorize, manage, and drive the project workflow. Issues are categorized into one of four types — **Bug**, **Feature**, **Documentation**, or **Task** — and all new issues receive the `Needs-Triage` label until a team member has reviewed them.
+The team triages new issues daily through a shared developer and PM rotation.
+During triage, the team uses labels to categorize, manage, and drive the project
+workflow. Issues are categorized into one of four types — **Bug**, **Feature**,
+**Documentation**, or **Task** — and all new issues receive the `Needs-Triage`
+label until an area label is applied and a response records the next step.
+Remove `Needs-Triage` then, including when the response asks for more information;
+use `Needs-Author-Feedback` while awaiting the author's reply.
+Assignment is separate: work is assigned when its scope is clear and someone
+is ready to take it.
+
+See [How MXC is managed](./docs/repository-management.md) for area ownership,
+release milestones, community prioritization, and SDK versioning.
 
 If you file issues or create PRs, please keep an eye on your GitHub notifications. Issues and PRs that remain unanswered for several days after a request for information may be closed.
 
