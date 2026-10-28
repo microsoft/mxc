@@ -21,6 +21,7 @@ import os from 'os';
 import {
   MxcError,
 } from '@microsoft/mxc-sdk/v1';
+import * as dev from '@microsoft/mxc-sdk/v1/dev';
 import {
   spawnInContainer,
   runInContainer,
@@ -85,6 +86,121 @@ const policyValidationSkipReason =
   platformSkipReason ?? (await probeIsolationSessionFeature());
 
 describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () => {
+  it('V1.Dev preserves lifecycle responses, captured exec, pipes, PTY, and caller ownership', async () => {
+    const provision = JSON.stringify({
+      version: '1.1.0-alpha', phase: 'provision', containment: 'isolation_session',
+      network: isolationSessionNetwork,
+    });
+    const reply = (json: string): Record<string, unknown> => {
+      const envelope: { result: Record<string, unknown> } = JSON.parse(json);
+      assert.ok(envelope.result && typeof envelope.result === 'object');
+      return envelope.result;
+    };
+    assert.deepStrictEqual(reply(await dev.validateProvisionJson(provision)), {});
+    const provisioned = reply(await dev.provisionContainerJson(provision));
+    const sandboxId = provisioned.sandboxId;
+    assert.ok(typeof sandboxId === 'string' && sandboxId.length > 0);
+    const phase = (name: string) => JSON.stringify({
+      version: '1.0.0', phase: name, sandboxId,
+    });
+    const exec = (commandLine: string) => JSON.stringify({
+      version: '1.1.0-alpha', phase: 'exec', sandboxId,
+      process: { commandLine, timeout: 30000 },
+    });
+    let started = false;
+    let workspace: string | undefined;
+    try {
+      const metadata = provisioned.metadata as Record<string, unknown>;
+      assert.ok(metadata && typeof metadata.agentUserName === 'string');
+      assert.ok(typeof metadata.agentUserSid === 'string' && metadata.agentUserSid.length > 0);
+      assert.ok(typeof metadata.ephemeralWorkspacePath === 'string');
+      workspace = metadata.ephemeralWorkspacePath;
+      assert.ok(fs.existsSync(workspace));
+      assert.deepStrictEqual(reply(await dev.validateStartJson(phase('start'))), {});
+      assert.deepStrictEqual(reply(await dev.startContainerJson(phase('start'), { experimental: true })), {});
+      started = true;
+
+      const dryRunFile = path.join(workspace, 'dev-validation-must-not-run.txt');
+      assert.deepStrictEqual(reply(await dev.validateProcessJson(exec(`echo MUST_NOT_RUN> "${dryRunFile}"`))), {});
+      assert.ok(!fs.existsSync(dryRunFile));
+      const captured = await dev.runInContainerJson(exec('echo DEV_EXEC_OUT & echo DEV_EXEC_ERR 1>&2 & exit /b 7'));
+      assert.strictEqual(captured.exitCode, 7);
+      assert.strictEqual(captured.timedOut, false);
+      assert.match(captured.stdout, /DEV_EXEC_OUT/);
+      assert.match(captured.stderr, /DEV_EXEC_ERR/);
+
+      const pipe = await dev.spawnInContainerJson(
+        exec('cmd.exe /v:on /c "set /p L= & echo DEV_PIPE:!L! & exit /b 9"'));
+      try {
+        assert.ok(pipe.standardInput);
+        const output = readStreamText(pipe.standardOutput);
+        const error = readStreamText(pipe.standardError);
+        pipe.standardInput.end('ping-pong\r\n');
+        const result = await pipe.wait();
+        assert.strictEqual(result.exitCode, 9);
+        assert.strictEqual(result.timedOut, false);
+        assert.match(await output, /DEV_PIPE:ping-pong/);
+        assert.strictEqual(await error, '');
+      } finally {
+        pipe.dispose();
+      }
+
+      const terminal = await dev.spawnInContainerWithPtyJson(exec('cmd.exe /q'), {
+        experimental: true, size: { rows: 30, columns: 90 },
+      });
+      try {
+        const output = readStreamText(terminal.output);
+        terminal.resize({ rows: 40, columns: 100 });
+        terminal.input.write('set MXC_DEV_MARK=OK\r\necho DEV_PTY_%MXC_DEV_MARK%\r\nexit /b 13\r\n');
+        const result = await terminal.wait();
+        assert.strictEqual(result.exitCode, 13);
+        assert.strictEqual(result.timedOut, false);
+        assert.match(await output, /DEV_PTY_OK/);
+      } finally {
+        terminal.dispose();
+      }
+
+      assert.deepStrictEqual(reply(await dev.validateStopJson(phase('stop'))), {});
+      const stillOwned = await dev.runInContainerJson(exec('echo DEV_CALLER_OWNS_CONTAINER'));
+      assert.strictEqual(stillOwned.exitCode, 0);
+      assert.match(stillOwned.stdout, /DEV_CALLER_OWNS_CONTAINER/);
+      assert.deepStrictEqual(reply(await dev.stopContainerJson(phase('stop'))), {});
+      started = false;
+      assert.deepStrictEqual(reply(await dev.validateDeprovisionJson(phase('deprovision'))), {});
+    } finally {
+      try {
+        if (started) await dev.stopContainerJson(phase('stop'));
+      } finally {
+        assert.deepStrictEqual(reply(await dev.deprovisionContainerJson(phase('deprovision'))), {});
+      }
+    }
+    assert.ok(workspace && !fs.existsSync(workspace));
+    await assert.rejects(dev.startContainerJson(phase('start')),
+      (error: unknown) => error instanceof MxcError && error.code === 'stale_id');
+  });
+
+  it('V1.Dev captured timeout returns partial output despite descendant-held pipes', { timeout: 30000 }, async () => {
+    const { containerId } = await provisionContainer({
+      containment: 'isolation_session', network: isolationSessionNetwork,
+    });
+    try {
+      await startContainer(containerId);
+      const started = performance.now();
+      const result = await dev.runInContainerJson(JSON.stringify({
+        version: '1.0.0', phase: 'exec', sandboxId: containerId,
+        process: {
+          commandLine: 'echo DEV_TIMEOUT_PARTIAL & start /b cmd.exe /c ping -n 60 127.0.0.1 >nul & ping -n 60 127.0.0.1 >nul',
+          timeout: 750,
+        },
+      }));
+      assert.strictEqual(result.timedOut, true);
+      assert.match(result.stdout, /DEV_TIMEOUT_PARTIAL/);
+      assert.ok(performance.now() - started < 10000, 'capture waited for a descendant-held pipe');
+    } finally {
+      await safeDeprovision(containerId);
+    }
+  });
+
   it('captures output, nonzero exits, concurrent large streams, and timeout', async () => {
     const { containerId } = await provisionContainer(
       { containment: 'isolation_session', network: isolationSessionNetwork },

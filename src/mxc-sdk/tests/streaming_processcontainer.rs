@@ -15,6 +15,49 @@ use mxc_sdk::v1::{spawn, ContainerRequest, Containment, FilesystemPolicy};
 
 #[test]
 #[ignore = "requires a PSEC-capable Windows host"]
+fn dev_json_processcontainer_capture_and_pipes() {
+    use mxc_sdk::v1::dev::{self, JsonOptions};
+    use std::io::{Read, Write};
+
+    for version in ["1.0.0", "1.1.0-alpha"] {
+        let captured = serde_json::json!({
+            "version": version,
+            "containment": "process",
+            "process": {
+                "commandLine": "cmd.exe /c \"echo DEV_CAPTURE_OK & echo DEV_CAPTURE_ERR 1>&2 & exit /b 7\"",
+                "timeout": 30000,
+            },
+        })
+        .to_string();
+        let output = dev::run_json(&captured, JsonOptions::default()).expect("capture exact JSON");
+        assert_eq!(output.outcome, WaitResult::Exited(7));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("DEV_CAPTURE_OK"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("DEV_CAPTURE_ERR"));
+
+        let request = serde_json::json!({
+            "version": version,
+            "containment": "process",
+            "process": {
+                "commandLine": "cmd.exe /v:on /c \"set /p L= & echo DEV_PIPE:!L! & exit /b 9\"",
+                "timeout": 30000,
+            },
+        })
+        .to_string();
+        let mut process = dev::spawn_json(&request, JsonOptions { experimental: true })
+            .expect("spawn exact JSON");
+        let mut stdin = process.take_stdin().expect("stdin");
+        let mut stdout = process.take_stdout().expect("stdout");
+        stdin.write_all(b"ping-pong\r\n").expect("write input");
+        drop(stdin);
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).expect("read output");
+        assert!(text.contains("DEV_PIPE:ping-pong"), "{text}");
+        assert_eq!(process.wait().expect("wait"), WaitResult::Exited(9));
+    }
+}
+
+#[test]
+#[ignore = "requires a PSEC-capable Windows host"]
 fn streaming_processcontainer_bidirectional_stdio() {
     use std::io::{Read, Write};
 

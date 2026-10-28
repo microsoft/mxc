@@ -8,12 +8,9 @@ versioned public API is in `Microsoft.Mxc.Sdk.V1`. All request and policy types
 in this API use the SDK-selected contract version; callers do not select
 that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
-`Microsoft.Mxc.Sdk.V1.Dev` provides
-[exact-JSON APIs](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md).
-The dev operations accept complete caller-authored, exact-version JSON and
-authorize experimental backends separately. Lifecycle and validation return
-the native response JSON string; captured output uses the existing V1 result
-type. The PTY dev entry points are synchronous only.
+Use [Microsoft.Mxc.Sdk.V1.Dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
+for MXC request JSON with a caller-declared contract version and separate
+experimental backend authorization.
 
 ## Run to completion
 
@@ -173,9 +170,6 @@ support cancellation. Backend and phase-specific policy requirements are
 described in the
 [IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
 [WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides.
-
-Captured in-container execution returns partial output on timeout without
-waiting for descendant-held output pipes.
 
 `MxcLifecycle.SpawnInContainerWithPty(id, request, options?)` starts an
 IsolationSession exec with a caller-controlled terminal and returns an

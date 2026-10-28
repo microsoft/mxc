@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Text;
 using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 using Microsoft.Mxc.Sdk.V1;
 using Xunit;
@@ -45,6 +46,33 @@ public class DevEntryPointTests
     }
 
     [Fact]
+    public async Task CapturedExecValidatesBeforeCanceledSpawn()
+    {
+        const string start = """{"version":"1.0.0","phase":"start","sandboxId":"iso:unused"}""";
+        var error = await Assert.ThrowsAsync<MxcException>(
+            () => Dev.MxcLifecycle.RunInContainerJsonAsync(
+                start, cancellationToken: new CancellationToken(true)));
+        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
+        Assert.Contains("RunInContainerJson requires phase 'exec'", error.Message);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("exec")]
+    public void PreparationPreservesUnicodeJsonAndExtractsTimeout(string? phase)
+    {
+        var json =
+            " {\"version\":\"1.1.0-alpha\",\"_comment\":\"caf\u00e9 \ud83d\ude00\"," +
+            (phase is null ? "" : "\"phase\":\"exec\",\"sandboxId\":\"iso:unused\",") +
+            "\"process\":{\"commandLine\":\"echo\",\"timeout\":250}} ";
+        var (request, timeout) = Dev.DevJsonRequest.Prepare(
+            json, nameof(PreparationPreservesUnicodeJsonAndExtractsTimeout), phase);
+        Assert.Equal((uint?)250, timeout);
+        Assert.Equal((byte)0, request[^1]);
+        Assert.Equal(json, Encoding.UTF8.GetString(request.AsSpan(0, request.Length - 1)));
+    }
+
+    [Fact]
     public void ExactContractErrorsReachPublicDevFacade()
     {
         const string unregistered =
@@ -85,6 +113,27 @@ public class DevEntryPointTests
         const string json = """{"version":"1.0.0","process":{"commandLine":"echo"}}""" + "\0";
         var error = Assert.Throws<MxcException>(() => Dev.MxcContainer.RunJson(json));
         Assert.Equal(ErrorCode.MalformedRequest, error.Code);
+    }
+
+    [Theory]
+    [InlineData('\uD800')]
+    [InlineData('\uDC00')]
+    public async Task LoneSurrogatesAreMalformedRequests(char surrogate)
+    {
+        var creation = """{"version":"1.0.0","process":{"commandLine":"echo"}}""" + surrogate;
+        var start = """{"version":"1.0.0","phase":"start","sandboxId":"iso:unused"}""" + surrogate;
+        var sync = Assert.Throws<MxcException>(() => Dev.MxcContainer.RunJson(creation));
+        Assert.Equal(ErrorCode.MalformedRequest, sync.Code);
+        sync = Assert.Throws<MxcException>(() => Dev.MxcLifecycle.StartContainerJson(start));
+        Assert.Equal(ErrorCode.MalformedRequest, sync.Code);
+
+        var asynchronous = await Assert.ThrowsAsync<MxcException>(
+            () => Dev.MxcContainer.RunJsonAsync(
+                creation, cancellationToken: TestContext.Current.CancellationToken));
+        Assert.Equal(ErrorCode.MalformedRequest, asynchronous.Code);
+        asynchronous = await Assert.ThrowsAsync<MxcException>(
+            () => Dev.MxcLifecycle.StartContainerJsonAsync(start));
+        Assert.Equal(ErrorCode.MalformedRequest, asynchronous.Code);
     }
 
     [Fact]

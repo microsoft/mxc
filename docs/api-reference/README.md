@@ -15,15 +15,14 @@ See the [consumer glossary](../glossary.md) for terminology.
 | .NET | [V1](dotnet/v1/README.md) | `Microsoft.Mxc.Sdk.V1` |
 | Node | [V1](node/v1/README.md) | `@microsoft/mxc-sdk/v1` |
 
-V1.Dev exact-JSON entry points are listed in [Rust](rust/v1/dev.md),
-[.NET](dotnet/v1/dev.md), and [Node](node/v1/dev.md). Each accepts a complete
-caller-authored exact-version document. Use V1.Dev when the typed V1 API
-cannot express the request, such as a supported historical contract or
-fields in the mutable development contract. Prefer typed V1 for published
-functionality; development-contract fields and experimental backends are
-for development and testing, not production dependencies. The selected
-contract must be registered in the MXC build, and experimental backend
-authorization is an independent invocation option.
+V1.Dev JSON APIs are listed in [Rust](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md),
+[.NET](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md),
+and [Node](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md). They accept complete
+MXC request JSON with a caller-declared contract version registered in the
+MXC build. Experimental backends require a separate invocation option.
+Prefer typed V1 when it can express the request. Development-contract
+fields and experimental backends are for development and testing, not
+production dependencies.
 
 ## Choosing an operation
 

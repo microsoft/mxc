@@ -6,8 +6,9 @@ Public entrypoint: `mxc_sdk::v1`. [Types](types.md) | [Overview](README.md)
 
 Signatures describe the typed consumer API and omit implementation bodies.
 Callers do not supply JSON or a schema version.
-The separate [V1.Dev exact-JSON API](dev.md) accepts caller-authored requests
-for one-shot execution and state-aware lifecycle operations.
+The separate [V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md)
+accepts caller-authored requests
+for create-and-run execution and container lifecycle operations.
 Attached execution is not exposed by the V1 SDK.
 
 ## Choosing a launch operation

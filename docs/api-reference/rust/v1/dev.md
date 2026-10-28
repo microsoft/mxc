@@ -1,16 +1,16 @@
 # Rust V1.Dev exact-JSON API
 
-Public entrypoint: `mxc_sdk::v1::dev`. All methods accept one complete,
-caller-authored exact-version JSON document and execute through the
-in-process engine. No method stamps a version, reserializes the request, or
-takes a second container ID. Invalid versions, unknown fields, and malformed
-JSON are rejected by the exact contract parser.
+> **Audience:** MXC consumers
 
-`JsonOptions { experimental: bool }` authorizes an experimental backend
-independently of the authored version. `PtyJsonOptions` also carries
-`size: MxcPtySize` (24 rows by 80 columns by default). The full request,
-including its version, phase, and any container ID, is a single JSON string.
-Result and process types are the existing `mxc_sdk::v1` types.
+Public entrypoint: `mxc_sdk::v1::dev`. Methods pass complete MXC request JSON
+unchanged to the in-process engine. The JSON supplies the contract `version`,
+`phase`, and container ID where applicable. MXC rejects unregistered versions,
+unknown fields, and malformed JSON.
+
+`JsonOptions { experimental: bool }` authorizes experimental backends
+independently of the JSON version. `PtyJsonOptions` also carries
+`size: MxcPtySize` (24 rows by 80 columns by default).
+Result and process types belong to `mxc_sdk::v1`.
 
 `run_json` and `run_in_container_json` return byte-preserving
 `ExecutionResult` values; a nonzero workload exit or timeout is an outcome,
@@ -44,8 +44,14 @@ pub fn validate_deprovision_json(json: &str, options: JsonOptions) -> Result<Str
 pub fn validate_process_json(json: &str, options: JsonOptions) -> Result<String, Error>;
 ```
 
-Capture uses pipe-backed execution: a backend without piped execution
-rejects this mode with `UnsupportedContainment` even when experimental
-access is authorized. PTY and state-aware support also depend on the
-selected backend and host. Unsupported modes fail rather than switching to
-another I/O mode.
+`run_json` uses pipe-backed execution or backend-owned capture. MicroVM
+provides captured output without live pipes; it requires Windows x64, a build
+with the `microvm` Cargo feature, experimental authorization, and the signed
+NVX bundle and host prerequisites described in the
+[MicroVM guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md). Missing platform or build
+support returns `BackendUnavailable`.
+
+Pipe and PTY spawns and existing-container capture require the selected
+backend's corresponding I/O and lifecycle support. MicroVM does not support
+these operations. Unsupported modes fail rather than switching to another
+I/O mode.

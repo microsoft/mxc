@@ -1,11 +1,11 @@
 # Node V1.Dev exact-JSON API
 
-Public subpath: `@microsoft/mxc-sdk/v1/dev`. All operations accept one
-complete caller-authored exact-version JSON string and return Promises.
-The SDK never stamps a version or reserializes the document through the V1
-stable mapper. Native exact parsing remains authoritative for unknown fields,
-unsupported versions, policy, and backend availability. There is no
-package-root alias.
+> **Audience:** MXC consumers
+
+Public subpath: `@microsoft/mxc-sdk/v1/dev`. Operations accept complete MXC
+request JSON with a caller-declared contract version and return Promises.
+MXC validates the unchanged document against its declared contract and
+checks policy and backend availability.
 
 `JsonOptions` contains optional `experimental?: boolean` authorization,
 independent of the authored JSON version. `PtyJsonOptions` additionally
@@ -36,19 +36,16 @@ export function validateDeprovisionJson(json: string, options?: JsonOptions): Pr
 export function validateProcessJson(json: string, options?: JsonOptions): Promise<string>;
 ```
 
-Captured stdout and stderr are returned as lossy UTF-8 text. Pipe and PTY
-operations resolve with owning V1 handles after startup. Existing-container
-execution does not deprovision its caller-owned container. On timeout,
-in-container capture closes its output streams and returns the text collected
-so far. If capture fails, disposal cannot replace the
-original read or wait error; read failures reject without waiting for the
-workload to exit. The Node ProcessContainer one-shot PTY route
-passes the original UTF-8 JSON through `wxc-exec --config-base64`, including
-the historical `0.9.0-alpha` `appcontainer` alias, rather than the stable
-typed mapper. Its Promise resolves when the executor starts, before the executor
-finishes policy validation; subsequent failures appear in combined terminal
-output and its exit code. This route cannot expose structured native warnings
-or output metadata through its current terminal channel. It forwards
-`process.timeout` to `wxc-exec`, but `wait().timedOut` remains `false` on an
-executor exit even if the executor enforced that timeout; the terminal
-channel supplies no distinct timeout outcome.
+Captured stdout and stderr are lossy UTF-8 text. Callers own pipe and PTY
+handles. Existing-container execution leaves the container caller-owned.
+On timeout, in-container capture returns partial text without waiting for
+output streams to close. Read failures reject promptly, and cleanup
+preserves the original read or wait error.
+
+On Windows, ProcessContainer `spawnWithPtyJson` uses `wxc-exec`;
+`0.9.0-alpha` requests support the `appcontainer` alias. Its Promise resolves
+at executor startup, before policy validation. Later failures appear in
+combined terminal output and the exit code. Structured warnings and output
+metadata are unavailable on this route. The executor enforces
+`process.timeout`, but `wait().timedOut` is `false`: the terminal channel
+reports only an exit code.

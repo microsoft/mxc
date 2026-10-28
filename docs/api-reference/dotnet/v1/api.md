@@ -23,10 +23,9 @@ LXC, and Seatbelt direct execution. Existing-container PTY support remains
 IsolationSession-only. Seatbelt PTY rejects `guiAccess`. Terminal handles
 give the caller explicit input, output, resize, and process ownership; there
 is no separate public attached-console launch API. Typed V1 does not accept
-["MXC request JSON"](../../../schema.md#mxc-request-json); the
-[V1.Dev exact-JSON API](dev.md) accepts caller-authored requests separately.
-Captured existing-container execution closes its output readers on timeout
-and returns the text collected so far with `TimedOut = true`.
+["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
+[V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
+accepts caller-authored requests separately.
 
 Read the terminal output concurrently rather than only after waiting. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller

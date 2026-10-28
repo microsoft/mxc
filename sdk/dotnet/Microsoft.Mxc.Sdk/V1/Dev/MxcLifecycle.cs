@@ -22,8 +22,9 @@ public static class MxcLifecycle
         JsonOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        DevJsonRequest.Inspect(json, nameof(RunInContainerJson), "exec");
-        using var process = await SpawnInContainerJsonAsync(json, options, cancellationToken)
+        var (request, timeout) = DevJsonRequest.Prepare(json, nameof(RunInContainerJson), "exec");
+        using var process = await Microsoft.Mxc.Sdk.V1.MxcLifecycle.RunBlockingOperationAsync(
+            () => SpawnInContainer(request, timeout, options), late => late.Dispose(), cancellationToken)
             .ConfigureAwait(false);
         var (outcome, stdout, stderr) = await process
             .WaitForExitWithOutputAsync(cancellationToken).ConfigureAwait(false);
@@ -40,8 +41,13 @@ public static class MxcLifecycle
 
     public static MxcProcess SpawnInContainerJson(string json, JsonOptions? options = null)
     {
-        var timeout = DevJsonRequest.Inspect(json, nameof(SpawnInContainerJson), "exec");
-        var request = DevJsonRequest.ToNullTerminatedUtf8(json);
+        var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnInContainerJson), "exec");
+        return SpawnInContainer(request, timeout, options);
+    }
+
+    private static MxcProcess SpawnInContainer(
+        byte[] request, uint? timeout, JsonOptions? options)
+    {
         unsafe
         {
             fixed (byte* requestPtr = request)
@@ -77,10 +83,10 @@ public static class MxcLifecycle
         string json,
         PtyJsonOptions? options = null)
     {
-        var timeout = DevJsonRequest.Inspect(json, nameof(SpawnInContainerWithPtyJson), "exec");
+        var (request, timeout) = DevJsonRequest.Prepare(
+            json, nameof(SpawnInContainerWithPtyJson), "exec");
         var size = MxcPtySize.ResolveInitial(options?.Size);
         size.Validate(nameof(options));
-        var request = DevJsonRequest.ToNullTerminatedUtf8(json);
         unsafe
         {
             fixed (byte* requestPtr = request)
@@ -170,8 +176,7 @@ public static class MxcLifecycle
     private static string RunPhase(
         string json, string operation, string phase, bool dryRun, JsonOptions? options)
     {
-        DevJsonRequest.Inspect(json, operation, phase);
-        var request = DevJsonRequest.ToNullTerminatedUtf8(json);
+        var (request, _) = DevJsonRequest.Prepare(json, operation, phase);
         unsafe
         {
             fixed (byte* requestPtr = request)

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { PassThrough, Readable } from 'node:stream';
 import { afterEach, it } from 'node:test';
 import { _setBindingRawRunAsyncImplementation } from '../../src/bindings/run.js';
@@ -161,7 +162,7 @@ it('typed and raw captured execs return partial output when pipes stay open afte
 
 it('settles capture before a pending native read permits stream close', {
   timeout: 2000,
-}, async () => {
+}, async (t) => {
   for (const waitFails of [false, true]) {
     let finishDestroy: (() => void) | undefined;
     const output = new Readable({
@@ -188,6 +189,13 @@ it('settles capture before a pending native read permits stream close', {
       free: async () => {},
     };
     const proc = new MxcProcess(driver);
+    const externalEnd = () => {};
+    const externalClose = () => {};
+    const externalError = () => {};
+    output.on('end', externalEnd);
+    output.on('close', externalClose);
+    output.on('error', externalError);
+    const concat = t.mock.method(Buffer, 'concat');
     try {
       if (waitFails) {
         await assert.rejects(captureProcessOutput(proc), /native wait failed/);
@@ -200,9 +208,20 @@ it('settles capture before a pending native read permits stream close', {
       }
       assert.strictEqual(output.destroyed, true);
       assert.strictEqual(output.closed, false);
+      assert.deepStrictEqual(output.listeners('end'), [externalEnd]);
+      assert.deepStrictEqual(output.listeners('close'), [externalClose]);
+      assert.ok(output.listeners('error').includes(externalError));
+      assert.strictEqual(concat.mock.callCount(), 1);
+      output.emit('end');
+      output.emit('error', new Error('late native read failure'));
+      const closed = once(output, 'close');
+      finishDestroy?.();
+      await closed;
+      assert.strictEqual(concat.mock.callCount(), 1);
     } finally {
       finishDestroy?.();
       proc.dispose();
+      concat.mock.restore();
     }
   }
 });

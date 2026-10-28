@@ -12,12 +12,15 @@ internal static class DevJsonRequest
     // The phase/timeout inspection must not reject nesting the native JSON parser accepts.
     private static readonly JsonDocumentOptions InspectionOptions = new() { MaxDepth = 128 };
 
-    internal static uint? Inspect(string json, string operation, string? expectedPhase = null)
+    internal static (byte[] Request, uint? TimeoutMs) Prepare(
+        string json, string operation, string? expectedPhase = null)
     {
         ArgumentNullException.ThrowIfNull(json);
+        var request = ToNullTerminatedUtf8(json);
         try
         {
-            using var document = JsonDocument.Parse(json, InspectionOptions);
+            using var document = JsonDocument.Parse(
+                request.AsMemory(0, request.Length - 1), InspectionOptions);
             if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
                 throw new MxcException(ErrorCode.MalformedRequest,
@@ -59,9 +62,9 @@ internal static class DevJsonRequest
                 timeout.ValueKind == JsonValueKind.Number &&
                 timeout.TryGetUInt32(out var milliseconds))
             {
-                return milliseconds;
+                return (request, milliseconds);
             }
-            return null;
+            return (request, null);
         }
         catch (JsonException error)
         {
@@ -70,7 +73,7 @@ internal static class DevJsonRequest
         }
     }
 
-    internal static byte[] ToNullTerminatedUtf8(string json)
+    private static byte[] ToNullTerminatedUtf8(string json)
     {
         if (json.Contains('\0'))
         {

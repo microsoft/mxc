@@ -1,20 +1,20 @@
 # .NET V1.Dev exact-JSON API
 
-Public namespace: `Microsoft.Mxc.Sdk.V1.Dev`. All methods accept one complete
-caller-authored exact-version JSON string; they do not stamp a version, parse
-through typed V1, or take a duplicate container ID. Native exact parsing
-rejects unregistered versions and unknown fields. Phase-specific methods
-check the JSON phase before calling native code.
+> **Audience:** MXC consumers
 
-`JsonOptions.Experimental` authorizes an experimental backend independently
-of the JSON version. `PtyJsonOptions` is a separate option type for PTY
-operations with its own `Experimental` and optional `MxcPtySize? Size`
-(24 rows by 80 columns by default). Non-PTY operations accept only
-`JsonOptions`. Return types are the existing V1 execution and process types;
-lifecycle and validation results are complete native response JSON strings,
-without narrowing through typed V1 metadata. When importing both typed and
-dev namespaces, qualify the dev facade (for example,
-`using Dev = Microsoft.Mxc.Sdk.V1.Dev;`).
+Public namespace: `Microsoft.Mxc.Sdk.V1.Dev`. Methods accept complete MXC
+request JSON containing the contract `version`, `phase`, and container ID
+where applicable. MXC validates the unchanged document against its declared
+contract; unregistered versions and unknown fields are rejected.
+Phase-specific methods require the matching JSON `phase`.
+
+Use `JsonOptions` for non-PTY calls and `PtyJsonOptions` for PTY calls.
+Both define `Experimental`, independently of the JSON version; PTY options
+also define `MxcPtySize? Size` (24 rows by 80 columns by default).
+Execution returns V1 result and process types. Lifecycle and validation
+return complete response JSON strings, including backend metadata. When
+importing both namespaces, qualify the Dev facade, for example with
+`using Dev = Microsoft.Mxc.Sdk.V1.Dev;`.
 
 ```csharp
 // Microsoft.Mxc.Sdk.V1.Dev.MxcContainer
@@ -56,12 +56,13 @@ string ValidateProcessJson(string json, JsonOptions? options = null);
 Task<string> ValidateProcessJsonAsync(string json, JsonOptions? options = null);
 ```
 
-PTY entry points are synchronous only. Only the four async run/spawn methods
-take cancellation tokens, matching their existing typed V1 counterparts.
-One-shot `RunJsonAsync` cancellation stops awaiting, not native execution;
-`RunInContainerJsonAsync` disposes its owned process on cancellation. Async
-lifecycle operations run off the caller's thread but have no cancellation
-token. Captured output is returned as lossy UTF-8 text; live handles retain
-the existing V1 stream and disposal contract.
-Timed-out in-container capture closes its readers and returns partial text
-without deprovisioning the caller-owned container.
+PTY methods are synchronous. Async run/spawn methods accept cancellation
+tokens. Canceling `RunJsonAsync` stops awaiting, not native execution;
+canceling `RunInContainerJsonAsync` disposes its owned process. Async
+lifecycle management and validation calls run off the caller's thread
+without cancellation tokens.
+
+Captured output is lossy UTF-8 text. Callers own and dispose live handles;
+existing-container execution leaves the container caller-owned.
+A descendant holding an output pipe open can delay captured execution
+completion after a workload timeout.

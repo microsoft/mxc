@@ -12,33 +12,47 @@ function collectStream(stream: Readable | null): {
     return { result: Promise.resolve(''), closeForTimeout: () => {} };
   }
 
-  let timedOut = false;
+  let settled = false;
   const chunks: Buffer[] = [];
-  let resolveResult!: (value: string) => void;
+  let settle!: (error?: Error) => void;
   const collect = (chunk: Buffer | string) => {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   };
   const result = new Promise<string>((resolve, reject) => {
-    resolveResult = resolve;
-    stream.on('data', collect);
-    stream.once('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    stream.once('error', reject);
-    stream.once('close', () => {
-      if (timedOut) {
-        resolve(Buffer.concat(chunks).toString('utf8'));
-      } else if (!stream.readableEnded) {
-        reject(new Error('captured output closed before EOF'));
+    const onEnd = () => settle();
+    const onError = (error: Error) => settle(error);
+    const onClose = () => settle(stream.readableEnded
+      ? undefined : new Error('captured output closed before EOF'));
+    settle = (error) => {
+      if (settled) return;
+      settled = true;
+      stream.off('data', collect);
+      stream.off('end', onEnd);
+      stream.off('close', onClose);
+      // MxcProcess still handles errors from delayed native reads.
+      stream.off('error', onError);
+      if (error !== undefined) {
+        chunks.length = 0;
+        reject(error);
+      } else {
+        const text = Buffer.concat(chunks).toString('utf8');
+        chunks.length = 0;
+        resolve(text);
       }
-    });
+    };
+    stream.on('data', collect);
+    stream.once('end', onEnd);
+    stream.once('error', onError);
+    stream.once('close', onClose);
   });
   return {
     result,
     closeForTimeout: () => {
-      timedOut = true;
-      stream.pause();
-      if (stream.readableLength > 0) stream.read(stream.readableLength);
-      stream.off('data', collect);
-      resolveResult(Buffer.concat(chunks).toString('utf8'));
+      if (!settled) {
+        stream.pause();
+        if (stream.readableLength > 0) stream.read(stream.readableLength);
+        settle();
+      }
       stream.destroy();
     },
   };

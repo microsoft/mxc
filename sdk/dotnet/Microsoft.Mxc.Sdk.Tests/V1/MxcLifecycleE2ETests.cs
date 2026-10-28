@@ -2,10 +2,12 @@
 // Licensed under the MIT License.
 
 using System.Text.Json;
+using System.Text;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Microsoft.Mxc.Sdk.Tests;
 using Xunit;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 
 namespace Microsoft.Mxc.Sdk.Tests.V1;
 
@@ -23,6 +25,99 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 public class MxcLifecycleE2ETests
 {
     private const string Cmd = @"C:\Windows\System32\cmd.exe";
+
+    [Fact]
+    public async Task DevJson_LifecyclePreservesResponsesExecutionAndCallerOwnership()
+    {
+        IsolationSessionHost.Require();
+        const string provision = """
+            {
+                "version":"1.1.0-alpha","phase":"provision","containment":"isolation_session",
+                "network":{
+                    "egress":{"default":"allow"},
+                    "ingress":{"default":"allow","hostLoopback":"allow"}
+                }
+            }
+            """;
+        static void AssertEmptyResult(string json)
+        {
+            using var response = JsonDocument.Parse(json);
+            Assert.Empty(response.RootElement.GetProperty("result").EnumerateObject());
+        }
+        AssertEmptyResult(await Dev.MxcLifecycle.ValidateProvisionJsonAsync(provision));
+        using var provisioned = JsonDocument.Parse(
+            await Dev.MxcLifecycle.ProvisionContainerJsonAsync(provision));
+        var result = provisioned.RootElement.GetProperty("result");
+        var id = result.GetProperty("sandboxId").GetString();
+        Assert.False(string.IsNullOrEmpty(id));
+        using var teardown = new Teardown(new ContainerId(id!));
+        var metadata = result.GetProperty("metadata");
+        Assert.False(string.IsNullOrEmpty(metadata.GetProperty("agentUserName").GetString()));
+        Assert.False(string.IsNullOrEmpty(metadata.GetProperty("agentUserSid").GetString()));
+        var workspace = metadata.GetProperty("ephemeralWorkspacePath").GetString()!;
+        Assert.True(Directory.Exists(workspace));
+
+        string Phase(string phase) =>
+            $$$"""{"version":"1.0.0","phase":"{{{phase}}}","sandboxId":"{{{JsonEncodedText.Encode(id!)}}}"}""";
+        string Exec(string command) =>
+            $$$"""{"version":"1.1.0-alpha","phase":"exec","sandboxId":"{{{JsonEncodedText.Encode(id!)}}}","process":{"commandLine":"{{{JsonEncodedText.Encode(command)}}}","timeout":30000}}""";
+
+        AssertEmptyResult(Dev.MxcLifecycle.ValidateStartJson(Phase("start")));
+        AssertEmptyResult(Dev.MxcLifecycle.StartContainerJson(
+            Phase("start"), new Dev.JsonOptions { Experimental = true }));
+        var validationFile = Path.Combine(workspace, "dev-must-not-run.txt");
+        AssertEmptyResult(await Dev.MxcLifecycle.ValidateProcessJsonAsync(
+            Exec($"echo MUST_NOT_RUN> \"{validationFile}\"")));
+        Assert.False(File.Exists(validationFile));
+        var captured = await Dev.MxcLifecycle.RunInContainerJsonAsync(
+            Exec("echo DEV_EXEC_OUT & echo DEV_EXEC_ERR 1>&2 & exit /b 7"),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(captured.TimedOut);
+        Assert.Equal(7, captured.ExitCode);
+        Assert.Contains("DEV_EXEC_OUT", captured.Stdout);
+        Assert.Contains("DEV_EXEC_ERR", captured.Stderr);
+
+        using (var pipe = Dev.MxcLifecycle.SpawnInContainerJson(
+            Exec("cmd.exe /v:on /c \"set /p L= & echo DEV_PIPE:!L! & exit /b 9\"")))
+        {
+            using var stdin = pipe.StandardInput;
+            Assert.NotNull(stdin);
+            var output = pipe.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
+            await stdin.WriteAsync(Encoding.UTF8.GetBytes("ping-pong\r\n"),
+                TestContext.Current.CancellationToken);
+            stdin.Dispose();
+            var (outcome, stdout, _) = await output;
+            Assert.False(outcome.TimedOut);
+            Assert.Equal(9, outcome.ExitCode);
+            Assert.Contains("DEV_PIPE:ping-pong", Encoding.UTF8.GetString(stdout));
+        }
+        using (var terminal = Dev.MxcLifecycle.SpawnInContainerWithPtyJson(
+            Exec("cmd.exe /q"), new Dev.PtyJsonOptions { Size = new MxcPtySize(30, 90) }))
+        {
+            using var reader = new StreamReader(terminal.Output, Encoding.UTF8);
+            var output = reader.ReadToEndAsync(TestContext.Current.CancellationToken);
+            terminal.Resize(new MxcPtySize(40, 100));
+            await terminal.Input.WriteAsync(
+                Encoding.UTF8.GetBytes("set MXC_DEV_MARK=OK\r\necho DEV_PTY_%MXC_DEV_MARK%\r\nexit /b 13\r\n"),
+                TestContext.Current.CancellationToken);
+            var outcome = await terminal.WaitAsync(TestContext.Current.CancellationToken);
+            Assert.False(outcome.TimedOut);
+            Assert.Equal(13, outcome.ExitCode);
+            Assert.Contains("DEV_PTY_OK", await output);
+        }
+        AssertEmptyResult(Dev.MxcLifecycle.ValidateStopJson(Phase("stop")));
+        var stillOwned = Dev.MxcLifecycle.RunInContainerJson(Exec("echo DEV_CALLER_OWNS_CONTAINER"));
+        Assert.Equal(0, stillOwned.ExitCode);
+        Assert.Contains("DEV_CALLER_OWNS_CONTAINER", stillOwned.Stdout);
+        AssertEmptyResult(await Dev.MxcLifecycle.StopContainerJsonAsync(Phase("stop")));
+        AssertEmptyResult(Dev.MxcLifecycle.ValidateDeprovisionJson(Phase("deprovision")));
+        AssertEmptyResult(Dev.MxcLifecycle.DeprovisionContainerJson(Phase("deprovision")));
+        teardown.Defuse();
+        Assert.False(Directory.Exists(workspace));
+        var stale = Assert.Throws<MxcException>(
+            () => Dev.MxcLifecycle.StartContainerJson(Phase("start")));
+        Assert.Equal(ErrorCode.StaleId, stale.Code);
+    }
 
     /// <summary>
     /// Deprovisions a sandbox the test did not deprovision itself. Provision
@@ -192,31 +287,6 @@ public class MxcLifecycleE2ETests
             var result = proc.Wait();
 
             Assert.True(result.TimedOut);
-        }
-    }
-
-    [Fact]
-    public async Task Exec_CapturedTimeoutClosesDescendantHeldOutput()
-    {
-        IsolationSessionHost.Require();
-
-        var started = ProvisionAndStart();
-        using (started.Teardown)
-        {
-            var request = new ExecutionRequest(
-                $"{Cmd} /c echo MXC_TIMEOUT_PARTIAL & start /b {Cmd} /c ping -n 60 127.0.0.1 >nul & ping -n 60 127.0.0.1 >nul")
-            {
-                TimeoutMs = 750,
-            };
-            var capture = MxcLifecycle.RunInContainerAsync(
-                started.Id, request, cancellationToken: TestContext.Current.CancellationToken);
-            var finished = await Task.WhenAny(
-                capture, Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
-            Assert.Same(capture, finished);
-
-            var result = await capture;
-            Assert.True(result.TimedOut);
-            Assert.Contains("MXC_TIMEOUT_PARTIAL", result.Stdout);
         }
     }
 

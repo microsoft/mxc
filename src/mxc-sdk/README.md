@@ -17,13 +17,9 @@ checks request compatibility without creating a container. An incompatible
 request has no selected tier and an explanatory error, while host facts remain
 available.
 
-`mxc_sdk::v1::dev` provides
-[exact-JSON API signatures](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md).
-V1.Dev runs caller-authored exact-version requests in-process. It provides
-one-shot and existing-container capture, pipe and PTY spawns, lifecycle
-operations, and dry-run validation. Lifecycle calls return the complete
-native response JSON; capture and live process handles reuse the V1 result
-types. Backend support remains mode-dependent.
+Use [mxc_sdk::v1::dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md)
+for caller-authored MXC request JSON. It supports execution, container
+lifecycle operations, and validation through the in-process engine.
 
 ## Run to completion and spawn
 

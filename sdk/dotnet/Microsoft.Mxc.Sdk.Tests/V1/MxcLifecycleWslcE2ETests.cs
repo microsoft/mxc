@@ -2,9 +2,11 @@
 // Licensed under the MIT License.
 
 using System.Text;
+using System.Text.Json;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Xunit;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 
 namespace Microsoft.Mxc.Sdk.Tests.V1;
 
@@ -16,6 +18,79 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 [Collection("MxcLiveHost")]
 public class MxcLifecycleWslcE2ETests
 {
+    [Fact]
+    public async Task DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership()
+    {
+        RequireWslc();
+        const string provision = """
+            {"version":"1.1.0-alpha","phase":"provision","containment":"wslc",
+             "wslc":{"provision":{"image":"alpine:latest"}}}
+            """;
+        static void AssertEmptyResult(string json)
+        {
+            using var response = JsonDocument.Parse(json);
+            Assert.Empty(response.RootElement.GetProperty("result").EnumerateObject());
+        }
+        AssertEmptyResult(Dev.MxcLifecycle.ValidateProvisionJson(provision));
+        using var response = JsonDocument.Parse(
+            await Dev.MxcLifecycle.ProvisionContainerJsonAsync(provision));
+        var id = response.RootElement.GetProperty("result").GetProperty("sandboxId").GetString();
+        Assert.False(string.IsNullOrEmpty(id));
+        string Phase(string phase) =>
+            $$$"""{"version":"1.0.0","phase":"{{{phase}}}","sandboxId":"{{{JsonEncodedText.Encode(id!)}}}"}""";
+        string Exec(string command) =>
+            $$$"""{"version":"1.1.0-alpha","phase":"exec","sandboxId":"{{{JsonEncodedText.Encode(id!)}}}","process":{"commandLine":"{{{JsonEncodedText.Encode(command)}}}","timeout":30000}}""";
+        var started = false;
+        try
+        {
+            AssertEmptyResult(await Dev.MxcLifecycle.ValidateStartJsonAsync(Phase("start")));
+            AssertEmptyResult(Dev.MxcLifecycle.StartContainerJson(
+                Phase("start"), new Dev.JsonOptions { Experimental = true }));
+            started = true;
+            AssertEmptyResult(Dev.MxcLifecycle.ValidateProcessJson(Exec("touch /tmp/dev-must-not-run")));
+            var captured = await Dev.MxcLifecycle.RunInContainerJsonAsync(
+                Exec("test ! -e /tmp/dev-must-not-run || exit 99; cat; echo DEV_WSLC_OUT; echo DEV_WSLC_ERR >&2; exit 7"),
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.False(captured.TimedOut);
+            Assert.Equal(7, captured.ExitCode);
+            Assert.Contains("DEV_WSLC_OUT", captured.Stdout);
+            Assert.Contains("DEV_WSLC_ERR", captured.Stderr);
+            using (var pipe = Dev.MxcLifecycle.SpawnInContainerJson(Exec("cat; echo DEV_WSLC_PIPE; exit 9")))
+            {
+                Assert.Null(pipe.StandardInput);
+                var (outcome, stdout, _) = await pipe.WaitForExitWithOutputAsync(
+                    TestContext.Current.CancellationToken);
+                Assert.False(outcome.TimedOut);
+                Assert.Equal(9, outcome.ExitCode);
+                Assert.Contains("DEV_WSLC_PIPE", Encoding.UTF8.GetString(stdout));
+            }
+            AssertEmptyResult(Dev.MxcLifecycle.ValidateStopJson(Phase("stop")));
+            var retained = Dev.MxcLifecycle.RunInContainerJson(Exec("echo DEV_WSLC_STILL_OWNED"));
+            Assert.Equal(0, retained.ExitCode);
+            Assert.Contains("DEV_WSLC_STILL_OWNED", retained.Stdout);
+            AssertEmptyResult(await Dev.MxcLifecycle.StopContainerJsonAsync(Phase("stop")));
+            started = false;
+            AssertEmptyResult(await Dev.MxcLifecycle.ValidateDeprovisionJsonAsync(Phase("deprovision")));
+        }
+        finally
+        {
+            try
+            {
+                if (started)
+                {
+                    Dev.MxcLifecycle.StopContainerJson(Phase("stop"));
+                }
+            }
+            finally
+            {
+                AssertEmptyResult(Dev.MxcLifecycle.DeprovisionContainerJson(Phase("deprovision")));
+            }
+        }
+        var stale = Assert.Throws<MxcException>(
+            () => Dev.MxcLifecycle.StartContainerJson(Phase("start")));
+        Assert.Equal(ErrorCode.NotProvisioned, stale.Code);
+    }
+
     private static void RequireWslc()
     {
 #if MXC_WITH_WSLC

@@ -71,9 +71,7 @@ take a caller-supplied schema version. Each v1 SDK targets the published exact
 
 Raw configuration APIs require the caller to declare a registered `version`
 to select an immutable published or mutable development contract.
-Rust `mxc_sdk::v1::dev`, .NET `Microsoft.Mxc.Sdk.V1.Dev`, and Node
-`@microsoft/mxc-sdk/v1/dev` accept complete caller-authored one-shot or
-state-aware JSON strings using the native exact-version parsing path.
+The [V1.Dev SDK APIs](#sdk-major-version-namespaces) accept these documents.
 Experimental backend authorization is supplied separately in invocation
 options, not inferred from the document's version.
 
@@ -102,18 +100,24 @@ version:
 
 Contract-mapped SDK types live in a namespace for their schema-contract major:
 `Microsoft.Mxc.Sdk.V1`, `mxc_sdk::v1`, and `@microsoft/mxc-sdk/v1`.
-The V1 namespace contains `SandboxPolicy`, its policy sections, containment
-selection and backend settings, policy-to-request builders, and typed
-state-aware lifecycle request/result/option types and entry points. These APIs
+The typed V1 surface contains `ContainerRequest`, its policy sections,
+containment selection and backend settings, and container lifecycle
+request/result/option types and entry points. These typed APIs
 evolve additively as published 1.x contracts grow; the SDK owns the exact
 contract target (currently `1.0.0`) and callers do not supply a schema version.
 A future breaking schema line adds a side-by-side V2 namespace rather than
 replacing V1.
 
-Version-independent APIs stay at the package root: errors and error codes,
-running-sandbox handles and output/wait types, platform/backend discovery,
-telemetry consent, schema-version constants, raw exact-JSON APIs that take
-caller-declared versions, and executor-backed raw config APIs.
+V1.Dev is a separate API family within the supported V1 entrypoint:
+`mxc_sdk::v1::dev`, `Microsoft.Mxc.Sdk.V1.Dev`, and
+`@microsoft/mxc-sdk/v1/dev`. Its callers declare a registered JSON contract
+version instead of using the typed V1 target. The SDK API major and the
+document's contract version are independent; `Dev` does not implicitly
+select the development contract or authorize experimental backends.
+
+Version-independent operations and types, including errors, process handles,
+output/wait types, discovery, and telemetry consent, use supported V*
+entrypoints.
 
 ### Versioning follows Semver
 

@@ -9,12 +9,9 @@ The package root exports no public APIs. These APIs use the SDK-selected contrac
 version; callers do not select it. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md)
 for terminology.
 
-`@microsoft/mxc-sdk/v1/dev` provides
-[exact-JSON APIs](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md).
-The dev operations accept complete caller-authored, exact-version JSON and
-authorize experimental backends separately. They return Promises; lifecycle
-and validation return the native response JSON string. ProcessContainer PTY
-passes the original JSON through `wxc-exec` without stable typed mapping.
+Use [@microsoft/mxc-sdk/v1/dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
+for MXC request JSON with a caller-declared contract version and separate
+experimental backend authorization.
 
 ```bash
 npm install @microsoft/mxc-sdk

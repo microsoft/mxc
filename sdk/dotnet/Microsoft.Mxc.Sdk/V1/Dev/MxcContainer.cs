@@ -15,8 +15,7 @@ public static class MxcContainer
 
     public static ExecutionResult RunJson(string json, JsonOptions? options = null)
     {
-        DevJsonRequest.Inspect(json, nameof(RunJson));
-        var request = DevJsonRequest.ToNullTerminatedUtf8(json);
+        var (request, _) = DevJsonRequest.Prepare(json, nameof(RunJson));
         unsafe
         {
             fixed (byte* requestPtr = request)
@@ -64,8 +63,7 @@ public static class MxcContainer
 
     public static MxcProcess SpawnJson(string json, JsonOptions? options = null)
     {
-        var timeout = DevJsonRequest.Inspect(json, nameof(SpawnJson));
-        var request = DevJsonRequest.ToNullTerminatedUtf8(json);
+        var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnJson));
         unsafe
         {
             fixed (byte* requestPtr = request)
@@ -99,10 +97,9 @@ public static class MxcContainer
 
     public static MxcPtyProcess SpawnWithPtyJson(string json, PtyJsonOptions? options = null)
     {
-        var timeout = DevJsonRequest.Inspect(json, nameof(SpawnWithPtyJson));
+        var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnWithPtyJson));
         var size = MxcPtySize.ResolveInitial(options?.Size);
         size.Validate(nameof(options));
-        var request = DevJsonRequest.ToNullTerminatedUtf8(json);
         unsafe
         {
             fixed (byte* requestPtr = request)

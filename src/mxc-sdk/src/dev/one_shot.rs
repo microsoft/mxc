@@ -13,7 +13,9 @@ use super::{JsonOptions, PtyJsonOptions};
 /// The registered `version` and one-shot request root are parsed by the engine
 /// without stamping or reserializing the input. `options.experimental` only
 /// authorizes an experimental backend; it does not select a contract version.
-/// Backends without pipe-backed execution reject this capture mode.
+/// The engine uses pipes or backend-owned capture. MicroVM capture requires
+/// Windows x64, the `microvm` Cargo feature, experimental authorization, and
+/// the signed NVX bundle and host prerequisites.
 /// Nonzero workload exit and timeout are results, not API errors. Parser,
 /// launch, and output-read failures return [`Error`].
 pub fn run_json(json: &str, options: JsonOptions) -> Result<ExecutionResult, Error> {
@@ -78,25 +80,5 @@ mod tests {
             let error = crate::v1::dev::run_json(json, JsonOptions { experimental }).unwrap_err();
             assert_eq!(error.code, ErrorCode::MalformedRequest);
         }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
-    fn run_json_captures_process_container_output() {
-        let json = r#"{
-            "version":"1.0.0",
-            "containment":"process",
-            "process":{"commandLine":"cmd /c echo hello-dev-json","timeout":30000},
-            "filesystem":{"readwritePaths":["C:\\Windows\\Temp"]}
-        }"#;
-        let output = crate::v1::dev::run_json(json, JsonOptions::default())
-            .expect("one-shot ProcessContainer request should run");
-        assert_eq!(output.outcome, crate::v1::WaitResult::Exited(0));
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("hello-dev-json"),
-            "captured stdout: {:?}",
-            output.stdout
-        );
     }
 }
