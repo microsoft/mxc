@@ -323,14 +323,16 @@ whatever MXC passed.
 |-------|---------------|-------------|
 | `readwritePaths` | `--bind <path> <path>` | Read-write bind mount (overrides base RO) |
 | `readonlyPaths` | `--ro-bind <path> <path>` | Explicit read-only bind mount |
-| `deniedPaths` (directory) | `--tmpfs <path>` | Masked with an empty tmpfs |
+| `deniedPaths` (directory or missing path) | `--tmpfs <path>`, then `--remount-ro <path>` | Masked with a read-only tmpfs |
 | `deniedPaths` (file) | `--ro-bind /dev/null <path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
 
 A denied path is classified by its own on-disk type (via `symlink_metadata`,
-no symlink-follow): a directory is masked with an empty `--tmpfs`, while a
+no symlink-follow): a directory is masked with a read-only `--tmpfs`, while a
 regular file is masked by binding `/dev/null` over it (masking a file with a
 tmpfs would replace it with an empty *directory*, changing its type). Paths that
-cannot be stat'd (missing/unreadable) fall back to `--tmpfs`.
+cannot be stat'd (missing/unreadable) fall back to a read-only `--tmpfs`.
+The masks are remounted after policy mounts are created, so a more specific
+allowed child remains accessible with its own permissions.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point

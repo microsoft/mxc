@@ -354,7 +354,7 @@ fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
 }
 
 /// Build the complete `bwrap` argument list, masking **every** denied path as a
-/// directory (`--tmpfs`).
+/// directory with a read-only tmpfs.
 ///
 /// This is the pure, classification-free entry point: it performs no filesystem
 /// I/O and so stays unit-testable on every host. Unit tests and any caller that
@@ -475,6 +475,7 @@ pub(crate) fn build_args_classified_with_mode(
     // precedence. `resolve_mount_order` assumes object normalization already ran
     // (it does, in the runner before `build_args`), so exact same-path conflicts
     // are already collapsed to the strictest intent.
+    let mut denied_directories = Vec::new();
     for mount in mounts {
         match mount.intent {
             // Read-write: override the base ro-bind and any standard mount.
@@ -503,9 +504,15 @@ pub(crate) fn build_args_classified_with_mode(
                     ]);
                 } else {
                     args.extend(["--tmpfs".into(), mount.destination.clone()]);
+                    denied_directories.push(&mount.destination);
                 }
             }
         }
+    }
+
+    // Child mounts need their mountpoints created before the masks become read-only.
+    for destination in denied_directories {
+        args.extend(["--remount-ro".into(), destination.clone()]);
     }
 
     // -- Working directory -------------------------------------------------
@@ -1329,6 +1336,11 @@ mod tests {
         // tmpfs at /secrets, and no ro-bind of /dev/null onto it.
         policy_mount_pos(&args, "--tmpfs", "/secrets");
         assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--remount-ro" && w[1] == "/secrets"),
+            "a denied directory mask must be read-only: {args:?}"
+        );
+        assert!(
             args.windows(3)
                 .all(|w| !(w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == "/secrets")),
             "a directory denied path must not be masked with /dev/null: {args:?}"
@@ -1411,6 +1423,24 @@ mod tests {
             "child file mask (pos {child}) must come after parent tmpfs (pos {parent}) \
              so it lands inside the masked subtree: {args:?}"
         );
+    }
+
+    #[test]
+    fn denied_tmpfs_masks_are_sealed_after_child_mounts() {
+        let mut r = base_request();
+        r.policy.denied_paths = vec!["/data".into(), "/data/nested".into()];
+        r.policy.readwrite_paths = vec!["/data/allowed/deep".into()];
+        let args = build_args(&r, None);
+
+        let child = policy_mount_pos(&args, "--bind", "/data/allowed/deep");
+        for path in ["/data", "/data/nested"] {
+            let mask = policy_mount_pos(&args, "--tmpfs", path);
+            let remount = args
+                .windows(2)
+                .position(|w| w[0] == "--remount-ro" && w[1] == path)
+                .unwrap_or_else(|| panic!("missing read-only remount for {path}: {args:?}"));
+            assert!(mask < remount && child < remount, "{args:?}");
+        }
     }
 
     #[test]
