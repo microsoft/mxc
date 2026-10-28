@@ -383,4 +383,20 @@ pub struct Seatbelt {
     /// Additional Mach service global names the process may resolve.
     #[serde(default)]
     pub extra_mach_lookups: OptionalField<Vec<String>>,
+    /// Records sandbox denials to a JSON report.
+    #[serde(default)]
+    pub capture_denials: OptionalField<SeatbeltCaptureDenials>,
+}
+
+/// macOS Seatbelt denial-capture settings.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCaptureDenials {
+    /// How each ungranted access is handled while it is recorded.
+    #[serde(default)]
+    pub mode: OptionalField<CaptureDenialsMode>,
+    /// Optional absolute file path for the denial report; may start with `~/`.
+    #[serde(default)]
+    pub output_path: OptionalField<String>,
 }

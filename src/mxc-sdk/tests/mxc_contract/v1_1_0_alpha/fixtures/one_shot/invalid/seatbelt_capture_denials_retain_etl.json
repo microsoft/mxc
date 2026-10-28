@@ -1,0 +1,12 @@
+{
+  "version": "1.1.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "echo retainEtl is Windows-only"
+  },
+  "seatbelt": {
+    "captureDenials": {
+      "retainEtl": true
+    }
+  }
+}

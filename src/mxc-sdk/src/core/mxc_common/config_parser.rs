@@ -1243,13 +1243,27 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         nested_pty,
         keychain_access,
         extra_mach_lookups,
+        capture_denials,
     } = sb;
+    // outputPath may start with `~`; the backend expands and validates it.
+    let capture_denials =
+        capture_denials.map(|wire::SeatbeltCaptureDenials { mode, output_path }| {
+            CaptureDenialsConfig {
+                mode: match mode {
+                    Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
+                    Some(wire::CaptureDenialsMode::Block) | None => CaptureDenialsMode::Block,
+                },
+                output_path,
+                retain_etl: false,
+            }
+        });
     SeatbeltConfig {
         profile_override,
         gui_access: gui_access.unwrap_or(false),
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
+        capture_denials,
     }
 }
 
@@ -1290,58 +1304,20 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
     }
 }
 
-/// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
-/// must be an absolute path whose parent directory already exists (the runner
-/// writes the JSON denials output file there after the workload exits). The
-/// path itself must not be an existing directory. A relative path, directory
-/// path, or missing parent yields an actionable error.
-fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Result<(), WxcError> {
-    let candidate = std::path::Path::new(path);
-    if !candidate.is_absolute() {
-        let msg = format!(
-            "processContainer.captureDenials.outputPath must be an absolute path: '{path}'"
-        );
+/// Logs and rejects an invalid `captureDenials.outputPath` (`field` names it).
+fn validate_capture_denials_output_path(
+    field: &str,
+    path: &str,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    crate::learning_mode_core::capture_output::validate_output_path(
+        field,
+        std::path::Path::new(path),
+    )
+    .map_err(|msg| {
         logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
-    }
-    match candidate.parent() {
-        // A filesystem root ("/", "C:\\") has either no parent (`None`) or an
-        // empty parent, and cannot name a trace file.
-        None => {
-            let msg = format!(
-                "processContainer.captureDenials.outputPath must name a file, not a \
-                 directory root: '{path}'"
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-        Some(parent) if parent.as_os_str().is_empty() => {
-            let msg = format!(
-                "processContainer.captureDenials.outputPath must name a file, not a \
-                 directory root: '{path}'"
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-        Some(parent) if !parent.is_dir() => {
-            let msg = format!(
-                "processContainer.captureDenials.outputPath parent directory does not \
-                 exist: '{}'",
-                parent.display()
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-        Some(_) if candidate.is_dir() => {
-            let msg = format!(
-                "processContainer.captureDenials.outputPath must name a file, not an \
-                 existing directory: '{path}'"
-            );
-            logger.log_line(&msg);
-            Err(WxcError::ConfigParse(msg))
-        }
-        _ => Ok(()),
-    }
+        WxcError::ConfigParse(msg)
+    })
 }
 
 fn normalize_common_request_ir(
@@ -1487,7 +1463,11 @@ fn normalize_common_request_ir(
         // eagerly so a bad path fails at parse time rather than deep in the runner.
         if let Some(cd) = ac.capture_denials {
             if let Some(path) = cd.output_path.as_deref() {
-                validate_capture_denials_output_path(path, logger)?;
+                validate_capture_denials_output_path(
+                    "processContainer.captureDenials.outputPath",
+                    path,
+                    logger,
+                )?;
             }
             let mode = match cd.mode {
                 Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
@@ -2276,16 +2256,49 @@ mod tests {
             (missing.as_path(), "parent directory does not exist"),
             (directory.path(), "existing directory"),
         ] {
-            let error =
-                validate_capture_denials_output_path(&path.to_string_lossy(), &mut test_logger())
-                    .unwrap_err();
+            let error = validate_capture_denials_output_path(
+                "f",
+                &path.to_string_lossy(),
+                &mut test_logger(),
+            )
+            .unwrap_err();
             assert!(error.to_string().contains(message), "{path:?}: {error}");
         }
         validate_capture_denials_output_path(
+            "f",
             &directory.path().join("capture.json").to_string_lossy(),
             &mut test_logger(),
         )
         .expect("valid absolute output file");
+    }
+
+    #[test]
+    fn development_seatbelt_capture_denials_maps_to_config() {
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "seatbelt",
+            "seatbelt": {"captureDenials": {"mode": "allow"}},
+            "process": {"commandLine": "echo dev"}
+        }"#;
+        let MxcRequest::OneShot(request) = parse_exact_for_test(json).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        let capture = request.seatbelt.unwrap().capture_denials.unwrap();
+        assert_eq!(capture.mode, CaptureDenialsMode::Allow);
+        assert_eq!(capture.output_path, None);
+
+        // The backend expands `~` and validates the path, so parsing keeps it as written.
+        let tilde = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "seatbelt",
+            "seatbelt": {"captureDenials": {"outputPath": "~/denials.json"}},
+            "process": {"commandLine": "echo dev"}
+        }"#;
+        let MxcRequest::OneShot(request) = parse_exact_for_test(tilde).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        let capture = request.seatbelt.unwrap().capture_denials.unwrap();
+        assert_eq!(capture.output_path.as_deref(), Some("~/denials.json"));
     }
 
     #[test]

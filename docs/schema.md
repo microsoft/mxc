@@ -276,7 +276,14 @@ that can be executed independently.
         "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
-        "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
+        "extraMachLookups": [],            // Additional Mach service global-names the inner process may resolve
+        "captureDenials": {                // 1.1.0-alpha: record what the sandbox blocked.
+                                           // Not combinable with profileOverride.
+            "mode": "block",               // "block" (default) or "allow" (default-denied access is
+                                           // allowed and recorded; explicit denies still apply)
+            "outputPath": "~/denials.json" // Absolute or ~/ path; parent dir must exist. Omit for a
+                                           // temp file. Actual path is printed on stderr.
+        }
     },
 
     "telemetry": {                         // Telemetry (Windows only)

@@ -31,6 +31,11 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
+use crate::learning_mode_core::capture_output::{
+    combine_capture_and_cleanup_results, combine_process_and_teardown_results,
+    random_capture_suffix, remove_internal_capture_file, unique_denials_output_path,
+    write_stderr_line_best_effort,
+};
 use crate::mxc_common::api_set::is_api_set_implemented;
 use crate::mxc_common::audit::{
     sanitize_identity, AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason,
@@ -58,11 +63,7 @@ use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolic
 use crate::process_container_common::base_container_helpers::{
     build_psec_v1_security_environment_spec, has_conflicting_proxy_identity,
 };
-use crate::process_container_common::capture_output::{
-    combine_capture_and_cleanup_results, combine_process_and_teardown_results,
-    remove_internal_capture_file, unique_denials_output_path, write_capture_denials_document,
-    write_stderr_line_best_effort,
-};
+use crate::process_container_common::capture_output::write_capture_denials_document;
 use crate::process_container_common::job_object::UiJobObject;
 use crate::process_container_common::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_missing_required_env, diagnose_process_exit,
@@ -1994,8 +1995,7 @@ fn managed_capture_output_path_in(
     }
 
     for _ in 0..8 {
-        let suffix = crate::process_container_common::capture_output::random_capture_suffix()
-            .map_err(|error| ScriptResponse::error(&error))?;
+        let suffix = random_capture_suffix().map_err(|error| ScriptResponse::error(&error))?;
         let directory = root.join(format!("{directory_prefix}{}_{suffix}", std::process::id()));
         match std::fs::create_dir(&directory) {
             Ok(()) => {

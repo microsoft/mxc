@@ -1,0 +1,17 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "rmdir {{TESTDIR}}/timeout-out && echo CAPTURE_OUTPUT_REMOVED && exec sleep 30",
+        "timeout": 1000
+    },
+    "filesystem": {
+        "readwritePaths": ["{{TESTDIR}}"]
+    },
+    "seatbelt": {
+        "captureDenials": {
+            "outputPath": "{{TESTDIR}}/timeout-out/denials.json"
+        }
+    }
+}

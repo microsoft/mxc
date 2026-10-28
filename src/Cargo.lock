@@ -1566,6 +1566,7 @@ dependencies = [
  "cc",
  "clap",
  "mxc-sdk",
+ "serde_json",
  "winresource",
 ]
 

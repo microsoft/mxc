@@ -193,3 +193,14 @@ fn rejects_seatbelt_and_macos_sandbox_section_alias_together() {
 
     assert_invalid(json);
 }
+
+#[test]
+fn rejects_seatbelt_capture_denials() {
+    let json = r#"{
+        "version": "1.0.0",
+        "seatbelt": {"captureDenials": {}},
+        "process": {"commandLine": "echo"}
+    }"#;
+
+    assert_invalid(json);
+}

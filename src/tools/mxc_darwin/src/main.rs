@@ -15,7 +15,7 @@ use std::process;
 use clap::Parser;
 use mxc_sdk::mxc_common::config_parser::load_one_shot_request;
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
-use mxc_sdk::mxc_common::models::ExecutionRequest;
+use mxc_sdk::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode, ExecutionRequest};
 
 #[cfg(target_os = "macos")]
 use mxc_sdk::mxc_common::models::ScriptResponse;
@@ -55,6 +55,26 @@ struct Cli {
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
     log_file: Option<String>,
+
+    /// Run with seatbelt.captureDenials in allow mode: default-denied
+    /// operations are allowed and recorded.
+    #[arg(long)]
+    audit: bool,
+}
+
+const AUDIT_CAPTURE_DENIALS_CONFLICT_MSG: &str =
+    "--audit cannot be combined with seatbelt.captureDenials; use captureDenials.mode: \"allow\" for permissive capture";
+
+fn apply_audit(request: &mut ExecutionRequest) -> Result<(), String> {
+    let seatbelt = request.seatbelt.get_or_insert_with(Default::default);
+    if seatbelt.capture_denials.is_some() {
+        return Err(AUDIT_CAPTURE_DENIALS_CONFLICT_MSG.to_string());
+    }
+    seatbelt.capture_denials = Some(CaptureDenialsConfig {
+        mode: CaptureDenialsMode::Allow,
+        ..Default::default()
+    });
+    Ok(())
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -110,6 +130,12 @@ fn main() {
 
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
+    if cli.audit {
+        if let Err(message) = apply_audit(&mut request) {
+            eprintln!("Error: {message}");
+            process::exit(1);
+        }
+    }
 
     log_request(&request, &mut logger);
 
@@ -158,6 +184,12 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
+    // The logger records warnings (such as captureDenials allow mode) without
+    // printing them; this binary owns its terminal, so print them here.
+    for warning in logger.warnings() {
+        eprintln!("{warning}");
+    }
+
     if request.dry_run {
         handle_dry_run_exit(&response, logger);
     }
@@ -175,6 +207,17 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
 
     print!("{}", response.standard_out);
     eprint!("{}", response.standard_err);
+    if let Some(pointer) = response
+        .output_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.capture_denials.as_ref())
+    {
+        // Workloads inherit stderr and may leave the last line unterminated.
+        match serde_json::to_string(pointer) {
+            Ok(line) => eprintln!("\n{line}"),
+            Err(error) => eprintln!("failed to serialize captureDenials output pointer: {error}"),
+        }
+    }
 
     // Never exit non-zero on an infrastructure failure without a diagnostic:
     // `display_script_results` only writes the error into the (buffered,

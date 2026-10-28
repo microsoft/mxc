@@ -659,6 +659,10 @@ export interface RuntimeConfig {
  */
 export interface Seatbelt {
   /**
+   * Records sandbox denials to a JSON report.
+   */
+  captureDenials?: SeatbeltCaptureDenials;
+  /**
    * Additional Mach service global names the process may resolve.
    */
   extraMachLookups?: string[];
@@ -678,6 +682,20 @@ export interface Seatbelt {
    * Optional override of the generated sandbox profile.
    */
   profileOverride?: string;
+}
+
+/**
+ * macOS Seatbelt denial-capture settings.
+ */
+export interface SeatbeltCaptureDenials {
+  /**
+   * How each ungranted access is handled while it is recorded.
+   */
+  mode?: CaptureDenialsMode;
+  /**
+   * Optional absolute file path for the denial report; may start with `~/`.
+   */
+  outputPath?: string;
 }
 
 export type StartPhase = "start";

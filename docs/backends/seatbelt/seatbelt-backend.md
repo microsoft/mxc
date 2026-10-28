@@ -11,7 +11,7 @@ framework behind the App Sandbox that every Mac App Store app uses.
 |---|---|
 | **Binary** | `mxc-exec-mac` |
 | **Config value** | `"containment": "seatbelt"` |
-| **Schema** | `0.9.0-alpha` or later. |
+| **Schema** | `1.0.0` or later. |
 | **Requires** | macOS 15 (Sequoia) or later. No root, no daemon, no install. |
 | **Isolation** | Process tree (no named container, no lifecycle, nothing to clean up) |
 | **Enforced by** | The macOS kernel, via a generated profile |
@@ -26,8 +26,8 @@ The sandbox lives exactly as long as the process tree it wraps.
 
 ```json
 {
-    "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
-    "version": "0.9.0-alpha",
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
     "containment": "seatbelt",
     "process": { "commandLine": "echo hi", "timeout": 30000 },
     "filesystem": {
@@ -362,6 +362,7 @@ Set under a top-level `"seatbelt"` key.
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
 | `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. |
+| `captureDenials` | object | unset | **Requires config version `1.1.0-alpha`.** Records what the sandbox blocked into a JSON report. See [Learning mode](#learning-mode-capturedenials). |
 
 <details>
 <summary><code>guiAccess</code> — exactly what it opens</summary>
@@ -390,6 +391,61 @@ in `global-name`). Read access to `/private/var/db/mds` and
 `/private/var/folders`. System keychain stores are already covered by the
 baseline `/Library` and `/System` allows.
 </details>
+
+## Learning mode (`captureDenials`)
+
+Learning mode shows what a workload tried to do that the policy did not
+allow, so you can decide what to grant. The config must use version
+`1.1.0-alpha`. The v1 SDKs send `1.0.0` requests, so they can't turn this on;
+use `mxc-exec-mac` instead.
+
+```json
+"seatbelt": {
+    "captureDenials": {
+        "mode": "block",
+        "outputPath": "~/mxc/denials.json"
+    }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Explicit denies, such as `deniedPaths` and `ui` denies, are still enforced. |
+| `outputPath` | a temp file | Absolute path, or one starting with `~/`. The parent directory must exist. |
+
+MXC adds a per-run ID to the file name (`denials.json` becomes
+`denials.<pid>_<id>.json`). Names without an extension get `.json` first.
+MXC writes a `.verbose.json` file next to it and
+prints the actual path on stderr as a JSON line:
+
+```json
+{"type":"captureDenials","outputPath":"/Users/me/mxc/denials.53120_9f2c….json","exitCode":0,"totalDenials":4,"deniedResourcesTruncated":false}
+```
+
+The report uses the [same format as Windows](../../logging-access-denied.md#output-file-the-caller-consumes).
+`deniedResourcesTruncated: true` means some denials may be missing, including
+when a captured report could not be parsed.
+If a workload times out and capture collection or report writing also fails,
+the timeout error includes the capture failure reason.
+
+`mxc-exec-mac --audit config.json` is a shortcut that runs the
+config with `captureDenials` in `"allow"` mode and writes the report to a temp
+file.
+
+**Limitations**
+
+- It can't be combined with `profileOverride`. MXC finds this run's entries
+  by tagging the rules in its generated profile, and it doesn't rewrite a
+  custom profile.
+
+- macOS hides the remote address in network reports (`remote:*:443`), so only
+  the port is known.
+
+- Reads of paths that don't exist aren't reported.
+
+- MXC reads the reports with `log stream`. If it can't collect every report
+  before the workload exits, the verbose file sets `processedEventsTruncated`
+  to `true`. Accounts that can't run `log stream` haven't been tested.
 
 ## Process environment
 
@@ -477,6 +533,7 @@ fail with `Operation not permitted`. Grant the working directory in
 ./mxc-exec-mac config.json                        # config file
 ./mxc-exec-mac --config-base64 <base64-string>    # inline config
 ./mxc-exec-mac --dry-run config.json              # validate, don't run
+./mxc-exec-mac --audit config.json                # record what gets blocked (learning mode)
 ./mxc-exec-mac --debug --log-file mxc.log config.json
 ```
 

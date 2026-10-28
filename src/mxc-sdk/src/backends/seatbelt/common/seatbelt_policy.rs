@@ -123,6 +123,23 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
     Ok(())
 }
 
+/// `seatbelt.captureDenials` relies on tagging the rules of the generated
+/// profile, so a replacement profile cannot be captured.
+pub fn validate_seatbelt_capture_denials(request: &ExecutionRequest) -> Result<(), String> {
+    let Some(config) = request.seatbelt.as_ref() else {
+        return Ok(());
+    };
+    if config.capture_denials.is_some() && config.profile_override.is_some() {
+        return Err("Seatbelt: seatbelt.captureDenials cannot be combined with \
+                    seatbelt.profileOverride. Capture tags the rules in MXC's generated \
+                    profile to find this run's log entries, and MXC does not rewrite a \
+                    custom profile. Remove profileOverride, or add your own \
+                    (with message ...) tags and read them with `log stream`"
+            .to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +270,21 @@ mod tests {
         assert!(!gui_access_effective(&gui_request(true, true)));
         assert!(!gui_access_effective(&gui_request(false, false)));
         assert!(!gui_access_effective(&ExecutionRequest::default()));
+    }
+
+    #[test]
+    fn capture_denials_requires_generated_profile() {
+        let mut r = ExecutionRequest {
+            seatbelt: Some(SeatbeltConfig {
+                capture_denials: Some(Default::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_seatbelt_capture_denials(&r).is_ok());
+
+        r.seatbelt.as_mut().unwrap().profile_override = Some("(version 1)".into());
+        let msg = validate_seatbelt_capture_denials(&r).unwrap_err();
+        assert!(msg.contains("profileOverride"), "got: {msg}");
     }
 }

@@ -25,9 +25,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::learning_mode_core::capture_output::{
+    combine_process_and_teardown_results, random_capture_suffix, unique_denials_output_path,
+    write_capture_denials_document,
+};
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, ProxyAddress, ScriptResponse};
+use crate::mxc_common::models::{
+    CaptureDenialsMode, ExecutionRequest, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -38,14 +44,16 @@ use crate::mxc_common::validator::{
 };
 use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
+use crate::seatbelt_common::capture_analysis::analyze_events;
 #[cfg(test)]
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
+use crate::seatbelt_common::denial_capture::DenialCollector;
 #[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
 use crate::seatbelt_common::profile_builder::build_profile_with_terminals;
 use crate::seatbelt_common::profile_preparation::{
-    expand_tilde, prepare_profile, resolve_policy_path,
+    expand_tilde, prepare_capture_output_path, prepare_profile, resolve_policy_path,
 };
 
 #[link(name = "proc")]
@@ -288,8 +296,11 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .map_err(error_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
             .map_err(error_response)?;
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_capture_denials(request)
+            .map_err(error_response)?;
         // Dry runs never reach spawn, so reject unresolvable paths here too.
         prepare_profile(request).map_err(error_response)?;
+        prepare_capture_output_path(request).map_err(error_response)?;
         resolved_working_directory_opt(request).map_err(error_response)?;
 
         Ok(())
@@ -362,6 +373,7 @@ fn spawn_exec(
     // this is limited to timeout-bounded runs, which are inherently
     // non-interactive.
     let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
+    let capture_plan = plan_denial_capture(request).map_err(error_response)?;
     let (mut command, pty) = build_sandbox_command(
         request,
         proxy_address,
@@ -371,8 +383,17 @@ fn spawn_exec(
             StdioMode::Pty(size) => Some(size),
             _ => None,
         },
+        capture_plan.as_ref().map(|plan| plan.tag.as_str()),
         logger,
     )?;
+    // Fail closed: never run a capture request without a live log stream.
+    if capture_plan.as_ref().is_some_and(|plan| plan.allow_mode) {
+        logger.warning_line(ALLOW_MODE_WARNING);
+    }
+    let capture = capture_plan
+        .map(|plan| plan.start())
+        .transpose()
+        .map_err(error_response)?;
 
     // Always start from a cleared environment so untrusted sandboxed code never
     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
@@ -459,8 +480,52 @@ fn spawn_exec(
         termination_error: None,
         group: new_session || new_group || stdio != StdioMode::Inherit,
         session_id,
+        capture,
+        capture_error: None,
+        capture_warnings: Vec::new(),
+        output_metadata: None,
     }))
 }
+
+struct DenialCapturePlan {
+    tag: String,
+    output_path: PathBuf,
+    allow_mode: bool,
+}
+
+impl DenialCapturePlan {
+    fn start(self) -> Result<ActiveDenialCapture, String> {
+        Ok(ActiveDenialCapture {
+            collector: DenialCollector::start(&self.tag)?,
+            output_path: self.output_path,
+        })
+    }
+}
+
+struct ActiveDenialCapture {
+    collector: DenialCollector,
+    output_path: PathBuf,
+}
+
+/// Picks the log tag and denials file path for a `captureDenials` request.
+fn plan_denial_capture(request: &ExecutionRequest) -> Result<Option<DenialCapturePlan>, String> {
+    let Some(config) = request
+        .seatbelt
+        .as_ref()
+        .and_then(|config| config.capture_denials.as_ref())
+    else {
+        return Ok(None);
+    };
+    let configured_path = prepare_capture_output_path(request)?;
+    Ok(Some(DenialCapturePlan {
+        tag: format!("mxc-capture-{}", random_capture_suffix()?),
+        output_path: unique_denials_output_path(configured_path.as_deref())?,
+        allow_mode: config.mode == CaptureDenialsMode::Allow,
+    }))
+}
+
+const ALLOW_MODE_WARNING: &str = "Seatbelt captureDenials mode 'allow' ran the workload without \
+     enforcing default-denied operations; denials.json lists what would have been blocked";
 
 /// A running Seatbelt-sandboxed process: the child plus, for the pipes path,
 /// its parent-side pipe ends. See [`SandboxProcess`] for the contract.
@@ -491,9 +556,72 @@ struct SeatbeltSandboxProcess {
     /// The child leads an owned session, so job-control descendants in other
     /// process groups can be terminated without touching the host session.
     session_id: Option<libc::pid_t>,
+    /// Live `captureDenials` log stream; consumed by `wait()`.
+    capture: Option<ActiveDenialCapture>,
+    /// A failed capture, replayed by later `wait()` calls.
+    capture_error: Option<(std::io::ErrorKind, String)>,
+    capture_warnings: Vec<String>,
+    output_metadata: Option<SandboxOutputMetadata>,
+}
+
+impl SeatbeltSandboxProcess {
+    /// Drains the capture stream after the child exits and writes denials.json.
+    fn finish_capture(&mut self, exit_code: Option<i32>) -> std::io::Result<()> {
+        if let Some((kind, message)) = &self.capture_error {
+            return Err(std::io::Error::new(*kind, message.clone()));
+        }
+        let Some(capture) = self.capture.take() else {
+            return Ok(());
+        };
+        let result = self.write_capture(capture, exit_code);
+        if let Err(error) = &result {
+            self.capture_error = Some((error.kind(), error.to_string()));
+        }
+        result
+    }
+
+    fn write_capture(
+        &mut self,
+        capture: ActiveDenialCapture,
+        exit_code: Option<i32>,
+    ) -> std::io::Result<()> {
+        let collected = capture.collector.finish().map_err(|error| {
+            std::io::Error::other(format!("captureDenials failed to collect denials: {error}"))
+        })?;
+        if !collected.drained {
+            self.capture_warnings.push(
+                "Seatbelt captureDenials could not confirm that all sandbox log events were \
+                 received; denials.json may be incomplete"
+                    .to_string(),
+            );
+        }
+        // An undrained stream may have dropped late events.
+        let analysis = analyze_events(
+            &collected.events,
+            collected.events_truncated || !collected.drained,
+        );
+        let pointer = write_capture_denials_document(
+            analysis,
+            exit_code.unwrap_or(-1),
+            &capture.output_path,
+        )?;
+        self.output_metadata = Some(SandboxOutputMetadata {
+            capture_denials: Some(pointer.into()),
+            capture_denials_error: None,
+        });
+        Ok(())
+    }
 }
 
 impl SandboxProcess for SeatbeltSandboxProcess {
+    fn warnings(&self) -> Vec<String> {
+        self.capture_warnings.clone()
+    }
+
+    fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.output_metadata.as_ref()
+    }
+
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         if let Some(pty) = self.pty.as_ref() {
             let stdio = pty.take_native_stdio()?;
@@ -746,7 +874,8 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             pty.finish_native_bridge();
         }
         cancel_and_join_discard(pty_thread, &pty_canceller);
-        result
+        let capture_result = self.finish_capture(result.as_ref().ok().copied());
+        combine_process_and_teardown_results(result, capture_result)
     }
 }
 
@@ -782,6 +911,7 @@ fn build_sandbox_command(
     new_session: bool,
     new_group: bool,
     pty_size: Option<PtySize>,
+    capture_tag: Option<&str>,
     logger: &mut Logger,
 ) -> Result<(Command, Option<LivePty>), ScriptResponse> {
     let mut command = Command::new(DEFAULT_SHELL);
@@ -844,7 +974,8 @@ fn build_sandbox_command(
         })?,
         None => Vec::new(),
     };
-    let inputs = prepare_profile(request).map_err(error_response)?;
+    let mut inputs = prepare_profile(request).map_err(error_response)?;
+    inputs.capture_tag = capture_tag.map(str::to_string);
     let profile = build_profile_with_terminals(request, proxy_address, &inputs, &terminal_paths)
         .map_err(error_response)?;
     log_generated_profile(&profile, logger);
@@ -852,6 +983,14 @@ fn build_sandbox_command(
         .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
     let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
 
+    apply_profile_before_exec(&mut command, profile_cstr);
+
+    Ok((command, pty))
+}
+
+/// Applies `profile` with `sandbox_init` in the child, after any earlier
+/// `pre_exec` hooks and before `exec`.
+pub(crate) fn apply_profile_before_exec(command: &mut Command, profile_cstr: CString) {
     // SAFETY: The closure runs after fork(), before exec(). We only call
     // sandbox_init with a pre-allocated CString — no Rust allocations
     // happen inside the closure. sandbox_init is used in this fork+exec
@@ -877,8 +1016,6 @@ fn build_sandbox_command(
             Ok(())
         });
     }
-
-    Ok((command, pty))
 }
 
 fn inherited_terminal_paths() -> std::io::Result<Vec<PathBuf>> {
@@ -1084,6 +1221,7 @@ mod tests {
             !with_pty,
             false,
             with_pty.then_some(PtySize::default()),
+            None,
             &mut logger,
         )
         .expect("build probe command");
@@ -1695,5 +1833,75 @@ os.close(fd)
         };
         let err = absolute_working_directory_with("work", gone).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// Allow mode lets the read through, still lists it, and reports the
+    /// written file through `output_metadata` once `wait` returns.
+    #[test]
+    fn capture_denials_allow_mode_reports_after_wait() {
+        use crate::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
+
+        let directory = tempfile::tempdir().unwrap();
+        let directory = std::fs::canonicalize(directory.path()).unwrap();
+        let secret = directory.join("secret.txt");
+        std::fs::write(&secret, "visible").unwrap();
+        let mut request = base_request();
+        request.script_code = format!("cat '{}'; exit 3", secret.display());
+        request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
+            mode: CaptureDenialsMode::Allow,
+            output_path: Some(directory.join("denials.json").display().to_string()),
+            ..Default::default()
+        });
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+
+        let mut process = SeatbeltScriptRunner::new()
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .expect("spawn");
+        let mut stdout = String::new();
+        std::io::Read::read_to_string(&mut process.take_stdout().unwrap(), &mut stdout).unwrap();
+        assert_eq!(process.wait().unwrap(), 3);
+
+        assert_eq!(stdout, "visible");
+        assert!(logger.warnings().contains(&ALLOW_MODE_WARNING.to_string()));
+        let pointer = process
+            .output_metadata()
+            .and_then(|metadata| metadata.capture_denials.as_ref())
+            .expect("capture pointer");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&pointer.output_path).unwrap()).unwrap();
+        assert_eq!(document["summary"]["exitCode"], 3);
+        assert!(document["denials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|denial| denial["resource"] == secret.display().to_string()
+                && denial["accessType"] == "read"));
+    }
+
+    #[test]
+    fn capture_write_failure_is_repeated_by_later_waits() {
+        use crate::mxc_common::models::CaptureDenialsConfig;
+
+        let directory = tempfile::tempdir().unwrap();
+        let output_dir = directory.path().join("out");
+        std::fs::create_dir(&output_dir).unwrap();
+        let mut request = base_request();
+        request.script_code = "exit 0".to_string();
+        request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
+            output_path: Some(output_dir.join("denials.json").display().to_string()),
+            ..Default::default()
+        });
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let mut process = SeatbeltScriptRunner::new()
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .expect("spawn");
+        std::fs::remove_dir(&output_dir).unwrap();
+
+        let first = process.wait().expect_err("report write must fail");
+        let second = process
+            .wait()
+            .expect_err("a later wait must not report success");
+        assert_eq!(first.to_string(), second.to_string());
+        assert!(process.output_metadata().is_none());
     }
 }

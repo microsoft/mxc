@@ -183,6 +183,7 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty,
         keychain_access,
         extra_mach_lookups,
+        capture_denials,
     } = value;
     wire::Seatbelt {
         profile_override: profile_override.into_option(),
@@ -190,6 +191,19 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),
+        capture_denials: capture_denials
+            .into_option()
+            .map(convert_seatbelt_capture_denials),
+    }
+}
+
+fn convert_seatbelt_capture_denials(
+    value: contract::SeatbeltCaptureDenials,
+) -> wire::SeatbeltCaptureDenials {
+    let contract::SeatbeltCaptureDenials { mode, output_path } = value;
+    wire::SeatbeltCaptureDenials {
+        mode: mode.into_option().map(convert_capture_denials_mode),
+        output_path: output_path.into_option(),
     }
 }
 

@@ -1307,6 +1307,10 @@
       "additionalProperties": false,
       "description": "macOS Seatbelt backend settings.",
       "properties": {
+        "captureDenials": {
+          "$ref": "#/definitions/SeatbeltCaptureDenials",
+          "description": "Records sandbox denials to a JSON report."
+        },
         "extraMachLookups": {
           "description": "Additional Mach service global names the process may resolve.",
           "items": {
@@ -1328,6 +1332,21 @@
         },
         "profileOverride": {
           "description": "Optional override of the generated sandbox profile.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "SeatbeltCaptureDenials": {
+      "additionalProperties": false,
+      "description": "macOS Seatbelt denial-capture settings.",
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/CaptureDenialsMode",
+          "description": "How each ungranted access is handled while it is recorded."
+        },
+        "outputPath": {
+          "description": "Optional absolute file path for the denial report; may start with `~/`.",
           "type": "string"
         }
       },

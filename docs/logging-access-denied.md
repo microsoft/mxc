@@ -15,7 +15,9 @@ surfaces the resulting denial events is layered on top in later work.
 
 > **Platform support.** Learning-mode capabilities are **Windows-only** and
 > apply to the Windows ProcessContainer backend, which requires native PSEC
-> support.
+> support. macOS has a separate `seatbelt.captureDenials` that
+> writes the same report format; see the
+> [Seatbelt guide](backends/seatbelt/seatbelt-backend.md#learning-mode-capturedenials).
 
 ## The two capabilities
 
@@ -394,7 +396,7 @@ provider and reason enums cannot truthfully represent the new WFP diagnostic
 groups. The compatibility projection therefore does not fabricate a legacy
 provider or reason: it omits those groups from the public verbose signature
 array and includes their occurrence counts in the existing overflow counters.
-MXC's native product capture path retains the complete groups in version 5.
+MXC's native product capture path retains the complete groups in version 6.
 
 ### Verbose logging event signatures
 
@@ -411,7 +413,7 @@ to the redaction, timestamp omission, and bounds described below.
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "signatures": [
     {
       "signature": {
@@ -454,10 +456,13 @@ Version `4` adds the schema `eventName` field, the network-decision provider,
 and `schemaUnavailable` outcome used by scoped verbose diagnostics. Version
 `5` adds MXC's internal WFP-specific outcome reasons, typed network decision
 reason, reason-specific configuration recommendation, and exact endpoint
-components. All native PSEC `captureDenials` results write version 5,
-including legacy access-only `StartLearningModeTrace` capture and traces
-with no WFP occurrences. MXC readers that consume captured
-artifacts dispatch versions 3, 4, and 5 to separate closed contracts. They
+components. Version `6` adds the `seatbelt` provider for macOS Seatbelt
+reports. All `captureDenials` results write version 6, including native PSEC
+access-only `StartLearningModeTrace` capture and traces with no WFP
+occurrences. MXC readers that consume captured artifacts dispatch versions 3,
+4, 5, and 6 to separate closed contracts. Seatbelt signatures use
+`providerGuid` `com.apple.security.sandbox`, event ID `0`, and the Seatbelt
+operation (for example `file-read-data`) as `eventName`. They
 reject unknown fields, newer providers/reasons under an older version label,
 and every unsupported version rather than interpreting newer vocabulary with
 an older schema.

@@ -303,10 +303,13 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         "lxc".into(),
         serde_json::to_value(lxc_config).unwrap_or(Value::Null),
     );
-    root.insert(
-        "seatbelt".into(),
-        serde_json::to_value(seatbelt).unwrap_or(Value::Null),
-    );
+    let mut seatbelt_value = serde_json::to_value(seatbelt).unwrap_or(Value::Null);
+    if let Value::Object(seatbelt_map) = &mut seatbelt_value {
+        if let Some(Value::Object(cd)) = seatbelt_map.get_mut("captureDenials") {
+            cd.remove("output_path");
+        }
+    }
+    root.insert("seatbelt".into(), seatbelt_value);
     root.insert(
         "wslc".into(),
         serde_json::to_value(wslc).unwrap_or(Value::Null),
@@ -708,6 +711,30 @@ mod tests {
             block_hash, allow_hash,
             "capture_denials.mode is an enforcement decision and MUST enter the hash"
         );
+    }
+
+    #[test]
+    fn seatbelt_capture_denials_output_path_does_not_change_the_hash() {
+        use crate::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode, SeatbeltConfig};
+
+        let with_path = |output_path: Option<&str>, mode| {
+            let mut r = request();
+            r.seatbelt = Some(SeatbeltConfig {
+                capture_denials: Some(CaptureDenialsConfig {
+                    mode,
+                    output_path: output_path.map(str::to_string),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            policy_hash(&r)
+        };
+        let base = with_path(None, CaptureDenialsMode::Block);
+        assert_eq!(
+            base,
+            with_path(Some("/tmp/denials.json"), CaptureDenialsMode::Block)
+        );
+        assert_ne!(base, with_path(None, CaptureDenialsMode::Allow));
     }
 
     #[test]

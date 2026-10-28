@@ -179,6 +179,11 @@ pub struct SeatbeltConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub extra_mach_lookups: Vec<String>,
+
+    /// Records sandbox denials through the unified log while the workload
+    /// runs. `retain_etl` is unused on macOS.
+    #[serde(rename = "captureDenials", skip_serializing_if = "Option::is_none")]
+    pub capture_denials: Option<CaptureDenialsConfig>,
 }
 
 fn default_nested_pty() -> bool {
@@ -193,6 +198,7 @@ impl Default for SeatbeltConfig {
             nested_pty: true,
             keychain_access: false,
             extra_mach_lookups: Vec::new(),
+            capture_denials: None,
         }
     }
 }
@@ -1226,6 +1232,19 @@ pub struct CaptureDenialsOutput {
 impl CaptureDenialsOutput {
     /// The fixed `type` discriminator value.
     pub const KIND: &'static str = "captureDenials";
+}
+
+impl From<crate::learning_mode_core::DenialsOutputPointer> for CaptureDenialsOutput {
+    fn from(pointer: crate::learning_mode_core::DenialsOutputPointer) -> Self {
+        Self {
+            kind: pointer.kind,
+            output_path: pointer.output_path,
+            exit_code: pointer.exit_code,
+            total_denials: pointer.total_denials,
+            denied_resources_truncated: pointer.denied_resources_truncated,
+            etl_path: None,
+        }
+    }
 }
 
 impl ScriptResponse {

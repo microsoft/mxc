@@ -24,10 +24,17 @@
 //! Apple's Seatbelt sandbox evaluates rules with last-match-wins semantics (within a given
 //! operation), so trailing deny rules take precedence over earlier allow
 //! rules — the behavior callers expect from MXC's `denied_paths`.
+//!
+//! With `seatbelt.captureDenials`, every deny rule carries the run's
+//! `(with message "<tag>")` so its log entries can be attributed to this run.
+//! Allow mode swaps `(deny default)` for `(allow default (with report) ...)`,
+//! and the broad guiAccess grants report under `<tag>:grant`.
 
 use crate::mxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
 use crate::mxc_common::host_is_canonical_loopback;
-use crate::mxc_common::models::{ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress};
+use crate::mxc_common::models::{
+    CaptureDenialsMode, ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress,
+};
 use crate::seatbelt_common::seatbelt_policy;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -40,6 +47,47 @@ pub struct ProfileInputs {
     pub denied_paths: Vec<String>,
     pub developer_dir: Option<String>,
     pub user_keychains: Option<String>,
+    /// Per-run log tag; required when `seatbelt.captureDenials` is set.
+    pub capture_tag: Option<String>,
+}
+
+/// Suffix on the capture tag for accesses allowed by a broad guiAccess grant.
+pub const GRANT_TAG_SUFFIX: &str = ":grant";
+
+/// Capture settings resolved for one profile build.
+struct CaptureRules<'a> {
+    tag: &'a str,
+    allow_mode: bool,
+}
+
+impl CaptureRules<'_> {
+    fn grant_modifier(&self) -> String {
+        format!(
+            " (with report) (with message {})",
+            quote_scheme(&format!("{}{GRANT_TAG_SUFFIX}", self.tag))
+        )
+    }
+}
+
+fn capture_rules<'a>(
+    request: &ExecutionRequest,
+    inputs: &'a ProfileInputs,
+) -> Result<Option<CaptureRules<'a>>, String> {
+    let Some(config) = request
+        .seatbelt
+        .as_ref()
+        .and_then(|c| c.capture_denials.as_ref())
+    else {
+        return Ok(None);
+    };
+    let tag = inputs
+        .capture_tag
+        .as_deref()
+        .ok_or_else(|| "Seatbelt: captureDenials log tag was not prepared".to_string())?;
+    Ok(Some(CaptureRules {
+        tag,
+        allow_mode: config.mode == CaptureDenialsMode::Allow,
+    }))
 }
 
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
@@ -63,19 +111,31 @@ pub(crate) fn build_profile_with_terminals(
     inputs: &ProfileInputs,
     terminal_paths: &[PathBuf],
 ) -> Result<String, String> {
-    if let Some(override_profile) = request
-        .seatbelt
-        .as_ref()
-        .and_then(|c| c.profile_override.as_ref())
-    {
+    let seatbelt = request.seatbelt.as_ref();
+    if let Some(override_profile) = seatbelt.and_then(|c| c.profile_override.as_ref()) {
+        if seatbelt.is_some_and(|c| c.capture_denials.is_some()) {
+            return Err(
+                "Seatbelt: captureDenials cannot tag a profileOverride profile".to_string(),
+            );
+        }
         return Ok(override_profile.clone());
     }
+    let capture = capture_rules(request, inputs)?;
 
     let mut out = String::with_capacity(2048);
 
-    // Header — Apple's Seatbelt requires `(version 1)` and we baseline with deny-default.
+    // Capture allow mode replaces the normal deny-default baseline.
     out.push_str("(version 1)\n");
-    out.push_str("(deny default)\n");
+    match &capture {
+        Some(rules) if rules.allow_mode => {
+            let _ = writeln!(
+                out,
+                "(allow default (with report) (with message {}))",
+                quote_scheme(rules.tag)
+            );
+        }
+        _ => out.push_str("(deny default)\n"),
+    }
 
     // Minimum allow rules so a child process can actually run. These are
     // the same things Apple's own built-in profiles (e.g. no-internet)
@@ -103,16 +163,44 @@ pub(crate) fn build_profile_with_terminals(
     // Policy-derived allow rules.
     let resolved = ResolvedPaths::from_inputs(inputs);
     write_filesystem_allow(&mut out, &resolved);
-    write_network_rules(&mut out, request, proxy_address);
+    write_network_rules(
+        &mut out,
+        request,
+        proxy_address,
+        capture.as_ref().is_some_and(|rules| rules.allow_mode),
+    );
     write_nested_pty_rules(&mut out, request);
     write_keychain_rules(&mut out, request, inputs.user_keychains.as_deref())?;
     write_extra_seatbelt_rules(&mut out, request);
-    write_ui_rules(&mut out, request);
+    write_ui_rules(&mut out, request, capture.as_ref());
 
     // Policy-derived deny rules go LAST so they win on conflict.
     write_filesystem_deny(&mut out, &resolved);
 
-    Ok(out)
+    match capture {
+        Some(rules) => Ok(tag_deny_rules(&out, rules.tag)),
+        None => Ok(out),
+    }
+}
+
+/// Adds `(with message "<tag>")` to every rule that starts with `(deny `,
+/// right after its operation names.
+fn tag_deny_rules(profile: &str, tag: &str) -> String {
+    let modifier = format!(" (with message {})", quote_scheme(tag));
+    let mut out = String::with_capacity(profile.len() + 256);
+    for line in profile.split_inclusive('\n') {
+        let Some(rest) = line.strip_prefix("(deny ") else {
+            out.push_str(line);
+            continue;
+        };
+        let ops_end = rest.find(['(', ')', '\n']).unwrap_or(rest.len());
+        let ops = rest[..ops_end].trim_end();
+        out.push_str("(deny ");
+        out.push_str(ops);
+        out.push_str(&modifier);
+        out.push_str(&rest[ops.len()..]);
+    }
+    out
 }
 
 /// Baseline allow rules required for any sandboxed process to start.
@@ -303,13 +391,13 @@ fn write_network_rules(
     out: &mut String,
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
+    allow_default: bool,
 ) {
     let policy = &request.policy;
     let allow_outbound = seatbelt_policy::egress_allowed(policy);
     match allow_outbound {
         false => {
-            // Pure deny — implicit from `(deny default)`.
-            out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
+            out.push_str(";; --- network: default-deny egress (no general outbound grant) ---\n");
         }
         true => {
             out.push_str(";; --- network: outbound allowed (any host) ---\n");
@@ -317,12 +405,9 @@ fn write_network_rules(
         }
     }
 
-    write_host_loopback_rules(out, policy, allow_outbound);
+    write_host_loopback_rules(out, policy, allow_outbound, allow_default);
 
-    // Emitted last on purpose: among rules whose filters both match, Seatbelt
-    // takes the *last* one. Nothing here denies `localhost` today — the deny
-    // arm needs an open egress default, which skips the proxy entirely — so
-    // going last keeps the port-scoped allow safe if that ever changes.
+    // The proxy port must override the broader host-loopback deny.
     if !allow_outbound {
         if let Some(address) = proxy_address {
             write_proxy_reachability_rules(out, address);
@@ -343,14 +428,17 @@ fn write_network_rules(
 /// where this rule enforces the container-to-host half and the blanket
 /// `network-inbound` grant over-permits the host-to-container half.
 ///
-/// Only the two combinations that actually change the profile emit anything;
-/// deny-under-deny is already covered by `(deny default)`, and allow-under-allow
-/// is already covered by the blanket outbound allow.
-fn write_host_loopback_rules(out: &mut String, policy: &ContainerPolicy, allow_outbound: bool) {
+/// Capture allow mode needs an explicit deny even when authored egress is deny.
+fn write_host_loopback_rules(
+    out: &mut String,
+    policy: &ContainerPolicy,
+    allow_outbound: bool,
+    allow_default: bool,
+) {
     let loopback_allowed = seatbelt_policy::host_loopback_allowed(policy);
 
     match (loopback_allowed, allow_outbound) {
-        (false, true) => {
+        (false, _) if allow_outbound || allow_default => {
             // `localhost` matches this machine on any of its addresses, so this
             // also closes the "reach the host via its LAN IP" path.
             out.push_str(";; --- network: ingress.hostLoopback=deny — close host loopback,\n");
@@ -378,21 +466,8 @@ fn write_outbound_allow_rules(out: &mut String) {
     out.push_str("(allow system-socket)\n");
 }
 
-/// Emit the outbound rules that let the sandbox reach the proxy while the
-/// default policy stays deny.
-///
-/// Only called from the default-deny arms of [`write_network_rules`], so
-/// everything here sits under a `(deny default)` baseline.
-///
-/// A loopback proxy is scoped to its exact `localhost:<port>`, so clients that
-/// ignore `HTTP_PROXY` can't reach any other port or machine. Note the scoping
-/// is by port, not by address: `localhost` means "this machine", so the rule
-/// also covers the host's non-loopback addresses on that same port. A
-/// non-loopback proxy can't be expressed at all — Seatbelt's `(remote ip ...)`
-/// matches neither DNS names nor specific addresses — so it fails closed. The
-/// backend validator rejects that combination before profile construction;
-/// failing closed here keeps any future disagreement about what counts as
-/// loopback from silently opening up egress.
+/// Grant proxy reachability under authored deny-egress, after any loopback deny.
+/// `localhost:<port>` covers every host address; non-loopback proxies are rejected.
 fn write_proxy_reachability_rules(out: &mut String, proxy_address: &ProxyAddress) {
     if host_is_canonical_loopback(proxy_address.host()) {
         let _ = writeln!(
@@ -424,7 +499,7 @@ fn write_local_network_rules(out: &mut String, allow_ingress: bool) {
     out.push_str("(allow network-inbound (local ip))\n");
 }
 
-fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
+fn write_ui_rules(out: &mut String, request: &ExecutionRequest, capture: Option<&CaptureRules>) {
     let ui = &request.policy.ui;
     let gui_access = seatbelt_policy::gui_access_effective(request);
 
@@ -446,15 +521,19 @@ fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
             // versions. Rather than maintaining a fragile allowlist, we
             // permit all mach-lookup when guiAccess is on. Filesystem and
             // network policies still apply.
+            // Under captureDenials, these grants also report each use.
+            let report = capture
+                .map(CaptureRules::grant_modifier)
+                .unwrap_or_default();
             out.push_str(";; --- guiAccess: allow all Mach IPC for GUI applications ---\n");
-            out.push_str("(allow mach-lookup)\n");
+            let _ = writeln!(out, "(allow mach-lookup{report})");
             // GUI apps must register their own Mach services (XPC listeners)
             // to receive callbacks from WindowServer and other system agents.
-            out.push_str("(allow mach-register)\n");
+            let _ = writeln!(out, "(allow mach-register{report})");
 
             // IOKit user-client access for GPU / Metal rendering
             out.push_str(";; --- guiAccess: allow IOKit for GPU rendering ---\n");
-            out.push_str("(allow iokit-open)\n");
+            let _ = writeln!(out, "(allow iokit-open{report})");
 
             // Needed for app temp files, caches, GPU shader caches
             out.push_str(";; --- guiAccess: allow writing to per-user temp/cache ---\n");
@@ -1684,6 +1763,7 @@ mod tests {
             denied_paths: vec!["/prepared/denied".into()],
             developer_dir: Some("/Applications/ProfileTest.app".into()),
             user_keychains: Some("/Users/prepared/Library/Keychains".into()),
+            capture_tag: None,
         };
         let profile = super::build_profile_with_proxy(&request, None, &inputs).unwrap();
         for path in [
@@ -1711,5 +1791,152 @@ mod tests {
         let error =
             super::build_profile_with_proxy(&request, None, &ProfileInputs::default()).unwrap_err();
         assert!(error.contains("not prepared for keychainAccess"), "{error}");
+    }
+
+    fn capture_request(mode: CaptureDenialsMode, gui_access: bool) -> ExecutionRequest {
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: !gui_access,
+            clipboard: ClipboardPolicy::None,
+            injection: false,
+        };
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access,
+            capture_denials: Some(crate::mxc_common::models::CaptureDenialsConfig {
+                mode,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        r
+    }
+
+    fn capture_profile(request: &ExecutionRequest) -> String {
+        let inputs = ProfileInputs {
+            denied_paths: vec!["/prepared/denied".into()],
+            capture_tag: Some("mxc-capture-test".into()),
+            ..Default::default()
+        };
+        super::build_profile_with_proxy(request, None, &inputs).unwrap()
+    }
+
+    fn deny_lines(profile: &str) -> Vec<&str> {
+        profile
+            .lines()
+            .filter(|line| line.starts_with("(deny "))
+            .collect()
+    }
+
+    #[test]
+    fn capture_block_mode_tags_every_deny_rule() {
+        let p = capture_profile(&capture_request(CaptureDenialsMode::Block, false));
+        assert!(
+            p.contains("(deny default (with message \"mxc-capture-test\"))"),
+            "{p}"
+        );
+        // ui.disable, clipboard, injection, hostLoopback, and deniedPaths denies.
+        let denies = deny_lines(&p);
+        assert!(denies.len() >= 6, "{p}");
+        for line in denies {
+            assert!(
+                line.contains(" (with message \"mxc-capture-test\")"),
+                "{line}"
+            );
+        }
+        assert!(p.contains(
+            "(deny network-outbound (with message \"mxc-capture-test\") (remote ip \"localhost:*\"))"
+        ));
+    }
+
+    #[test]
+    fn capture_allow_mode_reports_instead_of_denying_by_default() {
+        let p = capture_profile(&capture_request(CaptureDenialsMode::Allow, false));
+        assert!(p.starts_with(
+            "(version 1)\n(allow default (with report) (with message \"mxc-capture-test\"))\n"
+        ));
+        assert!(!p.contains("(deny default"), "{p}");
+        // Explicit denies stay enforced.
+        assert!(p.contains(
+            "(deny file-read* file-read-metadata file-write* network-bind network-outbound (with message \"mxc-capture-test\")\n"
+        ));
+    }
+
+    #[test]
+    fn capture_allow_mode_preserves_loopback_policy_and_proxy_exception() {
+        let inputs = ProfileInputs {
+            capture_tag: Some("mxc-capture-test".into()),
+            ..Default::default()
+        };
+        let proxy = ProxyAddress::new("127.0.0.1".into(), 44444);
+        for loopback in [NetworkAction::Deny, NetworkAction::Allow] {
+            let mut request = capture_request(CaptureDenialsMode::Allow, false);
+            request.policy.network_egress = Some(egress(NetworkAction::Deny));
+            request.policy.network_ingress =
+                Some(crate::mxc_common::models::NetworkIngressPolicy {
+                    default: NetworkAction::Allow,
+                    host_loopback: loopback,
+                });
+            let loopback_rule = match loopback {
+                NetworkAction::Deny =>
+                    "(deny network-outbound (with message \"mxc-capture-test\") (remote ip \"localhost:*\"))",
+                NetworkAction::Allow =>
+                    "(allow network-outbound (remote ip \"localhost:*\"))",
+            };
+            let profile = super::build_profile_with_proxy(&request, None, &inputs).unwrap();
+            assert!(profile.contains(loopback_rule), "{profile}");
+
+            let profile = super::build_profile_with_proxy(&request, Some(&proxy), &inputs).unwrap();
+            let loopback_position = profile.find(loopback_rule).expect("loopback rule");
+            let proxy_position = profile
+                .find("(allow network-outbound (remote ip \"localhost:44444\"))")
+                .expect("proxy-port exception");
+            assert!(proxy_position > loopback_position, "{profile}");
+        }
+    }
+
+    #[test]
+    fn capture_reports_broad_gui_grants_under_the_grant_tag() {
+        let p = capture_profile(&capture_request(CaptureDenialsMode::Block, true));
+        let report = " (with report) (with message \"mxc-capture-test:grant\")";
+        for op in ["mach-lookup", "mach-register", "iokit-open"] {
+            assert!(p.contains(&format!("(allow {op}{report})")), "{op}: {p}");
+        }
+    }
+
+    #[test]
+    fn capture_without_a_prepared_tag_fails_closed() {
+        let request = capture_request(CaptureDenialsMode::Block, false);
+        let error =
+            super::build_profile_with_proxy(&request, None, &ProfileInputs::default()).unwrap_err();
+        assert!(error.contains("log tag was not prepared"), "{error}");
+
+        let mut request = request;
+        request.seatbelt.as_mut().unwrap().profile_override = Some("(version 1)".into());
+        let error =
+            super::build_profile_with_proxy(&request, None, &ProfileInputs::default()).unwrap_err();
+        assert!(error.contains("profileOverride"), "{error}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_profiles_compile_in_the_macos_sandbox() {
+        for (mode, gui_access) in [
+            (CaptureDenialsMode::Block, false),
+            (CaptureDenialsMode::Allow, false),
+            (CaptureDenialsMode::Block, true),
+            (CaptureDenialsMode::Allow, true),
+        ] {
+            let profile = capture_profile(&capture_request(mode, gui_access));
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/usr/bin/true"])
+                .output()
+                .expect("sandbox-exec runs");
+            assert!(
+                output.status.success(),
+                "{mode:?}/{gui_access}: {}\n{profile}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

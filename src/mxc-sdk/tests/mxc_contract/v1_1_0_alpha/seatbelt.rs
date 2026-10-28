@@ -192,3 +192,42 @@ fn rejects_seatbelt_and_macos_sandbox_section_alias_together() {
 
     assert_invalid(json);
 }
+
+#[test]
+fn accepts_seatbelt_capture_denials() {
+    for body in [
+        r#"{}"#,
+        r#"{"mode": "block"}"#,
+        r#"{"mode": "allow", "outputPath": "/tmp/denials.json"}"#,
+    ] {
+        let json = format!(
+            r#"{{
+                "version": "1.1.0-alpha",
+                "seatbelt": {{"captureDenials": {body}}},
+                "process": {{"commandLine": "echo"}}
+            }}"#
+        );
+
+        assert_valid(&json);
+    }
+}
+
+#[test]
+fn rejects_invalid_seatbelt_capture_denials() {
+    for body in [
+        r#"true"#,
+        r#"{"mode": "audit"}"#,
+        r#"{"outputPath": 1}"#,
+        r#"{"retainEtl": true}"#,
+    ] {
+        let json = format!(
+            r#"{{
+                "version": "1.1.0-alpha",
+                "seatbelt": {{"captureDenials": {body}}},
+                "process": {{"commandLine": "echo"}}
+            }}"#
+        );
+
+        assert_invalid(&json);
+    }
+}

@@ -418,6 +418,19 @@ pub struct Seatbelt {
     pub keychain_access: Option<bool>,
     /// Additional Mach service global-names the inner process may resolve.
     pub extra_mach_lookups: Option<Vec<String>>,
+    /// Seatbelt denial capture (development contract only).
+    pub capture_denials: Option<SeatbeltCaptureDenials>,
+}
+
+/// macOS Seatbelt denial-capture settings.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SeatbeltCaptureDenials {
+    /// Defaults to `block` when omitted.
+    pub mode: Option<CaptureDenialsMode>,
+    /// Absolute path for the JSON denials report; a run id is inserted into
+    /// the file stem. Its parent directory must exist.
+    pub output_path: Option<String>,
 }
 
 /// Telemetry configuration (`telemetry`).
