@@ -128,9 +128,10 @@ A desktop session or service whose `PATH` leaves out `/usr/sbin` therefore
 still finds `iptables` there. MXC uses the first executable file with the
 tool's name and launches it from the path its checks approved. If that file
 cannot start, is too old, or uses an iptables backend the sandbox cannot drive,
-the request fails with an error naming the file; MXC does not try another copy.
-Empty and relative `PATH` entries are ignored, so a tool is never taken from the
-current directory.
+the request fails; MXC does not try another copy. The error names the file for
+the network tools, and for a `bwrap` that is not executable, is missing its
+interpreter or loader, or is too old. Empty and relative `PATH` entries are
+ignored, so a tool is never taken from the current directory.
 
 The lookup applies only to the host programs that set up the sandbox. The
 command inside the sandbox gets its own `PATH`; see

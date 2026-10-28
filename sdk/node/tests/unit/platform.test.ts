@@ -1510,6 +1510,31 @@ describe('bwrap subprocess helpers', () => {
   );
 
   it(
+    'follows symlinks before `..` in a PATH entry, as the native lookup does',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-dotdot-'));
+      try {
+        const release = path.join(root, 'srv', 'releases', 'v1');
+        fs.mkdirSync(release, { recursive: true });
+        fs.mkdirSync(path.join(root, 'srv', 'releases', 'bin'));
+        fs.mkdirSync(path.join(root, 'opt', 'bin'), { recursive: true });
+        fs.symlinkSync(release, path.join(root, 'opt', 'current'));
+        writeFakeBwrap(path.join(root, 'srv', 'releases', 'bin'), '0.6.0');
+        writeFakeBwrap(path.join(root, 'opt', 'bin'), '0.9.0');
+        const entry = `${root}/opt/current/../bin`;
+
+        assert.deepStrictEqual(
+          withBwrapSearch(entry, [], () => _runBwrapVersionCommand(3000)),
+          { kind: 'output', path: `${entry}/bwrap`, stdout: 'bubblewrap 0.6.0\n' },
+        );
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
     'ignores a relative PATH entry',
     { skip: os.platform() !== 'linux' },
     () => {

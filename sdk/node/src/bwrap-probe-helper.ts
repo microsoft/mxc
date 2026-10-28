@@ -77,7 +77,10 @@ type BwrapLookup =
 async function findBwrap(): Promise<BwrapLookup> {
   let notExecutable: string | undefined;
   for (const directory of searchDirectories()) {
-    const candidate = path.join(directory, 'bwrap');
+    // path.join would collapse `..` before the kernel follows symlinks, so it
+    // could check a different file than the native lookup.
+    const separator = directory.endsWith(path.sep) ? '' : path.sep;
+    const candidate = `${directory}${separator}bwrap`;
     try {
       if (!(await fs.stat(candidate)).isFile()) continue;
     } catch {
