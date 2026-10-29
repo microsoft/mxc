@@ -149,10 +149,15 @@ does not check out a replacement. Another reservation requires an explicit
 provision. The backend will report release acceptance, not completion of the
 service's reset process.
 
-The relay finishes before returning a completed `ExecHandle`; it exposes no
-live remote cancellation handle. Normal nonzero guest exit codes are preserved.
-Transport loss before `EXIT` or a remote `ERROR` yields the abnormal-exit
-sentinel `-1`, not a confirmed remote exit.
+The relay returns a completed `ExecHandle` with `ExecOutcome::Exited(code)` only
+after an actual `EXIT` frame. All reported guest exit codes, including `-1`,
+are preserved. It exposes no live remote cancellation handle.
+Transport loss before `EXIT` or a remote `ERROR` returns
+`MxcError::backend_error`, with distinct operation-specific `details.code`
+values and explicit command-outcome uncertainty where the outcome cannot be
+established. A remote `ERROR` retains available service failure context; it
+does not imply a confirmed process exit or kill. Native execution reports the
+structured error on stderr, without appending it to workload stdout.
 
 ## Backend applicability and availability
 
@@ -373,7 +378,7 @@ results outside it.
 | Request rejected locally | Invalid configuration, policy or ID fails before a service request, so the rejected operation causes no remote action. |
 | Checkout outcome unknown or ID lost | A reservation may exist without a usable returned ID. Uncertain checkout errors report `possiblySucceeded` and available request context. MXC does not automatically retry checkout, guarantee release, or reconstruct a lost ID. Service-side reconciliation is outside this milestone. |
 | Readiness failure | The reservation is not automatically released or replaced. The caller can retry readiness with the retained ID and valid credentials, or explicitly release it. |
-| Execution failure or caller disconnect | MXC reports connection failures explicitly. Connection loss or a remote error after execution begins can leave the command outcome unknown; the completed handle reports `-1`, while local I/O/protocol failures can return errors. Output already relayed is retained, commands are not automatically replayed, and caller exit/cancellation does not guarantee remote process cleanup or reservation release. |
+| Execution failure or caller disconnect | Connection loss, remote `ERROR` and local I/O/protocol failures return structured MXC errors, not synthetic command exits. Errors distinguish the failure cause and report command-outcome uncertainty when applicable; no confirmed exit or remote cleanup is inferred. Output already relayed is retained, commands are not automatically replayed, and caller exit/cancellation does not guarantee remote process cleanup or reservation release. |
 | Release failure or lost response | The reservation may remain, or release may already have been accepted. The caller retains the ID and deployment/account context, reports cleanup failure separately from the original failure, and retries release against the same ID with valid CP credentials under a separate cleanup budget. |
 | Release accepted, reservation expired, or later checkout | Release is idempotent, but acceptance does not confirm completed reset/sanitization or reusable capacity. Expired reservations surface service errors, not an implicit replacement or restoration of guest data. A new checkout is independent and does not clean up an old reservation; the caller retains its ID for cleanup, and leaked capacity may cause the new checkout to fail. |
 
@@ -409,7 +414,7 @@ while existing-reservation exec supports synchronous relayed stdio.
 | `w365agents_cp_loopback` plus lifecycle fixture | Successful checkout with equal IDs, omitted computer ID, different computer ID, malformed GUID/body or lost response. | Equal/omitted computer IDs produce the same session-based ID; mismatch/unusable success has `possiblySucceeded` and no minted usable ID or second POST. One failure is not proof no reservation exists. |
 | CP/status/upgrade failure fixtures | 401, 403, 404, 429, 500, other non-success and malformed responses. | Errors retain operation-specific categories/request IDs; 500 checkout reports uncertainty; no automatic retry/fallback/escalation occurs. |
 | Readiness fixture | Waiting/Live then Ready, unknown state, expired budget, `readyTimeoutMs: 0`. | Success only on Ready; timeout has last state; zero polls once; no release or replacement on timeout. |
-| `w365agents_loopback` and lifecycle relay fixture | Input/EOF, stdout/stderr frames, EXIT 0 and 7, oversized start payload, oversized/malformed received frames, loss before EXIT, remote ERROR and local output error. | I/O and exit codes are preserved; oversized EXEC_START fails before dial; oversized/malformed received frames fail explicitly; post-upgrade loss/ERROR gives `-1`, local failures surface errors, and commands are never replayed automatically after failure. |
+| `w365agents_loopback` and lifecycle relay fixture | Input/EOF, stdout/stderr frames, EXIT 0, 7 and -1, oversized start payload, oversized/malformed received frames, loss before EXIT, remote ERROR and local output error. | I/O and actual EXIT codes are preserved, including -1. Oversized EXEC_START fails before dial; oversized/malformed received frames fail explicitly. Post-upgrade loss and remote ERROR return `backend_error` with distinct operation-specific codes and appropriate outcome-uncertainty details, not `ExecCompleted`; local failures also surface errors. Native errors go to stderr without altering already-relayed stdout, and commands are never replayed automatically after failure. |
 | `w365agents_correlation_loopback` and TLS fixtures | Correlation off/on, secrets in config/metadata, invalid certificates, host/header injection and redirect responses. | No blank correlation header, no leaked token/ticket in diagnostics; TLS cannot be bypassed in production; no redirect or credential forwarding. |
 | Lifecycle release/recovery fixture | Exec fails, release fails/response is lost, caller retries release with retained ID and renewed token; response 200/202/204/404. | Primary and cleanup results both retained; retry targets same session only; report acceptance without reset completion. |
 | Lifecycle subsequent-creation fixture | After failed cleanup of reservation A, explicitly provision B, then retry cleanup A. | Exactly one new checkout; distinct returned IDs; cleanup A never targets B; no hidden cleanup/reallocation or shared local registry corruption. |
