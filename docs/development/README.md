@@ -16,6 +16,7 @@ terms, plain-English alternatives, and guidance on naming specific types.
 - [Versioning design](architecture/versioning.md)
 - [Feature spec and review template](architecture/designs/feature-spec-template.md)
 - [API proposal and review template](architecture/designs/api-spec-template.md)
+- [Windows 365 for Agents backend design](architecture/designs/1615-w365a-backend/README.md)
 - [Telemetry architecture](architecture/telemetry.md)
 - [Telemetry consent design](architecture/telemetry-consent-design.md)
 - [IsolationSession one-shot architecture](architecture/backends/isolation-session/oneshot.md)
