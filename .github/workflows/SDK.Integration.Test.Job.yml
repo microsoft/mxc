@@ -17,7 +17,7 @@ jobs:
           - name_label: windows-node26
             os_label: windows
             runner: windows-latest
-            node_version: 26.8.0
+            node_version: 26.8.2
           - name_label: linux
             os_label: linux
             runner: ubuntu-latest
