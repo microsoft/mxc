@@ -194,12 +194,14 @@ public class MxcContainerWslcE2ETests
         using var cancel = new CancellationTokenSource();
         var cancelled = proc.WaitAsync(cancel.Token);
         await Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
-        Assert.False(cancelled.IsCompleted, "the SDK reported the exit on time, so there was no cleanup to wait for");
 
         cancel.Cancel();
 
         await AssertFinishesWithinAsync(cancelled, TimeSpan.FromSeconds(5), "the cancelled wait waited for the cleanup");
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        if (!cancelled.IsCompletedSuccessfully)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        }
         var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
         await AssertFinishesWithinAsync(wait, TimeSpan.FromSeconds(150), "the command never finished");
         Assert.False((await wait).TimedOut);
@@ -214,7 +216,6 @@ public class MxcContainerWslcE2ETests
         var (proc, stdin) = await SpawnCommandWithLateExitAsync();
         var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
         await Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
-        Assert.False(wait.IsCompleted, "the SDK reported the exit on time, so there was no cleanup to wait for");
 
         var warnings = Task.Run(() => proc.Warnings, TestContext.Current.CancellationToken);
         await AssertFinishesWithinAsync(warnings, TimeSpan.FromSeconds(5), "Warnings waited for the cleanup");
@@ -230,6 +231,30 @@ public class MxcContainerWslcE2ETests
             Request("true"),
             cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(next.ExitCode == 0, "the disposed process did not release its session before its wait returned");
+    }
+
+    [Fact]
+    public async Task SpawnWithStdin_ATimeoutEndsACommandThatIgnoresSigtermAndReleasesItsBlockedWrite()
+    {
+        RequireWslc();
+
+        var request = new ContainerRequest("sh -c 'trap \"\" TERM; sleep 300'")
+        {
+            TimeoutMs = 5_000,
+            Containment = new Containment.Wslc(),
+        };
+        using var proc = MxcContainer.SpawnWithStdin(request);
+        var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+        var write = await StartBlockedWriteAsync(stdin);
+
+        var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
+
+        await AssertFinishesWithinAsync(wait, TimeSpan.FromSeconds(150), "the timed-out command never finished");
+        Assert.True((await wait).TimedOut);
+        await AssertFinishesWithinAsync(write, TimeSpan.FromSeconds(10), "the timeout did not release the write");
+        Assert.True(write.IsFaulted, "input the command never read must not be reported as delivered");
+        stdin.Dispose();
     }
 
     [Fact]

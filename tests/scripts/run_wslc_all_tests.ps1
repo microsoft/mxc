@@ -635,6 +635,18 @@ try {
         if (($r.Stdout + $r.Stderr) -notmatch 'timed out') { return "the timeout was not reported (stderr: $($r.Stderr.Trim()))" }
     }))
 
+    # Host stdin stays open, so the marker could only come from stdin being
+    # closed while the command was still running.
+    $null = $results.Add((Invoke-WslcStdinTest "a timed-out reader that ignores SIGTERM never sees end-of-file" {
+        $h = Start-WslcStdinRun -Command 'sh -c ''trap "" TERM; cat; echo SAW-EOF-BEFORE-STOP''' -TimeoutMs 3000 -WriteStdin
+        $r = Wait-WslcStdinRun $h -Seconds 180
+        Close-WslcStdin $h
+        Write-Host ("(took {0:N1}s) " -f $r.Seconds) -NoNewline -ForegroundColor Gray
+        if (-not $r.Exited) { return "wxc-exec did not exit within 180s of a 3s timeout" }
+        if ($r.ExitCode -ne -1) { return "expected exit -1, got $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -match 'SAW-EOF-BEFORE-STOP') { return "the command saw end-of-file before it was stopped" }
+    }))
+
     # The WSLc SDK reports the exit of a command that left a lot of input unread
     # late, and may drop output the command wrote after its input backed up.
     $null = $results.Add((Invoke-WslcStdinTest "a stdin flood into a command that ignores it finishes without losing output silently" {

@@ -144,6 +144,7 @@ public class MxcProcess : IMxcProcess
     private ReadStreamState _stderrState;
 
     private readonly List<Task> _drainTasks = new();
+    private readonly List<MxcStreamCloser> _drainClosers = new();
 
     // The policy timeout (if any) and a monotonic start stamp. The polling wait
     // path enforces this deadline itself: mxc_sandbox_try_wait never kills, and
@@ -454,7 +455,7 @@ public class MxcProcess : IMxcProcess
     /// </summary>
     /// <returns>The exit code, or a timed-out result.</returns>
     /// <exception cref="MxcException">A wait error occurred.</exception>
-    public WaitResult Wait() => WaitCore(CancellationToken.None);
+    public WaitResult Wait() => WaitCore();
 
     /// <summary>
     /// Awaitable form of <see cref="Wait"/>. Honours <paramref name="cancellationToken"/>
@@ -466,7 +467,7 @@ public class MxcProcess : IMxcProcess
     /// process's cleanup, which carries on for a later wait to return.
     /// </remarks>
     public Task<WaitResult> WaitAsync(CancellationToken cancellationToken = default) =>
-        Task.Run(() => WaitCore(cancellationToken), cancellationToken);
+        Task.Run(() => WaitCoreAsync(cancellationToken), cancellationToken);
 
     /// <summary>
     /// Check whether the child has exited without blocking.
@@ -484,7 +485,9 @@ public class MxcProcess : IMxcProcess
     /// This is a status probe only. Call <see cref="Wait"/> or
     /// <see cref="WaitAsync(CancellationToken)"/> after exit to complete
     /// backend finalization, reclaim descendants, and make output metadata
-    /// available.
+    /// available. While a wait is finishing the cleanup of a process it killed
+    /// at its timeout, this returns <see langword="false"/> until that cleanup
+    /// completes.
     /// </remarks>
     /// <exception cref="MxcException">The process status could not be queried.</exception>
     public bool TryGetExitCode(out int exitCode)
@@ -560,28 +563,52 @@ public class MxcProcess : IMxcProcess
         return true;
     }
 
-    private WaitResult WaitCore(CancellationToken cancellationToken)
+    private WaitResult WaitCore()
+    {
+        PrepareWait();
+        var poll = MinPollInterval;
+        while (true)
+        {
+            if (PollForFinishing() is { } finishing)
+            {
+                return finishing.GetAwaiter().GetResult();
+            }
+            Thread.Sleep(poll);
+            poll = NextPollInterval(poll);
+        }
+    }
+
+    // Awaits rather than blocks, so a wait holds no pool thread while the
+    // native cleanup runs.
+    private async Task<WaitResult> WaitCoreAsync(CancellationToken cancellationToken)
+    {
+        PrepareWait();
+        var poll = MinPollInterval;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (PollForFinishing() is { } finishing)
+            {
+                return await finishing.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            await Task.Delay(poll, cancellationToken).ConfigureAwait(false);
+            poll = NextPollInterval(poll);
+        }
+    }
+
+    private void PrepareWait()
     {
         if (_waitClosesUntakenStdin)
         {
             CloseUntakenStdin();
         }
         EnsureDrainUntaken();
+    }
 
-        var poll = MinPollInterval;
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (PollForFinishing() is { } finishing)
-            {
-                return finishing.WaitAsync(cancellationToken).GetAwaiter().GetResult();
-            }
-
-            cancellationToken.WaitHandle.WaitOne(poll);
-            var next = poll + poll;
-            poll = next > MaxPollInterval ? MaxPollInterval : next;
-        }
+    private static TimeSpan NextPollInterval(TimeSpan poll)
+    {
+        var next = poll + poll;
+        return next > MaxPollInterval ? MaxPollInterval : next;
     }
 
     private Task<WaitResult>? PollForFinishing()
@@ -672,21 +699,19 @@ public class MxcProcess : IMxcProcess
     }
 
     // A Dispose during the native wait leaves the release to here, before any
-    // wait sees the result.
+    // wait sees the result. Draining output can outlive the process, so it is
+    // not waited for.
     private void EndFinishing()
     {
-        List<Task>? drains = null;
+        bool disposed;
         lock (_controlLock)
         {
             _isFinishing = false;
-            if (_disposed)
-            {
-                drains = new List<Task>(_drainTasks);
-            }
+            disposed = _disposed;
         }
-        if (drains is not null)
+        if (disposed)
         {
-            ReleaseNative(drains);
+            ReleaseNative(joinDrainsInBackground: true);
         }
     }
 
@@ -885,6 +910,13 @@ public class MxcProcess : IMxcProcess
                 return;
             }
             slot = new MxcReadPipeStream(MxcReadStreamHandle.FromRaw(s));
+            var closer = stdout
+                ? NativeMethods.mxc_sandbox_stdout_closer(_handle.Ptr)
+                : NativeMethods.mxc_sandbox_stderr_closer(_handle.Ptr);
+            if (closer is not null)
+            {
+                _drainClosers.Add(new MxcStreamCloser(MxcStreamCloserHandle.FromRaw(closer)));
+            }
         }
         state = ReadStreamState.Draining;
         var stream = slot;
@@ -917,7 +949,6 @@ public class MxcProcess : IMxcProcess
     /// </remarks>
     public void Dispose()
     {
-        List<Task> drains;
         lock (_controlLock)
         {
             if (_disposed)
@@ -929,33 +960,49 @@ public class MxcProcess : IMxcProcess
             {
                 return;
             }
-            // Snapshot the drain tasks under the lock; no new ones start once
-            // _disposed is set (EnsureDrainUntaken throws).
-            drains = new List<Task>(_drainTasks);
         }
-        ReleaseNative(drains);
+        ReleaseNative(joinDrainsInBackground: false);
     }
 
-    private void ReleaseNative(List<Task> drains)
+    private void ReleaseNative(bool joinDrainsInBackground)
     {
         // Free the sandbox handle first: mxc_sandbox_free kills the child tree,
         // closing the child's stdout/stderr write ends so any blocked reader or
         // drain task gets EOF and unblocks.
         _handle.Dispose();
 
-        // Now the drain/read tasks observe EOF and finish; wait for them before
-        // releasing the stream handles so no detached task keeps running.
-        // Refcounting already makes the free itself safe against an in-flight
-        // read; this just avoids leaking background tasks.
+        // A descendant that outlives the process can keep its output open.
+        foreach (var closer in _drainClosers)
+        {
+            CloseQuietly(closer, required: false);
+        }
+
+        if (joinDrainsInBackground)
+        {
+            _ = Task.Run(ReleaseStreams);
+        }
+        else
+        {
+            ReleaseStreams();
+        }
+    }
+
+    private void ReleaseStreams()
+    {
+        // Joined before the stream handles are released so no drain task outlives them.
         try
         {
-            Task.WaitAll(drains.ToArray());
+            Task.WaitAll(_drainTasks.ToArray());
         }
         catch
         {
             // Faulted drain tasks are best-effort; their handles are freed below.
         }
 
+        foreach (var closer in _drainClosers)
+        {
+            closer.Dispose();
+        }
         _stdin?.Dispose();
         _stdout?.Dispose();
         _stderr?.Dispose();
