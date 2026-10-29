@@ -1157,7 +1157,7 @@ fn start_session_boot(
                     }
                     .map(BootedSession)
                     .map_err(|failure| BootFailure {
-                        error: sr_err(failure.response),
+                        error: sr_err(*failure.response),
                         store_may_be_held: failure.store_may_be_held,
                     })
                 }

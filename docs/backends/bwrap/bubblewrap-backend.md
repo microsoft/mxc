@@ -28,7 +28,8 @@ requiring root privileges or a container runtime.
   compatibility on x86-64, and AArch32 compatibility on AArch64. Platform
   detection reports Bubblewrap as unavailable on architectures for which MXC
   cannot generate the required seccomp program.
-- **Bubblewrap** installed and on PATH:
+- **Bubblewrap** installed (see [Host tool lookup](#host-tool-lookup) for where
+  MXC looks for it):
   ```bash
   # Debian/Ubuntu
   sudo apt install bubblewrap
@@ -51,14 +52,15 @@ requiring root privileges or a container runtime.
   alive. Successful Rust-executor advisory results are cached for the process
   lifetime; Rust failures are not cached, and execution validation probes again
   before launch so a changed PATH target cannot reuse an advisory result. The
+  launch then runs the same `bwrap` file that validation checked. The
   Node SDK caches the complete `getPlatformSupport()` result, including
   failures, for the module lifetime; restart the Node process after remediating
   the host.
-- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed
-  and on PATH, plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
+- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed,
+  plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
   `--keep-caps`), `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
   `ip6tables-restore` for the in-namespace egress and ingress rules, a POSIX
-  `sh` (the supervisor runs as `sh -c`), and the
+  `sh` and `sleep` (the supervisor runs as `sh -c`), and the
   `nf_conntrack` kernel module loaded for the inbound chain's connection-state
   match (unprivileged Bubblewrap cannot load it on demand).
 
@@ -112,6 +114,29 @@ requiring root privileges or a container runtime.
   cat /proc/sys/kernel/unprivileged_userns_clone
   ```
 
+### Host tool lookup
+
+MXC finds `bwrap` and the network tools above in this order, both for the
+availability checks (including the Node SDK's `getPlatformSupport()`) and for
+the launch:
+
+1. The directories on the calling process's `PATH`, in order.
+2. `/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, and
+   `/bin`, in that order.
+
+A desktop session or service whose `PATH` leaves out `/usr/sbin` therefore
+still finds `iptables` there. MXC uses the first executable file with the
+tool's name and launches it from the path its checks approved. If that file
+cannot start, is too old, or uses an iptables backend the sandbox cannot drive,
+the request fails; MXC does not try another copy. The error names the file for
+the network tools, and for a `bwrap` that is not executable, is missing its
+interpreter or loader, or is too old. Empty and relative `PATH` entries are
+ignored, so a tool is never taken from the current directory.
+
+The lookup applies only to the host programs that set up the sandbox. The
+command inside the sandbox gets its own `PATH`; see
+[Process environment](#process-environment).
+
 ## Quick Start
 
 ```json
@@ -157,6 +182,12 @@ Bubblewrap creates a namespace-isolated process by:
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
 
+`bwrap` runs with `--die-with-parent`, whose parent-death signal Linux delivers
+when the *thread* that forked `bwrap` exits. MXC therefore forks `bwrap` from
+a dedicated thread that lives as long as the process, so a sandbox started from
+a pooled or short-lived thread (for example a Tokio `spawn_blocking` worker)
+survives that thread and dies only with the embedding process.
+
 The address-family filter is always active. Attempts to create VSOCK, packet,
 or other unlisted socket families fail with `EPERM`. Because io_uring can
 create sockets from submission-queue entries that seccomp cannot inspect, the
@@ -196,7 +227,6 @@ descriptors, but the workload cannot reopen the host terminal through
 `/dev/tty` or use it for terminal job control. For programs that need a
 controlling terminal, use the SDK's PTY execution API, which allocates a
 separate terminal and supports resizing and merged output.
-
 ### Deny-by-default filesystem
 
 The baseline mirrors the macOS Seatbelt backend's `(deny default)` posture:
@@ -327,14 +357,16 @@ A stalled probe rejects startup rather than leaving a policy check unenforced.
 |-------|---------------|-------------|
 | `readwritePaths` | `--bind <path> <path>` | Read-write bind mount (overrides base RO) |
 | `readonlyPaths` | `--ro-bind <path> <path>` | Explicit read-only bind mount |
-| `deniedPaths` (directory) | `--tmpfs <path>` | Masked with an empty tmpfs |
+| `deniedPaths` (directory or missing path) | `--tmpfs <path>`, then `--remount-ro <path>` | Masked with a read-only tmpfs |
 | `deniedPaths` (file) | `--ro-bind /dev/null <path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
 
 A denied path is classified by its own on-disk type (via `symlink_metadata`,
-no symlink-follow): a directory is masked with an empty `--tmpfs`, while a
+no symlink-follow): a directory is masked with a read-only `--tmpfs`, while a
 regular file is masked by binding `/dev/null` over it (masking a file with a
 tmpfs would replace it with an empty *directory*, changing its type). Paths that
-cannot be stat'd (missing/unreadable) fall back to `--tmpfs`.
+cannot be stat'd (missing/unreadable) fall back to a read-only `--tmpfs`.
+The masks are remounted after policy mounts are created, so a more specific
+allowed child remains accessible with its own permissions.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point
@@ -737,8 +769,9 @@ shared-host-network behavior.
 
 0. Before anything is launched, `validate` probes the host tools this mode
    depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
-   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`, and
-   `ip6tables-restore` — so a host that is
+   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`,
+   `ip6tables-restore`, and `sleep`, found as described in
+   [Host tool lookup](#host-tool-lookup) — so a host that is
    missing one fails immediately with a message naming it, rather than partway
    through supervisor startup. For the `iptables` family presence is not
    enough: the probe also reads the backend from the version banner and refuses
@@ -747,9 +780,11 @@ shared-host-network behavior.
    probe is bounded by a short timeout, and runs in its own process group so a
    backgrounded descendant that inherited the probe's output cannot outlive it:
    a wedged binary is reported as hung and named, instead of stalling every
-   proxy-mode execution on the host indefinitely. A successful probe is cached
-   for the life of the process; failures are not, so installing the missing
-   tool takes effect without a restart.
+   proxy-mode execution on the host indefinitely. A successful probe is reused
+   for the life of the process while the lookup keeps selecting the same paths;
+   a different path is probed again before it runs, and failures are not
+   reused, so installing the missing tool takes effect without a restart. The
+   supervisor runs each tool from the path the probe checked.
 1. The caller starts the proxy and names its loopback endpoint with
    `runtimeConfig.networkProxy`. The parser admits `localhost`, `127.0.0.1`,
    or `[::1]`; Bubblewrap rejects `[::1]` because its gateway reaches only
@@ -977,7 +1012,7 @@ Contract `0.9.0-alpha` provides no MXC-managed host-list policy for that proxy.
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
 | Startup | Create → Start → Attach | Single `bwrap` exec; proxy-only and firewall-enforced modes add a user/network-namespace supervisor, `slirp4netns`, and namespace-local firewall chains |
 | Network isolation | iptables + veth | `--unshare-net` for ruleless deny; private netns + slirp4netns and namespace-local iptables for proxy or firewall-enforced policies |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, iproute2 `ip`, a POSIX `sh`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, iproute2 `ip`, a POSIX `sh` and `sleep`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
@@ -1017,6 +1052,18 @@ The streaming suite also runs the real Bubblewrap binary through an
 isolated wrapper that removes `--die-with-parent`, then checks explicit
 kill, timeout, and handle-drop cleanup. This reproduces the absence of
 parent-death protection during startup without relying on a scheduling race.
+
+## Troubleshooting
+
+These failures carry the `backend_error` code and exit `-1`.
+
+| Message | Meaning |
+|---|---|
+| `Bubblewrap (bwrap) is not installed or not on PATH` / version too old | The host has no usable Bubblewrap; install `bubblewrap` 0.5+ |
+| `requires 'slirp4netns' on PATH` / `requires unprivileged user and network namespaces` | The host cannot provide the sandbox network |
+| `script_code is empty` / `must not carry credentials` / an egress or proxy refusal | The request is at fault; change it and retry |
+| `failed to spawn bwrap` / `failed to allocate PTY` / proxy namespace start failure | The request was accepted but the launch faulted |
+| `failed to wrap stdio pipes` | The sandbox started and then faulted |
 
 ## Limitations
 

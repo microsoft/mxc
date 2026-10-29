@@ -249,6 +249,8 @@ impl std::fmt::Display for IsolationSessionError {
     }
 }
 
+// SDK v2: Policy -> rejected (policy_validation), ServiceUnavailable ->
+// unavailable (backend_unavailable). See docs/development/plans/sdk-v2-error-codes.md.
 impl From<IsolationSessionError> for ScriptResponse {
     fn from(err: IsolationSessionError) -> Self {
         ScriptResponse::error(&err.to_string())

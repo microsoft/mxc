@@ -228,9 +228,10 @@ function Run-IsolationSessionTest {
     param(
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
-        [int[]]$ExpectedExitAnyOf = @(),
         [string[]]$OutputContains = @(),
         [string[]]$OutputLineNotEqual = @(),
+        [string]$ExpectedErrorCode,
+        [string]$ExpectedErrorMessageContains,
         [hashtable]$Request,
         [switch]$DryRun
     )
@@ -276,12 +277,7 @@ function Run-IsolationSessionTest {
     $pass = $true
     $reason = ""
 
-    if ($ExpectedExitAnyOf.Count -gt 0) {
-        if ($ExpectedExitAnyOf -notcontains $exitCode) {
-            $pass = $false
-            $reason = "Expected exit one of $($ExpectedExitAnyOf -join ', '), got $exitCode"
-        }
-    } elseif ($exitCode -ne $ExpectedExit) {
+    if ($exitCode -ne $ExpectedExit) {
         $pass = $false
         $reason = "Expected exit $ExpectedExit, got $exitCode"
     }
@@ -306,6 +302,25 @@ function Run-IsolationSessionTest {
                 $reason = "Output has line equal to '$needle'"
                 break
             }
+        }
+    }
+
+    if ($pass -and $ExpectedErrorCode) {
+        $envelope = $null
+        foreach ($line in ($output -split "`r?`n")) {
+            if (-not $line.Trim().StartsWith('{"error"')) { continue }
+            try { $envelope = $line | ConvertFrom-Json } catch { $envelope = $null }
+        }
+        if ($null -eq $envelope) {
+            $pass = $false
+            $reason = "No error envelope in output"
+        } elseif ($envelope.error.code -ne $ExpectedErrorCode) {
+            $pass = $false
+            $reason = "Expected error code '$ExpectedErrorCode', got '$($envelope.error.code)'"
+        } elseif ($ExpectedErrorMessageContains -and
+                  -not ([string]$envelope.error.message).Contains($ExpectedErrorMessageContains)) {
+            $pass = $false
+            $reason = "Error message missing '$ExpectedErrorMessageContains': $($envelope.error.message)"
         }
     }
 
@@ -361,11 +376,12 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
 # must appear in the captured output (proves streams aren't crossed or dropped mid-run).
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_interleaved.json" `
     -OutputContains @("OUT_A", "ERR_A", "OUT_B", "ERR_B", "OUT_C")))
-# Timeout: ping runs ~30s against a 1500ms deadline. The service-side timer and
-# the local wait report different codes, and either can win the race to end the
-# run.
+# Timeout: ping runs ~30s against a 1500ms deadline. The service timer is armed
+# with a grace margin, so the local wait ends the run and reports the timeout.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
-    -ExpectedExitAnyOf 1, -1))
+    -ExpectedExit -1 `
+    -ExpectedErrorCode "backend_error" `
+    -ExpectedErrorMessageContains "script timed out after 1500ms"))
 
 # Any IsolationSession-specific object is rejected at the same closed exact
 # contract boundary, before the command can run.

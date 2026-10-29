@@ -912,7 +912,7 @@ fn plan_state_aware_with_kind<'a>(
 ///   with the sandbox exit code. A clean non-zero *sandbox* exit is not an MXC
 ///   failure, so no `Error` is emitted.
 /// - `Err(MxcError)` — an `Execution` failure plus an `Error` carrying
-///   the [`classify_mxc_error`] category.
+///   the `classify_mxc_error` category.
 ///
 /// Terminal path (`run_state_aware_main` exits immediately after), so it calls
 /// [`shutdown`].

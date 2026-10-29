@@ -9,6 +9,10 @@ The package root exports no public APIs. These APIs use the SDK-selected contrac
 version; callers do not select it. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md)
 for terminology.
 
+Use [@microsoft/mxc-sdk/v1/dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
+for MXC request JSON with a caller-declared contract version and separate
+experimental backend authorization.
+
 ```bash
 npm install @microsoft/mxc-sdk
 ```
@@ -123,6 +127,9 @@ Terminal stderr is merged into `output`. Closing `input` requests terminal EOF
 when supported; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess`.
 Unsupported combinations are rejected before sandbox creation.
+ProcessContainer PTY passes `timeoutMs` to `wxc-exec`, but the executor
+channel reports only an exit code: `terminal.wait().timedOut` is `false`
+even if that timeout ended the workload.
 
 ## Lifecycle API
 
@@ -168,6 +175,8 @@ try {
 
 `spawnInContainer` returns a `Promise<MxcProcess>` with live standard pipes;
 `runInContainer` returns a `Promise<ExecutionResult>` with captured output.
+On timeout, it returns partial captured text without waiting for a
+descendant-held output stream to close.
 A WSLC command started by `spawnInContainer` reads end-of-file on stdin;
 `spawnInContainerWithStdin` gives it a writable `standardInput`.
 `spawnInContainerWithPty(containerId, request, options?)` starts an

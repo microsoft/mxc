@@ -8,7 +8,7 @@
 //! *on-disk* aliases: a symlink, junction, 8.3 short name, or `\\?\` prefix that
 //! redirects one path into another tree only diverges once the OS resolves it.
 //! [`canonicalize_path`] opens the object and asks Windows for its final path
-//! ([`GetFinalPathNameByHandleW`]), collapsing every such alias to one canonical
+//! (`GetFinalPathNameByHandleW`), collapsing every such alias to one canonical
 //! DOS spelling that callers can compare structurally.
 //!
 //! Like [`crate::mxc_common::filesystem_object`] this does file I/O, so it lives in

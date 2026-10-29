@@ -101,6 +101,12 @@ The Linux .NET SDK job also installs LXC and runs the public V1
 `MxcContainerLxcE2ETests` as root. Keep its test filter aligned with the class
 name; the job rejects an empty selection or a run without passing tests.
 
+The Linux .NET SDK job also installs Bubblewrap and strictly runs
+`MxcContainerBubblewrapE2ETests.Spawn_OutlivesTheThreadThatSpawnedIt`. The
+backend availability gate turns a missing Bubblewrap prerequisite into a
+failure, and the exact-method filter plus result-count check ensures the
+regression itself ran and passed.
+
 ### Local Windows SDK proxy checks
 
 The Node, .NET, and Rust SDK tests can exercise ProcessContainer with an external

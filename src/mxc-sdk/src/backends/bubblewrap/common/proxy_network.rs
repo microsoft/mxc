@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{mpsc, Condvar, Mutex, OnceLock};
+use std::sync::{mpsc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,7 @@ use nix::unistd::{access, dup2, pipe2, AccessFlags, Pid};
 use tempfile::TempDir;
 
 use crate::bwrap_common::bwrap_command::{path_is_denied, PolicyMount, COMMAND_TAIL};
+use crate::bwrap_common::host_tools::{self, LookupError};
 use crate::bwrap_common::network_rules::{
     payload_file_name, render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
 };
@@ -154,6 +155,16 @@ const SUPERVISOR_SCRIPT: &str = r#"
 set -eu
 state_dir="$1"
 lock_wait="$2"
+
+# Every host tool arrives as the absolute path the parent checked, so nothing
+# below depends on this process's PATH.
+nsenter="$3"
+ip="$4"
+slirp4netns="$5"
+iptables_restore="$6"
+ip6tables_restore="$7"
+sleep="$8"
+
 # Inherited descriptors are remapped to fixed numbers by the parent (see
 # `remap_descriptors`): 3 is the parent's PID pipe, 4 is slirp's exit pipe.
 # They are hardcoded rather than passed in argv because /bin/sh is dash on
@@ -178,14 +189,14 @@ fi
 # creation fails. The workload gate comes too late to order these two steps.
 ns="/proc/$child_pid/ns/net"
 while :; do
-    loopback=$(nsenter --net="$ns" -- ip -4 -o address show dev lo up) || {
+    loopback=$("$nsenter" --net="$ns" -- "$ip" -4 -o address show dev lo up) || {
         echo "mxc: failed to query Bubblewrap loopback readiness" >&2
         exit 1
     }
     case "$loopback" in
         *" inet 127.0.0.1/8 "*) break ;;
     esac
-    sleep 0.01
+    "$sleep" 0.01
 done
 
 # slirp signals readiness internally so the supervisor, not slirp, decides when
@@ -193,7 +204,7 @@ done
 # is safe to hardcode: the parent hands this child exactly 0-4, so nothing else
 # can be sitting on it.
 exec 9> "$state_dir/slirp.internal"
-slirp4netns --configure --mtu=65520 \
+"$slirp4netns" --configure --mtu=65520 \
     --ready-fd 9 --exit-fd 4 \
     "$child_pid" tap0 &
 slirp_pid=$!
@@ -203,7 +214,7 @@ while [ ! -s "$state_dir/slirp.internal" ]; do
         echo "slirp4netns exited before signalling readiness" >&2
         exit 1
     fi
-    sleep 0.01
+    "$sleep" 0.01
 done
 
 # Network filtering in both directions, programmed here because it needs
@@ -234,7 +245,7 @@ conntrack_hint="mxc: could not install the sandbox network policy. If the error 
 'Invalid argument', this host is missing the nf_conntrack kernel module that the inbound \
 connection-state match requires, and an unprivileged sandbox cannot load it."
 for payload in "$state_dir"/rules.v4.*; do
-    nsenter --net="$ns" -- iptables-restore -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
+    "$nsenter" --net="$ns" -- "$iptables_restore" -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
 done
 # No IPv6 payload is written when the kernel has no IPv6 stack (see
 # `rule_families`), and an unmatched glob expands to itself. IPv4 has no such
@@ -242,7 +253,7 @@ done
 # supervisor.
 for payload in "$state_dir"/rules.v6.*; do
     [ -e "$payload" ] || continue
-    nsenter --net="$ns" -- ip6tables-restore -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
+    "$nsenter" --net="$ns" -- "$ip6tables_restore" -w "$lock_wait" -n "$payload" || { echo "$conntrack_hint" >&2; exit 1; }
 done
 
 # Signalled by path, not through a descriptor: this is a plain file the parent
@@ -290,6 +301,35 @@ pub(crate) struct SandboxProxy {
     egress: ProxyEgress,
 }
 
+/// Why [`SandboxProxy::resolve`] failed.
+#[derive(Debug)]
+pub(crate) enum ProxyResolveError {
+    /// The endpoint, or the address it resolves to, cannot be enforced.
+    Rejected(String),
+    /// The host lookup itself did not produce an answer.
+    Lookup(String),
+}
+
+impl ProxyResolveError {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Rejected(message) | Self::Lookup(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for ProxyResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl From<String> for ProxyResolveError {
+    fn from(message: String) -> Self {
+        Self::Rejected(message)
+    }
+}
+
 impl SandboxProxy {
     /// Derive the sandbox-visible proxy from the configured one.
     ///
@@ -297,7 +337,7 @@ impl SandboxProxy {
     /// an address: the workload then presents the `Host` header and proxy-auth
     /// realm the operator configured. An IP literal has no name to pin, so a
     /// loopback literal is rewritten to slirp's gateway instead.
-    pub(crate) fn resolve(configured: &ProxyAddress) -> Result<Self, String> {
+    pub(crate) fn resolve(configured: &ProxyAddress) -> Result<Self, ProxyResolveError> {
         Self::resolve_with(configured, resolve_ipv4)
     }
 
@@ -312,7 +352,7 @@ impl SandboxProxy {
         if needs_lookup {
             return Ok(());
         }
-        checked
+        checked.map_err(|error| error.message().to_string())
     }
 
     /// Run the static checks, reporting whether a lookup would have followed.
@@ -321,11 +361,13 @@ impl SandboxProxy {
     /// also exactly when a hosts pin is created -- an IP literal resolves to
     /// `Ok(None)` from [`ProxyAddress::host_pin`]. Callers use the flag to
     /// reason about the pin without duplicating that classification.
-    fn inspect_without_resolving(configured: &ProxyAddress) -> (bool, Result<(), String>) {
+    fn inspect_without_resolving(
+        configured: &ProxyAddress,
+    ) -> (bool, Result<(), ProxyResolveError>) {
         let asked_to_resolve = Cell::new(false);
         let checked = Self::resolve_with(configured, |_, _| {
             asked_to_resolve.set(true);
-            Err(String::new())
+            Err(ProxyResolveError::Lookup(String::new()))
         });
 
         (asked_to_resolve.get(), checked.map(|_| ()))
@@ -338,10 +380,14 @@ impl SandboxProxy {
     /// a lookup whose answer the test does not control.
     fn resolve_with(
         configured: &ProxyAddress,
-        resolve: impl Fn(&str, u16) -> Result<Ipv4Addr, String>,
-    ) -> Result<Self, String> {
+        resolve: impl Fn(&str, u16) -> Result<Ipv4Addr, ProxyResolveError>,
+    ) -> Result<Self, ProxyResolveError> {
         if configured.port() == 0 {
-            return Err("Bubblewrap: proxy-only egress requires a non-zero proxy port".to_string());
+            return Err(
+                "Bubblewrap: proxy-only egress requires a non-zero proxy port"
+                    .to_string()
+                    .into(),
+            );
         }
         let host = configured.host().trim_matches(['[', ']']);
 
@@ -377,7 +423,7 @@ impl SandboxProxy {
             // an address nothing answers on -- failing at connect time rather
             // than at policy time.
             if ip.is_unspecified() {
-                return Self::rewritten(configured);
+                return Ok(Self::rewritten(configured)?);
             }
             if ip.is_loopback() {
                 return Err(format!(
@@ -385,13 +431,14 @@ impl SandboxProxy {
                      network namespace cannot reach; bind the proxy to 127.0.0.1 or a dual-stack \
                      wildcard address instead. The egress rule is emitted with IPv4 iptables.",
                     configured.host()
-                ));
+                )
+                .into());
             }
-            return Err(ipv6_unsupported(host));
+            return Err(ipv6_unsupported(host).into());
         }
 
         if is_reserved_loopback_name {
-            return Self::rewritten(configured);
+            return Ok(Self::rewritten(configured)?);
         }
 
         let resolved = resolve(host, configured.port())?;
@@ -516,27 +563,29 @@ fn with_deadline<T: Send + 'static>(
 /// `getaddrinfo` cannot be cancelled, so the lookup is moved to a thread and
 /// abandoned once the bound expires -- the wait is bounded even though the
 /// query itself keeps running until the resolver gives up.
-fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, ProxyResolveError> {
     let query = host.to_string();
     let waited = with_deadline(RESOLVE_TIMEOUT_LABEL, RESOLVE_TIMEOUT, move || {
         lookup_ipv4(&query, port)
     })
     .map_err(|error| {
-        format!("Bubblewrap: could not start the lookup of proxy host '{host}': {error}")
+        ProxyResolveError::Lookup(format!(
+            "Bubblewrap: could not start the lookup of proxy host '{host}': {error}"
+        ))
     })?;
 
     match waited {
         Ok(resolved) => resolved,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: resolving proxy host '{host}' exceeded {}s. The proxy endpoint is \
              resolved on the host because DNS is closed inside the sandbox, so an unresponsive \
              host resolver blocks the sandbox from starting. Check the host's DNS configuration, \
              or give the proxy as an IPv4 address to skip resolution.",
             RESOLVE_TIMEOUT.as_secs()
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+        ))),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: the lookup of proxy host '{host}' ended without an answer."
-        )),
+        ))),
     }
 }
 
@@ -545,14 +594,14 @@ fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
 /// Only the first IPv4 answer is used, and it is the same one the sandbox is
 /// pinned to. Opening the rest would widen the chain to addresses the sandbox
 /// can no longer select: with DNS closed, the pin is its only resolution path.
-fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, ProxyResolveError> {
     let resolved: Vec<IpAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|error| {
-            format!(
+            ProxyResolveError::Lookup(format!(
                 "Bubblewrap: could not resolve proxy host '{host}': {error}. The proxy endpoint \
                  is resolved on the host because DNS is closed inside the sandbox."
-            )
+            ))
         })?
         .map(|addr| addr.ip())
         .collect();
@@ -564,11 +613,11 @@ fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
     // A name with AAAA records and no A records is the same unenforceable case
     // as an IPv6 literal, so say so rather than claiming it does not resolve.
     if resolved.is_empty() {
-        Err(format!(
+        Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: proxy host '{host}' did not resolve to any address."
-        ))
+        )))
     } else {
-        Err(ipv6_unsupported(host))
+        Err(ipv6_unsupported(host).into())
     }
 }
 
@@ -751,10 +800,8 @@ impl ProxyNetworkNamespace {
     /// the sandbox needs to agree with the plan, which only a hostname proxy
     /// endpoint produces. `resolver` redirects the sandbox's nameserver to
     /// slirp's forwarder, which only a loopback-resolver host produces.
-    ///
-    /// Callers reach this only after `BwrapRunner::validate` has already run
-    /// [`probe_dependencies`], so the probe is not repeated here.
     pub(crate) fn start(
+        tools: &NetworkTools,
         plan: &EgressPlan,
         ingress: &IngressPlan,
         pin: Option<&ProxyHostPin>,
@@ -800,20 +847,14 @@ impl ProxyNetworkNamespace {
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
         set_nonblocking(liveness_reader.as_raw_fd())?;
 
-        let mut command = Command::new("unshare");
+        let mut command = Command::new(&tools.unshare);
         command
-            .args([
-                "--user",
-                "--map-current-user",
-                "--keep-caps",
-                "--",
-                "sh",
-                "-c",
-                SUPERVISOR_SCRIPT,
-                "mxc-bwrap-proxy-supervisor",
-            ])
+            .args(["--user", "--map-current-user", "--keep-caps", "--"])
+            .arg(&tools.sh)
+            .args(["-c", SUPERVISOR_SCRIPT, "mxc-bwrap-proxy-supervisor"])
             .arg(state_dir.path())
             .arg(XTABLES_LOCK_WAIT.as_secs().to_string())
+            .args(tools.supervisor_arguments())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
@@ -1257,7 +1298,7 @@ fn run_probe(
     }
 }
 
-/// Arguments for the namespace grant check, and the single definition of what
+/// Flags for the namespace grant check, and the single definition of what
 /// the kernel is asked for — the walk builds the command through its injected
 /// factory.
 ///
@@ -1265,18 +1306,21 @@ fn run_probe(
 /// refuse (unprivileged userns disabled, AppArmor restriction, or
 /// `user.max_net_namespaces` exhausted), which would otherwise surface deep
 /// inside supervisor startup. Both namespaces are requested together, mirroring
-/// the `CLONE_NEWUSER|CLONE_NEWNET` bwrap asks for, and via `sh -c :` because
-/// the supervisor itself runs as `sh -c`.
-const PRIVATE_NAMESPACE_PROBE_ARGS: [&str; 8] = [
-    "--user",
-    "--map-current-user",
-    "--keep-caps",
-    "--net",
-    "--",
-    "sh",
-    "-c",
-    ":",
-];
+/// the `CLONE_NEWUSER|CLONE_NEWNET` bwrap asks for.
+const PRIVATE_NAMESPACE_PROBE_FLAGS: [&str; 5] =
+    ["--user", "--map-current-user", "--keep-caps", "--net", "--"];
+
+fn private_namespace_probe<F>(tools: &NetworkTools, command: &F) -> Command
+where
+    F: Fn(&Path, &[&str]) -> Command,
+{
+    let mut probe = command(&tools.unshare, &PRIVATE_NAMESPACE_PROBE_FLAGS);
+
+    // The supervisor runs as `sh -c` inside these namespaces, so the check runs
+    // a no-op the same way.
+    probe.arg(&tools.sh).args(["-c", ":"]);
+    probe
+}
 
 /// Run the namespace grant check and turn a refusal into actionable guidance.
 ///
@@ -1287,6 +1331,7 @@ const PRIVATE_NAMESPACE_PROBE_ARGS: [&str; 8] = [
 /// the pure-formatter level.
 fn check_private_namespaces(
     command: Command,
+    shell: &Path,
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
 ) -> Result<(), String> {
@@ -1295,7 +1340,7 @@ fn check_private_namespaces(
         format!("Bubblewrap: {requirement} requires private user and network namespaces: {error}")
     })?;
     if !userns.status.success() {
-        return Err(namespace_probe_error(userns.status, use_case));
+        return Err(namespace_probe_error(userns.status, shell, use_case));
     }
     Ok(())
 }
@@ -1310,16 +1355,17 @@ fn shell_failed_to_start(code: i32) -> bool {
 ///
 /// Split out so the diagnostics are testable: a host where the namespaces work
 /// cannot be made to produce these statuses.
-fn namespace_probe_error(status: ExitStatus, use_case: PrivateNetworkUse) -> String {
+fn namespace_probe_error(status: ExitStatus, shell: &Path, use_case: PrivateNetworkUse) -> String {
     let requirement = use_case.requirement();
+
     // 126/127 are the exec-failure codes `unshare` propagates (EACCES and
-    // ENOENT). A PATH lookup can produce either, and both mean the namespaces
-    // worked and `sh` is what could not start.
+    // ENOENT). Both mean the namespaces worked and the shell is what could not
+    // start.
     if status.code().is_some_and(shell_failed_to_start) {
         return format!(
-            "Bubblewrap: {requirement} requires 'sh' on PATH inside the sandbox namespace \
-             (the proxy supervisor runs as 'sh -c'), which this host could not start. \
-             Install a POSIX shell or {}.",
+            "Bubblewrap: {requirement} runs its network supervisor with '{}', which could not \
+             start inside the new namespace. Install a working POSIX shell or {}.",
+            shell.display(),
             use_case.remedy()
         );
     }
@@ -1810,14 +1856,14 @@ impl PrivateNetworkUse {
 /// Whether this host can enforce proxy-only egress, and why not when it cannot.
 ///
 /// Pre-flight counterpart to the launch-path check in
-/// [`crate::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
+/// [`crate::bwrap_common::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
 /// caller that cannot ask this ahead of time only learns the answer when the
 /// run fails. Advisory — the runner still probes before it launches.
 ///
 /// Not exhaustive: a missing `nf_conntrack` module is only detectable when the
 /// rules are installed, so it still surfaces at launch.
 ///
-/// Bounded by [`PRE_FLIGHT_BUDGET`] in total, unlike the launch-path walk: a
+/// Bounded by `PRE_FLIGHT_BUDGET` in total, unlike the launch-path walk: a
 /// caller answering "can this host do it?" before spawning cannot afford the
 /// sum of every per-command timeout. The walk runs in a deadline-watched
 /// worker, so the ceiling holds even when a spawn itself blocks (a PATH lookup
@@ -1833,6 +1879,7 @@ pub fn probe_proxy_enforcement() -> Result<(), String> {
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::total(PRE_FLIGHT_BUDGET),
         )
+        .map(|_| ())
     })
 }
 
@@ -1963,92 +2010,152 @@ impl Drop for PreflightSlot {
     }
 }
 
-pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), String> {
-    static PROBED: OnceLock<()> = OnceLock::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NetworkTools {
+    unshare: PathBuf,
+    sh: PathBuf,
+    slirp4netns: PathBuf,
+    nsenter: PathBuf,
+    ip: PathBuf,
+    iptables: PathBuf,
+    ip6tables: PathBuf,
+    iptables_restore: PathBuf,
+    ip6tables_restore: PathBuf,
+    sleep: PathBuf,
+}
+
+impl NetworkTools {
+    fn find<L>(use_case: PrivateNetworkUse, find: L) -> Result<Self, String>
+    where
+        L: Fn(&str) -> Result<PathBuf, LookupError>,
+    {
+        let tool = |name: &str| {
+            find(name).map_err(|error| {
+                format!(
+                    "Bubblewrap: {} requires '{name}', which {error}. Install it or {}.",
+                    use_case.requirement(),
+                    use_case.remedy()
+                )
+            })
+        };
+        Ok(Self {
+            unshare: tool("unshare")?,
+            sh: tool("sh")?,
+            slirp4netns: tool("slirp4netns")?,
+            nsenter: tool("nsenter")?,
+            ip: tool("ip")?,
+            iptables: tool("iptables")?,
+            ip6tables: tool("ip6tables")?,
+            iptables_restore: tool("iptables-restore")?,
+            ip6tables_restore: tool("ip6tables-restore")?,
+            sleep: tool("sleep")?,
+        })
+    }
+
+    /// `(name, path, argument, whether its iptables backend must be checked)`
+    /// for the tools without a dedicated check.
+    fn tool_probes(&self) -> [(&'static str, &Path, &'static str, bool); 7] {
+        [
+            ("nsenter", &self.nsenter, "--version", false),
+            ("ip", &self.ip, "-Version", false),
+            // The supervisor runs only the -restore variants, but these carry
+            // the version banner the backend decision reads.
+            ("iptables", &self.iptables, "--version", true),
+            ("ip6tables", &self.ip6tables, "--version", true),
+            (
+                "iptables-restore",
+                &self.iptables_restore,
+                "--version",
+                true,
+            ),
+            (
+                "ip6tables-restore",
+                &self.ip6tables_restore,
+                "--version",
+                true,
+            ),
+            ("sleep", &self.sleep, "0", false),
+        ]
+    }
+
+    /// The paths [`SUPERVISOR_SCRIPT`] reads from `$3` onward, in its order.
+    fn supervisor_arguments(&self) -> [&Path; 6] {
+        [
+            &self.nsenter,
+            &self.ip,
+            &self.slirp4netns,
+            &self.iptables_restore,
+            &self.ip6tables_restore,
+            &self.sleep,
+        ]
+    }
+}
+
+pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<NetworkTools, String> {
+    static APPROVED: Mutex<Option<NetworkTools>> = Mutex::new(None);
 
     probe_dependencies_caching(
-        &PROBED,
+        &APPROVED,
         use_case,
         ProbeBudget::unbounded(),
+        host_tools::find,
         real_probe_command,
     )
 }
 
-/// [`probe_dependencies`] against a caller-supplied cache, so the reuse rules
-/// are testable without a process-global `OnceLock`.
-///
-/// Only the tool and version checks are cached, and only on success: a failure
-/// usually means the operator has not installed slirp4netns yet. The
-/// namespace-allocation check stays outside, because unlike a package on PATH
-/// the kernel's answer changes under a running process.
-fn probe_dependencies_caching<F>(
-    cache: &OnceLock<()>,
+/// [`probe_dependencies`] against a caller-supplied approval, so the reuse
+/// rules are testable without process-global state.
+fn probe_dependencies_caching<L, F>(
+    approved: &Mutex<Option<NetworkTools>>,
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
+    find: L,
     command: F,
-) -> Result<(), String>
+) -> Result<NetworkTools, String>
 where
-    F: Fn(&str, &[&str]) -> Command,
+    L: Fn(&str) -> Result<PathBuf, LookupError>,
+    F: Fn(&Path, &[&str]) -> Command,
 {
-    if cache.get().is_none() {
-        probe_stable_dependencies(use_case, budget, &command)?;
-        let _ = cache.set(());
+    let tools = NetworkTools::find(use_case, find)?;
+
+    // A newly installed tool, or a PATH change that selects other files, takes
+    // effect without restarting the process.
+    let already_approved = approved
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        == Some(&tools);
+    if !already_approved {
+        probe_stable_dependencies(use_case, budget, &tools, &command)?;
+        *approved.lock().unwrap_or_else(PoisonError::into_inner) = Some(tools.clone());
     }
 
+    // Namespace limits can change while the process runs, so this check is
+    // never cached.
     check_private_namespaces(
-        command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS),
+        private_namespace_probe(&tools, &command),
+        &tools.sh,
         use_case,
         budget,
-    )
-}
-
-/// Tools for namespace readiness and rules: `(binary, probe flag,
-/// whether its backend must also be checked)`.
-///
-/// `iptables` / `ip6tables` are probed even though the supervisor only runs the
-/// `-restore` variants: they carry the version banner the backend decision
-/// reads, and ship in the same package. Over-strict is safe here; under-strict
-/// would let a launch fail on a host the pre-flight called supported.
-const RULE_TOOL_PROBES: [(&str, &str, bool); 6] = [
-    ("nsenter", "--version", false),
-    ("ip", "-Version", false),
-    ("iptables", "--version", true),
-    ("ip6tables", "--version", true),
-    ("iptables-restore", "--version", true),
-    ("ip6tables-restore", "--version", true),
-];
-
-/// Whether a dependency probe covers a command [`SUPERVISOR_SCRIPT`] invokes.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SupervisorCommandCoverage {
-    /// `probe_dependencies_uncached` refuses the host when this is missing.
-    Probed,
-    /// Deliberately unprobed, with the reason.
-    Exempt(&'static str),
+    )?;
+    Ok(tools)
 }
 
 /// Digest of the reviewed [`SUPERVISOR_SCRIPT`], line-ending independent.
 /// Bumping it acknowledges that the command list below was re-checked.
 #[cfg(test)]
-const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0x5165_3562_ed22_bacf;
+const EXPECTED_SUPERVISOR_SCRIPT_DIGEST: u64 = 0xcbaa_8a75_caa4_2e8b;
 
-/// Every external command [`SUPERVISOR_SCRIPT`] runs, and how the pre-flight
-/// walk accounts for it.
+/// Every external command [`SUPERVISOR_SCRIPT`] runs, each of which the
+/// pre-flight walk must check.
 #[cfg(test)]
-const SUPERVISOR_EXTERNAL_COMMANDS: &[(&str, SupervisorCommandCoverage)] = &[
-    ("slirp4netns", SupervisorCommandCoverage::Probed),
-    ("nsenter", SupervisorCommandCoverage::Probed),
-    ("ip", SupervisorCommandCoverage::Probed),
-    ("iptables-restore", SupervisorCommandCoverage::Probed),
-    ("ip6tables-restore", SupervisorCommandCoverage::Probed),
-    (
-        "sleep",
-        SupervisorCommandCoverage::Exempt(
-            "coreutils; cannot realistically be absent on a host that already \
-             has util-linux and iptables",
-        ),
-    ),
+const SUPERVISOR_EXTERNAL_COMMANDS: &[&str] = &[
+    "slirp4netns",
+    "nsenter",
+    "ip",
+    "iptables-restore",
+    "ip6tables-restore",
+    "sleep",
 ];
 
 /// How each dependency check's command is built.
@@ -2056,7 +2163,7 @@ const SUPERVISOR_EXTERNAL_COMMANDS: &[(&str, SupervisorCommandCoverage)] = &[
 /// Injectable so a test can make one specific tool look missing or broken
 /// without depending on what the runner happens to have installed — and so the
 /// success path can be driven on a host that has none of the tooling.
-fn real_probe_command(program: &str, args: &[&str]) -> Command {
+fn real_probe_command(program: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(program);
     command.args(args);
     command
@@ -2065,24 +2172,21 @@ fn real_probe_command(program: &str, args: &[&str]) -> Command {
 fn probe_dependencies_uncached(
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
-) -> Result<(), String> {
-    probe_dependencies_with(use_case, budget, real_probe_command)
+) -> Result<NetworkTools, String> {
+    probe_dependencies_with(use_case, budget, host_tools::find, real_probe_command)
 }
 
-fn probe_dependencies_with<F>(
+fn probe_dependencies_with<L, F>(
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
+    find: L,
     command: F,
-) -> Result<(), String>
+) -> Result<NetworkTools, String>
 where
-    F: Fn(&str, &[&str]) -> Command,
+    L: Fn(&str) -> Result<PathBuf, LookupError>,
+    F: Fn(&Path, &[&str]) -> Command,
 {
-    probe_stable_dependencies(use_case, budget, &command)?;
-    check_private_namespaces(
-        command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS),
-        use_case,
-        budget,
-    )
+    probe_dependencies_caching(&Mutex::new(None), use_case, budget, find, command)
 }
 
 /// The half of the walk whose answers are fixed by what is installed: tool
@@ -2090,20 +2194,22 @@ where
 fn probe_stable_dependencies<F>(
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
+    tools: &NetworkTools,
     command: &F,
 ) -> Result<(), String>
 where
-    F: Fn(&str, &[&str]) -> Command,
+    F: Fn(&Path, &[&str]) -> Command,
 {
     let requirement = use_case.requirement();
+    let slirp4netns = tools.slirp4netns.display();
     let slirp = run_probe(
-        command("slirp4netns", &["--version"]),
+        command(&tools.slirp4netns, &["--version"]),
         "slirp4netns",
         budget,
     )
     .map_err(|error| {
         format!(
-            "Bubblewrap: {requirement} requires 'slirp4netns' on PATH: {error}. \
+            "Bubblewrap: {requirement} requires 'slirp4netns' ({slirp4netns}): {error}. \
              Install slirp4netns or {}.",
             use_case.remedy()
         )
@@ -2111,14 +2217,18 @@ where
     if !slirp.status.success() {
         return Err(format!(
             "Bubblewrap: {requirement} requires a working slirp4netns installation \
-             (slirp4netns --version exited with {})",
+             ({slirp4netns} --version exited with {})",
             slirp.status
         ));
     }
 
+    let unshare_path = tools.unshare.display();
     let unshare =
-        run_probe(command("unshare", &["--help"]), "unshare", budget).map_err(|error| {
-            format!("Bubblewrap: {requirement} requires util-linux 'unshare' on PATH: {error}")
+        run_probe(command(&tools.unshare, &["--help"]), "unshare", budget).map_err(|error| {
+            format!(
+                "Bubblewrap: {requirement} requires util-linux 'unshare' ({unshare_path}): \
+                 {error}"
+            )
         })?;
     if !unshare.status.success()
         || !unshare.stdout.contains("--map-current-user")
@@ -2126,23 +2236,24 @@ where
     {
         return Err(format!(
             "Bubblewrap: {requirement} requires util-linux unshare with \
-             --map-current-user and --keep-caps support"
+             --map-current-user and --keep-caps support ({unshare_path})"
         ));
     }
 
-    // The in-namespace rules are programmed with these, so a host missing them
-    // must fail here rather than deep inside supervisor startup.
-    for (binary, probe, has_backend) in RULE_TOOL_PROBES {
-        let output = run_probe(command(binary, &[probe]), binary, budget).map_err(|error| {
+    // A broken tool must fail here rather than deep inside supervisor startup.
+    for (binary, path, probe, has_backend) in tools.tool_probes() {
+        let output = run_probe(command(path, &[probe]), binary, budget).map_err(|error| {
             format!(
-                "Bubblewrap: {requirement} requires '{binary}' on PATH to enforce {}: {error}",
+                "Bubblewrap: {requirement} requires '{binary}' ({}) to enforce {}: {error}",
+                path.display(),
                 use_case.mechanism()
             )
         })?;
         if !output.status.success() {
             return Err(format!(
                 "Bubblewrap: {requirement} requires a working '{binary}' installation \
-                 ({binary} {probe} exited with {})",
+                 ({} {probe} exited with {})",
+                path.display(),
                 output.status
             ));
         }
@@ -2151,6 +2262,7 @@ where
         if has_backend {
             iptables_backend_is_usable(
                 binary,
+                path,
                 &output.stdout,
                 Path::new(XTABLES_LOCK_PATH),
                 use_case,
@@ -2174,6 +2286,7 @@ where
 /// question, and for legacy the lock itself is tested.
 fn iptables_backend_is_usable(
     binary: &str,
+    path: &Path,
     banner: &str,
     lock: &Path,
     use_case: PrivateNetworkUse,
@@ -2188,13 +2301,14 @@ fn iptables_backend_is_usable(
     // A pre-1.8 banner carries no marker at all; those builds are legacy-only.
     Err(format!(
         "Bubblewrap: {} requires an iptables backend the sandbox supervisor can \
-         drive without privilege, but '{binary}' resolves to the legacy backend ({}) and \
+         drive without privilege, but '{binary}' ({}) resolves to the legacy backend ({}) and \
          '{}' is not writable by this user. The {} rules are installed by an \
          unprivileged supervisor in a user namespace, which keeps the caller's uid, so the \
          root-owned lock is unreachable and every rule would fail. Select the nf_tables \
          backend (for example: update-alternatives --set {binary} /usr/sbin/{binary}-nft), \
          or make '{}' writable.",
         use_case.requirement(),
+        path.display(),
         banner.trim(),
         lock.display(),
         use_case.mechanism(),
@@ -2495,6 +2609,9 @@ mod tests {
         let error = SandboxProxy::resolve_with(&address, resolver([10, 0, 2, 2]))
             .expect_err("the slirp gateway must not be pinned as if it were a host address");
 
+        let ProxyResolveError::Rejected(error) = error else {
+            panic!("a reserved answer is a policy refusal: {error}");
+        };
         assert!(
             error.contains("10.0.2.0/24") && error.contains("127.0.0.1"),
             "error should name the reserved range and the supported alternative: {error}"
@@ -2568,7 +2685,7 @@ mod tests {
 
     /// A resolver that answers every name with `ip`, so pin decisions can be
     /// tested without a lookup the test does not control.
-    fn resolver(ip: [u8; 4]) -> impl Fn(&str, u16) -> Result<Ipv4Addr, String> {
+    fn resolver(ip: [u8; 4]) -> impl Fn(&str, u16) -> Result<Ipv4Addr, ProxyResolveError> {
         move |_, _| Ok(Ipv4Addr::from(ip))
     }
 
@@ -2710,7 +2827,7 @@ mod tests {
         let loopback = ProxyAddress::new("[::1]".into(), 8080);
         let error = SandboxProxy::resolve(&loopback).unwrap_err();
         assert!(
-            error.contains("IPv4"),
+            error.message().contains("IPv4"),
             "error should explain the IPv4 requirement: {error}"
         );
 
@@ -2730,10 +2847,37 @@ mod tests {
         );
         let error = SandboxProxy::resolve(&address).unwrap_err();
 
+        // A lookup failure is a host fault, not a refusal of the policy.
+        let ProxyResolveError::Lookup(error) = error else {
+            panic!("an unresolvable name is a lookup failure: {error}");
+        };
         assert!(
             error.contains("proxy.corp.invalid"),
             "error should name the offending host: {error}"
         );
+    }
+
+    #[test]
+    fn a_failed_lookup_is_not_reported_as_a_refusal() {
+        let address = ProxyAddress::new("proxy.example".into(), 3128);
+        let error = SandboxProxy::resolve_with(&address, |_, _| {
+            Err(ProxyResolveError::Lookup("timed out".into()))
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, ProxyResolveError::Lookup(_)), "{error}");
+    }
+
+    #[test]
+    fn static_rejections_are_refusals() {
+        for host in ["[::1]", "2001:db8::1", "10.0.2.2"] {
+            let address = ProxyAddress::new(host.into(), 8080);
+            let error = SandboxProxy::resolve(&address).unwrap_err();
+            assert!(
+                matches!(error, ProxyResolveError::Rejected(_)),
+                "{host}: {error}"
+            );
+        }
     }
 
     /// `::1` used to be rewritten to the IPv4 gateway, which handed the sandbox
@@ -2747,7 +2891,7 @@ mod tests {
             let error = SandboxProxy::resolve(&address).unwrap_err();
 
             assert!(
-                error.contains("IPv6 loopback"),
+                error.message().contains("IPv6 loopback"),
                 "error should name the unreachable address family: {error}"
             );
         }
@@ -2769,7 +2913,7 @@ mod tests {
         let error = SandboxProxy::resolve(&address).unwrap_err();
 
         assert!(
-            error.contains("non-zero"),
+            error.message().contains("non-zero"),
             "error should explain the port requirement: {error}"
         );
     }
@@ -3698,7 +3842,7 @@ mod tests {
     fn script_signals_readiness_only_after_rules_are_installed() {
         // The caller releases the workload on this signal, so emitting it early
         // would let the workload run with egress wide open.
-        let last_restore = script_offset("ip6tables-restore");
+        let last_restore = script_offset(r#""$ip6tables_restore""#);
         let ready = script_offset(r#"printf ready > "$state_dir/slirp.ready""#);
 
         assert!(
@@ -3729,8 +3873,8 @@ mod tests {
     fn script_restores_both_families() {
         // A family left unrestored is a family with no chain and no terminal
         // verdict, so it would stay wide open.
-        script_offset("-- iptables-restore ");
-        script_offset("-- ip6tables-restore ");
+        script_offset(r#"-- "$iptables_restore" "#);
+        script_offset(r#"-- "$ip6tables_restore" "#);
     }
 
     #[test]
@@ -3738,7 +3882,7 @@ mod tests {
         // Offset-based ordering assertions only hold if the restores run
         // inline. Backgrounding one would satisfy those tests while destroying
         // the guarantee that rules precede readiness.
-        let rules_start = script_offset("-- iptables-restore ");
+        let rules_start = script_offset(r#"-- "$iptables_restore" "#);
         let ready = script_offset(r#"printf ready > "$state_dir/slirp.ready""#);
         let script = normalised_script();
         let region = &script[rules_start..ready];
@@ -3967,7 +4111,7 @@ mod tests {
 
         let restores: Vec<&&str> = code
             .iter()
-            .filter(|line| line.contains("tables-restore"))
+            .filter(|line| line.contains(r#"tables_restore""#))
             .collect();
         assert_eq!(
             restores.len(),
@@ -3989,9 +4133,16 @@ mod tests {
         // The whole policy travels in the restore payloads now, so any
         // surviving per-rule invocation would be an unbatched leftover.
         assert!(
-            !code
+            !code.iter().any(|line| {
+                [
+                    "-- iptables ",
+                    "-- ip6tables ",
+                    r#""$iptables""#,
+                    r#""$ip6tables""#,
+                ]
                 .iter()
-                .any(|line| line.contains("-- iptables ") || line.contains("-- ip6tables ")),
+                .any(|call| line.contains(call))
+            }),
             "rule installation must go through iptables-restore, not per-rule calls"
         );
     }
@@ -4230,8 +4381,8 @@ mod tests {
         );
     }
 
-    /// `unshare` runs `sh` via a PATH lookup, so an exec failure surfaces as
-    /// either exec code; a refused namespace exits 1 and must stay distinct.
+    /// An exec failure of the shell surfaces as either exec code; a refused
+    /// namespace exits 1 and must stay distinct.
     #[test]
     fn an_exec_failure_is_told_apart_from_a_refused_namespace() {
         assert!(shell_failed_to_start(126));
@@ -4251,7 +4402,11 @@ mod tests {
     /// A host where they work cannot produce this status, so classify directly.
     #[test]
     fn a_refused_namespace_names_every_knob_that_could_be_responsible() {
-        let error = namespace_probe_error(exit_status(1), PrivateNetworkUse::ProxyOnlyEgress);
+        let error = namespace_probe_error(
+            exit_status(1),
+            Path::new("/usr/bin/sh"),
+            PrivateNetworkUse::ProxyOnlyEgress,
+        );
 
         assert!(error.contains("refused"), "got: {error}");
         for knob in [
@@ -4269,10 +4424,16 @@ mod tests {
     #[test]
     fn a_shell_that_cannot_start_is_not_reported_as_a_refused_namespace() {
         for code in [126, 127] {
-            let error =
-                namespace_probe_error(exit_status(code), PrivateNetworkUse::ProxyOnlyEgress);
+            let error = namespace_probe_error(
+                exit_status(code),
+                Path::new("/usr/bin/sh"),
+                PrivateNetworkUse::ProxyOnlyEgress,
+            );
 
-            assert!(error.contains("'sh'"), "must name the shell, got: {error}");
+            assert!(
+                error.contains("'/usr/bin/sh'"),
+                "must name the shell, got: {error}"
+            );
             assert!(
                 !error.contains("apparmor"),
                 "must not offer namespace remedies, got: {error}"
@@ -4280,25 +4441,18 @@ mod tests {
         }
     }
 
-    fn on_path(tool: &str) -> bool {
-        Command::new("sh")
-            .args(["-c", &format!("command -v {tool} >/dev/null 2>&1")])
-            .status()
-            .is_ok_and(|status| status.success())
+    fn is_installed(tool: &str) -> bool {
+        host_tools::find(tool).is_ok()
     }
 
     fn namespaces_are_available() -> bool {
-        Command::new("unshare")
-            .args([
-                "--user",
-                "--map-current-user",
-                "--keep-caps",
-                "--net",
-                "--",
-                "sh",
-                "-c",
-                ":",
-            ])
+        let (Ok(unshare), Ok(sh)) = (host_tools::find("unshare"), host_tools::find("sh")) else {
+            return false;
+        };
+        Command::new(unshare)
+            .args(PRIVATE_NAMESPACE_PROBE_FLAGS)
+            .arg(sh)
+            .args(["-c", ":"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -4306,20 +4460,26 @@ mod tests {
     }
 
     fn iptables_uses_nf_tables() -> bool {
-        Command::new("iptables")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("nf_tables"))
+        host_tools::find("iptables").is_ok_and(|iptables| {
+            Command::new(iptables)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("nf_tables"))
+        })
+    }
+
+    fn script_variable(tool: &str) -> String {
+        format!(r#""${}""#, tool.replace('-', "_"))
     }
 
     /// The supervisor is the only place proxy mode shells out at launch, so the
     /// pre-flight walk is only honest if it covers what that script runs.
     ///
     /// Shell is not worth parsing here — the binaries appear in argument
-    /// position (`nsenter --net=… -- iptables-restore …`) as well as command
-    /// position, so a tokenizer would miss exactly the cases that matter.
-    /// Pinning the constant is exact instead: any edit fails here and forces a
-    /// re-check of [`SUPERVISOR_EXTERNAL_COMMANDS`].
+    /// position (`"$nsenter" --net=… -- "$iptables_restore" …`) as well as
+    /// command position, so a tokenizer would miss exactly the cases that
+    /// matter. Pinning the constant is exact instead: any edit fails here and
+    /// forces a re-check of [`SUPERVISOR_EXTERNAL_COMMANDS`].
     #[test]
     fn supervisor_script_changes_force_a_dependency_re_review() {
         // FNV-1a rather than `DefaultHasher`, whose output is not stable across
@@ -4333,8 +4493,9 @@ mod tests {
 
         assert_eq!(
             digest, EXPECTED_SUPERVISOR_SCRIPT_DIGEST,
-            "SUPERVISOR_SCRIPT changed. Re-check that probe_dependencies_uncached probes every \
-             binary the script runs (including those passed to `nsenter --`), update \
+            "SUPERVISOR_SCRIPT changed. Re-check that every binary the script runs \
+             (including those passed to `nsenter --`) arrives as a checked path from \
+             NetworkTools::supervisor_arguments and is probed by the dependency walk, update \
              SUPERVISOR_EXTERNAL_COMMANDS, then set EXPECTED_SUPERVISOR_SCRIPT_DIGEST to {digest:#x}."
         );
     }
@@ -4343,30 +4504,27 @@ mod tests {
     /// removed would claim coverage nothing needs.
     #[test]
     fn every_listed_supervisor_command_is_actually_invoked() {
-        for (name, _) in SUPERVISOR_EXTERNAL_COMMANDS {
+        for name in SUPERVISOR_EXTERNAL_COMMANDS {
             assert!(
-                SUPERVISOR_SCRIPT.contains(name),
+                SUPERVISOR_SCRIPT.contains(&script_variable(name)),
                 "SUPERVISOR_EXTERNAL_COMMANDS lists '{name}', but SUPERVISOR_SCRIPT no longer \
                  runs it; drop the entry"
             );
         }
     }
 
-    /// Every command marked `Probed` must really be one the walk refuses a host
-    /// over, otherwise the annotation is decorative.
     #[test]
-    fn commands_marked_probed_are_in_the_dependency_walk() {
-        // The walk's full set: the two checked directly, plus the rule tooling.
+    fn every_supervisor_command_is_in_the_dependency_walk() {
+        // The walk's full set: the two checked directly, plus the probe list.
+        let tools = tools_in(Path::new("/mxc-test-tools"));
         let mut probed: Vec<&str> = vec!["slirp4netns", "unshare"];
-        probed.extend(RULE_TOOL_PROBES.iter().map(|(binary, _, _)| *binary));
+        probed.extend(tools.tool_probes().iter().map(|(name, ..)| *name));
 
-        for (name, coverage) in SUPERVISOR_EXTERNAL_COMMANDS {
-            if *coverage == SupervisorCommandCoverage::Probed {
-                assert!(
-                    probed.contains(name),
-                    "'{name}' is marked Probed but probe_dependencies_uncached never checks it"
-                );
-            }
+        for name in SUPERVISOR_EXTERNAL_COMMANDS {
+            assert!(
+                probed.contains(name),
+                "the supervisor runs '{name}' but probe_dependencies_uncached never checks it"
+            );
         }
     }
 
@@ -4375,15 +4533,17 @@ mod tests {
     /// surfaces as a dead supervisor mid-startup.
     #[test]
     fn the_rule_tools_the_supervisor_runs_are_probed() {
+        let tools = tools_in(Path::new("/mxc-test-tools"));
         for binary in ["nsenter", "ip", "iptables-restore", "ip6tables-restore"] {
             assert!(
-                SUPERVISOR_SCRIPT.contains(binary),
+                SUPERVISOR_SCRIPT.contains(&script_variable(binary)),
                 "expected the supervisor to run '{binary}'"
             );
             assert!(
-                RULE_TOOL_PROBES
+                tools
+                    .tool_probes()
                     .iter()
-                    .any(|(probed, _, _)| *probed == binary),
+                    .any(|(probed, ..)| *probed == binary),
                 "the supervisor runs '{binary}' but the pre-flight walk never probes it"
             );
         }
@@ -4407,9 +4567,9 @@ mod tests {
         use std::cell::RefCell;
 
         let log = RefCell::new(Vec::new());
-        let counting = |program: &str, args: &[&str]| {
+        let counting = |program: &Path, args: &[&str]| {
             log.borrow_mut()
-                .push(format!("{program} {}", args.join(" ")));
+                .push(format!("{} {}", tool_name(program), args.join(" ")));
             walk_stub_for(program, None)
         };
 
@@ -4428,10 +4588,15 @@ mod tests {
                 .count()
         };
 
-        let cache = OnceLock::new();
+        let approved = Mutex::new(None);
         let run = |use_case| {
-            let _ =
-                probe_dependencies_caching(&cache, use_case, ProbeBudget::unbounded(), counting);
+            let _ = probe_dependencies_caching(
+                &approved,
+                use_case,
+                ProbeBudget::unbounded(),
+                lookup_where_only(None),
+                counting,
+            );
             (stable_runs(), namespace_runs())
         };
 
@@ -4455,6 +4620,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_different_tool_selection_is_checked_before_it_is_used() {
+        use std::cell::Cell;
+
+        let stable_runs = Cell::new(0_u32);
+        let counting = |program: &Path, _args: &[&str]| {
+            if tool_name(program) == "slirp4netns" {
+                stable_runs.set(stable_runs.get() + 1);
+            }
+            walk_stub_for(program, None)
+        };
+        let approved = Mutex::new(None);
+        let run = |directory: &'static str| {
+            let tools = probe_dependencies_caching(
+                &approved,
+                PrivateNetworkUse::ProxyOnlyEgress,
+                ProbeBudget::unbounded(),
+                |name: &str| Ok(Path::new(directory).join(name)),
+                counting,
+            )
+            .expect("every tool answers");
+            assert_eq!(tools, tools_in(Path::new(directory)));
+            stable_runs.get()
+        };
+
+        assert_eq!(run("/first"), 1);
+        assert_eq!(
+            run("/first"),
+            1,
+            "the approved files must not be re-checked"
+        );
+        assert_eq!(run("/second"), 2, "different files must be checked first");
+    }
+
     /// A failure must not be remembered: it usually means the operator has not
     /// installed the tooling yet.
     #[test]
@@ -4462,8 +4661,8 @@ mod tests {
         use std::cell::Cell;
 
         let attempts = Cell::new(0_u32);
-        let cache = OnceLock::new();
-        let failing = |_: &str, _: &[&str]| {
+        let approved = Mutex::new(None);
+        let failing = |_: &Path, _: &[&str]| {
             attempts.set(attempts.get() + 1);
             let mut command = Command::new("sh");
             command.args(["-c", "exit 1"]);
@@ -4471,18 +4670,20 @@ mod tests {
         };
 
         probe_dependencies_caching(
-            &cache,
+            &approved,
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::unbounded(),
+            lookup_where_only(None),
             failing,
         )
         .expect_err("a host whose tooling fails must not be reported usable");
         let after_first = attempts.get();
 
         probe_dependencies_caching(
-            &cache,
+            &approved,
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::unbounded(),
+            lookup_where_only(None),
             failing,
         )
         .expect_err("the failure must not have been cached");
@@ -4504,6 +4705,7 @@ mod tests {
 
         let error = check_private_namespaces(
             command,
+            Path::new("/usr/bin/sh"),
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::unbounded(),
         )
@@ -4524,12 +4726,16 @@ mod tests {
 
             let error = check_private_namespaces(
                 command,
+                Path::new("/usr/bin/sh"),
                 PrivateNetworkUse::ProxyOnlyEgress,
                 ProbeBudget::unbounded(),
             )
             .expect_err("an exec failure must fail the walk");
 
-            assert!(error.contains("'sh'"), "must name the shell, got: {error}");
+            assert!(
+                error.contains("'/usr/bin/sh'"),
+                "must name the shell, got: {error}"
+            );
             assert!(
                 !error.contains("apparmor"),
                 "must not offer namespace remedies, got: {error}"
@@ -4544,6 +4750,7 @@ mod tests {
 
         assert!(check_private_namespaces(
             command,
+            Path::new("/usr/bin/sh"),
             PrivateNetworkUse::ProxyOnlyEgress,
             ProbeBudget::unbounded(),
         )
@@ -4554,8 +4761,9 @@ mod tests {
     /// passing everywhere while proving nothing, so pin what it requests.
     #[test]
     fn the_namespace_probe_asks_for_both_namespaces_as_the_supervisor_does() {
-        let command = real_probe_command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS);
-        assert_eq!(command.get_program(), "unshare");
+        let tools = tools_in(Path::new("/mxc-test-tools"));
+        let command = private_namespace_probe(&tools, &real_probe_command);
+        assert_eq!(command.get_program(), tools.unshare.as_os_str());
 
         let args: Vec<String> = command
             .get_args()
@@ -4567,34 +4775,53 @@ mod tests {
                 "the probe must request {flag}, got: {args:?}"
             );
         }
-        // The supervisor runs as `sh -c`, so the probe must exercise that.
+
+        // The supervisor runs its shell with `-c`, so the probe must exercise that.
         assert!(
             args.windows(2)
-                .any(|pair| pair[0] == "sh" && pair[1] == "-c"),
+                .any(|pair| Path::new(&pair[0]) == tools.sh && pair[1] == "-c"),
             "the probe must run the supervisor's shell, got: {args:?}"
         );
     }
 
+    fn tool_name(program: &Path) -> &str {
+        program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    }
+
+    fn tools_in(directory: &Path) -> NetworkTools {
+        NetworkTools::find(PrivateNetworkUse::ProxyOnlyEgress, |name| {
+            Ok(directory.join(name))
+        })
+        .expect("every tool is found")
+    }
+
+    fn lookup_where_only(
+        missing: Option<&'static str>,
+    ) -> impl Fn(&str) -> Result<PathBuf, LookupError> {
+        move |name| {
+            if Some(name) == missing {
+                return Err(LookupError::NotFound);
+            }
+            Ok(Path::new("/mxc-test-tools").join(name))
+        }
+    }
+
     /// A stand-in for the whole dependency walk: every tool succeeds with the
-    /// banner the walk demands, except `missing`, which is not on PATH.
+    /// banner the walk demands.
     ///
     /// Makes each refusal reproducible on any host, including one with none of
     /// the real tooling — where the host-conditional walk test proves nothing.
-    fn walk_where_only(missing: Option<&'static str>) -> impl Fn(&str, &[&str]) -> Command {
-        move |program, _args| {
-            if Some(program) == missing {
-                // A name that cannot exist on PATH, so the spawn fails with
-                // ENOENT exactly as a genuinely absent tool would.
-                return Command::new("mxc-probe-absent-tool-for-tests");
-            }
-            walk_stub_for(program, None)
-        }
+    fn walk_stub(program: &Path, _args: &[&str]) -> Command {
+        walk_stub_for(program, None)
     }
 
     /// A stand-in that succeeds, emitting the banner the walk parses for
     /// `program`. `override_script` replaces that behaviour for one tool.
-    fn walk_stub_for(program: &str, override_script: Option<&str>) -> Command {
-        let script = override_script.unwrap_or(match program {
+    fn walk_stub_for(program: &Path, override_script: Option<&str>) -> Command {
+        let script = override_script.unwrap_or(match tool_name(program) {
             // The walk requires both flags to be advertised.
             "unshare" => "printf '%s\\n' '--map-current-user --keep-caps'",
             // The backend gate refuses anything that is not nf_tables.
@@ -4617,9 +4844,10 @@ mod tests {
             probe_dependencies_with(
                 PrivateNetworkUse::ProxyOnlyEgress,
                 ProbeBudget::unbounded(),
-                walk_where_only(None),
+                lookup_where_only(None),
+                walk_stub,
             ),
-            Ok(())
+            Ok(tools_in(Path::new("/mxc-test-tools")))
         );
     }
 
@@ -4630,29 +4858,56 @@ mod tests {
         for tool in [
             "slirp4netns",
             "unshare",
+            "sh",
             "nsenter",
             "ip",
             "iptables",
             "ip6tables",
             "iptables-restore",
             "ip6tables-restore",
+            "sleep",
         ] {
             let error = probe_dependencies_with(
                 PrivateNetworkUse::ProxyOnlyEgress,
                 ProbeBudget::unbounded(),
-                walk_where_only(Some(tool)),
+                lookup_where_only(Some(tool)),
+                walk_stub,
             )
             .expect_err("a missing tool must fail the walk");
 
             assert!(
-                error.contains(tool),
+                error.contains(&format!("'{tool}'")),
                 "a missing '{tool}' must be named, got: {error}"
+            );
+            assert!(
+                error.contains("/usr/sbin"),
+                "the refusal must say where the tool was looked for, got: {error}"
             );
             assert!(
                 error.contains("runtimeConfig.networkProxy"),
                 "the refusal must name the config that required it, got: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_found_tool_that_cannot_start_is_reported_at_its_path() {
+        let factory = |program: &Path, args: &[&str]| {
+            if tool_name(program) == "nsenter" {
+                return Command::new("/mxc-probe-absent-directory/nsenter");
+            }
+            walk_stub(program, args)
+        };
+
+        let error = probe_dependencies_with(
+            PrivateNetworkUse::ProxyOnlyEgress,
+            ProbeBudget::unbounded(),
+            lookup_where_only(None),
+            factory,
+        )
+        .expect_err("a tool that cannot start must fail the walk");
+
+        assert!(error.contains("/mxc-test-tools/nsenter"), "got: {error}");
     }
 
     /// The wording differs by use case, so direct egress must not be told to
@@ -4662,7 +4917,8 @@ mod tests {
         let error = probe_dependencies_with(
             PrivateNetworkUse::FirewallEnforcement,
             ProbeBudget::unbounded(),
-            walk_where_only(Some("slirp4netns")),
+            lookup_where_only(Some("slirp4netns")),
+            walk_stub,
         )
         .expect_err("a missing tool must fail the walk");
 
@@ -4677,25 +4933,29 @@ mod tests {
     /// must not collapse the two.
     #[test]
     fn a_tool_that_exits_non_zero_is_reported_as_a_broken_installation() {
-        let factory = |program: &str, _args: &[&str]| {
-            if program == "nsenter" {
-                return walk_stub_for(program, Some("exit 3"));
-            }
-            walk_stub_for(program, None)
-        };
+        let tools = tools_in(Path::new("/mxc-test-tools"));
+        for (broken, path, ..) in tools.tool_probes() {
+            let factory = |program: &Path, _args: &[&str]| {
+                if tool_name(program) == broken {
+                    return walk_stub_for(program, Some("exit 3"));
+                }
+                walk_stub_for(program, None)
+            };
 
-        let error = probe_dependencies_with(
-            PrivateNetworkUse::ProxyOnlyEgress,
-            ProbeBudget::unbounded(),
-            factory,
-        )
-        .expect_err("a broken tool must fail the walk");
+            let error = probe_dependencies_with(
+                PrivateNetworkUse::ProxyOnlyEgress,
+                ProbeBudget::unbounded(),
+                lookup_where_only(None),
+                factory,
+            )
+            .expect_err("a broken tool must fail the walk");
 
-        assert!(error.contains("nsenter"), "got: {error}");
-        assert!(
-            error.contains("working"),
-            "a broken install must not be reported as missing, got: {error}"
-        );
+            assert!(error.contains(&path.display().to_string()), "got: {error}");
+            assert!(
+                error.contains("working"),
+                "a broken install must not be reported as missing, got: {error}"
+            );
+        }
     }
 
     /// `unshare` on PATH is not enough — an implementation without the flags
@@ -4707,8 +4967,8 @@ mod tests {
             "printf '%s\\n' '--map-current-user'",
             "printf '%s\\n' '--keep-caps'",
         ] {
-            let factory = move |program: &str, _args: &[&str]| {
-                if program == "unshare" {
+            let factory = move |program: &Path, _args: &[&str]| {
+                if tool_name(program) == "unshare" {
                     return walk_stub_for(program, Some(banner));
                 }
                 walk_stub_for(program, None)
@@ -4717,6 +4977,7 @@ mod tests {
             let error = probe_dependencies_with(
                 PrivateNetworkUse::ProxyOnlyEgress,
                 ProbeBudget::unbounded(),
+                lookup_where_only(None),
                 factory,
             )
             .expect_err("an unshare without both flags must fail the walk");
@@ -4869,7 +5130,7 @@ mod tests {
     /// failing hosts that do meet every requirement.
     #[test]
     fn the_whole_dependency_walk_passes_on_a_host_that_meets_every_requirement() {
-        const CHECKED_TOOLS: [&str; 9] = [
+        const CHECKED_TOOLS: [&str; 10] = [
             "slirp4netns",
             "unshare",
             "sh",
@@ -4879,10 +5140,11 @@ mod tests {
             "ip6tables",
             "iptables-restore",
             "ip6tables-restore",
+            "sleep",
         ];
         let missing: Vec<&str> = CHECKED_TOOLS
             .into_iter()
-            .filter(|tool| !on_path(tool))
+            .filter(|tool| !is_installed(tool))
             .collect();
         let equipped =
             missing.is_empty() && namespaces_are_available() && iptables_uses_nf_tables();
@@ -5080,6 +5342,7 @@ mod tests {
         assert!(
             iptables_backend_is_usable(
                 "iptables",
+                Path::new("/usr/sbin/iptables"),
                 "iptables v1.8.10 (nf_tables)\n",
                 &unreachable_lock(&dir),
                 PrivateNetworkUse::ProxyOnlyEgress
@@ -5097,6 +5360,7 @@ mod tests {
 
         let error = iptables_backend_is_usable(
             "iptables",
+            Path::new("/usr/sbin/iptables"),
             "iptables v1.8.10 (legacy)\n",
             &unreachable_lock(&dir),
             PrivateNetworkUse::ProxyOnlyEgress,
@@ -5106,6 +5370,10 @@ mod tests {
         assert!(
             error.contains("iptables") && error.contains("nf_tables"),
             "the error must name the binary and the backend to switch to: {error}"
+        );
+        assert!(
+            error.contains("/usr/sbin/iptables"),
+            "the error must name the file that was checked: {error}"
         );
     }
 
@@ -5117,6 +5385,7 @@ mod tests {
 
         let error = iptables_backend_is_usable(
             "iptables",
+            Path::new("/usr/sbin/iptables"),
             "iptables v1.8.10 (legacy)\n",
             &unreachable_lock(&dir),
             PrivateNetworkUse::FirewallEnforcement,
@@ -5140,6 +5409,7 @@ mod tests {
 
         let error = iptables_backend_is_usable(
             "iptables",
+            Path::new("/usr/sbin/iptables"),
             "iptables v1.8.10 (legacy)\n",
             &unreachable_lock(&dir),
             PrivateNetworkUse::ProxyOnlyEgress,
@@ -5180,6 +5450,7 @@ mod tests {
         assert!(
             iptables_backend_is_usable(
                 "iptables",
+                Path::new("/usr/sbin/iptables"),
                 "iptables v1.8.10 (legacy)\n",
                 &lock,
                 PrivateNetworkUse::ProxyOnlyEgress
@@ -5210,6 +5481,7 @@ mod tests {
         assert!(
             iptables_backend_is_usable(
                 "iptables",
+                Path::new("/usr/sbin/iptables"),
                 "iptables v1.6.1\n",
                 &unreachable_lock(&dir),
                 PrivateNetworkUse::ProxyOnlyEgress
@@ -5271,8 +5543,9 @@ mod tests {
     /// argument fails, as the real one does when a glob matched nothing and
     /// reached it unexpanded.
     const FAKE_NSENTER: &str = r#"#!/bin/sh
+PATH=$MXC_TEST_STUB_PATH
 case "$*" in
-    *" -- ip "*)
+    *" -- "*/ip" "*)
         if [ ! -e "$MXC_TEST_LOOPBACK_QUERY" ]; then
             printf '%s\n' "$*" > "$MXC_TEST_LOOPBACK_QUERY"
         fi
@@ -5296,7 +5569,10 @@ tool=""
 payload=""
 for arg in "$@"; do
     case "$arg" in
-        iptables-restore|ip6tables-restore) tool="${arg%-restore}" ;;
+        */iptables-restore|*/ip6tables-restore)
+            tool="${arg##*/}"
+            tool="${tool%-restore}"
+            ;;
         -*) ;;
         *) [ -f "$arg" ] && payload="$arg" ;;
     esac
@@ -5316,6 +5592,7 @@ exit 0
     /// Signals readiness on the descriptor the supervisor opened for it (9),
     /// then idles so the supervisor's `wait` has something to wait on.
     const FAKE_SLIRP: &str = r#"#!/bin/sh
+PATH=$MXC_TEST_STUB_PATH
 echo $$ > "$MXC_TEST_SLIRP_PID"
 case "$(cat "$MXC_TEST_LOOPBACK_STATE")" in
     *" inet 127.0.0.1/8 "*) ;;
@@ -5340,6 +5617,7 @@ exec sleep 30
     /// on demand, so the fail-closed ordering can be observed rather than read.
     struct FakeSupervisor {
         dir: TempDir,
+        tools: NetworkTools,
         child: Supervisor,
         pid_writer: Option<File>,
         _exit_writer: OwnedFd,
@@ -5480,6 +5758,16 @@ exec sleep 30
         fs::set_permissions(path, perms).expect("chmod stub");
     }
 
+    fn stub_tools(bin: &Path) -> NetworkTools {
+        NetworkTools::find(PrivateNetworkUse::ProxyOnlyEgress, |name| match name {
+            // The supervisor script runs these for real; its other tools are
+            // stubs or are only handed to the fake `nsenter`.
+            "sh" | "sleep" => host_tools::find(name),
+            _ => Ok(bin.join(name)),
+        })
+        .expect("the host has sh and sleep")
+    }
+
     fn spawn_fake_supervisor(fail_at: Option<u32>, slirp_dies: bool) -> FakeSupervisor {
         spawn_fake_supervisor_with_plan(
             &EgressPlan::for_proxy(SLIRP_HOST_GATEWAY_IP, 3128),
@@ -5534,24 +5822,25 @@ exec sleep 30
         }
         install_stub(&bin.join("nsenter"), FAKE_NSENTER);
         install_stub(&bin.join("slirp4netns"), FAKE_SLIRP);
+        let tools = stub_tools(&bin);
 
         let stderr = File::create(dir.path().join("supervisor.stderr")).expect("stderr");
         let (exit_reader, exit_writer) = pipe2(OFlag::O_CLOEXEC).expect("exit pipe");
         let (pid_reader, pid_writer) = pipe2(OFlag::O_CLOEXEC).expect("pid pipe");
 
-        // The stubs shadow the real tools; the rest of PATH still supplies the
-        // coreutils the script uses (`sleep`, `cat`).
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let mut command = Command::new("sh");
+        // A PATH naming no real directory proves the script runs only the tools
+        // it is handed. The stubs restore the test's own PATH for coreutils.
+        let mut command = Command::new(&tools.sh);
         command
             .args(["-c", SUPERVISOR_SCRIPT, "mxc-test-supervisor"])
             .arg(&state)
             .arg("1")
-            .env("PATH", path)
+            .args(tools.supervisor_arguments())
+            .env("PATH", dir.path().join("no-tools"))
+            .env(
+                "MXC_TEST_STUB_PATH",
+                std::env::var_os("PATH").unwrap_or_default(),
+            )
             .env("MXC_TEST_COUNT", dir.path().join("rules.count"))
             .env("MXC_TEST_ARGS", dir.path().join("rules.args"))
             .env("MXC_TEST_PAYLOAD", dir.path().join("rules.payload"))
@@ -5579,6 +5868,7 @@ exec sleep 30
 
         FakeSupervisor {
             dir,
+            tools,
             child,
             pid_writer: Some(File::from(pid_writer)),
             _exit_writer: exit_writer,
@@ -5612,7 +5902,10 @@ exec sleep 30
                 .expect("query arguments");
             assert_eq!(
                 query.trim(),
-                "--net=/proc/4242/ns/net -- ip -4 -o address show dev lo up"
+                format!(
+                    "--net=/proc/4242/ns/net -- {} -4 -o address show dev lo up",
+                    supervisor.tools.ip.display()
+                )
             );
 
             fs::write(&state, "1: lo    inet 127.0.0.1/8 scope host lo\n")
@@ -6148,24 +6441,18 @@ exec sleep 30
         let bin = state_dir.path().join("bin");
         fs::create_dir_all(&bin).expect("bin dir");
         install_stub(&bin.join("nsenter"), BLOCKING_NSENTER);
+        let tools = stub_tools(&bin);
         let blocked_pid_path = state_dir.path().join("blocked.pid");
         let stderr = File::create(state_dir.path().join("supervisor.stderr")).expect("stderr");
         let (exit_reader, exit_writer) = pipe2(OFlag::O_CLOEXEC).expect("exit pipe");
         let (pid_reader, pid_writer) = pipe2(OFlag::O_CLOEXEC).expect("pid pipe");
 
-        let mut command = Command::new("sh");
+        let mut command = Command::new(&tools.sh);
         command
             .args(["-c", SUPERVISOR_SCRIPT, "mxc-test-supervisor"])
             .arg(state_dir.path())
             .arg("1")
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    bin.display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
+            .args(tools.supervisor_arguments())
             .env("MXC_TEST_BLOCKED_PID", &blocked_pid_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

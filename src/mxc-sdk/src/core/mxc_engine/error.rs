@@ -4,7 +4,7 @@
 //! The SDK's own error type — a crate-owned facade over the internal
 //! `mxc_common` error, so the public API never exposes the foundation crate.
 
-use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
+use crate::mxc_common::mxc_error::{ApiFailure, MxcError, MxcErrorCode};
 
 /// Error codes returned by the SDK, corresponding one-for-one to the
 /// snake_case codes reported by MXC.
@@ -47,6 +47,26 @@ impl ErrorCode {
 impl std::fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl ErrorCode {
+    /// The internal code this facade code stands for.
+    fn to_internal(self) -> MxcErrorCode {
+        match self {
+            Self::MalformedRequest => MxcErrorCode::MalformedRequest,
+            Self::UnsupportedContainment => MxcErrorCode::UnsupportedContainment,
+            Self::UnsupportedPhase => MxcErrorCode::UnsupportedPhase,
+            Self::BackendUnavailable => MxcErrorCode::BackendUnavailable,
+            Self::MalformedId => MxcErrorCode::MalformedId,
+            Self::StaleId => MxcErrorCode::StaleId,
+            Self::NotProvisioned => MxcErrorCode::NotProvisioned,
+            Self::NotStarted => MxcErrorCode::NotStarted,
+            Self::AlreadyStarted => MxcErrorCode::AlreadyStarted,
+            Self::AlreadyStopped => MxcErrorCode::AlreadyStopped,
+            Self::PolicyValidation => MxcErrorCode::PolicyValidation,
+            Self::BackendError => MxcErrorCode::BackendError,
+        }
     }
 }
 
@@ -147,11 +167,36 @@ impl From<MxcError> for Error {
     }
 }
 
+impl Error {
+    /// Recover the internal error this facade error stands for, so an
+    /// in-repo binary can emit the typed envelope and exit status its code
+    /// implies.
+    ///
+    /// Deliberately an inherent method rather than `impl From<Error> for
+    /// MxcError`: a second `MxcError: From<_>` impl makes `?` ambiguous
+    /// wherever the error type is inferred.
+    ///
+    /// `MxcError::details` has no facade counterpart and does not survive the
+    /// round trip.
+    #[doc(hidden)]
+    pub fn into_mxc_error(self) -> MxcError {
+        let mut error = MxcError::new(self.code.to_internal(), self.message);
+        if let Some(operation) = self.operation {
+            let mut failure = ApiFailure::new(operation);
+            failure.native_code = self.native_code;
+            error = error.with_api_failure(failure);
+        }
+        if let Some(remediation) = self.remediation {
+            error = error.with_remediation(remediation);
+        }
+        error
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
-
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.
     ///

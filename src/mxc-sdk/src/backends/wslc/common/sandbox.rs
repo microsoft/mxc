@@ -16,7 +16,7 @@
 //! # What WSLC can and cannot stream
 //!
 //! - **stdout / stderr** — the SDK pushes them to callbacks, which this module
-//!   forwards to an in-memory stream per handle (see [`crate::wslc_common::stream_buffer`]);
+//!   forwards to an in-memory stream per handle (see `crate::wslc_common::stream_buffer`);
 //!   the caller reads the other end. Native-stdio callers receive synthesized
 //!   OS pipes pumped from those streams because the SDK exposes bytes rather
 //!   than pipe handles. Each exposed output needs its own blocking pump because

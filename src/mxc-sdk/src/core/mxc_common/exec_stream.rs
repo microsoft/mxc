@@ -19,7 +19,7 @@
 //! [`ExecHandle`]'s contract is that pipe-handle ownership stays with the
 //! backend's underlying process object. So this adapter does **not** take the
 //! raw handles: it **duplicates** each non-null pipe handle
-//! ([`try_clone_to_owned`]) and wraps the *duplicate* as an owned reader/writer.
+//! (`try_clone_to_owned`) and wraps the *duplicate* as an owned reader/writer.
 //! The adapter closes only its duplicates on drop; the backend's originals (and
 //! its `waiter`/`terminator`, which may also reference them) are untouched — so
 //! there is no double-close even for a backend that keeps and closes its own
@@ -39,7 +39,6 @@
 //! caller abandon a read on a stream it *did* take — see
 //! [`stdout_closer`](SandboxProcess::stdout_closer).
 //!
-//! [`try_clone_to_owned`]: std::os::windows::io::BorrowedHandle::try_clone_to_owned
 //! [`ExecStdio::Piped`]: crate::mxc_common::state_aware_backend::ExecStdio::Piped
 //! [`ExecStdio::Relayed`]: crate::mxc_common::state_aware_backend::ExecStdio::Relayed
 
@@ -656,7 +655,7 @@ impl Drop for ExecSandboxProcess {
 }
 
 /// Map an [`ExecOutcome`] onto the [`SandboxProcess`] convention, where a
-/// timeout is an `Err` carrying [`io::ErrorKind::TimedOut`](std::io::ErrorKind)
+/// timeout is an `Err` carrying [`std::io::ErrorKind::TimedOut`]
 /// rather than an exit code.
 ///
 /// That convention is not invented here: five one-shot backends already report

@@ -17,6 +17,10 @@ checks request compatibility without creating a container. An incompatible
 request has no selected tier and an explanatory error, while host facts remain
 available.
 
+Use [mxc_sdk::v1::dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md)
+for caller-authored MXC request JSON. It supports execution, container
+lifecycle operations, and validation through the in-process engine.
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or

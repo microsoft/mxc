@@ -281,24 +281,25 @@ fn unpack_zip_strict(archive_path: &Path, destination: &Path) {
         let mut entry = archive
             .by_index(index)
             .unwrap_or_else(|error| panic!("cannot read NVX zip entry {index}: {error}"));
+        let name = entry
+            .name()
+            .unwrap_or_else(|error| panic!("cannot decode NVX zip entry {index} name: {error}"))
+            .into_owned();
         assert!(
             !entry.is_symlink(),
             "NVX bundle archive must not contain links: {}",
-            entry.name()
+            name
         );
-        let relative = entry.enclosed_name().unwrap_or_else(|| {
-            panic!(
-                "NVX bundle archive entry path is not safe: {}",
-                entry.name()
-            )
-        });
+        let relative = entry
+            .enclosed_name()
+            .unwrap_or_else(|| panic!("NVX bundle archive entry path is not safe: {}", name));
         assert!(
             !relative.as_os_str().is_empty()
                 && relative
                     .components()
                     .all(|component| matches!(component, Component::Normal(_))),
             "NVX bundle archive entry path is not safe: {}",
-            entry.name()
+            name
         );
         let out_path = destination.join(&relative);
         if entry.is_dir() {
@@ -308,7 +309,7 @@ fn unpack_zip_strict(archive_path: &Path, destination: &Path) {
             assert!(
                 entry.is_file(),
                 "NVX bundle archive must contain only regular files and directories: {}",
-                entry.name()
+                name
             );
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent)
