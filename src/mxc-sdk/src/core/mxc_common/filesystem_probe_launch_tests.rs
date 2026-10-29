@@ -31,14 +31,28 @@ mod scenarios {
     const STAGE_ENV: &str = "MXC_FILESYSTEM_PROBE_TEST_STAGE";
     const DIRECTORY_ENV: &str = "MXC_FILESYSTEM_PROBE_TEST_DIRECTORY";
     const WATCHDOG: Duration = Duration::from_secs(15);
+    const LXC_FIXTURE: &str = "mxc-probe-deadline";
 
     fn exercise_request(backend: &str, provision: bool, stage: String, directory: &Path) {
-        let target = directory.join("stalled-path");
-        let marker = directory.join("workload-ran");
-        std::fs::write(&target, b"readable").unwrap();
+        let allowed = directory.join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        let readable = allowed.join("readable");
+        let denied = directory.join("denied");
+        let marker = allowed.join("workload-ran");
+        std::fs::write(&readable, b"readable").unwrap();
+        std::fs::write(&denied, b"denied").unwrap();
+        let target = if matches!(
+            stage.as_str(),
+            "bwrap-denied" | "lxc-denied" | "wslc-overlap"
+        ) {
+            &denied
+        } else {
+            &readable
+        };
         let filesystem = FilesystemPolicy {
-            readwrite_paths: vec![directory.to_str().unwrap().to_string()],
-            readonly_paths: vec![target.to_str().unwrap().to_string()],
+            readwrite_paths: vec![allowed.to_str().unwrap().to_string()],
+            readonly_paths: vec![readable.to_str().unwrap().to_string()],
+            denied_paths: vec![denied.to_str().unwrap().to_string()],
             ..Default::default()
         };
         assert!(INJECTION.set((stage, target.clone())).is_ok());
@@ -67,6 +81,7 @@ mod scenarios {
             v1::spawn(
                 ContainerRequest {
                     containment,
+                    container_name: (backend == "lxc").then(|| LXC_FIXTURE.to_string()),
                     filesystem: Some(filesystem),
                     ..ContainerRequest::new(command)
                 },
@@ -101,17 +116,39 @@ mod scenarios {
             !marker.exists(),
             "workload executed before rejecting the policy"
         );
+        if backend == "lxc" && directory.join("lxc").exists() {
+            assert!(
+                !directory.join("lxc").join(LXC_FIXTURE).exists(),
+                "LXC did not release its container after the filesystem probe timed out"
+            );
+        }
     }
 
-    fn run_cases(backend: &str, provision: bool, name: &str) {
+    fn run_cases(backend: &str, provision: bool, name: &str, stages: &[&str]) {
         if let Ok(stage) = std::env::var(STAGE_ENV) {
             let directory = PathBuf::from(std::env::var_os(DIRECTORY_ENV).unwrap());
             exercise_request(backend, provision, stage, &directory);
             return;
         }
         let module = module_path!().split_once("::").unwrap().1;
-        for stage in ["parser", "object", "delegation"] {
+        for stage in stages {
             let directory = tempfile::tempdir().unwrap();
+            let lxc_path = directory.path().join("lxc");
+            let lxc_mount_stage = matches!(*stage, "lxc-rebound" | "lxc-denied");
+            if lxc_mount_stage {
+                std::fs::create_dir(&lxc_path).unwrap();
+                let output = Command::new("lxc-create")
+                    .arg("-P")
+                    .arg(&lxc_path)
+                    .args(["-n", LXC_FIXTURE, "-t", "none"])
+                    .output()
+                    .expect("LXC command-line tools are required for mount-probe coverage");
+                assert!(
+                    output.status.success(),
+                    "could not create the empty LXC fixture: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
             let log = File::create(directory.path().join("child.log")).unwrap();
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -122,6 +159,7 @@ mod scenarios {
                 ])
                 .env(STAGE_ENV, stage)
                 .env(DIRECTORY_ENV, directory.path())
+                .env("LXC_PATH", &lxc_path)
                 .stdout(Stdio::from(log.try_clone().unwrap()))
                 .stderr(Stdio::from(log))
                 .spawn()
@@ -139,6 +177,19 @@ mod scenarios {
                 std::thread::sleep(Duration::from_millis(10));
             };
             let output = std::fs::read_to_string(directory.path().join("child.log")).unwrap();
+            if lxc_mount_stage && lxc_path.join(LXC_FIXTURE).exists() {
+                let cleanup = Command::new("lxc-destroy")
+                    .arg("-P")
+                    .arg(&lxc_path)
+                    .args(["-n", LXC_FIXTURE, "-f"])
+                    .output()
+                    .expect("clean up the LXC fixture after a failed regression");
+                assert!(
+                    cleanup.status.success(),
+                    "could not remove the LXC fixture: {}",
+                    String::from_utf8_lossy(&cleanup.stderr)
+                );
+            }
             assert!(
                 status.is_some_and(|status| status.success()),
                 "{backend} {stage} stalled-path rejection failed: {status:?}\n{output}"
@@ -148,7 +199,11 @@ mod scenarios {
                 "{backend} {stage} did not execute its child regression:\n{output}"
             );
             assert!(
-                !directory.path().join("workload-ran").exists(),
+                !directory
+                    .path()
+                    .join("allowed")
+                    .join("workload-ran")
+                    .exists(),
                 "{backend} executed the workload before rejecting {stage}"
             );
         }
@@ -162,6 +217,7 @@ mod scenarios {
             "bubblewrap",
             false,
             "bubblewrap_launch_rejects_stalled_paths",
+            &["parser", "object", "delegation"],
         );
     }
 
@@ -169,20 +225,83 @@ mod scenarios {
     #[ignore = "runs in backend validation with an external watchdog"]
     #[cfg(target_os = "linux")]
     fn lxc_launch_rejects_stalled_paths() {
-        run_cases("lxc", false, "lxc_launch_rejects_stalled_paths");
+        run_cases(
+            "lxc",
+            false,
+            "lxc_launch_rejects_stalled_paths",
+            &["parser", "object", "delegation"],
+        );
     }
 
     #[test]
     #[ignore = "runs in backend validation with an external watchdog"]
     #[cfg(all(windows, feature = "wslc"))]
     fn wslc_launch_rejects_stalled_paths() {
-        run_cases("wslc", false, "wslc_launch_rejects_stalled_paths");
+        run_cases(
+            "wslc",
+            false,
+            "wslc_launch_rejects_stalled_paths",
+            &["parser", "object", "delegation"],
+        );
     }
 
     #[test]
     #[ignore = "runs in backend validation with an external watchdog"]
     #[cfg(all(windows, feature = "wslc"))]
     fn wslc_provision_rejects_stalled_paths() {
-        run_cases("wslc", true, "wslc_provision_rejects_stalled_paths");
+        run_cases(
+            "wslc",
+            true,
+            "wslc_provision_rejects_stalled_paths",
+            &["parser", "object", "delegation"],
+        );
+    }
+
+    #[test]
+    #[ignore = "runs in backend validation with an external watchdog"]
+    #[cfg(target_os = "linux")]
+    fn bubblewrap_denied_paths_reject_stalls() {
+        run_cases(
+            "bubblewrap",
+            false,
+            "bubblewrap_denied_paths_reject_stalls",
+            &["bwrap-denied"],
+        );
+    }
+
+    #[test]
+    #[ignore = "requires root and LXC command-line tools"]
+    #[cfg(target_os = "linux")]
+    fn lxc_mount_paths_reject_stalls() {
+        run_cases(
+            "lxc",
+            false,
+            "lxc_mount_paths_reject_stalls",
+            &["lxc-rebound", "lxc-denied"],
+        );
+    }
+
+    #[test]
+    #[ignore = "runs in backend validation with an external watchdog"]
+    #[cfg(all(windows, feature = "wslc"))]
+    fn wslc_overlap_rejects_stalls() {
+        run_cases(
+            "wslc",
+            false,
+            "wslc_overlap_rejects_stalls",
+            &["wslc-overlap"],
+        );
+    }
+
+    #[test]
+    #[ignore = "runs in backend validation with an external watchdog"]
+    #[cfg(all(windows, feature = "wslc"))]
+    fn wslc_provision_overlap_rejects_stalls() {
+        run_cases(
+            "wslc",
+            true,
+            "wslc_provision_overlap_rejects_stalls",
+            &["wslc-overlap"],
+        );
     }
 }

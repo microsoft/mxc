@@ -23,11 +23,19 @@ release_directory="$repo_root/src/target/release"
 
 run_filesystem_probe_tests() {
     local executable="$binary_directory/mxc-filesystem-probe-tests"
-    local test_name="core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::${backend}_launch_rejects_stalled_paths"
+    local cases=("${backend}_launch_rejects_stalled_paths")
+    if [[ "$backend" == "bubblewrap" ]]; then
+        cases+=(bubblewrap_denied_paths_reject_stalls)
+    else
+        cases+=(lxc_mount_paths_reject_stalls)
+    fi
     test -f "$executable"
     chmod +x "$executable"
-    "$executable" --list --ignored --exact "$test_name" | grep -Fx "$test_name: test"
-    "$executable" --ignored --exact "$test_name"
+    for case in "${cases[@]}"; do
+        local test_name="core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
+        "$executable" --list --ignored --exact "$test_name" | grep -Fx "$test_name: test"
+        "$executable" --ignored --exact "$test_name"
+    done
 }
 
 case "$backend" in

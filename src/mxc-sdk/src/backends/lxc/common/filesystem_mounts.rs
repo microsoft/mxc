@@ -62,6 +62,9 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 /// Resolve a denied host path to the real target to mask, because the kernel
 /// refuses to mount over or through a symlink.
 fn resolve_denied_host_path(host_path: &str) -> Result<String, String> {
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("lxc-denied", host_path);
+
     match resolve_through_symlinks(Path::new(host_path)) {
         Some(resolved) => {
             let real = resolved.to_str().ok_or_else(|| {
@@ -97,6 +100,9 @@ fn has_rebound_descendant(container_path: &str, rebound: &[String]) -> bool {
 /// The container-side forms of a re-bound path to compare against denied
 /// directories: the path as written, and its symlink-resolved target.
 fn rebound_comparison_paths(host_path: &str) -> Vec<String> {
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("lxc-rebound", host_path);
+
     let original = host_path.trim_start_matches('/').to_string();
     let mut out = Vec::with_capacity(2);
     if let Some(resolved) = resolve_through_symlinks(Path::new(host_path)) {

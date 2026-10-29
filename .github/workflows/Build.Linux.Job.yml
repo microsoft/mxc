@@ -188,11 +188,22 @@ jobs:
             python3 -c 'import json,sys; items=[json.loads(line) for line in sys.stdin]; paths=[m["executable"] for m in items if m.get("reason")=="compiler-artifact" and m["target"]["name"]=="mxc_sdk" and m["profile"]["test"] and m.get("executable")]; assert len(paths)==1, paths; print(paths[0])')"
           destination="target/${{ matrix.target }}/release/mxc-filesystem-probe-tests"
           cp "$payload" "$destination"
-          for backend in bubblewrap lxc; do
-            test_name="core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::${backend}_launch_rejects_stalled_paths"
+          for case in bubblewrap_launch_rejects_stalled_paths lxc_launch_rejects_stalled_paths \
+            bubblewrap_denied_paths_reject_stalls lxc_mount_paths_reject_stalls; do
+            test_name="core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
             "$destination" --list --ignored --exact "$test_name" | grep -Fx "$test_name: test"
           done
-          "$destination" --ignored filesystem_probe::launch_tests::
+          "$destination" --ignored filesystem_probe::launch_tests:: --skip lxc_mount_paths_reject_stalls
+
+      - name: Test LXC mount-probe deadlines
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y lxc-utils
+          sudo "target/${{ matrix.target }}/release/mxc-filesystem-probe-tests" --ignored --exact \
+            core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::lxc_mount_paths_reject_stalls
 
       # This lane selects lib tests by module, so mxc_pty needs an explicit
       # step; the macOS lane picks it up via the package-wide run. The tests

@@ -66,7 +66,7 @@ fn exercise_library_unload() {
     );
     let state = Box::leak(Box::new(AtomicU8::new(0)));
 
-    // SAFETY: this fixture contains only the test worker and the production module pin.
+    // SAFETY: the fixture contains the production probe and its dependencies.
     let library = unsafe { libloading::Library::new(&library_path) }.unwrap();
 
     // SAFETY: the fixture exports this signature and state remains alive for process lifetime.

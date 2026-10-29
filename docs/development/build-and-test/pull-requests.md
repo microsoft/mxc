@@ -30,8 +30,10 @@ cargo build --locked -p mxc-sdk --example module_lifetime_fixture
 cargo test --locked -p mxc-sdk --test module_lifetime
 ```
 
-The test closes a native library after a worker times out, then releases the
-worker and checks that it can finish. It runs in a subprocess so an unload
+The fixture runs the production filesystem probe until it times out. The test
+then closes its library handle, releases the blocked operation, and checks that
+the worker can finish. Removing the probe's module pin must fail this regression.
+It runs in a subprocess so an unload
 regression cannot crash the test runner. The full native Cargo test suites also
 build the fixture example and run this test on Windows and macOS. Both Linux
 matrix lanes explicitly build the fixture and run the test in their release
@@ -40,7 +42,9 @@ profile with the lane's target.
 ### Filesystem probe request deadlines
 
 The Windows and Linux builds run public SDK requests with a blocked existence,
-object-identity, or delegation probe. Each must return a path-specific timeout
+object-identity, or delegation probe. Separate cases let those checks finish,
+then block Bubblewrap denied-path resolution, LXC rebound/denied-mount resolution,
+or WSLC overlap canonicalization. Each must return a path-specific timeout
 without executing the workload. WSLC coverage also calls container provisioning.
 A separate process enforces a 15-second watchdog so a missing timeout fails
 rather than hanging CI. Fault injection is compiled only under `cfg(test)`;
@@ -49,12 +53,15 @@ shipping libraries and executors contain no blocking-path switch.
 Run locally from `src`:
 
 ```text
-cargo test --locked -p mxc-sdk --lib filesystem_probe::launch_tests:: -- --ignored
+cargo test --locked -p mxc-sdk --lib filesystem_probe::launch_tests:: -- --ignored --skip lxc_mount_paths_reject_stalls
 cargo test --locked -p mxc-sdk --lib --features wslc filesystem_probe::launch_tests:: -- --ignored
 ```
 
 Use the first command on Linux (with Bubblewrap installed) and the second on
-Windows. The builds stage `mxc-filesystem-probe-tests` (`.exe` on Windows)
+Windows. Run `lxc_mount_paths_reject_stalls` separately as root with the LXC
+command-line tools installed. It creates an empty container without downloading
+an image or starting a workload, uses private container storage, and verifies
+timeout cleanup. The builds stage `mxc-filesystem-probe-tests` (`.exe` on Windows)
 alongside the executor artifacts, but exclude it from the published npm SDK
 package. Scheduled Bubblewrap, LXC, and WSLC suites
 require this executable, verify the expected tests are present, and run their

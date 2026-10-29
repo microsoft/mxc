@@ -175,8 +175,10 @@ tests.
 Bubblewrap, LXC, and WSLC also run the prebuilt
 `mxc-filesystem-probe-tests` executable from their build artifact. These public
 SDK regressions block each policy probe in a subprocess, require a bounded
-path-specific rejection, and check that no workload ran; WSLC also covers
-container provisioning. The blocked-call hook is test-only. See
+path-specific rejection, and check that no workload ran. They cover both shared
+validation and backend-specific deny/mount/overlap probes; WSLC also covers
+container provisioning. LXC mount cases run as root against an empty, stopped
+container in private storage and verify cleanup. The blocked-call hook is test-only. See
 [filesystem probe request deadlines](pull-requests.md#filesystem-probe-request-deadlines)
 for local commands and watchdog behavior.
 

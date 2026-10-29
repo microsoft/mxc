@@ -1214,6 +1214,9 @@ fn resolve_denied_paths(
 }
 
 fn resolve_denied_path(path: &str) -> Result<(String, bool), String> {
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("bwrap-denied", path);
+
     let resolved = match resolve_through_symlinks(Path::new(path)) {
         Some(resolved) => {
             if let Some(error) = resolved.error {
