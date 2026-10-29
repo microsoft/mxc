@@ -22,10 +22,11 @@ use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
+use crate::mxc_common::filesystem_object::FilesystemPolicyError;
+use crate::mxc_common::filesystem_symlink::{is_policy_path_error, resolve_through_symlinks};
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -38,7 +39,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
 use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version, network_rules,
+    bwrap_version, lifetime_spawner, network_rules,
     provider_monitor::ProviderMonitor,
     proxy_network,
     resolver_file::ResolverFile,
@@ -46,6 +47,15 @@ use crate::bwrap_common::{
 };
 
 const DNS_PORT: u16 = 53;
+
+// SDK v2: Rejected -> rejected (policy_validation), Lookup -> failed(LaunchFailed).
+// See docs/development/plans/sdk-v2-error-codes.md.
+fn proxy_resolve_failure_response(error: proxy_network::ProxyResolveError) -> ScriptResponse {
+    match error {
+        proxy_network::ProxyResolveError::Rejected(message)
+        | proxy_network::ProxyResolveError::Lookup(message) => ScriptResponse::error(&message),
+    }
+}
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -84,7 +94,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        self.validate_prepared(request)?;
+        let launch = self.validate_prepared(request)?;
         let use_case = match ResolvedNetworkMode::from_request(
             request,
             request.policy.network_proxy.is_enabled(),
@@ -98,8 +108,10 @@ impl SandboxBackend for BubblewrapScriptRunner {
             _ => None,
         };
         if let Some(use_case) = use_case {
-            proxy_network::probe_private_namespaces(use_case)
-                .map_err(|error| ScriptResponse::error(&error))?;
+            if let Some(tools) = launch.network_tools.as_ref() {
+                proxy_network::probe_private_namespaces(tools, use_case)
+                    .map_err(|error| ScriptResponse::error(&error))?;
+            }
         }
         Ok(())
     }
@@ -111,10 +123,8 @@ impl SandboxBackend for BubblewrapScriptRunner {
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         validate_common(request)?;
-        // Keep the plan validation derived so the firewall path installs
-        // exactly what was accepted instead of deriving it again.
-        let egress_plan = self.validate_prepared(request)?;
-        if let Some(plan) = egress_plan.as_ref() {
+        let launch = self.validate_prepared(request)?;
+        if let Some(plan) = launch.egress_plan.as_ref() {
             warn_unreachable_v6_targets(plan, logger);
         }
         // Tighten aliases of the same host object to the strictest intent
@@ -133,22 +143,18 @@ impl SandboxBackend for BubblewrapScriptRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(error) => return Err(error.into_response()),
         };
         // Reject any policy path the invoking user cannot access, so the sandbox
         // never gains access the caller lacks. Runs after object normalization
         // so it sees the already-tightened intents.
-        if let Err(msg) = crate::mxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
-        }
+        crate::mxc_common::filesystem_access::check_delegation(&request.policy)
+            .map_err(|error| error.into_response())?;
         // Resolve denied paths that traverse a symlink to their real host path
         // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
         // Only clones the request when a path needs rewriting (common case:
         // none). See docs/backends/bwrap/bubblewrap-backend.md.
-        let plan = match resolve_denied_paths(&request.policy, logger) {
-            Ok(plan) => plan,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
-        };
+        let plan = resolve_denied_paths(&request.policy, logger).map_err(|e| e.into_response())?;
         let resolved;
         let request = match plan.paths {
             Some(denied_paths) => {
@@ -165,24 +171,31 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // The masks are built from the list above, not from the one the caller
         // wrote, so the pin conflict has to be judged against it too.
         if let Err(msg) = check_pin_against_denied_hosts(request) {
+            // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
             return Err(ScriptResponse::error(&msg));
         }
         warn_resolver_mount_hint(request, logger);
         warn_cwd_mount_hint(request, logger);
-        let child = self.spawn_bwrap(request, &plan.files, egress_plan, logger, stdio)?;
+        let child = self.spawn_bwrap(request, &plan.files, launch, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
 }
 
+/// What validation checked, so the launch runs exactly that instead of looking
+/// it up or deriving it again.
+#[derive(Debug)]
+struct ValidatedLaunch {
+    egress_plan: Option<network_rules::EgressPlan>,
+    bwrap: PathBuf,
+    network_tools: Option<proxy_network::NetworkTools>,
+}
+
 impl BubblewrapScriptRunner {
-    /// Validate the request and its tool dependencies, and prepare its egress plan.
-    ///
-    /// Returning the plan lets `spawn` install exactly what validation
-    /// accepted instead of deriving it a second time on every spawn.
+    /// Validate the request and prepare its egress plan and host tools.
     fn validate_prepared(
         &self,
         request: &ExecutionRequest,
-    ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse> {
+    ) -> Result<ValidatedLaunch, ScriptResponse> {
         // Execution validation deliberately bypasses the advisory success
         // cache: a prior platform-support query must not approve a different
         // executable after `PATH` or its contents change.
@@ -198,9 +211,9 @@ impl BubblewrapScriptRunner {
         &self,
         request: &ExecutionRequest,
         probe: F,
-    ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse>
+    ) -> Result<ValidatedLaunch, ScriptResponse>
     where
-        F: FnOnce() -> Result<bwrap_version::BwrapVersion, bwrap_version::BwrapUnavailable>,
+        F: FnOnce() -> Result<bwrap_version::ProbedBwrap, bwrap_version::BwrapUnavailable>,
     {
         validate_network_policy_support(request, self.network_policy_support())?;
 
@@ -208,6 +221,7 @@ impl BubblewrapScriptRunner {
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
         if request.script_code.is_empty() {
+            // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
             return Err(ScriptResponse::error(
                 "script_code is empty — nothing to execute.",
             ));
@@ -236,6 +250,7 @@ impl BubblewrapScriptRunner {
             if crate::mxc_common::proxy_env::proxy_url_has_credentials(&url) {
                 // Built from the redacted form so the rejection cannot become
                 // the leak it is rejecting.
+                // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
                 return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: runtimeConfig.networkProxy must not carry credentials ('{}'). \
                      Bubblewrap passes the proxy URL to bwrap as a --setenv command-line \
@@ -252,9 +267,11 @@ impl BubblewrapScriptRunner {
         // Programmatic requests also need the parser's proxy-only restriction:
         // direct egress must not be accepted and then discarded at launch.
         if let Some(reason) = bwrap_command::proxy_with_egress_rejection(request) {
+            // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
             return Err(ScriptResponse::error(reason));
         }
         if let Some(reason) = bwrap_command::directional_network_rejection(request) {
+            // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
             return Err(ScriptResponse::error(reason));
         }
 
@@ -277,11 +294,13 @@ impl BubblewrapScriptRunner {
         if proxy_only {
             if let Some(address) = request.policy.network_proxy.address.as_ref() {
                 if let Err(error) = proxy_network::SandboxProxy::check_without_resolving(address) {
+                    // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
                     return Err(ScriptResponse::error(&error));
                 }
                 if let Err(error) =
                     proxy_network::check_hosts_pin_against_policy(address, &request.policy)
                 {
+                    // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
                     return Err(ScriptResponse::error(&error));
                 }
                 // Repeated in `spawn` against the normalized policy.
@@ -296,6 +315,7 @@ impl BubblewrapScriptRunner {
         let egress_plan = if firewall_enforced {
             match network_rules::EgressPlan::for_request(request) {
                 Ok(plan) => Some(plan),
+                // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
                 Err(error) => return Err(ScriptResponse::error(&error)),
             }
         } else {
@@ -305,10 +325,11 @@ impl BubblewrapScriptRunner {
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
-        if let Err(err) = probe() {
-            return Err(ScriptResponse::error(&err.to_string()));
-        }
-        if proxy_only || firewall_enforced {
+        let bwrap = probe().map_err(|err| {
+            // SDK v2: unavailable (backend_unavailable). See docs/development/plans/sdk-v2-error-codes.md.
+            ScriptResponse::error(&err.to_string())
+        })?;
+        let network_tools = if proxy_only || firewall_enforced {
             // Proxy and firewall are mutually exclusive, so this names the one
             // the caller actually asked for.
             let use_case = if proxy_only {
@@ -316,12 +337,21 @@ impl BubblewrapScriptRunner {
             } else {
                 proxy_network::PrivateNetworkUse::FirewallEnforcement
             };
-            if let Err(error) = proxy_network::probe_dependencies(use_case) {
-                return Err(ScriptResponse::error(&error));
-            }
-        }
+            Some(
+                proxy_network::probe_dependencies(use_case).map_err(|error| {
+                    // SDK v2: unavailable (backend_unavailable). See docs/development/plans/sdk-v2-error-codes.md.
+                    ScriptResponse::error(&error)
+                })?,
+            )
+        } else {
+            None
+        };
 
-        Ok(egress_plan)
+        Ok(ValidatedLaunch {
+            egress_plan,
+            bwrap: bwrap.path,
+            network_tools,
+        })
     }
 }
 
@@ -453,10 +483,23 @@ impl BubblewrapScriptRunner {
         &self,
         request: &ExecutionRequest,
         denied_files: &HashSet<String>,
-        egress_plan: Option<network_rules::EgressPlan>,
+        launch: ValidatedLaunch,
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<BwrapChild, ScriptResponse> {
+        let ValidatedLaunch {
+            egress_plan,
+            bwrap,
+            network_tools,
+        } = launch;
+        let checked_network_tools = || {
+            network_tools.as_ref().ok_or_else(|| {
+                ScriptResponse::error(
+                    "Bubblewrap: private networking was selected without checking its host tools.",
+                )
+            })
+        };
+
         // The caller manages the proxy; pass its address into the sandbox
         // environment and restrict direct egress to that endpoint.
         let configured_proxy = request.policy.network_proxy.address.as_ref();
@@ -484,7 +527,7 @@ impl BubblewrapScriptRunner {
             })?;
             Some(
                 proxy_network::SandboxProxy::resolve(address)
-                    .map_err(|error| ScriptResponse::error(&error))?,
+                    .map_err(proxy_resolve_failure_response)?,
             )
         } else {
             None
@@ -504,6 +547,7 @@ impl BubblewrapScriptRunner {
                 // through the proxy rather than a nameserver of its own.
                 let resolver = None;
                 match proxy_network::ProxyNetworkNamespace::start(
+                    checked_network_tools()?,
                     &egress.plan(),
                     &network_rules::IngressPlan::for_policy(&request.policy),
                     egress.pin(),
@@ -512,7 +556,9 @@ impl BubblewrapScriptRunner {
                     request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
-                    Err(error) => return Err(ScriptResponse::error(&error)),
+                    Err(error) => {
+                        return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error))
+                    }
                 }
             }
             // Direct directional egress uses the same private namespace.
@@ -525,12 +571,14 @@ impl BubblewrapScriptRunner {
                     Some(plan) => plan,
                     None => match network_rules::EgressPlan::for_request(request) {
                         Ok(plan) => plan,
+                        // SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
                         Err(error) => return Err(ScriptResponse::error(&error)),
                     },
                 };
                 let resolver =
                     proxy_network::ResolverPin::for_host(&request.policy, &mounts, logger);
                 match proxy_network::ProxyNetworkNamespace::start(
+                    checked_network_tools()?,
                     &plan,
                     &network_rules::IngressPlan::for_policy(&request.policy),
                     None,
@@ -542,7 +590,9 @@ impl BubblewrapScriptRunner {
                         warn_resolver_blocked_by_egress(&plan, network.resolver_pinned(), logger);
                         Some(network)
                     }
-                    Err(error) => return Err(ScriptResponse::error(&error)),
+                    Err(error) => {
+                        return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error))
+                    }
                 }
             }
             None => None,
@@ -552,7 +602,7 @@ impl BubblewrapScriptRunner {
             Ok(file) => file,
             Err(error) => {
                 stop_proxy_network(&mut proxy_network, logger);
-                return Err(ScriptResponse::error(&error));
+                return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error));
             }
         };
         let mut args = bwrap_command::build_args_classified_with_mode(
@@ -573,7 +623,7 @@ impl BubblewrapScriptRunner {
                 Ok(startup) => Some(startup),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
-                    return Err(ScriptResponse::error(&error));
+                    return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error));
                 }
             },
             None => None,
@@ -585,7 +635,7 @@ impl BubblewrapScriptRunner {
         );
 
         // 3. Spawn `bwrap`.
-        let mut command = Command::new("bwrap");
+        let mut command = Command::new(&bwrap);
         command.args(&args);
         let pty = match stdio {
             StdioMode::Pipes => {
@@ -617,9 +667,10 @@ impl BubblewrapScriptRunner {
                 Ok(pty) => Some(pty),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
-                    return Err(ScriptResponse::error(&format!(
-                        "Bubblewrap: failed to allocate PTY: {error}"
-                    )));
+                    return Err(ScriptResponse::failed(
+                        FailurePhase::LaunchFailed,
+                        &format!("Bubblewrap: failed to allocate PTY: {error}"),
+                    ));
                 }
             },
         };
@@ -646,14 +697,16 @@ impl BubblewrapScriptRunner {
         }
         proxy_network::inherit_descriptors(&mut command, descriptors);
 
-        let mut child = match command.spawn() {
+        // `--die-with-parent` binds bwrap to the forking *thread*, so fork from
+        // one that outlives every sandbox rather than from the caller's.
+        let mut child = match lifetime_spawner::spawn(command) {
             Ok(process) => process,
             Err(error) => {
                 stop_proxy_network(&mut proxy_network, logger);
-                return Err(ScriptResponse::error(&format!(
-                    "Bubblewrap: failed to spawn bwrap: {}",
-                    error
-                )));
+                return Err(ScriptResponse::failed(
+                    FailurePhase::LaunchFailed,
+                    &format!("Bubblewrap: failed to spawn bwrap: {}", error),
+                ));
             }
         };
 
@@ -687,7 +740,10 @@ impl BubblewrapScriptRunner {
                     Err(detail) => format!("{error}; {detail}"),
                 };
                 stop_proxy_network(&mut proxy_network, logger);
-                return Err(ScriptResponse::error(&error));
+                return Err(ScriptResponse::failed(
+                    FailurePhase::PostLaunchFailed,
+                    &error,
+                ));
             }
         }
 
@@ -710,10 +766,13 @@ impl BubblewrapScriptRunner {
                     let _ = child.wait();
                     stop_proxy_network(&mut proxy_network, logger);
                     let error = out_result.err().or(err_result.err());
-                    return Err(ScriptResponse::error(&format!(
-                        "Bubblewrap: failed to wrap stdio pipes: {}",
-                        error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
-                    )));
+                    return Err(ScriptResponse::failed(
+                        FailurePhase::PostLaunchFailed,
+                        &format!(
+                            "Bubblewrap: failed to wrap stdio pipes: {}",
+                            error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
+                        ),
+                    ));
                 }
             };
         let timeout = if request.script_timeout == 0 {
@@ -1215,23 +1274,28 @@ struct DeniedPlan {
 fn resolve_denied_paths(
     policy: &crate::mxc_common::models::ContainerPolicy,
     logger: &mut Logger,
-) -> Result<DeniedPlan, String> {
+) -> Result<DeniedPlan, FilesystemPolicyError> {
     let mut changed = false;
     let mut out = Vec::with_capacity(policy.denied_paths.len());
     let mut files = HashSet::new();
     for p in &policy.denied_paths {
         if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
             if let Some(error) = resolved.error {
-                return Err(format!(
+                let message = format!(
                     "Bubblewrap: deniedPaths entry '{p}' could not be resolved ({error}); \
                      refusing to start."
-                ));
+                );
+                return Err(if is_policy_path_error(&error) {
+                    FilesystemPolicyError::Policy(message)
+                } else {
+                    FilesystemPolicyError::Host(message)
+                });
             }
             let resolved = resolved.path.to_str().ok_or_else(|| {
-                format!(
+                FilesystemPolicyError::Policy(format!(
                     "Bubblewrap: deniedPaths entry '{p}' resolves to a non-UTF-8 host path that \
                      cannot be safely masked; refusing to start."
-                )
+                ))
             })?;
             if resolved != p.as_str() {
                 let _ = writeln!(
@@ -1278,6 +1342,43 @@ mod tests {
             script_code: "echo hi".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_failed_bwrap_spawn_is_a_launch_failure() {
+        use crate::mxc_common::logger::Mode;
+        use crate::mxc_common::mxc_error::MxcErrorCode;
+
+        // A NUL in an argument makes `Command::spawn` fail before exec.
+        let request = ExecutionRequest {
+            script_code: "echo \0".into(),
+            ..Default::default()
+        };
+        let Some(resp) = BubblewrapScriptRunner::new()
+            .spawn_bwrap(
+                &request,
+                &HashSet::new(),
+                ValidatedLaunch {
+                    egress_plan: None,
+                    bwrap: PathBuf::from("/usr/bin/bwrap"),
+                    network_tools: None,
+                },
+                &mut Logger::new(Mode::Buffer),
+                StdioMode::Pipes,
+            )
+            .err()
+        else {
+            panic!("spawning bwrap with a NUL argument must fail");
+        };
+
+        assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(resp.failure_phase.error_code(), MxcErrorCode::BackendError);
+        assert_eq!(resp.exit_code, -1);
+        assert!(
+            resp.error_message.contains("failed to spawn bwrap"),
+            "got: {}",
+            resp.error_message
+        );
     }
 
     #[test]
@@ -2181,7 +2282,10 @@ mod tests {
                 detail: "permission denied".to_string(),
             },
             bwrap_version::BwrapUnavailable::UnrecognizedVersion("junk".to_string()),
-            bwrap_version::BwrapUnavailable::TooOld(bwrap_version::BwrapVersion::new(0, 4, 1)),
+            bwrap_version::BwrapUnavailable::TooOld {
+                found: bwrap_version::BwrapVersion::new(0, 4, 1),
+                path: "/usr/bin/bwrap".into(),
+            },
         ];
 
         for failure in failures {
@@ -2190,6 +2294,46 @@ mod tests {
                 .validate_prepared_with_probe(&request, || Err(failure))
                 .unwrap_err();
             assert_eq!(error.error_message, expected);
+        }
+    }
+
+    // SDK v2: refusals report policy_validation and a missing bwrap reports
+    // backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
+    #[test]
+    fn refusals_and_a_missing_bwrap_report_backend_error() {
+        use crate::mxc_common::mxc_error::MxcErrorCode;
+
+        let runner = BubblewrapScriptRunner::new();
+        let empty_script = ExecutionRequest {
+            script_code: String::new(),
+            ..base_request()
+        };
+
+        for (what, error) in [
+            (
+                "empty script_code",
+                runner.validate(&empty_script).unwrap_err(),
+            ),
+            (
+                "proxy credentials",
+                runner
+                    .validate(&request_with_a_credential_bearing_proxy())
+                    .unwrap_err(),
+            ),
+            (
+                "missing bwrap",
+                runner
+                    .validate_prepared_with_probe(&base_request(), || {
+                        Err(bwrap_version::BwrapUnavailable::NotFound)
+                    })
+                    .unwrap_err(),
+            ),
+        ] {
+            assert_eq!(
+                error.failure_phase.error_code(),
+                MxcErrorCode::BackendError,
+                "input={what}; output={error:?}"
+            );
         }
     }
 
@@ -2373,7 +2517,10 @@ mod tests {
             let error = resolve_denied_paths(&policy, &mut logger)
                 .err()
                 .unwrap_or_else(|| panic!("{} must fail closed", denied.display()));
-            assert!(error.contains("could not be resolved"), "{error}");
+            assert!(
+                matches!(&error, FilesystemPolicyError::Policy(m) if m.contains("could not be resolved")),
+                "{error:?}"
+            );
         }
     }
 

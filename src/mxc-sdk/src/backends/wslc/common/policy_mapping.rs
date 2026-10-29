@@ -10,6 +10,7 @@
 //! injected, so its logic stays testable without touching disk.
 
 use crate::mxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
+use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest};
 use crate::wslc_common::wslc_bindings::WslcContainerNetworkingMode;
@@ -331,13 +332,13 @@ pub fn validate_denied_path_overlap(
 ///
 /// Returns the tightened policy when normalization changed something (the caller
 /// rebuilds the request around it) or `None` when the policy was already
-/// conflict-free. Any failure is returned as a `String`; callers map it to their
-/// own error envelope (`ScriptResponse` / `MxcError`). Normalization diagnostics
+/// conflict-free. Callers map a failure to their own error envelope
+/// (`ScriptResponse` / `MxcError`). Normalization diagnostics
 /// are written to `logger`; callers decide how to surface them.
 pub fn apply_provision_policy_gate(
     request: &ExecutionRequest,
     logger: &mut Logger,
-) -> Result<Option<ContainerPolicy>, String> {
+) -> Result<Option<ContainerPolicy>, FilesystemPolicyError> {
     let normalized =
         crate::mxc_common::filesystem_object::normalize_object_conflicts(&request.policy, logger)?;
     let effective = normalized.as_ref().unwrap_or(&request.policy);
@@ -346,7 +347,8 @@ pub fn apply_provision_policy_gate(
         &effective.readwrite_paths,
         &effective.readonly_paths,
         &effective.denied_paths,
-    )?;
+    )
+    .map_err(FilesystemPolicyError::Policy)?;
     Ok(normalized)
 }
 

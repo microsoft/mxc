@@ -324,6 +324,51 @@ for sentinel in CONTROL_PROXY_REACHABLE_OK DIRECT_EGRESS_BLOCKED_OK LOOPBACK_EXE
 done
 echo "PASS: proxy-only egress enforcement"
 
+# A desktop session's PATH often leaves out the sbin directories that hold
+# iptables.
+NO_TOOLS_DIR="$CONTROL_DIR/no-tools"
+mkdir -p "$NO_TOOLS_DIR"
+
+echo "Running Bubblewrap host tool discovery test (no tools on PATH)..."
+if ! BACKENDS_OUT=$(env PATH="$NO_TOOLS_DIR" "$LXC_EXEC" --available-backends 2>&1); then
+    echo "$BACKENDS_OUT"
+    echo "FAIL: host tool discovery (lxc-exec returned non-zero)"
+    exit 1
+fi
+if ! grep -q '"proxyEnforcement"' <<<"$BACKENDS_OUT"; then
+    echo "$BACKENDS_OUT"
+    echo "FAIL: host tool discovery (proxy enforcement was not reported)"
+    exit 1
+fi
+echo "PASS: host tool discovery with no tools on PATH"
+
+echo "Running Bubblewrap proxy-only egress enforcement test (no tools on PATH)..."
+if ! EGRESS_OUT=$(env PATH="$NO_TOOLS_DIR" "$LXC_EXEC" --experimental \
+    "$(render_config bubblewrap_network_proxy_egress_denied.json)" 2>&1); then
+    echo "$EGRESS_OUT"
+    echo "FAIL: proxy-only egress with no tools on PATH (lxc-exec returned non-zero)"
+    exit 1
+fi
+for sentinel in CONTROL_PROXY_REACHABLE_OK DIRECT_EGRESS_BLOCKED_OK LOOPBACK_EXEMPT_OK \
+    CAP_NET_ADMIN_DROPPED_OK TAMPER_REFUSED_OK TAMPER_INEFFECTIVE_OK PROXY_STILL_OK; do
+    if ! grep -q "$sentinel" <<<"$EGRESS_OUT"; then
+        echo "$EGRESS_OUT"
+        echo "FAIL: proxy-only egress with no tools on PATH (sentinel '$sentinel' not found)"
+        exit 1
+    fi
+done
+echo "PASS: proxy-only egress enforcement with no tools on PATH"
+
+echo "Running Bubblewrap runtime proxy test (PATH unset)..."
+if ! UNSET_OUT=$(env -u PATH "$LXC_EXEC" --experimental \
+    "$(render_config bubblewrap_network_proxy_builtin.json)" 2>&1) ||
+    ! grep -q "PROXY_OK" <<<"$UNSET_OUT"; then
+    echo "$UNSET_OUT"
+    echo "FAIL: runtime proxy with PATH unset"
+    exit 1
+fi
+echo "PASS: runtime proxy with PATH unset"
+
 # Every other proxied request here is plain HTTP, so without this the tunnel
 # path could regress while the suite stayed green. The target is the control
 # listener, so the sentinel coming back proves both that the tunnel carried

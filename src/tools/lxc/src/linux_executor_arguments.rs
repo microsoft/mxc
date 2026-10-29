@@ -5,7 +5,8 @@ use clap::Parser;
 use mxc_sdk::mxc_common::config_parser::load_one_shot_request;
 use mxc_sdk::mxc_common::logger::Logger;
 use mxc_sdk::mxc_common::models::ExecutionRequest;
-use std::process;
+use mxc_sdk::mxc_common::mxc_error::MxcError;
+use mxc_sdk::mxc_common::script_runner::emit_mxc_error_exit;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -99,19 +100,17 @@ impl LinuxExecutorArguments {
         } else if let Some(ref path) = self.config_path {
             (path.clone(), false)
         } else {
-            eprintln!(
-                "Error: No config provided. Use a positional path, --config, or --config-base64"
-            );
-            process::exit(1);
+            emit_mxc_error_exit(&MxcError::malformed_request(
+                "No config provided. Use a positional path, --config, or --config-base64",
+            ));
         };
 
         let mut request = match load_one_shot_request(&config_data, logger, is_base64) {
             Ok(r) => r,
-            Err(_) => {
-                eprintln!("Request error");
+            Err(error) => {
                 crate::emit_warnings(logger);
                 eprint!("{}", logger.get_buffer());
-                process::exit(1);
+                emit_mxc_error_exit(&error.to_mxc_error());
             }
         };
 
@@ -125,20 +124,19 @@ impl LinuxExecutorArguments {
         self.setup_hyperlight.is_some()
     }
 
-    pub fn setup_hyperlight(&self) -> Result<String, String> {
+    pub fn setup_hyperlight(&self) -> Result<String, MxcError> {
         if let Some(config_path) = &self.config_path {
-            return Err(format!(
-                "Error: --setup-hyperlight takes no config path; name runtimes with \
+            return Err(MxcError::malformed_request(format!(
+                "--setup-hyperlight takes no config path; name runtimes with \
                  --setup-hyperlight={config_path}"
-            ));
+            )));
         }
 
         #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
         {
-            Err(
-                "Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)"
-                    .to_string(),
-            )
+            Err(MxcError::unsupported_containment(
+                "--setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)",
+            ))
         }
 
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -146,35 +144,35 @@ impl LinuxExecutorArguments {
             // WHP is delay-loaded; check before setup boots a VM.
             #[cfg(target_os = "windows")]
             if !mxc_sdk::hyperlight_common::is_whp_available() {
-                return Err(
-                    "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
-                     Enable the HypervisorPlatform optional feature and reboot."
-                        .to_string(),
-                );
+                return Err(MxcError::backend_unavailable(
+                    "--setup-hyperlight requires Windows Hypervisor Platform (WHP). \
+                     Enable the HypervisorPlatform optional feature and reboot.",
+                ));
             }
 
             //KVM is checked before anything is pulled.
             #[cfg(target_os = "linux")]
             if !mxc_sdk::hyperlight_common::is_kvm_available() {
-                return Err(
-                    "Error: --setup-hyperlight requires KVM: /dev/kvm must be readable and \
-                     writable by this user."
-                        .to_string(),
-                );
+                return Err(MxcError::backend_unavailable(
+                    "--setup-hyperlight requires KVM: /dev/kvm must be readable and \
+                     writable by this user.",
+                ));
             }
 
             // Setup is an interactive install: the pull and the warm-up
             // report progress as they go.
             let runtimes =
                 mxc_sdk::hyperlight_common::parse_runtimes(&self.setup_hyperlight.clone().unwrap())
-                    .map_err(|message| format!("Error: {message}"))?;
+                    .map_err(MxcError::malformed_request)?;
 
             let mut logger = mxc_sdk::mxc_common::logger::Logger::new(
                 mxc_sdk::mxc_common::logger::Mode::Console,
             );
             match mxc_sdk::hyperlight_common::setup(self.force, &runtimes, &mut logger) {
                 Ok(home) => Ok(format!("hyperlight setup: image home ready at {home:?}")),
-                Err(msg) => Err(format!("hyperlight setup failed: {msg}")),
+                Err(msg) => Err(MxcError::backend_error(format!(
+                    "hyperlight setup failed: {msg}"
+                ))),
             }
         }
     }
@@ -187,8 +185,9 @@ impl LinuxExecutorArguments {
         let name = match self.containername {
             Some(ref n) => n,
             None => {
-                eprintln!("Error: --containername is required with --delete");
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::malformed_request(
+                    "--containername is required with --delete",
+                ));
             }
         };
 

@@ -678,7 +678,7 @@ pub fn has_platform_exec() -> bool {
 /// Whether `bwrap` (Bubblewrap) is installed, runnable, and new enough on this
 /// Linux host. Bubblewrap characterization tests skip cleanly otherwise (e.g. a
 /// CI runner without `bubblewrap` installed, or one shipping a release older
-/// than [`mxc_sdk::bwrap_common::bwrap_version::MIN_BWRAP_VERSION`]) — the backend
+/// than `mxc_sdk::bwrap_common::bwrap_version::MIN_BWRAP_VERSION`) — the backend
 /// rejects such hosts up front, so the tests would have nothing to exercise.
 pub fn has_bwrap() -> bool {
     #[cfg(target_os = "linux")]

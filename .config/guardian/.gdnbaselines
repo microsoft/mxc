@@ -190,6 +190,24 @@
       "createdDate": "2026-05-28 18:54:11Z",
       "expirationDate": "2026-11-14 18:58:06Z",
       "justification": "This error is baselined with an expiration date of 180 days from 2026-05-28 18:58:06Z"
+    },
+    "380522f9c5e6a21db2bf668171948f25e88fc4e87f6962e6d0f8ae8bdbd2f3a7": {
+      "signature": "380522f9c5e6a21db2bf668171948f25e88fc4e87f6962e6d0f8ae8bdbd2f3a7",
+      "alternativeSignatures": [
+        "436ad5e9a87859c8fcfb56b1caaa7902a6611bf6bad43ebe5ff099eacf234a30",
+        "6e245e0c83a86549a057f9ee48bae31d5e0903ee502537a15a090c06007581b6",
+        "a4e2e8c04668baa2acb37ce5b45e71381ee5ea607ed616d6cb3bc18a82b06801"
+      ],
+      "target": "out/x86_64-pc-windows-msvc/aci-edge-sandboxes/bin/aci_edge_agent.dll",
+      "uriBaseId": "file:///D:/a/_work/1/s/",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2026-10-28 08:18:40Z",
+      "expirationDate": "2027-04-16 08:55:35Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2026-10-28 08:55:35Z"
     }
   }
 }

@@ -68,7 +68,7 @@ test jobs only ever `download-artifact`.
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
 | `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. The x64 artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp and argument generation, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
@@ -172,6 +172,17 @@ Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites ski
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+ProcessContainer's required V1.Dev cases cover capture and bidirectional
+pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
+direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
+against Bubblewrap and Seatbelt in Linux and macOS PR integration jobs.
+
+IsolationSession and WSLC require V1.Dev lifecycle, captured/piped exec,
+validation, and cleanup cases. IsolationSession also covers existing-container
+PTYs; its Rust and Node cases check partial capture on timeout with
+descendant-held pipes. Bundle discovery and runtime result gates require the
+named scenarios to pass.
+
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
 accepted-id lists (`ValidateSet` on Windows, the `case` arms on Unix) are what
@@ -220,7 +231,7 @@ get fixed or wired.
 | Backend | Status | Notes |
 |---------|--------|-------|
 | ProcessContainer | ✅ Good | Requires native PSEC; verifies public SDK streaming, filesystem policy and aliases, CLI contract boundaries, DOS/NT final paths, egress/loopback/proxy rules, the functional UI matrix, HANDLES, and global atoms. Unsupported host capabilities must reject requests. Privilege removal uses a host-token control. Application workload tests remain manual-only. |
-| Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. Private resolver fixtures check host IPC isolation, descriptor-backed snapshots, symlink layouts, filesystem-policy precedence, and nonregular-file rejection. The Linux build explicitly runs the resolver safety unit tests. It also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. |
+| Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. Private resolver fixtures check host IPC isolation, descriptor-backed snapshots, symlink layouts, filesystem-policy precedence, and nonregular-file rejection. The Linux build explicitly runs the resolver safety unit tests. It also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. The proxy, firewall, and version-gate suites also run with host tools missing from `PATH`, so tool discovery and launch must find them in the standard system directories. |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
 | IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |

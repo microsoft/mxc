@@ -175,7 +175,7 @@ $helperPaths = @(& (Join-Path $PSScriptRoot 'stage-isolation-session-test-helper
     -SourceDirectory (Join-Path $repoRoot 'tests\scripts') -ScriptsDirectory $scriptsOut)
 
 $integrationOut = New-Directory (Join-Path $OutputDirectory 'sdk-integration')
-Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\windows-process-container.test.js'), (Join-Path $integrationRoot 'dist\wslc-state-aware.test.js'), (Join-Path $integrationRoot 'dist\wslc-e2e.test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
+Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\windows-process-container.test.js'), (Join-Path $integrationRoot 'dist\dev.test.js'), (Join-Path $integrationRoot 'dist\wslc-state-aware.test.js'), (Join-Path $integrationRoot 'dist\wslc-e2e.test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
 Copy-Item -LiteralPath (Join-Path $integrationRoot 'package.json'), (Join-Path $integrationRoot 'run-tests.js') -Destination $integrationOut
 # Stages the SDK built above in place of the installed copy.
 $modulesOut = New-Directory (Join-Path $integrationOut 'node_modules')
@@ -224,6 +224,7 @@ $required = @(
     'sdk-integration\run-tests.js',
     'sdk-integration\dist\isolation-session-state-aware.test.js',
     'sdk-integration\dist\windows-process-container.test.js',
+    'sdk-integration\dist\dev.test.js',
     'sdk-integration\dist\wslc-state-aware.test.js',
     'sdk-integration\dist\wslc-e2e.test.js',
     "sdk-integration\node_modules\@microsoft\mxc-sdk\bin\$Architecture\wxc-wslc-daemon.exe",
@@ -259,17 +260,36 @@ function Assert-Discovery {
 Assert-Discovery 'in-process tests' '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$' {
     & (Join-Path $inproc 'mxc-sdk-isolation-session-tests.exe') --list
 }
+foreach ($test in 'dev_json_one_shot_pty_supports_interactive_input', 'dev_json_lifecycle_preserves_execution_and_caller_ownership') {
+    Assert-Discovery "in-process $test" "(?m)^${test}: test\r?$" {
+        & (Join-Path $inproc 'mxc-sdk-isolation-session-tests.exe') --list --exact $test
+    }
+}
 Assert-Discovery 'SDK helper tests' '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$' {
     & (Join-Path $inproc 'mxc-sdk-helpers-tests.exe') --list
 }
-Assert-Discovery 'ProcessContainer streaming test' '(?m)^streaming_processcontainer_bidirectional_stdio: test\r?$' {
-    & (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe') --list --ignored --exact streaming_processcontainer_bidirectional_stdio
+foreach ($test in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+    Assert-Discovery "ProcessContainer $test" "(?m)^${test}: test\r?$" {
+        & (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe') --list --ignored --exact $test
+    }
 }
 Assert-Discovery '.NET tests' 'Microsoft\.Mxc\.Sdk\.Tests' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full
 }
 Assert-Discovery '.NET streaming tests' 'MxcProcessTests\.Streaming_WritesStdin_AndReadsEchoedStdout' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcProcessTests'
+}
+Assert-Discovery '.NET exact-JSON creation tests' 'MxcProcessTests\.DevJson_CapturesOutputAndStreamsInput' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcProcessTests'
+}
+Assert-Discovery '.NET exact-JSON PTY tests' 'MxcContainerIsolationSessionE2ETests\.DevJson_PtySupportsInteractiveInputAndExitStatus' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcContainerIsolationSessionE2ETests'
+}
+Assert-Discovery '.NET exact-JSON IsolationSession lifecycle tests' 'MxcLifecycleE2ETests\.DevJson_LifecyclePreservesResponsesExecutionAndCallerOwnership' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleE2ETests'
+}
+Assert-Discovery '.NET exact-JSON WSLC lifecycle tests' 'MxcLifecycleWslcE2ETests\.DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership' {
+    & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleWslcE2ETests'
 }
 Assert-Discovery '.NET WSLC lifecycle tests' 'MxcLifecycleWslcE2ETests\.' {
     & (Join-Path $dotnetOut 'Microsoft.Mxc.Sdk.Tests.exe') -list full -class '*.MxcLifecycleWslcE2ETests'
@@ -285,6 +305,9 @@ try {
     }
     Assert-Discovery 'Node ProcessContainer suite' '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/windows-process-container.test.js
+    }
+    Assert-Discovery 'Node exact-JSON creation suite' 'V1.Dev spawnWithPtyJson supports an interactive terminal' {
+        & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/dev.test.js
     }
     Assert-Discovery 'Node WSLC lifecycle suite' 'WSLC state-aware lifecycle E2E' {
         & (Join-Path $OutputDirectory 'node\node.exe') --test --test-force-exit dist/wslc-state-aware.test.js

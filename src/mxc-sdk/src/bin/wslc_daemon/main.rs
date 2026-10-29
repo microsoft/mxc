@@ -8,8 +8,8 @@
 //! `deprovision`) runs as a separate short-lived `wxc-exec` process, but the
 //! WSLc SDK has no cross-process re-attach for its `WslcSession` /
 //! `WslcContainer` handles. This daemon holds those handles on a single worker
-//! thread ([`session_manager`]) and serves the phase processes over an
-//! owner-only named pipe ([`control_server`]).
+//! thread (`session_manager`) and serves the phase processes over an
+//! owner-only named pipe (`control_server`).
 //!
 //! Boot sequence:
 //! 1. Secure the record root and mint a unique pipe name.

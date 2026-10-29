@@ -39,13 +39,13 @@ trap cleanup EXIT
 FAIL=0
 
 # --- Scenario 1: denied parent, read-write child -----------------------------
-# /data is denied (masked), but /data/secret_child is read-write. The deep child
+# /data is denied (masked), but /data/deep/secret_child is read-write. The child
 # must survive the masked parent; a sibling under the denied parent must not.
 sudo rm -rf "$BASE1"
-sudo mkdir -p "$BASE1/data/secret_child"
-echo "CHILD_KEPT" | sudo tee "$BASE1/data/secret_child/keep.txt" > /dev/null
+sudo mkdir -p "$BASE1/data/deep/secret_child"
+echo "CHILD_KEPT" | sudo tee "$BASE1/data/deep/secret_child/keep.txt" > /dev/null
 echo "PARENT_SECRET" | sudo tee "$BASE1/data/sibling.txt" > /dev/null
-sudo chown -R "$(id -u):$(id -g)" "$BASE1/data/secret_child"
+sudo chown -R "$(id -u):$(id -g)" "$BASE1/data/deep/secret_child"
 
 echo "Running Bubblewrap most-specific test 1 (denied parent, rw child)..."
 OUT1=$("$LXC_EXEC" --experimental \
@@ -53,8 +53,8 @@ OUT1=$("$LXC_EXEC" --experimental \
 echo "$OUT1"
 
 if echo "$OUT1" | grep -q "CHILD_OK" && echo "$OUT1" | grep -q "CHILD_WRITE_OK" \
-    && echo "$OUT1" | grep -q "PARENT_MASKED_OK" \
-    && ! echo "$OUT1" | grep -qE "CHILD_MISSING|CHILD_WRITE_FAIL|PARENT_LEAK"; then
+    && echo "$OUT1" | grep -q "PARENT_MASKED_OK" && echo "$OUT1" | grep -q "PARENT_WRITE_BLOCKED" \
+    && ! echo "$OUT1" | grep -qE "CHILD_MISSING|CHILD_WRITE_FAIL|PARENT_LEAK|PARENT_WRITE_FAIL"; then
     echo "PASS: rw child survived denied parent; parent sibling masked."
 else
     echo "FAIL: most-specific rw child did not win over denied parent."

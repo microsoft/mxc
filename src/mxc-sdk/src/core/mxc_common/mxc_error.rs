@@ -49,6 +49,28 @@ impl MxcErrorCode {
             Self::BackendError => "backend_error",
         }
     }
+
+    /// The process exit status a failure with this code terminates with.
+    ///
+    /// Every caller-fault code exits 1: the request asked for something that
+    /// will not be done, and only a changed request can succeed. A host fault
+    /// (`backend_unavailable`) and a runtime fault (`backend_error`) exit -1,
+    /// and are told apart by the code rather than by the status.
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Self::BackendUnavailable | Self::BackendError => -1,
+            Self::MalformedRequest
+            | Self::UnsupportedContainment
+            | Self::UnsupportedPhase
+            | Self::MalformedId
+            | Self::StaleId
+            | Self::NotProvisioned
+            | Self::NotStarted
+            | Self::AlreadyStarted
+            | Self::AlreadyStopped
+            | Self::PolicyValidation => 1,
+        }
+    }
 }
 
 impl std::fmt::Display for MxcErrorCode {
@@ -187,6 +209,18 @@ impl MxcError {
         self.api_failure.as_ref().map(|f| f.operation.as_str())
     }
 
+    /// Serialise to the JSON response envelope callers parse.
+    ///
+    /// Falls back to a minimal hand-written envelope if serialisation itself
+    /// fails, so a consumer that requires `error.code` still parses something.
+    pub fn to_envelope_string(&self) -> String {
+        let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(self);
+        serde_json::to_string(&envelope).unwrap_or_else(|_| {
+            r#"{"error":{"code":"backend_error","message":"failed to serialise error envelope"}}"#
+                .to_string()
+        })
+    }
+
     /// The underlying platform status, when known. Never present without
     /// [`MxcError::operation`].
     pub fn native_code(&self) -> Option<&str> {
@@ -319,6 +353,27 @@ mod tests {
             assert_eq!(json, Value::String(wire.to_string()));
             let parsed: MxcErrorCode = serde_json::from_value(json).unwrap();
             assert_eq!(parsed, code);
+        }
+    }
+
+    #[test]
+    fn only_host_and_runtime_faults_exit_minus_one() {
+        let cases = [
+            (MxcErrorCode::MalformedRequest, 1),
+            (MxcErrorCode::UnsupportedContainment, 1),
+            (MxcErrorCode::UnsupportedPhase, 1),
+            (MxcErrorCode::BackendUnavailable, -1),
+            (MxcErrorCode::MalformedId, 1),
+            (MxcErrorCode::StaleId, 1),
+            (MxcErrorCode::NotProvisioned, 1),
+            (MxcErrorCode::NotStarted, 1),
+            (MxcErrorCode::AlreadyStarted, 1),
+            (MxcErrorCode::AlreadyStopped, 1),
+            (MxcErrorCode::PolicyValidation, 1),
+            (MxcErrorCode::BackendError, -1),
+        ];
+        for (code, exit) in cases {
+            assert_eq!(code.exit_code(), exit, "{code}");
         }
     }
 
