@@ -115,7 +115,7 @@ to the snapshot between calls.
 
 | Aspect | Behaviour |
 |---|---|
-| Exit code | The script's: `sys.exit(N)`, `process.exit(N)` or `exit N` gives `N`, an uncaught exception gives `1`, a runner error gives `-1` with the reason in `error_message` |
+| Exit code | The script's: `sys.exit(N)`, `process.exit(N)` or `exit N` gives `N`, an uncaught exception gives `1`. A refused request gives `1` and a host or runtime fault gives `-1`, with the reason in `error_message` |
 | Timeout | `process.timeout` bounds the run; a guest that overruns is interrupted and the run reports `execution timed out` |
 | stdout / stderr | Inherited by the guest; `ScriptResponse.standard_out` stays empty, so capture at the process level |
 
@@ -155,11 +155,18 @@ contain whitespace, `:` or brackets, and two mounts may not share one.
 
 ## Troubleshooting
 
+Failures carry an error code: `policy_validation` (exit 1) when the request
+asks for something the backend refuses, `backend_unavailable` (exit -1) when
+the host cannot provide the backend at all, and `backend_error` (exit -1) for
+setup and runtime faults.
+
 | Message | Meaning |
 |---|---|
-| `no hyperlight image found for the <runtime> runtime` | No home holds that runtime; run `--setup-hyperlight=<runtime>`, or set `MXC_HYPERLIGHT_HOME` |
+| `hyperlight policy error: …` | The request is at fault (`policy_validation`); change it and retry |
+| `no hyperlight image found for the <runtime> runtime` | No home holds that runtime (`backend_unavailable`); run `--setup-hyperlight=<runtime>`, or set `MXC_HYPERLIGHT_HOME` |
 | `holds a rootfs from another hyperlight-unikraft release` | The directory predates the crate the binary was built with; `--setup-hyperlight=<runtime>` rebuilds it |
-| `Hyperlight requires KVM` / `Hyperlight requires Windows Hypervisor Platform` | No hypervisor for this process (error code `backend_unavailable`): on Linux `/dev/kvm` is missing or not readable and writable, on Windows WHP is not enabled |
+| `Hyperlight requires KVM` / `Hyperlight requires Windows Hypervisor Platform` | No hypervisor for this process (`backend_unavailable`): on Linux `/dev/kvm` is missing or not readable and writable, on Windows WHP is not enabled |
+| `hyperlight setup error: …` / `hyperlight runtime error: …` | The run was accepted but faulted (`backend_error`) |
 | `execution timed out after N s` | The script overran `process.timeout` |
 
 Run with `--debug` to see the home chosen, restore and call timings, and

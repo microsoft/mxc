@@ -76,23 +76,26 @@ pub fn spawn_one_shot(
 /// workload exits, and whose relay scope borrows the process — into a
 /// non-blocking start with detached relays.
 fn inherit_not_served() -> ScriptResponse {
-    ScriptResponse {
-        failure_phase: FailurePhase::Rejected,
-        ..ScriptResponse::error(
-            "the isolation session backend does not yet support inherited stdio; it serves piped \
-             stdio, which is what an in-process caller receives. Run it through wxc-exec to have \
-             the workload relayed onto this process's own stdio.",
-        )
-    }
+    ScriptResponse::rejected(
+        "the isolation session backend does not yet support inherited stdio; it serves piped \
+         stdio, which is what an in-process caller receives. Run it through wxc-exec to have \
+         the workload relayed onto this process's own stdio.",
+    )
+}
+
+/// Flattens a launch failure onto a [`ScriptResponse`].
+// SDK v2: BackendUnavailable -> unavailable, PolicyValidation -> rejected.
+// See docs/development/plans/sdk-v2-error-codes.md.
+fn launch_failure_response(error: &MxcError) -> ScriptResponse {
+    ScriptResponse::failed(FailurePhase::LaunchFailed, &error.message)
 }
 
 impl SandboxBackend for IsolationSessionRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         // One-shot runs the whole lifecycle, so provision-phase rules apply to
         // the whole call — the same check the run-to-completion path makes.
-        //
-        // Everything it refuses is a caller-fixable request problem, and the
-        // phase is what the dispatcher reads back to classify it.
+        // SDK v2: keep the phase from validate_runner so an unavailable service
+        // reports backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
         ScriptRunner::validate_runner(self, request).map_err(|resp| ScriptResponse {
             failure_phase: FailurePhase::Rejected,
             ..resp
@@ -115,19 +118,13 @@ impl SandboxBackend for IsolationSessionRunner {
             StdioMode::Pty(size) => {
                 spawn_one_shot_pty(request, logger, size).map_err(|error| match error {
                     OneShotSpawnFailure::Refused(response) => response,
-                    OneShotSpawnFailure::Launch(error) => ScriptResponse {
-                        failure_phase: FailurePhase::LaunchFailed,
-                        ..ScriptResponse::error(&error.message)
-                    },
+                    OneShotSpawnFailure::Launch(error) => launch_failure_response(&error),
                 })
             }
             // Delegated so both entry points share one validation prologue.
             StdioMode::Pipes => spawn_one_shot(request, logger).map_err(|e| match e {
                 OneShotSpawnFailure::Refused(resp) => resp,
-                OneShotSpawnFailure::Launch(err) => ScriptResponse {
-                    failure_phase: FailurePhase::LaunchFailed,
-                    ..ScriptResponse::error(&err.message)
-                },
+                OneShotSpawnFailure::Launch(err) => launch_failure_response(&err),
             }),
         }
     }
@@ -839,5 +836,12 @@ mod tests {
         let before = launch.to_string();
         let after = with_cleanup_failures(launch, &[]).to_string();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn inherited_stdio_is_refused_as_a_request_problem() {
+        let refused = inherit_not_served();
+        assert_eq!(refused.failure_phase, FailurePhase::Rejected);
+        assert_eq!(refused.exit_code, 1);
     }
 }

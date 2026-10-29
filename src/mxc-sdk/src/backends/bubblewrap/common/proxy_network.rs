@@ -290,6 +290,35 @@ pub(crate) struct SandboxProxy {
     egress: ProxyEgress,
 }
 
+/// Why [`SandboxProxy::resolve`] failed.
+#[derive(Debug)]
+pub(crate) enum ProxyResolveError {
+    /// The endpoint, or the address it resolves to, cannot be enforced.
+    Rejected(String),
+    /// The host lookup itself did not produce an answer.
+    Lookup(String),
+}
+
+impl ProxyResolveError {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Rejected(message) | Self::Lookup(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for ProxyResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl From<String> for ProxyResolveError {
+    fn from(message: String) -> Self {
+        Self::Rejected(message)
+    }
+}
+
 impl SandboxProxy {
     /// Derive the sandbox-visible proxy from the configured one.
     ///
@@ -297,7 +326,7 @@ impl SandboxProxy {
     /// an address: the workload then presents the `Host` header and proxy-auth
     /// realm the operator configured. An IP literal has no name to pin, so a
     /// loopback literal is rewritten to slirp's gateway instead.
-    pub(crate) fn resolve(configured: &ProxyAddress) -> Result<Self, String> {
+    pub(crate) fn resolve(configured: &ProxyAddress) -> Result<Self, ProxyResolveError> {
         Self::resolve_with(configured, resolve_ipv4)
     }
 
@@ -312,7 +341,7 @@ impl SandboxProxy {
         if needs_lookup {
             return Ok(());
         }
-        checked
+        checked.map_err(|error| error.message().to_string())
     }
 
     /// Run the static checks, reporting whether a lookup would have followed.
@@ -321,11 +350,13 @@ impl SandboxProxy {
     /// also exactly when a hosts pin is created -- an IP literal resolves to
     /// `Ok(None)` from [`ProxyAddress::host_pin`]. Callers use the flag to
     /// reason about the pin without duplicating that classification.
-    fn inspect_without_resolving(configured: &ProxyAddress) -> (bool, Result<(), String>) {
+    fn inspect_without_resolving(
+        configured: &ProxyAddress,
+    ) -> (bool, Result<(), ProxyResolveError>) {
         let asked_to_resolve = Cell::new(false);
         let checked = Self::resolve_with(configured, |_, _| {
             asked_to_resolve.set(true);
-            Err(String::new())
+            Err(ProxyResolveError::Lookup(String::new()))
         });
 
         (asked_to_resolve.get(), checked.map(|_| ()))
@@ -338,10 +369,14 @@ impl SandboxProxy {
     /// a lookup whose answer the test does not control.
     fn resolve_with(
         configured: &ProxyAddress,
-        resolve: impl Fn(&str, u16) -> Result<Ipv4Addr, String>,
-    ) -> Result<Self, String> {
+        resolve: impl Fn(&str, u16) -> Result<Ipv4Addr, ProxyResolveError>,
+    ) -> Result<Self, ProxyResolveError> {
         if configured.port() == 0 {
-            return Err("Bubblewrap: proxy-only egress requires a non-zero proxy port".to_string());
+            return Err(
+                "Bubblewrap: proxy-only egress requires a non-zero proxy port"
+                    .to_string()
+                    .into(),
+            );
         }
         let host = configured.host().trim_matches(['[', ']']);
 
@@ -377,7 +412,7 @@ impl SandboxProxy {
             // an address nothing answers on -- failing at connect time rather
             // than at policy time.
             if ip.is_unspecified() {
-                return Self::rewritten(configured);
+                return Ok(Self::rewritten(configured)?);
             }
             if ip.is_loopback() {
                 return Err(format!(
@@ -385,13 +420,14 @@ impl SandboxProxy {
                      network namespace cannot reach; bind the proxy to 127.0.0.1 or a dual-stack \
                      wildcard address instead. The egress rule is emitted with IPv4 iptables.",
                     configured.host()
-                ));
+                )
+                .into());
             }
-            return Err(ipv6_unsupported(host));
+            return Err(ipv6_unsupported(host).into());
         }
 
         if is_reserved_loopback_name {
-            return Self::rewritten(configured);
+            return Ok(Self::rewritten(configured)?);
         }
 
         let resolved = resolve(host, configured.port())?;
@@ -516,27 +552,29 @@ fn with_deadline<T: Send + 'static>(
 /// `getaddrinfo` cannot be cancelled, so the lookup is moved to a thread and
 /// abandoned once the bound expires -- the wait is bounded even though the
 /// query itself keeps running until the resolver gives up.
-fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, ProxyResolveError> {
     let query = host.to_string();
     let waited = with_deadline(RESOLVE_TIMEOUT_LABEL, RESOLVE_TIMEOUT, move || {
         lookup_ipv4(&query, port)
     })
     .map_err(|error| {
-        format!("Bubblewrap: could not start the lookup of proxy host '{host}': {error}")
+        ProxyResolveError::Lookup(format!(
+            "Bubblewrap: could not start the lookup of proxy host '{host}': {error}"
+        ))
     })?;
 
     match waited {
         Ok(resolved) => resolved,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: resolving proxy host '{host}' exceeded {}s. The proxy endpoint is \
              resolved on the host because DNS is closed inside the sandbox, so an unresponsive \
              host resolver blocks the sandbox from starting. Check the host's DNS configuration, \
              or give the proxy as an IPv4 address to skip resolution.",
             RESOLVE_TIMEOUT.as_secs()
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+        ))),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: the lookup of proxy host '{host}' ended without an answer."
-        )),
+        ))),
     }
 }
 
@@ -545,14 +583,14 @@ fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
 /// Only the first IPv4 answer is used, and it is the same one the sandbox is
 /// pinned to. Opening the rest would widen the chain to addresses the sandbox
 /// can no longer select: with DNS closed, the pin is its only resolution path.
-fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, ProxyResolveError> {
     let resolved: Vec<IpAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|error| {
-            format!(
+            ProxyResolveError::Lookup(format!(
                 "Bubblewrap: could not resolve proxy host '{host}': {error}. The proxy endpoint \
                  is resolved on the host because DNS is closed inside the sandbox."
-            )
+            ))
         })?
         .map(|addr| addr.ip())
         .collect();
@@ -564,11 +602,11 @@ fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
     // A name with AAAA records and no A records is the same unenforceable case
     // as an IPv6 literal, so say so rather than claiming it does not resolve.
     if resolved.is_empty() {
-        Err(format!(
+        Err(ProxyResolveError::Lookup(format!(
             "Bubblewrap: proxy host '{host}' did not resolve to any address."
-        ))
+        )))
     } else {
-        Err(ipv6_unsupported(host))
+        Err(ipv6_unsupported(host).into())
     }
 }
 
@@ -1810,14 +1848,14 @@ impl PrivateNetworkUse {
 /// Whether this host can enforce proxy-only egress, and why not when it cannot.
 ///
 /// Pre-flight counterpart to the launch-path check in
-/// [`crate::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
+/// [`crate::bwrap_common::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
 /// caller that cannot ask this ahead of time only learns the answer when the
 /// run fails. Advisory — the runner still probes before it launches.
 ///
 /// Not exhaustive: a missing `nf_conntrack` module is only detectable when the
 /// rules are installed, so it still surfaces at launch.
 ///
-/// Bounded by [`PRE_FLIGHT_BUDGET`] in total, unlike the launch-path walk: a
+/// Bounded by `PRE_FLIGHT_BUDGET` in total, unlike the launch-path walk: a
 /// caller answering "can this host do it?" before spawning cannot afford the
 /// sum of every per-command timeout. The walk runs in a deadline-watched
 /// worker, so the ceiling holds even when a spawn itself blocks (a PATH lookup
@@ -2495,6 +2533,9 @@ mod tests {
         let error = SandboxProxy::resolve_with(&address, resolver([10, 0, 2, 2]))
             .expect_err("the slirp gateway must not be pinned as if it were a host address");
 
+        let ProxyResolveError::Rejected(error) = error else {
+            panic!("a reserved answer is a policy refusal: {error}");
+        };
         assert!(
             error.contains("10.0.2.0/24") && error.contains("127.0.0.1"),
             "error should name the reserved range and the supported alternative: {error}"
@@ -2568,7 +2609,7 @@ mod tests {
 
     /// A resolver that answers every name with `ip`, so pin decisions can be
     /// tested without a lookup the test does not control.
-    fn resolver(ip: [u8; 4]) -> impl Fn(&str, u16) -> Result<Ipv4Addr, String> {
+    fn resolver(ip: [u8; 4]) -> impl Fn(&str, u16) -> Result<Ipv4Addr, ProxyResolveError> {
         move |_, _| Ok(Ipv4Addr::from(ip))
     }
 
@@ -2710,7 +2751,7 @@ mod tests {
         let loopback = ProxyAddress::new("[::1]".into(), 8080);
         let error = SandboxProxy::resolve(&loopback).unwrap_err();
         assert!(
-            error.contains("IPv4"),
+            error.message().contains("IPv4"),
             "error should explain the IPv4 requirement: {error}"
         );
 
@@ -2730,10 +2771,37 @@ mod tests {
         );
         let error = SandboxProxy::resolve(&address).unwrap_err();
 
+        // A lookup failure is a host fault, not a refusal of the policy.
+        let ProxyResolveError::Lookup(error) = error else {
+            panic!("an unresolvable name is a lookup failure: {error}");
+        };
         assert!(
             error.contains("proxy.corp.invalid"),
             "error should name the offending host: {error}"
         );
+    }
+
+    #[test]
+    fn a_failed_lookup_is_not_reported_as_a_refusal() {
+        let address = ProxyAddress::new("proxy.example".into(), 3128);
+        let error = SandboxProxy::resolve_with(&address, |_, _| {
+            Err(ProxyResolveError::Lookup("timed out".into()))
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, ProxyResolveError::Lookup(_)), "{error}");
+    }
+
+    #[test]
+    fn static_rejections_are_refusals() {
+        for host in ["[::1]", "2001:db8::1", "10.0.2.2"] {
+            let address = ProxyAddress::new(host.into(), 8080);
+            let error = SandboxProxy::resolve(&address).unwrap_err();
+            assert!(
+                matches!(error, ProxyResolveError::Rejected(_)),
+                "{host}: {error}"
+            );
+        }
     }
 
     /// `::1` used to be rewritten to the IPv4 gateway, which handed the sandbox
@@ -2747,7 +2815,7 @@ mod tests {
             let error = SandboxProxy::resolve(&address).unwrap_err();
 
             assert!(
-                error.contains("IPv6 loopback"),
+                error.message().contains("IPv6 loopback"),
                 "error should name the unreachable address family: {error}"
             );
         }
@@ -2769,7 +2837,7 @@ mod tests {
         let error = SandboxProxy::resolve(&address).unwrap_err();
 
         assert!(
-            error.contains("non-zero"),
+            error.message().contains("non-zero"),
             "error should explain the port requirement: {error}"
         );
     }

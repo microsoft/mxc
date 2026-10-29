@@ -83,8 +83,9 @@ mod provider {
     /// Returns `true` if the ETW provider is currently registered.
     ///
     /// Cheap and lock-free — intended for guarding best-effort emit paths such
-    /// as [`emit_panic`](crate)-style hooks. May momentarily lag a concurrent
-    /// `init`/`shutdown`, which is acceptable for best-effort telemetry.
+    /// as [`emit_panic`](crate::mxc_common::telemetry::emit_panic)-style hooks.
+    /// May momentarily lag a concurrent `init`/`shutdown`, which is acceptable
+    /// for best-effort telemetry.
     pub fn is_active() -> bool {
         ACTIVE.load(Ordering::Acquire)
     }

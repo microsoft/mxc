@@ -89,15 +89,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
-name = "arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -541,17 +532,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "derive_builder"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -699,6 +679,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -1530,7 +1511,7 @@ dependencies = [
  "hyperlight-unikraft",
  "libc",
  "libloading",
- "nix",
+ "nix 0.29.0",
  "quick-xml",
  "same-file",
  "schemars",
@@ -1635,6 +1616,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -2520,6 +2513,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3313,20 +3312,24 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "2.4.2"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
- "arbitrary",
  "crc32fast",
- "crossbeam-utils",
- "displaydoc",
  "flate2",
  "indexmap",
  "memchr",
- "thiserror",
+ "nix 0.31.3",
+ "typed-path",
  "zopfli",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

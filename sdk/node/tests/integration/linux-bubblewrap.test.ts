@@ -8,6 +8,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import {
   sdk,
   supportedVersions,
@@ -315,6 +316,64 @@ describe('lxc-exec --available-backends contract', {
     } finally {
       platform._setLinuxProbeRunner(null);
       platform._resetPlatformSupportCache();
+    }
+  });
+});
+
+// `bwrap --die-with-parent` arms PR_SET_PDEATHSIG, which Linux fires when the
+// *thread* that forked bwrap exits. The SDK must not tie a sandbox to the
+// JavaScript thread that requested it: a Worker that spawns a sandbox and then
+// exits must leave the workload running.
+describe('Linux Bubblewrap spawn thread lifetime', {
+  skip: !isLinuxBubblewrap ? 'requires Linux with bwrap installed' : undefined,
+}, () => {
+  it('keeps the sandbox running after the spawning Worker exits', { timeout: 30000 }, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-thread-'));
+    const marker = path.join(dir, 'marker');
+    try {
+      // The workload reports through a file: the Worker's end of the stdout
+      // pipe closes when the Worker exits.
+      const worker = new Worker(`
+        const { parentPort, workerData } = require('node:worker_threads');
+        (async () => {
+          const { spawn } = await import(workerData.sdkV1);
+          const proc = await spawn({
+            command: 'echo ready; sleep 1; echo survived > ' + workerData.marker,
+            containment: { type: 'bubblewrap' },
+            filesystem: { readwritePaths: [workerData.dir] },
+            timeoutMs: 30000,
+          });
+          // Keep reading until the Worker is terminated: leaving the loop
+          // destroys the stream, and a stream error ends the run.
+          let announced = false;
+          for await (const chunk of proc.standardOutput) {
+            if (!announced && String(chunk).includes('ready')) {
+              // The workload is running, so bwrap has armed its parent-death signal.
+              announced = true;
+              parentPort.postMessage('ready');
+            }
+          }
+        })().catch((error) => parentPort.postMessage({ error: String(error?.stack ?? error) }));
+      `, {
+        eval: true,
+        workerData: {
+          sdkV1: pathToFileURL(path.join(getSdkPackageRoot(), 'dist', 'v1', 'index.js')).href,
+          marker,
+          dir,
+        },
+      });
+      const [message] = await new Promise<unknown[]>((resolve) => worker.once('message', (m) => resolve([m])));
+      assert.strictEqual(message, 'ready', `the Worker did not see the workload start: ${JSON.stringify(message)}`);
+      await worker.terminate();
+
+      const deadline = Date.now() + 15000;
+      while (!fs.existsSync(marker) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.ok(fs.existsSync(marker), 'the sandbox died with the Worker that spawned it');
+      assert.strictEqual(fs.readFileSync(marker, 'utf8').trim(), 'survived');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

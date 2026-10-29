@@ -10,7 +10,8 @@ use std::{eprint, process};
 
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::{ExecutionRequest, ScriptResponse};
-use mxc_sdk::mxc_common::script_runner;
+use mxc_sdk::mxc_common::mxc_error::MxcError;
+use mxc_sdk::mxc_common::script_runner::{self, emit_mxc_error_exit, emit_warning_envelopes};
 use mxc_sdk::mxc_common::telemetry;
 
 use mxc_sdk::lxc_common::signal_cleanup;
@@ -28,7 +29,7 @@ fn main() {
     // Enable the file sink if needed
     if let Some(ref log_path) = arguments.get_log_path() {
         if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
-            eprintln!("Warning: could not open log file '{}': {}", log_path, e);
+            emit_warning_envelopes(&[format!("could not open log file '{log_path}': {e}")]);
         }
     }
 
@@ -40,8 +41,9 @@ fn main() {
                 process::exit(0);
             }
             Err(e) => {
-                eprintln!("Error: probe serialization failed: {e}");
-                process::exit(1);
+                emit_mxc_error_exit(&MxcError::backend_error(format!(
+                    "probe serialization failed: {e}"
+                )));
             }
         }
     } else if arguments.does_user_want_hyperlight_setup() {
@@ -50,10 +52,7 @@ fn main() {
                 eprintln!("{message}");
                 process::exit(0);
             }
-            Err(message) => {
-                eprintln!("{message}");
-                process::exit(1);
-            }
+            Err(error) => emit_mxc_error_exit(&error),
         }
     } else if arguments.does_user_want_to_delete_a_container() {
         let success = arguments.delete_container(&mut logger);
@@ -95,8 +94,9 @@ fn main() {
 
     // Setup watchdog for unexpected shutdowns
     if let Err(e) = signal_cleanup::install() {
-        eprintln!("Error: failed to install signal cleanup handler: {e}");
-        process::exit(1);
+        emit_mxc_error_exit(&MxcError::backend_error(format!(
+            "failed to install signal cleanup handler: {e}"
+        )));
     }
 
     let run_start = Instant::now();
@@ -105,7 +105,6 @@ fn main() {
     let response = match mxc_sdk::mxc_engine::run(&request, &mut logger) {
         Ok(response) => response,
         Err(e) => {
-            eprintln!("error: {}", e.message);
             emit_warnings(&logger);
             eprint!("{}", logger.get_buffer());
             telemetry::emit_early_exit_with_kind(
@@ -114,14 +113,15 @@ fn main() {
                 requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
-            process::exit(1);
+            emit_mxc_error_exit(&e.into_mxc_error());
         }
     };
 
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
 
-    emit_warnings(&logger);
+    // Emitted before the dry-run branch below, which exits the process.
+    emit_warning_envelopes(response.warnings());
 
     // Handle dry_run request.
     if arguments.parse_and_validate() {
@@ -155,9 +155,7 @@ fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
 }
 
 fn emit_warnings(logger: &Logger) {
-    for warning in logger.warnings() {
-        eprintln!("{warning}");
-    }
+    emit_warning_envelopes(logger.warnings());
 }
 
 fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {

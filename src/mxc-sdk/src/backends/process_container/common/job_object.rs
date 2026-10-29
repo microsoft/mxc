@@ -361,7 +361,7 @@ impl UiJobObject {
     /// Terminates the complete process tree and confirms that the job is empty.
     ///
     /// This is the **strict** drain: a failure to observe the job reach zero
-    /// active processes within [`JOB_EMPTY_WAIT_TIMEOUT`] is returned as an
+    /// active processes within `JOB_EMPTY_WAIT_TIMEOUT` is returned as an
     /// error. Use it only where full drain certainty is a correctness
     /// requirement, including native capture finalization after workload teardown.
     /// Ordinary (non-capture) teardown should prefer

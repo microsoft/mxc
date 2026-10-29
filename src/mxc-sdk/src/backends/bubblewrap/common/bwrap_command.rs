@@ -181,7 +181,8 @@ impl ResolvedNetworkMode {
 /// Refuse an inbound posture Bubblewrap cannot honor.
 ///
 /// The backend declares `INGRESS_DEFAULT` and `HOST_LOOPBACK` in
-/// [`network_policy_support`], which tells shared validation it understands
+/// [`crate::mxc_common::sandbox_process::SandboxBackend::network_policy_support`],
+/// which tells shared validation it understands
 /// those fields — not that it can satisfy both of their values. Shared
 /// validation therefore stops checking them and these rejections become the
 /// only thing standing between an unsupported value and a silent drop, so they

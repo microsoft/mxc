@@ -9,12 +9,12 @@
 //!
 //! RAII guards ensure cleanup even on error paths.
 //!
-//! [`start_container`](WSLContainerRunner::start_container) owns everything up
+//! `start_container` owns everything up
 //! to and including "container started, init process in hand" and is shared by
 //! both execution models: the run-to-completion [`ScriptRunner`] here, and the
 //! streaming [`SandboxBackend`](crate::mxc_common::sandbox_process::SandboxBackend) in
-//! [`crate::sandbox`]. They differ only in where the SDK's I/O callbacks send
-//! their bytes — see [`IoSink`].
+//! [`crate::wslc_common::sandbox`]. They differ only in where the SDK's I/O callbacks send
+//! their bytes — see `IoSink`.
 
 use std::ffi::c_void;
 use std::fmt::Write;
@@ -839,7 +839,7 @@ impl WSLContainerRunner {
     /// and the init-process handle. The caller decides what happens next — wait
     /// to completion ([`Self::run_internal`]) or stream
     /// (the [`SandboxBackend`](crate::mxc_common::sandbox_process::SandboxBackend) impl
-    /// in [`crate::sandbox`]).
+    /// in [`crate::wslc_common::sandbox`]).
     ///
     /// `output` selects where the SDK's output callbacks send their bytes; the
     /// caller-side read ends (if any) come back on [`StartedContainer::pipes`],
@@ -882,9 +882,11 @@ impl WSLContainerRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => {
-                let _ = writeln!(logger, "[WSLC] {}", msg);
-                return Err(WslcError::Rejected(msg).into_response());
+            Err(error) => {
+                let _ = writeln!(logger, "[WSLC] {}", error.message());
+                // SDK v2: FilesystemPolicyError::Host maps to WslcError::Host (backend_error).
+                // See docs/development/plans/sdk-v2-error-codes.md.
+                return Err(WslcError::Rejected(error.message().to_string()).into_response());
             }
         };
 
@@ -2031,7 +2033,15 @@ mod tests {
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
-        assert_eq!(response.exit_code, -1, "overlap must fail the run");
+        assert_eq!(
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
+            "overlap must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
         assert!(
             response.error_message.contains("cannot be enforced"),
             "expected the overlap error, got: {}",
@@ -2080,8 +2090,13 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(
-            response.exit_code, -1,
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
             "junction-aliased deny must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             response.error_message.contains("cannot be enforced"),
@@ -2130,8 +2145,13 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(
-            response.exit_code, -1,
+            response.exit_code,
+            crate::mxc_common::models::FailurePhase::Rejected.failure_exit_code(),
             "absent junction-aliased deny must fail the run"
+        );
+        assert_eq!(
+            response.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
         );
         assert!(
             response.error_message.contains("cannot be enforced"),

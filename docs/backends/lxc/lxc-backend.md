@@ -324,6 +324,18 @@ streaming in a long-lived service.
 sudo lxc-checkconfig
 ```
 
+## Troubleshooting
+
+These failures carry the `backend_error` code and exit `-1`.
+
+| Message | Meaning |
+|---|---|
+| `the LXC runtime is not available on this host` | `lxc-ls --version` did not run; install the LXC tools |
+| `sandboxes can only be launched on Linux` | Wrong OS for the backend |
+| `distribution and release are required` / a proxy, egress or inherited-stdio refusal | The request is at fault; change it and retry |
+| `Failed to create container` / `Failed to start container` / `container '…' is already in use` | The request was accepted but the launch faulted |
+| `did not receive an IPv4 address` / `Failed to discover the container init PID` | The container started and then faulted before the script ran |
+
 ## Limitations
 
 - **The workload can send only ICMP Echo.** A `protocol: "icmp"` rule lets every

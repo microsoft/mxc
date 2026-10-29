@@ -122,6 +122,43 @@ jobs:
             exit 1
           fi
 
+      # This regression requires Linux and a usable Bubblewrap. Install it in
+      # the Linux lane and make an unavailable backend fail instead of skip.
+      - name: Install Bubblewrap
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          command -v bwrap
+
+      # Filter to this one method and verify exactly one successful test, so
+      # unrelated .NET tests cannot make this regression gate pass.
+      - name: Test Bubblewrap thread lifetime
+        if: matrix.os_label == 'linux'
+        shell: bash
+        env:
+          MXC_BWRAP_TESTS_REQUIRE_EXECUTION: "1"
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/dotnet-test-bubblewrap.log"
+          dotnet test \
+            --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj \
+            --no-build --no-restore -- \
+            --filter-method '*MxcContainerBubblewrapE2ETests.Spawn_OutlivesTheThreadThatSpawnedIt*' \
+            2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::error::dotnet test exited $status"
+            exit "$status"
+          fi
+          if ! grep -qE 'total: *1' "$log" || ! grep -qE 'succeeded: *1' "$log"; then
+            echo '::error::The Bubblewrap thread-lifetime regression did not run and pass exactly once.'
+            exit 1
+          fi
+
       # Exercise the opt-in backends as one complete native unit. The managed
       # tests dry-run both backends and verify WSLC's daemon + SDK DLL were
       # propagated into the application output.

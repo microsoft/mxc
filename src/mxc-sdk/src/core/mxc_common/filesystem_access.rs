@@ -26,6 +26,7 @@
 //! **first**, so delegation is checked against the already-tightened intents (a
 //! path moved `rw → denied` must not then be required to have write access).
 
+use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::models::ContainerPolicy;
 
 /// The access the invoking user must hold to delegate a path to the sandbox.
@@ -55,11 +56,19 @@ impl AccessMode {
     }
 }
 
+/// What probing the invoking user's access to a path found.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Access {
+    Granted,
+    /// The path does not exist; the existence warning reports it instead.
+    Missing,
+    /// The user lacks the access, or the path cannot be named on this host.
+    Denied,
+    /// The path could not be examined (e.g. a stale mount or I/O error).
+    Uninspectable(String),
+}
+
 /// Checks whether the invoking user holds the requested access to `path`.
-///
-/// Returns `Some(true)` / `Some(false)` when the result is determinable, or
-/// `None` when it cannot be determined (e.g. the path does not exist — that case
-/// is surfaced separately by the existence warning, so delegation skips it).
 ///
 /// On Unix this uses `access(2)`, which checks the requested permissions
 /// against the process's **real** UID/GID (the invoking user) and covers both
@@ -77,19 +86,16 @@ impl AccessMode {
 /// On Windows it probes the caller's effective access with `CreateFileW`
 /// (requesting `GENERIC_READ` / `GENERIC_READ | GENERIC_WRITE`, opened with
 /// `FILE_FLAG_BACKUP_SEMANTICS` so directories are covered too). A successful
-/// open means the access is granted. Matching the Unix posture, the check
-/// **fails closed**: only a genuinely missing path (`ERROR_FILE_NOT_FOUND` /
-/// `ERROR_PATH_NOT_FOUND` — surfaced separately by the existence warning) is
-/// skipped (`None`); every other failure, including `ERROR_ACCESS_DENIED` and
-/// ambiguous errors (sharing/lock violation, transient I/O), is treated as
-/// "cannot confirm access" and rejected (`Some(false)`) rather than silently
-/// allowed. This covers files *and* directories — including the common WSLC
-/// `readwritePaths` directory case — implementing spec D3 for the WSLC backend.
+/// open means the access is granted. On both platforms only a missing path is
+/// skipped; every other failure is refused. This covers files *and* directories,
+/// including the common WSLC `readwritePaths` directory case.
 #[cfg(unix)]
-fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
+fn user_can_access(path: &str, mode: AccessMode) -> Access {
     use std::ffi::CString;
 
-    let c_path = CString::new(path).ok()?;
+    let Ok(c_path) = CString::new(path) else {
+        return Access::Denied;
+    };
     let mask = match mode {
         AccessMode::Read => libc::R_OK,
         AccessMode::ReadWrite => libc::R_OK | libc::W_OK,
@@ -97,26 +103,25 @@ fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
     // SAFETY: `c_path` is a valid NUL-terminated C string for the duration of the call.
     let rc = unsafe { libc::access(c_path.as_ptr(), mask) };
     if rc == 0 {
-        return Some(true);
+        return Access::Granted;
     }
-    // access(2) failed. Distinguish genuine non-existence — which is skipped
-    // here and surfaced separately by the existence warning — from an access
-    // denial, which is the exact case delegation must catch (including a parent
-    // directory the caller cannot traverse, reported as EACCES). Only a missing
-    // path yields `None`; every other errno is treated as "not accessible".
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(libc::ENOENT) | Some(libc::ENOTDIR) => None,
-        _ => Some(false),
+    classify_access_error(std::io::Error::last_os_error())
+}
+
+/// An untraversable parent reports `EACCES`, so it counts as a denial.
+#[cfg(unix)]
+fn classify_access_error(error: std::io::Error) -> Access {
+    match error.raw_os_error() {
+        Some(libc::ENOENT) | Some(libc::ENOTDIR) => Access::Missing,
+        Some(libc::EACCES) | Some(libc::EPERM) | Some(libc::EROFS) => Access::Denied,
+        _ => Access::Uninspectable(error.to_string()),
     }
 }
 
 #[cfg(windows)]
-fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
+fn user_can_access(path: &str, mode: AccessMode) -> Access {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_READ,
-        GENERIC_WRITE,
-    };
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -152,53 +157,66 @@ fn user_can_access(path: &str, mode: AccessMode) -> Option<bool> {
             unsafe {
                 let _ = CloseHandle(h);
             }
-            Some(true)
+            Access::Granted
         }
-        _ => {
-            // Fail closed, mirroring the Unix posture: skip ONLY a genuinely
-            // missing path (surfaced separately by the existence warning). Every
-            // other failure — access denied, sharing/lock violation, transient
-            // I/O — means we cannot confirm the caller has the access, which for
-            // a security delegation gate must reject rather than silently allow.
-            // SAFETY: reads the thread-local last error set by the failed call above.
-            let err = unsafe { GetLastError() };
-            if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
-                None
-            } else {
-                Some(false)
-            }
-        }
+        // SAFETY: reads the thread-local last error set by the failed call above.
+        _ => classify_access_error(unsafe { GetLastError() }),
+    }
+}
+
+#[cfg(windows)]
+fn classify_access_error(error: windows::Win32::Foundation::WIN32_ERROR) -> Access {
+    use windows::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_PATH_NOT_FOUND,
+        ERROR_WRITE_PROTECT,
+    };
+
+    match error {
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Access::Missing,
+        ERROR_ACCESS_DENIED | ERROR_INVALID_NAME | ERROR_WRITE_PROTECT => Access::Denied,
+        _ => Access::Uninspectable(std::io::Error::from_raw_os_error(error.0 as i32).to_string()),
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn user_can_access(_path: &str, _mode: AccessMode) -> Option<bool> {
-    None
+fn user_can_access(_path: &str, _mode: AccessMode) -> Access {
+    Access::Missing
 }
 
 /// Validates the delegation constraint (spec D3): the sandbox receives no more
 /// access than the invoking user holds. `readwritePaths` require the user to
 /// have read+write access and `readonlyPaths` require read access; `deniedPaths`
-/// are unbounded and not checked. Paths whose access cannot be determined (e.g.
-/// non-existent paths) are skipped rather than rejected.
+/// are unbounded and not checked. Non-existent paths are skipped.
 ///
-/// Returns the rejection message for the first path that fails, or `Ok(())` when
-/// every checkable path is within the caller's access. Callers surface the
-/// message as their backend-appropriate error (e.g. `ScriptResponse::error`).
-pub fn check_delegation(policy: &ContainerPolicy) -> Result<(), String> {
+/// Fails closed on the first path that fails: a path the user cannot access is
+/// [`FilesystemPolicyError::Policy`], and a path that could not be examined is
+/// [`FilesystemPolicyError::Host`].
+pub fn check_delegation(policy: &ContainerPolicy) -> Result<(), FilesystemPolicyError> {
     for (paths, mode) in [
         (&policy.readonly_paths, AccessMode::Read),
         (&policy.readwrite_paths, AccessMode::ReadWrite),
     ] {
         for path in paths {
-            if user_can_access(path, mode) == Some(false) {
-                return Err(format!(
-                    "Filesystem path '{}' ({}): the invoking user does not have {} access, \
-                     so it cannot be delegated to the sandbox",
-                    path,
-                    mode.list_name(),
-                    mode.access_phrase(),
-                ));
+            match user_can_access(path, mode) {
+                Access::Granted | Access::Missing => {}
+                Access::Denied => {
+                    return Err(FilesystemPolicyError::Policy(format!(
+                        "Filesystem path '{}' ({}): the invoking user does not have {} access, \
+                         so it cannot be delegated to the sandbox",
+                        path,
+                        mode.list_name(),
+                        mode.access_phrase(),
+                    )));
+                }
+                Access::Uninspectable(reason) => {
+                    return Err(FilesystemPolicyError::Host(format!(
+                        "Filesystem path '{}' ({}): could not check the invoking user's {} \
+                         access ({reason}), so it was not delegated to the sandbox",
+                        path,
+                        mode.list_name(),
+                        mode.access_phrase(),
+                    )));
+                }
             }
         }
     }
@@ -224,8 +242,8 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
         let f = file.to_str().unwrap();
 
-        assert_eq!(user_can_access(f, AccessMode::Read), Some(true));
-        assert_eq!(user_can_access(f, AccessMode::ReadWrite), Some(true));
+        assert_eq!(user_can_access(f, AccessMode::Read), Access::Granted);
+        assert_eq!(user_can_access(f, AccessMode::ReadWrite), Access::Granted);
         assert!(check_delegation(&policy(&[f], &[])).is_ok());
     }
 
@@ -236,8 +254,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path().to_str().unwrap();
 
-        assert_eq!(user_can_access(d, AccessMode::Read), Some(true));
-        assert_eq!(user_can_access(d, AccessMode::ReadWrite), Some(true));
+        assert_eq!(user_can_access(d, AccessMode::Read), Access::Granted);
+        assert_eq!(user_can_access(d, AccessMode::ReadWrite), Access::Granted);
         assert!(check_delegation(&policy(&[d], &[])).is_ok());
     }
 
@@ -247,7 +265,7 @@ mod tests {
         // (existence is surfaced separately as a warning, not a delegation error).
         assert_eq!(
             user_can_access("/definitely/not/here/mxc-xyz", AccessMode::Read),
-            None
+            Access::Missing
         );
         assert!(check_delegation(&policy(&["/definitely/not/here/mxc-xyz"], &[])).is_ok());
     }
@@ -259,16 +277,34 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn ambiguous_error_fails_closed() {
-        // A path Windows rejects for a reason OTHER than not-found or
-        // access-denied (here an invalid name containing an illegal `<`
-        // character → ERROR_INVALID_NAME) must fail closed — `Some(false)` →
-        // rejected — not be silently skipped. This locks the Unix/Windows
-        // posture alignment: only a genuinely-missing path is skipped; every
-        // other failure is treated as "cannot confirm access" and rejected.
+    fn an_invalid_path_name_is_refused_as_a_policy_error() {
         let invalid = "C:\\mxc_invalid<name";
-        assert_eq!(user_can_access(invalid, AccessMode::Read), Some(false));
-        assert!(check_delegation(&policy(&[], &[invalid])).is_err());
+        assert_eq!(user_can_access(invalid, AccessMode::Read), Access::Denied);
+        assert!(matches!(
+            check_delegation(&policy(&[], &[invalid])),
+            Err(FilesystemPolicyError::Policy(_))
+        ));
+    }
+
+    /// A stale mount or I/O error is the host's fault, but still refuses the path.
+    #[test]
+    fn only_a_denial_blames_the_request() {
+        #[cfg(unix)]
+        let (denied, uninspectable) = (
+            std::io::Error::from_raw_os_error(libc::EACCES),
+            std::io::Error::from_raw_os_error(libc::EIO),
+        );
+        #[cfg(windows)]
+        let (denied, uninspectable) = (
+            windows::Win32::Foundation::ERROR_ACCESS_DENIED,
+            windows::Win32::Foundation::ERROR_SHARING_VIOLATION,
+        );
+
+        assert_eq!(classify_access_error(denied), Access::Denied);
+        assert!(matches!(
+            classify_access_error(uninspectable),
+            Access::Uninspectable(_)
+        ));
     }
 
     #[cfg(unix)]
@@ -289,11 +325,12 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
         let f = file.to_str().unwrap();
 
-        assert_eq!(user_can_access(f, AccessMode::Read), Some(false));
+        assert_eq!(user_can_access(f, AccessMode::Read), Access::Denied);
         let err = check_delegation(&policy(&[], &[f])).unwrap_err();
         assert!(
-            err.contains("does not have read access"),
-            "expected delegation rejection, got: {err}"
+            matches!(err, FilesystemPolicyError::Policy(_))
+                && err.message().contains("does not have read access"),
+            "expected delegation rejection, got: {err:?}"
         );
 
         // Restore permissions so the tempdir can be cleaned up.
@@ -326,7 +363,7 @@ mod tests {
 
         assert_eq!(
             user_can_access(f, AccessMode::Read),
-            Some(false),
+            Access::Denied,
             "an untraversable parent (EACCES) must be reported as inaccessible, not skipped"
         );
         assert!(check_delegation(&policy(&[], &[f])).is_err());
@@ -362,13 +399,14 @@ mod tests {
 
         assert_eq!(
             user_can_access(f, AccessMode::Read),
-            Some(false),
+            Access::Denied,
             "a path with an explicit deny-read ACE must be reported as inaccessible"
         );
         let err = check_delegation(&policy(&[], &[f])).unwrap_err();
         assert!(
-            err.contains("does not have read access"),
-            "expected delegation rejection, got: {err}"
+            matches!(err, FilesystemPolicyError::Policy(_))
+                && err.message().contains("does not have read access"),
+            "expected delegation rejection, got: {err:?}"
         );
 
         // Remove the deny ACE so the tempdir can clean up without surprises.

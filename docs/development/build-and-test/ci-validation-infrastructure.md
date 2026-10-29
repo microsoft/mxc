@@ -177,6 +177,17 @@ Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites ski
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+ProcessContainer's required V1.Dev cases cover capture and bidirectional
+pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
+direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
+against Bubblewrap and Seatbelt in Linux and macOS PR integration jobs.
+
+IsolationSession and WSLC require V1.Dev lifecycle, captured/piped exec,
+validation, and cleanup cases. IsolationSession also covers existing-container
+PTYs; its Rust and Node cases check partial capture on timeout with
+descendant-held pipes. Bundle discovery and runtime result gates require the
+named scenarios to pass.
+
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
 accepted-id lists (`ValidateSet` on Windows, the `case` arms on Unix) are what

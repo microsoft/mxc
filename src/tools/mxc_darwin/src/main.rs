@@ -10,12 +10,13 @@
 //! use still requires macOS.
 
 use std::fmt::Write;
-use std::process;
 
 use clap::Parser;
 use mxc_sdk::mxc_common::config_parser::load_one_shot_request;
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::ExecutionRequest;
+use mxc_sdk::mxc_common::mxc_error::MxcError;
+use mxc_sdk::mxc_common::script_runner::{emit_mxc_error_exit, emit_warning_envelopes};
 
 #[cfg(target_os = "macos")]
 use mxc_sdk::mxc_common::models::ScriptResponse;
@@ -84,8 +85,9 @@ fn main() {
     } else if let Some(ref path) = cli.config_path {
         (path.clone(), false)
     } else {
-        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
-        process::exit(1);
+        emit_mxc_error_exit(&MxcError::malformed_request(
+            "No config provided. Use a positional path, --config, or --config-base64",
+        ));
     };
 
     let mut logger = Logger::new(if cli.debug {
@@ -96,15 +98,15 @@ fn main() {
 
     if let Some(ref log_path) = cli.log_file {
         if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
-            eprintln!("Warning: could not open log file '{}': {}", log_path, e);
+            emit_warning_envelopes(&[format!("could not open log file '{log_path}': {e}")]);
         }
     }
 
     let mut request = match load_one_shot_request(&config_data, &mut logger, is_base64) {
         Ok(r) => r,
-        Err(_) => {
-            eprint!("Request error\n{}", logger.get_buffer());
-            process::exit(1);
+        Err(error) => {
+            eprint!("{}", logger.get_buffer());
+            emit_mxc_error_exit(&error.to_mxc_error());
         }
     };
 
@@ -160,13 +162,16 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     let response = match mxc_sdk::mxc_engine::run(request, logger) {
         Ok(response) => response,
         Err(e) => {
-            eprintln!("error: {}", e.message);
+            emit_warning_envelopes(logger.warnings());
             eprint!("{}", logger.get_buffer());
-            process::exit(1);
+            emit_mxc_error_exit(&e.into_mxc_error());
         }
     };
     let run_elapsed = run_start.elapsed();
     let _ = writeln!(logger, "Runner completed in {}ms", run_elapsed.as_millis());
+
+    // Emitted before the dry-run branch below, which exits the process.
+    emit_warning_envelopes(response.warnings());
 
     if request.dry_run {
         handle_dry_run_exit(&response, logger);
@@ -192,15 +197,14 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     // with lxc-exec / wxc-exec (issue #564).
     mxc_sdk::mxc_common::script_runner::emit_backend_error_envelope(&response);
 
-    process::exit(response.exit_code);
+    std::process::exit(response.exit_code);
 }
 
 #[cfg(not(target_os = "macos"))]
 fn run_seatbelt(_request: &ExecutionRequest, logger: &mut Logger) -> ! {
-    eprintln!(
-        "mxc-exec-mac: the macOS sandbox backend is only available on macOS. \
-         This binary was built for a non-Darwin target and cannot execute scripts."
-    );
     print!("{}", logger.get_buffer());
-    process::exit(1);
+    emit_mxc_error_exit(&MxcError::backend_unavailable(
+        "mxc-exec-mac: the macOS sandbox backend is only available on macOS. \
+         This binary was built for a non-Darwin target and cannot execute scripts.",
+    ));
 }

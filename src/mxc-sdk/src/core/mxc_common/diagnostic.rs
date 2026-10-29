@@ -158,7 +158,7 @@ impl DiagnosticConfig {
 /// Produce a redacted JSON representation of an `ExecutionRequest` suitable for diagnostic logging.
 ///
 /// - Environment variable values are replaced with `<redacted>`.
-/// - `script_code` is truncated to [`SCRIPT_CODE_TRUNCATE_LEN`] characters.
+/// - `script_code` is truncated to `SCRIPT_CODE_TRUNCATE_LEN` characters.
 /// - `network_proxy` (which is `#[serde(skip)]`) is logged separately.
 pub fn redacted_request_json(request: &ExecutionRequest) -> String {
     // Build a redacted copy for serialization.
@@ -206,7 +206,7 @@ pub fn redacted_request_json(request: &ExecutionRequest) -> String {
 }
 
 /// Parse caller-supplied raw config JSON and redact secret-bearing fields
-/// (same closed set of markers as [`crate::mxc_common::config_deserialize`]'s error-path
+/// (same closed set of markers as `crate::mxc_common::config_deserialize`'s error-path
 /// redaction, e.g. `token`, `secret`, and whole `user` credential bundles)
 /// before it is safe to write to a diagnostic sink.
 ///
@@ -230,7 +230,7 @@ pub fn redact_raw_config_json(raw: &str) -> String {
 }
 
 /// Recursively blank JSON object values whose key is secret-bearing (see
-/// [`crate::mxc_common::config_deserialize::is_secret_path_field`]). Over-redaction fails
+/// `crate::mxc_common::config_deserialize::is_secret_path_field`). Over-redaction fails
 /// safe: e.g. blanking the whole `user` object (rather than only `upn`/
 /// `wamToken` within it) never leaks a credential.
 fn redact_secret_fields(value: &mut serde_json::Value) {

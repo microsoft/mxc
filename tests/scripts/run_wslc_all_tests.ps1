@@ -365,13 +365,13 @@ $null = $results.Add((Run-WslcTest "wslc_network_bridged.json" `
 # rules, so a per-destination egress rule must be refused rather than quietly
 # widened to the posture's default.
 foreach ($ruleConfig in @("wslc_network_egress_rules_rejected.json", "wslc_network_egress_deny_rules_rejected.json")) {
-    $null = $results.Add((Run-WslcTest $ruleConfig -ExpectedExit -1 `
+    $null = $results.Add((Run-WslcTest $ruleConfig -ExpectedExit 1 `
         -OutputContains "network.egress allow/deny rules" `
         -OutputNotContains "WSLC_EGRESS_RULES_SHOULD_NOT_RUN"))
 }
 # `process.env` without `inheritDefaultEnv` is launched through `env -i NAME=VALUE`,
 # which puts the injected proxy URL in argv and therefore in /proc/<pid>/cmdline.
-$null = $results.Add((Run-WslcTest "wslc_network_proxy_credentials_rejected.json" -ExpectedExit -1 `
+$null = $results.Add((Run-WslcTest "wslc_network_proxy_credentials_rejected.json" -ExpectedExit 1 `
     -OutputContains "must not carry credentials" `
     -OutputNotContains "WSLC_PROXY_CREDENTIALS_SHOULD_NOT_RUN"))
 # Delegate the cooperative proxy fixture to its owning script, which asserts
@@ -431,11 +431,11 @@ $null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ForceDebug `
     -OutputContains "Image 'busybox:latest' found" -OutputNotContains "Pulling image"))
 # The store is warm now, so a miss here can only come from the denied posture.
 Clear-ColdCacheStore
-$null = $results.Add((Run-WslcTest "wslc_cold_cache_denied_egress.json" -ExpectedExit -1 `
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_denied_egress.json" -ExpectedExit 1 `
     -OutputContains "declares no egress" -OutputNotContains "SHOULD_NOT_RUN"))
 # `Check the image name and tag` is unique to the non-retryable arm; every arm
 # says `could not be pulled`.
-$null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit -1 `
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit 1 `
     -OutputContains "Check the image name and tag"))
 Clear-ColdCacheStore
 
@@ -465,7 +465,7 @@ $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_true.json" `
 # deliver. It is refused before any container is created, so the payload must
 # never run.
 $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false_rejected.json" `
-    -ExpectedExit -1 `
+    -ExpectedExit 1 `
     -OutputContains "destroyOnExit=false"))
 
 Write-Host "`n--- Stdin Tests ---" -ForegroundColor Cyan
