@@ -118,12 +118,27 @@ Callers will pass this ID to subsequent lifecycle operations. It will contain
 no credentials or endpoints.
 
 For the supported pooled flow, the session ID also identifies the computer
-used for readiness and execution. The backend will reject a checkout response
-containing a different computer ID; if the computer ID is omitted, it will
-use the session ID.
+used for readiness and execution. The MXC backend checks the returned IDs
+before reporting successful provisioning and rejects a different computer ID.
+If the computer ID is omitted, it uses the session ID under the supported
+pooled-flow assumption.
 
+A mismatched or malformed computer ID is an unexpected service response for
+this supported pooled flow.
 Rejecting an inconsistent successful response happens **after possible
 reservation creation** and reports `id_mismatch` and `possiblySucceeded: true`.
+When the session ID is valid, a mismatched or malformed computer ID does not
+erase that reservation's cleanup identity. The structured error retains
+`details.poolId`, `details.sessionId` and `details.sandboxId`. The backend
+constructs the cleanup reference as `w365:{poolId}:{sessionId}`; the caller
+passes it unchanged as `sandboxId` to `deprovision` or `stop`, with valid CP
+configuration and credentials. Release targets the session ID, never the
+mismatched computer ID.
+
+The cleanup reference is not a successful provisioning result or assurance
+that readiness or execution is supported. MXC does not automatically release
+the reservation or retry checkout. If the response cannot be parsed or the
+session ID is missing or malformed, no cleanup reference is fabricated.
 
 The caller will persist the returned ID and retain its account and deployment
 context separately. The service will authorize each operation. Release will
@@ -376,7 +391,8 @@ results outside it.
 | Failure or transition | Remaining state and caller-visible recovery |
 | --- | --- |
 | Request rejected locally | Invalid configuration, policy or ID fails before a service request, so the rejected operation causes no remote action. |
-| Checkout outcome unknown or ID lost | A reservation may exist without a usable returned ID. Uncertain checkout errors report `possiblySucceeded` and available request context. MXC does not automatically retry checkout, guarantee release, or reconstruct a lost ID. Service-side reconciliation is outside this milestone. |
+| Checkout rejected with a known session ID | A mismatched or malformed computer ID does not prevent explicit release of a valid session. The caller retains `details.sandboxId` from the error and passes it unchanged to `deprovision` or `stop` with valid CP credentials. If release fails, it retains the reference and reports the checkout and cleanup failures separately. |
+| Checkout outcome unknown or session ID unavailable | A lost/unparseable response or lost/malformed session ID can leave a reservation without a cleanup reference. Uncertain checkout errors report `possiblySucceeded` and available request context. MXC does not automatically retry checkout, guarantee release, or reconstruct a lost ID. Service-side reconciliation is outside this milestone. |
 | Readiness failure | The reservation is not automatically released or replaced. The caller can retry readiness with the retained ID and valid credentials, or explicitly release it. |
 | Execution failure or caller disconnect | Connection loss, remote `ERROR` and local I/O/protocol failures return structured MXC errors, not synthetic command exits. Errors distinguish the failure cause and report command-outcome uncertainty when applicable; no confirmed exit or remote cleanup is inferred. Output already relayed is retained, commands are not automatically replayed, and caller exit/cancellation does not guarantee remote process cleanup or reservation release. |
 | Release failure or lost response | The reservation may remain, or release may already have been accepted. The caller retains the ID and deployment/account context, reports cleanup failure separately from the original failure, and retries release against the same ID with valid CP credentials under a separate cleanup budget. |
@@ -411,12 +427,12 @@ while existing-reservation exec supports synchronous relayed stdio.
 | Lifecycle environment fixture | Omitted `process.env`, `[]`, and supplied entries, each with omitted/false/true `inheritDefaultEnv`. | Accepted requests forward only supplied entries, with none for omitted/empty env; the inheritance flag is not forwarded. Supplied env with false/omitted fails with `policy_validation` before any remote connection. No MXC host environment is forwarded. Actual guest inheritance and overrides are checked in the Phase 4 live scenario below. |
 | Lifecycle process-input fixture | Command with omitted/empty/supplied `cwd` and omitted/zero/positive `process.timeout`. | The service fixture receives the unchanged command, no `cwd` for omitted/empty input or the supplied guest path otherwise, and `timeoutMs` of 0 for omitted/zero input or the supplied positive millisecond value. |
 | Phase 4 live process-input scenario | Execute through the native lifecycle path in a known guest directory, with known non-sensitive guest-default variables and an override of one using `inheritDefaultEnv: true`. Repeat with omitted env and with `env: []` plus `inheritDefaultEnv: true`; run a command whose normal duration exceeds a positive timeout. | Output identifies the selected directory, preserves the unmodified guest-default variable and reflects the override; omitted/empty env preserves guest defaults. The timed command terminates remotely without reaching normal completion; record the returned exit/error result. A local timeout or disconnect alone does not establish remote termination. |
-| `w365agents_cp_loopback` plus lifecycle fixture | Successful checkout with equal IDs, omitted computer ID, different computer ID, malformed GUID/body or lost response. | Equal/omitted computer IDs produce the same session-based ID; mismatch/unusable success has `possiblySucceeded` and no minted usable ID or second POST. One failure is not proof no reservation exists. |
+| `w365agents_cp_loopback` plus lifecycle fixture | Equal IDs or omitted computer ID; different/malformed computer ID with a valid session ID; lost response, unparseable body or missing/malformed session ID. | Equal/omitted computer IDs produce the same session-based ID. Rejected successful checkout reports `possiblySucceeded`; a valid session ID is retained with the pool ID and opaque `sandboxId` in error details, not a successful container result. An unavailable/invalid session ID produces no fabricated cleanup reference. No second POST occurs. |
 | CP/status/upgrade failure fixtures | 401, 403, 404, 429, 500, other non-success and malformed responses. | Errors retain operation-specific categories/request IDs; 500 checkout reports uncertainty; no automatic retry/fallback/escalation occurs. |
 | Readiness fixture | Waiting/Live then Ready, unknown state, expired budget, `readyTimeoutMs: 0`. | Success only on Ready; timeout has last state; zero polls once; no release or replacement on timeout. |
 | `w365agents_loopback` and lifecycle relay fixture | Input/EOF, stdout/stderr frames, EXIT 0, 7 and -1, oversized start payload, oversized/malformed received frames, loss before EXIT, remote ERROR and local output error. | I/O and actual EXIT codes are preserved, including -1. Oversized EXEC_START fails before dial; oversized/malformed received frames fail explicitly. Post-upgrade loss and remote ERROR return `backend_error` with distinct operation-specific codes and appropriate outcome-uncertainty details, not `ExecCompleted`; local failures also surface errors. Native errors go to stderr without altering already-relayed stdout, and commands are never replayed automatically after failure. |
 | `w365agents_correlation_loopback` and TLS fixtures | Correlation off/on, secrets in config/metadata, invalid certificates, host/header injection and redirect responses. | No blank correlation header, no leaked token/ticket in diagnostics; TLS cannot be bypassed in production; no redirect or credential forwarding. |
-| Lifecycle release/recovery fixture | Exec fails, release fails/response is lost, caller retries release with retained ID and renewed token; response 200/202/204/404. | Primary and cleanup results both retained; retry targets same session only; report acceptance without reset completion. |
+| Lifecycle release/recovery fixture | Deprovision using `details.sandboxId` from a rejected checkout with a valid session ID; exec fails, release fails/response is lost, caller retries release with retained ID and renewed token; response 200/202/204/404. | Release uses the validated session ID, not the mismatched computer ID, without requiring successful start/exec or another checkout. Primary and cleanup results are both retained; retry targets the same session only; report acceptance without reset completion. |
 | Lifecycle subsequent-creation fixture | After failed cleanup of reservation A, explicitly provision B, then retry cleanup A. | Exactly one new checkout; distinct returned IDs; cleanup A never targets B; no hidden cleanup/reallocation or shared local registry corruption. |
 | Lifecycle process-exit fixture | Kill/exit a test executor during command or after provision; invoke fresh executor with persisted ID. | Local process/socket resources reclaimed; no false claim of remote kill/checkin; fresh request routes same retained ID without checkout. Real guest outcome remains a manual-service assertion. |
 | Probe/registry regressions | Probe with and without W365 feature and compare other backend results. | W365 is not locally asserted available; no auth/network call; existing backend capabilities/experimental classifications unchanged. |
