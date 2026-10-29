@@ -637,8 +637,10 @@ try {
 
     # The WSLc SDK reports the exit of a command that left a lot of input unread
     # late, and may drop output the command wrote after its input backed up.
+    # A command that ends well after its input backs up is reported the minimum
+    # 30 s late, the smallest delay the warning has to catch.
     $null = $results.Add((Invoke-WslcStdinTest "a stdin flood into a command that ignores it finishes without losing output silently" {
-        $h = Start-WslcStdinRun -Command "sh -c 'sleep 3; echo FLOODED-DONE'" -WriteStdin
+        $h = Start-WslcStdinRun -Command "sh -c 'sleep 40; echo FLOODED-DONE'" -TimeoutMs 120000 -WriteStdin
         $flood = [byte[]]::new(32 * 1024 * 1024)
         $null = $h.Stdin.WriteAsync($flood, 0, $flood.Length)
         $r = Wait-WslcStdinRun $h -Seconds 300

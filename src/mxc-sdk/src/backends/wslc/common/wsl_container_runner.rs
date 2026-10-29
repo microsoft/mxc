@@ -159,6 +159,11 @@ const EXIT_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// How long to wait for an abandoned pull before giving up on its session.
 const PULL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long the exit callback may trail the exit event before output is
+/// reported as possibly incomplete: the SDK delivers it within milliseconds,
+/// or 30 s or more late when a command leaves a lot of its stdin unread.
+const LATE_EXIT_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Reported when the SDK's exit callback arrives well after the exit event.
 const LATE_EXIT_WARNING: &str =
     "WARNING: the WSLc SDK reported the command's exit late, so its output may be incomplete. \
@@ -699,6 +704,7 @@ impl WSLContainerRunner {
                 .into_response());
             }
         }
+        let exit_seen = std::time::Instant::now();
 
         // Input the process can no longer read is dropped, so a writer
         // blocked on it returns now rather than at teardown.
@@ -708,7 +714,7 @@ impl WSLContainerRunner {
         // is the only proof the process is actually gone. Only the final wait
         // below may leak the context, since the SDK can call back late.
         let mut confirmed = io_ctx.wait_for_exit_callback();
-        let callback_late = !confirmed;
+        let callback_late = exit_seen.elapsed() >= LATE_EXIT_THRESHOLD;
         if !confirmed {
             if timed_out {
                 // The `SIGTERM` above was only a request, and it plainly did not
