@@ -584,9 +584,9 @@ pub trait SandboxBackend {
     /// stdio wired per `stdio`, returning a handle. On a validation or spawn
     /// failure returns a [`ScriptResponse`] carrying the error.
     ///
-    /// Implementations must apply shared validation and [`Self::validate`]
-    /// before performing any process-launch side effects. This keeps direct
-    /// streaming callers and the [`Runner`] bridge on the same safe path.
+    /// Implementations must apply shared and backend-specific request validation
+    /// before launching. Environmental checks may instead be enforced by the
+    /// actual sandbox setup, before the workload is allowed to run.
     fn spawn(
         &mut self,
         request: &ExecutionRequest,

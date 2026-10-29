@@ -113,6 +113,79 @@ fn streaming_bubblewrap_bidirectional_stdio() {
 }
 
 #[test]
+fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    use mxc_sdk::v1::{NetworkAction, NetworkEgressPolicy, NetworkPolicy};
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_NAMESPACE_FAILURE_FIXTURE";
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        let mut request = bwrap_request("echo WORKLOAD_STARTED", 0);
+        request.network = Some(NetworkPolicy {
+            egress: Some(NetworkEgressPolicy {
+                default: Some(NetworkAction::Allow),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let error = match spawn(request, Default::default()) {
+            Ok(_) => panic!("a failed network namespace must not start the workload"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("test: bwrap namespace refused")
+                && error.message.contains("user.max_net_namespaces"),
+            "startup error lost the diagnostic or remedy: {error:?}"
+        );
+        return;
+    }
+
+    if !bwrap_available() {
+        return;
+    }
+    if let Err(error) = mxc_sdk::bwrap_common::proxy_network::probe_proxy_enforcement() {
+        if std::env::var("MXC_BWRAP_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {
+            panic!("strict mode: {error}");
+        }
+        println!("SKIPPED: {error}");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("shim directory");
+    let shim = dir.path().join("bwrap");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.11.0'; exit 0; fi\n\
+         echo 'test: bwrap namespace refused' >&2\nexit 1\n",
+    )
+    .expect("write bwrap shim");
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+        .expect("make bwrap shim executable");
+    let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").expect("PATH")),
+    ))
+    .expect("shim PATH");
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "streaming_bubblewrap_reports_network_namespace_startup_failure",
+            "--nocapture",
+        ])
+        .env(FIXTURE_ENV, "1")
+        .env("PATH", path)
+        .output()
+        .expect("run startup failure fixture");
+    assert!(
+        output.status.success(),
+        "startup failure fixture exited {}:\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn streaming_bubblewrap_isolates_controlling_terminal() {
     if !bwrap_available() {
         return;

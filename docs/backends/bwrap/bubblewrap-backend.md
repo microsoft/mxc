@@ -731,9 +731,9 @@ shared-host-network behavior.
 
 ### How it works
 
-0. Before anything is launched, `validate` probes the host tools this mode
+0. Before a launch, the runner checks the host tools this mode
    depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
-   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`, and
+   `--keep-caps`), `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`, and
    `ip6tables-restore` — so a host that is
    missing one fails immediately with a message naming it, rather than partway
    through supervisor startup. For the `iptables` family presence is not
@@ -745,7 +745,10 @@ shared-host-network behavior.
    a wedged binary is reported as hung and named, instead of stalling every
    proxy-mode execution on the host indefinitely. A successful probe is cached
    for the life of the process; failures are not, so installing the missing
-   tool takes effect without a restart.
+   tool takes effect without a restart. Standalone validation and dry runs also
+   try creating disposable user and network namespaces and running `sh`. A
+   launch does not repeat that allocation: it checks namespace availability
+   when it starts the supervisor and Bubblewrap.
 1. The caller starts the proxy and names its loopback endpoint with
    `runtimeConfig.networkProxy`. The parser admits `localhost`, `127.0.0.1`,
    or `[::1]`; Bubblewrap rejects `[::1]` because its gateway reaches only
