@@ -75,6 +75,15 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs. The
 test jobs need the three builds; a failed bundle fails only the IsolationSession
 jobs, at their bundle download.
 
+Buffered SDK output limits are exercised by the Seatbelt and Bubblewrap
+streaming suites in the corresponding build jobs, and by the macOS C ABI
+suite (including NUL-to-UTF-8 expansion). Scheduled IsolationSession validation
+also checks Node lifecycle capture and .NET native and managed capture.
+These scenarios emit more than 1 MiB on both streams and assert bounded
+retention, truncation warnings, and workload completion with its original
+exit code. Host-independent tests cover exact-limit behavior and draining
+beyond the retention limit.
+
 ### `Validation.Tests.Matrix.Job.yml` — "Create Validation Test Matrix"
 
 | Job | Runner | What it does |

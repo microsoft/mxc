@@ -18,17 +18,17 @@ public sealed class ExecutionResult
     /// <summary>True if the run hit its <see cref="ContainerRequest.TimeoutMs"/> and was killed.</summary>
     public bool TimedOut { get; init; }
 
-    /// <summary>Everything the contained process wrote to stdout.</summary>
+    /// <summary>Text decoded from the first 1 MiB of stdout; see <see cref="Warnings"/> for truncation.</summary>
     public string Stdout { get; init; } = string.Empty;
 
-    /// <summary>Everything the contained process wrote to stderr.</summary>
+    /// <summary>Text decoded from the first 1 MiB of stderr; see <see cref="Warnings"/> for truncation.</summary>
     public string Stderr { get; init; } = string.Empty;
 
     /// <summary>Structured outputs produced by optional containment features.</summary>
     public ExecutionMetadata? OutputMetadata { get; init; }
 
     /// <summary>
-    /// Security warnings raised during the run, empty when there were none.
+    /// Security, operational, and output truncation warnings raised during the run.
     /// </summary>
     /// <remarks>
     /// A policy that relaxes containment raises one — notably

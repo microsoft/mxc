@@ -78,6 +78,26 @@ fn streaming_bubblewrap_bidirectional_stdio() {
 }
 
 #[test]
+fn bubblewrap_captured_execution_bounds_and_drains_both_streams() {
+    if !bwrap_available() {
+        return;
+    }
+    let request = bwrap_request(
+        "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2; exit 7",
+        30_000,
+    );
+    let output = mxc_sdk::v1::run(request, Default::default()).expect("bounded capture");
+    assert_eq!(output.outcome, WaitResult::Exited(7));
+    assert_eq!(output.stdout, vec![0; 1048576]);
+    assert_eq!(output.stderr, vec![0; 1048576]);
+    for stream in ["stdout", "stderr"] {
+        assert!(output.warnings.contains(&format!(
+            "{stream} capture truncated at 1048576 bytes; use streaming APIs for complete output"
+        )));
+    }
+}
+
+#[test]
 fn bubblewrap_pty_supports_io_resize_and_merged_output() {
     if !bwrap_available() {
         return;

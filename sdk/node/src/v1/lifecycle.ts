@@ -167,16 +167,29 @@ function assertStateAwareStreamingOptions(
   }
 }
 
-function collectStream(stream: Readable | null): Promise<string> {
+const MAX_CAPTURED_OUTPUT_BYTES = 1024 * 1024;
+
+function collectStream(
+  stream: Readable | null,
+): Promise<{ text: string; truncated: boolean }> {
   if (stream === null) {
-    return Promise.resolve('');
+    return Promise.resolve({ text: '', truncated: false });
   }
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
+    const buffer = Buffer.alloc(MAX_CAPTURED_OUTPUT_BYTES);
+    let length = 0;
+    let truncated = false;
     stream.on('data', (chunk: Buffer | string) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const retained = Math.min(bytes.length, MAX_CAPTURED_OUTPUT_BYTES - length);
+      bytes.copy(buffer, length, 0, retained);
+      length += retained;
+      truncated ||= retained < bytes.length;
     });
-    stream.once('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+    stream.once('end', () => resolve({
+      text: buffer.subarray(0, length).toString('utf-8'),
+      truncated,
+    }));
     stream.once('error', reject);
   });
 }
@@ -287,6 +300,8 @@ export async function spawnInContainerWithPty<C extends LifecycleContainmentKind
  * Buffered exec convenience. Resolves with `{stdout, stderr, exitCode}`
  * on script completion. Native dispatch failures reject with `MxcError`;
  * workload failures are returned through the process exit code and streams.
+ * Retains the first 1 MiB per stream, drains excess output, and reports
+ * truncation in `warnings`. Use streaming APIs for complete output.
  */
 export async function runInContainer<C extends PipedExecuteBackend>(
   containerId: ContainerId<C>,
@@ -307,12 +322,20 @@ export async function runInContainer<C extends PipedExecuteBackend>(
   let failed = false;
   try {
     const [result, stdout, stderr] = await waitPromise;
+    const warnings = [...proc.warnings];
+    for (const [stream, output] of [['stdout', stdout], ['stderr', stderr]] as const) {
+      if (output.truncated) {
+        warnings.push(
+          `${stream} capture truncated at ${MAX_CAPTURED_OUTPUT_BYTES} bytes; use streaming APIs for complete output`,
+        );
+      }
+    }
     return {
-      stdout,
-      stderr,
+      stdout: stdout.text,
+      stderr: stderr.text,
       exitCode: result.exitCode,
       timedOut: result.timedOut,
-      warnings: [...proc.warnings],
+      warnings,
       ...(proc.outputMetadata === undefined
         ? {}
         : { outputMetadata: proc.outputMetadata }),

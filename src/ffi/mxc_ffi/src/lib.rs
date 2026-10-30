@@ -364,6 +364,9 @@ pub(crate) unsafe fn cstr_to_str<'a>(p: *const c_char) -> Option<&'a str> {
 /// Run a raw exact-version one-shot JSON request to completion and capture its
 /// output.
 ///
+/// Retains at most 1 MiB per stream before text conversion, drains excess
+/// output, and reports truncation in `warnings_json_utf8`.
+///
 /// `request_json_utf8` is a public MXC configuration with an exact registered
 /// `version`. `experimental` is nonzero to permit an experimental backend,
 /// which is otherwise refused with `backend_unavailable`; it is ignored for

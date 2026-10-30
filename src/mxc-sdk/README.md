@@ -41,6 +41,13 @@ Captured execution drains both streams concurrently. Output-read failures are
 returned as errors; timeouts cancel outstanding reads and return the partial
 output with `WaitResult::TimedOut`.
 
+Buffered execution (`run`, `run_in_container`, and `wait_with_output`) retains
+the first 1 MiB (1,048,576 bytes) of each output stream. Excess bytes are drained
+and discarded so the workload can still finish. Each truncated stream adds an
+entry to `ExecutionResult.warnings`; exit codes and timeout reporting are
+unchanged. Use `spawn` or `spawn_in_container` and process both streams
+incrementally when complete output is required.
+
 Creation takes `RunOptions`, `SpawnOptions`, or `SpawnWithPtyOptions` after
 the request. `SpawnWithPtyOptions.size` carries initial dimensions and defaults
 to 24 rows by 80 columns.

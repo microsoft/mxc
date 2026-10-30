@@ -30,6 +30,15 @@ Use `MxcContainer.Run` / `RunAsync` for captured output.
 Cancelling `RunAsync` stops awaiting the result; native execution continues
 until completion or the request timeout.
 
+Buffered execution (`Run` / `RunAsync`, `RunInContainer` /
+`RunInContainerAsync`, and `WaitForExitWithOutputAsync`) retains the first
+1 MiB (1,048,576 bytes) of each output stream before text decoding. Excess
+output is drained and discarded; truncation is reported in
+`ExecutionResult.Warnings`, or `MxcProcess.Warnings` after
+`WaitForExitWithOutputAsync`. Exit codes and timeout reporting are unchanged.
+Use streaming APIs and process both streams incrementally when complete
+output is required.
+
 ## Spawn with streaming output
 
 ```csharp

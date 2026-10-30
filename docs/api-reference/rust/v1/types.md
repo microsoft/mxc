@@ -239,6 +239,11 @@ impl From<MxcErrorCode> for ErrorCode {
 
 The captured result of running a [MxcProcess] to completion via wait_with_output.
 
+Buffered execution retains the first 1 MiB (1,048,576 bytes) per stream and
+drains and discards excess output. Each truncated stream adds a `warnings`
+entry; exit codes and timeout reporting are unchanged. Use streaming reads
+for complete output.
+
 ```rust
 pub struct ExecutionResult {
   pub outcome: WaitResult,

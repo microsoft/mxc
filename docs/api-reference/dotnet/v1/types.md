@@ -368,6 +368,11 @@ public enum ErrorCode
 
 The result of running a container to completion via MxcContainer.Run(ContainerRequest).
 
+Buffered execution retains the first 1 MiB (1,048,576 bytes) per stream before
+text decoding, drains and discards excess output, and adds a `Warnings` entry
+for each truncated stream. Exit codes and timeout reporting are unchanged.
+Use streaming APIs for complete output.
+
 ```csharp
 public sealed class ExecutionResult
 {
@@ -674,6 +679,11 @@ public static class MxcPlatform
 ## `Microsoft.Mxc.Sdk.V1.MxcProcess`
 
 A live process spawned by MxcContainer.Spawn(ContainerRequest).
+
+`WaitForExitWithOutputAsync` retains the first 1 MiB per stream and continues
+draining excess output. Truncation warnings are available through `Warnings`
+after capture completes. Reading `StandardOutput` and `StandardError`
+directly does not impose this retention limit.
 
 ```csharp
 public class MxcProcess : IMxcProcess

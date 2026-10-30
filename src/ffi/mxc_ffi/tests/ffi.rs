@@ -55,6 +55,56 @@ fn extern_version_matches_crate() {
     assert_eq!(v, env!("CARGO_PKG_VERSION"));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn extern_run_bounds_nul_output_and_reports_truncation() {
+    let request = CString::new(
+        serde_json::json!({
+            "version": "1.0.0",
+            "containment": "seatbelt",
+            "process": {
+                "commandLine": "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2; exit 7",
+                "timeout": 30000
+            }
+        })
+        .to_string(),
+    )
+    .expect("request C string");
+    let mut out = zeroed_result();
+    // SAFETY: the request and result storage are valid for this call.
+    let status = unsafe { mxc_run_json(request.as_ptr(), 0, &mut out) };
+    // SAFETY: non-null output fields are owned C strings initialized by the call.
+    // Copy them before freeing native allocations, including on failure.
+    let (stdout, stderr, warnings) = unsafe {
+        let text = |p: *const std::ffi::c_char| {
+            if p.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(p).to_string_lossy().into_owned()
+            }
+        };
+        let copied = (
+            text(out.stdout_utf8),
+            text(out.stderr_utf8),
+            text(out.warnings_json_utf8),
+        );
+        mxc_run_result_free(&mut out);
+        copied
+    };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_SUCCESS);
+    assert_eq!(out.exit_code, 7);
+    assert_eq!(out.timed_out, 0);
+    let expected = "\u{fffd}".repeat(1048576);
+    assert_eq!(stdout, expected);
+    assert_eq!(stderr, expected);
+    let warnings: Vec<String> = serde_json::from_str(&warnings).expect("warnings JSON");
+    for stream in ["stdout", "stderr"] {
+        assert!(warnings.contains(&format!(
+            "{stream} capture truncated at 1048576 bytes; use streaming APIs for complete output"
+        )));
+    }
+}
+
 #[test]
 fn extern_discovery_returns_owned_json() {
     let backends = mxc_available_backends_json();

@@ -153,6 +153,37 @@ public class MxcLifecycleE2ETests
         }
     }
 
+    [Fact]
+    public async Task Exec_BoundsOutputAndReportsTruncation()
+    {
+        IsolationSessionHost.Require();
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            var run = await MxcLifecycle.RunInContainerAsync(
+                started.Id,
+                new ExecutionRequest(
+                    "powershell.exe -NoProfile -NonInteractive -Command \"$chunk = 'x' * 8192; " +
+                    "for ($i = 0; $i -lt 256; $i++) { [Console]::Out.Write($chunk); " +
+                    "[Console]::Error.Write($chunk) }; exit 7\"")
+                {
+                    TimeoutMs = 30000,
+                },
+                cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.False(run.TimedOut);
+            Assert.Equal(7, run.ExitCode);
+            Assert.Equal(new string('x', 1048576), run.Stdout);
+            Assert.Equal(new string('x', 1048576), run.Stderr);
+            foreach (var stream in new[] { "stdout", "stderr" })
+            {
+                Assert.Contains(
+                    $"{stream} capture truncated at 1048576 bytes; use streaming APIs for complete output",
+                    run.Warnings);
+            }
+        }
+    }
+
     /// <summary>The sandboxed process's exit code must reach the caller
     /// unchanged, through the streaming handle's wait.</summary>
     [Fact]

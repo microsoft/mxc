@@ -55,6 +55,44 @@ public class MxcContainerIsolationSessionE2ETests
     }
 
     [Fact]
+    public async Task BufferedExecution_BoundsNativeAndManagedCapture()
+    {
+        IsolationSessionHost.Require();
+        var request = Request(
+            "powershell.exe -NoProfile -NonInteractive -Command \"$chunk = 'x' * 8192; " +
+            "for ($i = 0; $i -lt 256; $i++) { [Console]::Out.Write($chunk); " +
+            "[Console]::Error.Write($chunk) }; exit 7\"");
+        request.TimeoutMs = 30000;
+
+        using var proc = MxcContainer.Spawn(request);
+        var (result, stdout, stderr) = await proc.WaitForExitWithOutputAsync(
+            TestContext.Current.CancellationToken);
+        Assert.False(result.TimedOut);
+        Assert.Equal(7, result.ExitCode);
+        Assert.Equal(new string('x', 1048576), Encoding.UTF8.GetString(stdout));
+        Assert.Equal(new string('x', 1048576), Encoding.UTF8.GetString(stderr));
+        foreach (var stream in new[] { "stdout", "stderr" })
+        {
+            Assert.Contains(
+                $"{stream} capture truncated at 1048576 bytes; use streaming APIs for complete output",
+                proc.Warnings);
+        }
+
+        var captured = await MxcContainer.RunAsync(request,
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(captured.TimedOut);
+        Assert.Equal(7, captured.ExitCode);
+        Assert.Equal(new string('x', 1048576), captured.Stdout);
+        Assert.Equal(new string('x', 1048576), captured.Stderr);
+        foreach (var stream in new[] { "stdout", "stderr" })
+        {
+            Assert.Contains(
+                $"{stream} capture truncated at 1048576 bytes; use streaming APIs for complete output",
+                captured.Warnings);
+        }
+    }
+
+    [Fact]
     public void Run_ExecutesUnderADifferentAccount()
     {
         IsolationSessionHost.Require();

@@ -769,6 +769,56 @@ describe('deprovisionContainer', () => {
 });
 
 describe('runInContainer', () => {
+  for (const size of [0, 1048575, 1048576, 3 * 1048576 + 1]) {
+    it(`bounds and drains both output streams (${size} bytes)`, async () => {
+      const exec = installStateAwareExecBinding(
+        () => new FakeStateAwareExecBinding(
+          16, '', '', 0, { exitCode: 7, timedOut: false }, ['native warning'], false,
+        ),
+      );
+      const pending = runInContainer(
+        'iso:abc' as ContainerId<'isolation_session'>,
+        { command: 'emit output' },
+      );
+      const binding = exec.binding();
+      const stdoutEnded = new Promise<void>((resolve) => binding.standardOutput.once('end', resolve));
+      const stderrEnded = new Promise<void>((resolve) => binding.standardError.once('end', resolve));
+      for (let offset = 0; offset < size; offset += 8191) {
+        const length = Math.min(8191, size - offset);
+        binding.standardOutput.write(Buffer.alloc(length));
+        binding.standardError.write(Buffer.alloc(length, 'E'));
+      }
+      binding.completeStreams();
+      const result = await pending;
+      await Promise.all([stdoutEnded, stderrEnded]);
+      assert.strictEqual(result.stdout, '\0'.repeat(Math.min(size, 1048576)));
+      assert.strictEqual(result.stderr, 'E'.repeat(Math.min(size, 1048576)));
+      assert.strictEqual(result.exitCode, 7);
+      assert.strictEqual(result.timedOut, false);
+      assert.deepStrictEqual(result.warnings, size > 1048576 ? [
+        'native warning',
+        'stdout capture truncated at 1048576 bytes; use streaming APIs for complete output',
+        'stderr capture truncated at 1048576 bytes; use streaming APIs for complete output',
+      ] : ['native warning']);
+      assert.strictEqual(binding.freed, true);
+    });
+  }
+
+  it('does not hide stream errors after the capture limit', async () => {
+    const exec = installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(16, '', '', 0, undefined, [], false),
+    );
+    const pending = runInContainer(
+      'iso:abc' as ContainerId<'isolation_session'>,
+      { command: 'emit output' },
+    );
+    exec.binding().standardOutput.write(Buffer.alloc(1048577));
+    exec.binding().standardOutput.destroy(new Error('read failed after limit'));
+    exec.binding().standardError.end();
+    await assert.rejects(pending, /read failed after limit/);
+    assert.strictEqual(exec.binding().freed, true);
+  });
+
   it('does not require experimental authorization for stable backends', async () => {
     installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(16, 'stable\n', ''),

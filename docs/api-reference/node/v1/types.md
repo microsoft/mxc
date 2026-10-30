@@ -308,6 +308,11 @@ export interface ValidationResult {
 
 Captured output and terminal outcome of a completed workload.
 
+`run` and `runInContainer` retain the first 1 MiB (1,048,576 bytes) per stream
+before UTF-8 decoding, drain and discard excess output, and add a `warnings`
+entry for each truncated stream. Exit codes and timeout reporting are
+unchanged. Use streaming APIs for complete output.
+
 ```typescript
 export interface ExecutionResult {
   stdout: string;

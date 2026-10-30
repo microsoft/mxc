@@ -592,7 +592,9 @@ export interface CaptureDenialsError {
 
 /** Captured output and terminal outcome of a completed workload. */
 export interface ExecutionResult {
+  /** UTF-8 text decoded from the first 1 MiB of stdout; see warnings for truncation. */
   stdout: string;
+  /** UTF-8 text decoded from the first 1 MiB of stderr; see warnings for truncation. */
   stderr: string;
   exitCode: number;
   timedOut: boolean;

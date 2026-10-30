@@ -18,6 +18,58 @@ public class MxcProcessTests
         Environment.GetEnvironmentVariable("MXC_E2E_HOST_PREPPED") == "1";
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(1048575)]
+    [InlineData(1048576)]
+    [InlineData(3145729)]
+    public async Task CaptureOutput_BoundsRetentionAndDrainsExcess(int size)
+    {
+        using var stream = new MemoryStream(Enumerable.Repeat((byte)0, size).ToArray());
+        var (bytes, truncated) = await MxcProcess.CaptureOutputAsync(
+            stream, TestContext.Current.CancellationToken);
+
+        Assert.Equal(Math.Min(size, 1048576), bytes.Length);
+        Assert.All(bytes, value => Assert.Equal(0, value));
+        Assert.Equal(size > 1048576, truncated);
+        Assert.Equal(size, stream.Position);
+    }
+
+    [Fact]
+    public async Task CaptureOutput_PropagatesCancellation()
+    {
+        using var stream = new MemoryStream(new byte[1048577]);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => MxcProcess.CaptureOutputAsync(stream, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task CaptureOutput_DoesNotHideReadErrorsAfterTruncation()
+    {
+        using var stream = new FailingOutputStream();
+        var exception = await Assert.ThrowsAsync<IOException>(
+            () => MxcProcess.CaptureOutputAsync(stream, TestContext.Current.CancellationToken));
+        Assert.Equal("read failed after limit", exception.Message);
+    }
+
+    private sealed class FailingOutputStream : MemoryStream
+    {
+        public FailingOutputStream() : base(new byte[1048577]) { }
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            if (Position == Length)
+            {
+                throw new IOException("read failed after limit");
+            }
+            return base.ReadAsync(buffer, cancellationToken);
+        }
+    }
+
+    [Theory]
     [InlineData(null, null)]
     [InlineData(0u, null)]
     [InlineData(1u, 1u)]

@@ -29,6 +29,8 @@ use crate::state_aware_sdk::{
 };
 use crate::Error;
 
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
+
 fn run_typed_state_aware(
     input: crate::mxc_common::sdk_input::SdkStateAwareInput,
     dry_run: bool,
@@ -240,11 +242,11 @@ pub struct ExecutionResult {
     pub outcome: WaitResult,
     /// Policy and operational warnings from the container, such as security
     /// warnings, network rules that cannot carry traffic, or a cleanup step
-    /// that failed after the workload exited.
+    /// that failed after the workload exited. Also reports output truncation.
     pub warnings: Vec<String>,
-    /// Everything the child wrote to stdout.
+    /// The first 1 MiB the child wrote to stdout. See `warnings` for truncation.
     pub stdout: Vec<u8>,
-    /// Everything the child wrote to stderr.
+    /// The first 1 MiB the child wrote to stderr. See `warnings` for truncation.
     pub stderr: Vec<u8>,
     /// Structured outputs produced by optional container features.
     pub output_metadata: Option<ExecutionMetadata>,
@@ -400,6 +402,10 @@ impl MxcProcess {
     /// on separate threads, so an output-heavy child can't deadlock (reading one
     /// stream to EOF before the other can). Consumes the handle.
     ///
+    /// Retains at most 1 MiB per stream and drains and discards any excess.
+    /// Truncation adds a warning for each affected stream. Use streaming reads
+    /// when complete output is required.
+    ///
     /// `Err` reports an OS / wait or output-read failure; a timeout is reported
     /// as [`ExecutionResult`] with `outcome: WaitResult::TimedOut` and whatever each
     /// stream captured before cancellation. Timeout and wait failures cancel
@@ -407,13 +413,27 @@ impl MxcProcess {
     pub fn wait_with_output(mut self) -> std::io::Result<ExecutionResult> {
         fn capture(
             stream: Option<Box<dyn Read + Send>>,
-        ) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+        ) -> std::thread::JoinHandle<std::io::Result<(Vec<u8>, bool)>> {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
+                let mut truncated = false;
                 if let Some(mut stream) = stream {
-                    stream.read_to_end(&mut buf)?;
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        let read = match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(read) => read,
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        let retained = read.min(MAX_CAPTURED_OUTPUT_BYTES - buf.len());
+                        buf.extend_from_slice(&chunk[..retained]);
+                        truncated |= retained < read;
+                    }
                 }
-                Ok(buf)
+                Ok((buf, truncated))
             })
         }
 
@@ -426,7 +446,7 @@ impl MxcProcess {
         let outcome = self.wait();
         // Sampled after the wait: a backend whose teardown runs there reports
         // its failures here.
-        let warnings = self.inner.warnings();
+        let mut warnings = self.inner.warnings();
         let output_metadata = self.inner.output_metadata().cloned();
         // Some backends keep their original pipe ends until the process object
         // is released. Drop it before joining readers so they can observe EOF.
@@ -447,11 +467,21 @@ impl MxcProcess {
         let stderr = stderr
             .join()
             .unwrap_or_else(|_| Err(std::io::Error::other("stderr capture thread panicked")));
+        let outcome = outcome?;
+        let (stdout, stdout_truncated) = stdout?;
+        let (stderr, stderr_truncated) = stderr?;
+        for (stream, truncated) in [("stdout", stdout_truncated), ("stderr", stderr_truncated)] {
+            if truncated {
+                warnings.push(format!(
+                    "{stream} capture truncated at {MAX_CAPTURED_OUTPUT_BYTES} bytes; use streaming APIs for complete output"
+                ));
+            }
+        }
         Ok(ExecutionResult {
-            outcome: outcome?,
+            outcome,
             warnings,
-            stdout: stdout?,
-            stderr: stderr?,
+            stdout,
+            stderr,
             output_metadata,
         })
     }
@@ -739,6 +769,7 @@ mod tests {
         wait_warning: Option<String>,
         output_metadata: Option<ExecutionMetadata>,
         stdout: Option<Box<dyn Read + Send>>,
+        stderr: Option<Box<dyn Read + Send>>,
         release_output: Option<std::sync::mpsc::Sender<()>>,
         output_closer: Option<std::sync::mpsc::Sender<()>>,
         timed_out: bool,
@@ -848,7 +879,7 @@ mod tests {
         }
 
         fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
-            None
+            self.stderr.take()
         }
 
         fn stdout_closer(&self) -> Option<Box<dyn InnerCloser>> {
@@ -906,6 +937,7 @@ mod tests {
                 capture_denials_error: None,
             }),
             stdout: None,
+            stderr: None,
             release_output: None,
             output_closer: None,
             timed_out: false,
@@ -938,6 +970,7 @@ mod tests {
                 tail: std::io::Cursor::new(b"buffered tail".to_vec()),
                 released: false,
             })),
+            stderr: None,
             release_output: Some(release),
             output_closer: None,
             timed_out: false,
@@ -960,6 +993,7 @@ mod tests {
                 tail: std::io::Cursor::new(Vec::new()),
                 released: false,
             })),
+            stderr: None,
             release_output: None,
             output_closer: Some(close),
             timed_out: true,
@@ -976,6 +1010,7 @@ mod tests {
             wait_warning: None,
             output_metadata: None,
             stdout: Some(Box::new(FailedReader)),
+            stderr: None,
             release_output: None,
             output_closer: None,
             timed_out: false,
@@ -991,6 +1026,7 @@ mod tests {
             wait_warning: None,
             output_metadata: None,
             stdout: Some(Box::new(std::io::Cursor::new(Vec::<u8>::new()))),
+            stderr: None,
             release_output: None,
             output_closer: None,
             timed_out: false,
@@ -1005,6 +1041,97 @@ mod tests {
             error.to_string(),
             "native stdio must be taken before taking individual streams"
         );
+    }
+
+    #[test]
+    fn captured_output_bounds_both_streams_and_drains_excess() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountedReader {
+            remaining: usize,
+            byte: u8,
+            consumed: Arc<AtomicUsize>,
+            interrupted: bool,
+        }
+
+        impl Read for CountedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let count = buf.len().min(self.remaining);
+                buf[..count].fill(self.byte);
+                self.remaining -= count;
+                self.consumed.fetch_add(count, Ordering::Relaxed);
+                Ok(count)
+            }
+        }
+
+        for bytes in [
+            0,
+            MAX_CAPTURED_OUTPUT_BYTES - 1,
+            MAX_CAPTURED_OUTPUT_BYTES,
+            MAX_CAPTURED_OUTPUT_BYTES * 3 + 1,
+        ] {
+            let stdout_read = Arc::new(AtomicUsize::new(0));
+            let stderr_read = Arc::new(AtomicUsize::new(0));
+            let sandbox = MxcProcess::new(Box::new(FakeProcess {
+                warnings: vec!["native warning".into()],
+                wait_warning: Some("completion warning".into()),
+                output_metadata: None,
+                stdout: Some(Box::new(CountedReader {
+                    remaining: bytes,
+                    byte: 0,
+                    consumed: stdout_read.clone(),
+                    interrupted: false,
+                })),
+                stderr: Some(Box::new(CountedReader {
+                    remaining: bytes,
+                    byte: b'E',
+                    consumed: stderr_read.clone(),
+                    interrupted: false,
+                })),
+                release_output: None,
+                output_closer: None,
+                timed_out: false,
+            }));
+            let output = sandbox.wait_with_output().expect("bounded capture");
+            let retained = bytes.min(MAX_CAPTURED_OUTPUT_BYTES);
+            assert_eq!(output.outcome, WaitResult::Exited(0));
+            assert_eq!(output.stdout, vec![0; retained]);
+            assert_eq!(output.stderr, vec![b'E'; retained]);
+            assert_eq!(stdout_read.load(Ordering::Relaxed), bytes);
+            assert_eq!(stderr_read.load(Ordering::Relaxed), bytes);
+            let mut warnings = vec!["native warning", "completion warning"];
+            if bytes > MAX_CAPTURED_OUTPUT_BYTES {
+                warnings.extend([
+                    "stdout capture truncated at 1048576 bytes; use streaming APIs for complete output",
+                    "stderr capture truncated at 1048576 bytes; use streaming APIs for complete output",
+                ]);
+            }
+            assert_eq!(output.warnings, warnings);
+        }
+    }
+
+    #[test]
+    fn captured_read_failure_after_truncation_is_not_hidden() {
+        let sandbox = MxcProcess::new(Box::new(FakeProcess {
+            warnings: Vec::new(),
+            wait_warning: None,
+            output_metadata: None,
+            stdout: Some(Box::new(
+                std::io::repeat(0)
+                    .take((MAX_CAPTURED_OUTPUT_BYTES + 1) as u64)
+                    .chain(FailedReader),
+            )),
+            stderr: None,
+            release_output: None,
+            output_closer: None,
+            timed_out: false,
+        }));
+        let error = sandbox.wait_with_output().expect_err("read must fail");
+        assert_eq!(error.to_string(), "capture read failed");
     }
 
     #[test]

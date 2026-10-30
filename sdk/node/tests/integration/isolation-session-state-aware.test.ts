@@ -110,6 +110,20 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       assert.strictEqual(large.stdout, 'O'.repeat(count));
       assert.strictEqual(large.stderr, 'E'.repeat(count));
 
+      const capped = await runInContainer(containerId, {
+        command: 'powershell.exe -NoProfile -NonInteractive -Command "$chunk = \'x\' * 8192; for ($i = 0; $i -lt 256; $i++) { [Console]::Out.Write($chunk); [Console]::Error.Write($chunk) }; exit 7"',
+        timeoutMs: 30000,
+      });
+      assert.strictEqual(capped.exitCode, 7);
+      assert.strictEqual(capped.timedOut, false);
+      assert.strictEqual(capped.stdout, 'x'.repeat(1048576));
+      assert.strictEqual(capped.stderr, 'x'.repeat(1048576));
+      for (const stream of ['stdout', 'stderr']) {
+        assert.ok(capped.warnings.includes(
+          `${stream} capture truncated at 1048576 bytes; use streaming APIs for complete output`,
+        ));
+      }
+
       const timedOut = await runInContainer(containerId, {
         command: 'powershell.exe -NoProfile -NonInteractive -Command "[Console]::Out.WriteLine(\'BEFORE_TIMEOUT\'); Start-Sleep -Seconds 30"',
         timeoutMs: 2000,
