@@ -19,9 +19,11 @@ use crate::isolation_session_bindings::bindings::{
     IsoSessionUserResult,
 };
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_CHAR};
 use windows::Win32::System::Com::{CoDecrementMTAUsage, CoIncrementMTAUsage, CO_MTA_USAGE_COOKIE};
 use windows::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    GetConsoleMode, GetStdHandle, CONSOLE_MODE, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+    STD_OUTPUT_HANDLE,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 use windows::UI::WindowId;
@@ -35,7 +37,8 @@ use super::error::{
 };
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
-    create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_eof, create_relay_thread_with_stop,
+    duplicate_handle, PipeRelayWithStopParams,
 };
 use super::process_options::{
     build_iso_process_options, with_service_timeout_grace, ProcessOptions,
@@ -43,6 +46,23 @@ use super::process_options::{
 
 // The OS account name is lifecycle addressing data, not diagnostic identity.
 const AGENT_IDENTITY_MARKER: &str = "isolation-session-agent";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdinHandleKind {
+    Console,
+    PipeOrFile,
+}
+
+fn classify_stdin_handle(handle: HANDLE) -> StdinHandleKind {
+    let file_type = unsafe { GetFileType(handle) };
+    if file_type == FILE_TYPE_CHAR {
+        let mut mode = CONSOLE_MODE(0);
+        if unsafe { GetConsoleMode(handle, &mut mode) }.is_ok() {
+            return StdinHandleKind::Console;
+        }
+    }
+    StdinHandleKind::PipeOrFile
+}
 
 /// Keeps the process's MTA alive for as long as the lifecycle's WinRT objects,
 /// which outlive the call that created them.
@@ -426,10 +446,7 @@ impl IsolationSessionManager {
             let wxc_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
                 .map_err(|e| lifecycle_err(format!("GetStdHandle(stdin) failed: {}", e)))?;
 
-            // Manual-reset stop event for the stdin relay. Effective for a waitable
-            // `h_read` (console = TTY mode); for pipe handles it has no effect on a
-            // blocked `ReadFile`, so that relay misses its join and ends only when
-            // the calling process exits. Only `wxc-exec` reaches the non-TTY case.
+            // Manual-reset stop event for console-backed stdin relays.
             let stdin_stop_event = unsafe {
                 CreateEventW(None, true, false, PCWSTR::null())
                     .map_err(|e| lifecycle_err(format!("CreateEventW(stdin stop): {}", e)))?
@@ -525,51 +542,63 @@ impl IsolationSessionManager {
             } else {
                 None
             };
-            // Stdin: in interactive mode use the console-aware relay so
-            // `WINDOW_BUFFER_SIZE_EVENT` records propagate as
-            // `ResizeConsole(cols, rows)` calls on the agent's inner ConPTY.
-            // In non-interactive mode the agent's stdin is plain byte-oriented
-            // and the simpler stop-aware pipe relay is appropriate.
+            // Stdin relay selection is based on the actual local stdin handle,
+            // not on `options.interactive` (which is derived from stdout). A
+            // pipe/file read must be cancelled with `PipeReadCanceller`; a
+            // console handle can be interrupted by the stop event and, when the
+            // agent side is interactive, needs the console-aware relay for
+            // resize records.
             enum StdinRelayKind {
                 None,
-                Pipe(PipeRelayWithStopParams),
-                Console(ConsoleRelayParams),
+                PipeOrFile,
+                ConsoleByteStream(PipeRelayWithStopParams),
+                ConsoleInteractive(ConsoleRelayParams),
             }
 
             let stdin_relay_state = if stdin_handle_val == 0 {
                 StdinRelayKind::None
             } else {
-                // Owned, like the output relays': `process.Close()` releases the
-                // original while this relay may still be writing.
-                let stdin_h_write =
-                    duplicate_handle(HANDLE(stdin_handle_val as *mut core::ffi::c_void))
-                        .map_err(|e| lifecycle_err(format!("duplicate stdin handle: {}", e)))?;
-                // Shares the event object, so `signal_stop` still reaches the relay.
-                let stdin_h_stop = duplicate_handle(stdin_stop_owned.get())
-                    .map_err(|e| lifecycle_err(format!("duplicate stdin stop event: {}", e)))?;
-                if options.interactive {
-                    // Clone the WinRT process handle so the relay thread holds
-                    // its own ref-counted reference (WinRT clone = AddRef),
-                    // released when the thread frees the params it owns.
-                    let process_for_resize = process.clone();
-                    let impersonation = self.impersonation.clone();
-                    StdinRelayKind::Console(ConsoleRelayParams {
-                        h_read: wxc_stdin,
-                        h_write: stdin_h_write,
-                        h_stop_event: stdin_h_stop,
-                        resize_callback: Box::new(move |cols, rows| {
-                            let _ = owned_thread::call(&impersonation, || {
-                                let _ = process_for_resize.ResizeConsole(cols, rows);
-                                Ok(())
-                            });
-                        }),
-                    })
-                } else {
-                    StdinRelayKind::Pipe(PipeRelayWithStopParams {
-                        h_read: wxc_stdin,
-                        h_write: stdin_h_write,
-                        h_stop_event: stdin_h_stop,
-                    })
+                match classify_stdin_handle(wxc_stdin) {
+                    StdinHandleKind::PipeOrFile => StdinRelayKind::PipeOrFile,
+                    StdinHandleKind::Console => {
+                        // Owned, like the output relays': `process.Close()`
+                        // releases the original while this relay may still be
+                        // writing.
+                        let stdin_h_write =
+                            duplicate_handle(HANDLE(stdin_handle_val as *mut core::ffi::c_void))
+                                .map_err(|e| {
+                                    lifecycle_err(format!("duplicate stdin handle: {}", e))
+                                })?;
+                        // Shares the event object, so `signal_stop` still reaches the relay.
+                        let stdin_h_stop =
+                            duplicate_handle(stdin_stop_owned.get()).map_err(|e| {
+                                lifecycle_err(format!("duplicate stdin stop event: {}", e))
+                            })?;
+                        if options.interactive {
+                            // Clone the WinRT process handle so the relay thread holds
+                            // its own ref-counted reference (WinRT clone = AddRef),
+                            // released when the thread frees the params it owns.
+                            let process_for_resize = process.clone();
+                            let impersonation = self.impersonation.clone();
+                            StdinRelayKind::ConsoleInteractive(ConsoleRelayParams {
+                                h_read: wxc_stdin,
+                                h_write: stdin_h_write,
+                                h_stop_event: stdin_h_stop,
+                                resize_callback: Box::new(move |cols, rows| {
+                                    let _ = owned_thread::call(&impersonation, || {
+                                        let _ = process_for_resize.ResizeConsole(cols, rows);
+                                        Ok(())
+                                    });
+                                }),
+                            })
+                        } else {
+                            StdinRelayKind::ConsoleByteStream(PipeRelayWithStopParams {
+                                h_read: wxc_stdin,
+                                h_write: stdin_h_write,
+                                h_stop_event: stdin_h_stop,
+                            })
+                        }
+                    }
                 }
             };
 
@@ -577,11 +606,33 @@ impl IsolationSessionManager {
             // them on the heap under the relay thread's ownership.
             scope.stdin = match stdin_relay_state {
                 StdinRelayKind::None => None,
-                StdinRelayKind::Pipe(params) => Some(
+                StdinRelayKind::PipeOrFile => {
+                    // Ensure the agent's stdin will close on EOF for pipe/file-backed
+                    // stdin.
+                    let process_for_eof = process.clone();
+                    let impersonation = self.impersonation.clone();
+                    let on_eof: Box<dyn FnOnce() + Send> = Box::new(move || {
+                        let _ = owned_thread::call(&impersonation, || {
+                            let _ = process_for_eof.CloseStandardInput();
+                            Ok(())
+                        });
+                    });
+                    let (thread, canceller) = unsafe {
+                        create_relay_thread_with_eof(
+                            wxc_stdin,
+                            HANDLE(stdin_handle_val as *mut core::ffi::c_void),
+                            Some(on_eof),
+                        )
+                    }
+                    .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?;
+                    scope.stdin_canceller = Some(canceller);
+                    Some(thread)
+                }
+                StdinRelayKind::ConsoleByteStream(params) => Some(
                     unsafe { create_relay_thread_with_stop(params) }
                         .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
                 ),
-                StdinRelayKind::Console(params) => {
+                StdinRelayKind::ConsoleInteractive(params) => {
                     Some(unsafe { create_console_relay_thread(params) }.map_err(|e| {
                         lifecycle_err(format!("create console-aware stdin relay: {}", e))
                     })?)
@@ -1041,6 +1092,10 @@ struct RelayScope<'a> {
     /// ends keeps them open past the workload's exit, so EOF alone is not a
     /// bound.
     output_cancellers: Vec<PipeReadCanceller>,
+    /// Ends a pipe/file-backed stdin relay. Console stdin relays use the stop
+    /// event instead because `CancelSynchronousIo` has console-handle edge
+    /// cases.
+    stdin_canceller: Option<PipeReadCanceller>,
     finished: bool,
 }
 
@@ -1057,6 +1112,7 @@ impl<'a> RelayScope<'a> {
             stderr: None,
             stdin: None,
             output_cancellers: Vec::new(),
+            stdin_canceller: None,
             finished: false,
         }
     }
@@ -1070,6 +1126,12 @@ impl<'a> RelayScope<'a> {
 
     fn cancel_output_reads(&self) {
         for canceller in &self.output_cancellers {
+            canceller.close();
+        }
+    }
+
+    fn cancel_stdin_read(&self) {
+        if let Some(canceller) = &self.stdin_canceller {
             canceller.close();
         }
     }
@@ -1091,12 +1153,14 @@ impl<'a> RelayScope<'a> {
 
     fn stop_stdin(&self) {
         self.signal_stop();
+        self.cancel_stdin_read();
         Self::join(&self.stdin, Self::JOIN_MS);
     }
 
     /// Teardown for a workload that has already exited.
     fn finish(&mut self) {
         self.signal_stop();
+        self.cancel_stdin_read();
         let stdout_drained = Self::join(&self.stdout, Self::DRAIN_MS);
         let stderr_drained = Self::join(&self.stderr, Self::DRAIN_MS);
         if !(stdout_drained && stderr_drained) {
@@ -1116,6 +1180,7 @@ impl Drop for RelayScope<'_> {
             return;
         }
         self.signal_stop();
+        self.cancel_stdin_read();
         self.cancel_output_reads();
         let _ = self.process.Terminate();
         Self::join(&self.stdout, Self::JOIN_MS);
@@ -1302,9 +1367,9 @@ fn plan_wait(
 }
 
 /// Three-tier graceful shutdown for an `IsoSessionProcess` that's still
-/// running after `WaitForExit(timeout_ms)` returns. Tier 1: close stdin —
-/// many REPLs exit on EOF alone. Tier 2: `SendCtrlClose` — ConPTY-only;
-/// `E_NOTIMPL` outside ConPTY, benign. Tier 3: force-terminate, wait
+/// running after `WaitForExit(timeout_ms)` returns. Tier 1 asks the platform
+/// to close stdin, tier 2 tries `SendCtrlClose` (ConPTY-only; `E_NOTIMPL`
+/// outside ConPTY is benign), and tier 3 force-terminates, then waits
 /// infinitely (`WaitForExit(0)` = INFINITE) for the kill to land.
 ///
 /// The first `ExitCode()` query is `?`-propagated: a failure there means
