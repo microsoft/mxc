@@ -4,14 +4,13 @@
 use std::path::PathBuf;
 
 use super::abi::{
-    Access, Capabilities, EgressPolicy, ExecRequest, FilesystemPolicy, IngressPolicy, NetworkPeer,
-    NetworkPolicy, NetworkPort, NetworkRule, Protocol, ProvisionRequest, RuntimeConfig,
-    SandboxSpec,
+    Capabilities, EgressPolicy, ExecRequest, FilesystemPolicy, IngressPolicy, NetworkPeer,
+    NetworkPolicy, NetworkPort, NetworkRule, ProvisionRequest, RuntimeConfig, SandboxSpec,
 };
 
 use crate::mxc_common::models::{
     ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer as MxcNetworkPeer,
-    NetworkPort as MxcNetworkPort, NetworkProtocol, NetworkRule as MxcNetworkRule,
+    NetworkPort as MxcNetworkPort, NetworkRule as MxcNetworkRule,
 };
 use crate::mxc_common::mxc_error::MxcError;
 
@@ -39,7 +38,7 @@ pub(super) fn provision_request(
     let provision =
         ProvisionRequest {
             filesystem: filesystem_policy(request),
-            network: network_policy(request)?,
+            network: network_policy(request),
             runtime_config: request.policy.network_proxy.address.as_ref().map(|proxy| {
                 RuntimeConfig {
                     network_proxy: Some(proxy.to_url()),
@@ -279,39 +278,23 @@ fn filesystem_policy(request: &ExecutionRequest) -> Option<FilesystemPolicy> {
     (!filesystem.is_empty()).then_some(filesystem)
 }
 
-fn network_policy(request: &ExecutionRequest) -> Result<Option<NetworkPolicy>, MxcError> {
+fn network_policy(request: &ExecutionRequest) -> Option<NetworkPolicy> {
     if !request.policy.network_specified {
-        return Ok(None);
+        return None;
     }
     let egress = request.policy.network_egress.clone().unwrap_or_default();
     let ingress = request.policy.network_ingress.clone().unwrap_or_default();
-    Ok(Some(NetworkPolicy {
+    Some(NetworkPolicy {
         egress: EgressPolicy {
-            default: access(egress.default),
+            default: egress.default,
             allow: egress.allow.iter().map(network_rule).collect(),
             deny: egress.deny.iter().map(network_rule).collect(),
         },
         ingress: IngressPolicy {
-            default: access(ingress.default),
-            host_loopback: Some(access(ingress.host_loopback)),
+            default: ingress.default,
+            host_loopback: Some(ingress.host_loopback),
         },
-    }))
-}
-
-fn access(action: NetworkAction) -> Access {
-    match action {
-        NetworkAction::Allow => Access::Allow,
-        NetworkAction::Deny => Access::Deny,
-    }
-}
-
-fn protocol(value: NetworkProtocol) -> Protocol {
-    match value {
-        NetworkProtocol::Tcp => Protocol::Tcp,
-        NetworkProtocol::Udp => Protocol::Udp,
-        NetworkProtocol::Icmp => Protocol::Icmp,
-        NetworkProtocol::Any => Protocol::Any,
-    }
+    })
 }
 
 fn cidr(value: &NetworkCidr) -> String {
@@ -327,7 +310,7 @@ fn network_peer(peer: &MxcNetworkPeer) -> NetworkPeer {
 
 fn network_port(port: &MxcNetworkPort) -> NetworkPort {
     NetworkPort {
-        protocol: protocol(port.protocol),
+        protocol: port.protocol,
         port: port.port,
         end_port: port.end_port,
     }
@@ -349,7 +332,7 @@ fn unsupported(feature: &str) -> MxcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
+    use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy, NetworkProtocol};
     use crate::mxc_common::mxc_error::MxcErrorCode;
 
     fn request() -> ExecutionRequest {
@@ -425,7 +408,30 @@ mod tests {
         let request = json_network_rules_request();
         let (provision, _) = provision_request(&request, &capabilities()).unwrap();
         let network = provision.network.expect("network policy");
-        assert_eq!(network.egress.default, Access::Deny);
+        assert_eq!(
+            serde_json::to_value(&network).unwrap(),
+            serde_json::json!({
+                "egress": {
+                    "default": "deny",
+                    "allow": [
+                        {
+                            "to": [{"cidr": "10.0.0.0/8", "except": ["10.1.0.0/16"]}],
+                            "ports": [
+                                {"protocol": "tcp", "port": 8000, "endPort": 8080},
+                                {"protocol": "udp", "port": 53},
+                                {"protocol": "any"}
+                            ]
+                        },
+                        {"to": [{"cidr": "2001:db8::/32"}]}
+                    ],
+                    "deny": [
+                        {"to": [{"cidr": "192.0.2.0/24"}], "ports": [{"protocol": "icmp"}]}
+                    ]
+                },
+                "ingress": {"default": "deny", "hostLoopback": "deny"}
+            })
+        );
+        assert_eq!(network.egress.default, NetworkAction::Deny);
         assert_eq!(network.egress.allow.len(), 2);
         assert_eq!(network.egress.deny.len(), 1);
         let allow = &network.egress.allow[0];
@@ -434,9 +440,9 @@ mod tests {
         assert_eq!(allow.to[0].except, vec!["10.1.0.0/16"]);
         assert_eq!(allow.ports.len(), 3);
         for (actual, (protocol, port, end_port)) in allow.ports.iter().zip([
-            (Protocol::Tcp, Some(8000), Some(8080)),
-            (Protocol::Udp, Some(53), None),
-            (Protocol::Any, None, None),
+            (NetworkProtocol::Tcp, Some(8000), Some(8080)),
+            (NetworkProtocol::Udp, Some(53), None),
+            (NetworkProtocol::Any, None, None),
         ]) {
             assert_eq!(actual.protocol, protocol);
             assert_eq!(actual.port, port);
@@ -452,7 +458,7 @@ mod tests {
         assert_eq!(deny.to[0].cidr, "192.0.2.0/24");
         assert!(deny.to[0].except.is_empty());
         assert_eq!(deny.ports.len(), 1);
-        assert_eq!(deny.ports[0].protocol, Protocol::Icmp);
+        assert_eq!(deny.ports[0].protocol, NetworkProtocol::Icmp);
         assert_eq!(deny.ports[0].port, None);
         assert_eq!(deny.ports[0].end_port, None);
     }
@@ -551,9 +557,9 @@ mod tests {
                 vec![PathBuf::from(r"C:\rw\secret")]
             );
             let network = provision.network.unwrap();
-            assert_eq!(network.egress.default, Access::Deny);
-            assert_eq!(network.ingress.default, Access::Deny);
-            assert_eq!(network.ingress.host_loopback, Some(Access::Deny));
+            assert_eq!(network.egress.default, NetworkAction::Deny);
+            assert_eq!(network.ingress.default, NetworkAction::Deny);
+            assert_eq!(network.ingress.host_loopback, Some(NetworkAction::Deny));
         }
     }
 

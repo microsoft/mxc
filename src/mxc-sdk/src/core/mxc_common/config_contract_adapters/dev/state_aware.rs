@@ -158,8 +158,7 @@ fn state_aware_common(
         seatbelt: None,
         ui: None,
         hyperlight: None,
-        microvm_image: None,
-        microvm_memory_mib: None,
+        microvm: None,
     }
 }
 

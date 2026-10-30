@@ -49,7 +49,7 @@ impl StateAwareInput {
         if common.wslc.is_some() {
             contradictory.push("wslc");
         }
-        if common.microvm_image.is_some() || common.microvm_memory_mib.is_some() {
+        if common.microvm.is_some() {
             contradictory.push("microvm");
         }
         if common.lifecycle.is_some() {

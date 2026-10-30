@@ -13,12 +13,6 @@ versioning, repository-consistency, and SDK jobs. Repository consistency also
 checks that `mxc-sdk` is the only Rust release crate and has a valid package
 name, version, description, repository, and license.
 
-The .NET API check requires matching container ID prefixes for backends that
-support lifecycle operations, such as starting or stopping a container.
-Recognizing an ID is not enough: MXC recognizes `microvm:` IDs so it can return
-an unsupported-operation error. This does not require adding MicroVM lifecycle
-support to the .NET SDK.
-
 Windows builds first run host-only regression checks for loopback command
 quoting and native-process output capture. These verify direct and
 shell-wrapped launches, normal stdout/stderr capture, and prompt failure when

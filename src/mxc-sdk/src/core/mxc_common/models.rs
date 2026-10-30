@@ -240,7 +240,7 @@ pub struct IsolationSessionProvisionConfig {
     pub app_id: Option<String>,
 }
 
-/// Runtime-owned creation config for MicroVM lifecycle provisioning.
+/// Image and guest memory settings shared by MicroVM creation paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MicroVmProvisionConfig {
     /// Registry image fixed at creation.

@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::mxc_common::models::{NetworkAction, NetworkProtocol};
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 
 pub(super) const SANDBOX_ABI_VERSION: u32 = 1;
@@ -157,6 +158,7 @@ pub(super) struct RuntimeDigests {
     pub openvmm: String,
 }
 
+// Native message shapes follow the signed agent's JSON contract, not MXC request JSON.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ProvisionRequest {
@@ -204,7 +206,7 @@ pub(super) struct NetworkPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct EgressPolicy {
-    pub default: Access,
+    pub default: NetworkAction,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<NetworkRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -214,16 +216,9 @@ pub(super) struct EgressPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct IngressPolicy {
-    pub default: Access,
+    pub default: NetworkAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_loopback: Option<Access>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(super) enum Access {
-    Allow,
-    Deny,
+    pub host_loopback: Option<NetworkAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,20 +241,11 @@ pub(super) struct NetworkPeer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct NetworkPort {
-    pub protocol: Protocol,
+    pub protocol: NetworkProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_port: Option<u16>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(super) enum Protocol {
-    Tcp,
-    Udp,
-    Icmp,
-    Any,
 }
 
 // Read only the advertised capabilities that this adapter uses; other native features

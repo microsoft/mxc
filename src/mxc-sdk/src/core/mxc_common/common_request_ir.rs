@@ -3,7 +3,7 @@
 
 //! Common request intermediate representation assembled by exact contract adapters.
 
-use crate::mxc_common::wire;
+use crate::mxc_common::{models::MicroVmProvisionConfig, wire};
 use crate::mxc_contract::ContractVersion;
 
 #[derive(Debug, Clone)]
@@ -29,6 +29,5 @@ pub(crate) struct CommonRequestIR {
     pub(crate) test_feature: Option<wire::TestFeature>,
     pub(crate) windows_sandbox: Option<wire::WindowsSandbox>,
     pub(crate) hyperlight: Option<wire::Hyperlight>,
-    pub(crate) microvm_image: Option<String>,
-    pub(crate) microvm_memory_mib: Option<u32>,
+    pub(crate) microvm: Option<MicroVmProvisionConfig>,
 }

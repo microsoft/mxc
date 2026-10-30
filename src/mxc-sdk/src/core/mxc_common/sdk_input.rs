@@ -194,8 +194,7 @@ impl SdkStateAwareInput {
             test_feature: None,
             windows_sandbox: None,
             hyperlight: None,
-            microvm_image: None,
-            microvm_memory_mib: None,
+            microvm: None,
         };
         StateAwareInput::new(common, self.operation)
     }
