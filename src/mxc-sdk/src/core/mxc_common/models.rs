@@ -254,7 +254,7 @@ impl MicroVmProvisionConfig {
         memory_mib: Option<u32>,
     ) -> Result<(), crate::mxc_common::error::WxcError> {
         if memory_mib == Some(0) {
-            return Err(crate::mxc_common::error::WxcError::Validation(
+            return Err(crate::mxc_common::error::WxcError::ConfigParse(
                 "microvm.provision.memoryMib must be greater than zero".to_owned(),
             ));
         }

@@ -77,6 +77,41 @@ fn microvm_creation_rejects_invalid_images_before_runtime() {
 }
 
 #[test]
+fn zero_microvm_memory_is_malformed_in_json_sdk_creation_and_provision() {
+    let mut request = process_only_request("printf forbidden");
+    request["microvm"]["provision"] = serde_json::json!({"memoryMib": 0});
+    for experimental in [false, true] {
+        let options = dev::JsonOptions { experimental };
+        let error = dev::run_json(&request.to_string(), options).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+        assert!(
+            error
+                .message
+                .contains("microvm.provision.memoryMib must be greater than zero"),
+            "{error}"
+        );
+        let mut provision = request.clone();
+        provision.as_object_mut().unwrap().remove("process");
+        provision["phase"] = serde_json::json!("provision");
+        for validate in [false, true] {
+            let error = if validate {
+                dev::validate_provision_json(&provision.to_string(), options)
+            } else {
+                dev::provision_container_json(&provision.to_string(), options)
+            }
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+            assert!(
+                error
+                    .message
+                    .contains("microvm.provision.memoryMib must be greater than zero"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn microvm_json_operations_require_explicit_optin() {
     let mut request = process_only_request("printf forbidden");
     let json = request.to_string();
@@ -593,6 +628,26 @@ mod windows_x64 {
     #[test]
     #[ignore = "host-only; requires separately built wxc-exec.exe; never creates a VM"]
     fn host_only_executor_request_matrix() {
+        let mut zero_memory = process_only_request("printf forbidden");
+        zero_memory["microvm"]["provision"] = json!({"memoryMib": 0});
+        let sdk_error = dev::run_json(
+            &zero_memory.to_string(),
+            dev::JsonOptions { experimental: true },
+        )
+        .unwrap_err();
+        assert_eq!(sdk_error.code, ErrorCode::MalformedRequest);
+        for dry_run in [false, true] {
+            let output = executor_output_with_mode(&zero_memory, true, dry_run);
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("malformed_request"), "{stderr}");
+            assert!(!stderr.contains("policy_validation"), "{stderr}");
+            assert!(
+                stderr.contains("microvm.provision.memoryMib must be greater than zero"),
+                "{stderr}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
+        }
         for (label, patch) in rejected_requests() {
             let output = executor_output(&request_with_patch(patch), true);
             assert!(!output.status.success(), "executor accepted {label}");
@@ -789,6 +844,16 @@ except OSError as error:
     assert error.errno == errno.EACCES, error
 else:
     raise AssertionError("denied path was readable")
+try:
+    descriptor = os.open(root / "rw" / "secret", os.O_WRONLY)
+    try:
+        os.write(descriptor, b"forbidden")
+    finally:
+        os.close(descriptor)
+except OSError as error:
+    assert error.errno == errno.EACCES, error
+else:
+    raise AssertionError("denied path was writable")
 for operation in ("read", "write"):
     try:
         if operation == "read":

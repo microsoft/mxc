@@ -311,14 +311,12 @@ pub(super) fn into_common_request_ir(
         test_feature: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         hyperlight: hyperlight.into_option().map(convert_hyperlight),
-        microvm: microvm.into_option().map(|config| {
-            crate::mxc_common::models::MicroVmProvisionConfig {
-                image: config.image.into_inner(),
-                memory_mib: config
-                    .provision
-                    .into_option()
-                    .and_then(|provision| provision.memory_mib.into_option()),
-            }
+        microvm: microvm.into_option().map(|config| wire::MicroVm {
+            image: config.image.into_inner(),
+            memory_mib: config
+                .provision
+                .into_option()
+                .and_then(|provision| provision.memory_mib.into_option()),
         }),
     }
 }

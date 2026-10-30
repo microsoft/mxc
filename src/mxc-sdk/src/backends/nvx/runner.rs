@@ -368,13 +368,7 @@ impl ScriptRunner for NvxRunner {
         } else {
             super::policy::validate_request(request)
         };
-        result.map_err(|error| match error.code {
-            MxcErrorCode::PolicyValidation | MxcErrorCode::MalformedRequest => {
-                ScriptResponse::rejected(&error.message)
-            }
-            MxcErrorCode::BackendUnavailable => ScriptResponse::unavailable(&error.message),
-            _ => ScriptResponse::failed(FailurePhase::PostLaunchFailed, &error.to_string()),
-        })
+        result.map_err(error_response)
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
@@ -387,20 +381,18 @@ impl ScriptRunner for NvxRunner {
         });
         match result {
             Ok(response) => response,
-            Err(error) if error.code == MxcErrorCode::PolicyValidation => {
-                ScriptResponse::rejected(&error.message)
-            }
-            Err(error) => ScriptResponse {
-                exit_code: -1,
-                error_message: error.to_string(),
-                failure_phase: if error.code == MxcErrorCode::BackendUnavailable {
-                    FailurePhase::BackendUnavailable
-                } else {
-                    FailurePhase::PostLaunchFailed
-                },
-                ..Default::default()
-            },
+            Err(error) => error_response(error),
         }
+    }
+}
+
+fn error_response(error: MxcError) -> ScriptResponse {
+    match error.code {
+        MxcErrorCode::PolicyValidation | MxcErrorCode::MalformedRequest => {
+            ScriptResponse::rejected(&error.message)
+        }
+        MxcErrorCode::BackendUnavailable => ScriptResponse::unavailable(&error.message),
+        _ => ScriptResponse::failed(FailurePhase::PostLaunchFailed, &error.to_string()),
     }
 }
 
@@ -788,6 +780,63 @@ mod tests {
         fn close(&mut self) -> Result<(), MxcError> {
             self.calls.borrow_mut().push("close");
             self.close_res.clone()
+        }
+    }
+
+    #[test]
+    fn native_validation_errors_have_the_same_response_and_cleanup_in_both_paths() {
+        for validation in ["provision", "exec"] {
+            for cleanup_fails in [false, true] {
+                let mut responses = Vec::new();
+                for dry_run in [false, true] {
+                    let mut client = MockClient::ok();
+                    let error = MxcError::malformed_request("native malformed input");
+                    if validation == "provision" {
+                        client.validate_provision_res = Err(error);
+                    } else {
+                        client.validate_res = Err(error);
+                    }
+                    if cleanup_fails {
+                        client.close_res = Err(MxcError::backend_error("close failed"));
+                    }
+                    let state_root = tempfile::tempdir().unwrap();
+                    let path = state_root.path().to_path_buf();
+                    let error = if dry_run {
+                        validate_with_client(&mut client, state_root, &test_request()).unwrap_err()
+                    } else {
+                        run_with_client(
+                            &mut client,
+                            state_root,
+                            &test_request(),
+                            &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
+                            None,
+                        )
+                        .unwrap_err()
+                    };
+                    assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+                    let response = error_response(error);
+                    assert_eq!(response.failure_phase, FailurePhase::Rejected);
+                    assert_eq!(response.exit_code, 1);
+                    assert_eq!(
+                        response.failure_phase.error_code(),
+                        MxcErrorCode::PolicyValidation
+                    );
+                    assert!(response.error_message.starts_with("native malformed input"));
+                    assert_eq!(
+                        response.error_message.contains("close failed"),
+                        cleanup_fails
+                    );
+                    let expected: &[&str] = if validation == "provision" {
+                        &["capabilities", "validate_provision", "close"]
+                    } else {
+                        &["capabilities", "validate_provision", "validate", "close"]
+                    };
+                    assert_eq!(*client.calls.borrow(), expected);
+                    assert!(!path.exists());
+                    responses.push(response);
+                }
+                assert_eq!(responses[0].error_message, responses[1].error_message);
+            }
         }
     }
 

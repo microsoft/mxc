@@ -127,8 +127,8 @@ mod tests {
             &mut Logger::new(Mode::Buffer),
         )
         .unwrap_err();
-        let ParseError::OneShot(WxcError::Validation(message)) = error else {
-            panic!("expected one-shot semantic validation, got {error:?}");
+        let ParseError::OneShot(WxcError::ConfigParse(message)) = error else {
+            panic!("expected malformed one-shot memory settings, got {error:?}");
         };
         assert_eq!(
             message,

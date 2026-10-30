@@ -460,6 +460,13 @@ pub struct Hyperlight {
     pub runtime: Option<crate::mxc_common::models::HyperlightRuntime>,
 }
 
+/// MicroVM creation settings retained by contract adapters before normalization.
+#[derive(Debug, Clone)]
+pub(crate) struct MicroVm {
+    pub(crate) image: String,
+    pub(crate) memory_mib: Option<u32>,
+}
+
 /// WSL container backend config.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

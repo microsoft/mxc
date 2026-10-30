@@ -61,6 +61,7 @@ foreach ($name in @(
     'windows_x64::signed_bundle_sdk_json_capture',
     'windows_x64::signed_bundle_json_image_and_filesystem_policy',
     'windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors',
+    'windows_network::signed_bundle_host_loopback_ingress',
     'windows_network::signed_bundle_deny_default_proxy_policy'
 )) {
     if ($discovered -notcontains "$name`: test") {

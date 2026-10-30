@@ -140,6 +140,9 @@ fn main() {
         if mode != "missing-network-discovery" {
             println!("windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors: test");
         }
+        if mode != "missing-host-loopback-discovery" {
+            println!("windows_network::signed_bundle_host_loopback_ingress: test");
+        }
         if mode != "missing-network-proxy-discovery" {
             println!("windows_network::signed_bundle_deny_default_proxy_policy: test");
         }
@@ -176,6 +179,12 @@ fn main() {
     }
     if mode != "missing-network" {
         println!("VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement");
+    }
+    if mode != "missing-network-udp" {
+        println!("VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges");
+    }
+    if mode != "missing-host-loopback" {
+        println!("VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls");
     }
     if mode != "missing-network-proxy" {
         println!("VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic");
@@ -495,6 +504,8 @@ test("artifact dispatcher executes prebuilt SDK tests and preserves the log", ()
   assert.match(log, /VM_EXECUTED executor /);
   assert.match(log, /VM_EXECUTED executor console interruption /);
   assert.match(log, /VM_EXECUTED reachable controls and network allow\/deny\/nonmatching-port enforcement/);
+  assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges/);
+  assert.match(log, /VM_EXECUTED host-loopback ingress TCP\/UDP allow deny ready listeners and reply controls/);
   assert.match(log, /VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic/);
 });
 
@@ -508,6 +519,8 @@ for (const [mode, message] of [
   ["missing-configs", /did not execute the executor configs VM scenario/],
   ["missing-interruption", /did not execute the executor interruption VM scenario/],
   ["missing-network", /did not execute the network rules VM scenario/],
+  ["missing-network-udp", /did not execute the UDP network rules VM scenario/],
+  ["missing-host-loopback", /did not execute the host-loopback ingress VM scenario/],
   ["missing-network-proxy", /did not execute the network proxy VM scenario/],
   ["skipped", /skipped or filtered tests/],
   ["ignored", /skipped or filtered tests/],
@@ -567,6 +580,7 @@ for (const [mode, message] of [
   ["missing-sdk-json-discovery", /did not discover windows_x64::signed_bundle_sdk_json_capture/],
   ["missing-interruption-discovery", /did not discover windows_x64::signed_bundle_executor_console_interrupt/],
   ["missing-network-discovery", /did not discover[\s\S]*windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors/],
+  ["missing-host-loopback-discovery", /did not discover[\s\S]*windows_network::signed_bundle_host_loopback_ingress/],
   ["missing-network-proxy-discovery", /did not discover[\s\S]*windows_network::signed_bundle_deny_default_proxy_policy/],
 ]) {
   test(`staging rejects ${mode}`, () => {
@@ -581,6 +595,7 @@ for (const [mode, message] of [
       "missing-sdk-json-discovery",
       "missing-interruption-discovery",
       "missing-network-discovery",
+      "missing-host-loopback-discovery",
       "missing-network-proxy-discovery",
     ].includes(mode)) {
       assert.equal(existsSync(join(result.directory, "nvx-e2e-tests.exe")), false);

@@ -68,7 +68,7 @@ fn controlled_input_rejects_every_routing_and_one_shot_field() {
             "lxc" => common.lxc = Some(wire::Lxc::default()),
             "wslc" => common.wslc = Some(wire::Wslc::default()),
             "microvm" => {
-                common.microvm = Some(crate::mxc_common::models::MicroVmProvisionConfig {
+                common.microvm = Some(wire::MicroVm {
                     image: "docker.io/library/python:3.12-alpine".to_owned(),
                     memory_mib: None,
                 })

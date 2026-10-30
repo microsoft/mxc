@@ -443,6 +443,8 @@ function Invoke-MicroVmTests {
         'executor configs' = 'VM_EXECUTED executor configs '
         'executor interruption' = 'VM_EXECUTED executor console interruption '
         'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement'
+        'UDP network rules' = 'VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges'
+        'host-loopback ingress' = 'VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls'
         'network proxy' = 'VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic'
     }
     foreach ($scenario in $scenarios.Keys) {
