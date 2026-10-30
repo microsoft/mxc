@@ -420,6 +420,22 @@ impl LivePty {
             .map(|(reader, _)| reader)
     }
 
+    /// Read buffered startup diagnostics without waiting for more output.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn read_available_output(&self, limit: u64) -> std::io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        match (&self.primary).take(limit).read_to_end(&mut output) {
+            Ok(_) => Ok(output),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == Some(libc::EIO) =>
+            {
+                Ok(output)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Clone the merged terminal output reader with an out-of-band canceller.
     pub fn try_clone_reader_with_canceller(
         &self,
@@ -1673,6 +1689,36 @@ mod tests {
     #[test]
     fn poll_interval_is_500ms() {
         assert_eq!(PtyOptions::POLL_INTERVAL, Duration::from_millis(500));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn live_pty_reads_bounded_startup_output_without_waiting() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf 'namespace refused' >&2"]);
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        assert!(terminal
+            .read_available_output(1024)
+            .expect("empty PTY")
+            .is_empty());
+        let mut child = command.spawn().expect("spawn diagnostic child");
+        drop(command);
+        assert!(wait_for_exit(&mut child).success());
+        assert_eq!(
+            terminal.read_available_output(9).expect("bounded read"),
+            b"namespace"
+        );
+        assert_eq!(
+            terminal
+                .read_available_output(1024)
+                .expect("remaining output"),
+            b" refused"
+        );
+        assert!(terminal
+            .read_available_output(1024)
+            .expect("closed PTY")
+            .is_empty());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

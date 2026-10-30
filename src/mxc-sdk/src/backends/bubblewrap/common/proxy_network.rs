@@ -2501,7 +2501,16 @@ fn set_nonblocking(fd: RawFd) -> Result<(), String> {
         .map_err(|error| format!("Bubblewrap: failed to make descriptor nonblocking: {error}"))
 }
 
-pub(crate) fn startup_stderr(child: &mut Child) -> Result<String, String> {
+pub(crate) fn startup_output(
+    child: &mut Child,
+    pty: Option<&crate::mxc_pty::LivePty>,
+) -> Result<String, String> {
+    if let Some(pty) = pty {
+        let output = pty
+            .read_available_output(64 * 1024)
+            .map_err(|error| format!("Bubblewrap: failed to read startup PTY output: {error}"))?;
+        return Ok(String::from_utf8_lossy(&output).trim().to_string());
+    }
     let Some(stderr) = child.stderr.as_mut() else {
         return Ok(String::new());
     };
@@ -2592,7 +2601,7 @@ mod tests {
             .expect("start diagnostic child");
         assert!(child.wait().expect("wait for diagnostic child").success());
         assert_eq!(
-            startup_stderr(&mut child).expect("read startup stderr"),
+            startup_output(&mut child, None).expect("read startup stderr"),
             "namespace refused"
         );
     }

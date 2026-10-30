@@ -118,7 +118,7 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
-    use mxc_sdk::v1::{NetworkAction, NetworkEgressPolicy, NetworkPolicy};
+    use mxc_sdk::v1::{spawn_with_pty, NetworkAction, NetworkEgressPolicy, NetworkPolicy};
 
     const FIXTURE_ENV: &str = "MXC_BWRAP_NAMESPACE_FAILURE_FIXTURE";
     if std::env::var_os(FIXTURE_ENV).is_some() {
@@ -130,15 +130,19 @@ fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
             }),
             ..Default::default()
         });
-        let error = match spawn(request, Default::default()) {
-            Ok(_) => panic!("a failed network namespace must not start the workload"),
-            Err(error) => error,
-        };
-        assert!(
-            error.message.contains("test: bwrap namespace refused")
-                && error.message.contains("user.max_net_namespaces"),
-            "startup error lost the diagnostic or remedy: {error:?}"
-        );
+        for pty in [false, true] {
+            let result = if pty {
+                spawn_with_pty(request.clone(), Default::default()).map(|_| ())
+            } else {
+                spawn(request.clone(), Default::default()).map(|_| ())
+            };
+            let error = result.expect_err("a failed network namespace must not start the workload");
+            assert!(
+                error.message.contains("test: bwrap namespace refused")
+                    && error.message.contains("user.max_net_namespaces"),
+                "startup error lost the diagnostic or remedy (pty={pty}): {error:?}"
+            );
+        }
         return;
     }
 

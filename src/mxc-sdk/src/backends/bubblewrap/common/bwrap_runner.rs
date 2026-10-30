@@ -734,7 +734,7 @@ impl BubblewrapScriptRunner {
             if let Err(error) = startup_result {
                 let _ = child.kill();
                 let _ = child.wait();
-                let error = match proxy_network::startup_stderr(&mut child) {
+                let error = match proxy_network::startup_output(&mut child, pty.as_ref()) {
                     Ok(detail) if !detail.is_empty() => format!("{error}: {detail}"),
                     Ok(_) => error,
                     Err(detail) => format!("{error}; {detail}"),
