@@ -381,6 +381,15 @@ components — so the mask lands on the real object and its file/directory type 
 classified from that target. Dangling links, loops, and other paths that cannot
 be resolved fail before the sandbox starts.
 
+On merged-/usr hosts, baseline entries such as `/bin`, `/sbin`, and `/lib*` are
+symlinks into `/usr`. The sandbox recreates each one as a relative symlink to
+the mounted directory instead of mounting that directory a second time, so
+denying `/usr/bin/cat` or `/bin/cat` hides the file under both spellings. If one
+of these symlinks cannot be followed, for example because of a permission error
+or a symlink loop, the sandbox does not start. A baseline symlink whose target
+lies outside the baseline is still mounted at its own path, where a mask on the
+target's real path does not apply.
+
 Example:
 ```json
 {
@@ -1063,6 +1072,7 @@ These failures carry the `backend_error` code and exit `-1`.
 | `requires 'slirp4netns' on PATH` / `requires unprivileged user and network namespaces` | The host cannot provide the sandbox network |
 | `script_code is empty` / `must not carry credentials` / an egress or proxy refusal | The request is at fault; change it and retry |
 | `failed to spawn bwrap` / `failed to allocate PTY` / proxy namespace start failure | The request was accepted but the launch faulted |
+| `could not resolve the host's /bin` (or another system directory) | A merged-/usr symlink such as `/bin -> usr/bin` could not be followed; check that the link and its target are readable |
 | `failed to wrap stdio pipes` | The sandbox started and then faulted |
 
 ## Limitations
