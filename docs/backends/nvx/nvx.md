@@ -18,6 +18,12 @@ running hypervisor. Enable the `HypervisorPlatform` Windows optional feature
 and restart the host before running a workload. In a virtualized host, nested
 virtualization must also be available.
 
+Each MicroVM uses a CPU profile derived from the host's hypervisor for
+development. The profile is not pinned and can change after firmware,
+microcode, hypervisor, or operating system updates.
+Deriving a profile does not guarantee that the host can run a MicroVM;
+unsupported CPU or hypervisor features still cause startup to fail.
+
 From the repository root, build the executor:
 
 ```powershell
@@ -204,6 +210,7 @@ image selection, filesystem enforcement, directional network and proxy
 enforcement against controlled reachable host endpoints, binary
 stdout/stderr, exit codes, environment and working-directory settings,
 timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
+Both execution paths check that the guest sees the host CPU profile.
 An isolated-console scenario interrupts both startup and running execution,
 then verifies that the owned OpenVMM process has terminated and run storage
 has been removed.

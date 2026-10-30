@@ -749,6 +749,14 @@ mod windows_x64 {
         result
     }
 
+    fn assert_host_cpu_profile(stdout: &[u8]) {
+        let output = String::from_utf8_lossy(stdout);
+        assert!(
+            output.contains("Processor (host profile)"),
+            "guest CPU does not identify a host profile: {output}"
+        );
+    }
+
     fn capture_boundary_request(stderr_bytes: usize) -> Value {
         // Finite output bounds host memory and run time even if the capture guard regresses.
         let mut request = process_only_request(&format!(
@@ -945,6 +953,10 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     #[test]
     #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
     fn signed_bundle_facade_create_and_run() {
+        let profile = facade_run(process_only_request("cat /proc/cpuinfo"));
+        assert_eq!(profile.outcome, WaitResult::Exited(0));
+        assert_host_cpu_profile(&profile.stdout);
+
         let marker = nonce();
         for fallback in [
             None,
@@ -1367,6 +1379,10 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     #[test]
     #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
     fn signed_bundle_executor_create_and_run() {
+        let profile = executor_output(&process_only_request("cat /proc/cpuinfo"), false);
+        assert_eq!(profile.status.code(), Some(0));
+        assert_host_cpu_profile(&profile.stdout);
+
         let marker = nonce();
         for fallback in [
             None,

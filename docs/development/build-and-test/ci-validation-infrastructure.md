@@ -256,6 +256,8 @@ They check executor configurations, JSON requests that collect output, image
 selection, file access rules, and network address and port rules. They also
 check that traffic through a proxy works while direct connections are blocked,
 and that interrupting startup or execution removes the VM and its temporary files.
+The executor and captured JSON execution scenarios also check that the guest
+uses the host CPU profile.
 
 The network tests connect to servers controlled by the test. They check that
 the servers are reachable before and after testing the restrictions, so an
