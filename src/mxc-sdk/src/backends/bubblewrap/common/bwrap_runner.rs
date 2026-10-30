@@ -157,7 +157,11 @@ impl SandboxBackend for BubblewrapScriptRunner {
         }
         warn_resolver_mount_hint(request, logger);
         warn_cwd_mount_hint(request, logger);
-        let child = self.spawn_bwrap(request, &plan.files, launch, logger, stdio)?;
+        let baseline_links = bwrap_command::baseline_links(host_link_target).map_err(|error| {
+            ScriptResponse::failed(FailurePhase::LaunchFailed, &format!("Bubblewrap: {error}"))
+        })?;
+        let child =
+            self.spawn_bwrap(request, &plan.files, &baseline_links, launch, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
 }
@@ -464,6 +468,7 @@ impl BubblewrapScriptRunner {
         &self,
         request: &ExecutionRequest,
         denied_files: &HashSet<String>,
+        baseline_links: &[bwrap_command::BaselineLink],
         launch: ValidatedLaunch,
         logger: &mut Logger,
         stdio: StdioMode,
@@ -592,6 +597,7 @@ impl BubblewrapScriptRunner {
             denied_files,
             network_mode,
             Some(seccomp_filter.as_raw_fd()),
+            baseline_links,
             &resolver_args,
             &mounts,
         );
@@ -1302,6 +1308,23 @@ fn is_file_mask_target(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn host_link_target(path: &str) -> std::io::Result<Option<PathBuf>> {
+    use std::io::ErrorKind::NotFound;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {}
+        Err(error) if error.kind() != NotFound => return Err(error),
+        _ => return Ok(None),
+    }
+    match std::fs::canonicalize(path) {
+        Ok(target) => Ok(Some(target)),
+
+        // A dangling link mounts nothing: bwrap skips the --ro-bind-try source.
+        Err(error) if error.kind() == NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1328,6 +1351,7 @@ mod tests {
             .spawn_bwrap(
                 &request,
                 &HashSet::new(),
+                &[],
                 ValidatedLaunch {
                     egress_plan: None,
                     bwrap: PathBuf::from("/usr/bin/bwrap"),
@@ -1348,6 +1372,66 @@ mod tests {
             resp.error_message.contains("failed to spawn bwrap"),
             "got: {}",
             resp.error_message
+        );
+    }
+
+    #[test]
+    fn host_link_target_resolves_links_and_refuses_unresolvable_ones() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        symlink("usr/bin", root.join("bin")).unwrap();
+        symlink("usr/missing", root.join("dangling")).unwrap();
+        symlink("loop", root.join("loop")).unwrap();
+        let probe = |name: &str| host_link_target(root.join(name).to_str().unwrap());
+
+        assert_eq!(probe("bin").unwrap(), Some(root.join("usr/bin")));
+        assert_eq!(probe("usr/bin").unwrap(), None);
+        assert_eq!(probe("absent").unwrap(), None);
+        assert_eq!(probe("dangling").unwrap(), None);
+        assert!(probe("loop").is_err());
+    }
+
+    #[test]
+    fn a_probed_merged_usr_tree_becomes_relative_baseline_links() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        for real in ["usr/bin", "usr/lib", "usr/lib64", "etc"] {
+            std::fs::create_dir_all(root.join(real)).unwrap();
+        }
+        for (link, target) in [
+            ("bin", "usr/bin"),
+            ("sbin", "usr/sbin"),
+            ("lib", "usr/lib"),
+            ("lib32", "usr/lib32"),
+            ("lib64", "usr/lib64"),
+            ("usr/sbin", "bin"),
+        ] {
+            symlink(target, root.join(link)).unwrap();
+        }
+
+        let links = bwrap_command::baseline_links(|path| {
+            Ok(host_link_target(&format!("{}{path}", root.display()))?
+                .map(|target| Path::new("/").join(target.strip_prefix(&root).unwrap())))
+        })
+        .unwrap();
+        let links: Vec<_> = links
+            .iter()
+            .map(|link| (link.path, link.relative_target.as_str()))
+            .collect();
+        assert_eq!(
+            links,
+            [
+                ("/bin", "usr/bin"),
+                ("/sbin", "usr/bin"),
+                ("/lib", "usr/lib"),
+                ("/lib64", "usr/lib64"),
+                ("/usr/sbin", "bin"),
+            ]
         );
     }
 
