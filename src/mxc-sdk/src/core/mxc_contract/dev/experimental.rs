@@ -58,3 +58,34 @@ pub struct OneShotHyperlight {
     #[serde(default)]
     pub runtime: OptionalField<HyperlightRuntime>,
 }
+
+string_enum! {
+    /// Hypervisor the Kata backend runs.
+    #[derive(Debug)]
+    pub enum KataHypervisor {
+        /// QEMU.
+        Qemu => ["qemu"],
+        /// Cloud Hypervisor.
+        Clh => ["clh", "cloud-hypervisor"],
+        /// Firecracker. Needs an ext4 image as the guest root and cannot
+        /// share host directories.
+        Firecracker => ["firecracker"],
+        /// Dragonball, the VMM built into the Kata runtime.
+        Dragonball => ["dragonball"],
+    }
+}
+
+/// Kata backend settings.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Kata {
+    /// Absolute host path of the guest root filesystem: a directory, or an
+    /// ext4 image file. The backend never writes to it; changes live in a
+    /// per-sandbox layer that is discarded on deprovision.
+    pub rootfs: String,
+    /// Hypervisor to run. Defaults to the host's `MXC_KATA_HYPERVISOR`
+    /// setting, then `qemu`.
+    #[serde(default)]
+    pub hypervisor: OptionalField<KataHypervisor>,
+}

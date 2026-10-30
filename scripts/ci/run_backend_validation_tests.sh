@@ -6,7 +6,7 @@ set -euo pipefail
 # explicitly rather than reporting a false-success placeholder job.
 
 usage() {
-    echo "Usage: $0 <bubblewrap|lxc|microvm|seatbelt> <binary-directory>" >&2
+    echo "Usage: $0 <bubblewrap|lxc|kata|microvm|seatbelt> <binary-directory>" >&2
 }
 
 if [[ $# -ne 2 ]]; then
@@ -73,6 +73,25 @@ case "$backend" in
         # to execute this suite, so turn it into a failure rather than a
         # vacuously green gate.
         MXC_LXC_TESTS_REQUIRE_EXECUTION=1 bash "$test_script_root/run_lxc_all_tests.sh"
+        ;;
+    kata)
+        test -x "$binary_directory/lxc-exec"
+        # The in-process suite, built by the Linux build job. Artifact downloads
+        # drop the executable bit, which is restored after the copy below.
+        test -f "$binary_directory/streaming_kata"
+        mkdir -p "$release_directory"
+        cp -a "$binary_directory/." "$release_directory/"
+        chmod +x "$release_directory/lxc-exec" "$release_directory/streaming_kata"
+        # Where prepare-linux-host.sh installs Kata and the test root filesystems.
+        export MXC_KATA_ROOT="${MXC_KATA_ROOT:-/opt/kata}"
+        kata_assets="${MXC_KATA_TEST_ASSETS:-/var/lib/mxc-kata-test}"
+        export MXC_KATA_TEST_ROOTFS="${MXC_KATA_TEST_ROOTFS:-$kata_assets/rootfs}"
+        export MXC_KATA_TEST_ROOTFS_IMAGE="${MXC_KATA_TEST_ROOTFS_IMAGE:-$kata_assets/rootfs.ext4}"
+        export MXC_KATA_CONFIG_FIRECRACKER="${MXC_KATA_CONFIG_FIRECRACKER:-$kata_assets/configuration-rs-fc.toml}"
+        # A skip here means a prerequisite (KVM, Kata, a root filesystem)
+        # disappeared on a runner provisioned for this suite, so it fails
+        # instead of reporting a vacuous pass.
+        MXC_KATA_TESTS_REQUIRE_EXECUTION=1 bash "$test_script_root/run_kata_all_tests.sh"
         ;;
     seatbelt)
         test -x "$binary_directory/mxc-exec-mac"

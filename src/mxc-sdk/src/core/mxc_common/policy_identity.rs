@@ -78,7 +78,7 @@ use serde_json::{Map, Value};
 
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{
-    ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    ExecutionRequest, IsolationSessionProvisionConfig, KataConfig, WslcProvisionConfig,
     WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
@@ -166,6 +166,22 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             Value::Object(config)
         }
+        // The rootfs and hypervisor decide what the sandbox runs on, so they
+        // belong in the identity, as for a one-shot request.
+        StateAwareOperation::Provision(StateAwareProvision::Kata(KataConfig {
+            rootfs,
+            hypervisor,
+        })) => {
+            let mut config = Map::new();
+            config.insert("rootfs".into(), Value::String(rootfs.clone()));
+            if let Some(hypervisor) = hypervisor {
+                config.insert(
+                    "hypervisor".into(),
+                    Value::String(hypervisor.wire_name().to_string()),
+                );
+            }
+            Value::Object(config)
+        }
         StateAwareOperation::Provision(
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
@@ -242,6 +258,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         seatbelt,
         windows_sandbox,
         hyperlight,
+        kata,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
@@ -323,6 +340,15 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         root.insert(
             "hyperlight".into(),
             serde_json::to_value(hyperlight.clone().unwrap_or_default()).unwrap_or(Value::Null),
+        );
+    }
+    // The guest root filesystem and the hypervisor decide what the workload
+    // runs on. Hashed as written for the Kata backend only. An omitted
+    // hypervisor stays omitted because its default comes from the host.
+    if *containment == crate::mxc_common::models::ContainmentBackend::Kata {
+        root.insert(
+            "kata".into(),
+            serde_json::to_value(kata).unwrap_or(Value::Null),
         );
     }
 
@@ -780,6 +806,7 @@ mod tests {
             ContainmentBackend::IsolationSession,
             ContainmentBackend::Seatbelt,
             ContainmentBackend::Bubblewrap,
+            ContainmentBackend::Kata,
         ] {
             let mut changed = request();
             changed.containment = backend;
@@ -1067,6 +1094,26 @@ mod tests {
                 "state-aware authorization must not change {backend} policy identity"
             );
         }
+    }
+
+    #[test]
+    fn kata_provision_identity_covers_the_root_filesystem_and_hypervisor() {
+        let hash = |kata: &str| {
+            parsed_state_aware_hash(
+                &format!(
+                    r#"{{"version":"1.1.0-alpha","phase":"provision","containment":"kata","kata":{kata}}}"#
+                ),
+                "kata",
+            )
+        };
+        let base = hash(r#"{"rootfs":"/srv/a"}"#);
+        assert_eq!(base, hash(r#"{"rootfs":"/srv/a"}"#));
+        assert_ne!(base, hash(r#"{"rootfs":"/srv/b"}"#));
+        assert_ne!(base, hash(r#"{"rootfs":"/srv/a","hypervisor":"qemu"}"#));
+        assert_ne!(
+            hash(r#"{"rootfs":"/srv/a","hypervisor":"qemu"}"#),
+            hash(r#"{"rootfs":"/srv/a","hypervisor":"firecracker"}"#)
+        );
     }
 
     fn provision_json(backend: &str, extra_fields: &str) -> String {

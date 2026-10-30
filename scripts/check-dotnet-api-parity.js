@@ -474,11 +474,14 @@ const rustStateAware = read(
   "state_aware.rs"
 ).split("#[cfg(test)]")[0];
 const runStateAwareBody = namedBody(rustStateAware, "fn", "run_state_aware");
+// Windows Sandbox and Kata lifecycles are raw exact 1.1.0-alpha JSON only, so
+// the typed .NET lifecycle does not name them.
+const rawJsonOnlyLifecycles = ["WindowsSandbox", "Kata"];
 const rustBackends = [
   ...runStateAwareBody.matchAll(/ContainmentBackend::(\w+)\s*=>/g),
 ]
   .map((match) => match[1])
-  .filter((backend) => backend !== "WindowsSandbox");
+  .filter((backend) => !rawJsonOnlyLifecycles.includes(backend));
 if (rustBackends.length === 0) {
   errors.push("state_aware.rs: could not find state-aware backend dispatch");
 } else {
@@ -515,7 +518,7 @@ const rustPrefixBody = namedBody(rustDispatch, "fn", "backend_from_prefix");
 const rustPrefixes = [
   ...rustPrefixBody.matchAll(/"([^"]+)"\s*=>\s*Ok\(ContainmentBackend::(\w+)\)/g),
 ]
-  .filter((match) => match[2] !== "WindowsSandbox")
+  .filter((match) => !rawJsonOnlyLifecycles.includes(match[2]))
   .map((match) => `${match[1]}:${match[2]}`);
 function managedIdPrefixes(source) {
   return [

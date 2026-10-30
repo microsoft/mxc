@@ -7,8 +7,8 @@
 //! Binding neither parses configuration nor supplies backend defaults.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
-    WslcProvisionSessionConfig,
+    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, KataConfig,
+    WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::StatefulSandboxBackend;
@@ -201,6 +201,26 @@ where
             other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
         },
     )
+}
+
+/// Bind a Kata operation. Only provision carries configuration: the guest root
+/// filesystem and hypervisor.
+pub fn bind_kata<B>(parsed: ParsedStateAwareRequest) -> Result<BoundStateAwareRequest<B>, MxcError>
+where
+    B: StatefulSandboxBackend<
+        ProvisionConfig = KataConfig,
+        StartConfig = (),
+        ExecConfig = (),
+        StopConfig = (),
+        DeprovisionConfig = (),
+    >,
+{
+    BoundStateAwareRequest::bind(parsed, ContainmentBackend::Kata, "kata", |provision| {
+        match provision {
+            StateAwareProvision::Kata(config) => Ok(Some(config)),
+            other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
+        }
+    })
 }
 
 /// Bind a Windows Sandbox operation; no phase has backend configuration today.

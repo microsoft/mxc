@@ -163,7 +163,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ '${{ matrix.backend }}' == 'lxc' ]]; then
+          if [[ '${{ matrix.backend }}' == 'lxc' || '${{ matrix.backend }}' == 'kata' ]]; then
             sudo --preserve-env=RUNNER_TEMP bash scripts/ci/run_backend_validation_tests.sh \
               '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
               tee -a "$RUNNER_TEMP/mxc-ci.log"

@@ -108,6 +108,16 @@ pub fn run_state_aware(
         parsed.request().experimental_enabled,
     )?;
     match backend {
+        #[cfg(target_os = "linux")]
+        crate::mxc_common::models::ContainmentBackend::Kata => {
+            let bound = crate::mxc_common::state_aware_binding::bind_kata(parsed)?;
+            let mut runner = crate::kata_common::KataStateAwareRunner::new();
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
+                &mut runner,
+                bound,
+                dry_run,
+            )
+        }
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
             let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;
@@ -356,6 +366,18 @@ pub fn exec_state_aware(
         parsed.request().experimental_enabled,
     )?;
     match backend {
+        #[cfg(target_os = "linux")]
+        crate::mxc_common::models::ContainmentBackend::Kata => {
+            let bound = crate::mxc_common::state_aware_binding::bind_kata(parsed)?;
+            let mut runner = crate::kata_common::KataStateAwareRunner::new();
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+                &mut runner,
+                bound,
+            )?;
+            Ok(Box::new(
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
+        }
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
             let bound = crate::mxc_common::state_aware_binding::bind_windows_sandbox(parsed)?;

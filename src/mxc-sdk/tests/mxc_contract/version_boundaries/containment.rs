@@ -15,7 +15,7 @@ fn wslc_containment_is_introduced_in_v09() {
 
 #[test]
 fn development_containment_values_are_introduced_in_v11() {
-    for containment in ["vm", "windows_sandbox", "microvm", "hyperlight"] {
+    for containment in ["vm", "windows_sandbox", "microvm", "hyperlight", "kata"] {
         assert_v11_introduces(&format!(r#""containment": "{containment}""#));
     }
 }

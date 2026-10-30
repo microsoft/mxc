@@ -18,6 +18,7 @@ fn convert_containment(value: contract::OneShotContainment) -> wire::Containment
         contract::OneShotContainment::WindowsSandbox => wire::Containment::WindowsSandbox,
         contract::OneShotContainment::Microvm => wire::Containment::Microvm,
         contract::OneShotContainment::Hyperlight => wire::Containment::Hyperlight,
+        contract::OneShotContainment::Kata => wire::Containment::Kata,
         contract::OneShotContainment::Wslc => wire::Containment::Wslc,
         contract::OneShotContainment::IsolationSession => wire::Containment::IsolationSession,
     }
@@ -285,6 +286,7 @@ pub(super) fn into_common_request_ir(
         windows_sandbox,
         wslc,
         hyperlight,
+        kata,
     } = request;
     crate::mxc_common::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
@@ -310,6 +312,24 @@ pub(super) fn into_common_request_ir(
         test_feature: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         hyperlight: hyperlight.into_option().map(convert_hyperlight),
+        kata: kata.into_option().map(convert_kata),
+    }
+}
+
+pub(super) fn convert_kata(value: contract::Kata) -> wire::Kata {
+    let contract::Kata { rootfs, hypervisor } = value;
+    wire::Kata {
+        rootfs: Some(rootfs),
+        hypervisor: hypervisor.into_option().map(|hypervisor| match hypervisor {
+            contract::KataHypervisor::Qemu => crate::mxc_common::models::KataHypervisor::Qemu,
+            contract::KataHypervisor::Clh => crate::mxc_common::models::KataHypervisor::Clh,
+            contract::KataHypervisor::Firecracker => {
+                crate::mxc_common::models::KataHypervisor::Firecracker
+            }
+            contract::KataHypervisor::Dragonball => {
+                crate::mxc_common::models::KataHypervisor::Dragonball
+            }
+        }),
     }
 }
 

@@ -6,6 +6,8 @@
 pub enum Containment {
     /// IsolationSession backend.
     IsolationSession,
+    /// Kata Containers backend.
+    Kata,
     /// Windows Sandbox backend.
     WindowsSandbox,
     /// WSL container backend.
@@ -17,6 +19,7 @@ impl Containment {
     pub const fn as_str(self) -> &'static str {
         match self {
             Containment::IsolationSession => "isolation_session",
+            Containment::Kata => "kata",
             Containment::WindowsSandbox => "windows_sandbox",
             Containment::Wslc => "wslc",
         }
@@ -28,6 +31,7 @@ impl Containment {
     pub fn parse_exact(value: &str) -> Option<Self> {
         match value {
             "isolation_session" => Some(Containment::IsolationSession),
+            "kata" => Some(Containment::Kata),
             "windows_sandbox" => Some(Containment::WindowsSandbox),
             "wslc" => Some(Containment::Wslc),
             _ => None,
@@ -91,6 +95,12 @@ mod tests {
             probe_containment(json).unwrap(),
             Containment::IsolationSession
         );
+    }
+
+    #[test]
+    fn probe_accepts_kata() {
+        let json = r#"{"containment": "kata"}"#;
+        assert_eq!(probe_containment(json).unwrap(), Containment::Kata);
     }
 
     #[test]

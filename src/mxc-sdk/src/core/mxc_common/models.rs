@@ -44,6 +44,9 @@ pub enum ContainmentBackend {
     /// Uses `bwrap` to create namespace-isolated processes without root
     /// privileges. Selected on the wire as `"bubblewrap"`.
     Bubblewrap,
+    /// Kata Containers: a Linux microVM driven through the Kata shim v2
+    /// interface. Experimental; selected on the wire as `"kata"`.
+    Kata,
 }
 
 impl ContainmentBackend {
@@ -60,6 +63,7 @@ impl ContainmentBackend {
             ContainmentBackend::IsolationSession => "isolation_session",
             ContainmentBackend::Seatbelt => "seatbelt",
             ContainmentBackend::Bubblewrap => "bubblewrap",
+            ContainmentBackend::Kata => "kata",
         }
     }
 
@@ -75,6 +79,7 @@ impl ContainmentBackend {
             ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("isolationSession"),
             ContainmentBackend::Hyperlight => Some("hyperlight"),
+            ContainmentBackend::Kata => Some("kata"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::MicroVm
             | ContainmentBackend::Vm => None,
@@ -127,6 +132,7 @@ impl From<crate::mxc_common::wire::Containment> for ContainmentBackend {
             W::Seatbelt => Self::Seatbelt,
             W::IsolationSession => Self::IsolationSession,
             W::Bubblewrap => Self::Bubblewrap,
+            W::Kata => Self::Kata,
         }
     }
 }
@@ -897,6 +903,71 @@ pub struct HyperlightConfig {
     pub runtime: HyperlightRuntime,
 }
 
+/// Hypervisor the Kata backend asks the Kata shim to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KataHypervisor {
+    /// QEMU.
+    Qemu,
+    /// Cloud Hypervisor.
+    Clh,
+    /// Firecracker. It has no shared filesystem, so the guest root must be an
+    /// ext4 image and host directories cannot be granted.
+    Firecracker,
+    /// Dragonball, the VMM built into the Kata runtime.
+    Dragonball,
+}
+
+impl KataHypervisor {
+    /// Every hypervisor, in the order the documentation lists them.
+    pub const ALL: [KataHypervisor; 4] = [
+        KataHypervisor::Qemu,
+        KataHypervisor::Clh,
+        KataHypervisor::Firecracker,
+        KataHypervisor::Dragonball,
+    ];
+
+    /// The wire spelling, which is also what `MXC_KATA_HYPERVISOR` takes.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            KataHypervisor::Qemu => "qemu",
+            KataHypervisor::Clh => "clh",
+            KataHypervisor::Firecracker => "firecracker",
+            KataHypervisor::Dragonball => "dragonball",
+        }
+    }
+}
+
+impl std::str::FromStr for KataHypervisor {
+    type Err = String;
+
+    /// Accepts the wire spellings, plus `cloud-hypervisor` for `clh`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "qemu" => Ok(KataHypervisor::Qemu),
+            "clh" | "cloud-hypervisor" => Ok(KataHypervisor::Clh),
+            "firecracker" => Ok(KataHypervisor::Firecracker),
+            "dragonball" => Ok(KataHypervisor::Dragonball),
+            other => Err(format!(
+                "unknown Kata hypervisor {other:?}; expected one of {}",
+                KataHypervisor::ALL.map(|h| h.wire_name()).join(", ")
+            )),
+        }
+    }
+}
+
+/// Kata backend configuration (`kata`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KataConfig {
+    /// Host path of the guest root filesystem: a directory, or an ext4 image
+    /// file. Required.
+    pub rootfs: String,
+    /// Hypervisor to run. `None` selects the host default (`MXC_KATA_HYPERVISOR`,
+    /// then QEMU).
+    pub hypervisor: Option<KataHypervisor>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ExecutionRequest {
     /// Exact external contract that produced this request.
@@ -961,6 +1032,8 @@ pub struct ExecutionRequest {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// Hyperlight backend configuration (used when containment == Hyperlight).
     pub hyperlight: Option<HyperlightConfig>,
+    /// Kata backend configuration (used when containment == Kata).
+    pub kata: Option<KataConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Dry-run mode: validate config and runner setup then return success

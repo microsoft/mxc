@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::experimental::{OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
+use super::experimental::{Kata, OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
@@ -36,6 +36,8 @@ string_enum! {
         Microvm => ["microvm"],
         /// Select the Hyperlight micro-VM backend.
         Hyperlight => ["hyperlight"],
+        /// Select the Linux Kata Containers micro-VM backend.
+        Kata => ["kata"],
 
         // Stable values introduced in `0.9.0-alpha`.
         /// Select the WSL container backend.
@@ -109,4 +111,7 @@ pub struct Request {
     /// Optional one-shot Hyperlight backend settings.
     #[serde(default)]
     pub hyperlight: OptionalField<OneShotHyperlight>,
+    /// Optional Kata backend settings.
+    #[serde(default)]
+    pub kata: OptionalField<Kata>,
 }

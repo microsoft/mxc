@@ -147,6 +147,7 @@ fn state_aware_common(
         seatbelt: None,
         ui: None,
         hyperlight: None,
+        kata: None,
     }
 }
 
@@ -176,6 +177,7 @@ pub(super) fn provision_into_input(
         contract::ProvisionRequest::IsolationSession(request) => {
             isolation_session_provision_into_input(request)
         }
+        contract::ProvisionRequest::Kata(request) => kata_provision_into_input(request),
         contract::ProvisionRequest::WindowsSandbox(request) => {
             windows_sandbox_provision_into_input(request)
         }
@@ -204,6 +206,35 @@ fn isolation_session_provision_into_input(
     StateAwareInput::new(
         common,
         StateAwareOperation::Provision(StateAwareProvision::IsolationSession(provision)),
+    )
+}
+
+fn kata_provision_into_input(
+    request: contract::KataProvisionRequest,
+) -> Result<StateAwareInput, WxcError> {
+    let contract::KataProvisionRequest {
+        schema,
+        comment,
+        version,
+        phase: contract::ProvisionPhase,
+        containment: contract::KataContainment,
+        filesystem,
+        network,
+        telemetry,
+        kata,
+    } = request;
+    let kata = super::one_shot::convert_kata(kata);
+    let mut common = state_aware_common(schema, comment, version, telemetry);
+    common.filesystem = filesystem.into_option().map(convert_filesystem);
+    common.network = network.into_option().map(convert_network);
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Provision(StateAwareProvision::Kata(
+            crate::mxc_common::models::KataConfig {
+                rootfs: kata.rootfs.unwrap_or_default(),
+                hypervisor: kata.hypervisor,
+            },
+        )),
     )
 }
 

@@ -257,6 +257,7 @@ pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBa
 pub(crate) fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
     match prefix {
         "iso" => Ok(ContainmentBackend::IsolationSession),
+        "kata" => Ok(ContainmentBackend::Kata),
         "wsb" => Ok(ContainmentBackend::WindowsSandbox),
         "wslc" => Ok(ContainmentBackend::Wslc),
         // Future state-aware backends extend this list.

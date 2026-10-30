@@ -98,6 +98,25 @@ jobs:
             exit 1
           fi
 
+      # The Kata unit tests need neither Kata, KVM, nor root. The live suite
+      # runs in the validation matrix.
+      - name: Test kata_common module
+        working-directory: src
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$(mktemp)"
+          cargo test --locked --release --target "${{ matrix.target }}" \
+            -p mxc-sdk --lib 'backend_modules::kata::common::' 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+            echo "::error::Kata module filter ran no tests."
+            exit 1
+          fi
+
       # Bubblewrap is required to run the executor characterization tests in
       # mxc-sdk (they skip via has_bwrap() when it is absent). lxc-exec always
       # includes the Bubblewrap backend module, so the binary built above can
@@ -211,6 +230,11 @@ jobs:
           run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
           run_pinned "Probe coverage" -p mxc-sdk --lib mxc_engine::probe
           run_pinned "Backend registry" -p mxc-sdk --lib mxc_engine::backend_registry
+          # Reach the Kata backend through the FFI entry points. These requests
+          # are refused before a VM exists, so they need no Kata, KVM, or root.
+          run_pinned "Kata refusals" -p mxc-sdk --test streaming_kata kata_refuses_what_it_cannot_enforce_before_creating_anything
+          run_pinned "Kata lifecycle refusals" -p mxc-sdk --test streaming_kata kata_lifecycle_refuses_unknown_and_malformed_sandboxes
+          run_pinned "Kata FFI routing" -p mxc_ffi --test ffi extern_spawn_json_reaches_the_kata_backend_only_when_experimental
 
           # Hyperlight is a Linux backend only on x64, and the probe reports it
           # from a feature-gated branch the default build never compiles.
@@ -254,6 +278,20 @@ jobs:
           LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
         run: bash tests/scripts/run_bwrap_network_proxy_test.sh
 
+      # The validation matrix runs prebuilt artifacts, so the live Kata suite is
+      # built here and shipped next to lxc-exec. It boots VMs, so it needs root,
+      # KVM, and Kata, and runs only in the matrix.
+      - name: Build Kata live test
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$(cargo test --locked --release --target "${{ matrix.target }}" \
+            -p mxc-sdk --test streaming_kata --no-run --message-format=json |
+            jq -r 'select(.reason == "compiler-artifact" and .target.name == "streaming_kata" and .executable != null) | .executable')"
+          test -x "$binary"
+          cp "$binary" "target/${{ matrix.target }}/release/streaming_kata"
+
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -262,5 +300,6 @@ jobs:
             src/target/${{ matrix.target }}/release/lxc-exec
             src/target/${{ matrix.target }}/release/unix-test-proxy
             src/target/${{ matrix.target }}/release/libmxc_ffi.so
+            src/target/${{ matrix.target }}/release/streaming_kata
           if-no-files-found: error
           retention-days: 1

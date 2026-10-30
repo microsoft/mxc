@@ -307,6 +307,7 @@ mod tests {
             "seatbelt",
             "macos_sandbox",
             "isolation_session",
+            "kata",
         ] {
             let wire = wire::Containment::parse_wire_name(spelling).unwrap();
             let json = format!(r#"{{"containment":"{spelling}"}}"#);
@@ -333,6 +334,7 @@ mod tests {
             ("iso:abcd1234", ContainmentBackend::IsolationSession),
             ("wsb:abcd1234", ContainmentBackend::WindowsSandbox),
             ("wslc:abcd1234", ContainmentBackend::Wslc),
+            ("kata:abcd1234", ContainmentBackend::Kata),
         ] {
             let json = format!(r#"{{"phase":"exec","sandboxId":"{id}"}}"#);
             let source = CommandSource::parse(&json).unwrap();

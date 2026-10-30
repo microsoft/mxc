@@ -298,6 +298,11 @@ that can be executed independently.
 
     "hyperlight": {                        // Hyperlight settings (v0.10+)
         "runtime": "node"                  // Guest runtime: agent (default), python, python-shell, node, bash or dotnet-jit
+    },
+
+    "kata": {                              // Kata Containers settings (1.1.0-alpha, experimental)
+        "rootfs": "/srv/alpine",           // Required: host path of a root filesystem directory or ext4 image
+        "hypervisor": "qemu"               // qemu (default), clh, firecracker, or dragonball
     }
 }
 ```
@@ -498,6 +503,7 @@ force a particular backend.
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
 | `"microvm"` | MicroVM isolation via NVX on Windows x64 |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
+| `"kata"` | Linux microVM through the Kata Containers shim, on QEMU, Cloud Hypervisor, Firecracker, or Dragonball (experimental). Supports create-and-run execution and container lifecycle operations — see [`docs/backends/kata/kata-backend.md`](backends/kata/kata-backend.md). |
 | `"isolation_session"` | Windows isolation session: create-and-run execution uses a freshly provisioned isolated user account in its own OS-managed session. Container lifecycle operations can retain the session between executions. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |

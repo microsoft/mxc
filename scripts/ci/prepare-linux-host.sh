@@ -6,7 +6,7 @@ set -euo pipefail
 # matrix entry works on Ubuntu, Debian, and RHEL images.
 
 usage() {
-    echo "Usage: $0 <bubblewrap|lxc|microvm> <binary-directory>" >&2
+    echo "Usage: $0 <bubblewrap|lxc|kata|microvm> <binary-directory>" >&2
 }
 
 if [[ $# -ne 2 ]]; then
@@ -274,6 +274,79 @@ assert_workload_interpreters() {
     fi
 }
 
+# Kata Containers release the validation suite runs against. The checksums are
+# of the release asset and of Alpine's minirootfs for the version named.
+KATA_VERSION="4.3.1"
+KATA_SHA256="1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97"
+KATA_ROOT="/opt/kata"
+KATA_SHIM="$KATA_ROOT/runtime-rs/bin/containerd-shim-kata-v2"
+KATA_MARKER="$KATA_ROOT/.mxc-kata-release"
+KATA_ASSETS="/var/lib/mxc-kata-test"
+ALPINE_VERSION="3.22.2"
+ALPINE_SHA256="412454ed98025ad9cd910d13f3d448b184e81502baa83180e89f98d0f13674be"
+
+# Installs Kata (runtime-rs), a test root filesystem as a directory and as an
+# ext4 image, and a Firecracker configuration that passes the shim's validation.
+# Hardware virtualization is verified, never enabled: the job cannot change the
+# host's firmware or hypervisor settings.
+install_kata() {
+    if [[ ! -c /dev/kvm ]]; then
+        echo "ERROR: /dev/kvm is missing. The Kata backend needs hardware virtualization;" \
+             "this pool must expose it (nested virtualization on a virtual machine)." >&2
+        return 1
+    fi
+    sudo chmod a+rw /dev/kvm
+
+    resolve_package_manager || {
+        echo "ERROR: no supported package manager (apt-get, dnf, yum, microdnf) was found." >&2
+        return 1
+    }
+    if [[ "$package_manager" == "apt-get" ]]; then
+        apt_update
+        install_packages zstd e2fsprogs curl iproute2 util-linux
+    else
+        install_packages zstd e2fsprogs curl iproute util-linux
+    fi
+
+    local work
+    work="$(mktemp -d)"
+    # Reuse a cached install only if it is the pinned release.
+    local release="${KATA_VERSION} ${KATA_SHA256}"
+    if [[ ! -x "$KATA_SHIM" || "$(cat "$KATA_MARKER" 2>/dev/null)" != "$release" ]]; then
+        curl -fsSL --retry 3 -o "$work/kata.tar.zst" \
+            "https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/kata-static-${KATA_VERSION}-amd64.tar.zst"
+        echo "${KATA_SHA256}  $work/kata.tar.zst" | sha256sum -c -
+        sudo rm -rf "$KATA_ROOT"
+        sudo tar --zstd -xf "$work/kata.tar.zst" -C /
+        echo "$release" | sudo tee "$KATA_MARKER" >/dev/null
+    fi
+    "$KATA_SHIM" --version
+
+    sudo mkdir -p "$KATA_ASSETS"
+    # The marker is written last, so an interrupted build is redone from scratch.
+    local rootfs_marker="$KATA_ASSETS/.rootfs-release"
+    local rootfs_release="${ALPINE_VERSION} ${ALPINE_SHA256}"
+    if [[ "$(cat "$rootfs_marker" 2>/dev/null)" != "$rootfs_release" ]]; then
+        curl -fsSL --retry 3 -o "$work/alpine.tar.gz" \
+            "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION%.*}/releases/x86_64/alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
+        echo "${ALPINE_SHA256}  $work/alpine.tar.gz" | sha256sum -c -
+        sudo rm -rf "$KATA_ASSETS/rootfs" "$KATA_ASSETS/rootfs.ext4" "$rootfs_marker"
+        sudo mkdir "$KATA_ASSETS/rootfs"
+        sudo tar -xzf "$work/alpine.tar.gz" -C "$KATA_ASSETS/rootfs"
+        sudo mke2fs -q -t ext4 -d "$KATA_ASSETS/rootfs" "$KATA_ASSETS/rootfs.ext4" 128M
+        echo "$rootfs_release" | sudo tee "$rootfs_marker" >/dev/null
+    fi
+
+    # The Firecracker configuration shipped with Kata 4.3.1 fails validation:
+    # its dial_timeout_ms (45000) exceeds the shim's default reconnect timeout
+    # (3000). Use a copy with a short dial timeout.
+    sed -e 's/^dial_timeout_ms *=.*/dial_timeout_ms = 100/' \
+        "$KATA_ROOT/share/defaults/kata-containers/runtime-rs/configuration-rs-fc.toml" |
+        sudo tee "$KATA_ASSETS/configuration-rs-fc.toml" >/dev/null
+    grep -q '^dial_timeout_ms = 100$' "$KATA_ASSETS/configuration-rs-fc.toml"
+    rm -rf "$work"
+}
+
 chmod +x "$binary_directory/lxc-exec"
 
 # Run for every backend: this is host inventory, not a backend prerequisite.
@@ -310,6 +383,13 @@ case "$backend" in
         fi
         start_lxc_bridge
         ensure_bridge_firewall_zone
+        ;;
+    kata)
+        install_kata
+        test -x "$KATA_SHIM"
+        test -f "$KATA_ASSETS/rootfs.ext4"
+        test -f "$KATA_ASSETS/configuration-rs-fc.toml"
+        sudo -n true
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do

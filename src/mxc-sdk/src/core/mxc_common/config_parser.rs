@@ -8,8 +8,8 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, SeatbeltConfig,
-    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, HyperlightConfig, KataConfig, LifecycleConfig, LxcConfig, PortMapping,
+    SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
@@ -562,6 +562,10 @@ fn deserialize_development_request(
         }
         Some(Phase::Provision) => {
             let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
+                Containment::Kata => {
+                    deserialize_development_root(json, "Kata provision", "1.1", true)
+                        .map(ProvisionRequest::Kata)
+                }
                 Containment::WindowsSandbox => {
                     deserialize_development_root(json, "Windows Sandbox provision", "1.1", true)
                         .map(ProvisionRequest::WindowsSandbox)
@@ -1214,6 +1218,9 @@ fn present_backend_sections(
     if cfg.hyperlight.is_some() {
         push(ContainmentBackend::Hyperlight);
     }
+    if cfg.kata.is_some() {
+        push(ContainmentBackend::Kata);
+    }
     sections
 }
 
@@ -1288,6 +1295,7 @@ fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment
         "wslc" => Some(wire::Containment::Wslc),
         "wsb" => Some(wire::Containment::WindowsSandbox),
         "iso" => Some(wire::Containment::IsolationSession),
+        "kata" => Some(wire::Containment::Kata),
         _ => None,
     }
 }
@@ -1305,6 +1313,7 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::Seatbelt) => "seatbelt",
         Some(wire::Containment::IsolationSession) => "isolation_session",
         Some(wire::Containment::Bubblewrap) => "bubblewrap",
+        Some(wire::Containment::Kata) => "kata",
     }
 }
 
@@ -1669,6 +1678,11 @@ fn normalize_common_request_ir(
         runtime: h.runtime.unwrap_or_default(),
     });
 
+    let kata = cfg.kata.map(|k| KataConfig {
+        rootfs: k.rootfs.unwrap_or_default(),
+        hypervisor: k.hypervisor,
+    });
+
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
     let telemetry = cfg.telemetry.map(|raw| TelemetryConfig {
         enabled: raw.enabled,
@@ -1708,6 +1722,7 @@ fn normalize_common_request_ir(
         test_feature,
         windows_sandbox,
         hyperlight,
+        kata,
         experimental_enabled: false,
         dry_run: false,
     })
@@ -1729,6 +1744,7 @@ fn normalize_state_aware(
                 | StateAwareOperation::DeprovisionSession { .. } => Some(wire::Containment::Wslc),
                 StateAwareOperation::Provision(provision) => Some(match provision {
                     StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
+                    StateAwareProvision::Kata(_) => wire::Containment::Kata,
                     StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
                     StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
                 }),
@@ -1979,6 +1995,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     enum ProvisionSnapshot {
         IsolationSession(Option<Option<String>>),
+        Kata(String),
         WindowsSandbox,
         Wslc(Option<(Option<String>, Option<String>)>),
     }
@@ -1998,6 +2015,9 @@ mod tests {
                                 ProvisionSnapshot::IsolationSession(
                                     config.as_ref().map(|config| config.app_id.clone()),
                                 )
+                            }
+                            StateAwareProvision::Kata(config) => {
+                                ProvisionSnapshot::Kata(config.rootfs.clone())
                             }
                             StateAwareProvision::WindowsSandbox => {
                                 ProvisionSnapshot::WindowsSandbox
@@ -2322,6 +2342,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn kata_section_reaches_the_runtime_model_with_field_presence_preserved() {
+        use crate::mxc_common::models::KataHypervisor;
+
+        let parse = |kata: &str| {
+            let json = format!(
+                r#"{{
+                    "version": "1.1.0-alpha",
+                    "containment": "kata",
+                    "kata": {kata},
+                    "process": {{"commandLine": "uname -r"}}
+                }}"#
+            );
+            match parse_exact_for_test(&json).unwrap() {
+                MxcRequest::OneShot(request) => request,
+                MxcRequest::StateAware(_) => panic!("expected one-shot request"),
+            }
+        };
+
+        let explicit = parse(r#"{"rootfs": "/srv/alpine", "hypervisor": "cloud-hypervisor"}"#);
+        assert_eq!(explicit.containment, ContainmentBackend::Kata);
+        let kata = explicit.kata.expect("kata section");
+        assert_eq!(kata.rootfs, "/srv/alpine");
+        assert_eq!(kata.hypervisor, Some(KataHypervisor::Clh));
+
+        // The parser keeps an omitted hypervisor omitted: the host default
+        // belongs to the backend, not to parsing.
+        let omitted = parse(r#"{"rootfs": "/srv/alpine"}"#);
+        assert_eq!(omitted.kata.expect("kata section").hypervisor, None);
+    }
+
+    #[test]
+    fn kata_section_is_rejected_beside_another_containment() {
+        for containment in ["lxc", "bubblewrap", "hyperlight"] {
+            let json = format!(
+                r#"{{
+                    "version": "1.1.0-alpha",
+                    "containment": "{containment}",
+                    "kata": {{"rootfs": "/srv/alpine"}},
+                    "process": {{"commandLine": "echo"}}
+                }}"#
+            );
+            let error = match parse_exact_for_test(&json) {
+                Ok(_) => panic!("{containment}: a kata section must be rejected"),
+                Err(error) => error.message().to_string(),
+            };
+            assert!(error.contains("kata"), "{containment}: {error}");
+        }
+    }
+
+    #[test]
+    fn another_backend_section_is_rejected_beside_kata_containment() {
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "kata",
+            "kata": {"rootfs": "/srv/alpine"},
+            "lxc": {"distribution": "alpine", "release": "3.20"},
+            "process": {"commandLine": "echo"}
+        }"#;
+        let error = match parse_exact_for_test(json) {
+            Ok(_) => panic!("an lxc section beside kata must be rejected"),
+            Err(error) => error.message().to_string(),
+        };
+        assert!(error.contains("lxc"), "{error}");
+    }
+
     struct DevelopmentStateAwareRootCase {
         name: &'static str,
         json: &'static str,
@@ -2333,6 +2419,24 @@ mod tests {
     }
 
     const DEVELOPMENT_STATE_AWARE_ROOT_CASES: &[DevelopmentStateAwareRootCase] = &[
+        DevelopmentStateAwareRootCase {
+            name: "Kata provision",
+            json: r#"{"version":"1.1.0-alpha","phase":"provision","containment":"kata","kata":{"rootfs":"/srv/rootfs"}}"#,
+            expected_phase: Phase::Provision,
+            expected_declared_containment: Some(ContainmentBackend::Kata),
+            expected_runtime_containment: ContainmentBackend::Kata,
+            expected_sandbox_id: None,
+            expected_script: "",
+        },
+        DevelopmentStateAwareRootCase {
+            name: "Kata start",
+            json: r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"kata:0a1b2c3d"}"#,
+            expected_phase: Phase::Start,
+            expected_declared_containment: None,
+            expected_runtime_containment: ContainmentBackend::Kata,
+            expected_sandbox_id: Some("kata:0a1b2c3d"),
+            expected_script: "",
+        },
         DevelopmentStateAwareRootCase {
             name: "Windows Sandbox provision",
             json: r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,

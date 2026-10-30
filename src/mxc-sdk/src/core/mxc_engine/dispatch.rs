@@ -11,8 +11,8 @@
 //!
 //! Only the backends with a streaming path are handled here: ProcessContainer
 //! (native PSEC, constructed through `BaseContainerRunner::for_request` as on
-//! the run-to-completion path), Bubblewrap
-//! and LXC (Linux), Seatbelt (macOS), WSLC, and IsolationSession (Windows,
+//! the run-to-completion path), Bubblewrap,
+//! LXC, and Kata (Linux), Seatbelt (macOS), WSLC, and IsolationSession (Windows,
 //! behind the `wslc` and `isolation_session` features). Every other backend —
 //! including the remaining experimental ones (Windows Sandbox, MicroVM,
 //! Hyperlight) — returns [`MxcError::unsupported_containment`]; callers that
@@ -77,6 +77,7 @@ pub fn spawn_runner(
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::Lxc => spawn_lxc(request, logger),
+        ContainmentBackend::Kata => spawn_kata(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         ContainmentBackend::Wslc => spawn_wslc(request, logger, stdin),
         ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
@@ -180,6 +181,35 @@ fn spawn_bubblewrap_with_stdio(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     Err(MxcError::unsupported_containment(
         "Bubblewrap is only available on Linux",
+    ))
+}
+
+/// Serves piped stdio through the in-process Kata handle. Kata is experimental,
+/// so the caller must have opted in, which the other streaming arms need not
+/// check because none of them is experimental.
+#[cfg(target_os = "linux")]
+fn spawn_kata(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use crate::mxc_common::sandbox_process::SandboxBackend;
+    super::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
+    let mut backend = crate::kata_common::KataBackend::new();
+    backend
+        .spawn(request, logger, StdioMode::Pipes)
+        .map_err(map_spawn_error)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_kata(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "Kata is only available on Linux",
     ))
 }
 

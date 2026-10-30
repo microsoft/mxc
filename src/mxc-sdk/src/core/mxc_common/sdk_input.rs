@@ -131,6 +131,21 @@ impl SdkStateAwareInput {
                     .to_string(),
             ));
         }
+        let is_kata = matches!(
+            operation,
+            StateAwareOperation::Provision(
+                crate::mxc_common::state_aware_operation::StateAwareProvision::Kata(_)
+            )
+        ) || operation
+            .sandbox_id()
+            .is_some_and(|sandbox_id| sandbox_id.starts_with("kata:"));
+        if is_kata {
+            return Err(WxcError::ConfigParse(
+                "typed state-aware Rust SDK requests do not support Kata; use raw exact \
+                 1.1.0-alpha JSON"
+                    .to_string(),
+            ));
+        }
         if wslc_port_mappings_requested(&operation) && version != ContractVersion::V1_1_0Alpha {
             return Err(WxcError::ConfigParse(format!(
                 "WSLC state-aware provision port mappings require schema version \
@@ -194,6 +209,7 @@ impl SdkStateAwareInput {
             test_feature: None,
             windows_sandbox: None,
             hyperlight: None,
+            kata: None,
         };
         StateAwareInput::new(common, self.operation)
     }
@@ -300,6 +316,25 @@ mod tests {
             let error = SdkStateAwareInput::new(ContractVersion::V1_0_0, operation)
                 .expect_err("typed v1 must keep Windows Sandbox on the raw exact lane");
             assert!(error.to_string().contains("do not support Windows Sandbox"));
+        }
+    }
+
+    #[test]
+    fn typed_v1_keeps_kata_on_the_raw_exact_lane() {
+        use crate::mxc_common::models::KataConfig;
+        use crate::mxc_common::state_aware_operation::StateAwareProvision;
+        for operation in [
+            StateAwareOperation::Provision(StateAwareProvision::Kata(KataConfig::default())),
+            StateAwareOperation::Start {
+                sandbox_id: "kata:0a1b2c3d".to_string(),
+            },
+            StateAwareOperation::Deprovision {
+                sandbox_id: "kata:0a1b2c3d".to_string(),
+            },
+        ] {
+            let error = SdkStateAwareInput::new(ContractVersion::V1_1_0Alpha, operation)
+                .expect_err("typed requests must not reach Kata");
+            assert!(error.to_string().contains("do not support Kata"), "{error}");
         }
     }
 

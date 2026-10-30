@@ -308,8 +308,8 @@ The v1.0 contract preserves the v0.9 request roots and canonical field/value
 spellings, but removes the legacy `appcontainer`, `appContainer`, and
 `macos_sandbox` aliases. They remain rejected throughout the v1 contract line.
 Features that exist only in mutable v1.1 development, including Windows Sandbox
-provision and the `vm`, `microvm`, and `hyperlight` one-shot surfaces, are not
-accepted by v1.0.
+provision and the `vm`, `microvm`, `hyperlight`, and `kata` one-shot surfaces,
+are not accepted by v1.0.
 
 ### Trust boundary vs schema defaults
 
@@ -444,7 +444,7 @@ wxc-exec.exe --experimental config.json
 
 The parser **always** parses fields defined by the selected exact contract;
 parsing is flag-independent. The flag authorizes selecting an experimental
-backend (MicroVM, Hyperlight, or Windows Sandbox). Without it, native refuses
+backend (MicroVM, Hyperlight, Kata, or Windows Sandbox). Without it, native refuses
 the request with
 `backend_unavailable` on every one-shot and state-aware entry point. The flag
 is ignored for production backends, including production-backend fields in a

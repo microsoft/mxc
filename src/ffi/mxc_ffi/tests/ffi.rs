@@ -412,6 +412,52 @@ fn extern_run_executes_command() {
     unsafe { mxc_run_result_free(&mut out) };
 }
 
+/// Pins that `mxc_spawn_json` reaches the Kata backend and honors the
+/// experimental argument, which is not read from the JSON.
+///
+/// The firecracker hypervisor with a rootfs directory makes the backend refuse
+/// before touching the host, so the result is the same on every Linux host.
+#[cfg(target_os = "linux")]
+#[test]
+fn extern_spawn_json_reaches_the_kata_backend_only_when_experimental() {
+    let rootfs = std::env::temp_dir();
+    let request = CString::new(format!(
+        r#"{{
+            "version": "1.1.0-alpha",
+            "containment": "kata",
+            "kata": {{ "rootfs": {rootfs:?}, "hypervisor": "firecracker" }},
+            "process": {{ "commandLine": "echo hello-kata" }}
+        }}"#
+    ))
+    .unwrap();
+
+    for (experimental, expected_status, expected_text) in [
+        (0, mxc_ffi::MXC_STATUS_BACKEND_UNAVAILABLE, "experimental"),
+        (1, mxc_ffi::MXC_STATUS_POLICY_VALIDATION, "ext4 image"),
+    ] {
+        let mut handle: *mut MxcSandbox = ptr::null_mut();
+        // SAFETY: `MxcErrorDetail` contains integers and nullable pointers.
+        let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+        // SAFETY: valid request and writable fresh out-parameters.
+        let status =
+            unsafe { mxc_spawn_json(request.as_ptr(), experimental, &mut handle, &mut error) };
+
+        assert_eq!(status, expected_status, "experimental={experimental}");
+        assert!(handle.is_null());
+        // SAFETY: the message is a valid C string filled by `mxc_spawn_json`.
+        let message = unsafe { CStr::from_ptr(error.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert!(
+            message.contains(expected_text),
+            "unexpected message: {message}"
+        );
+
+        // SAFETY: `error` was filled by `mxc_spawn_json`.
+        unsafe { mxc_error_detail_free(&mut error) };
+    }
+}
+
 /// Pins that `mxc_spawn_json` reaches the LXC backend rather than refusing
 /// the containment.
 ///

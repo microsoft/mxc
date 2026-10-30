@@ -231,7 +231,9 @@ mod stable;
 mod state_aware;
 mod wslc;
 
-pub use experimental::{HyperlightRuntime, OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
+pub use experimental::{
+    HyperlightRuntime, Kata, KataHypervisor, OneShotHyperlight, OneShotWindowsSandbox, TestFeature,
+};
 pub use network::{
     Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
     NetworkProtocol, NetworkRule,
@@ -257,6 +259,7 @@ pub use state_aware::{
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
     IsolationSessionProvisionRequest, StateAwareIsolationSession,
 };
+pub use state_aware::{KataContainment, KataProvisionRequest};
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
 pub use state_aware::{
     ProvisionSessionPhase, StateAwareWslcSession, WslcProvisionSession, WslcProvisionSessionRequest,

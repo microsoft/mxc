@@ -23,6 +23,7 @@ enum Config {
     Absent,
     Unit,
     Isolation(Option<String>),
+    Kata(String, Option<crate::mxc_common::models::KataHypervisor>),
     Wslc(Option<String>, Option<String>, Option<Vec<PortMapping>>),
     WslcSession(Option<u32>, Option<u64>, Option<bool>),
 }
@@ -38,6 +39,7 @@ trait Case: Sized {
 }
 
 struct Isolation;
+struct Kata;
 struct WindowsSandbox;
 struct Wslc;
 
@@ -54,6 +56,22 @@ impl Case for Isolation {
         parsed: ParsedStateAwareRequest,
     ) -> Result<BoundStateAwareRequest<Recording<Self>>, MxcError> {
         bind_isolation_session(parsed)
+    }
+}
+
+impl Case for Kata {
+    type ProvisionConfig = crate::mxc_common::models::KataConfig;
+    const BACKEND: &'static str = "kata";
+    const PREFIX: &'static str = "kata";
+    fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
+        config.map_or(Config::Absent, |config| {
+            Config::Kata(config.rootfs.clone(), config.hypervisor)
+        })
+    }
+    fn bind(
+        parsed: ParsedStateAwareRequest,
+    ) -> Result<BoundStateAwareRequest<Recording<Self>>, MxcError> {
+        bind_kata(parsed)
     }
 }
 
@@ -396,6 +414,9 @@ fn input<C: Case>(phase: Phase) -> Value {
     });
     if phase == Phase::Provision {
         value["containment"] = json!(C::BACKEND);
+        if C::BACKEND == "kata" {
+            value["kata"] = json!({"rootfs": "/srv/rootfs", "hypervisor": "clh"});
+        }
         if C::BACKEND == "isolation_session" {
             value["network"] = json!({
                 "egress": {"default": "allow"},
@@ -502,6 +523,24 @@ fn every_backend_and_phase_preserves_validation_execution_and_dry_run_order() {
     lifecycle_matrix::<Isolation>();
     lifecycle_matrix::<WindowsSandbox>();
     lifecycle_matrix::<Wslc>();
+}
+
+#[test]
+fn kata_provision_binds_its_required_configuration_and_the_other_phases_carry_none() {
+    use crate::mxc_common::models::KataHypervisor;
+
+    assert_dispatch::<Kata>(
+        &input::<Kata>(Phase::Provision),
+        Config::Kata("/srv/rootfs".into(), Some(KataHypervisor::Clh)),
+    );
+    for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+        assert_dispatch::<Kata>(&input::<Kata>(phase), Config::Absent);
+    }
+
+    // The hypervisor stays omitted when the request omits it.
+    let mut value = input::<Kata>(Phase::Provision);
+    value["kata"] = json!({"rootfs": "/srv/rootfs"});
+    assert_dispatch::<Kata>(&value, Config::Kata("/srv/rootfs".into(), None));
 }
 
 #[test]
@@ -639,6 +678,7 @@ fn streaming_matrix<C: Case>() {
 #[test]
 fn streaming_uses_the_same_binding_and_preserves_its_phase_and_validation_gates() {
     streaming_matrix::<Isolation>();
+    streaming_matrix::<Kata>();
     streaming_matrix::<WindowsSandbox>();
     streaming_matrix::<Wslc>();
 }
@@ -665,6 +705,18 @@ fn incompatible_backend_operations_never_bind_as_absent_configuration() {
     mismatch::<WindowsSandbox, Wslc>();
     mismatch::<Wslc, Isolation>();
     mismatch::<Wslc, WindowsSandbox>();
+    for other in [Phase::Provision] {
+        for error in [
+            Kata::bind(parse(&input::<Isolation>(other))).unwrap_err(),
+            Kata::bind(parse(&input::<WindowsSandbox>(other))).unwrap_err(),
+            Kata::bind(parse(&input::<Wslc>(other))).unwrap_err(),
+            Isolation::bind(parse(&input::<Kata>(other))).unwrap_err(),
+            WindowsSandbox::bind(parse(&input::<Kata>(other))).unwrap_err(),
+            Wslc::bind(parse(&input::<Kata>(other))).unwrap_err(),
+        ] {
+            assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        }
+    }
 }
 
 fn session_parsed(operation: StateAwareOperation) -> ParsedStateAwareRequest {

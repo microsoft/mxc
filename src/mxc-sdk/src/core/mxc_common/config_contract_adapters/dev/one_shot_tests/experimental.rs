@@ -89,6 +89,10 @@ const DEVELOPMENT_CONTAINMENT_CASES: &[DevelopmentContainmentCase] = &[
         input: "hyperlight",
         expected: "hyperlight",
     },
+    DevelopmentContainmentCase {
+        input: "kata",
+        expected: "kata",
+    },
 ];
 
 #[test]
@@ -100,4 +104,35 @@ fn development_containment_variants_map_expected_wire_values() {
             serde_json::json!(case.expected)
         );
     }
+}
+
+#[test]
+fn kata_maps_expected_wire_fields() {
+    use crate::mxc_common::models::KataHypervisor;
+
+    let wire = adapt(
+        r#"{
+            "version": "1.1.0-alpha",
+            "containment": "kata",
+            "process": {"commandLine": "echo hello"},
+            "kata": {"rootfs": "/srv/rootfs.ext4", "hypervisor": "firecracker"}
+        }"#,
+    );
+    let kata = wire.kata.expect("kata should be populated");
+    assert_eq!(kata.rootfs.as_deref(), Some("/srv/rootfs.ext4"));
+    assert_eq!(kata.hypervisor, Some(KataHypervisor::Firecracker));
+    assert!(wire.hyperlight.is_none());
+}
+
+#[test]
+fn kata_hypervisor_stays_absent_when_omitted() {
+    let wire = adapt(
+        r#"{
+            "version": "1.1.0-alpha",
+            "containment": "kata",
+            "process": {"commandLine": "echo hello"},
+            "kata": {"rootfs": "/srv/rootfs"}
+        }"#,
+    );
+    assert_eq!(wire.kata.expect("kata").hypervisor, None);
 }

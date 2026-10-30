@@ -792,7 +792,9 @@ fn prepare_native_stdio(
 
 #[cfg(not(target_os = "windows"))]
 fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
-    dup_fd_to_file(handle).map(|f| Box::new(f) as Box<dyn Read + Send>)
+    // The backend's fd may be non-blocking, and a dup shares that. A plain read
+    // would fail with EAGAIN and end the relay early, so wait with poll.
+    wrap_cancellable_read(handle).map(|(reader, _)| reader)
 }
 
 /// Wrap a readable pipe as a cancellable reader — see the Windows variant.
@@ -1776,6 +1778,35 @@ mod tests {
         out.read_to_string(&mut buf).unwrap();
         assert_eq!(buf, "exec-stream-ok");
         assert_eq!(proc.wait().unwrap(), 0);
+    }
+
+    /// A relay reads a non-blocking pipe to the end even when the output
+    /// arrives late and exceeds the pipe buffer.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn wrap_read_waits_for_late_output_on_a_nonblocking_pipe() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        // SAFETY: the descriptor is open and F_SETFL takes an integer flag.
+        let rc = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+        assert_eq!(rc, 0);
+        let mut source = wrap_read(reader_handle(&reader)).expect("wrapped");
+
+        const TOTAL: usize = 256 * 1024;
+        let producer = std::thread::spawn(move || {
+            let chunk = [b'x'; 16 * 1024];
+            for _ in 0..TOTAL / chunk.len() {
+                std::thread::sleep(Duration::from_millis(5));
+                writer.write_all(&chunk).unwrap();
+            }
+        });
+
+        let mut received = Vec::new();
+        source.read_to_end(&mut received).unwrap();
+        producer.join().unwrap();
+        assert_eq!(received.len(), TOTAL);
     }
 
     /// A real stdin pipe is fed through the adapter's writer (a duplicate).

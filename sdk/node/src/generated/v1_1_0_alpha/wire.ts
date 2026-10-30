@@ -233,6 +233,68 @@ export interface IsolationSessionProvisionRequest {
 }
 
 /**
+ * Kata backend settings.
+ */
+export interface Kata {
+  /**
+   * Hypervisor to run. Defaults to the host's `MXC_KATA_HYPERVISOR` setting, then `qemu`.
+   */
+  hypervisor?: KataHypervisor;
+  /**
+   * Absolute host path of the guest root filesystem: a directory, or an ext4 image file. The backend never writes to it; changes live in a per-sandbox layer that is discarded on deprovision.
+   */
+  rootfs: string;
+}
+
+export type KataContainment = "kata";
+
+export type KataHypervisor = "qemu" | "clh" | "cloud-hypervisor" | "firecracker" | "dragonball";
+
+/**
+ * A complete state-aware `provision` request for kata.
+ *
+ * Filesystem and network policy are fixed here and apply to every process the sandbox runs later. The Kata backend enforces only a deny-all network.
+ */
+export interface KataProvisionRequest {
+  /**
+   * Optional JSON Schema reference for editor validation.
+   */
+  $schema?: string;
+  /**
+   * Optional human-readable annotation ignored by the runtime.
+   */
+  _comment?: unknown;
+  /**
+   * Exact `kata` containment marker.
+   */
+  containment: KataContainment;
+  /**
+   * Optional filesystem policy.
+   */
+  filesystem?: Filesystem;
+  /**
+   * Guest root filesystem and hypervisor.
+   */
+  kata: Kata;
+  /**
+   * Optional network policy.
+   */
+  network?: Network;
+  /**
+   * Exact `provision` phase marker.
+   */
+  phase: ProvisionPhase;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
+   * Exact development contract version.
+   */
+  version: Version;
+}
+
+/**
  * Container lifecycle settings.
  */
 export interface Lifecycle {
@@ -358,7 +420,7 @@ export interface NetworkRule {
 
 export type NonEmptyString = string;
 
-export type OneShotContainment = "process" | "processcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "wslc" | "isolation_session";
+export type OneShotContainment = "process" | "processcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "kata" | "wslc" | "isolation_session";
 
 /**
  * One-shot Hyperlight backend settings.
@@ -402,6 +464,10 @@ export interface OneShotRequest {
    * Optional one-shot Hyperlight backend settings.
    */
   hyperlight?: OneShotHyperlight;
+  /**
+   * Optional Kata backend settings.
+   */
+  kata?: Kata;
   /**
    * Optional lifecycle settings.
    */
@@ -979,4 +1045,4 @@ export interface WslcProvisionSessionRequest {
 /**
  * Exact mutable MXC development configuration contract.
  */
-export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;
+export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | KataProvisionRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;

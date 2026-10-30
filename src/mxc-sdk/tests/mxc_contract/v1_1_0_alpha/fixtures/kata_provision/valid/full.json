@@ -1,0 +1,18 @@
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "kata",
+  "kata": {
+    "rootfs": "/srv/rootfs",
+    "hypervisor": "clh"
+  },
+  "filesystem": {
+    "readwritePaths": ["/work"],
+    "readonlyPaths": ["/opt/tools"],
+    "deniedPaths": ["/work/.env"]
+  },
+  "network": {
+    "egress": {"default": "deny"},
+    "ingress": {"default": "deny", "hostLoopback": "deny"}
+  }
+}

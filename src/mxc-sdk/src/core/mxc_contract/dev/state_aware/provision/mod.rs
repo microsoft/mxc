@@ -11,6 +11,8 @@ string_marker! {
 pub enum ProvisionRequest {
     /// An IsolationSession provision request.
     IsolationSession(IsolationSessionProvisionRequest),
+    /// A Kata provision request.
+    Kata(KataProvisionRequest),
     /// A Windows Sandbox provision request.
     WindowsSandbox(WindowsSandboxProvisionRequest),
     /// A WSLC provision request.
@@ -19,6 +21,7 @@ pub enum ProvisionRequest {
 
 mod containment;
 mod isolation_session;
+mod kata;
 mod windows_sandbox;
 mod wslc;
 
@@ -28,5 +31,6 @@ pub use isolation_session::{
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
     IsolationSessionProvisionRequest, StateAwareIsolationSession,
 };
+pub use kata::{KataContainment, KataProvisionRequest};
 pub use windows_sandbox::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
 pub use wslc::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};

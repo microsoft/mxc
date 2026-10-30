@@ -46,6 +46,7 @@ binary targets of the same publishable package under `src/mxc-sdk/src/bin/`:
 |------|-----------|
 | ProcessContainer | `src/mxc-sdk/src/backends/process_container/common/` |
 | Bubblewrap, LXC, Seatbelt, Hyperlight | Corresponding folders under `src/mxc-sdk/src/backends/` |
+| Kata Containers | `src/mxc-sdk/src/backends/kata/common/` (Linux only): a ttrpc client for the Kata shim, the sandbox and execution model, and the policy mapping |
 | Windows Sandbox | SDK common/lifecycle modules plus `src/mxc-sdk/src/bin/windows_sandbox_{daemon,guest}/` |
 | WSLC | `src/mxc-sdk/src/backends/wslc/common/` plus `src/mxc-sdk/src/bin/wslc_daemon/` |
 | IsolationSession | SDK bindings and runtime modules under `backends/isolation_session/` |

@@ -46,6 +46,8 @@ pub enum Containment {
     IsolationSession,
     /// Unprivileged Linux bubblewrap sandbox.
     Bubblewrap,
+    /// Kata Containers microVM (experimental).
+    Kata,
 }
 
 impl Containment {
@@ -62,6 +64,7 @@ impl Containment {
             "seatbelt" | "macos_sandbox" => Self::Seatbelt,
             "isolation_session" => Self::IsolationSession,
             "bubblewrap" => Self::Bubblewrap,
+            "kata" => Self::Kata,
             _ => return None,
         })
     }
@@ -460,6 +463,16 @@ pub struct Hyperlight {
     pub runtime: Option<crate::mxc_common::models::HyperlightRuntime>,
 }
 
+/// Kata backend config.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Kata {
+    /// Host path of the guest root filesystem.
+    pub rootfs: Option<String>,
+    /// Hypervisor to run; the host default applies when absent.
+    pub hypervisor: Option<crate::mxc_common::models::KataHypervisor>,
+}
+
 /// WSL container backend config.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -538,6 +551,7 @@ mod tests {
         ContainmentBackend::IsolationSession,
         ContainmentBackend::Seatbelt,
         ContainmentBackend::Bubblewrap,
+        ContainmentBackend::Kata,
     ];
 
     #[test]

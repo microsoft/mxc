@@ -74,6 +74,7 @@ pub use provision::{
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
     IsolationSessionProvisionRequest, StateAwareIsolationSession,
 };
+pub use provision::{KataContainment, KataProvisionRequest};
 pub use provision::{ProvisionPhase, ProvisionRequest};
 pub use provision::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use provision::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};

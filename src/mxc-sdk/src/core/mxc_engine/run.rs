@@ -222,6 +222,9 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Bubblewrap => Err(MxcError::unsupported_containment(
             "Bubblewrap backend not available on Windows",
         )),
+        ContainmentBackend::Kata => Err(MxcError::unsupported_containment(
+            "Kata backend is only available on Linux",
+        )),
         ContainmentBackend::Seatbelt => Err(MxcError::unsupported_containment(
             "Seatbelt backend is only available on macOS (use mxc-exec-mac)",
         )),
@@ -304,6 +307,9 @@ fn resolve_runner_inner(
                 &request.lifecycle,
             ),
         ))),
+        ContainmentBackend::Kata => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
+            crate::kata_common::KataBackend::new(),
+        )))),
         ref other => Err(MxcError::unsupported_containment(format!(
             "the '{}' backend is not available on Linux",
             other.wire_name()

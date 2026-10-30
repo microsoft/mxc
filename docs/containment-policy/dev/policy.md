@@ -44,7 +44,7 @@ sandbox.
 | `lifecycle` | Optional `destroyOnExit` (default `true`) and `preservePolicy` (default `false`) booleans. |
 | `fallback` | Optional `allowDaclMutation` boolean accepted for 1.x compatibility and ignored. Removing this accepted field requires a new major contract. |
 | `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent and a permitting administrative policy. |
-| `processContainer`, `lxc`, `seatbelt`, `wslc`, `windowsSandbox`, `hyperlight` | Backend-specific settings; only the section matching the selected backend is accepted. |
+| `processContainer`, `lxc`, `seatbelt`, `wslc`, `windowsSandbox`, `hyperlight`, `kata` | Backend-specific settings; only the section matching the selected backend is accepted. |
 | `test` | Optional development-only placeholder with an optional string `message`; it has no policy enforcement effect. |
 
 ### Process and filesystem
@@ -130,10 +130,11 @@ is absent. Do not assume another backend enforces an omitted UI policy.
 `"process"` resolves to ProcessContainer on Windows, Bubblewrap on Linux, or
 Seatbelt on macOS. `"vm"` resolves to Windows Sandbox on Windows. Explicit
 values are `"processcontainer"`, `"lxc"`, `"bubblewrap"`, `"seatbelt"`,
-`"windows_sandbox"`, `"microvm"`, `"hyperlight"`, `"isolation_session"`,
-and `"wslc"`. The old `appcontainer` / `appContainer` and `macos_sandbox`
-spellings are not accepted. Windows Sandbox, MicroVM, and Hyperlight require
-experimental authorization and suitable host/build support.
+`"windows_sandbox"`, `"microvm"`, `"hyperlight"`, `"kata"`,
+`"isolation_session"`, and `"wslc"`. The old `appcontainer` / `appContainer`
+and `macos_sandbox` spellings are not accepted. Windows Sandbox, MicroVM,
+Hyperlight, and Kata require experimental authorization and suitable host/build
+support.
 
 | Section | Supported fields and important constraints |
 |---|---|
@@ -144,6 +145,7 @@ experimental authorization and suitable host/build support.
 | `wslc` | Optional `image`, `imageTarPath`, `storagePath`, `targetOs` (strings), `cpuCount` and `memoryMb` (non-negative integers), `gpu` (boolean), and `portMappings` (array of `windowsPort` / `containerPort`, 1-65535, optional `protocol`: TCP only). These are create-and-run settings. |
 | `windowsSandbox` | Optional `idleTimeoutMs` (non-negative integer milliseconds), legacy `idleTimeout` (non-negative integer), and `daemonPipeName` (string). Compatibility fields, not live controls of the current execution path. |
 | `hyperlight` | Optional `runtime`: `agent` (default), `python`, `python-shell`, `node`, `bash`, or `dotnet-jit`. The command line supplies source for that guest runtime. |
+| `kata` | Required `rootfs` (absolute host path of a root filesystem directory or ext4 image) and optional `hypervisor`: `qemu` (default), `clh` (or `cloud-hypervisor`), `firecracker`, or `dragonball`. See the [Kata backend guide](../../backends/kata/kata-backend.md). |
 
 For Seatbelt, `profileOverride` replaces the generated profile, so
 `filesystem`, `network`, and `ui` restrictions in the request are not
@@ -157,7 +159,9 @@ restrict networking: its request must explicitly set **all three** actions to
 `"allow"` and cannot carry rules or a proxy. An empty or absent `network`
 section is rejected for IsolationSession. MicroVM networking support is
 described in the [NVX capability table](../../backends/nvx/nvx.md#supported-operations-and-policy).
-Hyperlight rejects a supplied `network` section. Windows Sandbox
+Hyperlight rejects a supplied `network` section. Kata supports only a deny-all
+posture (omitted, or every default `deny` with no rules) because the VM has no
+network interface; it rejects anything else. Windows Sandbox
 create-and-run execution blocks networking when
 `network` is omitted; it rejects supplied `network.egress` or
 `network.ingress` sections (even empty or deny-only), host filters, and
@@ -167,10 +171,11 @@ development contract.
 ## Container lifecycle operations
 
 Set `phase` to `provision`, `start`, `exec`, `stop`, or `deprovision`. These
-operations exist for **IsolationSession, WSLc, and Windows Sandbox** in this
-contract. `provision` requires a concrete `containment` and must omit
+operations exist for **IsolationSession, WSLc, Windows Sandbox, and Kata** in
+this contract. `provision` requires a concrete `containment` and must omit
 `sandboxId`; subsequent phases require the ID returned by provision
-(`iso:...`, `wslc:...`, or `wsb:...`) and infer the backend from its prefix.
+(`iso:...`, `wslc:...`, `wsb:...`, or `kata:...`) and infer the backend from its
+prefix.
 WSLc also supports `provision-session` and `deprovision-session`, which require
 `containment: "wslc"` and carry no `sandboxId`. Every phase requires `version`;
 all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
@@ -181,8 +186,9 @@ all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
 | `provision-session` / `wslc` | Optional `wslc.provisionSession.cpuCount`, `memoryMb`, and `gpu`; no process, filesystem, network, or UI policy. |
 | `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, `portMappings`, or `sessionId`. Port mappings require all-allow bridged networking; CPU/memory/GPU sizing belongs to the session, not the sandbox. No storage-path override. |
 | `provision` / `windows_sandbox` | Optional `filesystem` only. No network, UI, proxy, or backend-specific settings; provision stores the immutable filesystem policy. Requires experimental authorization. |
+| `provision` / `kata` | Required `kata` (`rootfs`, optional `hypervisor`); optional `filesystem` and `network`, fixed at provision. Only a deny-all network is accepted. Requires experimental authorization. |
 | `start`, `stop`, `deprovision` | Required `sandboxId`; no process or policy sections. |
-| `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. All three backends reject supplied network policy at exec and inherit their provision posture. IsolationSession and Windows Sandbox reject a proxy; WSLc accepts an exec proxy. |
+| `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. Windows backends and WSLc reject supplied network policy at exec and inherit their provision posture; Kata accepts only deny-all there. IsolationSession and Windows Sandbox reject a proxy; WSLc accepts an exec proxy. |
 | `deprovision-session` / `wslc` | Required `sessionId`; no process, filesystem, network, UI, or backend configuration. |
 
 ### WSLc sessions
