@@ -421,7 +421,7 @@ impl LivePty {
     }
 
     /// Read buffered startup diagnostics without waiting for more output.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn read_available_output(&self, limit: u64) -> std::io::Result<Vec<u8>> {
         let mut output = Vec::new();
         match (&self.primary).take(limit).read_to_end(&mut output) {
@@ -1691,7 +1691,7 @@ mod tests {
         assert_eq!(PtyOptions::POLL_INTERVAL, Duration::from_millis(500));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn live_pty_reads_bounded_startup_output_without_waiting() {
         let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
