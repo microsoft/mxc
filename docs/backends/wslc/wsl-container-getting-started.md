@@ -364,7 +364,7 @@ container and reports the run as failed, even when the run also timed out.
 
 A command that exits while a large amount of its input is still unread (more
 than the few hundred KiB the WSLc SDK buffers) completes late: the SDK reports
-its exit about 50 seconds after the command ends, and may drop output the
+its exit 30 seconds or more after the command ends, and may drop output the
 command wrote after its input backed up. When that happens the executor, or
 the SDK process's warnings, report that output may be incomplete. Even a
 command such as `head -n 1` that stops reading early is delayed this way, so

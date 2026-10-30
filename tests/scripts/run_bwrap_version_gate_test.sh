@@ -1,16 +1,5 @@
 #!/bin/bash
-# Bubblewrap version-gating test.
-#
-# `bwrap_version.rs` carries unit tests for parsing and comparison, but nothing
-# asserted the end-to-end behavior when `bwrap` is missing or too old. The
-# property that matters to a user is that the run stops with a readable,
-# actionable error instead of an opaque spawn failure ("No such file or
-# directory") or an "unknown option" from an old binary.
-#
-# Both cases are staged with a PATH shim rather than by touching the host's
-# real installation. The same config is also run unshimmed as a positive
-# control, so a failure below is attributable to the gate and not to a config
-# that could never have run.
+# Bubblewrap version gate and executable lookup.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +19,9 @@ CONFIG="$REPO_DIR/tests/configs/bubblewrap_version_gate.json"
 SHIM_DIR="$(mktemp -d)"
 SENTINEL="VERSION_GATE_WORKLOAD_RAN"
 
+# Must match the directories MXC searches after PATH.
+FALLBACK_DIRECTORIES=(/usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin)
+
 cleanup() { rm -rf "$SHIM_DIR"; }
 trap cleanup EXIT
 
@@ -43,7 +35,7 @@ assert_gated() {
     local out rc=0
     shift 2
     echo "Running Bubblewrap version-gate test: $label..."
-    out=$(env "$@" "$LXC_EXEC" --experimental "$CONFIG" 2>&1) || rc=$?
+    out=$("$@" 2>&1) || rc=$?
     if [ "$rc" = 0 ]; then
         echo "$out"
         fail "$label (the run was accepted)"
@@ -59,25 +51,55 @@ assert_gated() {
     echo "PASS: $label"
 }
 
-# Positive control: an empty shim dir is the only difference between this run
-# and the "absent" case below.
+# Positive control: the config runs with the host's own bwrap, so a refusal
+# below comes from the case it stages rather than from the config.
 echo "Running Bubblewrap version-gate test: control (real bwrap)..."
 if ! "$LXC_EXEC" --experimental "$CONFIG" 2>&1 | grep -qF "$SENTINEL"; then
     fail "control — the config did not run with a real bwrap on PATH."
 fi
 echo "PASS: control (real bwrap)"
 
-# PATH points at a directory with no `bwrap` in it. lxc-exec is invoked by
-# absolute path, so only the sandbox binary lookup is affected.
+REAL_BWRAP="$(command -v bwrap)"
+case " ${FALLBACK_DIRECTORIES[*]} " in
+    *" $(dirname "$REAL_BWRAP") "*)
+        echo "Running Bubblewrap version-gate test: a bwrap missing from PATH..."
+        if ! env PATH="$SHIM_DIR" "$LXC_EXEC" --experimental "$CONFIG" 2>&1 |
+            grep -qF "$SENTINEL"; then
+            fail "a bwrap missing from PATH was not found in $(dirname "$REAL_BWRAP")"
+        fi
+        echo "PASS: a bwrap missing from PATH is found in a standard directory"
+        ;;
+    *)
+        echo "NOTE: $REAL_BWRAP is outside the standard directories; not testing the fallback."
+        ;;
+esac
+
+# Absent everywhere: the real bwrap hides every standard directory from the
+# executor under test, which then has nothing left to find. Symlinked ones,
+# such as /bin on a merged /usr, are hidden through their targets.
+hidden_directories=()
+for directory in "${FALLBACK_DIRECTORIES[@]}"; do
+    if [ -d "$directory" ] && [ ! -L "$directory" ]; then
+        hidden_directories+=(--tmpfs "$directory")
+    fi
+done
 assert_gated "an absent bwrap is reported, not spawned into" \
-    "is not installed or not on PATH" \
-    "PATH=$SHIM_DIR"
+    "is not installed" \
+    "$REAL_BWRAP" --dev-bind / / "${hidden_directories[@]}" --setenv PATH "$SHIM_DIR" -- \
+    "$LXC_EXEC" --experimental "$CONFIG"
 
 # A shim that reports a version below the floor set by `--clearenv`.
 printf '#!/bin/sh\necho "bubblewrap 0.3.0"\n' > "$SHIM_DIR/bwrap"
 chmod +x "$SHIM_DIR/bwrap"
 assert_gated "a too-old bwrap is refused before any flag is passed to it" \
-    "is too old" \
-    "PATH=$SHIM_DIR:$PATH"
+    "$SHIM_DIR/bwrap is too old" \
+    env PATH="$SHIM_DIR:$PATH" "$LXC_EXEC" --experimental "$CONFIG"
+
+# A shim whose interpreter does not exist, so it cannot start.
+printf '#!/mxc-test-missing-interpreter\n' > "$SHIM_DIR/bwrap"
+chmod +x "$SHIM_DIR/bwrap"
+assert_gated "a broken bwrap earlier on PATH is not bypassed" \
+    "could not be executed" \
+    env PATH="$SHIM_DIR:$PATH" "$LXC_EXEC" --experimental "$CONFIG"
 
 echo "All Bubblewrap version-gate tests passed."

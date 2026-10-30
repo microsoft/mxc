@@ -114,3 +114,25 @@ if [ -z "$SANDBOX_NETNS" ] || [ "$SANDBOX_NETNS" = "$HOST_NETNS" ]; then
     exit 1
 fi
 echo "PASS: directional firewall enforces CIDR allow, deny precedence, and tamper resistance"
+
+# The rule tools often live in sbin directories a desktop session's PATH leaves
+# out.
+echo "Running Bubblewrap firewall test with no host tools on PATH..."
+mkdir -p "$WORK_DIR/no-tools"
+FIREWALL_RC=0
+FIREWALL_OUT=$(env PATH="$WORK_DIR/no-tools" "$LXC_EXEC" --experimental \
+    "$REPO_DIR/tests/configs/bubblewrap_network_firewall.json" 2>&1) || FIREWALL_RC=$?
+if [ "$FIREWALL_RC" -ne 0 ]; then
+    echo "$FIREWALL_OUT"
+    echo "FAIL: firewall sandbox with no tools on PATH exited $FIREWALL_RC."
+    exit 1
+fi
+for marker in ALLOWED_DEST_OK DENY_WINS_OK CAP_NET_ADMIN_DROPPED_OK \
+    TAMPER_REFUSED_OK TAMPER_INEFFECTIVE_OK; do
+    if ! grep -qF "$marker" <<<"$FIREWALL_OUT"; then
+        echo "$FIREWALL_OUT"
+        echo "FAIL: firewall workload with no tools on PATH did not report $marker."
+        exit 1
+    fi
+done
+echo "PASS: directional firewall enforcement with no host tools on PATH"

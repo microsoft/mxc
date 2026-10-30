@@ -12,15 +12,15 @@
 //! The parsing half is pure (no I/O), so it is unit-tested on every host; only
 //! [`probe_bwrap`] shells out.
 
-use std::ffi::OsStr;
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{mpsc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::bwrap_common::host_tools::{self, LookupError};
 use crate::bwrap_common::probe_exec::{self, CapturedOutput};
 
 /// The minimum `bwrap` version the Bubblewrap backend supports.
@@ -156,13 +156,13 @@ impl fmt::Display for BwrapVersion {
 pub enum BwrapUnavailable {
     /// This build cannot generate a seccomp program for the host architecture.
     UnsupportedArchitecture(String),
-    /// No `bwrap` executable was found on `PATH`.
+    /// No `bwrap` was found on `PATH` or in the standard system directories.
     NotFound,
     /// The `bwrap --version` probe failed to start or did not complete
     /// successfully (e.g. a permissions problem or a non-zero exit). Distinct
     /// from [`Self::NotFound`] so observed failures preserve their underlying
-    /// cause. An executable found on `PATH` with a missing loader or shebang
-    /// target maps here rather than to [`Self::NotFound`].
+    /// cause. A `bwrap` file that is not executable, or whose loader or
+    /// shebang target is missing, maps here rather than to [`Self::NotFound`].
     ProbeFailed {
         /// Exit status of `bwrap --version`, when the process ran at all.
         status: Option<i32>,
@@ -173,7 +173,7 @@ pub enum BwrapUnavailable {
     /// closed here: without a version we cannot assert the required flags exist.
     UnrecognizedVersion(String),
     /// `bwrap` is present but predates [`MIN_BWRAP_VERSION`].
-    TooOld(BwrapVersion),
+    TooOld { found: BwrapVersion, path: PathBuf },
 }
 
 impl fmt::Display for BwrapUnavailable {
@@ -186,9 +186,10 @@ impl fmt::Display for BwrapUnavailable {
             ),
             Self::NotFound => write!(
                 f,
-                "Bubblewrap (bwrap) is not installed or not on PATH. \
+                "Bubblewrap (bwrap) is not installed: it {}. \
                  Install it via your package manager (e.g., apt install bubblewrap). \
-                 Version {MIN_BWRAP_VERSION} or newer is required."
+                 Version {MIN_BWRAP_VERSION} or newer is required.",
+                LookupError::NotFound
             ),
             Self::ProbeFailed { status, detail } => {
                 write!(
@@ -216,17 +217,24 @@ impl fmt::Display for BwrapUnavailable {
                  `bwrap --version` printed {output:?}. \
                  Version {MIN_BWRAP_VERSION} or newer is required."
             ),
-            Self::TooOld(found) => write!(
+            Self::TooOld { found, path } => write!(
                 f,
-                "Bubblewrap (bwrap) {found} is too old: version {MIN_BWRAP_VERSION} or newer is \
-                 required ({MIN_BWRAP_VERSION_REASON}). \
-                 Upgrade the bubblewrap package."
+                "Bubblewrap (bwrap) {found} at {} is too old: version {MIN_BWRAP_VERSION} or \
+                 newer is required ({MIN_BWRAP_VERSION_REASON}). \
+                 Upgrade the bubblewrap package.",
+                path.display()
             ),
         }
     }
 }
 
 impl std::error::Error for BwrapUnavailable {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbedBwrap {
+    pub(crate) path: PathBuf,
+    pub(crate) version: BwrapVersion,
+}
 
 /// Probe the host for a usable `bwrap`.
 ///
@@ -238,7 +246,9 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
         &CACHED_BWRAP_VERSION,
         cached_probe_gate(),
         BWRAP_VERSION_TIMEOUT,
-        probe_bwrap_uncached_until,
+        |deadline, timeout| {
+            probe_bwrap_uncached_until(deadline, timeout).map(|bwrap| bwrap.version)
+        },
     )
 }
 
@@ -273,7 +283,7 @@ where
 /// Execution validation uses this so a prior platform-support query cannot
 /// approve a different executable after `PATH` or its contents change.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn probe_bwrap_uncached() -> Result<BwrapVersion, BwrapUnavailable> {
+pub(crate) fn probe_bwrap_uncached() -> Result<ProbedBwrap, BwrapUnavailable> {
     ensure_filter_architecture()?;
     probe_bwrap_uncached_until(
         Instant::now() + BWRAP_VERSION_TIMEOUT,
@@ -296,16 +306,23 @@ fn ensure_filter_architecture() -> Result<(), BwrapUnavailable> {
 fn probe_bwrap_uncached_until(
     deadline: Instant,
     timeout: Duration,
-) -> Result<BwrapVersion, BwrapUnavailable> {
+) -> Result<ProbedBwrap, BwrapUnavailable> {
     probe_bwrap_uncached_with(|| run_bwrap_version_until(deadline, timeout))
 }
 
-fn probe_bwrap_uncached_with<F>(run: F) -> Result<BwrapVersion, BwrapUnavailable>
+fn probe_bwrap_uncached_with<F>(run: F) -> Result<ProbedBwrap, BwrapUnavailable>
 where
-    F: FnOnce() -> Result<ProbeOutput, BwrapUnavailable>,
+    F: FnOnce() -> Result<(PathBuf, ProbeOutput), BwrapUnavailable>,
 {
-    let output = run()?;
-    check_probe_output(output)
+    let (path, output) = run()?;
+    let version = check_probe_output(output)?;
+    if version < MIN_BWRAP_VERSION {
+        return Err(BwrapUnavailable::TooOld {
+            found: version,
+            path,
+        });
+    }
+    Ok(ProbedBwrap { path, version })
 }
 
 #[derive(Debug)]
@@ -319,7 +336,7 @@ struct ProbeOutput {
 fn run_bwrap_version_until(
     deadline: Instant,
     timeout: Duration,
-) -> Result<ProbeOutput, BwrapUnavailable> {
+) -> Result<(PathBuf, ProbeOutput), BwrapUnavailable> {
     let gate = probe_gate();
     let Some(gate_permit) = gate.acquire_permit_until(deadline) else {
         return Err(probe_timeout(timeout));
@@ -330,8 +347,15 @@ fn run_bwrap_version_until(
         .name("bwrap-probe".to_string())
         .spawn(move || {
             let _gate_permit = gate_permit;
-            let result =
-                run_version_command_until(Path::new("bwrap"), &["--version"], deadline, timeout);
+
+            // The lookup runs on this worker too, so a stalled filesystem
+            // cannot hold the caller past its deadline.
+            let result = host_tools::find("bwrap")
+                .map_err(lookup_failure)
+                .and_then(|path| {
+                    run_version_command_until(&path, &["--version"], deadline, timeout)
+                        .map(|output| (path, output))
+                });
             let _ = sender.send(result);
         });
     if let Err(err) = worker {
@@ -373,10 +397,9 @@ fn run_version_command_until(
     timeout: Duration,
 ) -> Result<ProbeOutput, BwrapUnavailable> {
     // The public probe runs this entire operation in a deadline-watched worker,
-    // so PATH lookup and spawn are bounded without assuming a fixed `env` path.
-    // `probe_exec` owns the process group, the poll-bounded readers and the
-    // termination sweep; this layer only decides what each outcome *means* for
-    // `bwrap` specifically.
+    // so the spawn is bounded too. `probe_exec` owns the process group, the
+    // poll-bounded readers and the termination sweep; this layer only decides
+    // what each outcome *means* for `bwrap` specifically.
     let mut command = Command::new(executable);
     command.args(args);
 
@@ -434,6 +457,16 @@ fn finish_probe(
     })
 }
 
+fn lookup_failure(error: LookupError) -> BwrapUnavailable {
+    match error {
+        LookupError::NotFound => BwrapUnavailable::NotFound,
+        not_executable @ LookupError::NotExecutable(_) => BwrapUnavailable::ProbeFailed {
+            status: None,
+            detail: format!("`bwrap` {not_executable}"),
+        },
+    }
+}
+
 fn classify_spawn_failure(executable: &Path, err: io::Error) -> BwrapUnavailable {
     if err.kind() != io::ErrorKind::NotFound {
         return BwrapUnavailable::ProbeFailed {
@@ -441,45 +474,16 @@ fn classify_spawn_failure(executable: &Path, err: io::Error) -> BwrapUnavailable
             detail: err.to_string(),
         };
     }
-
-    if executable_mentions_path(executable) {
-        return if executable.exists() {
-            BwrapUnavailable::ProbeFailed {
-                status: None,
-                detail: format!(
-                    "`{}` was found but could not be executed ({err}); check for a missing interpreter or loader",
-                    executable.display()
-                ),
-            }
-        } else {
-            BwrapUnavailable::NotFound
-        };
+    if !executable.exists() {
+        return BwrapUnavailable::NotFound;
     }
-
-    if command_is_on_path(executable) {
-        return BwrapUnavailable::ProbeFailed {
-            status: None,
-            detail: format!(
-                "`{}` was found on PATH but could not be executed ({err}); check for a missing interpreter or loader",
-                executable.display()
-            ),
-        };
+    BwrapUnavailable::ProbeFailed {
+        status: None,
+        detail: format!(
+            "`{}` was found but could not be executed ({err}); check for a missing interpreter or loader",
+            executable.display()
+        ),
     }
-    BwrapUnavailable::NotFound
-}
-
-fn executable_mentions_path(executable: &Path) -> bool {
-    executable.is_absolute() || executable.components().count() > 1
-}
-
-fn command_is_on_path(executable: &Path) -> bool {
-    std::env::var_os("PATH")
-        .map(|path| path_contains_executable(executable, &path))
-        .unwrap_or(false)
-}
-
-fn path_contains_executable(executable: &Path, path: &OsStr) -> bool {
-    std::env::split_paths(path).any(|entry| entry.join(executable).is_file())
 }
 
 fn probe_internal_error(detail: &str) -> BwrapUnavailable {
@@ -502,17 +506,9 @@ fn check_probe_output(output: ProbeOutput) -> Result<BwrapVersion, BwrapUnavaila
     check_version_output(&stdout)
 }
 
-/// Validate a raw `bwrap --version` output string against
-/// [`MIN_BWRAP_VERSION`]. Split out from [`probe_bwrap`] so the decision logic
-/// is testable without a `bwrap` binary on the host.
 fn check_version_output(output: &str) -> Result<BwrapVersion, BwrapUnavailable> {
-    let version = parse_version(output)
-        .ok_or_else(|| BwrapUnavailable::UnrecognizedVersion(output.trim().to_string()))?;
-
-    if version < MIN_BWRAP_VERSION {
-        return Err(BwrapUnavailable::TooOld(version));
-    }
-    Ok(version)
+    parse_version(output)
+        .ok_or_else(|| BwrapUnavailable::UnrecognizedVersion(output.trim().to_string()))
 }
 
 /// Parse the version out of a `bwrap --version` line such as
@@ -579,6 +575,22 @@ fn leading_number(component: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
+    const TEST_BWRAP: &str = "/usr/bin/bwrap";
+
+    fn probe_with_banner(banner: &str) -> Result<ProbedBwrap, BwrapUnavailable> {
+        probe_bwrap_uncached_with(|| {
+            Ok((
+                PathBuf::from(TEST_BWRAP),
+                ProbeOutput {
+                    success: true,
+                    status: Some(0),
+                    stdout: banner.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                },
+            ))
+        })
+    }
+
     #[test]
     fn parses_standard_version_output() {
         assert_eq!(
@@ -618,8 +630,11 @@ mod tests {
         // Regression: reading the leading version accepted this as 0.5.0, even
         // though the installed bwrap is 0.4.1 and has no `--clearenv`.
         assert_eq!(
-            check_version_output("bubblewrap 0.5.0+really0.4.1"),
-            Err(BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1)))
+            probe_with_banner("bubblewrap 0.5.0+really0.4.1"),
+            Err(BwrapUnavailable::TooOld {
+                found: BwrapVersion::new(0, 4, 1),
+                path: PathBuf::from(TEST_BWRAP),
+            })
         );
     }
 
@@ -684,11 +699,11 @@ mod tests {
     #[test]
     fn accepts_minimum_and_newer_versions() {
         assert_eq!(
-            check_version_output("bubblewrap 0.5.0"),
+            probe_with_banner("bubblewrap 0.5.0").map(|bwrap| bwrap.version),
             Ok(MIN_BWRAP_VERSION)
         );
         assert_eq!(
-            check_version_output("bubblewrap 0.11.2"),
+            probe_with_banner("bubblewrap 0.11.2").map(|bwrap| bwrap.version),
             Ok(BwrapVersion::new(0, 11, 2))
         );
     }
@@ -696,9 +711,19 @@ mod tests {
     #[test]
     fn rejects_versions_below_the_minimum() {
         // 0.4.1 has `--ro-bind-try` but not `--clearenv`.
+        let error = probe_with_banner("bubblewrap 0.4.1").unwrap_err();
         assert_eq!(
-            check_version_output("bubblewrap 0.4.1"),
-            Err(BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1)))
+            error,
+            BwrapUnavailable::TooOld {
+                found: BwrapVersion::new(0, 4, 1),
+                path: PathBuf::from(TEST_BWRAP),
+            }
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("0.4.1 at /usr/bin/bwrap is too old"),
+            "{error}"
         );
     }
 
@@ -736,7 +761,10 @@ mod tests {
                 detail: "permission denied".to_string(),
             },
             BwrapUnavailable::UnrecognizedVersion("junk".to_string()),
-            BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1)),
+            BwrapUnavailable::TooOld {
+                found: BwrapVersion::new(0, 4, 1),
+                path: PathBuf::from(TEST_BWRAP),
+            },
         ] {
             let message = err.to_string();
             assert!(
@@ -751,6 +779,32 @@ mod tests {
         let message = BwrapUnavailable::UnsupportedArchitecture("riscv64".to_string()).to_string();
         assert!(message.contains("riscv64"));
         assert!(message.contains("seccomp address-family filter"));
+    }
+
+    #[test]
+    fn not_found_names_every_place_bwrap_was_looked_for() {
+        let message = BwrapUnavailable::NotFound.to_string();
+        assert!(message.contains("PATH"), "{message}");
+        for directory in host_tools::FALLBACK_DIRECTORIES {
+            assert!(message.contains(directory), "{message}");
+        }
+    }
+
+    #[test]
+    fn an_unexecutable_bwrap_is_reported_as_broken_with_its_path() {
+        let failure = lookup_failure(LookupError::NotExecutable(PathBuf::from("/opt/x/bwrap")));
+        assert!(
+            matches!(
+                &failure,
+                BwrapUnavailable::ProbeFailed { status: None, detail }
+                    if detail.contains("/opt/x/bwrap") && detail.contains("not executable")
+            ),
+            "{failure:?}"
+        );
+        assert_eq!(
+            lookup_failure(LookupError::NotFound),
+            BwrapUnavailable::NotFound
+        );
     }
 
     #[test]
@@ -844,12 +898,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn missing_binary_spawn_failure_is_classified_as_not_found() {
-        // A spawn failure with ENOENT means the binary is absent from PATH.
-        // Regression: when the probe used `/usr/bin/env bwrap`, a missing
-        // `/usr/bin/env` (e.g. NixOS) produced ProbeFailed instead of NotFound.
+    fn a_bwrap_removed_after_the_lookup_is_classified_as_not_found() {
+        let dir = tempfile::tempdir().unwrap();
         let error = run_version_command_with_timeout(
-            std::path::Path::new("this-binary-does-not-exist-on-any-path"),
+            &dir.path().join("bwrap"),
             &["--version"],
             Duration::from_secs(1),
         )
@@ -1023,16 +1075,25 @@ mod tests {
 
     #[test]
     fn uncached_probe_maps_injected_process_outcomes() {
-        let version = probe_bwrap_uncached_with(|| {
-            Ok(ProbeOutput {
-                success: true,
-                status: Some(0),
-                stdout: b"bubblewrap 0.5.0\n".to_vec(),
-                stderr: Vec::new(),
-            })
+        let bwrap = probe_bwrap_uncached_with(|| {
+            Ok((
+                PathBuf::from("/usr/sbin/bwrap"),
+                ProbeOutput {
+                    success: true,
+                    status: Some(0),
+                    stdout: b"bubblewrap 0.5.0\n".to_vec(),
+                    stderr: Vec::new(),
+                },
+            ))
         })
         .unwrap();
-        assert_eq!(version, MIN_BWRAP_VERSION);
+        assert_eq!(
+            bwrap,
+            ProbedBwrap {
+                path: PathBuf::from("/usr/sbin/bwrap"),
+                version: MIN_BWRAP_VERSION,
+            }
+        );
 
         let failure = BwrapUnavailable::ProbeFailed {
             status: Some(126),
