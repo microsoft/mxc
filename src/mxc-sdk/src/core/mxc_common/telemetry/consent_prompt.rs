@@ -72,7 +72,9 @@ mod tests {
             "Help improve MXC and other Microsoft product including Windows by sharing optional \
              diagnostic data with Microsoft.\n\n\
              If enabled, MXC sends diagnostic information about product usage, performance, and \
-             reliability. MXC does not send your commands, file paths, credentials, or other \
+             reliability, including a random session ID that links events from the same \
+             container lifecycle. \
+             MXC does not send your commands, full file paths, credentials, or other \
              customer content."
         );
         assert_eq!(prompt.affirmative_label.text, "Yes");

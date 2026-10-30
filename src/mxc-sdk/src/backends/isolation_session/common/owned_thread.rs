@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::process_util::{OwnedHandle, SendOwnedHandle};
+use crate::mxc_common::telemetry::session;
 
 use windows::Win32::Foundation::{ERROR_NO_TOKEN, HANDLE};
 use windows::Win32::Security::{
@@ -61,10 +62,12 @@ pub(super) fn call<T: Send>(
     let _mta = MtaReference::acquire()?;
     let sink = Logger::inherit_thread_diagnostic_sink();
     let sink = sink.has_diagnostic_sink().then_some(sink);
+    let telemetry_context = session::capture();
     let joined = std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name(THREAD_NAME.to_string())
             .spawn_scoped(scope, move || {
+                let _session = session::resume(telemetry_context);
                 if let Some(token) = &impersonation.token {
                     // SAFETY: `token` is a live impersonation token; `None`
                     // targets the current thread.
@@ -297,6 +300,76 @@ mod tests {
 
     fn sees_a_sink() -> bool {
         Logger::inherit_thread_diagnostic_sink().has_diagnostic_sink()
+    }
+
+    #[test]
+    fn piped_exec_workers_preserve_telemetry_authorization_and_attribution() {
+        use std::os::windows::io::AsRawHandle;
+
+        use crate::mxc_common::exec_stream::ExecSandboxProcess;
+        use crate::mxc_common::sandbox_process::SandboxProcess;
+        use crate::mxc_common::state_aware_backend::{null_pipe_handle, ExecHandle, ExecOutcome};
+        use crate::mxc_common::telemetry::{self, events::test_sink, LearningMode, ProcessEvent};
+
+        let store = tempfile::tempdir().unwrap();
+        let environment = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        environment.set_policy_value(3);
+        telemetry::consent::set_consent(true, "test").unwrap();
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        let mut logger = Logger::new(Mode::Buffer);
+        let _other_request =
+            session::start_with_learning_mode(true, "", LearningMode::Enforcement, &mut logger);
+        assert!(crate::mxc_telemetry::init("test", "dev"));
+
+        for (active, vector) in [(true, ""), (false, ""), (true, "invalid")] {
+            let _invocation = session::start_with_learning_mode(
+                active,
+                vector,
+                LearningMode::Learning,
+                &mut logger,
+            );
+            let expected_id = session::current();
+            let expected_mode = session::learning_mode();
+            let impersonation = Impersonation::of_this_thread().unwrap();
+            let (stdout_read, stdout_write) = std::io::pipe().unwrap();
+            let handle = ExecHandle {
+                stdout: HANDLE(stdout_read.as_raw_handle()),
+                stderr: null_pipe_handle(),
+                stdin: null_pipe_handle(),
+                stdin_closer: None,
+                waiter: Box::new(move || {
+                    call(&impersonation, || {
+                        assert_eq!(session::current(), expected_id);
+                        assert_eq!(session::learning_mode(), expected_mode);
+                        assert_eq!(session::invocation_disabled(), !active);
+                        test_sink::install();
+                        telemetry::log_process_event("synthetic", 42, ProcessEvent::Exited(7));
+                        let events = test_sink::take_requirements();
+                        test_sink::clear();
+                        assert_eq!(events.len(), usize::from(active));
+                        if active {
+                            assert_eq!(
+                                events[0].session_id,
+                                expected_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string())
+                            );
+                            assert_eq!(events[0].name, "MXC.ProcessExited");
+                        }
+                        Ok(())
+                    })
+                    .map_err(super::super::error::map_lifecycle_error)?;
+                    Ok(ExecOutcome::Exited(7))
+                }),
+                terminator: Box::new(|| Ok(())),
+            };
+            let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+            drop(stdout_write);
+            assert_eq!(process.wait().unwrap(), 7);
+            assert_eq!(session::current(), expected_id);
+            assert_eq!(session::invocation_disabled(), !active);
+        }
+        crate::mxc_telemetry::shutdown();
     }
 
     #[test]

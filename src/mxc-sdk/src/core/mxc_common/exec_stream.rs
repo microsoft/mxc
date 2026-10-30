@@ -272,14 +272,16 @@ impl ExecSandboxProcess {
         // exec we are about to terminate. On failure the slot still holds it.
         let waiter_slot = Arc::new(Mutex::new(Some(waiter)));
         let thread_slot = Arc::clone(&waiter_slot);
+        let telemetry_context = super::telemetry::session::capture();
         let spawned = std::thread::Builder::new()
             .name("mxc-exec-waiter".to_string())
-            .spawn(
-                move || match thread_slot.lock().ok().and_then(|mut w| w.take()) {
+            .spawn(move || {
+                let _session = super::telemetry::session::resume(telemetry_context);
+                match thread_slot.lock().ok().and_then(|mut w| w.take()) {
                     Some(waiter) => waiter(),
                     None => Err(MxcError::backend_error("exec waiter was already consumed")),
-                },
-            );
+                }
+            });
 
         let waiter_thread = match spawned {
             Ok(thread) => thread,
@@ -957,6 +959,44 @@ mod tests {
     fn classify_stream_passes_through_a_successful_wrap() {
         let got = classify_stream(false, || Some(7u8), "stdout").unwrap();
         assert_eq!(got, Some(7));
+    }
+
+    #[test]
+    fn exec_waiter_preserves_telemetry_context_for_enabled_and_disabled_requests() {
+        use crate::mxc_common::logger::{Logger, Mode};
+        use crate::mxc_common::telemetry::{session, LearningMode};
+
+        for (active, vector) in [(false, ""), (true, ""), (true, "invalid")] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let _scope = session::start_with_learning_mode(
+                active,
+                vector,
+                LearningMode::Learning,
+                &mut logger,
+            );
+            let expected_id = session::current();
+            let expected_mode = session::learning_mode();
+            let (stdout_read, stdout_write) = std::io::pipe().unwrap();
+            let handle = ExecHandle {
+                stdin_closer: None,
+                stdout: reader_handle(&stdout_read),
+                stderr: null_pipe_handle(),
+                stdin: null_pipe_handle(),
+                waiter: Box::new(move || {
+                    assert_eq!(session::current(), expected_id);
+                    assert_eq!(session::learning_mode(), expected_mode);
+                    assert_eq!(session::invocation_disabled(), !active);
+                    Ok(ExecOutcome::Exited(7))
+                }),
+                terminator: Box::new(|| Ok(())),
+            };
+            let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+            drop(stdout_write);
+            assert_eq!(process.wait().unwrap(), 7);
+            assert_eq!(session::current(), expected_id);
+            assert_eq!(session::learning_mode(), expected_mode);
+            assert_eq!(session::invocation_disabled(), !active);
+        }
     }
 
     /// A stream the backend named but that cannot be duplicated is a setup

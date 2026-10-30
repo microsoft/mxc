@@ -7,15 +7,24 @@
     redirects before any MXC write, grants consent through the canonical
     session-bound presenter protocol, captures the public MXC ETW provider,
     and restores all process/machine state in finally.
+
+.PARAMETER IsolationSessionLifecycle
+    Captures two real IsolationSession lifecycles through the existing lifecycle
+    suite instead of the create-and-run smoke request. Requires an available
+    IsolationSession backend and Administrator; missing prerequisites fail.
+    The executor must be a local-only debug build with test-support and
+    isolation_session features.
 #>
 
 [CmdletBinding()]
 param(
     [string]$BinDir,
-    [switch]$SkipClean
+    [switch]$SkipClean,
+    [switch]$IsolationSessionLifecycle
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib\TelemetryEtwAssertions.ps1')
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $srcDir = Join-Path $repoRoot 'src'
 if (-not $BinDir) {
@@ -35,7 +44,7 @@ if ($wxcExe -match '\\release\\') {
 $expectedBody = @'
 Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
 
-If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability, including a random session ID that links events from the same container lifecycle. MXC does not send your commands, full file paths, credentials, or other customer content.
 '@ -replace "`r`n", "`n"
 
 $configFile = Join-Path $repoRoot 'tests\examples\28_telemetry_enabled.json'
@@ -92,7 +101,7 @@ function Invoke-CanonicalGrant {
     if ($presentation.result -ne 'presentationRequired' -or -not $presentation.challenge -or -not $presentation.prompt) {
         throw "Unexpected consent presentation: $presentationLine"
     }
-    if ($presentation.prompt.resourceVersion -ne 3 -or
+    if ($presentation.prompt.resourceVersion -ne 4 -or
         $presentation.prompt.locale -ne 'en-US' -or
         $presentation.prompt.title.text -ne 'Help improve Microsoft Products' -or
         $presentation.prompt.body.text -ne $expectedBody -or
@@ -125,6 +134,7 @@ function Invoke-CanonicalGrant {
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    if ($IsolationSessionLifecycle) { throw 'Administrator privileges are required for lifecycle ETW capture.' }
     Write-Host 'SKIPPED: Administrator privileges are required for ETW session creation.' -ForegroundColor Yellow
     exit 0
 }
@@ -163,7 +173,7 @@ try {
             consent = $seed
             source = 'etw-smoke-proof'
             promptedMxcVersion = '0.0.0-smoke'
-            promptResourceVersion = 3
+            promptResourceVersion = 4
             promptLocale = 'en-US'
             updatedAtEpoch = 0
         }
@@ -191,56 +201,44 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create ETW trace session.' }
     $traceStarted = $true
 
-    $executionTimeoutSeconds = 60
-    $proc = Start-Process -FilePath $wxcExe -ArgumentList '--debug', $configFile -PassThru -NoNewWindow
-    # Caching the handle keeps ExitCode readable after the process exits.
-    $null = $proc.Handle
-    if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
-        Stop-Process -Id $proc.Id -Force
-        $proc.WaitForExit()
-        throw "wxc-exec timed out after $executionTimeoutSeconds seconds"
+    if ($IsolationSessionLifecycle) {
+        $manifestFile = Join-Path $tempDir 'lifecycle-invocations.json'
+        $global:LASTEXITCODE = 0
+        & (Join-Path $PSScriptRoot 'run_isolation_session_state_aware_tests.ps1') `
+            -WxcExePath $wxcExe -TelemetryResultsPath $manifestFile
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $manifestFile)) {
+            throw 'IsolationSession lifecycle telemetry scenario did not complete.'
+        }
+        $invocations = @(Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json)
+        $remainingRecords = @(Get-ChildItem -LiteralPath (Join-Path $tempDir 'mxc\correlation') -Filter '*.cv' -ErrorAction Stop)
+        if ($remainingRecords.Count -ne 0) { throw 'Deprovision left lifecycle correlation records behind.' }
+    } else {
+        $executionTimeoutSeconds = 60
+        $proc = Start-Process -FilePath $wxcExe -ArgumentList '--debug', $configFile -PassThru -NoNewWindow
+        # Caching the handle keeps ExitCode readable after the process exits.
+        $null = $proc.Handle
+        if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
+            Stop-Process -Id $proc.Id -Force
+            $proc.WaitForExit()
+            throw "wxc-exec timed out after $executionTimeoutSeconds seconds"
+        }
+        Write-Host "wxc-exec exited with code $($proc.ExitCode)"
+        $invocations = @([pscustomobject]@{ ProcessId = $proc.Id })
     }
-    Write-Host "wxc-exec exited with code $($proc.ExitCode)"
     Start-Sleep -Seconds 2
 
     logman stop $sessionName -ets 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to stop ETW trace session.' }
     $traceStarted = $false
     if (-not (Test-Path $etlFile) -or (Get-Item $etlFile).Length -eq 0) {
         throw 'ETL output was absent or empty.'
     }
     tracerpt "$etlFile" -o "$xmlFile" -of XML -lr -y 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to decode ETW trace.' }
     if (-not (Test-Path $xmlFile)) { throw 'tracerpt did not produce XML.' }
     $xml = Get-Content $xmlFile -Raw
-    $eventCount = ([regex]::Matches($xml, '<Event ')).Count
-    if ($eventCount -eq 0) {
-        throw 'No parseable MXC events were captured.'
-    }
-    if ($xml -notmatch [regex]::Escape($providerGuid)) {
-        throw "The ETL contains events, but none identify the Microsoft.MXC provider ($providerGuid)."
-    }
-    if ($xml -notmatch 'MXC\.Execution|MXC\.Error') {
-        throw 'Captured events did not preserve the MXC.Execution/MXC.Error identities.'
-    }
-    $expectedFields = @(
-        'PartA_PrivacyProduct',
-        'PartA_PrivacyDataCategory',
-        'PartA_PrivTags',
-        'mxc.sandbox_kind',
-        'mxc.backend',
-        'mxc.exit_code',
-        'mxc.outcome',
-        'mxc.duration_ms'
-    )
-    $eventBlocks = [regex]::Matches($xml, '(?s)<Event\b.*?</Event>')
-    $matchingEvent = $eventBlocks | Where-Object {
-        $eventXml = $_.Value
-        -not ($expectedFields | Where-Object {
-            $eventXml -notmatch [regex]::Escape($_)
-        })
-    } | Select-Object -First 1
-    if ($null -eq $matchingEvent) {
-        throw "No MXC event contained all required telemetry fields: $($expectedFields -join ', ')."
-    }
+    Assert-TelemetryExecutionTrace -XmlText $xml -ProviderGuid $providerGuid `
+        -Invocations $invocations -RequireLifecycles:$IsolationSessionLifecycle
     Write-Host 'PASSED: isolated MXC ETW capture smoke test' -ForegroundColor Green
 } finally {
     if ($traceStarted) { logman stop $sessionName -ets 2>$null | Out-Null }

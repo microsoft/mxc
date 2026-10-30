@@ -364,6 +364,13 @@ function Invoke-IsolationSessionSuites {
     $suites = [ordered]@{
         'one-shot' = { Invoke-ScriptSuite 'run_isolation_session_tests.ps1' }
         'state-aware' = { Invoke-ScriptSuite 'run_isolation_session_state_aware_tests.ps1' }
+        'lifecycle telemetry' = {
+            $telemetryBin = Join-Path $binaryDirectoryPath 'telemetry-test'
+            Assert-File -Path (Join-Path $telemetryBin 'wxc-exec.exe')
+            Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_telemetry_etw_smoke_test.ps1') `
+                -Arguments @{ BinDir = $telemetryBin; IsolationSessionLifecycle = $true; SkipClean = $true } |
+                Out-Host
+        }
         'Node' = {
             Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'isolation-session' -TestFile 'isolation-session-state-aware.test.js' `
                 -RequiredTests @('V1.Dev preserves lifecycle responses, captured exec, pipes, PTY, and caller ownership',

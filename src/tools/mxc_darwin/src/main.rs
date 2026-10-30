@@ -145,6 +145,16 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
         telemetry::install_panic_hook();
     }
 
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: request.containment.wire_name(),
+            phase: "",
+            correlation_vector: "",
+        },
+    );
+
     // Backend selection lives in `mxc_sdk::mxc_engine::run`, the single home for one-shot
     // dispatch. On macOS it always resolves to Seatbelt (logging a note if the
     // request asked for a different backend) and runs it to completion.

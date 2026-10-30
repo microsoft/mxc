@@ -298,83 +298,27 @@ fn redact_environment_values(value: &mut serde_json::Value) {
 /// Returns `"unknown"` if the parent PID cannot be determined, or
 /// `"?:<pid>"` if the parent process name cannot be resolved.
 pub fn get_parent_process_info() -> String {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use crate::mxc_common::process_util::{parent_process_id, process_image_path, OwnedHandle};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
-    let my_pid = std::process::id();
-
-    // Take a snapshot to find our parent PID.
-    // SAFETY: CreateToolhelp32Snapshot with TH32CS_SNAPPROCESS and pid 0
-    // takes a snapshot of all processes. No invalid memory access is possible.
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    let snapshot = match snapshot {
-        Ok(h) => h,
+    let ppid = match parent_process_id() {
+        Ok(pid) => pid,
         Err(_) => return "unknown".to_string(),
     };
 
-    let mut entry = PROCESSENTRY32W {
-        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-        ..Default::default()
-    };
-
-    let mut parent_pid = None;
-    // SAFETY: `entry` is initialized with correct `dwSize` and `snapshot` is a valid handle
-    // returned by CreateToolhelp32Snapshot above. CloseHandle is called on the valid snapshot.
-    unsafe {
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
-            loop {
-                if entry.th32ProcessID == my_pid {
-                    parent_pid = Some(entry.th32ParentProcessID);
-                    break;
-                }
-                if Process32NextW(snapshot, &mut entry).is_err() {
-                    break;
-                }
-            }
+    // SAFETY: The returned handle is checked and immediately wrapped for owned cleanup.
+    let exe_name = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, ppid) } {
+        Ok(handle) => {
+            let handle = OwnedHandle::new(handle);
+            process_image_path(handle.get())
+                .ok()
+                .and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "?".to_string())
         }
-        let _ = CloseHandle(snapshot);
-    }
-
-    let ppid = match parent_pid {
-        Some(p) => p,
-        None => return "unknown".to_string(),
-    };
-
-    // Resolve the parent's full image path.
-    // SAFETY: OpenProcess returns a valid handle or an error (checked via match).
-    // QueryFullProcessImageNameW writes into a stack-allocated buffer with bounded length.
-    // CloseHandle is called on the valid process handle before returning.
-    let exe_name = unsafe {
-        let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, ppid);
-        match proc {
-            Ok(handle) => {
-                let mut buf = [0u16; 1024];
-                let mut len = buf.len() as u32;
-                let name = if QueryFullProcessImageNameW(
-                    handle,
-                    PROCESS_NAME_FORMAT(0),
-                    windows::core::PWSTR(buf.as_mut_ptr()),
-                    &mut len,
-                )
-                .is_ok()
-                {
-                    let full = crate::mxc_common::string_util::from_wide(&buf[..len as usize]);
-                    full.rsplit('\\').next().unwrap_or(&full).to_string()
-                } else {
-                    "?".to_string()
-                };
-                let _ = CloseHandle(handle);
-                name
-            }
-            Err(_) => "?".to_string(),
-        }
+        Err(_) => "?".to_string(),
     };
 
     format!("{exe_name}:{ppid}")

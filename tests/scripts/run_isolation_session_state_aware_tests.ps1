@@ -33,6 +33,11 @@
     to <repo>/tests/configs. Override on the VM where the deployed layout
     differs from the repo layout.
 
+.PARAMETER TelemetryResultsPath
+    Runs only two bounded, real container lifecycles with telemetry enabled and
+    records executor PIDs and phases for the isolated ETW capture harness.
+    Use through run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle.
+
 .EXAMPLE
     .\run_isolation_session_state_aware_tests.ps1
     .\run_isolation_session_state_aware_tests.ps1 -WxcExePath C:\test\wxc-exec.exe -ConfigDir C:\test\tests\configs
@@ -40,11 +45,18 @@
 
 param(
     [string]$WxcExePath,
-    [string]$ConfigDir
+    [string]$ConfigDir,
+    [string]$TelemetryResultsPath
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if ($TelemetryResultsPath -and
+    ($env:MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID -ne "$PID" -or
+     $env:MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID -ne "$PID" -or
+     -not $env:MXC_TEST_LOCALAPPDATA_OVERRIDE -or -not $env:MXC_TEST_POLICY_KEY_OVERRIDE)) {
+    throw 'Run lifecycle telemetry through run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle for isolated consent and policy.'
+}
 
 # Host-side loopback anchor used by the positive network oracle. It serves from
 # a background runspace so the harness can sit blocked on an exec while the
@@ -152,6 +164,7 @@ function Get-IsolationSessionProbe {
 
 $probeResult = Get-IsolationSessionProbe -Exe $WxcExec
 if ($probeResult.Status -eq 'unavailable') {
+    if ($TelemetryResultsPath) { throw 'IsolationSession lifecycle telemetry requires an available backend.' }
     Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false" -ForegroundColor Yellow
     exit 0
 }
@@ -268,7 +281,8 @@ function Invoke-StateAware {
         # performing the phase. Lets a test pin that validation-time rejections
         # (e.g. a malformed sandboxId) fire identically whether or not the phase
         # would really run -- the dry-run/execution agreement.
-        [switch]$DryRun
+        [switch]$DryRun,
+        [int]$TimeoutSeconds = 120
     )
 
     $invocation = ConvertTo-StateAwareInvocation `
@@ -288,7 +302,14 @@ function Invoke-StateAware {
         # ConPTY interleaving --wxc-exec's stdout must be a single envelope.
         $proc = Start-Process -FilePath $WxcExec -ArgumentList $argList `
             -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile `
-            -NoNewWindow -PassThru -Wait
+            -NoNewWindow -PassThru
+        $null = $proc.Handle
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-Process -Id $proc.Id -Force
+            $proc.WaitForExit()
+            throw "Lifecycle phase '$($invocation.Operation)' timed out after $TimeoutSeconds seconds."
+        }
+        $proc.WaitForExit()
         # Coerce Stdout/Stderr to a single non-null string. Get-Content -Raw
         # on an empty / missing file returns $null, and downstream test
         # bodies use `-match` / `-notmatch` which behave differently on
@@ -298,6 +319,7 @@ function Invoke-StateAware {
         $stdoutText = Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue
         $stderrText = Get-Content $stderrFile -Raw -ErrorAction SilentlyContinue
         @{
+            ProcessId = $proc.Id
             ExitCode = $proc.ExitCode
             Stdout   = if ($null -eq $stdoutText) { "" } else { [string]$stdoutText }
             Stderr   = if ($null -eq $stderrText) { "" } else { [string]$stderrText }
@@ -450,6 +472,72 @@ function Envelope-Arm {
     if ($Envelope.PSObject.Properties.Name -contains 'result') { return 'result' }
     if ($Envelope.PSObject.Properties.Name -contains 'error') { return 'error' }
     '<unknown>'
+}
+
+if ($TelemetryResultsPath) {
+    $telemetryInvocations = [System.Collections.Generic.List[object]]::new()
+    foreach ($lifecycle in 1, 2) {
+        $telemetrySandboxId = $null
+        $shouldStop = $false
+        try {
+            foreach ($phase in @('provision', 'start', 'exec', 'exec', 'stop', 'deprovision')) {
+                $request = @{
+                    version = '1.0.0'
+                    phase = $phase
+                    telemetry = @{ enabled = $true }
+                }
+                if ($phase -eq 'provision') {
+                    $request.containment = 'isolation_session'
+                    $request.network = @{
+                        egress = @{ default = 'allow' }
+                        ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+                    }
+                } else {
+                    $request.sandboxId = $telemetrySandboxId
+                }
+                if ($phase -eq 'exec') {
+                    $request.process = @{
+                        commandLine = 'cmd.exe /d /c echo mxc-telemetry-lifecycle'
+                        timeout = 30000
+                    }
+                }
+                # Attempt stop even when start fails after creating host state.
+                if ($phase -eq 'start') { $shouldStop = $true }
+                $invocation = Invoke-StateAware -Request $request
+                if ($phase -eq 'provision') {
+                    $envelope = Parse-Envelope -Stdout $invocation.Stdout
+                    $telemetrySandboxId = [string]$envelope.result.sandboxId
+                }
+                if ($invocation.ExitCode -ne 0 -or
+                    ($phase -eq 'provision' -and -not $telemetrySandboxId) -or
+                    ($phase -eq 'exec' -and $invocation.Stdout -notmatch 'mxc-telemetry-lifecycle')) {
+                    throw "Telemetry lifecycle $lifecycle phase '$phase' failed: exit=$($invocation.ExitCode); $($invocation.Stdout) $($invocation.Stderr)"
+                }
+                $telemetryInvocations.Add([pscustomobject]@{
+                    Lifecycle = $lifecycle
+                    Phase = $phase
+                    ProcessId = $invocation.ProcessId
+                    ExitCode = $invocation.ExitCode
+                })
+                if ($phase -eq 'stop') { $shouldStop = $false }
+                if ($phase -eq 'deprovision') { $telemetrySandboxId = $null }
+            }
+        } finally {
+            if ($telemetrySandboxId) {
+                try {
+                    if ($shouldStop) {
+                        $cleanup = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = $telemetrySandboxId }
+                        if ($cleanup.ExitCode -ne 0) { Write-Warning "Telemetry lifecycle stop cleanup failed: $($cleanup.Stderr)" }
+                    }
+                } finally {
+                    $cleanup = Invoke-StateAware -Request @{ phase = 'deprovision'; sandboxId = $telemetrySandboxId }
+                    if ($cleanup.ExitCode -ne 0) { throw "Telemetry lifecycle deprovision cleanup failed: $($cleanup.Stderr)" }
+                }
+            }
+        }
+    }
+    $telemetryInvocations | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $TelemetryResultsPath
+    exit 0
 }
 
 # ---------------- Provision smoke check ----------------

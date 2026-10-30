@@ -544,6 +544,7 @@ fn run_state_aware_main(
         parsed.phase(),
         sandbox_id.as_deref(),
     );
+    let _session = telemetry::session::start(telemetry_active, &correlation, logger);
 
     // Attribute out-of-band emit paths (the console-control handler installed in
     // `main`, and the panic hook installed just below) to the resolved backend
@@ -563,6 +564,15 @@ fn run_state_aware_main(
     }
 
     let started = Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend,
+            phase,
+            correlation_vector: &correlation,
+        },
+    );
     // State-aware dispatch bypasses the one-shot runner funnel, so anchor the
     // effective lifecycle policy here before the request is consumed.
     let diagnostics_active = logger.has_diagnostic_sink();
@@ -1254,6 +1264,24 @@ fn main() {
         .as_ref()
         .map(|c| telemetry::init(c, &mut logger))
         .unwrap_or(false);
+    let learning_mode_requested = {
+        #[cfg(target_os = "windows")]
+        {
+            DiagnosticConfig::force_learning_mode()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    };
+    let learning_mode = telemetry::LearningMode::for_request(&request)
+        .with_overrides(cli.audit, learning_mode_requested);
+    let _session = telemetry::session::start_with_learning_mode(
+        telemetry_active,
+        "",
+        learning_mode,
+        &mut logger,
+    );
     let requested_sandbox_kind = request
         .telemetry
         .as_ref()
@@ -1267,6 +1295,16 @@ fn main() {
         telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
+
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: request.containment.wire_name(),
+            phase: "",
+            correlation_vector: "",
+        },
+    );
 
     // --audit injects permissiveLearningMode so denied operations are logged
     // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
@@ -1345,16 +1383,6 @@ fn main() {
     }
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
-    let learning_mode_requested = {
-        #[cfg(target_os = "windows")]
-        {
-            DiagnosticConfig::force_learning_mode()
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            false
-        }
-    };
     let learning_mode_injected = if learning_mode_requested
         && !request.policy.capabilities.iter().any(|c| {
             c.eq_ignore_ascii_case("learningModeLogging")

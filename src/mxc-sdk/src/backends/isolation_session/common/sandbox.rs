@@ -30,6 +30,7 @@ use crate::mxc_common::sandbox_process::{
 };
 use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::state_aware_backend::ExecOutcome;
+use crate::mxc_common::telemetry::session;
 use crate::mxc_common::validator::validate_common;
 
 use super::error::{lifecycle_err, IsolationSessionError};
@@ -234,9 +235,11 @@ fn start_pty_process(
     }
 
     let waiter_process = Arc::clone(&process);
+    let telemetry_context = session::capture();
     let waiter = std::thread::Builder::new()
         .name("mxc-isolation-pty-waiter".to_string())
         .spawn(move || {
+            let _session = session::resume(telemetry_context);
             waiter_process
                 .wait_for_exit(timeout_ms)
                 .map_err(super::error::map_lifecycle_error)

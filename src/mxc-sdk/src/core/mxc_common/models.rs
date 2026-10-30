@@ -629,6 +629,28 @@ impl Default for BaseProcessUiConfig {
     }
 }
 
+/// Reserved ProcessContainer access-check modes, shared by diagnostics and telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LearningModeCapability {
+    /// Record denied accesses without allowing them.
+    Learning,
+    /// Allow and record accesses instead of enforcing deny-by-default.
+    Permissive,
+}
+
+impl LearningModeCapability {
+    /// Windows derives capability SIDs case-insensitively.
+    pub(crate) fn from_capability_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("learningModeLogging") {
+            Some(Self::Learning)
+        } else if name.eq_ignore_ascii_case("permissiveLearningMode") {
+            Some(Self::Permissive)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ContainerPolicy {
     pub least_privilege_mode: bool,

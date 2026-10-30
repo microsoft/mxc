@@ -59,6 +59,13 @@ jobs:
           name: windows-sdk-test-bundle-${{ matrix.target }}
           path: artifacts/bin/windows-sdk-bundle
 
+      - name: Download local-only telemetry test executor
+        if: matrix.backend == 'isolation-session'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: telemetry-test-executor-${{ matrix.target }}
+          path: artifacts/bin/telemetry-test
+
       - name: Delayed start
         if: matrix.startup_delay_seconds > 0
         shell: powershell

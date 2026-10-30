@@ -20,8 +20,8 @@ C++ shim, WIL, or FFI is required.
 │  mxc_sdk::mxc_common::telemetry                      │
 │  (Rust — config resolution, sanitisation, types)     │
 │                                                      │
-│  init() / log_execution() / log_error() /             │
-│  log_verbose() / shutdown()                            │
+│  init() / log_execution_start() / log_execution_end() │
+│  log_error() / log_verbose() / shutdown()               │
 └───────────────┬──────────────────────────────────────┘
                 │  Direct Rust function calls
                 ▼
@@ -81,6 +81,19 @@ shared Part C custom event fields:
 | `IsDebugging` | bool | `cfg!(debug_assertions)` — true for debug builds |
 | `UTCReplace_AppSessionGuid` | bool | Always `true` — tells UTC to replace the app session GUID with a per-session identifier for privacy |
 
+Every event also includes `mxc.session_id`, a lowercase hyphenated UUID string
+shared by all 11 event families in one container lifecycle. It is request-scoped,
+not cached in `ProviderState`; streaming handles restore it during backend
+poll/wait/kill and final cleanup, including after moving to another thread.
+Disabled invocations suppress backend telemetry even when another request owns
+the provider. See [Correlating a lifecycle](#correlating-a-lifecycle).
+
+Unreleased consent resource version `4` discloses the random lifecycle session
+inventory, pending privacy/release-owner review, and requires
+explicit re-consent for earlier grants. Administrative policy, per-request
+opt-in, emission reauthorization, privacy tags and non-Windows no-ops remain
+unchanged.
+
 ## Windows-only M-ETW specification
 
 The following requirements are implemented through the local
@@ -118,7 +131,8 @@ targets for this work.
 ### ETW privacy and collection contract
 
 - Execution, error, and M-ETW requirement events contain bounded enums, opaque
-  MXC identities, numeric status fields, and schema field paths only.
+  MXC identities, numeric status fields, schema field paths, and the random
+  lifecycle session ID described above.
   `MXC.Verbose` is separately limited to the sanitized, typed inventory below.
 - Events do not contain command lines, environment values, complete file paths,
   UPNs, tokens, sandbox output, raw ETL, actionable denial documents, general
@@ -131,7 +145,7 @@ targets for this work.
   Enabling a local sink does not enable ETW, and disabling local sinks does not
   suppress ETW when the `Microsoft.MXC` provider is enabled by a consumer.
 - `MXC.SandboxNetworkPolicyApplied` records the network-policy application
-  attempt and its requested mode. `MXC.Execution` remains authoritative for
+  attempt and its requested mode. `MXC.ExecutionEnd` remains authoritative for
   whether the overall execution succeeded; no network-enforcement semantics are
   changed by this telemetry contract.
 - `MXC_TELEMETRY_PROVIDER_GROUP_GUID` is not set in public/OSS builds. When
@@ -149,32 +163,82 @@ targets for this work.
 ## Events
 
 The provider-qualified event identities include
-`Microsoft.MXC/MXC.Execution`, `Microsoft.MXC/MXC.Error`, and
+`Microsoft.MXC/MXC.ExecutionStart`, `Microsoft.MXC/MXC.ExecutionEnd`,
+`Microsoft.MXC/MXC.Error`, and
 `Microsoft.MXC/MXC.VerboseDenials`. `Microsoft.MXC` is the TraceLogging provider
 name. The M-ETW requirement events listed above share that provider.
 
-### MXC.Execution
+### MXC.ExecutionStart and MXC.ExecutionEnd
 
-Emitted when a one-shot execution completes (success or failure). It is also
-emitted on early-exit failures in the one-shot executors — configuration,
+These two events replace `MXC.Execution`; that old event name is no longer
+emitted. Collector filters and queries must use the new names. Both events
+retain the former execution fields, types, privacy metadata,
+and lifecycle session ID. Both additionally carry `mxc.capture_denials`.
+
+`MXC.ExecutionStart` is emitted after telemetry authorization and correlation
+setup, before execution or lifecycle dispatch, including before handled
+launch/validation failures. It means an invocation began, not that a child
+process launched. Its result fields are placeholders: `mxc.outcome` is
+`started`, `mxc.exit_code` and `mxc.duration_ms` are `0`, and
+`mxc.failure_reason` is empty. The exit-code placeholder does not mean success.
+
+`MXC.ExecutionEnd` is emitted when a create-and-run execution completes
+(success or failure). It is also emitted on early-exit failures in the executors — configuration,
 policy, and backend-init failures that terminate before a runner produces a
 result (with `mxc.exit_code` = 1 and `mxc.outcome` = `failure`).
 
-The state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
-`deprovision`) is also instrumented: each dispatched phase emits one
-`MXC.Execution` tagged with `mxc.phase`. Non-`exec` phases and `exec` dry-runs
+Lifecycle operations (`provision-session` / `provision` / `start` / `exec` / `stop` /
+`deprovision` / `deprovision-session`) are also instrumented: each dispatched phase emits one Start
+and one End tagged with `mxc.phase`. Non-`exec` phases and `exec` dry-runs
 report success with `mxc.exit_code` = 0; a completed `exec` reports the sandbox
 process exit code; a dispatch error reports `failure` plus an `MXC.Error`. As in
-the one-shot path, a clean non-zero sandbox exit is not treated as an MXC error.
+the create-and-run path, a clean non-zero sandbox exit is not treated as an MXC error.
+
+Streaming SDK calls emit Start before spawn and End on terminal observation,
+confirmed cancellation, timeout, or handle disposal, not when spawn returns.
+Start does not claim the terminal slot or release the provider. End retains
+the existing exactly-once terminal ownership, including best-effort executor
+panic/cancellation reporting. Each emission independently rechecks consent
+and policy, so withdrawal can suppress End after Start.
+
+Hard process termination, native crashes, or collection/delivery loss can leave
+an unmatched Start; absence of End is not proof of a crash. Requests rejected
+before telemetry initialization have no guaranteed pair. No retries or uploads
+are added. `mxc.session_id` groups the lifecycle, not each repeated operation;
+use `__TlgCV__` to distinguish lifecycle dispatches. No new per-invocation
+identifier is introduced.
+
+`mxc.capture_denials` reports the selected ProcessContainer access-check mode:
+`enforce` (normal policy enforcement without learning-mode denial recording),
+`deny-and-record`, or `allow-and-record`. Other backends and missing applicable invocation context
+use `not_applicable`. The normalized capability classifier is shared with
+backend diagnostics, uses exact case-insensitive names, and gives permissive
+mode precedence. JSON and typed SDK configuration therefore include the
+`learningMode` and `captureDenials` mappings. The executor snapshots its
+`--audit` and diagnostic-console overrides before Start, without moving trace
+setup, validation failures, or the existing capability mutations ahead of it.
+This is selected configuration, not an assertion that dispatch or OS setup
+succeeded. No commands, policy contents, or arbitrary capability names are
+added to telemetry.
+
+The invocation scope saves/restores the mode alongside session attribution.
+Streaming handles and backend workers retain the session ID, mode, and invocation
+suppression state across thread handoffs and cleanup. Missing session attribution
+reports `unknown` without disabling an otherwise authorized invocation; an opted-out
+invocation remains suppressed even while another request owns the provider. The process
+context supplies it to best-effort panic/cancellation reporting using the
+existing nonblocking recovery. Mode is not cached in process-wide provider
+state, and disabled invocations do not inherit another request's mode.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `mxc.sandbox_kind` | string | Containment kind requested by the caller (`process`, `vm`, or a concrete backend name) |
 | `mxc.backend` | string | Backend identifier; ProcessContainer reports `processcontainer` |
-| `mxc.exit_code` | int32 | Process exit code |
-| `mxc.outcome` | string | `"success"` or `"failure"` |
-| `mxc.duration_ms` | uint64 | Total execution time |
-| `mxc.failure_reason` | string | Failure category (if applicable) |
+| `mxc.capture_denials` | string | Selected mode: `enforce`, `deny-and-record`, `allow-and-record`, or `not_applicable`; not proof of successful setup |
+| `mxc.exit_code` | int32 | End: process exit code; Start: `0` placeholder |
+| `mxc.outcome` | string | Start: `"started"`; End: `"success"` or `"failure"` |
+| `mxc.duration_ms` | uint64 | End: elapsed execution time; Start: `0` |
+| `mxc.failure_reason` | string | End: failure category if applicable; Start: empty |
 | `mxc.phase` | string | Lifecycle phase (`provision-session`\|`provision`\|`start`\|`exec`\|`stop`\|`deprovision`\|`deprovision-session`); empty for create-and-run execution |
 | `__TlgCV__` | string | Microsoft Correlation Vector (MS-CV) — the lifecycle correlation key (see [Correlating a lifecycle](#correlating-a-lifecycle)); empty for one-shot executions |
 
@@ -272,92 +336,65 @@ contract are documented in
 
 ### Correlating a lifecycle
 
-The state-aware lifecycle runs each phase (`provision` → `start` → `exec` →
-`stop` → `deprovision`) as a **separate `wxc-exec` process**. The
-`UTCReplace_AppSessionGuid` common field is therefore per-process and cannot join
-events from different phases of the same sandbox. The stable join key is the
-**Microsoft Correlation Vector (MS-CV)**, emitted under TraceLogging's reserved
-`__TlgCV__` field.
+Use **`mxc.session_id`** to join events from `provision`, `start`, any number of
+`exec` calls, `stop`, and `deprovision`. SDK calls can run in-process or in
+separate `wxc-exec` processes; neither SDK consumers nor request JSON supply or
+relay the ID. `UTCReplace_AppSessionGuid` retains its existing UTC semantics
+and is not the cross-process lifecycle join key.
 
-MS-CV is a hierarchical, propagatable identifier of the form
-`<base>.<element>.<element>…` — a random base (128 bits, 22 base64 chars) plus a
-dotted chain of decimal elements. MXC uses it as follows:
+Provision seeds a Microsoft Correlation Vector (MS-CV), whose canonical base
+encodes 16 random bytes in 22 unpadded base64 characters. Once provision returns
+a sandbox ID, MXC persists the root internally under
+`%LOCALAPPDATA%\mxc\correlation\<sha256(sandbox_id)>.cv`. Later phases recall that
+root and spin distinct child vectors. The root's bytes, with UUID version/variant
+bits set, become the same lowercase UUIDv4-formatted `mxc.session_id` on every
+event. No additional session file or released SDK parameter is needed.
+`__TlgCV__` retains the hierarchical vector for phase-level analysis.
 
-- **`provision`** seeds a fresh random base and persists it locally once the
-  sandbox ID is known.
-- **`start`, `exec`, `stop`, and `deprovision`** recall that persisted root and
-  spin distinct child vectors sharing its base prefix. Successful deprovision
-  removes the record; a dry run keeps it.
-- Callers neither receive nor relay a correlation vector. It is internal to
-  MXC, not a JSON request or response field.
+Each create-and-run execution instead generates a fresh session UUID directly
+from OS randomness; its `__TlgCV__` remains empty. Neither identifier is derived
+from a user, device, command, executable name, or sandbox ID. The sandbox-ID hash
+is only a local storage lookup key and is not emitted as the session ID.
+The existing CV generator has a clock/nonce fallback when OS randomness fails;
+lifecycle IDs inherit that exceptional fallback, not a cryptographic guarantee.
+The direct create-and-run UUID path does not use this fallback.
 
 `provision-session` and `deprovision-session` each seed an independent vector
 when telemetry is authorized. They do not read, create, refresh, sweep, or
 delete the sandbox correlation store. Session IDs are not correlation-store
-keys or vector seeds. This applies to the executor, raw JSON entry points,
+keys or vector seeds. Their `mxc.session_id` values are independently generated
+diagnostic identifiers, not the backend's session identity. This applies to the executor, raw JSON entry points,
 and typed engine calls. Sandbox operations retain their existing store cleanup.
 
-An analyst groups all phases of one lifecycle by the shared **base prefix** of
-`__TlgCV__`, and orders/​distinguishes phases within it by the spun elements.
+The per-user store serializes operations with a cross-process file lock and
+atomically replaces records. A missing, corrupt, or pruned record establishes
+and persists a new root under the same lock, so subsequent phases can correlate
+even if telemetry was disabled during provision. That new segment cannot recover
+earlier events' ID. A successful new provision replaces any previous root; if
+telemetry is disabled, it removes stale state rather than linking a reused
+sandbox ID to an old lifecycle.
 
-An MS-CV is capped at 127 characters. In the unlikely event a long-lived
-lifecycle grows the vector to that cap, the next operator **freezes** it: it
-appends the `!` terminator (dropping the trailing element **whole**, at an
-element boundary, if needed to stay within the cap — never truncating a
-multi-digit element to a falsified value like `.42` → `.4`) and the vector is
-never mutated again. `increment` likewise freezes when its trailing element is
-already at `u32::MAX` and so cannot advance (the spec's value-overflow
-behaviour). Every later sandbox phase then emits that same frozen vector
-verbatim, so correlation by base prefix still holds — only the per-phase
-ordering elements stop advancing.
+Successful deprovision and terminal `not_provisioned` results remove the record,
+even when telemetry is disabled. Failed and dry-run deprovision retain it.
+Loads refresh active records; opportunistic pruning removes unrelated records
+older than 30 days and temporary files older than one day, with bounded sweeps.
+Disabling telemetry does not generate new roots; cleanup can remove existing
+state. Withdrawn consent continues to suppress emission.
 
-**Canonical validation.** A persisted vector is only built on (spun) when it is
-*relayable* — a well-formed mutable vector (canonical 22-char base64 base whose
-final char encodes a zero low nibble, followed by one or more canonical decimal
-`u32` elements) or a valid frozen (`!`-terminated) vector. Elements must be
-canonical: no leading zeros (`0` is allowed, `01` is not), no sign, no
-whitespace — a non-canonical element such as `01` would silently reshape the
-vector (`01` → `2` on increment) and break lexical sortability, so it is
-rejected. Anything not relayable — missing, empty, malformed, or a hostile
-`!`-terminated value like `user@contoso.com!` — is reseeded to a fresh random
-base rather than emitted verbatim.
-
-The correlation vector is **not** derived from the `sandbox_id`, so no
-caller-supplied identity (e.g. a UPN embedded in an IsolationSession
-`iso:<upn>` id) is ever involved: the base is pure randomness. Spin is defensive
-— a missing, empty, or malformed stored value falls back to a fresh seed rather
-than panicking telemetry. `__TlgCV__` is empty for one-shot executions (which have
-no lifecycle to correlate) and for a crash during `provision` before the vector is
-stashed. It is only computed and emitted when telemetry is authorized; response
-envelopes never contain it.
-
-**Why a random vector rather than a hashed `sandbox_id`.** An alternative
-design would derive the correlation key deterministically from the `sandbox_id`
-(e.g. a hash), avoiding persistence of a random root. We deliberately do **not** do
-this, for two reasons:
-
-1. **PII-safety.** A `sandbox_id` is caller-influenced and can embed identity — an
-   IsolationSession id is literally `iso:<upn>`. Hashing narrows but does not
-   eliminate the exposure (a hash is a stable pseudonym and, for a low-entropy
-   input like a known UPN, is reversible by dictionary). A base seeded from pure
-   OS randomness carries no caller identity at all, which is the stronger and
-   simpler guarantee.
-2. **WIL TraceLogging fidelity.** This implementation intentionally mirrors the WIL
-   TraceLogging correlation-vector design: a random 128-bit base extended/spun with
-   MS-CV v2 operators and emitted under the reserved `__TlgCV__` field. A bespoke
-   `sandbox_id`-hash scheme would diverge from that well-understood format and lose
-   the hierarchical parent/child structure (base prefix + spun elements) that lets
-   an analyst reconstruct phase ordering, not just group-by a flat key.
-
-Local persistence lets the random root minted at `provision` reach later
-executor processes without exposing it to callers.
+Store unavailability reports a diagnostic and permits a disconnected root
+without changing sandbox results. Cross-process continuity cannot be guaranteed
+without the shared record, including across different user accounts. Invalid
+session context or direct UUID-generation failure records `unknown`, with a
+fixed-code warning on normal initialization. Out-of-band executor panic and
+cancellation paths resume the stashed session on a best-effort, nonblocking basis.
+These IDs are diagnostic correlation, not authenticated identities.
 
 ### Crash telemetry (panic hook)
 
 When telemetry is active, the executors install a global
 [`std::panic::set_hook`] handler — both the one-shot executors and the
 state-aware path (`run_state_aware_main`). If any thread panics, the hook emits
-a failure `MXC.Execution` plus an `MXC.Error` categorised as `internal_error`
+a failure `MXC.ExecutionEnd` plus an `MXC.Error` categorised as `internal_error`
 (with `mxc.exit_code` = 101, the conventional Rust panic/abort exit code),
 attributed to the containment backend recorded at telemetry init and, on the
 state-aware path, the `mxc.phase` in progress. Consistent
@@ -374,7 +411,7 @@ hook, so the default stderr backtrace still prints.
 > runner does this for container-cleanup safety), the panic hook still fires
 > during unwinding and records the crash event with the `101` sentinel exit
 > code, then claims the exactly-once terminal-emit slot. The recovered
-> `MXC.Execution` completion event is therefore suppressed, so telemetry reports
+> `MXC.ExecutionEnd` completion event is therefore suppressed, so telemetry reports
 > `mxc.exit_code` = 101 even though the recovered process ultimately exits with a
 > different code (`-1`). The `101` here is a "a panic occurred" sentinel, not a
 > claim about the observed process exit code; `outcome` and `error_type` remain
@@ -384,7 +421,7 @@ hook, so the default stderr backtrace still prints.
 ### Cancellation telemetry (console control handler)
 
 On Windows, when telemetry is active, `wxc-exec`'s console control handler emits
-a failure `MXC.Execution` plus an `MXC.Error` categorised as `cancelled` when the
+a failure `MXC.ExecutionEnd` plus an `MXC.Error` categorised as `cancelled` when the
 operator interrupts a run (Ctrl-C, console close, or a system shutdown/logoff).
 The reported `mxc.exit_code` is 130 (the conventional "terminated by Ctrl-C"
 code, 128 + SIGINT) — a bounded attribution sentinel, since the OS ultimately

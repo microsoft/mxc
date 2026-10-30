@@ -194,7 +194,7 @@ fn seed_consent(local_app_data: &Path, state: &str) {
     std::fs::create_dir_all(&dir).expect("failed to create consent directory");
     let record = format!(
         r#"{{"schemaVersion":2,"consent":"{state}","source":"telemetry-etw-e2e",
-"promptedMxcVersion":"0.0.0-e2e","promptResourceVersion":3,
+"promptedMxcVersion":"0.0.0-e2e","promptResourceVersion":4,
 "promptLocale":"en-US","updatedAtEpoch":0}}"#
     );
     std::fs::write(dir.join("telemetry-consent.json"), record.replace('\n', ""))
@@ -325,9 +325,25 @@ fn assert_events_recorded(dump: &str) {
         dump.contains("Microsoft.MXC"),
         "no Microsoft.MXC events were recorded while telemetry consent was granted"
     );
+    for name in ["MXC.ExecutionStart", "MXC.ExecutionEnd"] {
+        assert!(
+            dump.contains(&format!("<Task>{name}</Task>")),
+            "the execution pair is missing {name}"
+        );
+    }
+    assert!(
+        !dump.contains("<Task>MXC.Execution</Task>"),
+        "the retired execution event must not be emitted"
+    );
+    assert!(
+        !dump.contains("mxc.host_app"),
+        "MXC events must not include host application attribution"
+    );
     // Field-level checks, so the test fails if the event is emitted but its
     // payload has been gutted.
     for field in [
+        "mxc.session_id",
+        "mxc.capture_denials",
         "mxc.sandbox_kind",
         "mxc.outcome",
         "PartA_PrivacyProduct",

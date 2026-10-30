@@ -124,7 +124,21 @@ jobs:
             -Features '${{ matrix.features }}'
 
       - name: Build debug executor for isolated telemetry smoke tests
-        run: cargo build --locked -p wxc --features test-support
+        env:
+          MXC_TELEMETRY_PROVIDER_GROUP_GUID: ''
+        run: cargo build --locked -p wxc --features "test-support isolation_session"
+
+      - name: Test telemetry ETW assertions, lifecycle requests and consent fixtures
+        shell: pwsh
+        run: ..\tests\scripts\test_telemetry_etw_assertions.ps1 -WxcExePath target\debug\wxc-exec.exe
+
+      - name: Upload local-only telemetry test executor
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: telemetry-test-executor-${{ matrix.target }}
+          path: src/target/debug/wxc-exec.exe
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Run isolated telemetry consent smoke test
         working-directory: ${{ github.workspace }}

@@ -80,6 +80,16 @@ fn main() {
         telemetry::install_panic_hook();
     }
 
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: request.containment.wire_name(),
+            phase: "",
+            correlation_vector: "",
+        },
+    );
+
     log_request(&request, &mut logger);
 
     // Setup watchdog for unexpected shutdowns

@@ -230,12 +230,27 @@ fn invoke_execution_request(
         .map(|config| telemetry::init(config, &mut logger))
         .unwrap_or(false);
     let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
+    let _session = telemetry::session::start_with_learning_mode(
+        telemetry_active,
+        "",
+        telemetry::LearningMode::for_request(request),
+        &mut logger,
+    );
     let requested_sandbox_kind = request
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
     let containment = request.containment.clone();
     let started = std::time::Instant::now();
+    telemetry::emit_execution_start(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: containment.wire_name(),
+            phase: "",
+            correlation_vector: "",
+        },
+    );
     let execution = match execute(request, &mut logger) {
         Ok(execution) => execution,
         Err(error) => {
@@ -257,19 +272,15 @@ fn invoke_execution_request(
     match execution {
         OneShotExecution::Streaming(process) => {
             let process = ProcessWithWarnings::wrap(process, extra_warnings);
-            let process: Box<dyn SandboxProcess> = if telemetry_registration.active() {
-                Box::new(TelemetryProcess::new(
-                    process,
-                    telemetry_registration.transfer(),
-                    TelemetryMode::OneShot {
-                        containment,
-                        requested_sandbox_kind,
-                    },
-                    started,
-                ))
-            } else {
-                process
-            };
+            let process = Box::new(TelemetryProcess::new(
+                process,
+                telemetry_registration.transfer(),
+                TelemetryMode::OneShot {
+                    containment,
+                    requested_sandbox_kind,
+                },
+                started,
+            ));
             Ok(OneShotExecution::Streaming(process))
         }
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
@@ -321,10 +332,6 @@ impl TelemetryRegistration {
         Self { active }
     }
 
-    pub(crate) fn active(&self) -> bool {
-        self.active
-    }
-
     pub(crate) fn transfer(&mut self) -> bool {
         std::mem::take(&mut self.active)
     }
@@ -338,12 +345,12 @@ impl Drop for TelemetryRegistration {
     }
 }
 
-/// Streaming process wrapper that owns one telemetry provider reference and
-/// emits exactly one terminal event for this SDK invocation.
+/// Streaming process wrapper that scopes backend attribution. When enabled,
+/// owns one provider reference and emits one terminal event for this invocation.
 ///
 /// # Terminal-event invariant
 ///
-/// Every non-nop path a caller can drive this wrapper through emits exactly
+/// When enabled, every non-nop path a caller can drive this wrapper through emits exactly
 /// one terminal telemetry event before the provider reference is released:
 ///
 /// * [`SandboxProcess::wait`] — real completion / timeout / spawn error.
@@ -361,7 +368,11 @@ impl Drop for TelemetryRegistration {
 /// after the event and after [`telemetry::shutdown`] releases the provider
 /// reference.
 struct TelemetryProcess {
-    inner: Box<dyn SandboxProcess>,
+    inner: Option<Box<dyn SandboxProcess>>,
+    session_context: telemetry::session::SessionContext,
+    // Disabled wrappers still suppress backend attribution when another request
+    // owns the shared provider, but otherwise preserve the raw process behavior.
+    enabled: bool,
     active: bool,
     // Set by kill_for_timeout() so telemetry reports a timeout instead of a
     // normal exit or cancellation. The backend keeps its own timeout state so
@@ -394,21 +405,17 @@ pub(crate) fn wrap_state_aware_telemetry_process_with_kind(
     requested_sandbox_kind: Option<&'static str>,
     started: std::time::Instant,
 ) -> Box<dyn SandboxProcess> {
-    if active {
-        Box::new(TelemetryProcess::new(
-            process,
-            true,
-            TelemetryMode::StateAware {
-                backend,
-                phase,
-                correlation_vector,
-                requested_sandbox_kind,
-            },
-            started,
-        ))
-    } else {
-        process
-    }
+    Box::new(TelemetryProcess::new(
+        process,
+        active,
+        TelemetryMode::StateAware {
+            backend,
+            phase,
+            correlation_vector,
+            requested_sandbox_kind,
+        },
+        started,
+    ))
 }
 
 impl TelemetryProcess {
@@ -420,12 +427,31 @@ impl TelemetryProcess {
     ) -> Self {
         let warnings = inner.warnings().to_vec();
         Self {
-            inner,
+            inner: Some(inner),
+            session_context: if active {
+                telemetry::session::capture()
+            } else {
+                telemetry::session::SessionContext::suppressed()
+            },
+            enabled: active,
             active,
             timeout_requested: false,
             warnings,
             mode,
             started,
+        }
+    }
+
+    fn inner(&self) -> &dyn SandboxProcess {
+        self.inner
+            .as_deref()
+            .expect("process remains owned until Drop")
+    }
+
+    fn inner_mut(&mut self) -> &mut (dyn SandboxProcess + '_) {
+        match self.inner.as_mut() {
+            Some(inner) => inner.as_mut(),
+            None => unreachable!("process remains owned until Drop"),
         }
     }
 
@@ -435,7 +461,7 @@ impl TelemetryProcess {
         include_output_metadata: bool,
     ) -> ScriptResponse {
         let output_metadata = include_output_metadata
-            .then(|| self.inner.output_metadata().cloned().map(Box::new))
+            .then(|| self.inner().output_metadata().cloned().map(Box::new))
             .flatten();
         let mut response = match result {
             Ok(exit_code) => ScriptResponse {
@@ -644,26 +670,29 @@ fn observe_before_drop(process: &mut dyn SandboxProcess) -> DropDisposition {
 
 impl Drop for TelemetryProcess {
     fn drop(&mut self) {
+        let _session = telemetry::session::resume(self.session_context);
         // If `wait` / `try_wait(Ok(Some))` / `kill` already emitted the
         // terminal event, `active` is false and this is a no-op. Otherwise,
         // preserve a completion that raced with Drop instead of misreporting a
         // successful fire-and-forget run as abandonment.
-        if !self.active {
-            return;
-        }
-        match observe_before_drop(self.inner.as_mut()) {
-            DropDisposition::Exited(exit_code) => {
-                // Finalize backend-owned output metadata after the nonblocking
-                // observation, while preserving the already-observed exit code.
-                let _ = self.inner.wait();
-                self.emit(&Ok(exit_code));
+        if self.active {
+            match observe_before_drop(self.inner_mut()) {
+                DropDisposition::Exited(exit_code) => {
+                    // Finalize backend-owned output metadata after the nonblocking
+                    // observation, while preserving the already-observed exit code.
+                    let _ = self.inner_mut().wait();
+                    self.emit(&Ok(exit_code));
+                }
+                DropDisposition::TimedOut => self.emit(&Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "sandbox execution timed out",
+                ))),
+                DropDisposition::Abandoned => self.emit_synthetic(SyntheticTerminal::Dropped),
             }
-            DropDisposition::TimedOut => self.emit(&Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "sandbox execution timed out",
-            ))),
-            DropDisposition::Abandoned => self.emit_synthetic(SyntheticTerminal::Dropped),
         }
+        // Backend Drop may emit teardown events after terminal emission.
+        // Keep this handle's session installed until that cleanup completes.
+        drop(self.inner.take());
     }
 }
 
@@ -671,7 +700,7 @@ impl SandboxProcess for TelemetryProcess {
     /// Merged at the call rather than when this wrapper was built: the wrapped
     /// process can report a cleanup failure long after that.
     fn warnings(&self) -> Vec<String> {
-        let mut merged = self.inner.warnings();
+        let mut merged = self.inner().warnings();
         for warning in &self.warnings {
             if !merged.contains(warning) {
                 merged.push(warning.clone());
@@ -681,55 +710,56 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn output_metadata(&self) -> Option<&crate::mxc_common::models::SandboxOutputMetadata> {
-        self.inner.output_metadata()
+        self.inner().output_metadata()
     }
 
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
-        self.inner.take_stdin()
+        self.inner_mut().take_stdin()
     }
 
     fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
-        self.inner.stdin_closer()
+        self.inner().stdin_closer()
     }
 
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
-        self.inner.take_native_stdio()
+        self.inner_mut().take_native_stdio()
     }
 
     fn is_pty(&self) -> bool {
-        self.inner.is_pty()
+        self.inner().is_pty()
     }
 
     fn pty_clone_reader(&self) -> std::io::Result<Box<dyn std::io::Read + Send>> {
-        self.inner.pty_clone_reader()
+        self.inner().pty_clone_reader()
     }
 
     fn pty_clone_reader_with_closer(&self) -> std::io::Result<PtyReaderWithCloser> {
-        self.inner.pty_clone_reader_with_closer()
+        self.inner().pty_clone_reader_with_closer()
     }
 
     fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
-        self.inner.pty_take_writer()
+        self.inner().pty_take_writer()
     }
 
     fn pty_resize(&self, size: PtySize) -> std::io::Result<()> {
-        self.inner.pty_resize(size)
+        self.inner().pty_resize(size)
     }
 
     fn pty_size(&self) -> std::io::Result<PtySize> {
-        self.inner.pty_size()
+        self.inner().pty_size()
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        self.inner.take_stdout()
+        self.inner_mut().take_stdout()
     }
 
     fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
-        self.inner.take_stderr()
+        self.inner_mut().take_stderr()
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        let result = match self.inner.try_wait() {
+        let _session = telemetry::session::resume(self.session_context);
+        let result = match self.inner_mut().try_wait() {
             Ok(Some(_)) if self.timeout_requested => Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "sandbox execution timed out",
@@ -758,13 +788,14 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn id(&self) -> u32 {
-        self.inner.id()
+        self.inner().id()
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
+        let _session = telemetry::session::resume(self.session_context);
         // A failed kill does not prove termination, so retain the exactly-once
         // slot for a later wait/try_wait that can report the real outcome.
-        let result = self.inner.kill();
+        let result = self.inner_mut().kill();
         if result.is_ok() {
             self.emit_cancellation();
         }
@@ -772,8 +803,11 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
-        self.timeout_requested = true;
-        let result = self.inner.kill_for_timeout();
+        let _session = telemetry::session::resume(self.session_context);
+        if self.enabled {
+            self.timeout_requested = true;
+        }
+        let result = self.inner_mut().kill_for_timeout();
         if result.is_ok() {
             self.emit(&Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -784,7 +818,8 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
-        let result = match self.inner.wait() {
+        let _session = telemetry::session::resume(self.session_context);
+        let result = match self.inner_mut().wait() {
             Ok(_) if self.timeout_requested => Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "sandbox execution timed out",
@@ -796,11 +831,11 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
-        self.inner.stdout_closer()
+        self.inner().stdout_closer()
     }
 
     fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
-        self.inner.stderr_closer()
+        self.inner().stderr_closer()
     }
 }
 
@@ -1101,6 +1136,255 @@ mod telemetry_process_tests {
         )
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sdk_start_precedes_dispatch_and_end_waits_for_a_terminal_outcome() {
+        use telemetry::events::test_sink;
+
+        let store = tempfile::tempdir().unwrap();
+        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        telemetry::consent::set_consent(true, "test").unwrap();
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        test_sink::install();
+        let mut request = ExecutionRequest {
+            telemetry: Some(crate::mxc_common::models::TelemetryConfig {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Keep multiple handles alive so provider ownership and attribution
+        // cannot accidentally be consumed by a Start write.
+        let mut processes = Vec::new();
+        let mut starts = Vec::new();
+        for (capabilities, expected_mode) in [
+            (vec![], "enforce"),
+            (vec!["learningModeLogging"], "deny-and-record"),
+            (vec!["permissiveLearningMode"], "allow-and-record"),
+            (
+                vec!["learningModeLogging", "permissiveLearningMode"],
+                "allow-and-record",
+            ),
+        ] {
+            request.policy.capabilities = capabilities.into_iter().map(str::to_owned).collect();
+            let process = spawn_execution_request_with_logger_and(
+                &request,
+                Logger::new(Mode::Buffer),
+                |_, _| {
+                    let captured = test_sink::take_starts();
+                    assert_eq!(captured.len(), 1, "Start must precede dispatcher entry");
+                    assert_eq!(captured[0].learning_mode, expected_mode);
+                    assert!(test_sink::take_executions().is_empty());
+                    starts.push(captured[0].clone());
+                    Ok(Box::new(StubProcess {
+                        try_wait_result: TryWaitResult::Running,
+                        wait_result: Ok(7),
+                        kill_fails: false,
+                        finalized: None,
+                        metadata_read_before_finalization: None,
+                        output_metadata: None,
+                    }))
+                },
+            )
+            .unwrap();
+            assert!(test_sink::take_executions().is_empty());
+            processes.push(process);
+        }
+        assert_eq!(
+            starts
+                .iter()
+                .map(|event| &event.session_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
+        for (index, mut process) in processes.into_iter().enumerate() {
+            assert_eq!(process.try_wait().unwrap(), None);
+            assert!(test_sink::take_executions().is_empty());
+            match index {
+                0 => {
+                    assert_eq!(process.wait().unwrap(), 7);
+                }
+                1 => {
+                    process.kill().unwrap();
+                }
+                2 => {
+                    process.kill_for_timeout().unwrap();
+                }
+                _ => {}
+            }
+            drop(process);
+            let ends = test_sink::take_executions();
+            assert_eq!(
+                ends.len(),
+                1,
+                "terminal observation and Drop must share one slot"
+            );
+            assert_eq!(ends[0].session_id, starts[index].session_id);
+            assert_eq!(ends[0].backend, starts[index].backend);
+            assert_eq!(ends[0].sandbox_kind, starts[index].sandbox_kind);
+            assert_eq!(ends[0].learning_mode, starts[index].learning_mode);
+            assert_ne!(ends[0].outcome, "started");
+            test_sink::take_errors();
+        }
+
+        let result =
+            spawn_execution_request_with_logger_and(&request, Logger::new(Mode::Buffer), |_, _| {
+                assert_eq!(test_sink::take_starts().len(), 1);
+                Err(MxcError::backend_unavailable("synthetic"))
+            });
+        assert!(result.is_err());
+        let ends = test_sink::take_executions();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(
+            ends[0].failure_reason,
+            Some(telemetry::FailureReason::InitError)
+        );
+        test_sink::clear();
+    }
+
+    struct SessionProbe {
+        expected: Option<uuid::Uuid>,
+        expected_learning_mode: telemetry::LearningMode,
+        expected_disabled: bool,
+        calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl SessionProbe {
+        fn record(&self, operation: &'static str) {
+            assert_eq!(telemetry::session::current(), self.expected);
+            assert_eq!(
+                telemetry::session::invocation_disabled(),
+                self.expected_disabled
+            );
+            assert_eq!(
+                telemetry::session::learning_mode(),
+                self.expected_learning_mode
+            );
+            self.calls.lock().unwrap().push(operation);
+        }
+    }
+
+    impl SandboxProcess for SessionProbe {
+        fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+            None
+        }
+        fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+        fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            self.record("poll");
+            Ok(None)
+        }
+        fn id(&self) -> u32 {
+            1
+        }
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.record("kill");
+            Ok(())
+        }
+        fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+            self.record("timeout");
+            Ok(())
+        }
+        fn wait(&mut self) -> std::io::Result<i32> {
+            self.record("wait");
+            Ok(0)
+        }
+    }
+
+    impl Drop for SessionProbe {
+        fn drop(&mut self) {
+            self.record("drop");
+        }
+    }
+
+    #[test]
+    fn moved_handle_restores_its_session_for_backend_operations_and_final_drop() {
+        for (enabled, vector) in [(false, ""), (true, ""), (true, "invalid")] {
+            let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let expected_id;
+            let mut process = {
+                let mut logger = Logger::new(Mode::Buffer);
+                let _scope = telemetry::session::start_with_learning_mode(
+                    true,
+                    vector,
+                    telemetry::LearningMode::PermissiveLearning,
+                    &mut logger,
+                );
+                expected_id = if enabled {
+                    telemetry::session::current()
+                } else {
+                    None
+                };
+                TelemetryProcess::new(
+                    Box::new(SessionProbe {
+                        expected: expected_id,
+                        expected_disabled: !enabled,
+                        expected_learning_mode: if enabled {
+                            telemetry::LearningMode::PermissiveLearning
+                        } else {
+                            telemetry::LearningMode::NotApplicable
+                        },
+                        calls: calls.clone(),
+                    }),
+                    enabled,
+                    TelemetryMode::StateAware {
+                        backend: "test".to_string(),
+                        phase: "exec".to_string(),
+                        correlation_vector: String::new(),
+                        requested_sandbox_kind: None,
+                    },
+                    std::time::Instant::now(),
+                )
+            };
+            // Exercise backend attribution without acquiring a real ETW provider
+            // or consulting the device's consent state for terminal emissions.
+            process.active = false;
+            std::thread::spawn(move || {
+                let mut logger = Logger::new(Mode::Buffer);
+                let _other = telemetry::session::start_with_learning_mode(
+                    true,
+                    "",
+                    telemetry::LearningMode::Learning,
+                    &mut logger,
+                );
+                let unrelated = telemetry::session::current();
+                assert_ne!(unrelated, expected_id);
+                assert_eq!(process.try_wait().unwrap(), None);
+                assert_eq!(telemetry::session::current(), unrelated);
+                assert_eq!(
+                    telemetry::session::learning_mode(),
+                    telemetry::LearningMode::Learning
+                );
+                process.kill().unwrap();
+                assert_eq!(telemetry::session::current(), unrelated);
+                process.kill_for_timeout().unwrap();
+                assert_eq!(telemetry::session::current(), unrelated);
+                let result = process.wait();
+                if enabled {
+                    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+                } else {
+                    assert_eq!(result.unwrap(), 0);
+                }
+                assert_eq!(telemetry::session::current(), unrelated);
+                drop(process);
+                assert_eq!(telemetry::session::current(), unrelated);
+            })
+            .join()
+            .unwrap();
+            assert_eq!(
+                *calls.lock().unwrap(),
+                ["poll", "kill", "timeout", "wait", "drop"]
+            );
+        }
+    }
+
     #[test]
     fn process_wrappers_forward_stream_lifecycle_operations() {
         let telemetry_calls = Arc::new(AtomicUsize::new(0));
@@ -1189,13 +1473,36 @@ mod telemetry_process_tests {
     #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
     #[test]
     fn shared_invocation_preserves_captured_results_warnings_and_errors() {
-        for outcome in [CapturedOutcome::Exited(42), CapturedOutcome::TimedOut] {
+        use telemetry::events::test_sink;
+
+        let store = tempfile::tempdir().unwrap();
+        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        telemetry::consent::set_consent(true, "test").unwrap();
+        let _lock = test_sink::TEST_LOCK.lock().unwrap();
+        test_sink::install();
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::MicroVm,
+            telemetry: Some(crate::mxc_common::models::TelemetryConfig {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        for outcome in [
+            CapturedOutcome::Exited(0),
+            CapturedOutcome::Exited(42),
+            CapturedOutcome::TimedOut,
+        ] {
             let mut calls = 0;
-            let result = invoke_execution_request(
-                &ExecutionRequest::default(),
-                Logger::new(Mode::Buffer),
-                |_, logger| {
+            let mut starts = Vec::new();
+            let result =
+                invoke_execution_request(&request, Logger::new(Mode::Buffer), |_, logger| {
                     calls += 1;
+                    starts = test_sink::take_starts();
+                    assert_eq!(starts.len(), 1, "Start must precede captured execution");
+                    assert!(test_sink::take_executions().is_empty());
                     logger.warning_line("invocation warning");
                     Ok(OneShotExecution::Captured(CapturedExecutionResult {
                         outcome,
@@ -1203,17 +1510,33 @@ mod telemetry_process_tests {
                         stdout: b"\xff\0\xfe".to_vec(),
                         stderr: b"\x80\0\x81".to_vec(),
                     }))
-                },
-            )
-            .unwrap();
+                })
+                .unwrap();
             assert_eq!(calls, 1);
             let OneShotExecution::Captured(result) = result else {
                 panic!("captured invocation must stay captured");
             };
             assert_eq!(result.outcome, outcome);
-            assert_eq!(result.warnings, ["invocation warning", "backend warning"]);
+            assert!(result.warnings.ends_with(&[
+                "invocation warning".to_owned(),
+                "backend warning".to_owned()
+            ]));
             assert_eq!(result.stdout, b"\xff\0\xfe");
             assert_eq!(result.stderr, b"\x80\0\x81");
+            let ends = test_sink::take_executions();
+            assert_eq!(ends.len(), 1);
+            assert_eq!(ends[0].session_id, starts[0].session_id);
+            assert_eq!(ends[0].backend, "microvm");
+            assert_eq!(ends[0].sandbox_kind, starts[0].sandbox_kind);
+            assert_eq!(
+                ends[0].failure_reason,
+                match outcome {
+                    CapturedOutcome::Exited(0) => None,
+                    CapturedOutcome::Exited(_) => Some(telemetry::FailureReason::ProcessError),
+                    CapturedOutcome::TimedOut => Some(telemetry::FailureReason::Timeout),
+                }
+            );
+            test_sink::take_errors();
         }
         for primary in [
             MxcError::malformed_request("malformed"),
@@ -1221,15 +1544,23 @@ mod telemetry_process_tests {
             MxcError::backend_unavailable("unavailable"),
             MxcError::backend_error("execution"),
         ] {
-            let error = invoke_execution_request(
-                &ExecutionRequest::default(),
-                Logger::new(Mode::Buffer),
-                |_, _| Err(primary.clone()),
-            )
+            let error = invoke_execution_request(&request, Logger::new(Mode::Buffer), |_, _| {
+                assert_eq!(test_sink::take_starts().len(), 1);
+                assert!(test_sink::take_executions().is_empty());
+                Err(primary.clone())
+            })
             .err()
             .expect("invocation failure");
+            let ends = test_sink::take_executions();
+            assert_eq!(ends.len(), 1);
+            assert_eq!(
+                ends[0].failure_reason,
+                Some(telemetry::classify_mxc_error(&primary))
+            );
             assert_eq!(error, Error::from(primary));
+            test_sink::take_errors();
         }
+        test_sink::clear();
     }
 
     #[test]
