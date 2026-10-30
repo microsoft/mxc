@@ -22,8 +22,11 @@ under a policy without network or `~/.npm` write access, and it fails. The
 caller reruns with `"captureDenials": {"mode": "block", "outputPath": "~/mxc/denials.json"}`.
 The run fails the same way, and the report lists a file write under `~/.npm`
 and `network-outbound:remote:*:443`. The caller adds `~/.npm` to
-`readwritePaths`, allows outbound 443, and reruns. The caller deletes
-`denials.<run-id>.json` and `denials.<run-id>.verbose.json`.
+`readwritePaths` and sets `network.egress.default` to `"allow"`. Seatbelt
+can't allow a single port, so this allows all outbound traffic; routing npm
+through a local proxy (`runtimeConfig.networkProxy`) is the narrower option.
+The caller reruns, then deletes `denials.<run-id>.json` and
+`denials.<run-id>.verbose.json`.
 
 **Example 2: list everything a new tool needs in one run (`allow`).** A
 developer runs `mxc-exec-mac --audit config.json`. The workload completes
@@ -37,7 +40,8 @@ temp report afterward.
 - Live permission prompts, policy changes during a run, or automatic policy
   generation.
 - A complete record of every access. Reads of missing paths aren't reported,
-  and network reports only show the port.
+  and network reports only show the port. The port is informational only;
+  Seatbelt can't grant access to just that port.
 - Custom profiles (`profileOverride`).
 - Learning mode on Linux backends.
 
