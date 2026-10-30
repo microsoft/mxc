@@ -72,9 +72,8 @@ temp report afterward.
 - `deniedResourcesTruncated: true` means the report may be missing denials.
   This happens when:
   - a collection limit is reached;
-  - MXC can't confirm it received every log event;
-  - a log event can't be parsed; or
-  - the workload's termination can't be confirmed.
+  - MXC can't confirm it received every log event; or
+  - a log event can't be parsed.
 - With `deniedResourcesTruncated: false`, zero denials still doesn't prove the
   policy grants everything the workload needs. See **Not covered** above.
 
@@ -130,6 +129,8 @@ capture after parsing.
 - The `allow`-mode enforcement warning.
 - An incomplete-capture warning when MXC can't confirm it received every log
   event.
+- A capture-failure warning when the run also times out, naming any retained
+  trace.
 
 ## Execution and container lifecycle support
 
@@ -163,7 +164,9 @@ capture after parsing.
 - **Output metadata:** no new fields. Seatbelt reports the retained
   `.seatbelt.log` path in the existing `etlPath`. Seatbelt reports capture
   failures as run errors and never sets `captureDenialsError`. When a trace is
-  retained, the error names its path.
+  retained, the error names its path. If the run also times out, the SDK
+  `wait` returns only the timeout, so MXC adds the capture failure and any
+  trace path to the process warnings.
 - **V2 changes:** `retainEtl` and `etlPath` are Windows-specific names. As
   part of #1580, the
   [SDK major-version notes](../../versioning.md#sdk-major-version-namespaces)
@@ -227,16 +230,19 @@ sequenceDiagram
 - **Caller owns:**
   - the report, verbose report, and retained trace, including temp-path ones.
 
-  MXC never deletes them.
+  MXC never deletes them after a successful run.
 - **Capture fails to start:** the workload never starts and no files are
   written.
 - **Collection or write fails after exit:** the run returns an error. A
-  timeout error includes the capture failure and keeps its timeout
-  classification.
-- **Termination fails:** the run returns an error. Any report is marked
-  `deniedResourcesTruncated: true`.
+  timeout keeps its timeout result, and the capture failure goes to the
+  process warnings.
+- **Termination fails:** MXC removes the report pair and returns an error.
+  Buffered callers only get the error, so they can't find the report.
+  A retained trace is kept, and the error names it.
 - **MXC killed mid-run:** the orphaned `log stream` exits when its output pipe
-  closes. MXC leaves no host state outside the caller's report paths.
+  closes. The workload may keep running: pipe workloads run in their own
+  session, and Seatbelt has no parent-death cleanup. This is existing
+  Seatbelt behavior and isn't changed here.
 - **Next run:** independent. It gets a new tag and new file names.
 
 ## Acceptance criteria and validation plan
@@ -255,13 +261,14 @@ Host: the macOS hosts in the `macos` job of
 | `--audit` | Temp report, pointer on stderr, warning | Existing |
 | GUI with and without `guiAccess`, clipboard denies | Expected records | Existing |
 | Host loopback in `allow` mode | Deny, allow, and proxy-port exception honored | Existing |
-| Timeout plus report-write failure | Error includes both causes | Existing |
+| Timeout plus report-write failure | CLI error includes both causes; SDK `wait` returns `TimedOut` with the capture failure in warnings | Existing, extended |
 | `profileOverride`, `1.0.0` field, `--audit` with capture | Rejected before start | Existing and new |
 | Two overlapping runs, same `outputPath` | Separate reports; each excludes the other's sentinel; no collectors left | New |
 | Byte budget reached before event limit | `deniedResourcesTruncated: true`, run completes | New |
 | `retainEtl` | `.seatbelt.log` exists, and the pointer's `etlPath` names it | New |
 | Incomplete drain | CLI prints warning | New |
-| Termination failure | Report marked incomplete | New (unit-level; can't force on a real host) |
+| Termination failure | Error returned; no report files remain | New (unit-level; can't force on a real host) |
+| `mxc-exec-mac` killed mid-run | No tagged `log stream` remains | New |
 | Discovery | `seatbelt` lists `captureDenials` | New, SDK discovery check in macOS CI |
 
 - **CI checks removed?** No.
