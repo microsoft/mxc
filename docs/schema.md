@@ -191,6 +191,8 @@ that can be executed independently.
     "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Optional externally assigned container ID.
                                            //  Omit it to use backend-defined internal naming.
+                                           //  Must not contain an embedded NUL (`\u0000`);
+                                           //  the executor rejects it rather than truncating.
     "containment": "processcontainer",     // Backend (see table below)
 
     "lifecycle": {

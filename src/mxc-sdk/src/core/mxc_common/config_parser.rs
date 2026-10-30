@@ -1396,6 +1396,15 @@ fn normalize_common_request_ir(
 
     let source_contract = cfg.source_contract;
     let container_id = cfg.container_id.unwrap_or_default();
+    // JSON may legally carry `\u0000`. `string_util::to_wide` truncates at that
+    // NUL, so a value used as a session or profile name would collapse to its
+    // prefix. This is the single funnel for every entry point. Do not echo the
+    // raw id; the NUL would also truncate logs.
+    if container_id.contains('\0') {
+        return Err(WxcError::ConfigParse(
+            "containerId must not contain null bytes".to_string(),
+        ));
+    }
 
     // Process section: required for one-shot and state-aware exec; optional for
     // non-exec state-aware phases (require_process == false).
@@ -4714,6 +4723,39 @@ mod tests {
         let mut logger = test_logger();
         load_mxc_request_from_json(state_aware, &mut logger)
             .expect("0.9 state-aware inheritance should parse");
+    }
+
+    #[test]
+    fn container_id_embedded_nul_is_rejected_on_every_entry_point() {
+        let one_shot = "{\n            \"version\": \"1.0.0\",\n            \"containerId\": \"alpha\\u0000evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let one_shot_error = load_mxc_request_from_json(one_shot, &mut test_logger()).unwrap_err();
+        assert!(
+            one_shot_error
+                .message()
+                .contains("containerId must not contain null bytes"),
+            "got {one_shot_error:?}"
+        );
+        assert!(
+            !one_shot_error.message().contains('\0'),
+            "diagnostic must not echo the raw NUL id"
+        );
+
+        let v09 = "{\n            \"version\": \"0.9.0-alpha\",\n            \"containerId\": \"alpha\\u0000evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let v09_error = load_mxc_request_from_json(v09, &mut test_logger()).unwrap_err();
+        assert!(
+            v09_error
+                .message()
+                .contains("containerId must not contain null bytes"),
+            "got {v09_error:?}"
+        );
+
+        let distinct = "{\n            \"version\": \"1.0.0\",\n            \"containerId\": \"alpha-evil\",\n            \"process\": {\"commandLine\": \"echo hi\"}\n        }";
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(distinct, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.container_id, "alpha-evil");
     }
 
     #[test]

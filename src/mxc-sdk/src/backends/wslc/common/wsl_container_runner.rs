@@ -584,6 +584,12 @@ impl WSLContainerRunner {
         request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
+        if request.container_id.contains('\0') {
+            return Err(
+                WslcError::Rejected("containerId must not contain null bytes".to_string())
+                    .into_response(),
+            );
+        }
         let session_name_str = resolve_session_name(&request.container_id);
         let session_name: Vec<u16> = to_wide(&session_name_str);
         let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
