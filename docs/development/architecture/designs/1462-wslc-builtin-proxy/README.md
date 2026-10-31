@@ -186,6 +186,12 @@ the proxy endpoint, and the custom proxy decides the final destinations.
 - **Egress deny plus `networkProxy`:** the controller forwards TCP only to the
   proxy's IP and port. Proxy credentials stay in the workload's environment.
 
+- **Proxy hostname:** MXC resolves it on Windows before creating the
+  controller and passes the first IPv4 answer in the controller's policy. The
+  controller relays only to that IP and never resolves the name. The
+  workload's `HTTP(S)_PROXY` points at the controller, so it needs no DNS to
+  reach the proxy. Bubblewrap also resolves the proxy on the host.
+
 - **`networkProxy` plus egress rules:** rejected.
 
 - **Loopback proxy URL:** the controller relays only to the proxy's port on
@@ -201,6 +207,7 @@ the proxy endpoint, and the custom proxy decides the final destinations.
 These are rejected before the workload is created:
 
 - Non-TCP allow rules, `networkProxy` plus egress rules, and UDP port mappings.
+- A proxy hostname with no IPv4 answer on Windows.
 - Proxied `hostLoopback: allow` when `AllowWSLContainerPrivileged` is `0`; the
   error names the policy.
 - Any proxied config on WSL older than 3.0.5; the error names the required
@@ -485,7 +492,7 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | `hostLoopback: allow` / `deny` | Windows loopback service reached / name and controller address refused | Proposed config |
 | Proxied `allow` and `deny` workloads in one daemon session | Only the `allow` workload reaches Windows loopback | Extend `run_wslc_state_aware_tests.ps1` |
 | `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (not yet measured) | Proposed config |
-| Egress deny plus `networkProxy` (remote and loopback URL) | Only the proxy endpoint reached | Extend `run_wslc_proxy_test.ps1` |
+| Egress deny plus `networkProxy` (IP, hostname and loopback URL) | Only the proxy endpoint reached; unresolvable hostname rejected | Extend `run_wslc_proxy_test.ps1` |
 | Non-TCP allow rule, proxy plus rules, UDP mapping | Rejected; no container created | Proposed rejection configs |
 | Lifecycle provision → start → exec → stop → deprovision (proxied) | Policy enforced on exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
 | Controller and networks left in a store (killed run or daemon) | Next session on that store deletes them; the next proxied run succeeds | Proposed test |
@@ -551,7 +558,17 @@ Delivery order:
 3. **Controller image distribution:** a bundled tar or a registry, and how is
    it signed? Owners: build maintainers.
 
-4. **Discovery:** see [`api.md`](api.md#open-questions).
+4. **DNS and deny rules:** a deny rule covering UDP 53 is bypassed: the
+   controller's DNS lookups go through Docker's resolver (`127.0.0.11`), WSL
+   and Windows, which picks the server per name. 
+   Potential options:
+   - Query Windows' DNS servers directly, checking each IP against the rules
+     first (matches LXC). Stale after network changes; VPN DNS reachability
+     from WSLC is unverified.
+   - Turn DNS off when any deny rule covers UDP 53 (fail closed; over-blocks).
+   - Document DNS as outside egress rules.
+
+5. **Discovery:** see [`api.md`](api.md#open-questions).
 
 ## Review checklist
 
