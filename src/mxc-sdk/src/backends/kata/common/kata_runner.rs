@@ -24,8 +24,9 @@ use crate::mxc_common::interruptible_reader::{InterruptibleReader, ReadCanceller
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
 use crate::mxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
-    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
+    take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess, StdioMode,
+    StreamCloser,
 };
 use crate::mxc_common::validator::{validate_common, NetworkPolicySupport};
 
@@ -244,6 +245,24 @@ impl KataProcess {
 impl SandboxProcess for KataProcess {
     fn warnings(&self) -> Vec<String> {
         self.warnings.clone()
+    }
+
+    /// What the Node SDK takes its streams through.
+    fn take_native_stdio(&mut self) -> io::Result<Option<NativeStdio>> {
+        use std::os::fd::AsFd;
+        let stdio = duplicate_and_take_native_stdio(
+            &mut self.stdin,
+            &mut self.stdout,
+            &mut self.stderr,
+            |stream| stream.as_fd().try_clone_to_owned(),
+            InterruptibleReader::try_clone_owned_fd,
+            InterruptibleReader::try_clone_owned_fd,
+        )?;
+        if stdio.is_some() {
+            self.stdout_canceller.take();
+            self.stderr_canceller.take();
+        }
+        Ok(stdio)
     }
 
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {

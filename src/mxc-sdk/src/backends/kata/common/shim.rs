@@ -134,8 +134,34 @@ pub(crate) fn start_args(sandbox_id: &str, address_hint: &Path) -> Vec<String> {
     ]
 }
 
-/// Starts the shim for the sandbox whose bundle is `bundle`.
+/// Starts the shim for the sandbox whose bundle is `bundle`. A shim that
+/// started but cannot be returned is killed, so no VM runs unrecorded.
 pub(crate) fn start(
+    shim_binary: &Path,
+    sandbox_id: &str,
+    bundle: &Path,
+    address_hint: &Path,
+) -> Result<Shim, KataError> {
+    let launched = launch(shim_binary, sandbox_id, bundle, address_hint);
+    if launched.is_err() {
+        kill_unowned(bundle);
+    }
+    launched
+}
+
+/// Kills the shim recorded in the bundle's `shim.pid`, if it is running. The
+/// bundle was cleared before the start, so the file is from this start.
+fn kill_unowned(bundle: &Path) {
+    let identity = std::fs::read_to_string(bundle.join("shim.pid"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .and_then(ProcessIdentity::of);
+    if let Some(identity) = identity {
+        identity.kill_group();
+    }
+}
+
+fn launch(
     shim_binary: &Path,
     sandbox_id: &str,
     bundle: &Path,
@@ -296,8 +322,8 @@ pub(crate) fn remove_leftovers(sandbox_id: &str, address: Option<&str>) {
     }
     for dir in [KATA_STATE_DIR, KATA_SHARED_DIR] {
         let path = Path::new(dir).join(sandbox_id);
-        if path.exists() {
-            let _ = mounts::unmount_under(&path);
+        // Not deleted while a mount stays: that would delete what it exposes.
+        if path.exists() && mounts::unmount_all(&path).is_ok() {
             let _ = std::fs::remove_dir_all(&path);
         }
     }
@@ -392,6 +418,35 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let err = start(&fake, "mxc-kata-test", dir.path(), &dir.path().join("sock")).unwrap_err();
         assert!(err.message().contains("boom: bad config"), "{err:?}");
+    }
+
+    #[test]
+    fn a_start_that_fails_after_the_shim_launched_kills_the_shim() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("shim");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nsleep 60 </dev/null >/dev/null 2>&1 &\necho $! > shim.pid\necho nonsense\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = start(&fake, "mxc-kata-test", dir.path(), &dir.path().join("sock")).unwrap_err();
+        assert!(err.message().contains("unix://"), "{err:?}");
+
+        let pid: u32 = std::fs::read_to_string(dir.path().join("shim.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ProcessIdentity::of(pid).is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "the launched shim is still running"
+            );
+            std::thread::sleep(POLL);
+        }
     }
 
     #[test]

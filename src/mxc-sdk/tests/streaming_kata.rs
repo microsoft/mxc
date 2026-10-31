@@ -434,6 +434,33 @@ fn kata_streams_stdio_runs_in_the_guest_kernel_and_has_no_network() {
 }
 
 #[test]
+fn kata_hands_native_stdio_to_a_create_and_run_request() {
+    for hypervisor in hypervisors() {
+        let _guard = exclusive();
+        let Some(live) = live(&hypervisor) else {
+            continue;
+        };
+        println!("== {hypervisor}: native stdio");
+
+        let request = one_shot(&live, "read line; echo \"got=$line\"", json!({}));
+        let mut process = spawn_container_json(&request, true).expect("the sandbox starts");
+        let stdio = process
+            .take_native_stdio()
+            .expect("native stdio is taken")
+            .expect("native stdio is available");
+        let mut stdin = std::fs::File::from(stdio.stdin.expect("stdin"));
+        let reader = read_native_output(std::fs::File::from(stdio.stdout.expect("stdout")));
+        stdin.write_all(b"hello\n").unwrap();
+        drop(stdin);
+        let outcome = process.wait().expect("the process is waited for");
+        assert_eq!(outcome, WaitResult::Exited(0), "{hypervisor}");
+        assert_eq!(reader.join().unwrap().trim(), "got=hello", "{hypervisor}");
+        drop(process);
+        assert_nothing_left(&live);
+    }
+}
+
+#[test]
 fn kata_input_a_workload_never_reads_cannot_outlive_it() {
     for hypervisor in hypervisors() {
         let _guard = exclusive();
@@ -809,9 +836,17 @@ fn exec_with_native_input(sandbox_id: &str, command: &str, input: &str) -> (Wait
         .expect("native stdio is taken")
         .expect("native stdio is available");
     let mut stdin = std::fs::File::from(stdio.stdin.expect("stdin"));
-    let mut stdout = std::fs::File::from(stdio.stdout.expect("stdout"));
-    let reader = std::thread::spawn(move || {
-        // Native stdout is non-blocking, so a read may find nothing yet.
+    let reader = read_native_output(std::fs::File::from(stdio.stdout.expect("stdout")));
+    stdin.write_all(input.as_bytes()).expect("input is written");
+    drop(stdin);
+    let outcome = handle.wait().expect("exec is waited for");
+    (outcome, reader.join().unwrap())
+}
+
+/// Reads a native stdout to its end. It is non-blocking, so a read may find
+/// nothing yet.
+fn read_native_output(mut stdout: std::fs::File) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
         let (mut text, mut chunk) = (Vec::new(), [0u8; 4096]);
         let deadline = Instant::now() + LIVE_TIMEOUT;
         while Instant::now() < deadline {
@@ -825,11 +860,7 @@ fn exec_with_native_input(sandbox_id: &str, command: &str, input: &str) -> (Wait
             }
         }
         String::from_utf8_lossy(&text).into_owned()
-    });
-    stdin.write_all(input.as_bytes()).expect("input is written");
-    drop(stdin);
-    let outcome = handle.wait().expect("exec is waited for");
-    (outcome, reader.join().unwrap())
+    })
 }
 
 /// Releases a sandbox when a test fails part way, so one failure does not

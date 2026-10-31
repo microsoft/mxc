@@ -74,7 +74,30 @@ pub(crate) fn unmount_under(root: &Path) -> io::Result<Vec<(PathBuf, io::Error)>
             return Ok(failed);
         }
     }
-    Ok(Vec::new())
+    // Callers delete the directory next, and deleting through a mount deletes
+    // what it exposes, so anything still mounted here is a failure.
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+    Ok(mounts_under(&mountinfo, root)
+        .into_iter()
+        .map(|mount| {
+            (
+                mount,
+                io::Error::other("still mounted after repeated unmounts"),
+            )
+        })
+        .collect())
+}
+
+/// [`unmount_under`] where a mount that stays is an error. Nothing below `root`
+/// may be deleted unless this succeeds.
+pub(crate) fn unmount_all(root: &Path) -> Result<(), String> {
+    match unmount_under(root) {
+        Ok(failed) => match failed.into_iter().next() {
+            None => Ok(()),
+            Some((mount, error)) => Err(format!("cannot unmount {}: {error}", mount.display())),
+        },
+        Err(error) => Err(format!("listing mounts below {}: {error}", root.display())),
+    }
 }
 
 #[cfg(test)]
@@ -118,5 +141,11 @@ mod tests {
     #[test]
     fn nothing_is_returned_when_the_root_has_no_mounts() {
         assert!(mounts_under(SAMPLE, Path::new("/run/mxc-kata/none")).is_empty());
+    }
+
+    #[test]
+    fn a_root_with_no_mounts_unmounts_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(unmount_all(dir.path()), Ok(()));
     }
 }

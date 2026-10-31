@@ -348,9 +348,8 @@ impl Sandbox {
     /// point stay.
     fn reset_bundle(&self) -> Result<(), KataError> {
         let bundle = self.bundle();
-        mounts::unmount_under(&bundle).map_err(|e| {
-            KataError::failed(format!("listing mounts below {}: {e}", bundle.display()))
-        })?;
+        // Deleting below a mount that stays would delete what it exposes.
+        mounts::unmount_all(&bundle).map_err(KataError::failed)?;
         let entries = std::fs::read_dir(&bundle)
             .map_err(|e| KataError::failed(format!("reading {}: {e}", bundle.display())))?;
         for entry in entries.flatten() {
@@ -432,7 +431,16 @@ impl Sandbox {
                     .map(drop)
                     .map_err(|e| KataError::failed(format!("the sandbox did not start: {e}")))
             });
-        if let Err(error) = created {
+        // The record is written last, so failing to write it stops the shim
+        // like any other failed start instead of leaving it running unrecorded.
+        let started = created.and_then(|()| {
+            self.record.state = State::Running;
+            self.record.shim = Some(shim.clone());
+            self.save()
+        });
+        if let Err(error) = started {
+            self.record.state = State::Provisioned;
+            self.record.shim = None;
             // The shim cannot exit while it still reads the init process's
             // standard input, so release it first.
             drop(init_stdin);
@@ -444,10 +452,8 @@ impl Sandbox {
             });
         }
 
-        self.record.state = State::Running;
-        self.record.shim = Some(shim);
         self.init_stdin = Some(init_stdin);
-        self.save()
+        Ok(())
     }
 
     /// Stops the shim and removes what it leaves behind on the host.
@@ -464,16 +470,10 @@ impl Sandbox {
         );
         // The shim unmounts the root filesystem and its shared directories on a
         // clean shutdown. A shim that was killed cannot, so sweep.
-        let leftovers = mounts::unmount_under(&self.bundle()).unwrap_or_default();
+        let leftovers = mounts::unmount_all(&self.bundle());
         shim::remove_leftovers(&self.record.id, Some(&shim.address));
         stopped?;
-        if let Some((mount, error)) = leftovers.into_iter().next() {
-            return Err(KataError::failed(format!(
-                "cannot unmount {}: {error}",
-                mount.display()
-            )));
-        }
-        Ok(())
+        leftovers.map_err(KataError::failed)
     }
 
     /// Runs `request`'s process in the started sandbox.
