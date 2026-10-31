@@ -128,7 +128,8 @@ Windows host's loopback (`127.0.0.1`), not the container's own loopback.
   mappings. A port mapping is its own grant for one port, allowed independent
   of `hostLoopback`, like the `networkProxy` endpoint.
 
-- **Granularity:** all ports or none, as on every other backend. Egress rules
+- **Granularity:** all TCP ports or none, as on every other backend. UDP to
+  Windows loopback isn't relayed. Egress rules
   don't apply to host loopback: `127.0.0.1` in an egress rule is the
   container's own loopback, and rules don't accept hostnames.
 
@@ -311,17 +312,30 @@ There is one controller per container, rather than one shared proxy, because:
 With `hostLoopback: allow`, MXC builds the controller with host loopback
 relaying. Otherwise none of it is set up.
 
+- **Relay address:** the controller adds a second address on the workload's
+  network and uses it only for host loopback. Its main address keeps DNS and
+  the proxy, so no Windows port is shadowed. MXC picks the workload's,
+  controller's and relay addresses (`WslcContainerNetwork.ipv4Address`), so
+  Docker never assigns the relay address. The controller's DNS and proxy
+  listen only on its main address, so the relay address carries TCP only.
+  UDP to `host.wslc.internal`, including DNS, gets no answer.
+
 - **Name lookup:** the controller's DNS answers `host.wslc.internal` with the
-  controller's address on the workload's network. With `deny`, it refuses the
-  name, even when DNS allows all names. MXC doesn't edit the workload's
-  `/etc/hosts`.
+  relay address. With `deny`, it refuses the name, even when DNS allows all
+  names. MXC doesn't edit the workload's `/etc/hosts`.
 
 - **Relaying:** an nftables `redirect` in the controller's own network
-  namespace sends TCP to that address, on any port except DNS and the proxy
-  port, to a local relay. The relay reads the original port
-  (`SO_ORIGINAL_DST`) and connects to the same port on `host.wslc.internal`.
-  Programs that ignore the proxy variables work too. Proxy requests for
-  `host.wslc.internal` go to the same place. Nothing is forwarded or routed.
+  namespace sends TCP to the relay address, on every port, to a local relay.
+  The relay reads the original port (`SO_ORIGINAL_DST`) and connects to the
+  same port on `host.wslc.internal`. Programs that ignore the proxy variables
+  work too. Proxy requests for `host.wslc.internal` go to the same place.
+  Nothing is forwarded or routed.
+
+- **Measured on WSL 3.0.5:** workloads reached Windows `127.0.0.1:53` and
+  `:3128` (the controller's DNS and proxy ports) through the relay address,
+  while the controller's main address still served its filtering proxy and
+  didn't relay to Windows. Workloads without host loopback couldn't reach a
+  relay address.
 
 - **Capability:** the redirect needs `NET_ADMIN` in the controller, added
   through `ContainerSettings.CapabilityAdditions`. The workload never gets it.
@@ -428,7 +442,7 @@ probes used direct TCP connections, ignoring the proxy variables.
 
 - `wslc/common/container_steps.rs`: networks, environment, port mappings, the
   session host loopback hostname, the controller's `NET_ADMIN`, and deleting
-  leftover controllers and networks when a session starts.
+  leftover workloads, controllers and networks when a session starts.
 
 - `bin/wslc_daemon/session_manager.rs`: track the controller and networks in
   `ContainerEntry`.
@@ -465,12 +479,14 @@ probes used direct TCP connections, ignoring the proxy variables.
 - **Daemon:** `ContainerEntry` tracks the controller and networks, and
   `Worker::shutdown` deletes them with the workload.
 
-- **Leftovers:** a crash leaves the controller and networks in the store.
-  Controller and network names use an MXC prefix and derive from the container
-  ID. A store admits one live session, so when MXC starts a session on a store
-  (create-and-run or daemon), any prefixed controller or network already there
-  is orphaned. MXC deletes them before creating anything, which frees their
-  names and subnets.
+- **Leftovers:** a crash leaves the workload, controller and networks in the
+  store. A store admits one live session, so when MXC starts a session on a
+  store (create-and-run or daemon), MXC's proxied-mode resources already there
+  are orphaned. MXC force-deletes the workload and controller (ignoring not
+  found), then the networks, which frees their names and subnets. Containers
+  go first because a network can't be deleted while one is attached
+  (`ERROR_SHARING_VIOLATION`). How MXC identifies them is
+  [open question 5](#open-questions).
 
 - **Controller exits during use:** the workload loses network access. MXC
   doesn't restart the controller; the caller must deprovision.
@@ -489,13 +505,13 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | Deny rule inside an allow range | Deny wins | Extend Network Tests (replaces `wslc_network_egress_deny_rules_rejected.json`) |
 | Mixed defaults, `egress.default: allow` | TCP works; UDP (other than DNS) and ICMP blocked | Proposed config |
 | Everything denied, with a port mapping | Windows `127.0.0.1:<port>` reaches the workload; workload egress and DNS refused | Proposed config |
-| `hostLoopback: allow` / `deny` | Windows loopback service reached / name and controller address refused | Proposed config |
+| `hostLoopback: allow` / `deny` | Windows loopback services reached, including on the controller's DNS and proxy ports; UDP to `host.wslc.internal` gets no answer / name and relay address refused | Proposed config |
 | Proxied `allow` and `deny` workloads in one daemon session | Only the `allow` workload reaches Windows loopback | Extend `run_wslc_state_aware_tests.ps1` |
 | `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (not yet measured) | Proposed config |
 | Egress deny plus `networkProxy` (IP, hostname and loopback URL) | Only the proxy endpoint reached; unresolvable hostname rejected | Extend `run_wslc_proxy_test.ps1` |
 | Non-TCP allow rule, proxy plus rules, UDP mapping | Rejected; no container created | Proposed rejection configs |
 | Lifecycle provision → start → exec → stop → deprovision (proxied) | Policy enforced on exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
-| Controller and networks left in a store (killed run or daemon) | Next session on that store deletes them; the next proxied run succeeds | Proposed test |
+| Workload, controller and networks left in a store (killed run or daemon) | Next session on that store deletes them; the next proxied run succeeds | Proposed test |
 | Configs valid today (`wslc_network_bridged/isolated/proxy*`, `wslc_port_mapping_*`) | Unchanged results | Existing tests |
 
 - **Not testable in CI:** WSL older than 3.0.5, since CI installs at least the
@@ -568,7 +584,22 @@ Delivery order:
    - Turn DNS off when any deny rule covers UDP 53 (fail closed; over-blocks).
    - Document DNS as outside egress rules.
 
-5. **Discovery:** see [`api.md`](api.md#open-questions).
+5. **Identifying leftovers:** the 3.0.5 SDK can't list containers, label them
+   or disconnect a network, so MXC must find leftovers by name. A prefix match
+   alone could delete another tool's `mxc-...` resources in a store shared
+   through `wslc.storagePath`. Potential options:
+   - **Ownership record:** before creating them, MXC writes the names to a
+     file under `%LOCALAPPDATA%\mxc` and cleanup deletes only those names. A
+     lost record leaves leftovers in place but never deletes another tool's
+     resources.
+   - **Exact names:** derive every name from one MXC ID (`mxc-<id>` for the
+     workload via `WslcSetContainerSettingsName`, plus `-ctl`, `-int` and
+     `-out`), list networks with `WslcListSessionNetworks`, and delete only
+     full-pattern matches. Unlikely to collide, but not ruled out.
+   - **Default stores only:** skip cleanup when `wslc.storagePath` is set.
+   - Ask WSLC for SDK support for listing containers.
+
+6. **Discovery:** see [`api.md`](api.md#open-questions).
 
 ## Review checklist
 
