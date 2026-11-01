@@ -1,32 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Filesystem-policy **delegation check** (roadmap item D3).
-//!
-//! Enforces that the sandbox is never granted more filesystem access than the
-//! invoking user already holds: every `readwritePaths` entry requires the user
-//! to have read+write access, and every `readonlyPaths` entry requires read
-//! access. `deniedPaths` are unbounded (denying access needs no access) and are
-//! not checked. A path the user cannot access is **rejected** so a sandboxed
-//! process can't reach files the caller themselves couldn't.
-//!
-//! This does file I/O (`access(2)` / `CreateFileW`), so it runs
-//! in each backend runner **close to the point of enforcement**, NOT in
-//! `config_parser` (which stays string-only). Two reasons:
-//!
-//! - **Correctness:** mount targets may not exist when the config is parsed
-//!   (they can be created between parse and launch), so a parse-time check would
-//!   skip them; checking just before the backend builds its mounts sees the real
-//!   filesystem state.
-//! - **TOCTOU:** doing the check adjacent to enforcement shrinks the window in
-//!   which the filesystem can change between the check and the mount.
-//!
-//! When object-based filesystem normalization is also wired into a runner
-//! (tightening conflicting path intents to the most restrictive), it must run
-//! **first**, so delegation is checked against the already-tightened intents (a
-//! path moved `rw → denied` must not then be required to have write access).
+//! Check that the invoking user can delegate the requested filesystem access.
 
 use crate::mxc_common::filesystem_object::FilesystemPolicyError;
+use crate::mxc_common::filesystem_probe::FilesystemProbe;
 use crate::mxc_common::models::ContainerPolicy;
 
 /// The access the invoking user must hold to delegate a path to the sandbox.
@@ -93,6 +71,9 @@ enum Access {
 fn user_can_access(path: &str, mode: AccessMode) -> Access {
     use std::ffi::CString;
 
+    #[cfg(test)]
+    super::filesystem_probe::launch_tests::stall("delegation", path);
+
     let Ok(c_path) = CString::new(path) else {
         return Access::Denied;
     };
@@ -126,6 +107,9 @@ fn user_can_access(path: &str, mode: AccessMode) -> Access {
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, OPEN_EXISTING,
     };
+
+    #[cfg(test)]
+    super::filesystem_probe::launch_tests::stall("delegation", path);
 
     // Probe the caller's effective access by asking the OS to open the object
     // with the required rights. FILE_FLAG_BACKUP_SEMANTICS lets the same call
@@ -183,21 +167,23 @@ fn user_can_access(_path: &str, _mode: AccessMode) -> Access {
     Access::Missing
 }
 
-/// Validates the delegation constraint (spec D3): the sandbox receives no more
-/// access than the invoking user holds. `readwritePaths` require the user to
-/// have read+write access and `readonlyPaths` require read access; `deniedPaths`
-/// are unbounded and not checked. Non-existent paths are skipped.
-///
-/// Fails closed on the first path that fails: a path the user cannot access is
-/// [`FilesystemPolicyError::Policy`], and a path that could not be examined is
-/// [`FilesystemPolicyError::Host`].
 pub fn check_delegation(policy: &ContainerPolicy) -> Result<(), FilesystemPolicyError> {
+    let mut probe = FilesystemProbe::default();
+    check_delegation_with(policy, |path, mode| {
+        probe.run(path, move |path| user_can_access(path, mode))
+    })
+}
+
+fn check_delegation_with(
+    policy: &ContainerPolicy,
+    mut check: impl FnMut(&str, AccessMode) -> Result<Access, String>,
+) -> Result<(), FilesystemPolicyError> {
     for (paths, mode) in [
         (&policy.readonly_paths, AccessMode::Read),
         (&policy.readwrite_paths, AccessMode::ReadWrite),
     ] {
         for path in paths {
-            match user_can_access(path, mode) {
+            match check(path, mode).map_err(FilesystemPolicyError::Host)? {
                 Access::Granted | Access::Missing => {}
                 Access::Denied => {
                     return Err(FilesystemPolicyError::Policy(format!(
@@ -273,6 +259,45 @@ mod tests {
     #[test]
     fn empty_policy_is_ok() {
         assert!(check_delegation(&ContainerPolicy::default()).is_ok());
+    }
+
+    #[test]
+    fn slow_probe_rejects_readonly_and_readwrite_grants() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for policy in [policy(&["slow"], &[]), policy(&[], &["slow"])] {
+            let mut probe = FilesystemProbe::for_test(Duration::from_millis(100));
+            let (release, wait) = mpsc::sync_channel(1);
+            let mut wait = Some(wait);
+            let result = check_delegation_with(&policy, |path, _| {
+                let wait = wait.take().unwrap();
+                probe.run(path, move |_| {
+                    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Access::Granted
+                })
+            });
+            let _ = release.send(());
+            let error = result.unwrap_err();
+            assert!(
+                matches!(&error, FilesystemPolicyError::Host(_)),
+                "{error:?}"
+            );
+            assert!(error.message().contains("'slow'"), "{error:?}");
+            assert!(
+                error.message().contains("timed out after 100ms"),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn denied_paths_do_not_need_delegation_probes() {
+        let policy = ContainerPolicy {
+            denied_paths: vec!["denied".to_string()],
+            ..Default::default()
+        };
+        check_delegation_with(&policy, |_, _| panic!("must not probe a denied path")).unwrap();
     }
 
     #[cfg(windows)]

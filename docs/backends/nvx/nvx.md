@@ -7,8 +7,8 @@ command in a Linux guest on a Windows x64 host. Enable the Cargo feature
 `microvm` and authorize experimental execution at runtime. The Cargo feature
 and the JSON selector `containment: "microvm"` retain their existing names.
 
-Phase 1 supports Windows x64 only. Windows ARM64 and Linux hosts do not have an
-active MicroVM execution path in this phase; support for those platforms is
+The backend supports Windows x64 only. Windows ARM64 and Linux hosts do not have an
+active MicroVM execution path; support for those platforms is
 future work. Enabling the feature does not make an unsupported host available.
 
 ## Requirements and quick start
@@ -43,6 +43,9 @@ Use the development `1.1.0-alpha` request contract:
 {
   "version": "1.1.0-alpha",
   "containment": "microvm",
+  "microvm": {
+    "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+  },
   "process": {
     "commandLine": "printf 'hello from the guest\\n'",
     "timeout": 30000
@@ -54,43 +57,74 @@ Use the development `1.1.0-alpha` request contract:
 wxc-exec.exe --experimental config.json
 ```
 
+For in-process Rust execution, pass the same JSON to `v1::dev::run_json` and
+authorize the experimental backend separately:
+
+```rust,no_run
+use mxc_sdk::v1::dev::{self, JsonOptions};
+
+let json = std::fs::read_to_string("config.json")?;
+let result = dev::run_json(&json, JsonOptions { experimental: true })?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The result contains captured stdout and stderr as bytes; it does not provide
+live streams or a persistent container.
+
 Commands run in the guest's POSIX shell, not in a host shell or a Python
-interpreter. The workload image is fixed to
-`mcr.microsoft.com/azurelinux/base/core:3.0`; requests cannot select another
-image in Phase 1. The native agent pulls that image on the host, so the host
-needs access to the registry even though guest networking is not enabled.
+interpreter. Every creation request requires a registry image in
+`microvm.image`; there is no default or local image-file input. Include a
+registry host containing a dot, `localhost`, or a host with an explicit
+numeric port, followed by `/` and the image repository. For example, use
+`docker.io/library/python:3.12-alpine` rather than `python:3.12-alpine` or
+`library/python:3.12-alpine`. References containing whitespace or control
+characters are rejected. The signed runtime validates the remaining reference
+syntax and pulls the selected image on the host. Host-side image
+acquisition does not grant the guest network access. MXC has no separate
+registry-credentials input. The runtime caches references by text within its
+state root, so a tag can retain previously pulled content; use a digest when
+immutable content identity is required.
 
 ## Supported operations and policy
 
 Schema-valid fields do not imply backend support. MXC rejects unsupported
 policy before creating a VM rather than ignoring it.
 
+The executor's `--dry-run` checks the signed bundle's capabilities and native
+request validation without probing or starting a VM. The complete signed
+bundle must be available even when only validating a request.
+
 The table describes this MXC integration, not every capability of NVX. The
 signed agent limits workloads to one hour and constrains their working
-directories and environments as described below. Fixed image selection,
-captured-only execution, and refusal of filesystem, network, UI,
-and public lifecycle policies are MXC Phase 1 restrictions.
+directories and environments as described below. Captured-only execution
+and refusal of UI, memory overrides, and public lifecycle operations
+are restrictions of this MXC integration.
 The [signed-agent documentation](https://github.com/microsoft/nvx/blob/0430ce79d125203c20f0aa69243480513a774296/aci_edge_sandboxes/README.md#agent-backend-opt-in)
 describes its contract; the direct OpenVMM backend uses a different guest and
 does not define the limits of this integration.
 
-| Surface | Phase 1 support |
+| Surface | Support |
 |---|---|
 | Host platforms | Windows x64 with WHP. Windows ARM64 and Linux execution are unavailable. |
 | Execution | Create-and-run development JSON requests with captured stdout, stderr, exit status, and timeout. |
-| Typed V1 SDK APIs | This phase does not add MicroVM targeting to the published typed APIs. |
-| Streaming, PTY, and container lifecycle operations | Unsupported. |
-| Workload image | Fixed Azure Linux image above; no request-level image selection. |
+| Rust SDK API | `v1::dev::run_json` supports captured execution with a MicroVM JSON request; typed V1 operations do not expose MicroVM selection. |
+| Streaming, PTY, and container lifecycle operations | Unsupported. Requests fail explicitly before backend setup. |
+| Workload image | Required caller-selected registry reference in `microvm.image`. |
+| Guest memory override | The contract defines `microvm.provision.memoryMib`, but explicit overrides return `PolicyValidation` before bundle discovery. Omit it to use the runtime default. |
 | Working directory | Optional absolute POSIX guest path; see the limits below. |
 | Environment | Guest default, optionally extended with additive entries; see below. |
 | Process timeout | `0` means no workload timeout; nonzero values may not exceed 3,600,000 ms. |
 | Captured output | At most 64 MiB (67,108,864 bytes) combined stdout and stderr. |
-| Filesystem policy | No host mounts or copy-back. Nonempty `readonlyPaths`, `readwritePaths`, or `deniedPaths` are rejected. |
-| Network policy | A supplied `network` section is rejected, including empty or deny-only sections. Omit it. |
-| Runtime proxy | `runtimeConfig.networkProxy` is rejected. Proxy environment variables are also rejected. |
+| Filesystem policy | Read-only, read-write, and denied paths are mapped to the agent and require the corresponding runtime capabilities. |
+| Network policy | Directional defaults and CIDR/protocol/port rules require the corresponding runtime capabilities. Unsupported ingress or host-loopback allow postures fail closed. |
+| Runtime proxy | `runtimeConfig.networkProxy` requires the runtime's proxy capability. Proxy environment variables remain rejected. |
 | UI policy | A supplied `ui` section is rejected. |
 | Legacy fallback settings | Accepted and ignored for contract compatibility; they do not enable host-DACL mutation. |
 | Lifecycle options | `destroyOnExit` must be `true` and `preservePolicy` must be `false`. |
+
+The development contract allows `microvm.provision.memoryMib` as an optional
+positive integer in MiB. Null, zero, negative, and non-integer values are
+rejected; omitting it or supplying `provision: {}` uses the backend default.
 
 Backend-specific sections must match the selected backend. For example,
 `processContainer.filesystem.enumeratePaths` and
@@ -131,7 +165,9 @@ does not offer persistent containers or manual lifecycle operations.
 On startup failure, the returned error includes bounded tails of the agent's
 VM log, boot-console log, and outcome report before teardown removes them.
 Each tail is limited to 8 KiB; truncation and unavailable diagnostics are
-identified without replacing the original failure.
+identified without replacing the original failure. If the configured proxy URL
+contains credentials, MXC withholds native error details and startup diagnostics
+to avoid exposing them; the error code and failed operation are still reported.
 
 In the Windows executor, Ctrl-C and Ctrl-Break request cancellation and allow
 VM shutdown, deprovisioning, and temporary-directory cleanup before exit code
@@ -151,8 +187,9 @@ successful deprovisioning; it does not maintain a persistent container database.
 If deprovisioning fails, MXC reports the failure and retains the directory,
 including its location in the error. This preserves the agent's resource
 records rather than deleting them while a VM might remain. Retention does not
-provide automatic recovery. Confirm that the operation's VM has stopped before
-manually removing retained storage.
+provide automatic recovery. Retained runtime files can contain sensitive data;
+protect them and confirm that the operation's VM has stopped before manually
+removing retained storage.
 
 ## Validation
 
@@ -162,7 +199,9 @@ Windows 25H2 x64. It consumes the same Windows build artifact, including the
 compiled `nvx_e2e` tests and the complete signed bundle; the validation host
 does not rebuild them.
 
-The SDK suite covers both the executor and captured JSON execution, binary
+The SDK suite covers both the executor and captured JSON execution, caller
+image selection, filesystem enforcement, directional network and proxy
+enforcement against controlled reachable host endpoints, binary
 stdout/stderr, exit codes, environment and working-directory settings,
 timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
 An isolated-console scenario interrupts both startup and running execution,
@@ -248,3 +287,8 @@ containing the exact pinned archive or its complete extracted contents. The
 build still verifies the pinned archive and/or file hashes. Stage the resulting
 complete `aci-edge-sandboxes` directory with the executor, and validate the
 packaged artifact on a prepared host before accepting the upgrade.
+
+Cargo output directories may be reached through a junction or directory
+symlink. Caller-supplied extracted bundle directories, including their
+ancestors, must not contain links or reparse points; use a direct path to the
+verified bundle instead.

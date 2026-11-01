@@ -1,29 +1,257 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_sdk::v1::ErrorCode;
+use mxc_sdk::{
+    __ffi,
+    v1::{dev, ErrorCode},
+};
+
+#[cfg(all(windows, target_arch = "x86_64", feature = "microvm"))]
+#[path = "nvx_e2e/network.rs"]
+mod windows_network;
 
 fn process_only_request(command: &str) -> serde_json::Value {
     serde_json::json!({
         "version": "1.1.0-alpha",
         "containment": "microvm",
+        "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"},
         "process": { "commandLine": command, "timeout": 30_000 }
     })
+}
+
+#[test]
+fn json_execution_requires_a_valid_contract() {
+    for json in [
+        "{ not json",
+        r#"{"version":"999.0.0","process":{"commandLine":"echo"}}"#,
+        r#"{"version":"1.0.0","process":{"commandLine":"echo"},"extra":true}"#,
+        r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:unused"}"#,
+    ] {
+        for experimental in [false, true] {
+            let error = __ffi::run_json(json, experimental).unwrap_err();
+            assert_eq!(error.code, ErrorCode::MalformedRequest, "{json}: {error}");
+            let error = __ffi::spawn_container_json(json, experimental)
+                .err()
+                .expect("invalid request must not spawn");
+            assert_eq!(error.code, ErrorCode::MalformedRequest, "{json}: {error}");
+        }
+    }
+}
+
+#[test]
+fn microvm_creation_rejects_invalid_images_before_runtime() {
+    for image in [
+        None,
+        Some(""),
+        Some(" "),
+        Some("\n"),
+        Some("python:3.12-alpine"),
+        Some("library/python:3.12-alpine"),
+        Some("localhost/"),
+    ] {
+        let mut request = process_only_request("printf forbidden");
+        request.as_object_mut().unwrap().remove("microvm");
+        if let Some(image) = image {
+            request["microvm"] = serde_json::json!({"image": image});
+        }
+        let error = __ffi::run_json(&request.to_string(), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+        assert!(
+            error.message.contains("microvm.image")
+                || (image.is_none() && error.message.contains("missing field `microvm`")),
+            "{error}"
+        );
+
+        request.as_object_mut().unwrap().remove("process");
+        request["phase"] = serde_json::json!("provision");
+        for dry_run in [false, true] {
+            let error = __ffi::run_lifecycle_json(&request.to_string(), dry_run, true).unwrap_err();
+            assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+            assert!(
+                error.message.contains("microvm.image")
+                    || (image.is_none() && error.message.contains("missing field `microvm`")),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_microvm_memory_is_malformed_in_json_sdk_creation_and_provision() {
+    let mut request = process_only_request("printf forbidden");
+    request["microvm"]["provision"] = serde_json::json!({"memoryMib": 0});
+    for experimental in [false, true] {
+        let options = dev::JsonOptions { experimental };
+        let error = dev::run_json(&request.to_string(), options).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+        assert!(
+            error
+                .message
+                .contains("microvm.provision.memoryMib must be greater than zero"),
+            "{error}"
+        );
+        let mut provision = request.clone();
+        provision.as_object_mut().unwrap().remove("process");
+        provision["phase"] = serde_json::json!("provision");
+        for validate in [false, true] {
+            let error = if validate {
+                dev::validate_provision_json(&provision.to_string(), options)
+            } else {
+                dev::provision_container_json(&provision.to_string(), options)
+            }
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+            assert!(
+                error
+                    .message
+                    .contains("microvm.provision.memoryMib must be greater than zero"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn microvm_json_operations_require_explicit_optin() {
+    let mut request = process_only_request("printf forbidden");
+    let json = request.to_string();
+    for spawn in [false, true] {
+        let error = if spawn {
+            __ffi::spawn_container_json(&json, false)
+                .err()
+                .expect("spawn must reject MicroVM without opt-in")
+        } else {
+            __ffi::run_json(&json, false).unwrap_err()
+        };
+        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+        assert!(error.message.contains("experimental"), "{error}");
+    }
+
+    request.as_object_mut().unwrap().remove("process");
+    request["phase"] = serde_json::json!("provision");
+    for dry_run in [false, true] {
+        let error = __ffi::run_lifecycle_json(&request.to_string(), dry_run, false).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+        assert!(error.message.contains("experimental"), "{error}");
+    }
+}
+
+#[test]
+fn sdk_json_rejects_invalid_requests_and_requires_explicit_optin() {
+    let request = process_only_request("printf forbidden");
+    let json = request.to_string();
+    let error = dev::run_json(&json, dev::JsonOptions::default()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+    assert!(error.message.contains("experimental"), "{error}");
+
+    for experimental in [false, true] {
+        let options = dev::JsonOptions { experimental };
+        for invalid in [
+            "{ not json".to_owned(),
+            r#"{"version":"999.0.0","process":{"commandLine":"echo"}}"#.to_owned(),
+            r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:unused"}"#.to_owned(),
+        ] {
+            let error = dev::run_json(&invalid, options).unwrap_err();
+            assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+        }
+        let mut invalid_image = request.clone();
+        invalid_image["microvm"]["image"] = serde_json::json!("python:3.12-alpine");
+        let error = dev::run_json(&invalid_image.to_string(), options).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+    }
+
+    #[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
+    {
+        let error = dev::run_json(&json, dev::JsonOptions { experimental: true }).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+        assert!(error.message.contains("Windows x64"), "{error}");
+    }
+}
+
+#[test]
+fn sdk_json_rejects_microvm_streaming_pty_and_lifecycle() {
+    let mut request = process_only_request("printf forbidden");
+    let options = dev::JsonOptions { experimental: true };
+    let json = request.to_string();
+    let error = dev::spawn_json(&json, options)
+        .err()
+        .expect("MicroVM streaming must be rejected");
+    assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
+    let error = dev::spawn_with_pty_json(
+        &json,
+        dev::PtyJsonOptions {
+            experimental: true,
+            ..Default::default()
+        },
+    )
+    .expect_err("MicroVM PTY must be rejected");
+    assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
+
+    request.as_object_mut().unwrap().remove("process");
+    request["phase"] = serde_json::json!("provision");
+    let json = request.to_string();
+    for call in [dev::provision_container_json, dev::validate_provision_json] {
+        let error = call(&json, options).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedPhase, "{error}");
+    }
+}
+
+#[test]
+fn non_microvm_experimental_json_run_and_spawn_require_explicit_optin() {
+    let json = r#"{"version":"1.1.0-alpha","containment":"windows_sandbox","process":{"commandLine":"echo forbidden"}}"#;
+    for experimental in [false, true] {
+        let run_error = __ffi::run_json(json, experimental).unwrap_err();
+        let spawn_error = __ffi::spawn_container_json(json, experimental)
+            .err()
+            .expect("Windows Sandbox does not support streaming");
+        for error in [run_error, spawn_error] {
+            if experimental {
+                assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
+                assert!(error.message.contains("streaming"), "{error}");
+            } else {
+                assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+                assert!(error.message.contains("experimental"), "{error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn declared_microvm_streaming_and_lifecycle_fail_closed() {
+    let mut request = process_only_request("printf forbidden");
+    let error = __ffi::spawn_container_json(&request.to_string(), true)
+        .err()
+        .expect("MicroVM streaming is not implemented");
+    assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
+    assert!(error.message.contains("streaming"), "{error}");
+
+    request.as_object_mut().unwrap().remove("process");
+    request["phase"] = serde_json::json!("provision");
+    for dry_run in [false, true] {
+        let error = __ffi::run_lifecycle_json(&request.to_string(), dry_run, true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedPhase, "{error}");
+        assert!(error.message.contains("lifecycle"), "{error}");
+    }
 }
 
 #[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
 #[test]
 fn unsupported_platform_or_feature_is_fail_closed() {
-    let error =
-        mxc_sdk::__ffi::run_json(&process_only_request("printf forbidden").to_string(), true)
-            .unwrap_err();
-    assert_eq!(error.code, ErrorCode::BackendUnavailable);
-    assert!(error.message.contains("Windows x64"));
+    let json = process_only_request("printf forbidden").to_string();
+    for experimental in [false, true] {
+        let error = __ffi::run_json(&json, experimental).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+        if experimental {
+            assert!(error.message.contains("Windows x64"), "{error}");
+        } else {
+            assert!(error.message.contains("experimental"), "{error}");
+        }
+    }
 }
 
 #[cfg(all(windows, target_arch = "x86_64", feature = "microvm"))]
 mod windows_x64 {
-    use std::path::PathBuf;
+    use std::path::{Component, Path, PathBuf, Prefix};
     use std::process::{Command, Output, Stdio};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -50,34 +278,72 @@ mod windows_x64 {
         assert!(error.message.contains("experimental"));
     }
 
+    #[test]
+    fn signed_agent_proxy_validation_withholds_credentials() {
+        for proxy in [
+            "http://synthetic-user:synthetic-secret@[::1]:3128",
+            "http://synthetic%3Auser:synthetic%40secret@[::1]:3128",
+        ] {
+            let mut request = process_only_request("printf forbidden");
+            request["runtimeConfig"] = json!({"networkProxy": proxy});
+            let error = __ffi::run_json(&request.to_string(), true).unwrap_err();
+            assert_eq!(error.code, ErrorCode::PolicyValidation, "{}", error.message);
+            assert!(
+                !error.message.contains("synthetic"),
+                "native error leaked credentials"
+            );
+            assert!(
+                error.message.contains("validate_provision"),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains("withheld"), "{}", error.message);
+            assert_no_run_state(std::process::id());
+        }
+
+        let mut request = process_only_request("printf forbidden");
+        request["runtimeConfig"] = json!({"networkProxy": "http://[::1]:3128"});
+        let error = __ffi::run_json(&request.to_string(), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyValidation, "{}", error.message);
+        assert!(
+            error.message.contains("OpenVMM reaches host loopback"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("withheld"), "{}", error.message);
+        assert_no_run_state(std::process::id());
+
+        request["runtimeConfig"] =
+            json!({"networkProxy": "http://synthetic-user:synthetic-secret@192.0.2.1:3128"});
+        let error = __ffi::run_json(&request.to_string(), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert!(error.message.contains("localhost"), "{}", error.message);
+        assert!(!error.message.contains("synthetic"));
+        assert_no_run_state(std::process::id());
+    }
+
     fn rejected_requests() -> Vec<(&'static str, Value)> {
         vec![
             (
-                "readonly",
-                json!({"filesystem": {"readonlyPaths": ["C:\\work"]}}),
+                "image-without-registry",
+                json!({"microvm": {"image": "python:3.12-alpine"}}),
             ),
             (
-                "readwrite",
-                json!({"filesystem": {"readwritePaths": ["C:\\work"]}}),
+                "ambiguous-image",
+                json!({"microvm": {"image": "library/python:3.12-alpine"}}),
             ),
             (
-                "denied",
-                json!({"filesystem": {"deniedPaths": ["C:\\work"]}}),
-            ),
-            ("network-empty", json!({"network": {}})),
-            (
-                "network-deny",
-                json!({"network": {"egress": {"default": "deny"}}}),
-            ),
-            (
-                "network-allow",
-                json!({"network": {"egress": {"default": "allow"}}}),
-            ),
-            (
-                "proxy",
-                json!({"runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}}),
+                "image-without-repository",
+                json!({"microvm": {"image": "localhost/"}}),
             ),
             ("ui", json!({"ui": {"disable": true}})),
+            (
+                "memory-override",
+                json!({"microvm": {
+                    "image": "docker.io/library/python:3.12-alpine",
+                    "provision": {"memoryMib": 512}
+                }}),
+            ),
             (
                 "capture",
                 json!({"processContainer": {"captureDenials": {}}}),
@@ -189,6 +455,7 @@ mod windows_x64 {
 
     fn process_limit_error(label: &str) -> Option<&'static str> {
         match label {
+            "memory-override" => Some("NVX guest memory overrides are not available in this build"),
             "cwd-limit" | "cwd-multibyte-limit" => {
                 Some("NVX process.cwd must not exceed 4095 UTF-8 bytes")
             }
@@ -259,6 +526,15 @@ mod windows_x64 {
             );
         }
 
+        let mut request = process_only_request("printf forbidden");
+        request["microvm"]["provision"] = json!({"memoryMib": 512});
+        let error = __ffi::run_json(&request.to_string(), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyValidation, "{error}");
+        assert_eq!(
+            error.message,
+            "NVX guest memory overrides are not available in this build"
+        );
+
         for (label, patch) in valid_process_boundaries() {
             let error =
                 mxc_sdk::__ffi::run_json(&request_with_patch(patch).to_string(), true).unwrap_err();
@@ -322,11 +598,18 @@ mod windows_x64 {
     }
 
     fn executor_output(request: &Value, missing_bundle: bool) -> Output {
+        executor_output_with_mode(request, missing_bundle, false)
+    }
+
+    fn executor_output_with_mode(request: &Value, missing_bundle: bool, dry_run: bool) -> Output {
         let directory = tempfile::tempdir().expect("executor request directory");
         let path = directory.path().join("request.json");
         std::fs::write(&path, request.to_string()).expect("write executor request");
         let mut command = Command::new(executor());
         command.arg("--experimental").arg(&path);
+        if dry_run {
+            command.arg("--dry-run");
+        }
         if missing_bundle {
             command.env(BUNDLE_ENV, directory.path().join("absent"));
         }
@@ -345,6 +628,26 @@ mod windows_x64 {
     #[test]
     #[ignore = "host-only; requires separately built wxc-exec.exe; never creates a VM"]
     fn host_only_executor_request_matrix() {
+        let mut zero_memory = process_only_request("printf forbidden");
+        zero_memory["microvm"]["provision"] = json!({"memoryMib": 0});
+        let sdk_error = dev::run_json(
+            &zero_memory.to_string(),
+            dev::JsonOptions { experimental: true },
+        )
+        .unwrap_err();
+        assert_eq!(sdk_error.code, ErrorCode::MalformedRequest);
+        for dry_run in [false, true] {
+            let output = executor_output_with_mode(&zero_memory, true, dry_run);
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("malformed_request"), "{stderr}");
+            assert!(!stderr.contains("policy_validation"), "{stderr}");
+            assert!(
+                stderr.contains("microvm.provision.memoryMib must be greater than zero"),
+                "{stderr}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
+        }
         for (label, patch) in rejected_requests() {
             let output = executor_output(&request_with_patch(patch), true);
             assert!(!output.status.success(), "executor accepted {label}");
@@ -376,6 +679,47 @@ mod windows_x64 {
         }
     }
 
+    #[test]
+    #[ignore = "requires a signed agent bundle and separately built wxc-exec.exe"]
+    fn signed_executor_proxy_validation_withholds_credentials() {
+        let directory = tempfile::tempdir().expect("executor request directory");
+        let request_path = directory.path().join("request.json");
+        let log_path = directory.path().join("executor.log");
+        let mut request = process_only_request("printf forbidden");
+        request["runtimeConfig"] =
+            json!({"networkProxy": "http://synthetic-user:synthetic-password@[::1]:3128"});
+        std::fs::write(&request_path, request.to_string()).expect("write executor request");
+
+        let child = Command::new(executor())
+            .arg("--experimental")
+            .arg("--debug")
+            .arg("--log-file")
+            .arg(&log_path)
+            .arg(&request_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("MXC executor process");
+        let pid = child.id();
+        let output = child.wait_with_output().expect("MXC executor output");
+        assert_no_run_state(pid);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("policy_validation"), "{stderr}");
+        assert!(stderr.contains("validate_provision"), "{stderr}");
+        assert!(stderr.contains("withheld"), "{stderr}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let log = std::fs::read_to_string(log_path).expect("executor log");
+        assert!(!log.is_empty(), "executor log should contain diagnostics");
+        for text in [stdout.as_ref(), stderr.as_ref(), log.as_str()] {
+            assert!(
+                !text.contains("synthetic"),
+                "executor diagnostics leaked credentials"
+            );
+        }
+    }
+
     fn nonce() -> String {
         format!(
             "mxc-nvx-{}-{}",
@@ -387,7 +731,7 @@ mod windows_x64 {
         )
     }
 
-    fn assert_no_run_state(pid: u32) {
+    pub(super) fn assert_no_run_state(pid: u32) {
         let prefix = format!("mxc-nvx-{pid}-");
         let retained: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .expect("temporary directory listing")
@@ -419,6 +763,183 @@ mod windows_x64 {
         assert_eq!(stdout.len(), CAPTURE_LIMIT / 2);
         assert_eq!(stderr.len(), stderr_bytes);
         assert!(stdout.iter().chain(stderr).all(|&byte| byte == 0));
+    }
+
+    fn guest_path_for_host_directory(path: &Path) -> String {
+        let canonical = path.canonicalize().expect("canonical host directory");
+        let mut components = canonical.components();
+        let drive = match components.next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+                _ => panic!("host directory must have a disk prefix"),
+            },
+            _ => panic!("host directory must have a disk prefix"),
+        };
+        assert!(matches!(components.next(), Some(Component::RootDir)));
+        let mut guest = format!("/mnt/{}", char::from(drive).to_ascii_lowercase());
+        for component in components {
+            match component {
+                Component::Normal(name) => {
+                    guest.push('/');
+                    guest.push_str(name.to_str().expect("UTF-8 host directory"));
+                }
+                _ => panic!("canonical host directory has an unsupported component"),
+            }
+        }
+        guest
+    }
+
+    #[test]
+    fn guest_path_resolves_windows_case_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let actual = directory.path().join("PolicyAlias");
+        std::fs::create_dir(&actual).unwrap();
+        let alias = directory.path().join("pOLICYalias");
+        let guest = guest_path_for_host_directory(&alias);
+        assert_eq!(guest, guest_path_for_host_directory(&actual));
+        assert!(guest.ends_with("/PolicyAlias"), "{guest}");
+        assert!(!guest.contains("pOLICYalias"), "{guest}");
+    }
+
+    #[test]
+    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
+    fn signed_bundle_json_image_and_filesystem_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let actual_root = directory.path().join("PolicyAlias");
+        std::fs::create_dir(&actual_root).unwrap();
+        let alias_root = directory.path().join("pOLICYalias");
+        assert_eq!(
+            actual_root.canonicalize().unwrap(),
+            alias_root.canonicalize().unwrap()
+        );
+        let ro = alias_root.join("ro");
+        let rw = alias_root.join("rw");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::create_dir(&rw).unwrap();
+        std::fs::write(ro.join("input"), b"read-ok").unwrap();
+        std::fs::write(rw.join("secret"), b"secret").unwrap();
+        let ungranted = alias_root.join("ungranted");
+        std::fs::write(&ungranted, b"ungranted-sentinel").unwrap();
+        assert_eq!(std::fs::read(&ungranted).unwrap(), b"ungranted-sentinel");
+        let host_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&ungranted)
+            .expect("ungranted fixture must be readable and writable by the host");
+        drop(host_file);
+        let guest_root = guest_path_for_host_directory(&alias_root);
+        let script = r#"python3 -c 'import errno, os, pathlib, sys
+assert sys.version_info[:2] == (3, 12)
+root = pathlib.Path(os.environ["MXC_NVX_POLICY_ROOT"])
+assert (root / "ro" / "input").read_bytes() == b"read-ok"
+try:
+    (root / "ro" / "input").write_bytes(b"forbidden")
+except OSError as error:
+    assert error.errno in (errno.EACCES, errno.EROFS), error
+else:
+    raise AssertionError("read-only mapping was writable")
+try:
+    (root / "rw" / "secret").read_bytes()
+except OSError as error:
+    assert error.errno == errno.EACCES, error
+else:
+    raise AssertionError("denied path was readable")
+try:
+    descriptor = os.open(root / "rw" / "secret", os.O_WRONLY)
+    try:
+        os.write(descriptor, b"forbidden")
+    finally:
+        os.close(descriptor)
+except OSError as error:
+    assert error.errno == errno.EACCES, error
+else:
+    raise AssertionError("denied path was writable")
+for operation in ("read", "write"):
+    try:
+        if operation == "read":
+            (root / "ungranted").read_bytes()
+        else:
+            # Do not create a guest-local file when the host sibling is unmapped.
+            with (root / "ungranted").open("r+b") as output:
+                output.write(b"forbidden")
+    except OSError as error:
+        expected = (errno.EACCES, errno.ENOENT)
+        if operation == "write":
+            expected += (errno.EROFS,)
+        assert error.errno in expected, error
+    else:
+        raise AssertionError("ungranted sibling allowed " + operation)
+(root / "rw" / "result").write_bytes(b"write-ok")
+print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
+'"#;
+        let request = json!({
+            "version": "1.1.0-alpha",
+            "containment": "microvm",
+            "microvm": {"image": "docker.io/library/python:3.12-alpine"},
+            "filesystem": {
+                "readonlyPaths": [ro.to_str().unwrap()],
+                "readwritePaths": [rw.to_str().unwrap()],
+                "deniedPaths": [rw.join("secret").to_str().unwrap()]
+            },
+            "network": {},
+            "process": {
+                "commandLine": script,
+                "env": [format!("MXC_NVX_POLICY_ROOT={guest_root}")],
+                "inheritDefaultEnv": true,
+                "timeout": 30000
+            }
+        });
+        let result = __ffi::run_json(&request.to_string(), true).unwrap();
+        assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
+        assert_eq!(result.stdout, b"NVX_JSON_IMAGE_AND_POLICY_OK");
+        assert_eq!(std::fs::read(ro.join("input")).unwrap(), b"read-ok");
+        assert_eq!(std::fs::read(rw.join("secret")).unwrap(), b"secret");
+        assert_eq!(std::fs::read(rw.join("result")).unwrap(), b"write-ok");
+        assert_eq!(std::fs::read(&ungranted).unwrap(), b"ungranted-sentinel");
+        assert_no_run_state(std::process::id());
+        println!("VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup");
+    }
+
+    #[test]
+    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
+    fn signed_bundle_sdk_json_capture() {
+        let options = dev::JsonOptions { experimental: true };
+        let mut invalid_proxy = process_only_request("printf forbidden");
+        invalid_proxy["runtimeConfig"] =
+            json!({"networkProxy": "http://synthetic-user:synthetic-password@[::1]:3128"});
+        let error = dev::run_json(&invalid_proxy.to_string(), options).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyValidation);
+        assert!(error.message.contains("validate_provision"), "{error}");
+        assert!(error.message.contains("withheld"), "{error}");
+        assert!(!format!("{error:?}").contains("synthetic"));
+        assert_no_run_state(std::process::id());
+
+        let request =
+            process_only_request("printf '\\377\\000\\376'; printf '\\200\\000\\201' >&2; exit 42");
+        let result = dev::run_json(&request.to_string(), options).unwrap();
+        assert_eq!(result.outcome, WaitResult::Exited(42));
+        assert_eq!(result.stdout, b"\xff\0\xfe");
+        assert_eq!(result.stderr, b"\x80\0\x81");
+        assert_no_run_state(std::process::id());
+
+        let mut timeout =
+            process_only_request("printf partial-out; printf partial-err >&2; sleep 5");
+        timeout["process"]["timeout"] = json!(200);
+        let result = dev::run_json(&timeout.to_string(), options).unwrap();
+        assert_eq!(result.outcome, WaitResult::TimedOut);
+        assert_eq!(result.stdout, b"partial-out");
+        assert_eq!(result.stderr, b"partial-err");
+        assert_no_run_state(std::process::id());
+
+        let error = dev::run_json(
+            &capture_boundary_request(CAPTURE_LIMIT / 2 + 1).to_string(),
+            options,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendError);
+        assert_eq!(error.message, CAPTURE_ERROR);
+        assert_no_run_state(std::process::id());
+        println!("VM_EXECUTED SDK JSON binary capture timeout limit and cleanup");
     }
 
     #[test]
@@ -494,6 +1015,43 @@ mod windows_x64 {
     #[test]
     #[ignore = "VM: requires separately built wxc-exec.exe, WHP and exact signed official bundle"]
     fn signed_bundle_executor_configs() {
+        let valid = process_only_request("printf forbidden");
+        let output = executor_output_with_mode(&valid, false, true);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            stdout.contains("Dry run completed. Result: validation passed"),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("forbidden"), "{stdout}");
+
+        let mut invalid_proxy = valid.clone();
+        invalid_proxy["runtimeConfig"] = json!({"networkProxy": "http://[::1]:3128"});
+        let output = executor_output_with_mode(&invalid_proxy, false, true);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("policy_validation"), "{stderr}");
+        assert!(stderr.contains("OpenVMM reaches host loopback"), "{stderr}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
+
+        invalid_proxy["runtimeConfig"] =
+            json!({"networkProxy": "http://synthetic:secret@[::1]:3128"});
+        let output = executor_output_with_mode(&invalid_proxy, false, true);
+        assert!(!output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("policy_validation"), "{stderr}");
+        assert!(stderr.contains("validate_provision"), "{stderr}");
+        assert!(stderr.contains("withheld"), "{stderr}");
+        assert!(!stdout.contains("synthetic"));
+        assert!(!stderr.contains("synthetic"));
+
+        let output = executor_output_with_mode(&valid, true, true);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("backend_unavailable"), "{stderr}");
+        assert!(stderr.contains("holds no agent bundle"), "{stderr}");
+
         let cases = [
             (
                 "microvm_hello.json",

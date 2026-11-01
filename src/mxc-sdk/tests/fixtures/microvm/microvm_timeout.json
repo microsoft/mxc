@@ -6,5 +6,8 @@
         "commandLine": "sleep 120; printf 'should not reach here\\n'",
         "timeout": 5000
     },
-    "containment": "microvm"
+    "containment": "microvm",
+    "microvm": {
+        "image": "mcr.microsoft.com/azurelinux/base/core:3.0"
+    }
 }

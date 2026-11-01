@@ -139,12 +139,12 @@ pub(crate) fn execute_one_shot_json(
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
 
     if request.containment == ContainmentBackend::MicroVm {
+        experimental::require_experimental_optin(
+            &request.containment,
+            request.experimental_enabled,
+        )?;
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         {
-            experimental::require_experimental_optin(
-                &request.containment,
-                request.experimental_enabled,
-            )?;
             return invoke_execution_request(&request, logger, |request, logger| {
                 run::log_policy_hash(request, logger);
                 crate::mxc_common::validator::validate_common(request).map_err(|response| {

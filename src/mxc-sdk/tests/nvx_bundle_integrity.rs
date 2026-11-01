@@ -36,11 +36,12 @@ fn fixture() -> (tempfile::TempDir, Vec<(&'static str, String)>) {
 }
 
 fn verify(directory: &std::path::Path, expected: &[(&str, String)]) {
+    let directory = directory.canonicalize().expect("canonical fixture root");
     let expected: Vec<(&str, &str)> = expected
         .iter()
         .map(|(path, digest)| (*path, digest.as_str()))
         .collect();
-    build_nvx_bundled::verify_bundle_against(directory, &expected);
+    build_nvx_bundled::verify_bundle_against(&directory, &expected);
 }
 
 #[test]
@@ -84,9 +85,15 @@ fn rejects_missing_or_unlisted_bundle_files() {
 }
 
 fn write_zip_fixture(entries: &[(&str, &[u8])]) -> (tempfile::TempDir, std::path::PathBuf, String) {
+    write_zip_fixture_in(tempfile::tempdir().expect("zip fixture dir"), entries)
+}
+
+fn write_zip_fixture_in(
+    directory: tempfile::TempDir,
+    entries: &[(&str, &[u8])],
+) -> (tempfile::TempDir, std::path::PathBuf, String) {
     use std::io::Write;
 
-    let directory = tempfile::tempdir().expect("zip fixture dir");
     let archive_path = directory.path().join("aci-edge-sandboxes.zip");
     let file = std::fs::File::create(&archive_path).expect("create zip fixture");
     let mut writer = zip::ZipWriter::new(file);
@@ -103,6 +110,10 @@ fn write_zip_fixture(entries: &[(&str, &[u8])]) -> (tempfile::TempDir, std::path
 
 #[test]
 fn extracts_and_verifies_complete_pinned_archive() {
+    check_complete_archive_extraction(tempfile::tempdir().expect("zip fixture dir"));
+}
+
+fn check_complete_archive_extraction(directory: tempfile::TempDir) {
     let entries = [
         ("SHA256SUMS", b"checksums".as_slice()),
         ("SOURCE-MANIFEST.json", b"source manifest".as_slice()),
@@ -118,8 +129,12 @@ fn extracts_and_verifies_complete_pinned_archive() {
         .iter()
         .map(|(path, sha)| (*path, sha.as_str()))
         .collect();
-    let (directory, archive_path, archive_sha) = write_zip_fixture(&entries);
-    let extracted = directory.path().join("extracted");
+    let (directory, archive_path, archive_sha) = write_zip_fixture_in(directory, &entries);
+    let extracted = directory
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root")
+        .join("extracted");
 
     build_nvx_bundled::extract_verified_archive_against(
         &archive_path,
@@ -128,6 +143,132 @@ fn extracts_and_verifies_complete_pinned_archive() {
         &expected_refs,
     );
     verify(&extracted, &expected);
+}
+
+#[cfg(any(windows, unix))]
+#[test]
+fn extracts_archive_with_a_linked_temporary_root() {
+    let owner = tempfile::tempdir().expect("linked-root fixture");
+    let root = owner.path().canonicalize().expect("canonical owner root");
+    let real_parent = root.join("real");
+    let linked_parent = root.join("linked");
+    std::fs::create_dir(&real_parent).expect("real fixture parent");
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&linked_parent)
+            .arg(&real_parent)
+            .output()
+            .expect("create fixture junction");
+        assert!(
+            output.status.success(),
+            "junction creation failed: {output:?}"
+        );
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_parent, &linked_parent).expect("create fixture symlink");
+    let directory = tempfile::tempdir_in(&linked_parent).expect("temporary directory under link");
+    assert!(directory.path().starts_with(&linked_parent));
+    check_complete_archive_extraction(directory);
+}
+
+#[cfg(all(feature = "microvm", any(windows, unix)))]
+#[test]
+fn stages_verified_bundle_with_a_linked_cargo_output_root() {
+    check_linked_cargo_staging(false);
+}
+
+#[cfg(all(feature = "microvm", any(windows, unix)))]
+#[test]
+fn stages_beside_executable_with_a_linked_cargo_build_directory() {
+    check_linked_cargo_staging(true);
+}
+
+#[cfg(all(feature = "microvm", any(windows, unix)))]
+fn check_linked_cargo_staging(linked_build_directory: bool) {
+    let entries = [
+        ("SOURCE-MANIFEST.json", b"source manifest".as_slice()),
+        ("bin/aci_edge_agent.dll", b"agent dll".as_slice()),
+        ("guest/initramfs-edge.cpio.gz", b"guest".as_slice()),
+    ];
+    let expected: Vec<(&str, String)> = entries
+        .iter()
+        .map(|(path, contents)| (*path, digest(contents)))
+        .collect();
+    let expected_refs: Vec<(&str, &str)> = expected
+        .iter()
+        .map(|(path, sha)| (*path, sha.as_str()))
+        .collect();
+    let (owner, _, archive_sha) = write_zip_fixture(&entries);
+    let root = owner.path().canonicalize().expect("canonical fixture root");
+    let profile = root.join("cargo").join("debug");
+    std::fs::create_dir_all(&profile).expect("Cargo profile directory");
+    let (real_cargo, linked_cargo, relative_out) = if linked_build_directory {
+        (
+            root.join("cache").join("build"),
+            profile.join("build"),
+            std::path::PathBuf::from("mxc-fixture").join("out"),
+        )
+    } else {
+        (
+            root.join("cargo"),
+            root.join("cargo-link"),
+            std::path::Path::new("debug")
+                .join("build")
+                .join("mxc-fixture")
+                .join("out"),
+        )
+    };
+    std::fs::create_dir_all(real_cargo.join(&relative_out)).expect("Cargo output directory");
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&linked_cargo)
+            .arg(&real_cargo)
+            .output()
+            .expect("create Cargo output junction");
+        assert!(
+            output.status.success(),
+            "junction creation failed: {output:?}"
+        );
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real_cargo, &linked_cargo).expect("create Cargo output symlink");
+    let out_dir = linked_cargo.join(&relative_out);
+    let staged = profile.join("aci-edge-sandboxes");
+
+    build_nvx_bundled::stage_bundle_against(&out_dir, Some(&root), &archive_sha, &expected_refs);
+    verify(&staged, &expected);
+    build_nvx_bundled::stage_bundle_against(&out_dir, None, &archive_sha, &expected_refs);
+    verify(&staged, &expected);
+    if linked_build_directory {
+        assert!(
+            !root.join("cache").join("aci-edge-sandboxes").exists(),
+            "runtime bundle must not be staged in the build cache"
+        );
+    }
+
+    let caller_source = out_dir.join("aci-edge-sandboxes");
+    assert!(
+        std::panic::catch_unwind(|| {
+            build_nvx_bundled::stage_bundle_against(
+                &out_dir,
+                Some(&caller_source),
+                &archive_sha,
+                &expected_refs,
+            );
+        })
+        .is_err(),
+        "caller-supplied linked ancestors must remain rejected"
+    );
+    for (path, contents) in entries {
+        assert_eq!(
+            std::fs::read(staged.join(path)).expect("unchanged staged artifact"),
+            contents
+        );
+    }
 }
 
 #[test]
@@ -146,7 +287,11 @@ fn rejects_archive_digest_mismatch_and_unsafe_or_unlisted_entries() {
         .collect();
 
     let (directory, archive_path, _) = write_zip_fixture(&entries);
-    let extracted = directory.path().join("extracted");
+    let extracted = directory
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root")
+        .join("extracted");
     assert!(
         std::panic::catch_unwind(|| {
             build_nvx_bundled::extract_verified_archive_against(
@@ -169,7 +314,11 @@ fn rejects_archive_digest_mismatch_and_unsafe_or_unlisted_entries() {
         ("SHA256SUMS", b"checksums".as_slice()),
         ("../escape.txt", b"escape".as_slice()),
     ]);
-    let extracted = directory.path().join("extracted");
+    let extracted = directory
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root")
+        .join("extracted");
     assert!(
         std::panic::catch_unwind(|| {
             build_nvx_bundled::extract_verified_archive_against(

@@ -91,6 +91,29 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      - name: Test and stage filesystem probe request deadlines
+        shell: pwsh
+        run: |
+          $messages = @(cargo test --locked --release --target '${{ matrix.target }}' `
+            -p mxc-sdk --features wslc --lib --no-run --message-format=json)
+          if ($LASTEXITCODE -ne 0) { throw 'Building filesystem probe tests failed.' }
+          $payload = @($messages | ConvertFrom-Json | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'mxc_sdk' -and
+            $_.profile.test -and $_.executable
+          })
+          if ($payload.Count -ne 1) { throw 'Expected one filesystem probe test executable.' }
+          $destination = 'target\${{ matrix.target }}\release\mxc-filesystem-probe-tests.exe'
+          Copy-Item -LiteralPath $payload[0].executable -Destination $destination -Force
+          $tests = @(& $destination --list --ignored)
+          if ($LASTEXITCODE -ne 0) { throw 'Listing filesystem probe tests failed.' }
+          foreach ($case in 'wslc_launch_rejects_stalled_paths', 'wslc_provision_rejects_stalled_paths',
+              'wslc_overlap_rejects_stalls', 'wslc_provision_overlap_rejects_stalls') {
+            $name = "core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
+            if ($tests -notcontains "${name}: test") { throw "Missing regression: $name" }
+          }
+          & $destination --ignored filesystem_probe::launch_tests::
+          if ($LASTEXITCODE -ne 0) { throw 'Filesystem probe request regression failed.' }
+
       - name: Test NVX host-only executor matrix
         if: matrix.target == 'x86_64-pc-windows-msvc'
         run: cargo test --locked --release --target ${{ matrix.target }}
@@ -163,6 +186,7 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
             src/target/${{ matrix.target }}/release/nvx-e2e-tests.exe
+            src/target/${{ matrix.target }}/release/mxc-filesystem-probe-tests.exe
             src/target/${{ matrix.target }}/release/aci-edge-sandboxes/
           if-no-files-found: error
           retention-days: 1

@@ -155,6 +155,79 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     }
 }
 
+/// An image reference with an explicit registry. The runtime validates its
+/// complete syntax.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageReference(String);
+
+impl ImageReference {
+    /// Validate image input before any backend state is opened.
+    pub fn new(value: String) -> Result<Self, String> {
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Require a registry and repository without validating the complete reference.
+    pub fn validate(value: &str) -> Result<(), String> {
+        if value.is_empty()
+            || value
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '\u{feff}')
+        {
+            return Err("microvm.image must be a nonempty image reference without whitespace or control characters".to_owned());
+        }
+        let valid_registry = |registry: &str| {
+            registry == "localhost"
+                || registry
+                    .char_indices()
+                    .any(|(index, c)| c == '.' && index > 0 && index + 1 < registry.len())
+                || registry.rsplit_once(':').is_some_and(|(host, port)| {
+                    !host.is_empty()
+                        && !port.is_empty()
+                        && port.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        };
+        if !value.split_once('/').is_some_and(|(registry, repository)| {
+            valid_registry(registry)
+                && repository
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !matches!(c, '/' | ':' | '@'))
+        }) {
+            return Err("microvm.image must include a registry host and image repository, such as docker.io/library/python:3.12-alpine".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Consume the validated input.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageReference {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for ImageReference {
+    fn schema_name() -> String {
+        "ImageReference".to_owned()
+    }
+
+    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let mut schema = <String as schemars::JsonSchema>::json_schema(generator).into_object();
+        let string = schema.string.get_or_insert_with(Default::default);
+        string.min_length = Some(1);
+        string.pattern = Some(
+            r"^(?:localhost|[^\s\x00-\x1f\x7f-\x9f/][^\s\x00-\x1f\x7f-\x9f/.]*\.[^\s\x00-\x1f\x7f-\x9f/]+|[^\s\x00-\x1f\x7f-\x9f/]+:[0-9]+)/[^/:\u0040\s\x00-\x1f\x7f-\x9f][^\s\x00-\x1f\x7f-\x9f]*(?![\s\S])".to_owned(),
+        );
+        schema.into()
+    }
+}
+
 /// A JSON array that must contain at least one element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NonEmptyVec<T>(Vec<T>);

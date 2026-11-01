@@ -146,6 +146,7 @@ support.
 | `windowsSandbox` | Optional `idleTimeoutMs` (non-negative integer milliseconds), legacy `idleTimeout` (non-negative integer), and `daemonPipeName` (string). Compatibility fields, not live controls of the current execution path. |
 | `hyperlight` | Optional `runtime`: `agent` (default), `python`, `python-shell`, `node`, `bash`, or `dotnet-jit`. The command line supplies source for that guest runtime. |
 | `kata` | Required `rootfs` (absolute host path of a root filesystem directory or ext4 image) and optional `hypervisor`: `qemu` (default), `clh` (or `cloud-hypervisor`), `firecracker`, or `dragonball`. See the [Kata backend guide](../../backends/kata/kata-backend.md). |
+| `microvm` | Required explicit registry-qualified `image`. Optional positive integer `provision.memoryMib` is defined by the contract but rejected by the backend; omit it to use the runtime default. See [NVX supported operations and policy](../../backends/nvx/nvx.md#supported-operations-and-policy). |
 
 For Seatbelt, `profileOverride` replaces the generated profile, so
 `filesystem`, `network`, and `ui` restrictions in the request are not

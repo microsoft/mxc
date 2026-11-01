@@ -31,10 +31,10 @@
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{sync_channel, SyncSender};
-use std::sync::OnceLock;
 
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
+use crate::mxc_common::module_lifetime::pin_current_module;
 use crate::mxc_common::process_util::{
     create_local_pipe, InterruptiblePipeReader, InterruptiblePipeWriter, PipeWriteCanceller,
     PipeWriter,
@@ -47,10 +47,7 @@ use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::validator::validate_common;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle as StdOwnedHandle};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HANDLE, HMODULE, WAIT_OBJECT_0};
-use windows::Win32::System::LibraryLoader::{
-    GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
-};
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
 use crate::wslc_common::error::WslcError;
@@ -401,33 +398,6 @@ impl Drop for PreparedNativeOutput {
     }
 }
 
-/// Keep the module containing output pump code loaded for the process lifetime.
-///
-/// Native pipe readers outlive the sandbox handle, so an active pump may still
-/// return from a blocking write after `mxc_sandbox_free` has completed.
-fn pin_output_pump_module() -> std::io::Result<()> {
-    static MODULE_PIN: OnceLock<Result<(), String>> = OnceLock::new();
-
-    MODULE_PIN
-        .get_or_init(|| {
-            let mut module = HMODULE::default();
-            // SAFETY: FROM_ADDRESS interprets the pointer as an address within
-            // the current module rather than as a string. PIN keeps that module
-            // loaded until process exit, so detached pumps can finish safely.
-            unsafe {
-                GetModuleHandleExW(
-                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                    PCWSTR(pin_output_pump_module as *const () as *const u16),
-                    &mut module,
-                )
-            }
-            .map_err(|error| format!("failed to pin the WSLC output-pump module: {error}"))
-        })
-        .as_ref()
-        .map_err(|error| std::io::Error::other(error.clone()))
-        .copied()
-}
-
 /// Prepare a native pipe and an idle output pump before detaching a WSLC stream.
 ///
 /// WSLC exposes stdout and stderr as callback-backed streams rather than
@@ -439,7 +409,7 @@ fn pin_output_pump_module() -> std::io::Result<()> {
 /// container. Keep the explicit one-pump-per-output tradeoff until the WSLC SDK
 /// exposes a waitable or cancellable asynchronous read primitive.
 pub(crate) fn prepare_native_output() -> std::io::Result<PreparedNativeOutput> {
-    pin_output_pump_module()?;
+    pin_current_module().map_err(std::io::Error::other)?;
     let (reader, writer) = create_local_pipe().map_err(std::io::Error::other)?;
     let mut destination = PipeWriter::new(writer);
     let (start, source) = sync_channel::<StreamReader>(1);
@@ -469,7 +439,7 @@ fn bridge_native_stdin(
     mut stdin: impl Write + Send + 'static,
     register_closer: impl FnOnce(Box<dyn StreamCloser>),
 ) -> std::io::Result<(OwnedPipe, StdinPump)> {
-    pin_output_pump_module()?;
+    pin_current_module().map_err(std::io::Error::other)?;
     let (read, write) = create_local_pipe().map_err(std::io::Error::other)?;
     let mut reader = InterruptiblePipeReader::new(read);
     let caller_end = write.try_into_std_owned_handle()?;

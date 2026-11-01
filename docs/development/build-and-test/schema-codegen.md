@@ -20,7 +20,7 @@ identities.
 ## Sources of truth
 
 `src/mxc-sdk/src/core/mxc_contract/dev/` defines the exact mutable
-`1.1.0-alpha` contract. Its one-shot and nine state-aware request roots are
+`1.1.0-alpha` contract. Its one-shot and ten state-aware request roots are
 independent closed Rust types. Constrained primitives and the `string_enum!`
 and `string_marker!` macros implement `JsonSchema` so deserialization and
 generated constants cannot drift.
@@ -95,7 +95,7 @@ dispatch:
 2. a present `phase` selects provision-session, provision, start, exec, stop,
    deprovision, or deprovision-session;
 3. provision additionally selects a backend-specific root by `containment`
-   (Windows Sandbox, IsolationSession, or WSLC in v1.1 development;
+   (Windows Sandbox, IsolationSession, MicroVM, or WSLC in v1.1 development;
    IsolationSession or WSLC in published v0.9 and v1.0). The two session phases
    select by `containment` as well, but admit only WSLC.
 

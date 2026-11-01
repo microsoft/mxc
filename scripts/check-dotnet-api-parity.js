@@ -518,7 +518,8 @@ const rustPrefixBody = namedBody(rustDispatch, "fn", "backend_from_prefix");
 const rustPrefixes = [
   ...rustPrefixBody.matchAll(/"([^"]+)"\s*=>\s*Ok\(ContainmentBackend::(\w+)\)/g),
 ]
-  .filter((match) => !rawJsonOnlyLifecycles.includes(match[2]))
+  // Prefix resolution also recognizes backends that only return unsupported_phase.
+  .filter((match) => rustBackends.includes(match[2]))
   .map((match) => `${match[1]}:${match[2]}`);
 function managedIdPrefixes(source) {
   return [

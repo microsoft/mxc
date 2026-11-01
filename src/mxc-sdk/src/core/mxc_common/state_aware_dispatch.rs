@@ -258,6 +258,7 @@ pub(crate) fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, Mx
     match prefix {
         "iso" => Ok(ContainmentBackend::IsolationSession),
         "kata" => Ok(ContainmentBackend::Kata),
+        "microvm" => Ok(ContainmentBackend::MicroVm),
         "wsb" => Ok(ContainmentBackend::WindowsSandbox),
         "wslc" => Ok(ContainmentBackend::Wslc),
         // Future state-aware backends extend this list.

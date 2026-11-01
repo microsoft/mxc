@@ -210,6 +210,7 @@ impl SdkStateAwareInput {
             windows_sandbox: None,
             hyperlight: None,
             kata: None,
+            microvm: None,
         };
         StateAwareInput::new(common, self.operation)
     }

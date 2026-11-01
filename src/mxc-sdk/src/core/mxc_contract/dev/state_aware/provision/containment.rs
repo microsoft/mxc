@@ -10,6 +10,8 @@ pub enum Containment {
     Kata,
     /// Windows Sandbox backend.
     WindowsSandbox,
+    /// MicroVM backend.
+    MicroVm,
     /// WSL container backend.
     Wslc,
 }
@@ -21,6 +23,7 @@ impl Containment {
             Containment::IsolationSession => "isolation_session",
             Containment::Kata => "kata",
             Containment::WindowsSandbox => "windows_sandbox",
+            Containment::MicroVm => "microvm",
             Containment::Wslc => "wslc",
         }
     }
@@ -33,6 +36,7 @@ impl Containment {
             "isolation_session" => Some(Containment::IsolationSession),
             "kata" => Some(Containment::Kata),
             "windows_sandbox" => Some(Containment::WindowsSandbox),
+            "microvm" => Some(Containment::MicroVm),
             "wslc" => Some(Containment::Wslc),
             _ => None,
         }

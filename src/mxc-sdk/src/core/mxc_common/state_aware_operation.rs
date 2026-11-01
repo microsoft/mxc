@@ -10,8 +10,8 @@
 //! never reads it.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, IsolationSessionProvisionConfig, KataConfig, WslcProvisionConfig,
-    WslcProvisionSessionConfig,
+    ContainmentBackend, IsolationSessionProvisionConfig, KataConfig, MicroVmProvisionConfig,
+    WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_request::Phase;
@@ -27,6 +27,8 @@ pub enum StateAwareProvision {
     Kata(KataConfig),
     /// Windows Sandbox has no backend-specific provision configuration.
     WindowsSandbox,
+    /// MicroVM provision configuration.
+    MicroVm(Option<MicroVmProvisionConfig>),
     /// An omitted image remains absent until the WSLC backend chooses a default.
     Wslc(Option<WslcProvisionConfig>),
 }
@@ -38,6 +40,7 @@ impl StateAwareProvision {
             Self::IsolationSession(_) => ContainmentBackend::IsolationSession,
             Self::Kata(_) => ContainmentBackend::Kata,
             Self::WindowsSandbox => ContainmentBackend::WindowsSandbox,
+            Self::MicroVm(_) => ContainmentBackend::MicroVm,
             Self::Wslc(_) => ContainmentBackend::Wslc,
         }
     }
@@ -124,6 +127,15 @@ impl StateAwareOperation {
     /// Both the JSON and typed-SDK entry points call this, so neither surface
     /// can accept a payload the other rejects.
     pub(crate) fn validate(&self) -> Result<(), crate::mxc_common::error::WxcError> {
+        if let Self::Provision(StateAwareProvision::MicroVm(config)) = self {
+            let config = config.as_ref().ok_or_else(|| {
+                crate::mxc_common::error::WxcError::Validation(
+                    "microvm.image is required".to_owned(),
+                )
+            })?;
+            crate::mxc_contract::dev::ImageReference::validate(&config.image)
+                .map_err(crate::mxc_common::error::WxcError::Validation)?;
+        }
         match self {
             Self::Provision(StateAwareProvision::Wslc(Some(config))) => {
                 match config.port_mappings.as_deref() {
@@ -137,7 +149,9 @@ impl StateAwareOperation {
             Self::DeprovisionSession { session_id } => {
                 validate_wslc_session_id(session_id).map_err(Into::into)
             }
-
+            Self::Provision(StateAwareProvision::MicroVm(Some(config))) => {
+                MicroVmProvisionConfig::validate_memory_mib(config.memory_mib)
+            }
             // Session sizing carries no cross-backend constraint; the WSLc
             // backend decides what it can honor.
             Self::ProvisionSession(_)
@@ -186,6 +200,10 @@ mod tests {
             (
                 StateAwareProvision::WindowsSandbox,
                 ContainmentBackend::WindowsSandbox,
+            ),
+            (
+                StateAwareProvision::MicroVm(None),
+                ContainmentBackend::MicroVm,
             ),
             (StateAwareProvision::Wslc(None), ContainmentBackend::Wslc),
             (
@@ -315,6 +333,10 @@ mod tests {
         assert_ne!(
             StateAwareProvision::Wslc(None),
             StateAwareProvision::Wslc(Some(WslcProvisionConfig::default()))
+        );
+        assert_ne!(
+            StateAwareProvision::MicroVm(None),
+            StateAwareProvision::MicroVm(Some(MicroVmProvisionConfig::default()))
         );
     }
 }

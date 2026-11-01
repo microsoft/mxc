@@ -890,7 +890,11 @@ impl ProxyNetworkNamespace {
             STARTUP_TIMEOUT,
         ) {
             let _ = supervisor.terminate();
-            return Err(error);
+            return Err(format!(
+                "{error}. If unshare was refused, check AppArmor's \
+                 kernel.apparmor_restrict_unprivileged_userns setting and the \
+                 kernel.unprivileged_userns_clone and user.max_user_namespaces limits"
+            ));
         }
 
         let userns_path = format!("/proc/{}/ns/user", supervisor.id());
@@ -1304,8 +1308,7 @@ fn run_probe(
 ///
 /// `unshare --help` only proves the flags are compiled in; the kernel can still
 /// refuse (unprivileged userns disabled, AppArmor restriction, or
-/// `user.max_net_namespaces` exhausted), which would otherwise surface deep
-/// inside supervisor startup. Both namespaces are requested together, mirroring
+/// `user.max_net_namespaces` exhausted). Both namespaces are requested together, mirroring
 /// the `CLONE_NEWUSER|CLONE_NEWNET` bwrap asks for.
 const PRIVATE_NAMESPACE_PROBE_FLAGS: [&str; 5] =
     ["--user", "--map-current-user", "--keep-caps", "--net", "--"];
@@ -1858,7 +1861,8 @@ impl PrivateNetworkUse {
 /// Pre-flight counterpart to the launch-path check in
 /// [`crate::bwrap_common::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
 /// caller that cannot ask this ahead of time only learns the answer when the
-/// run fails. Advisory — the runner still probes before it launches.
+/// run fails. Advisory — the runner checks the tools and creates the
+/// namespaces at launch.
 ///
 /// Not exhaustive: a missing `nf_conntrack` module is only detectable when the
 /// rules are installed, so it still surfaces at launch.
@@ -2130,15 +2134,19 @@ where
         *approved.lock().unwrap_or_else(PoisonError::into_inner) = Some(tools.clone());
     }
 
-    // Namespace limits can change while the process runs, so this check is
-    // never cached.
+    Ok(tools)
+}
+
+pub(crate) fn probe_private_namespaces(
+    tools: &NetworkTools,
+    use_case: PrivateNetworkUse,
+) -> Result<(), String> {
     check_private_namespaces(
-        private_namespace_probe(&tools, &command),
+        private_namespace_probe(tools, &real_probe_command),
         &tools.sh,
         use_case,
-        budget,
-    )?;
-    Ok(tools)
+        ProbeBudget::unbounded(),
+    )
 }
 
 /// Digest of the reviewed [`SUPERVISOR_SCRIPT`], line-ending independent.
@@ -2186,7 +2194,14 @@ where
     L: Fn(&str) -> Result<PathBuf, LookupError>,
     F: Fn(&Path, &[&str]) -> Command,
 {
-    probe_dependencies_caching(&Mutex::new(None), use_case, budget, find, command)
+    let tools = probe_dependencies_caching(&Mutex::new(None), use_case, budget, find, &command)?;
+    check_private_namespaces(
+        private_namespace_probe(&tools, &command),
+        &tools.sh,
+        use_case,
+        budget,
+    )?;
+    Ok(tools)
 }
 
 /// The half of the walk whose answers are fixed by what is installed: tool
@@ -2486,6 +2501,37 @@ fn set_nonblocking(fd: RawFd) -> Result<(), String> {
         .map_err(|error| format!("Bubblewrap: failed to make descriptor nonblocking: {error}"))
 }
 
+pub(crate) fn startup_output(
+    child: &mut Child,
+    pty: Option<&crate::mxc_pty::LivePty>,
+) -> Result<String, String> {
+    if let Some(pty) = pty {
+        let output = pty
+            .read_available_output(64 * 1024)
+            .map_err(|error| format!("Bubblewrap: failed to read startup PTY output: {error}"))?;
+        return Ok(String::from_utf8_lossy(&output).trim().to_string());
+    }
+    let Some(stderr) = child.stderr.as_mut() else {
+        return Ok(String::new());
+    };
+    set_nonblocking(stderr.as_raw_fd())?;
+    let mut output = Vec::new();
+    let mut buffer = [0; 4096];
+    while output.len() < 64 * 1024 {
+        match stderr.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => output.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+            Err(error) => {
+                return Err(format!(
+                    "Bubblewrap: failed to read startup stderr: {error}"
+                ))
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&output).trim().to_string())
+}
+
 /// The namespace supervisor and the process group it leads.
 ///
 /// The leader stays unreaped until its group has been swept. [`group_kill`]
@@ -2545,6 +2591,20 @@ fn has_exited_unreaped(pid: u32) -> std::io::Result<bool> {
 mod tests {
     use super::*;
     use crate::bwrap_common::bwrap_command::{COMPAT_RUN_LINK, COMPAT_RUN_TARGET};
+
+    #[test]
+    fn startup_stderr_returns_the_child_diagnostic() {
+        let mut child = Command::new("sh")
+            .args(["-c", "printf 'namespace refused\\n' >&2"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start diagnostic child");
+        assert!(child.wait().expect("wait for diagnostic child").success());
+        assert_eq!(
+            startup_output(&mut child, None).expect("read startup stderr"),
+            "namespace refused"
+        );
+    }
 
     /// The reported concern: a hostname proxy resolves through the host's
     /// resolver during setup, before the script timeout applies, so an
@@ -4563,7 +4623,7 @@ mod tests {
     /// Cache reuse, in the three shapes that matter: a remembered success, a
     /// failure that is retried, and reuse across use cases.
     #[test]
-    fn the_cache_remembers_tools_but_re_checks_namespaces() {
+    fn the_cache_remembers_tools_without_allocating_namespaces() {
         use std::cell::RefCell;
 
         let log = RefCell::new(Vec::new());
@@ -4590,13 +4650,14 @@ mod tests {
 
         let approved = Mutex::new(None);
         let run = |use_case| {
-            let _ = probe_dependencies_caching(
+            probe_dependencies_caching(
                 &approved,
                 use_case,
                 ProbeBudget::unbounded(),
                 lookup_where_only(None),
                 counting,
-            );
+            )
+            .expect("tool checks should succeed");
             (stable_runs(), namespace_runs())
         };
 
@@ -4605,6 +4666,7 @@ mod tests {
         // The cache is shared across use cases, which ask the same questions.
         let after_other_use_case = run(PrivateNetworkUse::FirewallEnforcement);
 
+        assert_eq!(after_first.0, 1, "the tool check must run on a cold cache");
         assert_eq!(
             after_second.0, after_first.0,
             "a warm cache must not re-run the tool checks"
@@ -4613,10 +4675,10 @@ mod tests {
             after_other_use_case.0, after_first.0,
             "the cache is shared across use cases, which ask the same questions"
         );
-        assert!(
-            after_second.1 > after_first.1 && after_other_use_case.1 > after_second.1,
-            "the namespace check must run on every call, warm cache or not: {after_first:?} \
-             then {after_second:?} then {after_other_use_case:?}"
+        assert_eq!(
+            (after_first.1, after_second.1, after_other_use_case.1),
+            (0, 0, 0),
+            "launch dependency checks must not allocate namespaces"
         );
     }
 

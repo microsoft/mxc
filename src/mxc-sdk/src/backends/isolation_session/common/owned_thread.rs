@@ -15,13 +15,9 @@
 use std::sync::Arc;
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::process_util::{OwnedHandle, SendOwnedHandle};
+use crate::mxc_common::process_util::{duplicate_thread_token, SendOwnedHandle};
 
-use windows::Win32::Foundation::{ERROR_NO_TOKEN, HANDLE};
-use windows::Win32::Security::{
-    DuplicateTokenEx, SecurityImpersonation, TokenImpersonation, TOKEN_DUPLICATE, TOKEN_IMPERSONATE,
-};
-use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken, SetThreadToken};
+use windows::Win32::System::Threading::SetThreadToken;
 use windows_core::RuntimeType;
 use windows_future::IAsyncOperation;
 
@@ -99,52 +95,27 @@ pub(super) fn wait_for<T: RuntimeType>(
         .map_err(|e| transport_err(operation, "wait failed", &e))
 }
 
-/// Duplicates the calling thread's impersonation token for another thread to
-/// set as its own. `None` when the thread is not impersonating.
-fn duplicate_thread_token() -> windows_core::Result<Option<SendOwnedHandle>> {
-    let mut token = HANDLE::default();
-    // SAFETY: the out-parameter is a valid, writable local.
-    let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_DUPLICATE, true, &mut token) };
-    match opened {
-        Ok(()) => {}
-        Err(e) if e.code() == ERROR_NO_TOKEN.to_hresult() => return Ok(None),
-        Err(e) => return Err(e),
-    }
-    let token = OwnedHandle::new(token);
-
-    let mut duplicate = HANDLE::default();
-    // SAFETY: `token` is a live token handle; the out-parameter is a valid,
-    // writable local.
-    unsafe {
-        DuplicateTokenEx(
-            token.get(),
-            TOKEN_IMPERSONATE,
-            None,
-            SecurityImpersonation,
-            TokenImpersonation,
-            &mut duplicate,
-        )
-    }?;
-    let mut duplicate = OwnedHandle::new(duplicate);
-    Ok(Some(SendOwnedHandle::take(&mut duplicate)))
-}
-
 #[cfg(test)]
 mod tests {
     use crate::mxc_common::logger::Mode;
+    use crate::mxc_common::process_util::OwnedHandle;
 
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::{
-        CreateRestrictedToken, CreateWellKnownSid, GetTokenInformation, ImpersonateSelf,
-        IsTokenRestricted, RevertToSelf, SecurityIdentification, TokenImpersonationLevel,
-        WinWorldSid, CREATE_RESTRICTED_TOKEN_FLAGS, PSID, SECURITY_IMPERSONATION_LEVEL,
-        SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, TOKEN_QUERY,
+        CreateRestrictedToken, CreateWellKnownSid, DuplicateTokenEx, GetTokenInformation,
+        ImpersonateSelf, IsTokenRestricted, RevertToSelf, SecurityIdentification,
+        SecurityImpersonation, TokenImpersonation, TokenImpersonationLevel, WinWorldSid,
+        CREATE_RESTRICTED_TOKEN_FLAGS, PSID, SECURITY_IMPERSONATION_LEVEL, SECURITY_MAX_SID_SIZE,
+        SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY,
     };
     use windows::Win32::System::Com::{
         CoGetApartmentType, CoInitializeEx, CoUninitialize, APTTYPE, APTTYPEQUALIFIER,
         APTTYPEQUALIFIER_IMPLICIT_MTA, APTTYPE_MAINSTA, APTTYPE_MTA, APTTYPE_STA,
         COINIT_APARTMENTTHREADED,
     };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    };
 
     use super::*;
     use crate::isolation_session_common::error::LifecycleFailure;

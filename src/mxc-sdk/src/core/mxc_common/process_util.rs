@@ -413,6 +413,40 @@ impl StreamCloser for PipeWriteCanceller {
 const BUFFER_SIZE: u32 = 4096;
 const MAX_OUTPUT_CHARS: usize = 1024 * 1024;
 
+pub(crate) fn duplicate_thread_token() -> windows::core::Result<Option<SendOwnedHandle>> {
+    use windows::Win32::Foundation::ERROR_NO_TOKEN;
+    use windows::Win32::Security::{
+        DuplicateTokenEx, SecurityImpersonation, TokenImpersonation, TOKEN_DUPLICATE,
+        TOKEN_IMPERSONATE,
+    };
+    use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+
+    let mut token = HANDLE::default();
+
+    // SAFETY: token is a writable handle slot for the current thread.
+    match unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_DUPLICATE, true, &mut token) } {
+        Ok(()) => {}
+        Err(error) if error.code() == ERROR_NO_TOKEN.to_hresult() => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let token = OwnedHandle::new(token);
+    let mut duplicate = HANDLE::default();
+
+    // SAFETY: token is live and duplicate is a writable handle slot.
+    unsafe {
+        DuplicateTokenEx(
+            token.get(),
+            TOKEN_IMPERSONATE,
+            None,
+            SecurityImpersonation,
+            TokenImpersonation,
+            &mut duplicate,
+        )
+    }?;
+    let mut duplicate = OwnedHandle::new(duplicate);
+    Ok(Some(SendOwnedHandle::take(&mut duplicate)))
+}
+
 /// Thread-safe owned handle wrapper that transfers HANDLE ownership across thread boundaries.
 /// After construction the source `OwnedHandle` is invalidated, and this wrapper is
 /// responsible for closing the handle on drop.

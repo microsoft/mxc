@@ -101,6 +101,10 @@ Note the required field lxc.
 }
 ```
 
+Filesystem validation and mount-target resolution use the shared
+[filesystem probe deadlines](../../schema.md#filesystem-probe-timeouts).
+A stalled probe rejects startup rather than leaving a policy check unenforced.
+
 ### LXC-Specific Options
 
 | Field | Type | Required | Description |

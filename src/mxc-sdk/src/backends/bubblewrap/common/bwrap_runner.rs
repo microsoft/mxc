@@ -94,7 +94,26 @@ impl SandboxBackend for BubblewrapScriptRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        self.validate_prepared(request).map(|_| ())
+        let launch = self.validate_prepared(request)?;
+        let use_case = match ResolvedNetworkMode::from_request(
+            request,
+            request.policy.network_proxy.is_enabled(),
+        ) {
+            ResolvedNetworkMode::ProxyOnly => {
+                Some(proxy_network::PrivateNetworkUse::ProxyOnlyEgress)
+            }
+            ResolvedNetworkMode::FirewallEnforced => {
+                Some(proxy_network::PrivateNetworkUse::FirewallEnforcement)
+            }
+            _ => None,
+        };
+        if let Some(use_case) = use_case {
+            if let Some(tools) = launch.network_tools.as_ref() {
+                proxy_network::probe_private_namespaces(tools, use_case)
+                    .map_err(|error| ScriptResponse::error(&error))?;
+            }
+        }
+        Ok(())
     }
 
     fn spawn(
@@ -172,7 +191,7 @@ struct ValidatedLaunch {
 }
 
 impl BubblewrapScriptRunner {
-    /// `validate`, plus the egress plan and host tools it checked.
+    /// Validate the request and prepare its egress plan and host tools.
     fn validate_prepared(
         &self,
         request: &ExecutionRequest,
@@ -698,6 +717,12 @@ impl BubblewrapScriptRunner {
             }
             let startup_result = startup
                 .child_pid(&mut child)
+                .map_err(|error| {
+                    format!(
+                        "{error}. If Bubblewrap cannot create a network namespace, \
+                         check user.max_net_namespaces and the host's namespace policy"
+                    )
+                })
                 .and_then(|child_pid| {
                     let network = proxy_network.as_mut().ok_or_else(|| {
                         "Bubblewrap: proxy network lifecycle disappeared during startup".to_string()
@@ -709,6 +734,11 @@ impl BubblewrapScriptRunner {
             if let Err(error) = startup_result {
                 let _ = child.kill();
                 let _ = child.wait();
+                let error = match proxy_network::startup_output(&mut child, pty.as_ref()) {
+                    Ok(detail) if !detail.is_empty() => format!("{error}: {detail}"),
+                    Ok(_) => error,
+                    Err(detail) => format!("{error}; {detail}"),
+                };
                 stop_proxy_network(&mut proxy_network, logger);
                 return Err(ScriptResponse::failed(
                     FailurePhase::PostLaunchFailed,
@@ -1245,14 +1275,42 @@ fn resolve_denied_paths(
     policy: &crate::mxc_common::models::ContainerPolicy,
     logger: &mut Logger,
 ) -> Result<DeniedPlan, FilesystemPolicyError> {
+    let mut probe = crate::mxc_common::filesystem_probe::FilesystemProbe::default();
     let mut changed = false;
     let mut out = Vec::with_capacity(policy.denied_paths.len());
     let mut files = HashSet::new();
     for p in &policy.denied_paths {
-        if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
+        let (resolved, is_file) = probe
+            .run(p, resolve_denied_path)
+            .map_err(FilesystemPolicyError::Host)??;
+        if resolved != *p {
+            let _ = writeln!(
+                logger,
+                "Bubblewrap: deniedPaths entry '{p}' resolves through a symlink; masking \
+                 its real path '{resolved}' instead."
+            );
+            changed = true;
+        }
+        if is_file {
+            files.insert(resolved.clone());
+        }
+        out.push(resolved);
+    }
+    Ok(DeniedPlan {
+        paths: changed.then_some(out),
+        files,
+    })
+}
+
+fn resolve_denied_path(path: &str) -> Result<(String, bool), FilesystemPolicyError> {
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("bwrap-denied", path);
+
+    let resolved = match resolve_through_symlinks(Path::new(path)) {
+        Some(resolved) => {
             if let Some(error) = resolved.error {
                 let message = format!(
-                    "Bubblewrap: deniedPaths entry '{p}' could not be resolved ({error}); \
+                    "Bubblewrap: deniedPaths entry '{path}' could not be resolved ({error}); \
                      refusing to start."
                 );
                 return Err(if is_policy_path_error(&error) {
@@ -1261,36 +1319,18 @@ fn resolve_denied_paths(
                     FilesystemPolicyError::Host(message)
                 });
             }
-            let resolved = resolved.path.to_str().ok_or_else(|| {
-                FilesystemPolicyError::Policy(format!(
-                    "Bubblewrap: deniedPaths entry '{p}' resolves to a non-UTF-8 host path that \
-                     cannot be safely masked; refusing to start."
-                ))
-            })?;
-            if resolved != p.as_str() {
-                let _ = writeln!(
-                    logger,
-                    "Bubblewrap: deniedPaths entry '{p}' resolves through a symlink; masking \
-                     its real path '{resolved}' instead."
-                );
-                if is_file_mask_target(resolved) {
-                    files.insert(resolved.to_owned());
-                }
-                out.push(resolved.to_owned());
-                changed = true;
-                continue;
-            }
+            resolved.path
         }
-        // Not rewritten: a real path or a rooted not-yet-existing path.
-        if is_file_mask_target(p) {
-            files.insert(p.clone());
-        }
-        out.push(p.clone());
-    }
-    Ok(DeniedPlan {
-        paths: changed.then_some(out),
-        files,
-    })
+        None => PathBuf::from(path),
+    };
+    let resolved = resolved.into_os_string().into_string().map_err(|_| {
+        FilesystemPolicyError::Policy(format!(
+            "Bubblewrap: deniedPaths entry '{path}' resolves to a non-UTF-8 host path that \
+             cannot be safely masked; refusing to start."
+        ))
+    })?;
+    let is_file = is_file_mask_target(&resolved);
+    Ok((resolved, is_file))
 }
 
 /// Classify a denied path for masking: `true` = `--ro-bind /dev/null` (file),

@@ -92,6 +92,7 @@ run_test "Bubblewrap Most-Specific Path" "$SCRIPT_DIR/run_bwrap_most_specific_te
 run_test "Bubblewrap Denied Masking" "$SCRIPT_DIR/run_bwrap_denied_masking_test.sh"
 run_test "Bubblewrap Network Block" "$SCRIPT_DIR/run_bwrap_network_test.sh"
 run_test "Bubblewrap Network Proxy" "$SCRIPT_DIR/run_bwrap_network_proxy_test.sh"
+run_test "Bubblewrap Namespace Startup" "$SCRIPT_DIR/run_bwrap_namespace_startup_test.sh"
 run_test "Bubblewrap Network Firewall" "$SCRIPT_DIR/run_bwrap_firewall_test.sh"
 run_test "Bubblewrap Loopback Resolver DNS" "$SCRIPT_DIR/run_bwrap_dns_test.sh"
 run_test "Bubblewrap Resolver IPC Isolation" "$SCRIPT_DIR/run_bwrap_resolver_isolation_test.sh"
