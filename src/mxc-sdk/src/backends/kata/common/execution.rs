@@ -15,7 +15,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -122,6 +122,21 @@ fn poll_or_wake(fd: RawFd, events: i16, wake: RawFd) -> io::Result<(i16, i16)> {
     }
 }
 
+/// Held from the room check to the write, so pumps feeding one pipe (stdout and
+/// stderr sent to the same place) cannot take its last free slot between them.
+static WRITE_GATE: Mutex<()> = Mutex::new(());
+
+/// Whether a write to `fd` would not wait. An error counts, so the write reports it.
+fn write_is_ready(fd: RawFd) -> bool {
+    let mut polled = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: `polled` is one valid pollfd.
+    unsafe { libc::poll(&mut polled, 1, 0) > 0 }
+}
+
 /// Writes all of `data`, giving up when `wake` has data or the write fails.
 ///
 /// Waits for room before each write and writes at most `PIPE_BUF` bytes, which
@@ -133,6 +148,11 @@ fn write_until_woken(sink: &mut (impl Write + AsRawFd), wake: RawFd, mut data: &
         match poll_or_wake(sink.as_raw_fd(), libc::POLLOUT, wake) {
             Ok((_, 0)) => {}
             _ => return false,
+        }
+        let _gate = WRITE_GATE.lock().unwrap_or_else(PoisonError::into_inner);
+        // Another pump may have used the room while this one waited for the gate.
+        if !write_is_ready(sink.as_raw_fd()) {
+            continue;
         }
         match sink.write(&data[..data.len().min(libc::PIPE_BUF)]) {
             Ok(0) => return false,
@@ -649,6 +669,8 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::testing::{queued, stdin_fixture};
     use super::*;
 
@@ -727,5 +749,46 @@ mod tests {
         // SAFETY: `sink` is open; F_GETFL only reads its flags.
         let flags = unsafe { libc::fcntl(sink.as_raw_fd(), libc::F_GETFL) };
         assert_eq!(flags & libc::O_NONBLOCK, 0, "the shared stream was changed");
+    }
+
+    /// Stdout and stderr sent to one pipe whose consumer stopped reading with
+    /// room left for a single write. Both pumps see room, but only one write
+    /// fits, and the other must not be left blocked in `write`.
+    #[test]
+    fn pumps_sharing_a_full_output_pipe_both_stop_when_asked() {
+        let (consumer, mut sink) = io::pipe().unwrap();
+        // SAFETY: `sink` is open; F_GETPIPE_SZ only reads the pipe's size.
+        let capacity = unsafe { libc::fcntl(sink.as_raw_fd(), libc::F_GETPIPE_SZ) } as usize;
+        for _ in 0..capacity / libc::PIPE_BUF - 1 {
+            sink.write_all(&[0u8; libc::PIPE_BUF]).unwrap();
+        }
+        let base = queued(&consumer);
+
+        for round in 0..300 {
+            let pumps = [(); 2].map(|()| {
+                let (source, feed) = io::pipe().unwrap();
+                let pump = Pump::start(source, sink.try_clone().unwrap()).unwrap();
+                (pump, feed)
+            });
+            for (_, feed) in &pumps {
+                (&*feed).write_all(&[1u8; libc::PIPE_BUF]).unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+
+            let (stopped, done) = mpsc::channel();
+            std::thread::spawn(move || {
+                for (pump, _feed) in pumps {
+                    pump.stop();
+                }
+                let _ = stopped.send(());
+            });
+            assert!(
+                done.recv_timeout(Duration::from_secs(5)).is_ok(),
+                "round {round}: a pump was left blocked in a write"
+            );
+            // Back to room for one write.
+            let mut excess = vec![0u8; queued(&consumer) - base];
+            (&consumer).read_exact(&mut excess).unwrap();
+        }
     }
 }
