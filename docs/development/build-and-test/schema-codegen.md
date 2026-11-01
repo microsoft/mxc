@@ -20,7 +20,7 @@ identities.
 ## Sources of truth
 
 `src/mxc-sdk/src/core/mxc_contract/dev/` defines the exact mutable
-`1.1.0-alpha` contract. Its one-shot and ten state-aware request roots are
+`1.1.0-alpha` contract. Its one-shot and eleven state-aware request roots are
 independent closed Rust types. Constrained primitives and the `string_enum!`
 and `string_marker!` macros implement `JsonSchema` so deserialization and
 generated constants cannot drift.
