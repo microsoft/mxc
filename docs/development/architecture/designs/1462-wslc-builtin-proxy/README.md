@@ -89,9 +89,9 @@ Built on the WSLC SDK networking support from Pierre and the WSLC team
 
 - Omitted fields keep their current WSLC defaults.
 
-- Changed operations: create-and-run, provision, start, stop and deprovision.
-  Exec, discovery and validation are unchanged apart from the newly accepted
-  values.
+- Changed operations: create-and-run, provision, start, exec, stop and
+  deprovision. Discovery and validation are unchanged apart from the newly
+  accepted values.
 
 ### Egress filtering
 
@@ -186,12 +186,26 @@ the proxy endpoint, and the custom proxy decides the final destinations.
 
 - **Egress deny plus `networkProxy`:** the controller forwards TCP only to the
   proxy's IP and port. Proxy credentials stay in the workload's environment.
+  The controller doesn't run its own filtering proxy, so the custom proxy's
+  port is free on the controller's address.
 
-- **Proxy hostname:** MXC resolves it on Windows before creating the
-  controller and passes the first IPv4 answer in the controller's policy. The
-  controller relays only to that IP and never resolves the name. The
-  workload's `HTTP(S)_PROXY` points at the controller, so it needs no DNS to
-  reach the proxy. Bubblewrap also resolves the proxy on the host.
+- **Proxy URL with a hostname:** the workload's proxy URL is passed through
+  unchanged. MXC resolves the name on Windows before creating the controller
+  and passes the first IPv4 answer in the controller's policy. The
+  controller's DNS answers only that name, with the controller's own address,
+  and the controller relays the proxy's port byte-for-byte to the resolved
+  IP. It never resolves the name itself. TLS to an `https://` proxy therefore
+  runs end to end and the certificate is checked against the proxy's name.
+
+- **Proxy URL with an IP or loopback address:** the workload can't reach
+  that address directly, so MXC replaces the URL's host with the controller's
+  address. A certificate can't match the replaced host, so these URLs must
+  use `http://`.
+
+- **Measured with a prototype on WSL 3.0.5:** through the controller, curl
+  reached an HTTPS proxy by its name with the certificate verified. Rewriting
+  the URL to the controller's address failed with a certificate name mismatch,
+  and `http://` to the TLS proxy failed.
 
 - **`networkProxy` plus egress rules:** rejected.
 
@@ -209,6 +223,7 @@ These are rejected before the workload is created:
 
 - Non-TCP allow rules, `networkProxy` plus egress rules, and UDP port mappings.
 - A proxy hostname with no IPv4 answer on Windows.
+- An `https://` `networkProxy` whose host is an IP address or loopback.
 - Proxied `hostLoopback: allow` when `AllowWSLContainerPrivileged` is `0`; the
   error names the policy.
 - Any proxied config on WSL older than 3.0.5; the error names the required
@@ -233,7 +248,13 @@ These are rejected before the workload is created:
   - `provision`: creates the networks, controller and workload. Network
     posture is fixed here.
   - `start`: starts the controller, then the workload.
-  - `exec`: unchanged; traffic goes through the running controller.
+  - `exec`: the daemon keeps the workload's proxy URL from `provision` and
+    sets the proxy variables on every exec with
+    `apply_cooperative_proxy_env`. This also applies when the exec replaces
+    the environment, since the variables are added before the `env -i`
+    command is built. An exec `networkProxy` must be omitted or match the
+    provision value; any other value is rejected. How provision receives
+    `networkProxy` is [open question 1](#open-questions).
   - `stop`: stops the workload, then the controller.
   - `deprovision`: deletes the workload, then the controller, then the
     networks.
@@ -277,7 +298,8 @@ These are rejected before the workload is created:
 ### Layout per container
 
 - **Workload:** alone on its own internal network with the controller.
-  `HTTP(S)_PROXY` and `resolv.conf` point at the controller.
+  `resolv.conf` points at the controller, and so does `HTTP(S)_PROXY`, either
+  directly or through a custom proxy's name.
 
 - **Controller:** on the workload's internal network and on its own normal
   network for outbound traffic.
@@ -444,8 +466,11 @@ probes used direct TCP connections, ignoring the proxy variables.
   session host loopback hostname, the controller's `NET_ADMIN`, and deleting
   leftover workloads, controllers and networks when a session starts.
 
-- `bin/wslc_daemon/session_manager.rs`: track the controller and networks in
-  `ContainerEntry`.
+- `bin/wslc_daemon/session_manager.rs`: track the controller, networks and
+  the workload's proxy URL in `ContainerEntry`.
+
+- `wslc/common/state_aware.rs`: `exec_config` applies the stored proxy URL
+  to every exec in a proxied container.
 
 - New controller binary: a static Rust (musl) `[[bin]]` target in `mxc-sdk`,
   packaged as an image and imported from a tar. No new crate.
@@ -508,9 +533,10 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | `hostLoopback: allow` / `deny` | Windows loopback services reached, including on the controller's DNS and proxy ports; UDP to `host.wslc.internal` gets no answer / name and relay address refused | Proposed config |
 | Proxied `allow` and `deny` workloads in one daemon session | Only the `allow` workload reaches Windows loopback | Extend `run_wslc_state_aware_tests.ps1` |
 | `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (not yet measured) | Proposed config |
-| Egress deny plus `networkProxy` (IP, hostname and loopback URL) | Only the proxy endpoint reached; unresolvable hostname rejected | Extend `run_wslc_proxy_test.ps1` |
+| Egress deny plus `networkProxy` (`http://` IP, hostname and loopback URL; `https://` hostname) | Only the proxy endpoint reached; the HTTPS proxy's certificate verified against its name; unresolvable hostname and `https://` IP or loopback URL rejected | Extend `run_wslc_proxy_test.ps1` |
 | Non-TCP allow rule, proxy plus rules, UDP mapping | Rejected; no container created | Proposed rejection configs |
 | Lifecycle provision → start → exec → stop → deprovision (proxied) | Policy enforced on exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
+| Proxied lifecycle exec without `networkProxy`, with merged and replaced environments | An allowed HTTPS request succeeds through the controller in both | Extend `run_wslc_state_aware_tests.ps1` |
 | Workload, controller and networks left in a store (killed run or daemon) | Next session on that store deletes them; the next proxied run succeeds | Proposed test |
 | Configs valid today (`wslc_network_bridged/isolated/proxy*`, `wslc_port_mapping_*`) | Unchanged results | Existing tests |
 
@@ -531,7 +557,8 @@ Delivery order:
    `build.bat` has neither today.
 2. Backend for create-and-run: policy classification, controller, networks,
    port mappings and leftover cleanup at session start.
-3. Backend for lifecycle operations: daemon tracking and cleanup.
+3. Backend for lifecycle operations: daemon tracking, proxy variables on
+   every exec, and cleanup.
 4. Host loopback: session hostname and controller relay.
 5. Docs and SDK tests; no API changes.
 
@@ -560,12 +587,17 @@ Delivery order:
 
 ## Open questions
 
-1. **Provision `networkProxy`:** network posture is fixed at provision, but
-   WSLC accepts the proxy only at exec (`validate_provision_policy` rejects
-   it). The MXC request JSON provision contract has no `runtimeConfig`. Rust
-   and .NET typed provision requests carry it; Node's doesn't. Should
-   `runtimeConfig` be added to the development provision contract, or should
-   exec configure the controller? Owners: `@theelliotm` and WSLC maintainers.
+1. **Provision `networkProxy`:** the controller is created at provision, so
+   it needs the proxy then. Today WSLC accepts the proxy only at exec
+   (`validate_provision_policy` rejects it), and the MXC request JSON
+   provision contract has no `runtimeConfig`. Rust and .NET typed provision
+   requests carry it; Node's doesn't. Potential options:
+   - Add `runtimeConfig` to the development provision contract and Node's
+     provision request.
+   - Support custom proxies only for create-and-run, and reject them for
+     lifecycle containers.
+
+   Owners: `@theelliotm` and WSLC maintainers.
 
 2. **Host loopback on older runtimes:** Currently valid `BRIDGED` contracts running 
    on WSL 3.0.3 will NOT get host loopback while those contracts running on 3.0.5 will. 
