@@ -157,6 +157,39 @@ expect '[]' "${OPEN[@]}"
 expect "$(json_array "${DENY_REAL[@]}")" "${DENIED[@]}"
 expect "$(json_array "${DENY_ALIAS[@]}")" "${DENIED[@]}"
 
+WHOLE=
+for alias in /sbin /lib32 /libx32 /lib /lib64; do
+    [ -L "$alias" ] || continue
+    real=$(readlink -f "$alias")
+    case "$real" in
+    /usr/sbin | /usr/lib | /usr/lib32 | /usr/lib64 | /usr/libx32) ;;
+    *) continue ;;
+    esac
+
+    # Hide the directory in a throwaway sandbox to check that /bin/sh, the
+    # probe shell, still starts without it.
+    if eval "$(lists "$real")" \
+        && bwrap --ro-bind / / --tmpfs "$real" -- /bin/sh -c true 2>/dev/null; then
+        WHOLE=$alias
+        break
+    fi
+done
+if [ -z "$WHOLE" ]; then
+    echo "NOTE: every merged-/usr directory other than /usr/bin holds part of /bin/sh; not testing a whole-directory denial."
+else
+    real=$(readlink -f "$WHOLE")
+    echo "Testing a whole-directory denial of $WHOLE -> $real, with /bin as the control."
+    PROBES=
+    OPEN=()
+    DENIED=()
+    probe WHOLE "$(lists "$real")" BLOCKED
+    probe WHOLE_ALIAS "$(lists "$WHOLE")" BLOCKED
+    probe CONTROL "$(lists /bin)" OPEN
+    expect '[]' "${OPEN[@]}"
+    expect "$(json_array "$real")" "${DENIED[@]}"
+    expect "$(json_array "$WHOLE")" "${DENIED[@]}"
+fi
+
 # Show lxc-exec a root whose /bin is a symlink loop.
 echo "Running Bubblewrap baseline-alias test: unresolvable /bin..."
 links=()

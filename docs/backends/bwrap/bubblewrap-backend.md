@@ -384,7 +384,10 @@ denying `/usr/bin/cat` or `/bin/cat` hides the file under both spellings. If one
 of these symlinks cannot be followed, for example because of a permission error
 or a symlink loop, the sandbox does not start. A baseline symlink whose target
 lies outside the baseline is still mounted at its own path, where a mask on the
-target's real path does not apply.
+target's real path does not apply. A `readonlyPaths` or `readwritePaths` entry
+spelled through one of these symlinks can be hidden by a denied parent
+directory; spell it with its real path instead, such as `/usr/lib/x/file`
+rather than `/lib/x/file`.
 
 Example:
 ```json
