@@ -4,6 +4,7 @@
 
 - **Status:** Proposed
 - **Issue:** [#1615: Add new experimental backend for Windows 365](https://github.com/microsoft/mxc/issues/1615)
+- **SDK usage and API proposal:** [Experimental JSON lifecycle and execution](api.md).
 - **Contributor:** @tbyfield (proposal); W365 team (planned implementation).
 - **Implementation PRs:** Not started.
 
@@ -75,20 +76,22 @@ not separate reasons to choose W365A.
   capacity ranking, and fallback to another pool.
 - MXC sign-in, account brokering, token acquisition or refresh, application-only
   or agentic identities, and guest application SSO guarantees.
-- Create-and-run execution, returned piped/buffered process handles, PTY, a
-  persistent shell, automatic command replay, or hidden keepalive/replacement.
+- Create-and-run execution, PTY, a persistent shell, automatic command replay,
+  or hidden keepalive/replacement.
 - Local mounts, workload network/proxy/UI/clipboard enforcement on the Cloud PC,
   provisioning a new VM, RDP/screen sharing, and a new daemon or workspace crate.
-- Typed SDK publication.
+- Typed W365 request configuration and contract publication.
 
 ## Proposed behavior
 
 The proposal adds experimental containment `w365_agents` and the
 `w365Agents` phase settings.
-The initial access path is MXC request JSON through a feature-enabled native
-executor, not new Rust, .NET, or Node typed SDK APIs. The caller supplies
-deployment coordinates and resource-specific tokens on each invocation,
-including refreshed credentials for cleanup.
+Callers use MXC request JSON through a feature-enabled executor or the existing
+Rust, .NET, and Node V1.Dev SDK APIs with experimental opt-in. The initial scope
+includes SDK captured execution and pipe-backed process handles as well as
+synchronous executor relay. [The API proposal](api.md) shows both workflows.
+The caller supplies deployment coordinates and resource-specific tokens on
+each invocation, including refreshed credentials for cleanup.
 
 For each lifecycle `exec` request, MXC connects to DesktopControl.Exec on the
 reserved Cloud PC and sends the requested command, working directory,
@@ -101,7 +104,7 @@ not run on the machine hosting MXC.
 | --- | --- | --- |
 | `provision` | Reserves a Cloud PC from the caller-selected pool through the control plane. | One checkout; opaque container ID and checkout metadata on success. |
 | `start` | Polls the reserved Cloud PC's readiness through the data plane. | Returns only on `Ready`, or reports an explicit failure/timeout. |
-| `exec` | Invokes DesktopControl.Exec on the reserved Cloud PC to execute the requested command. | Synchronous stdin/stdout/stderr relay and remote exit code, or explicit abnormal outcome. |
+| `exec` | Invokes DesktopControl.Exec on the reserved Cloud PC to execute the requested command. | Executor-relayed or SDK-captured/streamed output and remote exit code, or explicit abnormal outcome. |
 | `stop` | Releases the reservation through the control plane. | Terminal checkin request; `releaseRequested: true`, `restartable: false`. |
 | `deprovision` | Same release operation as stop | Cleanup without requiring an earlier successful stop. |
 
@@ -148,10 +151,15 @@ not depend on an earlier runner object or a live exec connection.
 
 | Mode | Create-and-run | Existing W365 reservation |
 | --- | --- | --- |
-| Run-to-completion with SDK-buffered output | No; lifecycle-only backend. | No buffered SDK result/handle API in this milestone; callers may capture the executor's own output externally. |
-| Live stdin/stdout/stderr | No implicit provision/exec/release wrapper. | Yes, synchronous `ExecStdio::Relayed`; MXC relays the caller process's streams itself. |
-| Returned piped process handles / nonblocking spawn | No. | No; `ExecStdio::Piped` is refused before execution. |
+| Run-to-completion with SDK-buffered output | No; lifecycle-only backend. | Yes, through the existing Dev run-in-container JSON API. |
+| Live stdin/stdout/stderr | No implicit provision/exec/release wrapper. | Yes: synchronous executor `ExecStdio::Relayed` or SDK `ExecStdio::Piped` streams. |
+| Returned piped process handles / nonblocking spawn | No. | Yes, through the existing Dev spawn-in-container JSON API. |
 | Interactive PTY | No. | No; the trait's unsupported-phase refusal applies. |
+
+Both the executor and Dev SDK support the complete reservation lifecycle.
+SDK run-in-container captures output; spawn-in-container returns caller-owned
+streams and a process handle without waiting for command completion.
+SDK calls enter the engine directly, without launching an executor.
 
 The useful order is provision, persist ID, start, one or more sequential execs,
 then stop and/or deprovision. Start polls readiness and may be repeated.
@@ -164,15 +172,27 @@ does not check out a replacement. Another reservation requires an explicit
 provision. The backend will report release acceptance, not completion of the
 service's reset process.
 
-The relay returns a completed `ExecHandle` with `ExecOutcome::Exited(code)` only
-after an actual `EXIT` frame. All reported guest exit codes, including `-1`,
-are preserved. It exposes no live remote cancellation handle.
+`ExecStdio::Relayed` runs synchronously using the executor's own
+stdin/stdout/stderr. `ExecStdio::Piped` exposes separate stdin/stdout/stderr
+without using host stdio. Closing stdin forwards EOF without releasing the
+reservation.
+
+Both modes report `ExecOutcome::Exited(code)` only after an actual `EXIT`
+frame. All reported guest exit codes, including `-1`, are preserved.
+
 Transport loss before `EXIT` or a remote `ERROR` returns
 `MxcError::backend_error`, with distinct operation-specific `details.code`
 values and explicit command-outcome uncertainty where the outcome cannot be
 established. A remote `ERROR` retains available service failure context; it
-does not imply a confirmed process exit or kill. Native execution reports the
+does not imply a confirmed process exit or kill. The executor reports the
 structured error on stderr, without appending it to workload stdout.
+SDK lifecycle, exec launch and wait failures preserve the
+[structured error details](api.md#errors-and-recovery).
+
+Remote kill is unsupported. SDK kill reports unsupported remote termination;
+local cancellation/disposal closes local I/O, not the reservation. A local
+deadline or disconnect must not produce a successful timeout result without
+evidence that the remote command stopped after its timeout.
 
 ## Backend applicability and availability
 
@@ -185,7 +205,8 @@ Existing host checks and experimental classifications are retained.
 
 Build feature availability, host support, service capability and authorization
 are separate. Every phase requires the `w365_agents` Cargo feature and runtime
-`--experimental`, even when its request contract parses.
+experimental authorization: `--experimental` for the executor or the Dev SDK's
+`JsonOptions` experimental flag, even when its request contract parses.
 Missing feature or authorization returns `backend_unavailable` before backend
 execution. Configuration JSON cannot grant that authorization.
 
@@ -198,8 +219,9 @@ service operation, not a local probe or trial checkout.
 
 ## Contracts, APIs, and compatibility
 
-**Request contract changes: Yes. Public SDK API changes: No. Existing published
-compatibility changes: No.** The new fields are limited to the mutable
+**Request contract changes: Yes. Public SDK API changes: Additive error metadata;
+existing invocation signatures are unchanged. Existing published compatibility
+changes: No.** The new request fields are limited to the mutable
 `1.1.0-alpha` development contract. `schemas/stable/` and the published
 `1.0.0` types remain unchanged.
 The [version registry](../../../../../schemas/schema-version.json) currently
@@ -266,9 +288,11 @@ value, and the last duplicate key wins. No environment from the machine
 running MXC is forwarded.
 
 `process.timeout` is unsigned 32-bit milliseconds, defaults to 0 and is sent
-as `timeoutMs`; 0 requests no command timeout, not a reservation lifetime
-guarantee. A positive timeout is enforced by the remote exec protocol, not a
-local process-tree kill guarantee. Invalid types and unknown fields fail parsing.
+as `timeoutMs`. Zero imposes no local MXC command deadline; execution remains
+subject to service-side timeout defaults and limits, so it does not guarantee
+unlimited runtime or reservation lifetime. A positive timeout is enforced by
+the remote exec protocol, not a local process-tree kill guarantee.
+Invalid types and unknown fields fail parsing.
 The encoded `EXEC_START` and each frame have a 64 KiB payload cap; oversized
 start payloads fail before connecting.
 
@@ -307,9 +331,15 @@ binding carries them into the backend. The Rust definitions generate
 [schema codegen guide](../../../build-and-test/schema-codegen.md).
 Generated TypeScript does not add a public SDK export.
 
-**API proposal: Not applicable.** No public Rust/.NET/Node signatures, SDK
-contracts or new FFI execution shape change, so no `api.md` is proposed.
-Existing V1 SDKs continue to target `1.0.0`.
+Existing SDK error conversion can discard backend details, including the
+sandbox ID. Preserving those details lets callers explicitly release a
+reservation even when provisioning returns an error.
+[The API proposal](api.md) defines additive SDK error metadata so available
+backend details, including the cleanup ID, survive SDK lifecycle and exec failures.
+Executor exec failures retain their structured stderr reporting.
+Existing invocation signatures and C ABI layouts remain compatible.
+Typed V1 requests still target `1.0.0`; W365A uses development JSON through
+the Dev APIs, without new typed W365 configuration.
 
 ## Design and security
 
@@ -329,20 +359,24 @@ DesktopControl.Exec. The relay transports the data; DesktopControl.Exec
 launches the command. These guest components are deployment prerequisites,
 not components installed by MXC.
 
+Piped execution reuses the existing `ExecHandle`/`ExecSandboxProcess` adapters.
+The W365 backend owns its transport resources.
+
 ```mermaid
 sequenceDiagram
     participant C as Caller
-    participant M as MXC executor / engine / W365 backend
+    participant M as MXC SDK or executor / engine / W365 backend
     participant S as W365 control plane
     participant D as Data plane / Cloud PC
     C->>M: Provision JSON, configuration and tokens
     M->>S: Checkout
     S-->>M: Reservation
     M-->>C: Container ID and metadata
-    C->>M: Start, then sequential exec with retained ID
+    C->>M: Start via SDK or executor
+    C->>M: Sequential exec via SDK or executor with retained ID
     M->>D: Readiness / DesktopControl.Exec
     D-->>M: Status / command output and completion
-    M-->>C: Readiness / relayed output and result
+    M-->>C: Readiness / captured or streamed output and result
     C->>M: Stop or deprovision
     M->>S: Delete session
     S-->>M: Release acceptance
@@ -378,13 +412,18 @@ duplicate lifecycle ownership.
 
 | Owner | State/resources and cleanup responsibility |
 | --- | --- |
-| Caller | Chooses pool, identity, coordinates and credentials; persists ID immediately; sequences commands; retains primary and cleanup results separately; attempts stop/deprovision with renewed CP credentials. |
-| MXC backend adapter | Validates and executes one phase; owns temporary TCP/TLS connections, frame buffers and local stdin relay thread. It has no durable reservation registry or reservation watchdog. |
+| Caller | Chooses pool, identity, coordinates and credentials; persists ID immediately; sequences commands; drains and disposes SDK-spawned process streams/handles or manages executor stdio; retains primary and cleanup results separately; attempts stop/deprovision with renewed CP credentials. |
+| MXC backend adapter | Validates and executes one phase; owns temporary connections, bounded stream buffers and relay workers. It has no durable reservation registry or reservation watchdog. |
 | W365 services / guest | Own reservation, remote command processes, guest files/environment, tenant policy, expiration and reset. Their continued state does not depend on retaining a runner object. |
 
-Successful exec closes its transient connection without checking in. The stdin
-pump can remain blocked in a read until input/EOF or executor exit. Exiting the
-native executor reclaims its local resources, not the remote reservation.
+Successful exec closes its transient connection without checking in. SDK capture
+owns and disposes its transient process handle; spawn transfers ownership to
+the caller, who drains stdout/stderr concurrently and closes stdin when done.
+Relay buffers are bounded and output loss is an explicit error; full SDK capture
+uses memory proportional to output size. Completion, failure and disposal must
+unblock SDK-local I/O without waiting for remote completion. The executor's
+relayed stdin reader may remain blocked until input/EOF or process exit.
+Neither process disposal, executor termination nor host exit releases the reservation.
 Service expiration or reset can lose guest work; callers checkpoint valuable
 results outside it.
 
@@ -394,18 +433,21 @@ results outside it.
 | Checkout rejected with a known session ID | A mismatched or malformed computer ID does not prevent explicit release of a valid session. The caller retains `details.sandboxId` from the error and passes it unchanged to `deprovision` or `stop` with valid CP credentials. If release fails, it retains the reference and reports the checkout and cleanup failures separately. |
 | Checkout outcome unknown or session ID unavailable | A lost/unparseable response or lost/malformed session ID can leave a reservation without a cleanup reference. Uncertain checkout errors report `possiblySucceeded` and available request context. MXC does not automatically retry checkout, guarantee release, or reconstruct a lost ID. Service-side reconciliation is outside this milestone. |
 | Readiness failure | The reservation is not automatically released or replaced. The caller can retry readiness with the retained ID and valid credentials, or explicitly release it. |
-| Execution failure or caller disconnect | Connection loss, remote `ERROR` and local I/O/protocol failures return structured MXC errors, not synthetic command exits. Errors distinguish the failure cause and report command-outcome uncertainty when applicable; no confirmed exit or remote cleanup is inferred. Output already relayed is retained, commands are not automatically replayed, and caller exit/cancellation does not guarantee remote process cleanup or reservation release. |
+| Execution failure or caller disconnect | Connection loss, remote `ERROR` and local I/O/protocol failures return structured MXC errors through SDK launch/wait or executor stderr, not synthetic command exits. Failed SDK capture returns an error, not a partial successful result; already-read spawned output remains the caller's. No confirmed remote cleanup is inferred, and commands are never replayed automatically. |
+| SDK process kill, cancellation or disposal | Local resources are closed without checkin or proof of remote termination. Explicit kill reports unsupported remote termination. The caller retains the ID for explicit release. |
+| Executor termination or host exit | Local process/socket resources are reclaimed without checkin. Closing the connection does not prove the remote command stopped. The caller retains the ID for explicit release through the SDK or executor. |
 | Release failure or lost response | The reservation may remain, or release may already have been accepted. The caller retains the ID and deployment/account context, reports cleanup failure separately from the original failure, and retries release against the same ID with valid CP credentials under a separate cleanup budget. |
 | Release accepted, reservation expired, or later checkout | Release is idempotent, but acceptance does not confirm completed reset/sanitization or reusable capacity. Expired reservations surface service errors, not an implicit replacement or restoration of guest data. A new checkout is independent and does not clean up an old reservation; the caller retains its ID for cleanup, and leaked capacity may cause the new checkout to fail. |
 
-MXC has no durable reservation registry or live remote cancellation handle.
+MXC has no durable reservation registry or service-confirmed remote cancellation
+handle.
 Request correlation may be unavailable when telemetry is off or authorization
 fails; diagnostics are not a guaranteed way to recover a lost reservation ID.
 
 Release has a 30000 ms HTTP timeout. Phase deadlines are client budgets, not
 hard guarantees over DNS, poll sleeps, service reset or remote process lifetime.
-Cleanup uses a separate budget, not an already-cancelled work deadline. The Phase 4 example
-reports both primary and cleanup results. Local result-construction failure
+Cleanup uses a separate budget, not an already-cancelled work deadline. The Phase 4 examples
+report both primary and cleanup results. Local result-construction failure
 also does not trigger compensating checkin.
 
 ## Acceptance criteria and validation plan
@@ -414,23 +456,29 @@ The proposed test groups below form the implementation's CI acceptance criteria.
 Unit/codec tests support, but do not replace, functional lifecycle validation.
 The [execution-mode support table](#execution-and-container-lifecycle-support)
 defines the lifecycle-only API boundary: create-and-run APIs are unsupported,
-while existing-reservation exec supports synchronous relayed stdio.
+while existing-reservation exec supports executor relay and SDK capture/spawn.
+[SDK-specific checks](api.md#validation-and-documentation) supplement
+the shared scenarios below.
 
 ### Observable assertions
 
 | Proposed test group/scenario | Action/input | Required assertion |
 | --- | --- | --- |
 | `mxc_contract_v1_1_0_alpha` W365 fixtures | All five phase requests, missing/empty/null/wrong-phase fields; published 1.0 requests. | Development fields parse only in their phase/version; preserve optional presence, reject unknowns/nulls; published fixtures and schemas unchanged. |
-| Engine authorization/binding tests | Invoke every phase without opt-in, with feature disabled, then authorized valid JSON. Include create-and-run, placement-session, piped and PTY requests. | Correct refusal before backend work; no network for unsupported modes, no authorization through JSON; checked dispatch only for supported lifecycle calls. |
+| Engine authorization/binding tests | Invoke every phase through the executor and Dev APIs, without opt-in, with feature disabled, then authorized. Include relayed/piped exec and unsupported create-and-run, placement-session and PTY requests. | Correct refusal before backend work; no network for unsupported modes, no authorization through JSON; checked dispatch accepts relayed and piped exec. |
 | `w365agents_lifecycle` native fixture (new) | Unsupported filesystem/network/UI/clipboard/proxy blocks, including empty/default policy blocks, and malformed IDs. | Contract or backend validation fails before any checkout/status/upgrade/delete request; fixture records zero requests. |
 | Lifecycle/config fixture | Omitted/empty phase settings, blank/whitespace hosts/tokens, missing environment; explicit host plus absent/blank token with an ambient token. | Defaults/presence follow agreed contract; missing configuration fails; no credential leaves for an explicit unpaired host. |
 | Lifecycle environment fixture | Omitted `process.env`, `[]`, and supplied entries, each with omitted/false/true `inheritDefaultEnv`. | Accepted requests forward only supplied entries, with none for omitted/empty env; the inheritance flag is not forwarded. Supplied env with false/omitted fails with `policy_validation` before any remote connection. No MXC host environment is forwarded. Actual guest inheritance and overrides are checked in the Phase 4 live scenario below. |
 | Lifecycle process-input fixture | Command with omitted/empty/supplied `cwd` and omitted/zero/positive `process.timeout`. | The service fixture receives the unchanged command, no `cwd` for omitted/empty input or the supplied guest path otherwise, and `timeoutMs` of 0 for omitted/zero input or the supplied positive millisecond value. |
-| Phase 4 live process-input scenario | Execute through the native lifecycle path in a known guest directory, with known non-sensitive guest-default variables and an override of one using `inheritDefaultEnv: true`. Repeat with omitted env and with `env: []` plus `inheritDefaultEnv: true`; run a command whose normal duration exceeds a positive timeout. | Output identifies the selected directory, preserves the unmodified guest-default variable and reflects the override; omitted/empty env preserves guest defaults. The timed command terminates remotely without reaching normal completion; record the returned exit/error result. A local timeout or disconnect alone does not establish remote termination. |
+| Phase 4 live process-input scenario | Execute through the native lifecycle path in a known guest directory, with known non-sensitive guest-default variables and an override of one using `inheritDefaultEnv: true`. Repeat with omitted env and with `env: []` plus `inheritDefaultEnv: true`; run with omitted and zero `process.timeout`, then run a command whose normal duration exceeds a positive timeout. | Output identifies the selected directory, preserves the unmodified guest-default variable and reflects the override; omitted/empty env preserves guest defaults. Confirm and record guest handling of zero `timeoutMs` and applicable service-side timeout defaults and limits. The positively timed command terminates remotely without reaching normal completion; record the returned exit/error result. A local timeout or disconnect alone does not establish remote termination. |
 | `w365agents_cp_loopback` plus lifecycle fixture | Equal IDs or omitted computer ID; different/malformed computer ID with a valid session ID; lost response, unparseable body or missing/malformed session ID. | Equal/omitted computer IDs produce the same session-based ID. Rejected successful checkout reports `possiblySucceeded`; a valid session ID is retained with the pool ID and opaque `sandboxId` in error details, not a successful container result. An unavailable/invalid session ID produces no fabricated cleanup reference. No second POST occurs. |
 | CP/status/upgrade failure fixtures | 401, 403, 404, 429, 500, other non-success and malformed responses. | Errors retain operation-specific categories/request IDs; 500 checkout reports uncertainty; no automatic retry/fallback/escalation occurs. |
 | Readiness fixture | Waiting/Live then Ready, unknown state, expired budget, `readyTimeoutMs: 0`. | Success only on Ready; timeout has last state; zero polls once; no release or replacement on timeout. |
 | `w365agents_loopback` and lifecycle relay fixture | Input/EOF, stdout/stderr frames, EXIT 0, 7 and -1, oversized start payload, oversized/malformed received frames, loss before EXIT, remote ERROR and local output error. | I/O and actual EXIT codes are preserved, including -1. Oversized EXEC_START fails before dial; oversized/malformed received frames fail explicitly. Post-upgrade loss and remote ERROR return `backend_error` with distinct operation-specific codes and appropriate outcome-uncertainty details, not `ExecCompleted`; local failures also surface errors. Native errors go to stderr without altering already-relayed stdout, and commands are never replayed automatically after failure. |
+| Executor relay lifecycle fixture | Concurrent stdout/stderr of at least 1 MiB each, binary data, stdin/EOF and slow/closed output readers through executor relayed exec. | Exact separate output with concurrent draining; bounded relay buffers and explicit local I/O errors. EOF is forwarded without checkout or release. |
+| Rust/.NET/Node Dev lifecycle fixture (new) | Provision, start, repeated captured/spawned exec, stop and deprovision through each SDK with feature-enabled native libraries; repeat without experimental opt-in. | Same reservation, complete lifecycle responses, separate output and actual exits; no executor subprocess or implicit release. Missing opt-in fails before network activity; PTY/create-and-run remain refused. |
+| SDK piped execution fixture | Concurrent large stdout/stderr, binary data, stdin/EOF, slow/untaken readers, launch failures and disposal during blocked I/O. | Exact separate output or explicit output/I/O errors; no host stdio use. EOF and local cleanup complete without release or waiting for remote `EXIT`. |
+| SDK error/recovery fixture | Rejected checkout with valid session ID, readiness/exec launch/wait failures, remote `ERROR`, release failure, explicit kill and local deadline. | SDK errors retain backend details. The error's `sandboxId` permits release through the same SDK; primary and cleanup failures are retained. No fabricated IDs, exits, remote kill or timeout claims. |
 | `w365agents_correlation_loopback` and TLS fixtures | Correlation off/on, secrets in config/metadata, invalid certificates, host/header injection and redirect responses. | No blank correlation header, no leaked token/ticket in diagnostics; TLS cannot be bypassed in production; no redirect or credential forwarding. |
 | Lifecycle release/recovery fixture | Deprovision using `details.sandboxId` from a rejected checkout with a valid session ID; exec fails, release fails/response is lost, caller retries release with retained ID and renewed token; response 200/202/204/404. | Release uses the validated session ID, not the mismatched computer ID, without requiring successful start/exec or another checkout. Primary and cleanup results are both retained; retry targets the same session only; report acceptance without reset completion. |
 | Lifecycle subsequent-creation fixture | After failed cleanup of reservation A, explicitly provision B, then retry cleanup A. | Exactly one new checkout; distinct returned IDs; cleanup A never targets B; no hidden cleanup/reallocation or shared local registry corruption. |
@@ -445,11 +493,12 @@ matrices do not enable `w365_agents`. Proposed additions:
 
 | CI workflow/job | Proposed coverage and prerequisites |
 | --- | --- |
-| `.github/workflows/Build.Windows.Job.yml`, `build` x64 on `windows-2025` | The job will build/test `mxc-sdk` and the feature-enabled native executor for x64 MSVC, then run the contract, engine, unit and loopback/native lifecycle fixtures above with selected-test/pass-count checks. Feature-disabled refusal coverage remains. Build CI requires no pool or tenant credential. |
+| `.github/workflows/Build.Windows.Job.yml`, `build` x64 on `windows-2025` | The job will build/test `mxc-sdk`, `mxc_ffi` and the feature-enabled executor for x64 MSVC, then run the contract, engine, error-transport and loopback/native/Rust Dev lifecycle, execution and recovery fixtures above with selected-test/pass-count checks. Feature-disabled refusal coverage remains. Build CI requires no pool or tenant credential. |
+| `.github/workflows/SDK.Unit.Test.Job.yml`, `SDK.Integration.Test.Job.yml` and `SDK.Dotnet.Test.Job.yml`, Windows x64 jobs | Run Node/.NET Dev lifecycle, capture/spawn and recovery fixtures against feature-enabled `mxc_ffi`, with selected/pass-count gates and .NET error-details/AOT coverage. Preserve existing SDK/backend matrices. |
 | Existing Windows arm64, `.github/workflows/Build.Linux.Job.yml` and `.github/workflows/Build.MacOS.Job.yml` jobs | Current backend gates and portable parser/feature-disabled regression checks remain unchanged. Additional W365 feature-enabled targets require owner agreement. |
-| Phase 4 manual example under `tests/scripts/` (new; not scheduled CI) | Prerequisites are a Windows x64 native executor, compatible Windows Cloud PC with DesktopControl.Exec, suitable tenant/pool and approved caller-supplied human identity/tokens. The example will exercise the corporate-resource workflow with an appropriately configured pool, the live process-input assertions above, guest-state retention, fresh-process recovery, nonzero exits, expiry/transport failure, cleanup failure/retry and terminal release. Results will identify actual outcomes, leftover IDs and scenarios not exercised. |
+| Phase 4 manual examples (new; not scheduled CI) | Prerequisites are Windows x64 feature-enabled executor/SDK/native artifacts, a compatible Windows Cloud PC with DesktopControl.Exec, suitable tenant/pool and approved caller-supplied human identity/tokens. Exercise the complete workflow through the executor and each Dev SDK, including captured/streamed output, the live process-input assertions above, guest-state retention, fresh-process recovery, nonzero exits, expiry/transport failure, cleanup failure/retry and terminal release. Results identify actual outcomes, leftover IDs and scenarios not exercised. |
 
-Lifecycle fixtures will invoke the normal development-JSON/native path against
+Lifecycle fixtures will invoke the normal executor and in-process Dev SDK paths against
 controlled service responses, with test-only trusted TLS that does not weaken
 production validation. Codec loopbacks supplement that coverage; pure tests
 cover deterministic poll clocks and frame limits. Interop tests need a
@@ -473,8 +522,8 @@ W365A is not currently wired into that suite.
 
 The proposed build-CI contract, loopback and native lifecycle fixtures use
 controlled service responses and synthetic credentials; they require no live
-tenant credentials or Cloud PC reservations. The Phase 4 manual live example
-uses real service access but runs only when explicitly invoked. It is the
+tenant credentials or Cloud PC reservations. The Phase 4 manual live examples
+use real service access but run only when explicitly invoked. They are the
 initial milestone's live-validation path, not a nightly test.
 
 Both manual and nightly live tests require a configured W365A test tenant,
@@ -485,8 +534,8 @@ tenant configuration, license assignments, pool capacity, guest configuration,
 test identities and permissions, and associated service costs. These
 dependencies make reliable live coverage non-trivial to establish and maintain.
 
-The manual harness, and a future nightly harness, supply the provision request
-through the development-JSON/native path with experimental opt-in. The inputs
+The manual harnesses, and a future nightly harness, supply the provision request
+through the executor or Dev SDK JSON path with experimental opt-in. The inputs
 follow the [phase settings](#routing-and-phase-settings):
 
 | Provision input | What the live-test harness supplies |
@@ -528,17 +577,18 @@ PRs. Implementation PRs use the non-closing reference `Refs #1615`.
 | Stage | Reviewable change |
 | --- | --- |
 | Phase 1: contracts and generated artifacts | A separate PR introduces development phase types, adapters, fixtures and generated schema/TypeScript artifacts. Published contracts remain unchanged; the unsupported backend stays unavailable until implemented. |
-| Phase 2: checkout and release | This stage establishes the direct-user contract and introduces the internal runner, ID mapping, CP client, fail-closed policy, engine registration/dispatch, feature forwarding and checked binding as a vertical slice with functional fixtures and CI wiring. |
-| Phase 3: readiness and execution | This stage introduces DP readiness, TLS upgrade and synchronous native relay, execution-mode refusals, failure/recovery tests and build-CI coverage. |
-| Phase 4: manual example and documentation | This stage provides the caller-driven example, sequential guest-state and recovery scenarios, feature-enabled native artifacts and backend guide. The accompanying results identify actual manual outcomes and unresolved live-infrastructure limits. |
-| Public SDK/API stage | Not applicable to this milestone; typed APIs, target versions and published signatures remain unchanged. Future publication/API work needs separate agreement. |
+| SDK error-metadata prerequisite | A separate PR preserves backend details through Rust, native error transport, .NET and Node as specified in [the API proposal](api.md), with compatibility and regression coverage. |
+| Phase 2: checkout and release | This stage establishes the direct-user contract and introduces the internal runner, ID mapping, CP client, fail-closed policy, engine registration/dispatch, feature forwarding and checked binding as a vertical slice. Executor and Dev SDK fixtures verify checkout/release and error-based cleanup with CI wiring. |
+| Phase 3: readiness and execution | This stage introduces DP readiness, TLS upgrade, executor relay and SDK pipe-backed capture/spawn through existing adapters, with cross-SDK execution/recovery and unsupported-mode coverage. |
+| Phase 4: manual examples and documentation | This stage provides executor-only and SDK-only lifecycle/execution examples, sequential guest-state and recovery scenarios, feature-enabled artifacts and backend guide. The accompanying results identify actual manual outcomes and unresolved live-infrastructure limits. |
+| Typed W365 SDK/API stage | Outside this milestone; typed request APIs and contract targets remain unchanged. Future publication/typed API work needs separate agreement. |
 
 Implementation includes updates to the canonical documentation: `docs/schema.md`,
 `docs/containment-policy/dev/policy.md`, a new
 `docs/backends/w365-agents/w365-agents.md`, lifecycle/backend plug-in and
-repository architecture references, feature authoring, validation infrastructure,
-and the native example's usage/prerequisites. SDK READMEs and versioned
-API references remain unchanged because their public surfaces do not change.
+repository architecture references, feature authoring/versioning, validation infrastructure,
+and the examples' usage/prerequisites. SDK README and versioned Dev/error
+reference updates are listed in the [API proposal](api.md#validation-and-documentation).
 
 ## Open questions
 
@@ -552,7 +602,7 @@ None for the proposed initial scope.
 - [x] Execution modes and container lifecycle support are explicit; exclusions are explained.
 - [x] Resource ownership, partial failures, failed cleanup, and subsequent container creation are addressed.
 - [x] Security, contract/API compatibility, and any breaking changes are addressed.
-- [x] A separate API proposal is linked when public APIs change. Not applicable: this milestone introduces no public API changes.
+- [x] A separate API proposal covers Dev SDK usage and additive error metadata; typed W365 APIs remain out of scope.
 - [x] Acceptance criteria and the CI plan cover observable behavior.
 - [x] Delivery and documentation changes are scoped; material questions are resolved.
 - [x] Answers are concise; diagrams explain the design without repeating the text.
