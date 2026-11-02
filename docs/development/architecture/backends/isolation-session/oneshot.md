@@ -163,26 +163,13 @@ exit-wait and exit code, console resize, and the graceful-shutdown ladder
 (close stdin → send-ctrl-close → terminate). It sets the interactive-console
 flag when `wxc-exec`'s stdout is a TTY.
 
-For pipe/file-backed host stdin, source EOF calls `CloseStandardInput` only
-when the workload uses ordinary pipes. The OS Preview client must also release
-its duplicate input handle for the workload to see EOF. With ConPTY, MXC ends
-the input relay without closing the console input, since that can terminate a
-still-running workload. A console workload waiting for more input may therefore
-remain running until its execution timeout.
+On timeout, MXC stops its input-copying thread and waits up to one second for
+it to release its pipe handle before calling `CloseStandardInput`. If the thread
+is still running, MXC skips that step and continues with console-close and
+termination, still reporting a timeout once the workload is confirmed stopped.
 
-After a confirmed timeout with the workload still running, the relay-managed
-path signals/cancels stdin and waits up to one second for its relay to exit
-**before** starting the shutdown sequence with `CloseStandardInput`. The relay
-must release its duplicate write handle for ordinary-pipe EOF to be possible.
-This hook does not run before the normal execution wait or for an already-exited
-workload. An exit during cooperative shutdown is still reported as a timeout.
-SDK streaming waits do not own this relay and retain their existing behavior.
-
-If the stdin relay does not exit within the join allowance, or its thread wait
-fails, execution returns a cleanup error and the existing error cleanup requests
-termination. It does not claim that the input writer was released or proceed
-through the cooperative shutdown sequence. Read cancellation cannot stop a
-blocked destination write or flush; bounded write cancellation is not added here.
+A failed Windows thread wait is an error, unlike a wait whose time limit expires.
+The OS client must also close its input handle for the workload to receive EOF.
 
 ## Bindings Workflow
 

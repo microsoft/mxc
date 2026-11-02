@@ -37,8 +37,7 @@ use super::error::{
 };
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
-    create_relay_thread, create_relay_thread_with_eof, create_relay_thread_with_stop,
-    duplicate_handle, PipeRelayWithStopParams,
+    create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
 };
 use super::process_options::{
     build_iso_process_options, with_service_timeout_grace, ProcessOptions,
@@ -62,19 +61,6 @@ fn classify_stdin_handle(handle: HANDLE) -> StdinHandleKind {
         }
     }
     StdinHandleKind::PipeOrFile
-}
-
-fn pipe_stdin_eof_callback(
-    options: &ProcessOptions,
-    close_stdin: impl FnOnce() + Send + 'static,
-) -> Option<Box<dyn FnOnce() + Send>> {
-    // Closing ConPTY input can terminate the workload. Only ordinary pipes
-    // should forward source EOF through CloseStandardInput.
-    if options.interactive {
-        None
-    } else {
-        Some(Box::new(close_stdin))
-    }
 }
 
 /// Keeps the process's MTA alive for as long as the lifecycle's WinRT objects,
@@ -620,19 +606,10 @@ impl IsolationSessionManager {
             scope.stdin = match stdin_relay_state {
                 StdinRelayKind::None => None,
                 StdinRelayKind::PipeOrFile => {
-                    let process_for_eof = process.clone();
-                    let impersonation = self.impersonation.clone();
-                    let on_eof = pipe_stdin_eof_callback(options, move || {
-                        let _ = owned_thread::call(&impersonation, || {
-                            let _ = process_for_eof.CloseStandardInput();
-                            Ok(())
-                        });
-                    });
                     let (thread, canceller) = unsafe {
-                        create_relay_thread_with_eof(
+                        create_relay_thread(
                             wxc_stdin,
                             HANDLE(stdin_handle_val as *mut core::ffi::c_void),
-                            on_eof,
                         )
                     }
                     .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?;
@@ -650,10 +627,7 @@ impl IsolationSessionManager {
                 }
             };
 
-            let outcome = started.wait_with_before_shutdown(options.timeout_ms, || {
-                scope.stop_stdin_before_shutdown()
-            })?;
-            scope.stop_stdin();
+            let outcome = started.wait(options.timeout_ms, || scope.stop_stdin())?;
             scope.finish();
 
             Ok(outcome)
@@ -715,7 +689,7 @@ impl IsolationSessionManager {
             // before the shutdown ladder destroys the evidence.
             waiter: Box::new(move || {
                 owned_thread::call(&waiter_process.impersonation, || {
-                    waiter_process.wait(timeout_ms)
+                    waiter_process.wait(timeout_ms, || Ok(true))
                 })
                 .map_err(super::error::map_lifecycle_error)
             }),
@@ -955,14 +929,13 @@ impl StartedProcess {
     /// first `ExitCode()` reads 259 for a workload that exited with 259, so it
     /// walks all three tiers and cannot then tell that exit from a live
     /// process. An exited process therefore returns its code directly.
-    pub(super) fn wait(&self, timeout_ms: u32) -> Result<ExecOutcome, IsolationSessionError> {
-        self.wait_with_before_shutdown(timeout_ms, || Ok(()))
-    }
-
-    fn wait_with_before_shutdown(
+    ///
+    /// `before_shutdown` stops caller-owned input copying after a timeout.
+    /// Returning false skips the stdin-close step because a writer remains open.
+    pub(super) fn wait(
         &self,
         timeout_ms: u32,
-        before_shutdown: impl FnOnce() -> Result<(), IsolationSessionError>,
+        before_shutdown: impl FnOnce() -> Result<bool, IsolationSessionError>,
     ) -> Result<ExecOutcome, IsolationSessionError> {
         // `WaitForExit` is a Win32 `WaitForSingleObject` on a kernel handle —
         // no COM round-trip. On timeout it returns -1; the ladder below then
@@ -983,33 +956,40 @@ impl StartedProcess {
         })?;
 
         match plan {
-            WaitPlan::Exited(exit_code) => self.record_exited(exit_code),
-            WaitPlan::TimedOutAfterDeadline | WaitPlan::KillThenReportTimeout => {
-                self.record_timed_out(timeout_ms)
+            // An exited process must skip shutdown: the ladder cannot
+            // distinguish a real exit code of 259 from STILL_ACTIVE.
+            WaitPlan::Exited(exit_code) => {
+                self.record_exited(exit_code);
+                return Ok(ExecOutcome::Exited(exit_code));
             }
+            // The deadline was spent, but the process is already gone.
+            // Nothing needs killing; retain the timeout result.
+            WaitPlan::TimedOutAfterDeadline => {
+                self.record_timed_out(timeout_ms);
+                return Ok(ExecOutcome::TimedOut);
+            }
+            WaitPlan::KillThenReportTimeout => {}
         }
 
-        complete_wait(plan, before_shutdown, || {
-            // Confirm termination before reporting a timeout, even if closing
-            // stdin lets the workload exit cooperatively.
-            let (_, terminate_error) = wait_with_graceful_shutdown(&self.process)?;
-            if let Some(error_code) = terminate_error {
-                self.record_kill_failed(error_code);
-            }
-            let after = self
-                .process
-                .ExitCode()
-                .map_err(|e| transport_err(op::RUN_PROCESS, "get ExitCode failed", &e))?;
-            if after == STILL_ACTIVE {
-                // A 259 exit during shutdown remains ambiguous: conservatively
-                // report failure rather than claiming the process was killed.
-                return Err(lifecycle_err(
-                    "the sandboxed process was still running after close-stdin, Ctrl-Close and \
-                     terminate; it timed out but could not be confirmed killed",
-                ));
-            }
-            Ok(())
-        })
+        self.record_timed_out(timeout_ms);
+        let stdin_released = before_shutdown()?;
+        let (_, terminate_error) = wait_with_graceful_shutdown(&self.process, stdin_released)?;
+        if let Some(error_code) = terminate_error {
+            self.record_kill_failed(error_code);
+        }
+        let after = self
+            .process
+            .ExitCode()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get ExitCode failed", &e))?;
+        if after == STILL_ACTIVE {
+            // A 259 exit during shutdown remains ambiguous: conservatively
+            // report failure rather than claiming the process was killed.
+            return Err(lifecycle_err(
+                "the sandboxed process was still running after timeout shutdown; \
+                 it timed out but could not be confirmed killed",
+            ));
+        }
+        Ok(ExecOutcome::TimedOut)
     }
 
     /// Kill the process now, reporting whether the kill request was *accepted*.
@@ -1145,29 +1125,23 @@ impl<'a> RelayScope<'a> {
 
     /// Whether the relay exited. An absent relay was never spawned.
     fn join(relay: &Option<OwnedHandle>, timeout_ms: u32) -> bool {
-        match relay {
-            // SAFETY: an owned thread handle held by this scope.
-            Some(t) => (unsafe { WaitForSingleObject(t.get(), timeout_ms) }) == WAIT_OBJECT_0,
-            None => true,
-        }
+        wait_for_relay(relay.as_ref(), timeout_ms).unwrap_or(false)
     }
 
-    /// Each relay reads its own duplicate, so one still running does not keep
-    /// the pipe handles alive.
+    /// A still-running relay owns its duplicates until it exits.
     fn close_handles(&self) {
         let _ = self.process.Close();
     }
 
-    fn stop_stdin(&self) {
+    fn stop_stdin(&mut self) -> Result<bool, IsolationSessionError> {
         self.signal_stop();
         self.cancel_stdin_read();
-        Self::join(&self.stdin, Self::JOIN_MS);
-    }
-
-    fn stop_stdin_before_shutdown(&self) -> Result<(), IsolationSessionError> {
-        self.signal_stop();
-        self.cancel_stdin_read();
-        wait_for_stdin_relay(self.stdin.as_ref(), Self::JOIN_MS)
+        let exited = wait_for_relay(self.stdin.as_ref(), Self::JOIN_MS)?;
+        if exited {
+            self.stdin = None;
+            self.stdin_canceller = None;
+        }
+        Ok(exited)
     }
 
     /// Teardown for a workload that has already exited.
@@ -1260,7 +1234,7 @@ impl ClosingProcess {
         &self,
         timeout_ms: u32,
     ) -> Result<ExecOutcome, IsolationSessionError> {
-        owned_thread::call(&self.impersonation, || self.wait(timeout_ms))
+        owned_thread::call(&self.impersonation, || self.wait(timeout_ms, || Ok(true)))
     }
 
     pub(super) fn terminate_process(&self) -> Result<(), IsolationSessionError> {
@@ -1379,41 +1353,19 @@ fn plan_wait(
     }
 }
 
-/// Run timeout cleanup only for a confirmed live process past its deadline.
-/// The relay must release its input writer before the shutdown ladder closes
-/// the platform's writers; otherwise the first tier cannot deliver pipe EOF.
-fn complete_wait(
-    plan: WaitPlan,
-    before_shutdown: impl FnOnce() -> Result<(), IsolationSessionError>,
-    shutdown: impl FnOnce() -> Result<(), IsolationSessionError>,
-) -> Result<ExecOutcome, IsolationSessionError> {
-    match plan {
-        WaitPlan::Exited(code) => Ok(ExecOutcome::Exited(code)),
-        WaitPlan::TimedOutAfterDeadline => Ok(ExecOutcome::TimedOut),
-        WaitPlan::KillThenReportTimeout => {
-            before_shutdown()?;
-            shutdown()?;
-            Ok(ExecOutcome::TimedOut)
-        }
-    }
-}
-
-fn wait_for_stdin_relay(
+fn wait_for_relay(
     relay: Option<&OwnedHandle>,
     timeout_ms: u32,
-) -> Result<(), IsolationSessionError> {
+) -> Result<bool, IsolationSessionError> {
     let Some(relay) = relay else {
-        return Ok(());
+        return Ok(true);
     };
     // SAFETY: the relay's owned thread handle remains valid throughout the wait.
     match unsafe { WaitForSingleObject(relay.get(), timeout_ms) } {
-        WAIT_OBJECT_0 => Ok(()),
-        WAIT_TIMEOUT => Err(lifecycle_err(
-            "stdin relay did not exit before timeout shutdown; its input write handle may \
-             still be open (a blocked write or flush cannot be cancelled by read cancellation)",
-        )),
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
         _ => Err(lifecycle_err(format!(
-            "waiting for stdin relay before timeout shutdown failed: {}",
+            "waiting for relay failed: {}",
             std::io::Error::last_os_error()
         ))),
     }
@@ -1424,6 +1376,7 @@ fn wait_for_stdin_relay(
 /// to close stdin, tier 2 tries `SendCtrlClose` (ConPTY-only; `E_NOTIMPL`
 /// outside ConPTY is benign), and tier 3 force-terminates, then waits
 /// infinitely (`WaitForExit(0)` = INFINITE) for the kill to land.
+/// Tier 1 is skipped if the caller's stdin relay has not exited.
 ///
 /// The first `ExitCode()` query is `?`-propagated: a failure there means
 /// the kernel handle is broken, and the cleanup methods on the same
@@ -1441,6 +1394,7 @@ fn wait_for_stdin_relay(
 /// independently determined the process was still running.
 fn wait_with_graceful_shutdown(
     process: &IsoSessionProcess,
+    stdin_released: bool,
 ) -> Result<(i32, Option<i32>), IsolationSessionError> {
     let mut exit_code = process
         .ExitCode()
@@ -1449,11 +1403,15 @@ fn wait_with_graceful_shutdown(
         return Ok((exit_code, None));
     }
 
-    let _ = process.CloseStandardInput();
-    let _ = process.WaitForExit(5000);
-    exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
-    if exit_code != STILL_ACTIVE {
-        return Ok((exit_code, None));
+    // A live relay can still hold a writer, so closing platform stdin alone
+    // cannot deliver EOF. Skip that grace period if the relay did not stop.
+    if stdin_released {
+        let _ = process.CloseStandardInput();
+        let _ = process.WaitForExit(5000);
+        exit_code = process.ExitCode().unwrap_or(STILL_ACTIVE);
+        if exit_code != STILL_ACTIVE {
+            return Ok((exit_code, None));
+        }
     }
 
     let _ = process.SendCtrlClose();
@@ -1477,7 +1435,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stdin_shutdown_releases_relay_writer_before_closing_platform_input() {
+    fn stdin_shutdown_join_distinguishes_running_and_released_relay() {
         use crate::mxc_common::process_util::create_local_pipe;
         use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
         use windows::Win32::System::Pipes::PeekNamedPipe;
@@ -1487,123 +1445,24 @@ mod tests {
         // SAFETY: the relay duplicates both live pipe handles.
         let (relay, canceller) =
             unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
-        let plan = plan_wait(5000, WAIT_FOR_EXIT_TIMEOUT, probe(STILL_ACTIVE)).unwrap();
-        assert_eq!(unsafe { WaitForSingleObject(relay.get(), 0) }, WAIT_TIMEOUT);
-
-        let outcome = complete_wait(
-            plan,
-            || {
-                canceller.close();
-                wait_for_stdin_relay(Some(&relay), 5000)
-            },
-            || {
-                // Stand in for CloseStandardInput releasing the platform writer.
-                // The caller's source writer is still open throughout shutdown.
-                drop(dest_write);
-                let error = unsafe { PeekNamedPipe(dest_read.get(), None, 0, None, None, None) }
-                    .expect_err("the relay must release its duplicate before shutdown");
-                assert_eq!(error.code(), ERROR_BROKEN_PIPE.to_hresult());
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(outcome, ExecOutcome::TimedOut);
-    }
-
-    #[test]
-    fn stdin_shutdown_does_not_run_for_completed_waits() {
-        for (timeout_ms, waited, exit_code, expected) in [
-            (5000, 7, 7, ExecOutcome::Exited(7)),
-            (5000, -1, -1, ExecOutcome::Exited(-1)),
-            (
-                5000,
-                STILL_ACTIVE,
-                STILL_ACTIVE,
-                ExecOutcome::Exited(STILL_ACTIVE),
-            ),
-            (0, -1, STILL_ACTIVE, ExecOutcome::Exited(-1)),
-            (5000, -1, 0, ExecOutcome::TimedOut),
-        ] {
-            let plan = plan_wait(timeout_ms, waited, probe(exit_code)).unwrap();
-            let outcome = complete_wait(
-                plan,
-                || panic!("a completed wait must not prepare timeout shutdown"),
-                || panic!("a completed wait must not escalate shutdown"),
-            )
-            .unwrap();
-            assert_eq!(outcome, expected);
-        }
-    }
-
-    #[test]
-    fn stdin_shutdown_reports_unreleased_relay_instead_of_escalating() {
-        use crate::mxc_common::process_util::create_local_pipe;
-
-        let (source_read, _source_write) = create_local_pipe().unwrap();
-        let (_dest_read, dest_write) = create_local_pipe().unwrap();
-        // SAFETY: the relay duplicates both live pipe handles.
-        let (relay, canceller) =
-            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
-        let result = complete_wait(
-            WaitPlan::KillThenReportTimeout,
-            || wait_for_stdin_relay(Some(&relay), 0),
-            || panic!("shutdown must not proceed with an unconfirmed relay exit"),
-        );
+        assert!(!wait_for_relay(Some(&relay), 0).unwrap());
         canceller.close();
-        wait_for_stdin_relay(Some(&relay), 5000).unwrap();
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("stdin relay did not exit"));
+        assert!(wait_for_relay(Some(&relay), 5000).unwrap());
+
+        // Stand in for CloseStandardInput releasing the platform writer.
+        // The caller's source writer is still open throughout shutdown.
+        drop(dest_write);
+        let error = unsafe { PeekNamedPipe(dest_read.get(), None, 0, None, None, None) }
+            .expect_err("the relay must release its duplicate before shutdown");
+        assert_eq!(error.code(), ERROR_BROKEN_PIPE.to_hresult());
     }
 
     #[test]
     fn stdin_shutdown_reports_wait_failure() {
         let invalid = OwnedHandle::new(HANDLE::default());
-        let error = wait_for_stdin_relay(Some(&invalid), 0).unwrap_err();
-        assert!(error.to_string().contains("waiting for stdin relay"));
-        assert!(wait_for_stdin_relay(None, 0).is_ok());
-    }
-
-    #[test]
-    fn stdin_shutdown_propagates_shutdown_failure_after_preparation() {
-        let prepared = std::cell::Cell::new(false);
-        let result = complete_wait(
-            WaitPlan::KillThenReportTimeout,
-            || {
-                prepared.set(true);
-                Ok(())
-            },
-            || {
-                assert!(prepared.get());
-                Err(lifecycle_err("shutdown failed"))
-            },
-        );
-        assert!(result.unwrap_err().to_string().contains("shutdown failed"));
-    }
-
-    #[test]
-    fn pipe_stdin_eof_closes_only_non_conpty_input() {
-        use super::super::process_options::build_process_options;
-        use crate::mxc_common::models::ExecutionRequest;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        for interactive in [false, true] {
-            let options = build_process_options(&ExecutionRequest::default(), interactive);
-            let closed = Arc::new(AtomicBool::new(false));
-            let closed_by_callback = Arc::clone(&closed);
-            let on_eof = pipe_stdin_eof_callback(&options, move || {
-                closed_by_callback.store(true, Ordering::SeqCst);
-            });
-
-            assert_eq!(on_eof.is_some(), !interactive);
-            assert!(!closed.load(Ordering::SeqCst));
-            if let Some(on_eof) = on_eof {
-                on_eof();
-            }
-            assert_eq!(closed.load(Ordering::SeqCst), !interactive);
-        }
+        let error = wait_for_relay(Some(&invalid), 0).unwrap_err();
+        assert!(error.to_string().contains("waiting for relay failed"));
+        assert!(wait_for_relay(None, 0).unwrap());
     }
 
     #[test]
