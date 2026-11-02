@@ -415,6 +415,18 @@ waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
 service serialises (or rejects, depending on session state) at its own layer.
 
+`Relayed` execution uses the same [stdin EOF behavior](oneshot.md#os-api-dependency)
+as create-and-run execution: pipe/file input ending closes workload stdin only
+without ConPTY. With ConPTY, the input relay ends without disconnecting the
+console. SDK `Piped` and explicit PTY operations are unchanged.
+
+On a confirmed timeout of a still-running workload, `Relayed` execution stops
+and joins its stdin relay before the shutdown sequence calls
+`CloseStandardInput`. This releases MXC's write duplicate before asking the OS
+to close its writers. The join is limited to one second; failure to confirm the
+relay exited is a cleanup error and takes the existing termination-on-error
+path. A cooperative exit after the deadline still produces a timeout result.
+
 ### Deprovision and concurrent sandboxes
 
 `deprovision` removes only its own agent user (`deprovision_agent_user`).
