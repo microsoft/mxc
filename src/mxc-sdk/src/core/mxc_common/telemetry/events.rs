@@ -795,7 +795,7 @@ mod tests {
         super::super::TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
         let mut logger =
             crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        let _session = super::super::session::start(true, "", &mut logger);
+        let _session = super::super::session::start(true, "", None, &mut logger);
         let session_id = super::super::session::current().unwrap().to_string();
         test_sink::install();
         super::super::emit_execution_start(
@@ -1024,10 +1024,10 @@ mod tests {
         test_sink::install();
         let mut logger =
             crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        let _enabled = super::super::session::start(true, "", &mut logger);
+        let _enabled = super::super::session::start(true, "", None, &mut logger);
         let expected = super::super::session::current().unwrap().to_string();
         {
-            let _disabled = super::super::session::start(false, "", &mut logger);
+            let _disabled = super::super::session::start(false, "", None, &mut logger);
             log_policy_hash("synthetic", "synthetic-hash", "1.0.1");
             assert!(test_sink::take_requirements().is_empty());
         }

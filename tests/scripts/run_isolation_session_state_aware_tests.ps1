@@ -38,6 +38,10 @@
     records executor PIDs and phases for the isolated ETW capture harness.
     Use through run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle.
 
+.PARAMETER TelemetryKeywords
+    Uses the development contract for the second telemetry lifecycle and
+    records each request's contract for descriptor-keyword assertions.
+
 .EXAMPLE
     .\run_isolation_session_state_aware_tests.ps1
     .\run_isolation_session_state_aware_tests.ps1 -WxcExePath C:\test\wxc-exec.exe -ConfigDir C:\test\tests\configs
@@ -46,7 +50,8 @@
 param(
     [string]$WxcExePath,
     [string]$ConfigDir,
-    [string]$TelemetryResultsPath
+    [string]$TelemetryResultsPath,
+    [switch]$TelemetryKeywords
 )
 
 $ErrorActionPreference = "Stop"
@@ -477,12 +482,13 @@ function Envelope-Arm {
 if ($TelemetryResultsPath) {
     $telemetryInvocations = [System.Collections.Generic.List[object]]::new()
     foreach ($lifecycle in 1, 2) {
+        $contractVersion = if ($TelemetryKeywords -and $lifecycle -eq 2) { '1.1.0-alpha' } else { '1.0.0' }
         $telemetrySandboxId = $null
         $shouldStop = $false
         try {
             foreach ($phase in @('provision', 'start', 'exec', 'exec', 'stop', 'deprovision')) {
                 $request = @{
-                    version = '1.0.0'
+                    version = $contractVersion
                     phase = $phase
                     telemetry = @{ enabled = $true }
                 }
@@ -518,6 +524,8 @@ if ($TelemetryResultsPath) {
                     Phase = $phase
                     ProcessId = $invocation.ProcessId
                     ExitCode = $invocation.ExitCode
+                    ContractVersion = $contractVersion
+                    RequireProcessExit = $phase -eq 'exec'
                 })
                 if ($phase -eq 'stop') { $shouldStop = $false }
                 if ($phase -eq 'deprovision') { $telemetrySandboxId = $null }

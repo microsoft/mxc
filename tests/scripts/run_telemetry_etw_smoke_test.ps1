@@ -14,13 +14,19 @@
     IsolationSession backend and Administrator; missing prerequisites fail.
     The executor must be a local-only debug build with test-support and
     isolation_session features.
+
+.PARAMETER CheckKeywords
+    Requires a local-only debug test-support executor built with
+    MXC_TELEMETRY_TEST_KEYWORDS=1. Checks actual Critical Data/Performance and
+    Measures/Usage metadata for development/published contracts, including failures.
 #>
 
 [CmdletBinding()]
 param(
     [string]$BinDir,
     [switch]$SkipClean,
-    [switch]$IsolationSessionLifecycle
+    [switch]$IsolationSessionLifecycle,
+    [switch]$CheckKeywords
 )
 
 $ErrorActionPreference = 'Stop'
@@ -134,7 +140,7 @@ function Invoke-CanonicalGrant {
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    if ($IsolationSessionLifecycle) { throw 'Administrator privileges are required for lifecycle ETW capture.' }
+    if ($IsolationSessionLifecycle -or $CheckKeywords) { throw 'Administrator privileges are required for required ETW scenarios.' }
     Write-Host 'SKIPPED: Administrator privileges are required for ETW session creation.' -ForegroundColor Yellow
     exit 0
 }
@@ -157,6 +163,32 @@ $etlFile = Join-Path $etlDir 'mxc_trace.etl'
 $xmlFile = Join-Path $etlDir 'mxc_trace.xml'
 $sessionName = "MxcTelemetryTest_$runId"
 $traceStarted = $false
+
+function Invoke-TraceRequest {
+    param([hashtable]$Request, [switch]$RequireFailure)
+
+    $requestFile = Join-Path $tempDir ("request-" + [guid]::NewGuid().ToString('N') + '.json')
+    $Request | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $requestFile
+    $proc = Start-Process -FilePath $wxcExe -ArgumentList '--debug', "`"$requestFile`"" -PassThru -NoNewWindow
+    try {
+        # Caching the handle keeps ExitCode readable after the process exits.
+        $null = $proc.Handle
+        if (-not $proc.WaitForExit(60000)) {
+            Stop-Process -Id $proc.Id -Force
+            $proc.WaitForExit()
+            throw 'wxc-exec timed out after 60 seconds.'
+        }
+        if ($RequireFailure -and $proc.ExitCode -eq 0) { throw 'The deliberate backend failure unexpectedly succeeded.' }
+        [pscustomobject]@{
+            ProcessId = $proc.Id
+            ContractVersion = $Request.version
+            RequireProcessExit = -not $RequireFailure -and $proc.ExitCode -eq 0
+            RequireError = [bool]$RequireFailure
+        }
+    } finally {
+        $proc.Dispose()
+    }
+}
 
 try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $consentFile) -Force | Out-Null
@@ -205,13 +237,22 @@ try {
         $manifestFile = Join-Path $tempDir 'lifecycle-invocations.json'
         $global:LASTEXITCODE = 0
         & (Join-Path $PSScriptRoot 'run_isolation_session_state_aware_tests.ps1') `
-            -WxcExePath $wxcExe -TelemetryResultsPath $manifestFile
+            -WxcExePath $wxcExe -TelemetryResultsPath $manifestFile -TelemetryKeywords:$CheckKeywords
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $manifestFile)) {
             throw 'IsolationSession lifecycle telemetry scenario did not complete.'
         }
         $invocations = @(Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json)
         $remainingRecords = @(Get-ChildItem -LiteralPath (Join-Path $tempDir 'mxc\correlation') -Filter '*.cv' -ErrorAction Stop)
         if ($remainingRecords.Count -ne 0) { throw 'Deprovision left lifecycle correlation records behind.' }
+    } elseif ($CheckKeywords) {
+        $invocations = @(
+            foreach ($version in @('1.0.0', '1.1.0-alpha')) {
+                $request = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json -AsHashtable
+                $request.version = $version
+                $null = $request.Remove('$schema')
+                Invoke-TraceRequest -Request $request
+            }
+        )
     } else {
         $executionTimeoutSeconds = 60
         $proc = Start-Process -FilePath $wxcExe -ArgumentList '--debug', $configFile -PassThru -NoNewWindow
@@ -224,6 +265,22 @@ try {
         }
         Write-Host "wxc-exec exited with code $($proc.ExitCode)"
         $invocations = @([pscustomobject]@{ ProcessId = $proc.Id })
+    }
+    $failureInvocations = @(
+        if ($CheckKeywords) {
+            foreach ($version in @('1.0.0', '1.1.0-alpha')) {
+                Invoke-TraceRequest -RequireFailure -Request @{
+                    version = $version
+                    containment = 'bubblewrap'
+                    process = @{ commandLine = 'true' }
+                    telemetry = @{ enabled = $true }
+                }
+            }
+        }
+    )
+    if ($CheckKeywords) {
+        $failureInvocations | ConvertTo-Json -Depth 4 |
+            Set-Content -LiteralPath (Join-Path $tempDir 'failure-invocations.json')
     }
     Start-Sleep -Seconds 2
 
@@ -238,7 +295,11 @@ try {
     if (-not (Test-Path $xmlFile)) { throw 'tracerpt did not produce XML.' }
     $xml = Get-Content $xmlFile -Raw
     Assert-TelemetryExecutionTrace -XmlText $xml -ProviderGuid $providerGuid `
-        -Invocations $invocations -RequireLifecycles:$IsolationSessionLifecycle
+        -Invocations $invocations -RequireLifecycles:$IsolationSessionLifecycle -CheckKeywords:$CheckKeywords
+    if ($CheckKeywords) {
+        Assert-TelemetryExecutionTrace -XmlText $xml -ProviderGuid $providerGuid `
+            -Invocations $failureInvocations -CheckKeywords
+    }
     Write-Host 'PASSED: isolated MXC ETW capture smoke test' -ForegroundColor Green
 } finally {
     if ($traceStarted) { logman stop $sessionName -ets 2>$null | Out-Null }

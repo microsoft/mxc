@@ -1106,7 +1106,7 @@ mod tests {
         let vector = pre_dispatch_vector(true, Phase::Exec, Some("synthetic-container"));
         let mut logger =
             crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        let _session = super::super::session::start(true, &vector, &mut logger);
+        let _session = super::super::session::start(true, &vector, None, &mut logger);
         let id = super::super::session::current().expect("valid session");
         fs::write(
             std::env::var_os("MXC_TEST_LIFECYCLE_SESSION_OUTPUT").unwrap(),

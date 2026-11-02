@@ -317,19 +317,26 @@ mod tests {
         telemetry::consent::set_consent(true, "test").unwrap();
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
         let mut logger = Logger::new(Mode::Buffer);
-        let _other_request =
-            session::start_with_learning_mode(true, "", LearningMode::Enforcement, &mut logger);
+        let _other_request = session::start_with_learning_mode(
+            true,
+            "",
+            None,
+            LearningMode::Enforcement,
+            &mut logger,
+        );
         assert!(crate::mxc_telemetry::init("test", "dev"));
 
         for (active, vector) in [(true, ""), (false, ""), (true, "invalid")] {
             let _invocation = session::start_with_learning_mode(
                 active,
                 vector,
+                Some(crate::mxc_contract::ContractVersion::V1_1_0Alpha),
                 LearningMode::Learning,
                 &mut logger,
             );
             let expected_id = session::current();
             let expected_mode = session::learning_mode();
+            let expected_critical = session::critical_events();
             let impersonation = Impersonation::of_this_thread().unwrap();
             let (stdout_read, stdout_write) = std::io::pipe().unwrap();
             let handle = ExecHandle {
@@ -341,6 +348,7 @@ mod tests {
                     call(&impersonation, || {
                         assert_eq!(session::current(), expected_id);
                         assert_eq!(session::learning_mode(), expected_mode);
+                        assert_eq!(session::critical_events(), expected_critical);
                         assert_eq!(session::invocation_disabled(), !active);
                         test_sink::install();
                         telemetry::log_process_event("synthetic", 42, ProcessEvent::Exited(7));

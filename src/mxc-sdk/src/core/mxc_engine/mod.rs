@@ -233,6 +233,7 @@ fn invoke_execution_request(
     let _session = telemetry::session::start_with_learning_mode(
         telemetry_active,
         "",
+        request.source_contract,
         telemetry::LearningMode::for_request(request),
         &mut logger,
     );
@@ -1249,6 +1250,7 @@ mod telemetry_process_tests {
         expected: Option<uuid::Uuid>,
         expected_learning_mode: telemetry::LearningMode,
         expected_disabled: bool,
+        expected_critical: bool,
         calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
     }
 
@@ -1262,6 +1264,10 @@ mod telemetry_process_tests {
             assert_eq!(
                 telemetry::session::learning_mode(),
                 self.expected_learning_mode
+            );
+            assert_eq!(
+                telemetry::session::critical_events(),
+                self.expected_critical
             );
             self.calls.lock().unwrap().push(operation);
         }
@@ -1314,6 +1320,7 @@ mod telemetry_process_tests {
                 let _scope = telemetry::session::start_with_learning_mode(
                     true,
                     vector,
+                    Some(crate::mxc_contract::ContractVersion::V1_1_0Alpha),
                     telemetry::LearningMode::PermissiveLearning,
                     &mut logger,
                 );
@@ -1326,6 +1333,7 @@ mod telemetry_process_tests {
                     Box::new(SessionProbe {
                         expected: expected_id,
                         expected_disabled: !enabled,
+                        expected_critical: enabled,
                         expected_learning_mode: if enabled {
                             telemetry::LearningMode::PermissiveLearning
                         } else {
@@ -1351,6 +1359,7 @@ mod telemetry_process_tests {
                 let _other = telemetry::session::start_with_learning_mode(
                     true,
                     "",
+                    None,
                     telemetry::LearningMode::Learning,
                     &mut logger,
                 );
@@ -1375,6 +1384,7 @@ mod telemetry_process_tests {
                 assert_eq!(telemetry::session::current(), unrelated);
                 drop(process);
                 assert_eq!(telemetry::session::current(), unrelated);
+                assert!(!telemetry::session::critical_events());
             })
             .join()
             .unwrap();

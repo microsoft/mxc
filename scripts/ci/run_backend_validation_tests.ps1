@@ -368,7 +368,7 @@ function Invoke-IsolationSessionSuites {
             $telemetryBin = Join-Path $binaryDirectoryPath 'telemetry-test'
             Assert-File -Path (Join-Path $telemetryBin 'wxc-exec.exe')
             Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_telemetry_etw_smoke_test.ps1') `
-                -Arguments @{ BinDir = $telemetryBin; IsolationSessionLifecycle = $true; SkipClean = $true } |
+                -Arguments @{ BinDir = $telemetryBin; IsolationSessionLifecycle = $true; CheckKeywords = $true; SkipClean = $true } |
                 Out-Host
         }
         'Node' = {

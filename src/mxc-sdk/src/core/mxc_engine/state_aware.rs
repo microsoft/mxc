@@ -624,7 +624,12 @@ fn exec_state_aware_attached_parsed(
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
-    let _session = telemetry::session::start(telemetry_active, &correlation, logger);
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let started = std::time::Instant::now();
     telemetry::emit_execution_start(
         telemetry_active,
@@ -694,7 +699,12 @@ fn run_state_aware_envelope(
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
-    let _session = telemetry::session::start(telemetry_active, &correlation, logger);
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
     telemetry::emit_execution_start(
@@ -800,7 +810,12 @@ fn exec_state_aware_process_parsed(
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
-    let _session = telemetry::session::start(telemetry_active, &correlation, logger);
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
     telemetry::emit_execution_start(
@@ -869,7 +884,12 @@ pub fn run_typed_state_aware_request(
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
-    let _session = telemetry::session::start(telemetry_active, &correlation, &mut logger);
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        &mut logger,
+    );
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
     telemetry::emit_execution_start(

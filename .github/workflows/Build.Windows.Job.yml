@@ -126,6 +126,8 @@ jobs:
       - name: Build debug executor for isolated telemetry smoke tests
         env:
           MXC_TELEMETRY_PROVIDER_GROUP_GUID: ''
+          MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID: ''
+          MXC_TELEMETRY_TEST_KEYWORDS: '1'
         run: cargo build --locked -p wxc --features "test-support isolation_session"
 
       - name: Test telemetry ETW assertions, lifecycle requests and consent fixtures
@@ -148,7 +150,7 @@ jobs:
       - name: Run isolated telemetry ETW smoke test
         working-directory: ${{ github.workspace }}
         shell: pwsh
-        run: tests\scripts\run_telemetry_etw_smoke_test.ps1 -BinDir src\target\debug
+        run: tests\scripts\run_telemetry_etw_smoke_test.ps1 -BinDir src\target\debug -CheckKeywords
 
       # Mutates the real consent store and HKLM policy, so it is confined to
       # the ephemeral GitHub-hosted runners this job declares.

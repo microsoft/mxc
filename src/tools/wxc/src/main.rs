@@ -544,7 +544,12 @@ fn run_state_aware_main(
         parsed.phase(),
         sandbox_id.as_deref(),
     );
-    let _session = telemetry::session::start(telemetry_active, &correlation, logger);
+    let _session = telemetry::session::start(
+        telemetry_active,
+        &correlation,
+        parsed.request().source_contract,
+        logger,
+    );
 
     // Attribute out-of-band emit paths (the console-control handler installed in
     // `main`, and the panic hook installed just below) to the resolved backend
@@ -1279,6 +1284,7 @@ fn main() {
     let _session = telemetry::session::start_with_learning_mode(
         telemetry_active,
         "",
+        request.source_contract,
         learning_mode,
         &mut logger,
     );

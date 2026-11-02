@@ -236,12 +236,23 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
             "telemetry: ETW provider registration failed; continuing without telemetry",
         );
     }
-    if activated && !crate::mxc_telemetry::IS_UTC_ROUTED {
-        logger.warning_line(
-            "telemetry: events are emitted to local ETW only; this build has no provider group \
-             GUID, so nothing is routed to the Microsoft pipeline (set \
-             MXC_TELEMETRY_PROVIDER_GROUP_GUID at build time for an internal build)",
-        );
+    let core_error = crate::mxc_telemetry::core_registration_error();
+    if activated && core_error != 0 {
+        logger.warning_line(&format!(
+            "telemetry: Core ETW registration failed (Win32 {core_error}); Core events are \
+             unavailable, existing telemetry registration is retained",
+        ));
+    }
+    if activated
+        && (!crate::mxc_telemetry::IS_UTC_ROUTED || !crate::mxc_telemetry::IS_CORE_UTC_ROUTED)
+    {
+        logger.warning_line(&format!(
+            "telemetry: events are emitted to local ETW only where no group is configured \
+             (legacy routing configured={}, Core routing configured={}); internal builds \
+             use MXC_TELEMETRY_PROVIDER_GROUP_GUID and MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID",
+            crate::mxc_telemetry::IS_UTC_ROUTED,
+            crate::mxc_telemetry::IS_CORE_UTC_ROUTED,
+        ));
     }
     activated
 }
@@ -1184,6 +1195,7 @@ mod tests {
         let _session = session::start_with_learning_mode(
             true,
             "",
+            None,
             LearningMode::PermissiveLearning,
             &mut logger,
         );
@@ -1275,7 +1287,7 @@ mod tests {
             TEST_FORCE_ACTIVE.with(|value| value.set(true));
             TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
             let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-            let _session = session::start(true, "", &mut logger);
+            let _session = session::start(true, "", None, &mut logger);
             set_process_context_with_kind(&ContainmentBackend::IsolationSession, Some("vm"));
             set_process_phase("exec");
             set_process_correlation_vector("synthetic-correlation");
@@ -1333,6 +1345,7 @@ mod tests {
                 let _scope = session::start_with_learning_mode(
                     true,
                     "",
+                    None,
                     LearningMode::PermissiveLearning,
                     &mut logger,
                 );
@@ -1643,7 +1656,7 @@ mod tests {
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        let scope = session::start(true, "", &mut logger);
+        let scope = session::start(true, "", None, &mut logger);
         let expected_session = session::current().unwrap().to_string();
         set_process_context_with_kind(&ContainmentBackend::IsolationSession, Some("vm"));
         set_process_phase("exec");
@@ -1688,7 +1701,7 @@ mod tests {
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
-        let scope = session::start(true, "", &mut logger);
+        let scope = session::start(true, "", None, &mut logger);
         let expected_session = session::current().unwrap().to_string();
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("start");

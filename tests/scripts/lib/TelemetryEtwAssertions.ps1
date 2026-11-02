@@ -6,7 +6,8 @@ function Assert-TelemetryExecutionTrace {
         [Parameter(Mandatory)][string]$XmlText,
         [Parameter(Mandatory)][guid]$ProviderGuid,
         [Parameter(Mandatory)][object[]]$Invocations,
-        [switch]$RequireLifecycles
+        [switch]$RequireLifecycles,
+        [switch]$CheckKeywords
     )
 
     if ($Invocations.Count -eq 0) { throw 'No executor invocations were recorded.' }
@@ -26,13 +27,13 @@ function Assert-TelemetryExecutionTrace {
     }
 
     [xml]$trace = $XmlText
-    $executionEvents = @(
+    $telemetryEvents = @(
         foreach ($event in $trace.SelectNodes("//*[local-name()='Event']")) {
             if ([string]$event.System.Provider.Guid -ne "{$ProviderGuid}" -and
                 [string]$event.System.Provider.Guid -ne "$ProviderGuid") { continue }
             $task = [string]$event.RenderingInfo.Task
             if ($task -eq 'MXC.Execution') { throw 'The retired MXC.Execution event was emitted.' }
-            if ($task -notin @('MXC.ExecutionStart', 'MXC.ExecutionEnd')) { continue }
+            if (-not $task.StartsWith('MXC.')) { continue }
             $fields = @{}
             foreach ($node in $event.SelectNodes("*[local-name()='EventData']/*[local-name()='Data']")) {
                 $fields[$node.GetAttribute('Name')] = $node.InnerText
@@ -41,6 +42,7 @@ function Assert-TelemetryExecutionTrace {
                 Task = $task
                 ProcessId = [int]$event.System.Execution.ProcessID
                 Timestamp = [DateTimeOffset]$event.System.TimeCreated.SystemTime
+                Keywords = [string]$event.System.Keywords
                 Fields = $fields
             }
         }
@@ -54,7 +56,43 @@ function Assert-TelemetryExecutionTrace {
     $lifecycleSessions = @{}
     $lifecycleRoots = @{}
     foreach ($invocation in $Invocations) {
-        $emitted = @($executionEvents | Where-Object { $_.ProcessId -eq $invocation.ProcessId })
+        $emitted = @($telemetryEvents | Where-Object { $_.ProcessId -eq $invocation.ProcessId })
+        if ($CheckKeywords) {
+            if ($invocation.ContractVersion -cnotin @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')) {
+                throw "Missing or unsupported contract attribution for executor $($invocation.ProcessId)."
+            }
+            foreach ($event in $emitted) {
+                $expectedKeyword = [uint64]0x0000400000000000
+                $expectedPrivacyTag = [uint64]0x02000000
+                if ($invocation.ContractVersion -ceq '1.1.0-alpha' -and
+                    $event.Task -cin @('MXC.ExecutionStart', 'MXC.ExecutionEnd', 'MXC.Error', 'MXC.ProcessExited')) {
+                    $expectedKeyword = [uint64]0x0000800000000000
+                    $expectedPrivacyTag = [uint64]0x01000000
+                }
+                if ($event.Keywords -notmatch '^0x[0-9a-fA-F]{1,16}$' -or
+                    [Convert]::ToUInt64($event.Keywords.Substring(2), 16) -ne $expectedKeyword) {
+                    throw "$($event.Task) from executor $($invocation.ProcessId) has incorrect Keywords '$($event.Keywords)'."
+                }
+                $privacyTagText = [string]$event.Fields['PartA_PrivTags']
+                $privacyTag = [uint64]0
+                if ($privacyTagText -match '^0x[0-9a-fA-F]{1,16}$') {
+                    $privacyTag = [Convert]::ToUInt64($privacyTagText.Substring(2), 16)
+                } elseif (-not [uint64]::TryParse($privacyTagText, [ref]$privacyTag)) {
+                    throw "$($event.Task) from executor $($invocation.ProcessId) has missing or invalid PartA_PrivTags '$privacyTagText'."
+                }
+                if ($privacyTag -ne $expectedPrivacyTag) {
+                    throw "$($event.Task) from executor $($invocation.ProcessId) has incorrect PartA_PrivTags '$privacyTagText'."
+                }
+            }
+            foreach ($requiredTask in @(
+                if ($invocation.RequireProcessExit) { 'MXC.ProcessExited' }
+                if ($invocation.RequireError) { 'MXC.Error' }
+            )) {
+                if (@($emitted | Where-Object { $_.Task -ceq $requiredTask }).Count -eq 0) {
+                    throw "Executor $($invocation.ProcessId) did not emit required event '$requiredTask'."
+                }
+            }
+        }
         $starts = @($emitted | Where-Object { $_.Task -eq 'MXC.ExecutionStart' })
         $ends = @($emitted | Where-Object { $_.Task -eq 'MXC.ExecutionEnd' })
         if ($starts.Count -ne 1 -or $ends.Count -ne 1) {

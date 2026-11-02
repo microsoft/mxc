@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::LearningMode;
 use crate::mxc_common::logger::Logger;
+use crate::mxc_contract::ContractVersion;
 
 thread_local! {
     static CURRENT: Cell<Option<SessionContext>> = const { Cell::new(None) };
@@ -25,6 +26,8 @@ pub(crate) struct SessionContext {
     session_id: Option<Uuid>,
     #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
     learning_mode: LearningMode,
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    critical_events: bool,
     disabled: bool,
 }
 
@@ -33,6 +36,7 @@ impl SessionContext {
         Self {
             session_id: None,
             learning_mode: LearningMode::NotApplicable,
+            critical_events: false,
             disabled: true,
         }
     }
@@ -60,8 +64,19 @@ impl Drop for SessionScope {
 
 /// Start one authorized invocation, reusing the lifecycle vector's random root.
 #[doc(hidden)]
-pub fn start(active: bool, vector: &str, logger: &mut Logger) -> SessionScope {
-    start_with_learning_mode(active, vector, LearningMode::NotApplicable, logger)
+pub fn start(
+    active: bool,
+    vector: &str,
+    source_contract: Option<ContractVersion>,
+    logger: &mut Logger,
+) -> SessionScope {
+    start_with_learning_mode(
+        active,
+        vector,
+        source_contract,
+        LearningMode::NotApplicable,
+        logger,
+    )
 }
 
 /// Start an invocation with its selected access-check mode.
@@ -69,6 +84,7 @@ pub fn start(active: bool, vector: &str, logger: &mut Logger) -> SessionScope {
 pub fn start_with_learning_mode(
     active: bool,
     vector: &str,
+    source_contract: Option<ContractVersion>,
     learning_mode: LearningMode,
     logger: &mut Logger,
 ) -> SessionScope {
@@ -92,6 +108,7 @@ pub fn start_with_learning_mode(
     resume(SessionContext {
         session_id: id,
         learning_mode,
+        critical_events: source_contract == Some(ContractVersion::V1_1_0Alpha),
         disabled: false,
     })
 }
@@ -118,6 +135,7 @@ pub(crate) fn capture() -> SessionContext {
     CURRENT.with(Cell::get).unwrap_or(SessionContext {
         session_id: None,
         learning_mode: LearningMode::NotApplicable,
+        critical_events: false,
         disabled: false,
     })
 }
@@ -134,6 +152,11 @@ pub(crate) fn invocation_disabled() -> bool {
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn learning_mode() -> LearningMode {
     capture().learning_mode
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn critical_events() -> bool {
+    capture().critical_events
 }
 
 pub(crate) fn resume(context: SessionContext) -> SessionScope {
@@ -181,16 +204,22 @@ mod tests {
     #[test]
     fn learning_mode_is_scoped_and_disabled_invocations_do_not_inherit_it() {
         let mut logger = Logger::new(Mode::Buffer);
-        let _outer = start_with_learning_mode(true, "", LearningMode::Learning, &mut logger);
+        let _outer = start_with_learning_mode(true, "", None, LearningMode::Learning, &mut logger);
         let outer = current();
         {
-            let _inner =
-                start_with_learning_mode(true, "", LearningMode::PermissiveLearning, &mut logger);
+            let _inner = start_with_learning_mode(
+                true,
+                "",
+                None,
+                LearningMode::PermissiveLearning,
+                &mut logger,
+            );
             assert_eq!(learning_mode(), LearningMode::PermissiveLearning);
             {
                 let _disabled = start_with_learning_mode(
                     false,
                     "",
+                    None,
                     LearningMode::PermissiveLearning,
                     &mut logger,
                 );
@@ -203,8 +232,13 @@ mod tests {
         assert_eq!(current(), outer);
         let result = std::panic::catch_unwind(|| {
             let mut logger = Logger::new(Mode::Buffer);
-            let _scope =
-                start_with_learning_mode(true, "", LearningMode::PermissiveLearning, &mut logger);
+            let _scope = start_with_learning_mode(
+                true,
+                "",
+                None,
+                LearningMode::PermissiveLearning,
+                &mut logger,
+            );
             panic!("synthetic invocation unwind");
         });
         assert!(result.is_err());
@@ -234,13 +268,13 @@ mod tests {
     #[test]
     fn nested_and_disabled_invocations_restore_the_outer_session() {
         let mut logger = Logger::new(Mode::Buffer);
-        let _outer = start(true, "", &mut logger);
+        let _outer = start(true, "", None, &mut logger);
         let outer = current().expect("random session");
         {
-            let _inner = start(true, "", &mut logger);
+            let _inner = start(true, "", None, &mut logger);
             assert_ne!(current(), Some(outer));
             {
-                let _disabled = start(false, "invalid", &mut logger);
+                let _disabled = start(false, "invalid", None, &mut logger);
                 assert_eq!(current(), None);
                 assert!(invocation_disabled());
             }
@@ -252,31 +286,49 @@ mod tests {
 
     #[test]
     fn a_streaming_session_can_be_resumed_on_another_thread() {
-        let mut logger = Logger::new(Mode::Buffer);
-        let _scope = start(true, "", &mut logger);
-        let id = current().expect("random session");
-        let context = capture();
-        std::thread::spawn(move || {
-            assert_eq!(current(), None);
-            {
-                let _scope = resume(context);
-                assert_eq!(current(), Some(id));
-                let mut buffer = [0; 36];
-                assert_eq!(wire_id(&mut buffer), id.to_string());
-            }
-            assert_eq!(current(), None);
-        })
-        .join()
-        .expect("worker completed");
-        assert_eq!(current(), Some(id));
+        for source_contract in [
+            None,
+            Some(ContractVersion::V0_9_0Alpha),
+            Some(ContractVersion::V1_0_0),
+            Some(ContractVersion::V1_1_0Alpha),
+        ] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let _scope = start(true, "", source_contract, &mut logger);
+            let expected_critical = source_contract == Some(ContractVersion::V1_1_0Alpha);
+            assert_eq!(critical_events(), expected_critical);
+            let id = current().expect("random session");
+            let context = capture();
+            std::thread::spawn(move || {
+                assert_eq!(current(), None);
+                assert!(!critical_events());
+                {
+                    let _scope = resume(context);
+                    assert_eq!(current(), Some(id));
+                    assert_eq!(critical_events(), expected_critical);
+                    let mut buffer = [0; 36];
+                    assert_eq!(wire_id(&mut buffer), id.to_string());
+                }
+                assert_eq!(current(), None);
+                assert!(!critical_events());
+            })
+            .join()
+            .expect("worker completed");
+            assert_eq!(current(), Some(id));
+            assert_eq!(critical_events(), expected_critical);
+        }
     }
 
     #[test]
     fn context_transfer_preserves_suppression_separately_from_missing_attribution() {
         for active in [false, true] {
             let mut logger = Logger::new(Mode::Buffer);
-            let _scope =
-                start_with_learning_mode(active, "invalid", LearningMode::Learning, &mut logger);
+            let _scope = start_with_learning_mode(
+                active,
+                "invalid",
+                Some(ContractVersion::V1_1_0Alpha),
+                LearningMode::Learning,
+                &mut logger,
+            );
             assert_eq!(current(), None);
             let context = capture();
             std::thread::spawn(move || {
@@ -284,6 +336,7 @@ mod tests {
                 let _outer = start_with_learning_mode(
                     true,
                     "",
+                    None,
                     LearningMode::PermissiveLearning,
                     &mut logger,
                 );
@@ -292,6 +345,7 @@ mod tests {
                     let _restored = resume(context);
                     assert_eq!(current(), None);
                     assert_eq!(invocation_disabled(), !active);
+                    assert_eq!(critical_events(), active);
                     assert_eq!(
                         learning_mode(),
                         if active {
@@ -305,6 +359,7 @@ mod tests {
                 assert_eq!(current(), outer_id);
                 assert!(!invocation_disabled());
                 assert_eq!(learning_mode(), LearningMode::PermissiveLearning);
+                assert!(!critical_events());
             })
             .join()
             .unwrap();
@@ -319,13 +374,20 @@ mod tests {
         reset_process();
         let mut logger = Logger::new(Mode::Buffer);
         {
-            let _owner = start_with_learning_mode(true, "", LearningMode::Learning, &mut logger);
+            let _owner = start_with_learning_mode(
+                true,
+                "",
+                Some(ContractVersion::V1_1_0Alpha),
+                LearningMode::Learning,
+                &mut logger,
+            );
             remember_process();
         }
         for active in [false, true] {
             let _invocation = start_with_learning_mode(
                 active,
                 "invalid",
+                None,
                 LearningMode::PermissiveLearning,
                 &mut logger,
             );
@@ -334,6 +396,7 @@ mod tests {
             assert_eq!(current(), None);
             assert_eq!(invocation_disabled(), !active);
             assert_eq!(learning_mode(), expected_mode);
+            assert!(!critical_events());
         }
         reset_process();
     }
@@ -342,22 +405,31 @@ mod tests {
     fn concurrent_invocations_have_distinct_ids_and_restore_context_after_unwind() {
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let workers: Vec<_> = (0..8)
-            .map(|_| {
+            .map(|worker| {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     let mut logger = Logger::new(Mode::Buffer);
-                    let _scope = start(true, "", &mut logger);
+                    let expected_critical = worker % 2 == 0;
+                    let contract = if expected_critical {
+                        ContractVersion::V1_1_0Alpha
+                    } else {
+                        ContractVersion::V1_0_0
+                    };
+                    let _scope = start(true, "", Some(contract), &mut logger);
                     let id = current().unwrap();
                     barrier.wait();
                     assert_eq!(current(), Some(id));
+                    assert_eq!(critical_events(), expected_critical);
                     let failed = std::panic::catch_unwind(|| {
                         let mut logger = Logger::new(Mode::Buffer);
-                        let _nested = start(true, "", &mut logger);
+                        let _nested = start(true, "", None, &mut logger);
                         assert_ne!(current(), Some(id));
+                        assert!(!critical_events());
                         panic!("synthetic invocation unwind");
                     });
                     assert!(failed.is_err());
                     assert_eq!(current(), Some(id));
+                    assert_eq!(critical_events(), expected_critical);
                     id
                 })
             })

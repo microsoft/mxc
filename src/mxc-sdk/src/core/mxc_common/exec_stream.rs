@@ -971,11 +971,13 @@ mod tests {
             let _scope = session::start_with_learning_mode(
                 active,
                 vector,
+                Some(crate::mxc_contract::ContractVersion::V1_1_0Alpha),
                 LearningMode::Learning,
                 &mut logger,
             );
             let expected_id = session::current();
             let expected_mode = session::learning_mode();
+            let expected_critical = session::critical_events();
             let (stdout_read, stdout_write) = std::io::pipe().unwrap();
             let handle = ExecHandle {
                 stdin_closer: None,
@@ -985,6 +987,7 @@ mod tests {
                 waiter: Box::new(move || {
                     assert_eq!(session::current(), expected_id);
                     assert_eq!(session::learning_mode(), expected_mode);
+                    assert_eq!(session::critical_events(), expected_critical);
                     assert_eq!(session::invocation_disabled(), !active);
                     Ok(ExecOutcome::Exited(7))
                 }),
