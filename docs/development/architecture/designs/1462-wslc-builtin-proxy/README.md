@@ -209,6 +209,9 @@ the proxy endpoint, and the custom proxy decides the final destinations.
 
 - **`networkProxy` plus egress rules:** rejected.
 
+- **`networkProxy` plus `egress.default: allow`:** see
+  [open question 7](#open-questions).
+
 - **Loopback proxy URL:** the controller relays only to the proxy's port on
   Windows `127.0.0.1`, independent of `hostLoopback`. No other host-loopback
   port opens. This matches Bubblewrap, Seatbelt and ProcessContainer, and
@@ -248,13 +251,20 @@ These are rejected before the workload is created:
   - `provision`: creates the networks, controller and workload. Network
     posture is fixed here.
   - `start`: starts the controller, then the workload.
-  - `exec`: the daemon keeps the workload's proxy URL from `provision` and
-    sets the proxy variables on every exec with
+  - `exec` in a proxied container: the daemon keeps the workload's proxy URL
+    from `provision` and sets the proxy variables on every exec with
     `apply_cooperative_proxy_env`. This also applies when the exec replaces
     the environment, since the variables are added before the `env -i`
     command is built. An exec `networkProxy` must be omitted or match the
     provision value; any other value is rejected. How provision receives
     `networkProxy` is [open question 1](#open-questions).
+  - `exec` credentials in a proxied container: `env -i` puts every variable
+    in the command line, readable through `/proc/<pid>/cmdline`. Before
+    injecting, MXC runs `reject_proxy_credentials_in_argv` on the URL it will
+    inject, whether from the exec or from `provision`. A replaced environment
+    with a credential-bearing proxy URL is rejected.
+  - `exec` in a `NONE` or `BRIDGED` container: unchanged; `networkProxy` is
+    set per exec, as today.
   - `stop`: stops the workload, then the controller.
   - `deprovision`: deletes the workload, then the controller, then the
     networks.
@@ -472,6 +482,9 @@ probes used direct TCP connections, ignoring the proxy variables.
 - `wslc/common/state_aware.rs`: `exec_config` applies the stored proxy URL
   to every exec in a proxied container.
 
+- `wslc/common/policy.rs`: `reject_proxy_credentials_in_argv` checks the
+  proxy URL that exec will inject, not only the exec request's own.
+
 - New controller binary: a static Rust (musl) `[[bin]]` target in `mxc-sdk`,
   packaged as an image and imported from a tar. No new crate.
 
@@ -534,11 +547,14 @@ Hosts: Windows x64 with WSL 3.0.5 or later (the nightly WSLC matrix). Suites:
 | Proxied `allow` and `deny` workloads in one daemon session | Only the `allow` workload reaches Windows loopback | Extend `run_wslc_state_aware_tests.ps1` |
 | `BRIDGED` container, WSL 3.0.5 or later | Reaches a Windows loopback service through `host.wslc.internal` (not yet measured) | Proposed config |
 | Egress deny plus `networkProxy` (`http://` IP, hostname and loopback URL; `https://` hostname) | Only the proxy endpoint reached; the HTTPS proxy's certificate verified against its name; unresolvable hostname and `https://` IP or loopback URL rejected | Extend `run_wslc_proxy_test.ps1` |
+| Egress allow, `ingress` or `hostLoopback` deny, plus `networkProxy` | Matches the resolution of [open question 7](#open-questions); `BRIDGED` all-allow plus proxy unchanged | Extend `run_wslc_proxy_test.ps1` |
 | Non-TCP allow rule, proxy plus rules, UDP mapping | Rejected; no container created | Proposed rejection configs |
 | Lifecycle provision → start → exec → stop → deprovision (proxied) | Policy enforced on exec; no controller or networks remain afterward; re-provision succeeds | Extend `run_wslc_state_aware_tests.ps1` |
 | Proxied lifecycle exec without `networkProxy`, with merged and replaced environments | An allowed HTTPS request succeeds through the controller in both | Extend `run_wslc_state_aware_tests.ps1` |
+| Provision with a credential-bearing proxy URL, then exec with a replaced environment and no `networkProxy` | Rejected; the error doesn't contain the password | Extend `run_wslc_state_aware_tests.ps1` |
 | Workload, controller and networks left in a store (killed run or daemon) | Next session on that store deletes them; the next proxied run succeeds | Proposed test |
 | Configs valid today (`wslc_network_bridged/isolated/proxy*`, `wslc_port_mapping_*`) | Unchanged results | Existing tests |
+| `BRIDGED` lifecycle provision without a proxy, then exec with `networkProxy` | Proxy variables injected, as today | Existing `run_wslc_state_aware_tests.ps1` lifecycle C |
 
 - **Not testable in CI:** WSL older than 3.0.5, since CI installs at least the
   pinned version, and `AllowWSLContainerPrivileged=0`, which is host policy.
@@ -632,6 +648,17 @@ Delivery order:
    - Ask WSLC for SDK support for listing containers.
 
 6. **Discovery:** see [`api.md`](api.md#open-questions).
+
+7. **`egress.default: allow` plus `networkProxy` in proxied mode:** a denied
+   `ingress` or `hostLoopback` selects proxied mode, where the controller
+   forwards only to the custom proxy. `allow` and `deny` then behave the same.
+   Potential options:
+   - Reject it, like Bubblewrap. `deny` plus `networkProxy` gives the same
+     result.
+   - Accept it and document that `allow` has no effect with a custom proxy.
+
+   `BRIDGED` with everything allowed plus the cooperative proxy is unchanged
+   either way.
 
 ## Review checklist
 
