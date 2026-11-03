@@ -886,6 +886,49 @@ fn streaming_timeout_kills_detached_descendant() {
     assert_descendant_gone(descendant, "after the timeout");
 }
 
+/// Ending one run must not touch the processes of another run.
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_kill_leaves_concurrent_run_running() {
+    use std::io::{BufRead, BufReader};
+
+    fn start() -> (mxc_sdk::v1::MxcProcess, u32) {
+        let mut proc = spawn(
+            seatbelt_request("sleep 300 & echo CHILD=$!; sleep 300", 0),
+            Default::default(),
+        )
+        .expect("spawn");
+        let mut line = String::new();
+        BufReader::new(proc.take_stdout().expect("stdout"))
+            .read_line(&mut line)
+            .expect("read child pid");
+        let child = line
+            .trim()
+            .strip_prefix("CHILD=")
+            .expect("CHILD= prefix")
+            .parse()
+            .expect("child pid");
+        (proc, child)
+    }
+
+    let (mut first, first_child) = start();
+    let (mut second, second_child) = start();
+    let _first_guard = KillIfFailing(first_child);
+    let _second_guard = KillIfFailing(second_child);
+
+    first.kill().expect("kill first run");
+    let _ = first.wait();
+    assert_descendant_gone(first_child, "after its run was killed");
+    assert!(
+        pid_alive(second_child),
+        "killing one run also killed {second_child} from a concurrent run"
+    );
+
+    second.kill().expect("kill second run");
+    let _ = second.wait();
+    assert_descendant_gone(second_child, "after its run was killed");
+}
+
 /// Owns a hopping chain's scratch directory. On drop it creates the stop file,
 /// waits for the chain to stop writing, and only then removes the directory;
 /// a chain that keeps running keeps its directory and stop file.
