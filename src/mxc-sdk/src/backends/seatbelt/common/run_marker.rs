@@ -16,6 +16,8 @@ use std::collections::HashSet;
 use std::ffi::CString;
 use std::time::{Duration, Instant};
 
+use super::seatbelt_policy::RUN_MARKER_NAME_PREFIX;
+
 #[link(name = "proc")]
 unsafe extern "C" {
     fn proc_listallpids(buffer: *mut libc::c_void, buffersize: libc::c_int) -> libc::c_int;
@@ -75,7 +77,8 @@ pub(super) struct RunMarker {
 
 impl RunMarker {
     pub(super) fn new() -> std::io::Result<Self> {
-        // Two independent names, so no wildcard rule can allow one and deny the other.
+        // Independent names: only a rule that looks at the random part of the
+        // names can allow one and deny the other.
         Ok(Self {
             marker: random_service_name()?,
             control: random_service_name()?,
@@ -174,7 +177,7 @@ fn random_service_name() -> std::io::Result<CString> {
         std::io::Error::other(format!("Seatbelt: failed to create a run marker: {error}"))
     })?;
     let nonce: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    CString::new(format!("com.microsoft.mxc.run.{nonce}")).map_err(std::io::Error::other)
+    CString::new(format!("{RUN_MARKER_NAME_PREFIX}{nonce}")).map_err(std::io::Error::other)
 }
 
 fn signal(mut token: AuditToken, signal: libc::c_int, first_error: &mut Option<std::io::Error>) {

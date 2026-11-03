@@ -42,6 +42,39 @@ pub fn validate_seatbelt_ui_policy(request: &ExecutionRequest) -> Result<(), Str
     Ok(())
 }
 
+/// Mach name prefix reserved for MXC's per-run process cleanup rules.
+pub const RUN_MARKER_NAME_PREFIX: &str = "com.microsoft.mxc.run.";
+
+/// Reject caller-supplied names in the reserved cleanup prefix. A rule copied
+/// from another run would make that run's cleanup kill this run's processes.
+pub fn validate_seatbelt_reserved_names(request: &ExecutionRequest) -> Result<(), String> {
+    let Some(config) = request.seatbelt.as_ref() else {
+        return Ok(());
+    };
+    if config
+        .profile_override
+        .as_deref()
+        .is_some_and(|profile| profile.contains(RUN_MARKER_NAME_PREFIX))
+    {
+        return Err(format!(
+            "Seatbelt: seatbelt.profileOverride contains '{RUN_MARKER_NAME_PREFIX}', which \
+             MXC reserves for its process cleanup rules. Remove those rules (they are \
+             specific to the run that printed them); MXC adds this run's own."
+        ));
+    }
+    if let Some(name) = config
+        .extra_mach_lookups
+        .iter()
+        .find(|name| name.starts_with(RUN_MARKER_NAME_PREFIX))
+    {
+        return Err(format!(
+            "Seatbelt: seatbelt.extraMachLookups entry '{name}' uses the prefix \
+             '{RUN_MARKER_NAME_PREFIX}', which MXC reserves for its process cleanup rules."
+        ));
+    }
+    Ok(())
+}
+
 /// Effective outbound posture; omission defaults to deny.
 pub fn egress_allowed(policy: &ContainerPolicy) -> bool {
     policy
@@ -245,6 +278,46 @@ mod tests {
         assert!(validate_seatbelt_ui_policy(&gui_request(false, true)).is_ok());
         // An absent seatbelt section must not trip the rule either.
         assert!(validate_seatbelt_ui_policy(&ExecutionRequest::default()).is_ok());
+    }
+
+    fn seatbelt_request(config: SeatbeltConfig) -> ExecutionRequest {
+        ExecutionRequest {
+            seatbelt: Some(config),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_reserved_cleanup_names() {
+        let copied_rule = "(version 1)(allow default)\n\
+             (allow mach-lookup (global-name \"com.microsoft.mxc.run.0123\"))";
+        let msg = validate_seatbelt_reserved_names(&seatbelt_request(SeatbeltConfig {
+            profile_override: Some(copied_rule.into()),
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert!(msg.contains("profileOverride"), "got: {msg}");
+
+        let msg = validate_seatbelt_reserved_names(&seatbelt_request(SeatbeltConfig {
+            extra_mach_lookups: vec![
+                "com.example.service".into(),
+                "com.microsoft.mxc.run.0123".into(),
+            ],
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert!(msg.contains("extraMachLookups"), "got: {msg}");
+    }
+
+    #[test]
+    fn accepts_names_outside_the_reserved_prefix() {
+        assert!(validate_seatbelt_reserved_names(&ExecutionRequest::default()).is_ok());
+        let request = seatbelt_request(SeatbeltConfig {
+            profile_override: Some("(version 1)(allow default)".into()),
+            extra_mach_lookups: vec!["com.microsoft.mxc.runner".into()],
+            ..Default::default()
+        });
+        assert!(validate_seatbelt_reserved_names(&request).is_ok());
     }
 
     #[test]

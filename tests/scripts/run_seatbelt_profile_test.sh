@@ -58,6 +58,34 @@ else
     fail "sandbox-exec is required by this suite"
 fi
 
+# The cleanup rules are per run, so they must stay out of the copyable block.
+grep -qF "com.microsoft.mxc.run." <<<"$PROFILE" &&
+    fail "the copyable profile carries this run's cleanup rules" "$PROFILE"
+pass "the copyable profile carries no per-run cleanup rules"
+RULES="$(sed -n "/^${END}\$/,\$p" <<<"$OUT" | grep -F "com.microsoft.mxc.run." | sed 's/^Seatbelt: *//')"
+[ "$(wc -l <<<"$RULES")" -eq 2 ] || fail "this run's two cleanup rules follow the profile" "$OUT"
+pass "this run's cleanup rules are printed after the profile"
+
+# JSON config whose profileOverride is the given text.
+override_config() {
+    local profile
+    profile="$(awk 'BEGIN { ORS = "" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\t/, "\\t");
+        if (NR > 1) print "\\n"; print }' <<<"$1")"
+    printf '{"version":"1.0.0","containment":"seatbelt",
+"process":{"commandLine":"echo %s","timeout":10000},
+"seatbelt":{"profileOverride":"%s"}}\n' "$2" "$profile" >"$SEATBELT_TMP/override.json"
+    echo "$SEATBELT_TMP/override.json"
+}
+
+run_config "$(override_config "$PROFILE" PASTED_PROFILE_OK)"
+expect_ok "the copied profile runs as a profileOverride" "PASTED_PROFILE_OK"
+
+# Another run's cleanup rules would make that run kill this run's processes.
+run_config "$(override_config "$PROFILE"$'\n'"$RULES" COPIED_RULES_RAN)"
+[ "$RC" != 0 ] || fail "a profileOverride with another run's cleanup rules was accepted" "$OUT"
+expect_marker "copied cleanup rules are refused" "MXC reserves for its process cleanup rules"
+expect_absent "the workload never ran with copied cleanup rules" "COPIED_RULES_RAN"
+
 # A grant named in the config must be visible in the profile it produced.
 run_config "$(render seatbelt_fs_baseline_reads.json)" --debug
 grep -qF "/bin" <<<"$(extract "$OUT")" || fail "the profile names the baseline read paths" "$OUT"

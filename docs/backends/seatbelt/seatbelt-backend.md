@@ -360,8 +360,8 @@ Set under a top-level `"seatbelt"` key.
 | `nestedPty` | bool | `true` | Lets the inner process allocate and use its own ptys, without granting access to unrelated host terminals. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
 | `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
-| `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** MXC still appends the two [process cleanup](#process-cleanup) rules. Last resort. |
-| `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. |
+| `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** MXC still appends the two [process cleanup](#process-cleanup) rules, and rejects an override that contains their `com.microsoft.mxc.run.` names. Last resort. |
+| `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. Names starting with `com.microsoft.mxc.run.` are rejected. |
 
 <details>
 <summary><code>guiAccess</code> — exactly what it opens</summary>
@@ -477,8 +477,13 @@ profile:
 Every process in the run inherits the profile and cannot remove it. To clean
 up, MXC scans the system's process list and asks macOS which processes have
 exactly this pair of rules. No service with either name exists, so the rules
-grant nothing. They are added after a `profileOverride` profile too, and they
-appear in `--debug` output.
+grant nothing. They are added after a `profileOverride` profile too.
+
+`--debug` prints these rules after the end of the generated profile, not inside
+it, so the profile can be copied into `profileOverride` without them. MXC
+rejects a `profileOverride` or `extraMachLookups` entry that uses the
+`com.microsoft.mxc.run.` prefix: another run's rules would make that run's
+cleanup kill this run's processes.
 
 MXC freezes every matching process before killing any, so a process cannot
 restart one that was just killed. It scans again until two scans in a row find

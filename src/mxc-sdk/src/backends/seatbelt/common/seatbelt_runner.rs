@@ -149,6 +149,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .map_err(rejected_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
             .map_err(rejected_response)?;
+        crate::seatbelt_common::seatbelt_policy::validate_seatbelt_reserved_names(request)
+            .map_err(rejected_response)?;
         // Dry runs never reach spawn, so reject unresolvable paths here too.
         prepare_profile(request).map_err(profile_error_response)?;
         resolved_working_directory_opt(request).map_err(profile_error_response)?;
@@ -704,9 +706,11 @@ fn build_sandbox_command(
     let mut profile =
         build_profile_with_terminals(request, proxy_address, &inputs, &terminal_paths)
             .map_err(profile_error_response)?;
-    // Last, so neither generated rules nor `profileOverride` can change it.
-    profile.push_str(&marker.profile_rules());
     log_generated_profile(&profile, logger);
+    // Last, so neither generated rules nor `profileOverride` can change it.
+    let marker_rules = marker.profile_rules();
+    log_run_marker_rules(&marker_rules, logger);
+    profile.push_str(&marker_rules);
     let profile_cstr = CString::new(profile).map_err(|e| {
         rejected_response(format!("seatbelt profile contains embedded NUL byte: {e}"))
     })?;
@@ -766,6 +770,17 @@ fn log_generated_profile(profile: &str, logger: &mut Logger) {
         let _ = writeln!(logger, "{line}");
     }
     let _ = writeln!(logger, "{PROFILE_LOG_END}");
+}
+
+/// Logged outside the copyable block: the rules belong to this run only.
+fn log_run_marker_rules(rules: &str, logger: &mut Logger) {
+    let _ = writeln!(
+        logger,
+        "Seatbelt: process cleanup rules for this run, added after the profile above:"
+    );
+    for line in rules.lines().filter(|line| line.starts_with('(')) {
+        let _ = writeln!(logger, "Seatbelt:   {line}");
+    }
 }
 
 /// A request this backend refuses.
