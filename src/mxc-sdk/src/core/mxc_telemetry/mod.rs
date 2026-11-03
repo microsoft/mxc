@@ -28,23 +28,26 @@
 #[cfg(target_os = "windows")]
 mod provider {
     use crate::mxc_common::telemetry::session;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    #[cfg(test)]
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::sync::OnceLock;
 
-    // Two handles share the provider name/GUID but have independent optional groups.
+    // One registration carries both event categories through the same group.
     include!(concat!(env!("OUT_DIR"), "/provider_def.rs"));
 
+    /// Whether this build may collect Required diagnostics without consent:
+    /// routed through the internal group, or the debug-only local test mode.
+    pub const REQUIRED_COLLECTION_ELIGIBLE: bool = MXC_REQUIRED_COLLECTION_ELIGIBLE;
     // Keep keyword/tag selection together without changing payload field order.
     macro_rules! write_categorized_event {
         ($name:tt, $privacy_tag:ident, $($fields:tt)*) => {
             if session::critical_events() {
-                if core_is_active() {
-                    let $privacy_tag = MXC_CRITICAL_PRIVACY_TAG;
-                    tracelogging::write_event!(
-                        MXC_CORE_PROVIDER, $name, keyword(MXC_CRITICAL_EVENT_KEYWORD), $($fields)*
-                    );
-                }
+                let $privacy_tag = MXC_CRITICAL_PRIVACY_TAG;
+                tracelogging::write_event!(
+                    MXC_PROVIDER, $name, keyword(MXC_CRITICAL_EVENT_KEYWORD), $($fields)*
+                );
             } else {
                 let $privacy_tag = MXC_PRIVACY_TAG;
                 tracelogging::write_event!(
@@ -78,7 +81,7 @@ mod provider {
 
     static STATE: OnceLock<ProviderState> = OnceLock::new();
 
-    /// Shared owner count for both ETW registration handles.
+    /// Shared owner count for the ETW registration.
     ///
     /// A `Mutex` (rather than an `AtomicBool`) is used so the wrapper's view of
     /// registration is updated **under the same lock that serialises the
@@ -97,19 +100,8 @@ mod provider {
     /// risking a mutex acquisition. It is written **inside** the `REGISTERED`
     /// critical section so the two never disagree about the final state.
     static ACTIVE: AtomicBool = AtomicBool::new(false);
-    static CORE_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static CORE_REGISTRATION_ERROR: AtomicU32 = AtomicU32::new(0);
-
     #[cfg(test)]
-    pub(super) static TEST_CORE_REGISTRATION_ERROR: AtomicU32 = AtomicU32::new(0);
-
-    pub(crate) fn core_is_active() -> bool {
-        CORE_ACTIVE.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn core_registration_error() -> u32 {
-        CORE_REGISTRATION_ERROR.load(Ordering::Acquire)
-    }
+    pub(super) static TEST_REGISTRATION_ERROR: AtomicU32 = AtomicU32::new(0);
 
     /// Returns `true` if the ETW provider is currently registered.
     ///
@@ -121,12 +113,11 @@ mod provider {
         ACTIVE.load(Ordering::Acquire)
     }
 
-    /// Register the ETW handles and cache version/channel strings.
+    /// Register the ETW provider and cache version/channel strings.
     ///
-    /// Returns `true` when the legacy registration is retained. Core failure
-    /// leaves legacy events available, records a status for the caller's warning,
-    /// and is retried on the next initialization. Legacy registration failure
-    /// returns `false` without registering Core. Successful registration does
+    /// Returns `true` when the registration is retained. Registration failure
+    /// leaves telemetry inactive and can be retried on the next initialization.
+    /// Successful registration does
     /// not guarantee an ETW session is listening.
     ///
     /// **Note:** Version and channel are captured on the **first** call only.
@@ -153,27 +144,22 @@ mod provider {
         // (documented on `crate::mxc_engine::spawn_execution_request`) and can leave ETW holding
         // callbacks into unmapped memory.
         if *registered == 0 {
-            let status = unsafe { MXC_PROVIDER.register() };
+            #[cfg(test)]
+            let injected_status = TEST_REGISTRATION_ERROR.load(Ordering::Acquire);
+            #[cfg(not(test))]
+            let injected_status = 0;
+            let status = if injected_status != 0 {
+                injected_status
+            } else {
+                // SAFETY: static provider lifetime and reference-counted ownership above.
+                unsafe { MXC_PROVIDER.register() }
+            };
             if status != 0 {
                 return false;
             }
             ACTIVE.store(true, Ordering::Release);
         }
 
-        if !core_is_active() {
-            #[cfg(test)]
-            let injected_status = TEST_CORE_REGISTRATION_ERROR.load(Ordering::Acquire);
-            #[cfg(not(test))]
-            let injected_status = 0;
-            let status = if injected_status != 0 {
-                injected_status
-            } else {
-                // SAFETY: same static lifetime and reference-counted ownership as MXC_PROVIDER.
-                unsafe { MXC_CORE_PROVIDER.register() }
-            };
-            CORE_REGISTRATION_ERROR.store(status, Ordering::Release);
-            CORE_ACTIVE.store(status == 0, Ordering::Release);
-        }
         *registered += 1;
         true
     }
@@ -184,13 +170,9 @@ mod provider {
         if *registered > 1 {
             *registered -= 1;
         } else if *registered == 1 {
-            if CORE_ACTIVE.swap(false, Ordering::AcqRel) {
-                MXC_CORE_PROVIDER.unregister();
-            }
             MXC_PROVIDER.unregister();
             *registered = 0;
             ACTIVE.store(false, Ordering::Release);
-            CORE_REGISTRATION_ERROR.store(0, Ordering::Release);
         }
     }
 
@@ -400,6 +382,9 @@ mod provider {
         content: &str,
         summary: &str,
     ) -> u32 {
+        if !session::legacy_events_enabled() {
+            return 0;
+        }
         let state = match STATE.get() {
             Some(s) => s,
             None => return 0,
@@ -475,6 +460,9 @@ mod provider {
     }
 
     pub fn log_process_timed_out(identity: &str, process_id: u32, timeout_ms: u64) {
+        if !session::legacy_events_enabled() {
+            return;
+        }
         let Some(state) = STATE.get() else { return };
         let mut session_buffer = [0; 36];
         let session_id = session::wire_id(&mut session_buffer);
@@ -509,6 +497,9 @@ mod provider {
         error_type: &str,
         error_code: i32,
     ) {
+        if !session::legacy_events_enabled() {
+            return;
+        }
         let Some(state) = STATE.get() else { return };
         let mut session_buffer = [0; 36];
         let session_id = session::wire_id(&mut session_buffer);
@@ -539,6 +530,9 @@ mod provider {
     }
 
     pub fn log_policy_hash(identity: &str, policy_hash: &str, config_schema_version: &str) {
+        if !session::legacy_events_enabled() {
+            return;
+        }
         let Some(state) = STATE.get() else { return };
         let mut session_buffer = [0; 36];
         let session_id = session::wire_id(&mut session_buffer);
@@ -573,6 +567,9 @@ mod provider {
         default_policy: &str,
         proxy_port: u64,
     ) {
+        if !session::legacy_events_enabled() {
+            return;
+        }
         let Some(state) = STATE.get() else { return };
         let mut session_buffer = [0; 36];
         let session_id = session::wire_id(&mut session_buffer);
@@ -603,6 +600,9 @@ mod provider {
     }
 
     pub fn log_sandbox_torn_down(identity: &str, status: &str, released_resources: &str) {
+        if !session::legacy_events_enabled() {
+            return;
+        }
         let Some(state) = STATE.get() else { return };
         let mut session_buffer = [0; 36];
         let session_id = session::wire_id(&mut session_buffer);
@@ -638,6 +638,9 @@ mod provider {
         offending_field: &str,
         phase: &str,
     ) {
+        if !session::legacy_events_enabled() {
+            return;
+        }
         let Some(state) = STATE.get() else { return };
         let mut session_buffer = [0; 36];
         let session_id = session::wire_id(&mut session_buffer);
@@ -677,11 +680,9 @@ mod provider {
 mod provider {
     /// Non-Windows builds never route to the Microsoft telemetry pipeline.
     pub const IS_UTC_ROUTED: bool = false;
-    pub(crate) const IS_CORE_UTC_ROUTED: bool = false;
 
-    pub(crate) fn core_registration_error() -> u32 {
-        0
-    }
+    /// Non-Windows builds never collect Required diagnostics.
+    pub const REQUIRED_COLLECTION_ELIGIBLE: bool = false;
 
     pub fn init(_version: &str, _channel: &str) -> bool {
         false
@@ -919,41 +920,28 @@ mod tests {
             !is_active(),
             "the final release must leave the provider inactive"
         );
-        #[cfg(target_os = "windows")]
-        assert!(
-            !core_is_active(),
-            "the final release must also unregister Core"
-        );
     }
 
     #[test]
     #[cfg(target_os = "windows")]
-    fn core_registration_failure_preserves_legacy_and_retries() {
+    fn registration_failure_stays_inactive_and_can_retry() {
         use std::sync::atomic::Ordering;
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for retry in [false, true] {
-            provider::TEST_CORE_REGISTRATION_ERROR.store(5, Ordering::Release);
+            provider::TEST_REGISTRATION_ERROR.store(5, Ordering::Release);
             let activated = init("0.0.0-test", "dev");
-            provider::TEST_CORE_REGISTRATION_ERROR.store(0, Ordering::Release);
-            assert!(activated);
-            assert!(is_active());
-            assert!(!core_is_active());
-            assert_eq!(core_registration_error(), 5);
+            provider::TEST_REGISTRATION_ERROR.store(0, Ordering::Release);
+            assert!(!activated);
+            assert!(!is_active());
             if retry {
                 assert!(
                     init("0.0.0-test", "dev"),
-                    "a retained registration must retry Core"
+                    "a failed registration must be retryable"
                 );
-                assert!(core_is_active());
-                assert_eq!(core_registration_error(), 0);
-                shutdown();
                 assert!(is_active());
-                assert!(core_is_active());
             }
             shutdown();
             assert!(!is_active());
-            assert!(!core_is_active());
-            assert_eq!(core_registration_error(), 0);
         }
     }
 
@@ -1171,23 +1159,33 @@ mod provider_codegen_tests {
     include!("provider_codegen.rs");
 
     #[test]
+    fn single_winext_registration_routes_both_event_categories() {
+        let group = Some("11111111-2222-4333-8444-555555555555");
+        let definition = generate_provider_def(group);
+        assert_eq!(definition.matches("define_provider!").count(), 1);
+        let constants = generate_event_metadata_consts(group, false);
+        assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x0000_8000_0000_0000"));
+        assert!(constants.contains("MXC_CRITICAL_PRIVACY_TAG: u64 = 0x0000_0000_0100_0000"));
+    }
+
+    #[test]
     fn absent_guid_yields_plain_provider() {
-        let def = generate_provider_def(None, None);
-        assert_eq!(def.matches("\"Microsoft.MXC\"").count(), 2);
+        let def = generate_provider_def(None);
+        assert_eq!(def.matches("\"Microsoft.MXC\"").count(), 1);
         assert!(!def.contains("group_id"));
         assert!(def.contains("IS_UTC_ROUTED: bool = false"));
     }
 
     #[test]
     fn empty_guid_yields_plain_provider() {
-        let def = generate_provider_def(Some(""), Some(""));
+        let def = generate_provider_def(Some(""));
         assert!(!def.contains("group_id"));
         assert!(def.contains("IS_UTC_ROUTED: bool = false"));
     }
 
     #[test]
     fn valid_guid_adds_group_id() {
-        let def = generate_provider_def(Some("7f10def4-a258-5fea-510e-2c3bb976687f"), None);
+        let def = generate_provider_def(Some("7f10def4-a258-5fea-510e-2c3bb976687f"));
         assert!(def.contains("group_id(\"7f10def4-a258-5fea-510e-2c3bb976687f\")"));
         assert!(def.contains("IS_UTC_ROUTED: bool = true"));
     }
@@ -1195,7 +1193,7 @@ mod provider_codegen_tests {
     #[test]
     #[should_panic(expected = "not a valid GUID")]
     fn invalid_guid_panics() {
-        let _ = generate_provider_def(Some("not-a-valid-guid"), None);
+        let _ = generate_provider_def(Some("not-a-valid-guid"));
     }
 
     #[test]
@@ -1211,7 +1209,7 @@ mod provider_codegen_tests {
 
     #[test]
     fn absent_guid_yields_local_only_event_metadata() {
-        let constants = generate_event_metadata_consts(None, None, false);
+        let constants = generate_event_metadata_consts(None, false);
         assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x1"));
         assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x1"));
         assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0"));
@@ -1220,7 +1218,7 @@ mod provider_codegen_tests {
 
     #[test]
     fn empty_guid_yields_local_only_event_metadata() {
-        let constants = generate_event_metadata_consts(Some(""), Some(""), false);
+        let constants = generate_event_metadata_consts(Some(""), false);
         assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x1"));
         assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x1"));
         assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0"));
@@ -1229,11 +1227,8 @@ mod provider_codegen_tests {
 
     #[test]
     fn valid_guid_yields_telemetry_event_metadata() {
-        let constants = generate_event_metadata_consts(
-            Some("7f10def4-a258-5fea-510e-2c3bb976687f"),
-            Some("4d584354-0000-4000-8000-e2e7e57fa4e0"),
-            false,
-        );
+        let constants =
+            generate_event_metadata_consts(Some("7f10def4-a258-5fea-510e-2c3bb976687f"), false);
         assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x0000_4000_0000_0000"));
         assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x0000_8000_0000_0000"));
         assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0000_0000_0200_0000"));
@@ -1242,85 +1237,54 @@ mod provider_codegen_tests {
 
     #[test]
     fn keyword_tests_cannot_enable_routing_or_release_overrides() {
-        assert!(!local_keyword_test_enabled(None, false, None, None));
-        assert!(local_keyword_test_enabled(Some("1"), true, None, None));
-        for (value, permitted, group, core_group) in [
-            ("1", false, None, None),
-            (
-                "1",
-                true,
-                Some("7f10def4-a258-5fea-510e-2c3bb976687f"),
-                None,
-            ),
-            (
-                "1",
-                true,
-                None,
-                Some("4d584354-0000-4000-8000-e2e7e57fa4e0"),
-            ),
-            ("true", true, None, None),
+        assert!(!local_keyword_test_enabled(None, false, None));
+        assert!(local_keyword_test_enabled(Some("1"), true, None));
+        for (value, permitted, group) in [
+            ("1", false, None),
+            ("1", true, Some("7f10def4-a258-5fea-510e-2c3bb976687f")),
+            ("true", true, None),
         ] {
             assert!(std::panic::catch_unwind(|| {
-                local_keyword_test_enabled(Some(value), permitted, group, core_group)
+                local_keyword_test_enabled(Some(value), permitted, group)
             })
             .is_err());
         }
-        let constants = generate_event_metadata_consts(None, None, true);
+        let constants = generate_event_metadata_consts(None, true);
         assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x0000_4000_0000_0000"));
         assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x0000_8000_0000_0000"));
         assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0000_0000_0200_0000"));
         assert!(constants.contains("MXC_CRITICAL_PRIVACY_TAG: u64 = 0x0000_0000_0100_0000"));
-        assert!(generate_provider_def(None, None).contains("IS_UTC_ROUTED: bool = false"));
+        assert!(generate_provider_def(None).contains("IS_UTC_ROUTED: bool = false"));
     }
 
     #[test]
-    fn registration_groups_and_metadata_are_independent() {
-        let legacy = "11111111-2222-4333-8444-555555555555";
-        let core = "4d584354-0000-4000-8000-e2e7e57fa4e0";
-        for legacy_group in [None, Some(legacy)] {
-            for core_group in [None, Some(core)] {
-                let definition = generate_provider_def(legacy_group, core_group);
-                assert_eq!(definition.matches("\"Microsoft.MXC\"").count(), 2);
-                for (handle, group) in [
-                    ("MXC_PROVIDER", legacy_group),
-                    ("MXC_CORE_PROVIDER", core_group),
-                ] {
-                    let option = group
-                        .map(|guid| format!(", group_id(\"{guid}\")"))
-                        .unwrap_or_default();
-                    assert!(definition.contains(&format!(
-                        "define_provider!({handle}, \"Microsoft.MXC\"{option});"
-                    )));
-                }
-                let constants = generate_event_metadata_consts(legacy_group, core_group, false);
-                let legacy_keyword = if legacy_group.is_some() {
-                    "0x0000_4000_0000_0000"
-                } else {
-                    "0x1"
-                };
-                let core_keyword = if core_group.is_some() {
-                    "0x0000_8000_0000_0000"
-                } else {
-                    "0x1"
-                };
-                let legacy_tag = if legacy_group.is_some() {
-                    "0x0000_0000_0200_0000"
-                } else {
-                    "0x0"
-                };
-                let core_tag = if core_group.is_some() {
-                    "0x0000_0000_0100_0000"
-                } else {
-                    "0x0"
-                };
-                assert!(constants.contains(&format!("MXC_EVENT_KEYWORD: u64 = {legacy_keyword};")));
-                assert!(constants.contains(&format!(
-                    "MXC_CRITICAL_EVENT_KEYWORD: u64 = {core_keyword};"
-                )));
-                assert!(constants.contains(&format!("MXC_PRIVACY_TAG: u64 = {legacy_tag};")));
-                assert!(constants.contains(&format!("MXC_CRITICAL_PRIVACY_TAG: u64 = {core_tag};")));
-            }
+    fn single_registration_controls_both_metadata_categories() {
+        for group in [None, Some("11111111-2222-4333-8444-555555555555")] {
+            let definition = generate_provider_def(group);
+            assert_eq!(definition.matches("define_provider!").count(), 1);
+            let option = group
+                .map(|guid| format!(", group_id(\"{guid}\")"))
+                .unwrap_or_default();
+            assert!(definition.contains(&format!(
+                "define_provider!(MXC_PROVIDER, \"Microsoft.MXC\"{option});"
+            )));
+            let constants = generate_event_metadata_consts(group, false);
+            let (keyword, critical_keyword, tag, critical_tag) = if group.is_some() {
+                (
+                    "0x0000_4000_0000_0000",
+                    "0x0000_8000_0000_0000",
+                    "0x0000_0000_0200_0000",
+                    "0x0000_0000_0100_0000",
+                )
+            } else {
+                ("0x1", "0x1", "0x0", "0x0")
+            };
+            assert!(constants.contains(&format!("MXC_EVENT_KEYWORD: u64 = {keyword};")));
+            assert!(constants.contains(&format!(
+                "MXC_CRITICAL_EVENT_KEYWORD: u64 = {critical_keyword};"
+            )));
+            assert!(constants.contains(&format!("MXC_PRIVACY_TAG: u64 = {tag};")));
+            assert!(constants.contains(&format!("MXC_CRITICAL_PRIVACY_TAG: u64 = {critical_tag};")));
         }
-        assert!(std::panic::catch_unwind(|| generate_provider_def(None, Some("invalid"))).is_err());
     }
 }

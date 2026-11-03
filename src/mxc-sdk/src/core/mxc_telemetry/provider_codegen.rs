@@ -38,42 +38,21 @@ fn is_valid_guid(s: &str) -> bool {
     canonicalize_guid(s).is_some()
 }
 
-/// Generate two registration handles with the same provider name/GUID.
-/// Each group is optional and independently validated; neither substitutes
-/// for the other's private build input.
-fn generate_provider_def(group_guid: Option<&str>, core_group_guid: Option<&str>) -> String {
-    let mut definition = String::new();
-    for (handle, guid, input) in [
-        (
-            "MXC_PROVIDER",
-            group_guid,
-            "MXC_TELEMETRY_PROVIDER_GROUP_GUID",
-        ),
-        (
-            "MXC_CORE_PROVIDER",
-            core_group_guid,
-            "MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID",
-        ),
-    ] {
-        let group = match guid {
-            Some(guid) if !guid.is_empty() => {
-                let canonical = canonicalize_guid(guid)
-                    .unwrap_or_else(|| panic!("{input} is not a valid GUID"));
-                format!(", group_id(\"{canonical}\")")
-            }
-            _ => String::new(),
-        };
-        definition.push_str(&format!(
-            "tracelogging::define_provider!({handle}, \"Microsoft.MXC\"{group});\n"
-        ));
-    }
-    definition.push_str(&format!(
-        "pub const IS_UTC_ROUTED: bool = {};\n\
-         pub(crate) const IS_CORE_UTC_ROUTED: bool = {};\n",
+/// Generate one registration for all MXC events, optionally in the WinExt group.
+fn generate_provider_def(group_guid: Option<&str>) -> String {
+    let group = match group_guid {
+        Some(guid) if !guid.is_empty() => {
+            let canonical = canonicalize_guid(guid)
+                .expect("MXC_TELEMETRY_PROVIDER_GROUP_GUID is not a valid GUID");
+            format!(", group_id(\"{canonical}\")")
+        }
+        _ => String::new(),
+    };
+    format!(
+        "tracelogging::define_provider!(MXC_PROVIDER, \"Microsoft.MXC\"{group});\n\
+         pub const IS_UTC_ROUTED: bool = {};\n",
         matches!(group_guid, Some(guid) if !guid.is_empty()),
-        matches!(core_group_guid, Some(guid) if !guid.is_empty()),
-    ));
-    definition
+    )
 }
 
 /// Validate the opt-in for local-only keyword-classification tests.
@@ -81,15 +60,13 @@ fn local_keyword_test_enabled(
     value: Option<&str>,
     permitted: bool,
     group_guid: Option<&str>,
-    core_group_guid: Option<&str>,
 ) -> bool {
     match value {
         None | Some("") => false,
         Some("1") => {
             assert!(
                 permitted
-                    && !matches!(group_guid, Some(guid) if !guid.is_empty())
-                    && !matches!(core_group_guid, Some(guid) if !guid.is_empty()),
+                    && !matches!(group_guid, Some(guid) if !guid.is_empty()),
                 "MXC_TELEMETRY_TEST_KEYWORDS requires a local-only Windows debug test-support build"
             );
             true
@@ -98,14 +75,10 @@ fn local_keyword_test_enabled(
     }
 }
 
-/// Each registration's metadata follows its own routing input. Ordinary local
-/// registrations use keyword 1 and privacy tag 0. The guarded local test mode
-/// supplies real metadata for both handles without routing either one.
-fn generate_event_metadata_consts(
-    group_guid: Option<&str>,
-    core_group_guid: Option<&str>,
-    test_keywords: bool,
-) -> String {
+/// Both event categories use the single registration's routing input.
+/// Local builds use keyword 1 and privacy tag 0 unless the guarded test mode
+/// enables metadata validation without routing.
+fn generate_event_metadata_consts(group_guid: Option<&str>, test_keywords: bool) -> String {
     let (keyword, privacy) =
         if matches!(group_guid, Some(guid) if !guid.is_empty()) || test_keywords {
             ("0x0000_4000_0000_0000", "0x0000_0000_0200_0000")
@@ -113,15 +86,17 @@ fn generate_event_metadata_consts(
             ("0x1", "0x0")
         };
     let (core_keyword, core_privacy) =
-        if matches!(core_group_guid, Some(guid) if !guid.is_empty()) || test_keywords {
+        if matches!(group_guid, Some(guid) if !guid.is_empty()) || test_keywords {
             ("0x0000_8000_0000_0000", "0x0000_0000_0100_0000")
         } else {
             ("0x1", "0x0")
         };
+    let eligible = matches!(group_guid, Some(guid) if !guid.is_empty()) || test_keywords;
     format!(
         "pub(crate) const MXC_EVENT_KEYWORD: u64 = {keyword};\n\
          pub(crate) const MXC_PRIVACY_TAG: u64 = {privacy};\n\
          pub(crate) const MXC_CRITICAL_EVENT_KEYWORD: u64 = {core_keyword};\n\
-         pub(crate) const MXC_CRITICAL_PRIVACY_TAG: u64 = {core_privacy};\n"
+         pub(crate) const MXC_CRITICAL_PRIVACY_TAG: u64 = {core_privacy};\n\
+         pub(crate) const MXC_REQUIRED_COLLECTION_ELIGIBLE: bool = {eligible};\n"
     )
 }

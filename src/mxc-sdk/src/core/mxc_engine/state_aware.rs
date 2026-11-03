@@ -611,12 +611,11 @@ fn exec_state_aware_attached_parsed(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     surface_attached_warnings(logger, |warning| {
         let _ = writeln!(std::io::stderr().lock(), "{warning}");
     });
@@ -689,12 +688,11 @@ fn run_state_aware_envelope(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -799,12 +797,11 @@ fn exec_state_aware_process_parsed(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        logger,
+    );
     let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
@@ -874,12 +871,11 @@ pub fn run_typed_state_aware_request(
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let telemetry_active = parsed
-        .request()
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, &mut logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        parsed.request().telemetry.as_ref(),
+        parsed.request().source_contract,
+        &mut logger,
+    );
     let backend = resolve_backend(&parsed)
         .map(|backend| backend.wire_name().to_string())
         .unwrap_or_else(|_| "unknown".to_string());

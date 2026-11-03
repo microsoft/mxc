@@ -224,11 +224,11 @@ fn invoke_execution_request(
     mut logger: Logger,
     execute: impl FnOnce(&ExecutionRequest, &mut Logger) -> Result<OneShotExecution, MxcError>,
 ) -> Result<OneShotExecution, Error> {
-    let telemetry_active = request
-        .telemetry
-        .as_ref()
-        .map(|config| telemetry::init(config, &mut logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        request.telemetry.as_ref(),
+        request.source_contract,
+        &mut logger,
+    );
     let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
     let _session = telemetry::session::start_with_learning_mode(
         telemetry_active,

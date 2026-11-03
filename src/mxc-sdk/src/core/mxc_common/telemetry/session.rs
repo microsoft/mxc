@@ -159,6 +159,10 @@ pub(crate) fn critical_events() -> bool {
     capture().critical_events
 }
 
+pub(crate) fn legacy_events_enabled() -> bool {
+    !capture().critical_events
+}
+
 pub(crate) fn resume(context: SessionContext) -> SessionScope {
     SessionScope {
         previous: CURRENT.with(|slot| slot.replace(Some(context))),

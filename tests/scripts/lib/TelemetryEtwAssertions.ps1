@@ -57,6 +57,13 @@ function Assert-TelemetryExecutionTrace {
     $lifecycleRoots = @{}
     foreach ($invocation in $Invocations) {
         $emitted = @($telemetryEvents | Where-Object { $_.ProcessId -eq $invocation.ProcessId })
+        if ($invocation.ContractVersion -ceq '1.1.0-alpha') {
+            foreach ($event in $emitted) {
+                if ($event.Task -cnotin @('MXC.ExecutionStart', 'MXC.ExecutionEnd', 'MXC.Error', 'MXC.ProcessExited')) {
+                    throw "$($event.Task) is excluded for development contract 1.1.0-alpha."
+                }
+            }
+        }
         if ($CheckKeywords) {
             if ($invocation.ContractVersion -cnotin @('0.9.0-alpha', '1.0.0', '1.1.0-alpha')) {
                 throw "Missing or unsupported contract attribution for executor $($invocation.ProcessId)."

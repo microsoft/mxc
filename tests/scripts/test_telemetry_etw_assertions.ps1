@@ -50,7 +50,7 @@ function New-TestTrace {
     $eventXml += @(
         foreach ($invocation in $invocations) {
             foreach ($task in @(
-                'MXC.PolicyHash'
+                if ($invocation.ContractVersion -ne '1.1.0-alpha') { 'MXC.PolicyHash' }
                 if ($invocation.RequireProcessExit) { 'MXC.ProcessExited' }
                 if ($invocation.RequireError) { 'MXC.Error' }
             )) {
@@ -155,6 +155,24 @@ $cases = @(
         }
     }; Fails = $true }
 )
+$cases += foreach ($excludedTask in @(
+    'MXC.VerboseDenials', 'MXC.ProcessTimedOut', 'MXC.ProcessKillFailed',
+    'MXC.PolicyHash', 'MXC.SandboxNetworkPolicyApplied', 'MXC.SandboxTornDown', 'MXC.ConfigRejected'
+)) {
+    @{
+        Name = "development inventory excludes $excludedTask"
+        EventName = $excludedTask
+        Fails = $true
+        ErrorPattern = 'is excluded for development contract'
+        Mutate = {
+            $source = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
+            $extra = $source.CloneNode($true)
+            $extra.RenderingInfo.Task = $case.EventName
+            $extra.System.Execution.SetAttribute('ProcessID', [string]$invocations[6].ProcessId)
+            $null = $trace.DocumentElement.AppendChild($extra)
+        }
+    }
+}
 foreach ($case in $cases) {
     [xml]$trace = New-TestTrace
     & $case.Mutate
@@ -164,6 +182,9 @@ foreach ($case in $cases) {
             -Invocations $invocations -RequireLifecycles -CheckKeywords
     } catch { $failure = $_.Exception.Message }
     if ([bool]$failure -ne $case.Fails) { throw "$($case.Name): unexpected assertion result '$failure'." }
+    if ($case.ErrorPattern -and $failure -notmatch $case.ErrorPattern) {
+        throw "$($case.Name): failed for the wrong reason '$failure'."
+    }
     Write-Host "PASS: $($case.Name)"
 }
 Assert-TelemetryExecutionTrace -XmlText (New-TestTrace) -ProviderGuid $providerGuid `

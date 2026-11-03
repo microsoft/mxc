@@ -33,6 +33,7 @@ use crate::mxc_common::models::{
 };
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::state_aware_dispatch::DispatchOutcome;
+use crate::mxc_contract::ContractVersion;
 
 pub use consent::ConsentState;
 pub use events::{
@@ -112,14 +113,25 @@ fn emit_active() -> bool {
     crate::mxc_telemetry::is_active()
 }
 
-/// Evaluate consent and policy for one complete logical emission.
+/// Evaluate authorization for one complete logical emission.
+///
+/// Development-contract requests emit Required diagnostics: no consent or
+/// request opt-in, only build eligibility and administrative policy. Other
+/// requests need consent and policy.
 fn authorization_allows_emission() -> bool {
     #[cfg(test)]
     if let Some(allowed) = TEST_AUTHORIZATION_OVERRIDE.with(|value| value.get()) {
         return allowed;
     }
 
+    if session::critical_events() {
+        return required_collection_allowed();
+    }
     consent::get_consent().allows_collection() && policy::get_policy().allows_collection()
+}
+
+fn required_collection_allowed() -> bool {
+    crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE && policy::required_collection_permitted()
 }
 
 fn invocation_can_emit(active: bool) -> bool {
@@ -229,30 +241,45 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
         log_suppression_reason(config, logger);
         return false;
     }
+    activate_provider(logger)
+}
 
+/// Initialize the provider for one request, selecting the gate by contract.
+///
+/// Development-contract requests collect Required diagnostics regardless of
+/// the request's telemetry object or MXC consent, when the build is eligible
+/// and administrative policy permits. All other requests use [`init`].
+pub fn init_for_request(
+    config: Option<&TelemetryConfig>,
+    source_contract: Option<ContractVersion>,
+    logger: &mut Logger,
+) -> bool {
+    if source_contract == Some(ContractVersion::V1_1_0Alpha) {
+        if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
+            logger.log_line("telemetry: Required diagnostics are not collected by this build");
+            return false;
+        }
+        if !policy::required_collection_permitted() {
+            logger.log_line("telemetry: Required diagnostics are blocked by administrative policy");
+            return false;
+        }
+        return activate_provider(logger);
+    }
+    config.is_some_and(|config| init(config, logger))
+}
+
+fn activate_provider(logger: &mut Logger) -> bool {
     let activated = crate::mxc_telemetry::init(MXC_VERSION, MXC_CHANNEL);
     if !activated && cfg!(target_os = "windows") {
         logger.warning_line(
             "telemetry: ETW provider registration failed; continuing without telemetry",
         );
     }
-    let core_error = crate::mxc_telemetry::core_registration_error();
-    if activated && core_error != 0 {
-        logger.warning_line(&format!(
-            "telemetry: Core ETW registration failed (Win32 {core_error}); Core events are \
-             unavailable, existing telemetry registration is retained",
-        ));
-    }
-    if activated
-        && (!crate::mxc_telemetry::IS_UTC_ROUTED || !crate::mxc_telemetry::IS_CORE_UTC_ROUTED)
-    {
-        logger.warning_line(&format!(
-            "telemetry: events are emitted to local ETW only where no group is configured \
-             (legacy routing configured={}, Core routing configured={}); internal builds \
-             use MXC_TELEMETRY_PROVIDER_GROUP_GUID and MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID",
-            crate::mxc_telemetry::IS_UTC_ROUTED,
-            crate::mxc_telemetry::IS_CORE_UTC_ROUTED,
-        ));
+    if activated && !crate::mxc_telemetry::IS_UTC_ROUTED {
+        logger.warning_line(
+            "telemetry: events are emitted to local ETW only; internal WinExt routing \
+             requires MXC_TELEMETRY_PROVIDER_GROUP_GUID at build time",
+        );
     }
     activated
 }
@@ -530,9 +557,12 @@ fn emit_sdk_with_release(active: bool, emit: impl FnOnce(&EmissionAuthorization)
 
 /// Emit one verbose-document chunk under a fresh live authorization decision.
 ///
-/// Returns `false` when collection is no longer authorized, allowing a caller
-/// to stop emitting the remaining chunks immediately.
+/// Returns `false` when the contract excludes verbose events or collection is
+/// no longer authorized, allowing a caller to stop emitting remaining chunks.
 pub fn emit_verbose(active: bool, event: &VerboseEvent<'_>) -> Result<bool, u32> {
+    if !session::legacy_events_enabled() {
+        return Ok(false);
+    }
     let Some(_auth) = EmissionAuthorization::for_invocation(active) else {
         return Ok(false);
     };
@@ -1379,6 +1409,31 @@ mod tests {
             assert_eq!(start.session_id, end.session_id);
         }
         reset_for_test();
+    }
+
+    #[test]
+    fn init_for_request_ignores_request_flag_and_consent_only_for_development() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = TelemetryTestEnv::new(tmp.path());
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let enabled = TelemetryConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+
+        // Published and unattributed requests still need consent.
+        for contract in [None, Some(ContractVersion::V1_0_0)] {
+            assert!(!init_for_request(Some(&enabled), contract, &mut logger));
+            assert!(!init_for_request(None, contract, &mut logger));
+        }
+
+        // Development requests need only build eligibility and policy, never
+        // consent, and a blocking policy always wins.
+        let dev = Some(ContractVersion::V1_1_0Alpha);
+        if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
+            assert!(!init_for_request(None, dev, &mut logger));
+        }
+        assert!(!required_collection_allowed() || policy::required_collection_permitted());
     }
 
     #[test]

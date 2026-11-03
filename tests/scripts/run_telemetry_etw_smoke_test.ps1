@@ -269,11 +269,13 @@ try {
     $failureInvocations = @(
         if ($CheckKeywords) {
             foreach ($version in @('1.0.0', '1.1.0-alpha')) {
+                # Required diagnostics ignore the request flag; published
+                # contracts still need the explicit opt-in.
                 Invoke-TraceRequest -RequireFailure -Request @{
                     version = $version
                     containment = 'bubblewrap'
                     process = @{ commandLine = 'true' }
-                    telemetry = @{ enabled = $true }
+                    telemetry = @{ enabled = ($version -ne '1.1.0-alpha') }
                 }
             }
         }

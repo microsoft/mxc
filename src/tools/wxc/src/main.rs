@@ -1215,12 +1215,11 @@ fn main() {
                 }
             };
         let mut parsed = parsed;
-        let telemetry_active = parsed
-            .request()
-            .telemetry
-            .as_ref()
-            .map(|config| telemetry::init(config, &mut logger))
-            .unwrap_or(false);
+        let telemetry_active = telemetry::init_for_request(
+            parsed.request().telemetry.as_ref(),
+            parsed.request().source_contract,
+            &mut logger,
+        );
         parsed.set_experimental_enabled(cli.experimental);
         parsed.set_dry_run(cli.dry_run);
         run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
@@ -1264,11 +1263,11 @@ fn main() {
     request.dry_run = cli.dry_run;
 
     // ── Telemetry init ──────────────────────────────────────────────
-    let telemetry_active = request
-        .telemetry
-        .as_ref()
-        .map(|c| telemetry::init(c, &mut logger))
-        .unwrap_or(false);
+    let telemetry_active = telemetry::init_for_request(
+        request.telemetry.as_ref(),
+        request.source_contract,
+        &mut logger,
+    );
     let learning_mode_requested = {
         #[cfg(target_os = "windows")]
         {

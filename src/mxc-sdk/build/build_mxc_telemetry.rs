@@ -6,16 +6,11 @@
 //! Generates `provider_def.rs` containing the `define_provider!` invocation
 //! plus event-metadata constants (`MXC_EVENT_KEYWORD`,
 //! `MXC_CRITICAL_EVENT_KEYWORD`, `MXC_PRIVACY_TAG`, `MXC_CRITICAL_PRIVACY_TAG`).
-//! Two handles retain the same `Microsoft.MXC` provider name/GUID:
-//!
-//! - `MXC_TELEMETRY_PROVIDER_GROUP_GUID` preserves the legacy registration,
-//!   with Measures/Usage metadata when set.
-//! - `MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID` supplies the approved Windows Core
-//!   Telemetry group for the Core registration, with Critical Data/Performance
-//!   metadata. It is equivalent to `TraceLoggingOptionWindowsCoreTelemetry()`.
-//!
-//! Each unset input leaves only its own registration local-only: keyword 1,
-//! privacy tag 0. Private group values are injected before compilation.
+//! All events use one `Microsoft.MXC` registration. The private
+//! `MXC_TELEMETRY_PROVIDER_GROUP_GUID` input supplies its WinExt group.
+//! Event and request-contract selection controls Measures/Usage versus
+//! Critical Data/Performance metadata, not provider routing or consent.
+//! Without a group, ordinary local builds use keyword 1 and privacy tag 0.
 //!
 //! `MXC_TELEMETRY_TEST_KEYWORDS=1` enables category-mask and privacy-tag validation
 //! only in local-only Windows debug test-support builds. It never enables routing.
@@ -52,11 +47,14 @@ pub(crate) fn run() {
     } else {
         None
     };
-    let core_group_guid = if target_os == "windows" {
-        std::env::var("MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID").ok()
-    } else {
-        None
-    };
+    if target_os == "windows" {
+        assert!(
+            std::env::var_os("MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID")
+                .is_none_or(|value| value.is_empty()),
+            "MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID is no longer supported; \
+             configure the WinExt group through MXC_TELEMETRY_PROVIDER_GROUP_GUID"
+        );
+    }
 
     let test_keywords = local_keyword_test_enabled(
         std::env::var("MXC_TELEMETRY_TEST_KEYWORDS").ok().as_deref(),
@@ -64,12 +62,10 @@ pub(crate) fn run() {
             && std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some()
             && std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some(),
         group_guid.as_deref(),
-        core_group_guid.as_deref(),
     );
-    let mut provider_def = generate_provider_def(group_guid.as_deref(), core_group_guid.as_deref());
+    let mut provider_def = generate_provider_def(group_guid.as_deref());
     provider_def.push_str(&generate_event_metadata_consts(
         group_guid.as_deref(),
-        core_group_guid.as_deref(),
         test_keywords,
     ));
 

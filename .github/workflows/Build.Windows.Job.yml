@@ -126,7 +126,6 @@ jobs:
       - name: Build debug executor for isolated telemetry smoke tests
         env:
           MXC_TELEMETRY_PROVIDER_GROUP_GUID: ''
-          MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID: ''
           MXC_TELEMETRY_TEST_KEYWORDS: '1'
         run: cargo build --locked -p wxc --features "test-support isolation_session"
 
