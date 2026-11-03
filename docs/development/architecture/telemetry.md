@@ -431,7 +431,15 @@ phase uses a new root but does not write it. After a successful, non-dry-run
 any record a concurrent request already wrote), so later phases correlate even
 if telemetry was disabled during provision. Dry runs and rejected requests leave
 the store unchanged. That new segment cannot recover
-earlier events' ID. A successful new provision replaces any previous root; if
+earlier events' ID.
+
+Correlation in this case is best effort. If telemetry is first enabled after
+provision and two phases for the same sandbox overlap before any root has been
+persisted, each can start with a different root. The first successful phase
+wins and every later phase reuses it. The losing invocation's own events stay
+consistent with each other but are not linked to the stored lifecycle. MXC does
+not serialize whole operations to prevent this. When telemetry is enabled from
+provision, correlation is not affected. A successful new provision replaces any previous root; if
 telemetry is disabled, it removes stale state rather than linking a reused
 sandbox ID to an old lifecycle.
 
