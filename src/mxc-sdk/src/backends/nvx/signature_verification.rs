@@ -19,9 +19,9 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
-    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
-    WTD_CHOICE_FILE, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, WTD_REVOKE_WHOLECHAIN,
-    WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+    CRYPT_PROVIDER_SGNR, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+    WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
+    WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
 };
 
 const MICROSOFT: &str = "Microsoft Corporation";
@@ -182,22 +182,58 @@ fn verified_publisher(data: &WINTRUST_DATA) -> io::Result<()> {
         let signer = signer
             .as_ref()
             .ok_or_else(|| io::Error::other("WinTrust returned no verified signer"))?;
-        if signer.dwError != 0 || signer.csCertChain == 0 || signer.pasCertChain.is_null() {
-            return Err(io::Error::other(
-                "WinTrust returned an invalid signer chain",
-            ));
-        }
-        let certificate = (*signer.pasCertChain).pCert;
-        if certificate.is_null() {
-            return Err(io::Error::other("WinTrust returned no signer certificate"));
-        }
-        verify_certificate_chain(certificate, &signer.sftVerifyAsOf)?;
+        verify_signer_chains(signer, &mut |signer| {
+            verify_certificate_chain(signer_certificate(signer)?, &signer.sftVerifyAsOf)
+        })?;
+        let certificate = signer_certificate(signer)?;
         let common_name = certificate_attribute(certificate, szOID_COMMON_NAME)?;
         let organization = certificate_attribute(certificate, szOID_ORGANIZATION_NAME)?;
         if common_name != MICROSOFT || organization != MICROSOFT {
             return Err(io::Error::other(format!(
                 "expected Microsoft Corporation publisher, got CN={common_name}, O={organization}"
             )));
+        }
+    }
+    Ok(())
+}
+
+unsafe fn signer_certificate(signer: &CRYPT_PROVIDER_SGNR) -> io::Result<*const CERT_CONTEXT> {
+    if signer.dwError != 0 || signer.csCertChain == 0 || signer.pasCertChain.is_null() {
+        return Err(io::Error::other(format!(
+            "WinTrust returned an invalid signer chain (0x{:08X})",
+            signer.dwError
+        )));
+    }
+    let certificate = unsafe { (*signer.pasCertChain).pCert };
+    if certificate.is_null() {
+        return Err(io::Error::other("WinTrust returned no signer certificate"));
+    }
+    Ok(certificate)
+}
+
+unsafe fn verify_signer_chains(
+    signer: &CRYPT_PROVIDER_SGNR,
+    verify: &mut impl FnMut(&CRYPT_PROVIDER_SGNR) -> io::Result<()>,
+) -> io::Result<()> {
+    // Counter-signers, including timestamp authorities, share the live WinTrust state.
+    // They need trusted chains, but are not required to be Microsoft publishers.
+    let mut pending = vec![(signer, false)];
+    while let Some((signer, timestamp)) = pending.pop() {
+        verify(signer).map_err(|error| {
+            if timestamp {
+                io::Error::other(format!("timestamp signer verification failed: {error}"))
+            } else {
+                error
+            }
+        })?;
+        if signer.csCounterSigners != 0 && signer.pasCounterSigners.is_null() {
+            return Err(io::Error::other(
+                "WinTrust returned no timestamp signer data",
+            ));
+        }
+        for index in (0..signer.csCounterSigners).rev() {
+            let counter = unsafe { &*signer.pasCounterSigners.add(index as usize) };
+            pending.push((counter, true));
         }
     }
     Ok(())
@@ -298,5 +334,39 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn primary_success_cannot_mask_an_unverified_timestamp_chain() {
+        for status in [0x40, 0x0100_0000, 0x4, 0x20] {
+            let mut timestamp = CRYPT_PROVIDER_SGNR {
+                dwError: status,
+                ..Default::default()
+            };
+            let signer = CRYPT_PROVIDER_SGNR {
+                csCounterSigners: 1,
+                pasCounterSigners: &mut timestamp,
+                ..Default::default()
+            };
+            let mut visited = Vec::new();
+            let error = unsafe {
+                verify_signer_chains(&signer, &mut |chain| {
+                    visited.push(chain.dwError);
+                    require_trusted_chain(chain.dwError)
+                })
+            }
+            .unwrap_err();
+            assert_eq!(visited, [0, status]);
+            assert!(error.to_string().contains("timestamp signer"), "{error}");
+        }
+        let signer = CRYPT_PROVIDER_SGNR {
+            csCounterSigners: 1,
+            ..Default::default()
+        };
+        let error = unsafe { verify_signer_chains(&signer, &mut |_| Ok(())) }.unwrap_err();
+        assert!(
+            error.to_string().contains("no timestamp signer data"),
+            "{error}"
+        );
     }
 }
