@@ -29,6 +29,9 @@
 mod component;
 
 #[cfg(target_os = "windows")]
+mod signature;
+
+#[cfg(target_os = "windows")]
 mod provider {
     use super::component;
     use crate::mxc_common::telemetry::session;

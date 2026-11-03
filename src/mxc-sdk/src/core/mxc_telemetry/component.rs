@@ -5,12 +5,17 @@
 //! in-process provider in charge, so telemetry never blocks MXC.
 
 use std::ffi::{c_char, CString};
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::os::windows::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use windows::core::{s, PCWSTR};
 use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+use super::signature;
 use windows::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW, GetProcAddress, LoadLibraryExW,
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -18,7 +23,7 @@ use windows::Win32::System::LibraryLoader::{
 };
 
 const COMPONENT_FILE: &str = "mxc_telemetry.dll";
-const SUPPORTED_ABI: u32 = 1;
+const SUPPORTED_ABI: u32 = 2;
 
 #[repr(C)]
 struct ExecutionEvent {
@@ -58,7 +63,7 @@ struct ProcessExitedEvent {
 }
 
 type AbiVersionFn = unsafe extern "C" fn() -> u32;
-type InitFn = unsafe extern "C" fn(*const c_char, *const c_char, u32) -> i32;
+type InitFn = unsafe extern "C" fn(*const c_char, *const c_char, u32, *const u16) -> i32;
 type ShutdownFn = unsafe extern "C" fn();
 type WriteExecutionFn = unsafe extern "C" fn(*const ExecutionEvent) -> i32;
 type WriteErrorFn = unsafe extern "C" fn(*const ErrorEvent) -> i32;
@@ -78,14 +83,14 @@ struct Component {
 static LOADED: Mutex<Option<Option<Component>>> = Mutex::new(None);
 static READY: AtomicBool = AtomicBool::new(false);
 
-/// Directory of the module containing this code (the executable or SDK DLL).
-fn module_dir() -> Option<PathBuf> {
+/// Path of the module containing this code (the executable or SDK DLL).
+fn module_path() -> Option<PathBuf> {
     let mut module = HMODULE::default();
     // SAFETY: the address belongs to this module; the refcount is unchanged.
     unsafe {
         GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            PCWSTR(module_dir as *const () as *const u16),
+            PCWSTR(module_path as *const () as *const u16),
             &mut module,
         )
         .ok()?;
@@ -96,15 +101,37 @@ fn module_dir() -> Option<PathBuf> {
     if len == 0 || len >= buffer.len() {
         return None;
     }
-    let path = PathBuf::from(String::from_utf16(&buffer[..len]).ok()?);
-    path.parent().map(PathBuf::from)
+    Some(PathBuf::from(String::from_utf16(&buffer[..len]).ok()?))
+}
+
+/// Opens the component so nobody can modify or replace it while it is
+/// verified and loaded. Release builds require its Authenticode signature to be
+/// trusted and to come from the same signer as the module that contains this
+/// code. Debug builds skip the signature check so local builds can use an
+/// unsigned component.
+fn open_trusted(path: &Path, host: &Path) -> Option<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ.0)
+        .open(path)
+        .ok()?;
+    if cfg!(debug_assertions) {
+        return Some(file);
+    }
+    let component_signer = signature::trusted_signer(&file, path)?;
+    let host_signer = signature::trusted_signer(&File::open(host).ok()?, host)?;
+    (component_signer == host_signer).then_some(file)
 }
 
 fn load() -> Option<Component> {
-    let path = module_dir()?.join(COMPONENT_FILE);
+    let host = module_path()?;
+    let path = host.parent()?.join(COMPONENT_FILE);
     if !path.is_file() {
         return None;
     }
+    // Held until the library is loaded, and the loaded image keeps the file
+    // locked afterwards.
+    let _guard = open_trusted(&path, &host)?;
     let wide: Vec<u16> = path
         .as_os_str()
         .to_string_lossy()
@@ -158,13 +185,23 @@ fn cstring(value: &str) -> CString {
 /// Registers the component's provider. Returns `false` when it is unavailable.
 pub fn init(version: &str, channel: &str) -> bool {
     let Some(c) = component() else { return false };
+    let Some(host) = module_path() else {
+        return false;
+    };
+    let host: Vec<u16> = host
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let (version, channel) = (cstring(version), cstring(channel));
-    // SAFETY: both strings are NUL-terminated and outlive the call.
+    // SAFETY: all strings are NUL-terminated and outlive the call.
     let ok = unsafe {
         (c.init)(
             version.as_ptr(),
             channel.as_ptr(),
             u32::from(cfg!(debug_assertions)),
+            host.as_ptr(),
         )
     } == 0;
     READY.store(ok, Ordering::Release);
