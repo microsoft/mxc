@@ -3,7 +3,7 @@
 
 import { describe, it, before, after, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { ChildProcess } from 'child_process';
+import { ChildProcess, execFileSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
@@ -183,6 +183,63 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     );
     assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
     assert.ok(result.stdout.includes('readonly test data'));
+  });
+
+  it('public tool discovery allows tool reads but denies sibling private files', { skip: sandboxSkipReason }, async () => {
+    tempDir = createTempDir('mxc-tool-discovery', import.meta.dirname);
+    const systemDirectory = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+    // Keep the new fixture private even when the host temp directory grants AppContainer access.
+    execFileSync(path.join(systemDirectory, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+      '-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference = 'Stop'; " +
+      '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; ' +
+      '$acl = [Security.AccessControl.DirectorySecurity]::new(); ' +
+      '$acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;FA;;;$sid)", ' +
+      '[Security.AccessControl.AccessControlSections]::Access); ' +
+      '[IO.Directory]::SetAccessControl($env:MXC_TOOL_DISCOVERY_FIXTURE, $acl)',
+    ], {
+      env: { ...process.env, MXC_TOOL_DISCOVERY_FIXTURE: tempDir },
+      windowsHide: true,
+      timeout: 30000,
+    });
+
+    const toolDirectory = path.join(tempDir, 'tools');
+    const privateDirectory = path.join(tempDir, 'private');
+    fs.mkdirSync(toolDirectory);
+    fs.mkdirSync(privateDirectory);
+    fs.writeFileSync(path.join(toolDirectory, 'pwsh.exe'), '');
+    const toolFile = path.join(toolDirectory, 'tool-data.txt');
+    const privateFile = path.join(privateDirectory, 'sentinel.txt');
+    const toolData = 'MXC_DISCOVERED_TOOL_READ_OK';
+    const privateData = 'MXC_PRIVATE_SIBLING_MUST_NOT_BE_READ';
+    fs.writeFileSync(toolFile, toolData);
+    fs.writeFileSync(privateFile, privateData);
+    assert.strictEqual(fs.readFileSync(privateFile, 'utf8'), privateData);
+
+    const readFile = (file: string, filesystem: Parameters<typeof sdk.run>[0]['filesystem'] = {}) => sdk.run({
+      containment: { type: 'processcontainer' },
+      command: `cmd.exe /d /c type "${file}"`,
+      workingDirectory: systemDirectory,
+      filesystem,
+      timeoutMs: 30000,
+    });
+    const assertDenied = (result: Awaited<ReturnType<typeof readFile>>) => {
+      assert.strictEqual(result.timedOut, false);
+      assert.notStrictEqual(result.exitCode, 0, `Unexpected private-file access: ${result.stdout}`);
+      assert.ok(!result.stdout.includes(privateData), 'Private sentinel contents escaped containment');
+    };
+    assertDenied(await readFile(privateFile));
+
+    const discovered = sdk.policy.filesystem.getAvailableToolsPolicy({
+      PATH: toolDirectory,
+      SystemDrive: path.parse(tempDir).root.replace(/\\$/, ''),
+    });
+    assert.deepStrictEqual(discovered.readonlyPaths, [path.resolve(toolDirectory)]);
+    const allowed = await readFile(toolFile, discovered);
+    assert.strictEqual(allowed.timedOut, false);
+    assert.strictEqual(allowed.exitCode, 0, allowed.stderr);
+    assert.strictEqual(allowed.stdout.trim(), toolData);
+    assertDenied(await readFile(privateFile, discovered));
   });
 
   it('should launch basic process container with valid version', { skip: sandboxSkipReason }, async () => {

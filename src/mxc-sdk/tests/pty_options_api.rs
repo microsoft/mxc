@@ -2,9 +2,16 @@
 // Licensed under the MIT License.
 
 use mxc_sdk::v1::{
-    self, ContainerId, ContainerRequest, ExecutionRequest, MxcPtyProcess, MxcPtySize,
-    SpawnInContainerWithPtyOptions, SpawnWithPtyOptions,
+    self, ContainerId, ContainerRequest, ExecutionRequest, MxcProcess, MxcPtyProcess, MxcPtySize,
+    SpawnInContainerWithPtyOptions, SpawnOptions, SpawnWithPtyOptions,
 };
+
+#[test]
+fn creation_spawns_take_the_same_request_and_options() {
+    let _: fn(ContainerRequest, SpawnOptions) -> Result<MxcProcess, mxc_sdk::v1::Error> = v1::spawn;
+    let _: fn(ContainerRequest, SpawnOptions) -> Result<MxcProcess, mxc_sdk::v1::Error> =
+        v1::spawn_with_stdin;
+}
 
 #[test]
 fn pty_entry_points_take_dimensions_from_operation_options() {

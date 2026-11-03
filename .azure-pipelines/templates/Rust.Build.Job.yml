@@ -210,6 +210,18 @@ jobs:
           contents: wslcsdk.dll
           targetFolder: $(outputDirectory)/$(targetTriple)
 
+      # The NVX release is already signed and hash-pinned; copy it without re-signing.
+      - pwsh: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = Join-Path '$(targetTripleDir)' 'aci-edge-sandboxes'
+          if (-not (Test-Path -LiteralPath (Join-Path $bundle 'SOURCE-MANIFEST.json') -PathType Leaf)) {
+              throw "The Windows x64 build is missing the signed NVX bundle: $bundle"
+          }
+          $artifact = Join-Path '$(outputDirectory)' '$(targetTriple)'
+          Copy-Item -LiteralPath $bundle -Destination $artifact -Recurse
+        displayName: Copy signed NVX runtime bundle
+        condition: and(succeeded(), eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+
       # Copy symbol files into a sibling `symbols/` subdir, NOT alongside the
       # binaries. Workaround for BinSkim BA2007: when the pdb is co-located,
       # BinSkim reads its S_COMPILE3 records and flags `-wd4146` in the

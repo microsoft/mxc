@@ -32,7 +32,8 @@ use crate::learning_mode_core::capture_output::{
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    CaptureDenialsMode, ExecutionRequest, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsMode, ExecutionRequest, FailurePhase, ProxyAddress, SandboxOutputMetadata,
+    ScriptResponse,
 };
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
@@ -51,9 +52,10 @@ use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
 use crate::seatbelt_common::denial_capture::DenialCollector;
 #[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
-use crate::seatbelt_common::profile_builder::build_profile_with_terminals;
+use crate::seatbelt_common::profile_builder::{build_profile_with_terminals, ProfileError};
 use crate::seatbelt_common::profile_preparation::{
-    expand_tilde, prepare_capture_output_path, prepare_profile, resolve_policy_path,
+    classify_io_error, expand_tilde, prepare_capture_output_path, prepare_profile,
+    resolve_policy_path,
 };
 
 #[link(name = "proc")]
@@ -293,15 +295,15 @@ impl SandboxBackend for SeatbeltScriptRunner {
         // Seatbelt's own invariants — the only home for them, so a caller that
         // builds an ExecutionRequest directly gets the same rules.
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
-            .map_err(error_response)?;
+            .map_err(rejected_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
-            .map_err(error_response)?;
+            .map_err(rejected_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_capture_denials(request)
-            .map_err(error_response)?;
+            .map_err(rejected_response)?;
         // Dry runs never reach spawn, so reject unresolvable paths here too.
-        prepare_profile(request).map_err(error_response)?;
-        prepare_capture_output_path(request).map_err(error_response)?;
-        resolved_working_directory_opt(request).map_err(error_response)?;
+        prepare_profile(request).map_err(profile_error_response)?;
+        prepare_capture_output_path(request).map_err(profile_error_response)?;
+        resolved_working_directory_opt(request).map_err(profile_error_response)?;
 
         Ok(())
     }
@@ -357,7 +359,7 @@ fn spawn_exec(
         } else {
             "a caller-owned PTY"
         };
-        return Err(error_response(format!(
+        return Err(rejected_response(format!(
             "Seatbelt guiAccess requires inherited stdio and cannot use {mode}"
         )));
     }
@@ -373,7 +375,7 @@ fn spawn_exec(
     // this is limited to timeout-bounded runs, which are inherently
     // non-interactive.
     let new_group = stdio == StdioMode::Inherit && timeout_from(request).is_some();
-    let capture_plan = plan_denial_capture(request).map_err(error_response)?;
+    let capture_plan = plan_denial_capture(request).map_err(profile_error_response)?;
     let (mut command, pty) = build_sandbox_command(
         request,
         proxy_address,
@@ -393,7 +395,7 @@ fn spawn_exec(
     let capture = capture_plan
         .map(|plan| plan.start())
         .transpose()
-        .map_err(error_response)?;
+        .map_err(launch_failed_response)?;
 
     // Always start from a cleared environment so untrusted sandboxed code never
     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
@@ -401,7 +403,7 @@ fn spawn_exec(
     //
     // The cwd is anchored and resolved to its physical path so `PWD` and the
     // default `HOME` match the directory the child actually starts in.
-    let resolved_cwd = resolved_working_directory_opt(request).map_err(error_response)?;
+    let resolved_cwd = resolved_working_directory_opt(request).map_err(profile_error_response)?;
     let cwd = resolved_cwd
         .as_deref()
         .unwrap_or(UNRESOLVED_WORKING_DIRECTORY);
@@ -435,7 +437,7 @@ fn spawn_exec(
 
     let mut child = command
         .spawn()
-        .map_err(|error| error_response(spawn_error(&error)))?;
+        .map_err(|error| launch_failed_response(spawn_error(&error)))?;
 
     let (stdin, stdout, stderr) = match stdio {
         StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
@@ -456,7 +458,7 @@ fn spawn_exec(
                 let _ = child.kill();
                 let _ = child.wait();
                 let error = out_result.err().or(err_result.err());
-                return Err(error_response(format!(
+                return Err(launch_failed_response(format!(
                     "Seatbelt: failed to wrap stdio pipes: {}",
                     error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
                 )));
@@ -508,7 +510,9 @@ struct ActiveDenialCapture {
 }
 
 /// Picks the log tag and denials file path for a `captureDenials` request.
-fn plan_denial_capture(request: &ExecutionRequest) -> Result<Option<DenialCapturePlan>, String> {
+fn plan_denial_capture(
+    request: &ExecutionRequest,
+) -> Result<Option<DenialCapturePlan>, ProfileError> {
     let Some(config) = request
         .seatbelt
         .as_ref()
@@ -518,8 +522,12 @@ fn plan_denial_capture(request: &ExecutionRequest) -> Result<Option<DenialCaptur
     };
     let configured_path = prepare_capture_output_path(request)?;
     Ok(Some(DenialCapturePlan {
-        tag: format!("mxc-capture-{}", random_capture_suffix()?),
-        output_path: unique_denials_output_path(configured_path.as_deref())?,
+        tag: format!(
+            "mxc-capture-{}",
+            random_capture_suffix().map_err(ProfileError::Host)?
+        ),
+        output_path: unique_denials_output_path(configured_path.as_deref())
+            .map_err(ProfileError::Host)?,
         allow_mode: config.mode == CaptureDenialsMode::Allow,
     }))
 }
@@ -961,26 +969,29 @@ fn build_sandbox_command(
                 },
                 &[],
             )
-            .map_err(|error| error_response(format!("Seatbelt: failed to allocate PTY: {error}")))
+            .map_err(|error| {
+                launch_failed_response(format!("Seatbelt: failed to allocate PTY: {error}"))
+            })
         })
         .transpose()?;
 
     let terminal_paths = match &pty {
         Some(pty) => vec![pty.secondary_path().to_path_buf()],
         None if !new_session => inherited_terminal_paths().map_err(|error| {
-            error_response(format!(
+            launch_failed_response(format!(
                 "Seatbelt: failed to resolve inherited terminals: {error}"
             ))
         })?,
         None => Vec::new(),
     };
-    let mut inputs = prepare_profile(request).map_err(error_response)?;
+    let mut inputs = prepare_profile(request).map_err(profile_error_response)?;
     inputs.capture_tag = capture_tag.map(str::to_string);
     let profile = build_profile_with_terminals(request, proxy_address, &inputs, &terminal_paths)
-        .map_err(error_response)?;
+        .map_err(profile_error_response)?;
     log_generated_profile(&profile, logger);
-    let profile_cstr = CString::new(profile)
-        .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
+    let profile_cstr = CString::new(profile).map_err(|e| {
+        rejected_response(format!("seatbelt profile contains embedded NUL byte: {e}"))
+    })?;
     let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
 
     apply_profile_before_exec(&mut command, profile_cstr);
@@ -1045,11 +1056,22 @@ fn log_generated_profile(profile: &str, logger: &mut Logger) {
     let _ = writeln!(logger, "{PROFILE_LOG_END}");
 }
 
-fn error_response(message: String) -> ScriptResponse {
-    ScriptResponse {
-        exit_code: -1,
-        error_message: message,
-        ..Default::default()
+/// A request this backend refuses.
+// SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+fn rejected_response(message: String) -> ScriptResponse {
+    ScriptResponse::failed(FailurePhase::None, &message)
+}
+
+/// A fault while bringing the sandboxed child up, after the request was
+/// accepted.
+fn launch_failed_response(message: String) -> ScriptResponse {
+    ScriptResponse::failed(FailurePhase::LaunchFailed, &message)
+}
+
+fn profile_error_response(error: ProfileError) -> ScriptResponse {
+    match error {
+        ProfileError::Policy(message) => rejected_response(message),
+        ProfileError::Host(message) => launch_failed_response(message),
     }
 }
 
@@ -1088,7 +1110,9 @@ const UNRESOLVED_WORKING_DIRECTORY: &str = "/";
 ///
 /// The same value feeds the environment, so the default `HOME` cannot name a
 /// directory the child never entered.
-fn resolved_working_directory_opt(request: &ExecutionRequest) -> Result<Option<String>, String> {
+fn resolved_working_directory_opt(
+    request: &ExecutionRequest,
+) -> Result<Option<String>, ProfileError> {
     let expand = |path: &str| expand_tilde(path).unwrap_or_else(|_| path.to_string());
     let Some(selected) = request
         .resolved_working_directory_with(|path| Path::new(&expand(path)).is_dir())
@@ -1097,27 +1121,33 @@ fn resolved_working_directory_opt(request: &ExecutionRequest) -> Result<Option<S
         return Ok(None);
     };
     let absolute = absolute_working_directory(&selected).map_err(|e| {
-        format!(
+        ProfileError::Host(format!(
             "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
-        )
+        ))
     })?;
     // Let the kernel walk the original path so `missing/..` cannot be folded away.
     match std::fs::metadata(&absolute) {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => {
-            return Err(format!(
+            return Err(ProfileError::Policy(format!(
                 "Seatbelt working directory '{absolute}' is not a directory"
-            ))
+            )))
         }
         Err(e) => {
-            return Err(format!(
-                "Seatbelt working directory '{absolute}' is not usable: {e}"
+            return Err(classify_io_error(
+                format!("Seatbelt working directory '{absolute}' is not usable: {e}"),
+                &e,
             ))
         }
     }
     resolve_policy_path(&absolute)
         .map(Some)
-        .map_err(|e| format!("Seatbelt working directory: {e}"))
+        .map_err(|error| match error {
+            ProfileError::Policy(e) => {
+                ProfileError::Policy(format!("Seatbelt working directory: {e}"))
+            }
+            ProfileError::Host(e) => ProfileError::Host(format!("Seatbelt working directory: {e}")),
+        })
 }
 
 /// Anchor a resolved working directory to the launcher's directory when it is
@@ -1377,6 +1407,19 @@ os.close(fd)
         .err()
         .expect("guiAccess PTY must be rejected");
         assert!(error.error_message.contains("caller-owned PTY"));
+        assert_eq!(error.failure_phase, FailurePhase::None);
+        assert_eq!(error.exit_code, FailurePhase::None.failure_exit_code());
+    }
+
+    #[test]
+    fn a_failed_launch_keeps_the_generic_backend_error_code() {
+        let response = launch_failed_response("failed to spawn sandboxed process".into());
+        assert_eq!(response.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(
+            response.failure_phase.error_code(),
+            crate::mxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+        assert_eq!(response.exit_code, -1);
     }
 
     #[test]
@@ -1560,6 +1603,8 @@ os.close(fd)
         assert!(response.error_message.contains("hostLoopback='allow'"));
         assert!(response.error_message.contains("default='deny'"));
         assert!(!response.error_message.contains("inherit 'default'"));
+        assert_eq!(response.failure_phase, FailurePhase::None);
+        assert_eq!(response.exit_code, FailurePhase::None.failure_exit_code());
     }
 
     /// The other divergent pair is expressible and must be accepted: it is the
@@ -1760,10 +1805,11 @@ os.close(fd)
         for cwd in ["dangling", "loop", "missing", "missing/../project", "file"] {
             let mut request = base_request();
             request.working_directory = dir.path().join(cwd).to_str().unwrap().into();
-            let error = SeatbeltScriptRunner::new()
+            let response = SeatbeltScriptRunner::new()
                 .validate(&request)
-                .expect_err("dry runs must reject an unusable cwd")
-                .error_message;
+                .expect_err("dry runs must reject an unusable cwd");
+            assert_eq!(response.failure_phase, FailurePhase::None, "{cwd}");
+            let error = response.error_message;
             assert!(
                 error.contains("Seatbelt working directory"),
                 "{cwd}: {error}"

@@ -580,6 +580,22 @@ export function _setPlatformDiagnosticLogger(fn: ((message: string) => void) | n
 const MIN_BWRAP_VERSION: readonly [number, number, number] = [0, 5, 0];
 const MIN_BWRAP_VERSION_REASON = 'the sandbox uses `--clearenv`, added in bwrap 0.5.0';
 
+// Searched after PATH, in this order, exactly as the native backend searches.
+const BWRAP_FALLBACK_DIRECTORIES: readonly string[] = [
+  '/usr/local/sbin',
+  '/usr/local/bin',
+  '/usr/sbin',
+  '/usr/bin',
+  '/sbin',
+  '/bin',
+];
+let bwrapFallbackDirectories: readonly string[] = BWRAP_FALLBACK_DIRECTORIES;
+
+/** @internal Test-only: replace the directories searched after PATH. */
+export function _setBwrapFallbackDirectories(directories: readonly string[] | null): void {
+  bwrapFallbackDirectories = directories ?? BWRAP_FALLBACK_DIRECTORIES;
+}
+
 /** Outcome of the Bubblewrap probe: available, or unavailable with a reason. */
 type BubblewrapProbe = { available: true } | { available: false; reason: string };
 
@@ -588,7 +604,7 @@ type BubblewrapProbe = { available: true } | { available: false; reason: string 
  * can fail. Mirrors the cases the Rust `probe_bwrap` distinguishes.
  */
 type BwrapVersionResult =
-  | { kind: 'output'; stdout: string }
+  | { kind: 'output'; path: string; stdout: string }
   | { kind: 'notFound' }
   | { kind: 'failed'; status: number | null; detail: string };
 
@@ -699,7 +715,14 @@ export function _setBwrapProbeWorkerFactory(factory: BwrapProbeWorkerFactory | n
 }
 
 type BwrapHelperResult =
-  | { kind: 'completed'; status: number | null; signal: string | null; stdout: string; stderr: string }
+  | {
+      kind: 'completed';
+      path: string;
+      status: number | null;
+      signal: string | null;
+      stdout: string;
+      stderr: string;
+    }
   | { kind: 'notFound' }
   | { kind: 'timeout' }
   | { kind: 'overflow' }
@@ -740,7 +763,7 @@ export function _mapBwrapHelperResult(
           detail: result.stderr.trim() || (result.signal ? `signal ${result.signal}` : ''),
         };
       }
-      return { kind: 'output', stdout: result.stdout };
+      return { kind: 'output', path: result.path, stdout: result.stdout };
   }
 }
 
@@ -779,6 +802,7 @@ export function _runBwrapVersionCommand(
         probeTimeoutMs,
         publishTimeoutMs,
         outputLimit: BWRAP_VERSION_MAX_BUFFER_BYTES,
+        fallbackDirectories: bwrapFallbackDirectories.join(path.delimiter),
       },
     });
   } catch (err) {
@@ -916,7 +940,8 @@ export function _probeBubblewrap(): BubblewrapProbe {
     return {
       available: false,
       reason:
-        `Bubblewrap (bwrap) is not installed or not on PATH. ` +
+        `Bubblewrap (bwrap) is not installed: it was not found on PATH or in ` +
+        `${bwrapFallbackDirectories.join(', ')}. ` +
         `Install it via your package manager (e.g., apt install bubblewrap). ` +
         `Version ${minVersion} or newer is required.`,
     };
@@ -948,7 +973,8 @@ export function _probeBubblewrap(): BubblewrapProbe {
     return {
       available: false,
       reason:
-        `Bubblewrap (bwrap) ${version.join('.')} is too old: version ${minVersion} or newer is required ` +
+        `Bubblewrap (bwrap) ${version.join('.')} at ${result.path} is too old: ` +
+        `version ${minVersion} or newer is required ` +
         `(${MIN_BWRAP_VERSION_REASON}). Upgrade the bubblewrap package.`,
     };
   }

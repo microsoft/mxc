@@ -1,41 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Object-based filesystem-policy normalization (roadmap item D6 —
-//! "object-based policy validation").
-//!
-//! The string-level [`crate::mxc_common::config_parser::normalize_filesystem_paths`] already
-//! resolves *same path string* appearing in multiple lists via
-//! most-restrictive-wins (`deny` > `readonly` > `readwrite`). This module
-//! handles the harder case: two **different** path strings that resolve to the
-//! **same filesystem object** (via bind mounts, symlinks, or hard links) but
-//! carry conflicting intents — e.g. `readwritePaths: ["/mnt/storage/data"]` and
-//! `deniedPaths: ["/data"]` where `/data` is a bind mount of the former. The
-//! agent could reach the "denied" object through the read-write alias.
-//!
-//! Because Linux mount namespaces (and the WSLC SDK) are *path*-based, denying
-//! one path to an object cannot deny another path to the same object (that's the
-//! non-actionable "object-based enforcement" gap). The best we can do at config
-//! time is **normalize**: detect aliases of the same object and tighten every
-//! alias to the strictest intent among them, emitting a warning per tightened
-//! path. Conflicting intents are resolved deterministically rather than erroring.
-//!
-//! **Fail-closed exception.** The normalization above relies on resolving each
-//! path to an object identity. When a path cannot be resolved (permission
-//! denied, unreachable mount, I/O error — as opposed to *cleanly missing*) and
-//! `deniedPaths` are present, MXC cannot prove that path is not an undetectable
-//! alias that would bypass a deny. Rather than proceed looser than intended, the
-//! config is **rejected** (fail closed). Cleanly-missing paths do not trigger
-//! this — they are genuinely absent, so there is nothing to alias.
-//!
-//! This does file I/O (`stat`/`CreateFile`), so — per design review — it lives
-//! here in `mxc_common` and is invoked by each backend runner close to the
-//! point of enforcement (NOT in `config_parser`, which stays string-only). This
-//! both honors that separation and shrinks the TOCTOU window between the check
-//! and the backend actually building its mounts.
+//! Tighten conflicting policy paths that refer to the same filesystem object.
 
+use crate::mxc_common::filesystem_probe::FilesystemProbe;
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::ContainerPolicy;
+use crate::mxc_common::models::{ContainerPolicy, ScriptResponse};
 use std::path::Path;
 
 /// Intent class for a policy path, ordered least → most restrictive so that
@@ -89,10 +59,34 @@ enum PathResolution {
     /// Nothing to alias; safe to skip. (Existence is surfaced separately by the
     /// parse-time existence warning.)
     Absent,
+    /// The caller is denied access to the path, so its identity cannot be read.
+    Inaccessible,
     /// The path exists (or may exist) but its identity could not be determined —
-    /// permission denied, an unreachable mount, or another I/O error. This is
-    /// the fail-closed trigger when `deniedPaths` are present.
+    /// an unreachable mount or another I/O error.
     Unknown,
+}
+
+/// Why a filesystem policy was refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FilesystemPolicyError {
+    /// The request is at fault, e.g. a policy path the caller cannot access.
+    Policy(String),
+    /// A policy path could not be examined; the same request may succeed later.
+    Host(String),
+}
+
+impl FilesystemPolicyError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Policy(message) | Self::Host(message) => message,
+        }
+    }
+
+    // SDK v2: Policy -> rejected (policy_validation), Host -> failed(LaunchFailed).
+    // See docs/development/plans/sdk-v2-error-codes.md.
+    pub fn into_response(self) -> ScriptResponse {
+        ScriptResponse::error(self.message())
+    }
 }
 
 /// Result of comparing two paths by filesystem-object identity.
@@ -117,6 +111,10 @@ pub enum ExistingObjectComparison {
 #[cfg(unix)]
 fn resolve_object(path: &Path) -> PathResolution {
     use std::os::unix::fs::MetadataExt;
+
+    #[cfg(test)]
+    super::filesystem_probe::launch_tests::stall("object", path);
+
     // `metadata` follows symlinks, giving the target object's identity.
     match std::fs::metadata(path) {
         Ok(md) => PathResolution::Object(ObjectId {
@@ -128,6 +126,7 @@ fn resolve_object(path: &Path) -> PathResolution {
         // could not examine the path.
         Err(e) => match e.raw_os_error() {
             Some(libc::ENOENT) | Some(libc::ENOTDIR) => PathResolution::Absent,
+            Some(libc::EACCES) | Some(libc::EPERM) => PathResolution::Inaccessible,
             _ => PathResolution::Unknown,
         },
     }
@@ -138,13 +137,16 @@ fn resolve_object(path: &Path) -> PathResolution {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
         OPEN_EXISTING,
     };
+
+    #[cfg(test)]
+    super::filesystem_probe::launch_tests::stall("object", path);
 
     let wide: Vec<u16> = path
         .as_os_str()
@@ -178,6 +180,8 @@ fn resolve_object(path: &Path) -> PathResolution {
             let err = unsafe { GetLastError() };
             return if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
                 classify_not_found_leaf_windows(path)
+            } else if err == ERROR_ACCESS_DENIED {
+                PathResolution::Inaccessible
             } else {
                 PathResolution::Unknown
             };
@@ -253,7 +257,8 @@ fn compare_resolved_filesystem_objects(
         // Unknown must take precedence over Absent on every platform. Treating
         // an unexaminable path as merely different would let callers proceed
         // without proving that the policy paths refer to distinct objects.
-        (PathResolution::Unknown, _) | (_, PathResolution::Unknown) => {
+        (PathResolution::Unknown | PathResolution::Inaccessible, _)
+        | (_, PathResolution::Unknown | PathResolution::Inaccessible) => {
             ExistingObjectComparison::Unknown
         }
         (PathResolution::Absent, _) | (_, PathResolution::Absent) => {
@@ -265,30 +270,21 @@ fn compare_resolved_filesystem_objects(
     }
 }
 
-/// Detect cross-path object conflicts and return a tightened copy of `policy`.
-///
-/// For each set of policy paths that resolve to the same filesystem object but
-/// carry differing intents, the looser-intent paths are moved into the strictest
-/// intent's list (`deny` > `readonly` > `readwrite`) and a warning is logged for
-/// each moved path. Cleanly-missing paths are left as-is.
-///
-/// Returns:
-/// - `Ok(Some(new_policy))` when at least one path's intent was tightened.
-/// - `Ok(None)` when there is nothing to change (the common case — no
-///   symlink / hard-link / bind-mount aliases), so callers can avoid cloning the
-///   request entirely.
-/// - `Err(message)` when the config must be **rejected**: a path could not be
-///   resolved to an object (permission denied, unreachable mount, I/O error —
-///   *not* cleanly missing) while `deniedPaths` are present, so an alias that
-///   would bypass a deny cannot be ruled out (fail closed). The message is
-///   suitable for surfacing as a backend error.
-///
-/// Run this *after* the string-level normalization in `config_parser`, close to
-/// where the backend builds its mounts.
 pub fn normalize_object_conflicts(
     policy: &ContainerPolicy,
     logger: &mut Logger,
-) -> Result<Option<ContainerPolicy>, String> {
+) -> Result<Option<ContainerPolicy>, FilesystemPolicyError> {
+    let mut probe = FilesystemProbe::default();
+    normalize_object_conflicts_with(policy, logger, |path| {
+        probe.run(path, |path| resolve_object(Path::new(path)))
+    })
+}
+
+fn normalize_object_conflicts_with(
+    policy: &ContainerPolicy,
+    logger: &mut Logger,
+    mut resolve: impl FnMut(&str) -> Result<PathResolution, String>,
+) -> Result<Option<ContainerPolicy>, FilesystemPolicyError> {
     let total =
         policy.readwrite_paths.len() + policy.readonly_paths.len() + policy.denied_paths.len();
     // A conflict needs at least two paths resolving to the same object, so a
@@ -314,30 +310,36 @@ pub fn normalize_object_conflicts(
     // Group entry indices by object identity. Resolution has three outcomes:
     // - `Object`: grouped for conflict detection.
     // - `Absent` (cleanly missing): skipped — nothing to alias.
-    // - `Unknown` (exists/maybe-exists but unexaminable): when `deniedPaths` are
-    //   present we cannot prove this path is not an undetectable alias that would
-    //   bypass a deny, so we FAIL CLOSED and reject. Without `deniedPaths` there
-    //   is no deny to bypass, so we log it and leave it in place.
+    // - `Inaccessible` / `Unknown` (exists/maybe-exists but unexaminable): when
+    //   `deniedPaths` are present we cannot prove this path is not an
+    //   undetectable alias that would bypass a deny, so we FAIL CLOSED. Without
+    //   `deniedPaths` there is no deny to bypass, so we log it and leave it in
+    //   place.
     let has_denied = !policy.denied_paths.is_empty();
     let mut groups: HashMap<ObjectId, Vec<usize>> = HashMap::new();
     for (i, (path, intent)) in entries.iter().enumerate() {
-        match resolve_object(Path::new(path)) {
+        match resolve(path).map_err(FilesystemPolicyError::Host)? {
             PathResolution::Object(id) => {
                 groups.entry(id).or_default().push(i);
             }
             PathResolution::Absent => {}
-            PathResolution::Unknown if has_denied => {
-                return Err(format!(
-                    "Filesystem path '{}' ({}) could not be resolved to a filesystem object \
-                     (permission denied, unreachable mount, or I/O error). Because deniedPaths \
-                     are present, MXC cannot verify it does not alias a denied object and rejects \
-                     the config rather than risk bypassing the deny. Ensure the path is reachable, \
-                     or remove the offending entry.",
+            PathResolution::Inaccessible if has_denied => {
+                return Err(FilesystemPolicyError::Policy(unresolvable_message(
                     path,
-                    intent.list_name(),
-                ));
+                    *intent,
+                    "permission denied",
+                    "Grant access to the path, or remove the offending entry.",
+                )));
             }
-            PathResolution::Unknown => {
+            PathResolution::Unknown if has_denied => {
+                return Err(FilesystemPolicyError::Host(unresolvable_message(
+                    path,
+                    *intent,
+                    "unreachable mount or I/O error",
+                    "Retry once the path is reachable, or remove the offending entry.",
+                )));
+            }
+            PathResolution::Inaccessible | PathResolution::Unknown => {
                 logger.log_line(&format!(
                     "WARNING: filesystem path '{}' ({}) could not be resolved to a filesystem \
                      object and was not checked for aliasing",
@@ -430,6 +432,15 @@ pub fn normalize_object_conflicts(
     Ok(Some(new_policy))
 }
 
+fn unresolvable_message(path: &str, intent: Intent, cause: &str, remedy: &str) -> String {
+    format!(
+        "Filesystem path '{path}' ({}) could not be resolved to a filesystem object ({cause}). \
+         Because deniedPaths are present, MXC cannot verify it does not alias a denied object \
+         and refuses to run rather than risk bypassing the deny. {remedy}",
+        intent.list_name(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +478,35 @@ mod tests {
         let p = ContainerPolicy::default();
         let mut logger = Logger::new(Mode::Buffer);
         assert!(normalize_ok(&p, &mut logger).is_none());
+    }
+
+    #[test]
+    fn probe_failure_rejects_even_without_denied_paths() {
+        for p in [
+            policy(&["slow"], &["readable"], &[]),
+            policy(&["slow"], &[], &["denied"]),
+        ] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let error = normalize_object_conflicts_with(&p, &mut logger, |path| {
+                Err(format!("probe for {path} timed out"))
+            })
+            .unwrap_err();
+            assert_eq!(
+                error,
+                FilesystemPolicyError::Host("probe for slow timed out".to_string())
+            );
+            assert!(logger.get_buffer().is_empty());
+        }
+    }
+
+    #[test]
+    fn single_path_does_not_start_a_probe() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let result =
+            normalize_object_conflicts_with(&policy(&["single"], &[], &[]), &mut logger, |_| {
+                panic!("one path cannot alias another policy entry")
+            });
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
@@ -675,8 +715,9 @@ mod tests {
         let err = normalize_object_conflicts(&p, &mut logger)
             .expect_err("an unexaminable path with deniedPaths present must fail closed");
         assert!(
-            err.contains("could not be resolved") && err.contains("deniedPaths"),
-            "expected a fail-closed rejection message, got: {err}"
+            matches!(&err, FilesystemPolicyError::Policy(message)
+                if message.contains("could not be resolved") && message.contains("deniedPaths")),
+            "expected a fail-closed policy rejection, got: {err:?}"
         );
 
         // Restore traversal so the tempdir can recurse in during cleanup.
@@ -742,8 +783,9 @@ mod tests {
         let err = normalize_object_conflicts(&p, &mut logger)
             .expect_err("an unexaminable path with deniedPaths present must fail closed");
         assert!(
-            err.contains("could not be resolved") && err.contains("deniedPaths"),
-            "expected a fail-closed rejection message, got: {err}"
+            matches!(&err, FilesystemPolicyError::Policy(message)
+                if message.contains("could not be resolved") && message.contains("deniedPaths")),
+            "expected a fail-closed policy rejection, got: {err:?}"
         );
 
         // Remove the deny ACE so the tempdir can clean up.

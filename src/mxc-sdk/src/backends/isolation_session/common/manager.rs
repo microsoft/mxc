@@ -37,7 +37,9 @@ use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
 };
-use super::process_options::{build_iso_process_options, ProcessOptions};
+use super::process_options::{
+    build_iso_process_options, with_service_timeout_grace, ProcessOptions,
+};
 
 // The OS account name is lifecycle addressing data, not diagnostic identity.
 const AGENT_IDENTITY_MARKER: &str = "isolation-session-agent";
@@ -398,16 +400,22 @@ impl IsolationSessionManager {
 
     /// Step 3: Create a process inside the started isolation session and run it
     /// to completion. Output is streamed live to the calling process's stdio via
-    /// internal relay threads; only the exit code is returned.
+    /// internal relay threads; only the exit code or timeout is returned.
+    ///
+    /// `options.timeout_ms` is enforced locally; the service-side timer is armed
+    /// with [`with_service_timeout_grace`] so a timeout is never reported as an
+    /// ordinary exit.
     ///
     /// This is the **relay** path, reached by `wxc-exec` and by an in-process
     /// caller that asked to attach. A caller that wants the streams handed back
     /// uses [`Self::piped_exec_handle`] instead.
+    ///
+    /// [`with_service_timeout_grace`]: super::process_options::with_service_timeout_grace
     pub(super) fn create_process(
         &self,
         options: &ProcessOptions,
         logger: Option<&mut Logger>,
-    ) -> Result<i32, IsolationSessionError> {
+    ) -> Result<ExecOutcome, IsolationSessionError> {
         owned_thread::call(&self.impersonation, || {
             // Everything fallible that does not need the workload runs first, so no
             // failure can strand a running one.
@@ -448,7 +456,8 @@ impl IsolationSessionManager {
             // Lifetime: each relay's param struct is moved to the heap and owned
             // by its thread, which frees it on exit, so joining is not required
             // for memory safety.
-            let started = self.start_process(options, logger.as_deref())?;
+            let service_options = with_service_timeout_grace(options.clone());
+            let started = self.start_process(&service_options, logger.as_deref())?;
             let process = &started.process;
             let stdout_handle_val = started.stdout;
             let stderr_handle_val = started.stderr;
@@ -583,10 +592,7 @@ impl IsolationSessionManager {
             scope.stop_stdin();
             scope.finish();
 
-            Ok(match outcome {
-                ExecOutcome::Exited(exit_code) => exit_code,
-                ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
-            })
+            Ok(outcome)
         })
     }
 
@@ -1219,7 +1225,7 @@ const STILL_ACTIVE: i32 = windows::Win32::Foundation::STATUS_PENDING.0;
 /// What `WaitForExit` returns when the deadline elapses before the process
 /// exits. Like [`STILL_ACTIVE`] this is a legal exit code in its own right, so
 /// it is never used alone to conclude a timeout.
-const WAIT_FOR_EXIT_TIMEOUT: i32 = -1;
+pub(super) const WAIT_FOR_EXIT_TIMEOUT: i32 = -1;
 
 /// How long [`StartedProcess::terminate`] waits for a kill to land before
 /// reporting success anyway. Bounded so a failed `Terminate` cannot wedge that

@@ -8,6 +8,7 @@ MXC uses a JSON configuration file. The current stable schema is at
 For development, the schema for version `1.1.0-alpha` at
 [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
+
 For self-contained references to what each supported version accepts, see
 [containment policy language](containment-policy/README.md).
 
@@ -121,6 +122,9 @@ identity-less host proxies omit `allowedProxyPeer` and require
 `hostLoopback: "allow"`. The identity-less route is a weaker development/testing
 deployment: it opens both host-loopback directions without restricting access
 to a named proxy peer. It does not enforce a proxy-only host-loopback exception.
+
+For MicroVM networking and proxy support, see the
+[NVX backend capability table](backends/nvx/nvx.md#supported-operations-and-policy).
 
 ```json
 {
@@ -339,7 +343,8 @@ use:
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
-| MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
+| MicroVM | The guest default; see [NVX working-directory behaviour](backends/nvx/nvx.md#working-directory-and-environment). |
+| Hyperlight | Not applicable — this backend rejects a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
@@ -385,6 +390,9 @@ On the WSL Container backend it is the container image's own `ENV`, which MXC
 neither authors nor enumerates — see
 [`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md#environment).
 
+For MicroVM environment support and limits, see
+[NVX working directory and environment](backends/nvx/nvx.md#working-directory-and-environment).
+
 ### Filesystem Policy
 
 The `filesystem` section defines path access policy shared across backends:
@@ -394,6 +402,12 @@ The `filesystem` section defines path access policy shared across backends:
 | `readwritePaths` | string[] | `[]` | Paths the process can read and write. |
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
+
+Backend support for filesystem policy is described in each backend guide; see
+the [NVX capability table](backends/nvx/nvx.md#supported-operations-and-policy)
+for MicroVM. Backend-specific sections, including
+`processContainer.filesystem.enumeratePaths`, can only accompany their matching
+`containment` selection.
 
 The ProcessContainer-only `processContainer.filesystem` section contains:
 
@@ -416,6 +430,45 @@ When paths overlap across `readwritePaths` and `deniedPaths`:
 
 Denying a parent does not cancel a more specific child grant. To block the
 child, remove its grant or add the child itself to `deniedPaths`.
+
+#### Filesystem probe timeouts
+
+Bubblewrap, LXC, and WSLC check filesystem policy just before enforcement.
+Listed aliases of the same object are tightened to the most restrictive intent
+(`denied` > `readonly` > `readwrite`), then delegation checks require read access
+for read-only grants and read/write access for writable grants. Missing paths
+are skipped; other access-check failures reject the request. Object identities
+that cannot be determined reject the request when denied paths are present,
+and otherwise produce a warning. These checks do not eliminate races between
+validation and mounting.
+
+Each policy-path probe has a **five-second deadline**, including time waiting
+for a worker. This also covers the parser's advisory existence probes on all
+backends, Bubblewrap and LXC mask-target resolution, and WSLC overlap
+canonicalization (including missing-tail ancestor lookup). A timeout or worker
+failure **rejects startup**, even without denied paths; it never treats the path
+as missing or skips a security check. The error names the path and the failure.
+Ordinary missing-path warnings and returned filesystem-error handling remain
+unchanged. The deadline is internal and independent of `process.timeout`,
+including when script execution has no timeout.
+
+Blocking filesystem calls cannot be cancelled reliably. A timed-out worker may
+remain blocked until the filesystem recovers, but at most **16 probe workers**
+can exist per process. A blocked worker retains its slot; repeated timeouts do
+not create unlimited threads. If all slots are occupied, later probes fail
+within the same deadline. Restore the inaccessible filesystem or restart the
+host process to recover capacity. Workers are reused within each validation
+pass, and Windows probes retain the caller's impersonation identity.
+
+Before starting a probe worker, MXC keeps its containing native library loaded
+for the rest of the process lifetime. Closing a caller's library handle after a
+timeout therefore cannot unload code beneath a blocked worker. If that lifetime
+protection cannot be established, the probe fails without starting a worker.
+
+On Unix, delegation uses the real UID/GID; a root-running LXC executor still
+checks root's access, not a pre-elevation user's access. These deadlines bound
+policy probes, not total sandbox startup, backend mount operations, or workload
+I/O if the filesystem becomes unavailable after validation.
 
 #### Path grants and root directories for Windows BaseContainer
 
@@ -480,7 +533,7 @@ force a particular backend.
 |-------|------------|
 | `"process"` | `processcontainer` on Windows, `bubblewrap` on Linux, `seatbelt` on macOS |
 | `"vm"` | Full hardware-virtualised VM isolation. Resolves to `windows_sandbox` on Windows. |
-| `"microvm"` | MicroVM on Windows (NanVix via the Windows Hypervisor Platform). Experimental. |
+| `"microvm"` | MicroVM on Windows x64 (NVX via the Windows Hypervisor Platform). Experimental. |
 
 #### Concrete backends
 
@@ -490,7 +543,7 @@ force a particular backend.
 | `"windows_sandbox"` | Windows Sandbox VM isolation. Supports create-and-run execution with a fresh disposable VM per execution, and container lifecycle operations backed by a long-lived per-container daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
-| `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
+| `"microvm"` | MicroVM isolation via NVX on Windows x64 |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session: create-and-run execution uses a freshly provisioned isolated user account in its own OS-managed session. Container lifecycle operations can retain the session between executions. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |

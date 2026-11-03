@@ -71,6 +71,9 @@ take a caller-supplied schema version. Each v1 SDK targets the published exact
 
 Raw configuration APIs require the caller to declare a registered `version`
 to select an immutable published or mutable development contract.
+The [V1.Dev SDK APIs](#sdk-major-version-namespaces) accept these documents.
+Experimental backend authorization is supplied separately in invocation
+options, not inferred from the document's version.
 
 ```typescript
 // sdk/node/src/types.ts
@@ -97,25 +100,49 @@ version:
 
 Contract-mapped SDK types live in a namespace for their schema-contract major:
 `Microsoft.Mxc.Sdk.V1`, `mxc_sdk::v1`, and `@microsoft/mxc-sdk/v1`.
-The V1 namespace contains `SandboxPolicy`, its policy sections, containment
-selection and backend settings, policy-to-request builders, and typed
-state-aware lifecycle request/result/option types and entry points. These APIs
+The typed V1 surface contains `ContainerRequest`, its policy sections,
+containment selection and backend settings, and container lifecycle
+request/result/option types and entry points. These typed APIs
 evolve additively as published 1.x contracts grow; the SDK owns the exact
 contract target (currently `1.0.0`) and callers do not supply a schema version.
 A future breaking schema line adds a side-by-side V2 namespace rather than
 replacing V1.
 
-Version-independent APIs stay at the package root: errors and error codes,
-running-sandbox handles and output/wait types, platform/backend discovery,
-telemetry consent, schema-version constants, raw exact-JSON APIs that take
-caller-declared versions, and executor-backed raw config APIs.
+V1.Dev is a separate API family within the supported V1 entrypoint:
+`mxc_sdk::v1::dev`, `Microsoft.Mxc.Sdk.V1.Dev`, and
+`@microsoft/mxc-sdk/v1/dev`. Its callers declare a registered JSON contract
+version instead of using the typed V1 target. The SDK API major and the
+document's contract version are independent; `Dev` does not implicitly
+select the development contract or authorize experimental backends.
+
+Version-independent operations and types, including errors, process handles,
+output/wait types, discovery, and telemetry consent, use supported V*
+entrypoints.
 
 ### Versioning follows Semver
 
-Per [semver.org](https://semver.org/):
-- **Patch** (x.y.Z) — bug fixes only
-- **Minor** (x.Y.0) — new features, backward compatible
-- **Major** (X.0.0) — breaking changes
+SDK releases follow [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html):
+
+- **Major** (X.0.0): breaking public API or incompatible documented behavior changes.
+- **Minor** (x.Y.0): backward-compatible API additions, newly exposed schema
+  capabilities, or new behavior. Public API deprecations require at least a
+  minor release.
+- **Patch** (x.y.Z): backward-compatible bug fixes and internal refactoring,
+  without new public APIs, schema capabilities, or feature behavior.
+
+Correcting behavior to match the documented contract can be a patch; introducing
+an incompatible contract requires a major version. The highest required change
+determines the release version, including urgent out-of-cycle releases.
+
+Features and fixes ship in new releases on the current release line; they are
+not backported to older release lines. Dependent projects must update to an SDK
+version that includes the change to receive it.
+
+SDK package versions and schema versions are independent. Evaluate compatibility
+on each axis separately: changing a schema does not automatically bump an SDK
+package, and releasing an SDK does not automatically bump a schema. Published
+contracts remain immutable. See [How MXC is managed](../../repository-management.md)
+for release cadence and milestone policy.
 
 A development prerelease for the next minor must retain accepted fields from
 the published major line. Retired settings such as `fallback.allowDaclMutation`
@@ -300,6 +327,22 @@ version when the old default is a security bug. The older stable schema is
 left unchanged so the release contract stays auditable; newer schemas
 document the corrected default. Consumers that need the legacy behavior
 must set the field explicitly.
+
+### Security-servicing exception: PowerShell tool discovery
+
+On Windows, the Rust V1
+`mxc_sdk::v1::policy::filesystem::available_tools_policy` and Node V1
+`policy.filesystem.getAvailableToolsPolicy` helpers must not implicitly grant
+recursive read access to the system-drive root when discovering `pwsh.exe`.
+Such a grant can expose host files beyond the discovered tool directories.
+Discovery grants access to tool directories and the PSReadLine history
+directory.
+
+This specific security-servicing exception applies within V1 and does not
+require a new versioned API surface.
+
+For PowerShell startup failures, see
+[troubleshooting](../../troubleshooting.md#powershell-startup).
 
 ### Shipped vs Experimental
 
@@ -693,6 +736,49 @@ Negotiation failures are **typed and actionable** — never a silent fallback:
   field, e.g. `deniedPaths`) fail with a specific message naming the
   unsupported field. Security policy is deterministic — no relaxation, no fuzzy
   fallback.
+
+Every executor failure is classified by **which side can act on it**, and that
+classification drives both the wire code and the process exit code:
+
+| Side at fault | Failure phase | Wire code | Exit code |
+|---|---|---|---|
+| The request — a different request succeeds | `Rejected` | `policy_validation` | `1` |
+| The host — no request change helps | `BackendUnavailable` | `backend_unavailable` | `-1` |
+| The runtime, during an accepted run | all other phases | `backend_error` | `-1` |
+
+Common cases:
+
+| Failure | Wire code |
+|---|---|
+| Policy field the backend cannot enforce (e.g. ProcessContainer `enumeratePaths`, `deniedPaths`, LPAC) | `backend_unavailable`¹ |
+| Policy path the invoking user cannot access | `backend_error`¹ |
+| Host fault while checking a policy path (I/O error, unresolvable path) | `backend_error` |
+| Missing host capability (e.g. no native PSEC, no denial-capture provider) | `backend_unavailable` |
+| Backend not compiled into this build | `unsupported_containment`¹ |
+| Experimental backend without the experimental opt-in | `backend_unavailable` |
+| Backend for another OS: create-and-run / container lifecycle operations | `unsupported_containment` / `backend_unavailable` |
+
+Unsupported policy is never silently dropped, and no failure above starts the
+run. The phase-specific codes `malformed_request`, `unsupported_containment`,
+`unsupported_phase`, and `malformed_id` also exit `1`.
+
+¹ Kept for SDK v1 compatibility, as are some backend refusals that still report
+`backend_error`. See the [SDK v2 error codes plan](../plans/sdk-v2-error-codes.md).
+
+Envelope lines share stderr with the workload's own output, so a workload can
+print text that looks like an envelope. Treat stderr envelopes as diagnostics,
+not as an authenticated result; the exit code and a held `ScriptResponse` are
+authoritative.
+
+`ScriptResponse` carries an optional `warnings` array of diagnostic strings.
+Warnings are advisory and never change the exit code; they are omitted from the
+wire entirely when a run produced none. The serialized response and the
+executor's stderr stream are two distinct shapes of the same warnings: on the
+response they are a `warnings: string[]` field, while an executor writes each
+one to stderr as its own line-delimited JSON object,
+`{"warning":{"message":"..."}}`, matching the error envelope
+`{"error":{"code":"...","message":"..."}}`. A caller reading stderr must parse
+the per-line objects; the array exists only on a response it holds directly.
 
 The MXC ↔ OS contract therefore reports: which feature failed, whether it was a
 version mismatch or a runtime/capability unavailability (e.g. Hyper-V off), and

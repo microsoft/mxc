@@ -112,6 +112,30 @@ mod tests {
         })
     }
 
+    #[test]
+    fn microvm_zero_memory_json_fails_during_normalization() {
+        use crate::mxc_common::{config_parser::ParseError, error::WxcError};
+
+        let json = r#"{
+            "version":"1.1.0-alpha",
+            "containment":"microvm",
+            "process":{"commandLine":"echo hello"},
+            "microvm":{"image":"docker.io/library/python:3.12-alpine","provision":{"memoryMib":0}}
+        }"#;
+        let error = crate::mxc_common::config_parser::load_mxc_request_from_json(
+            json,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap_err();
+        let ParseError::OneShot(WxcError::ConfigParse(message)) = error else {
+            panic!("expected malformed one-shot memory settings, got {error:?}");
+        };
+        assert_eq!(
+            message,
+            "microvm.provision.memoryMib must be greater than zero"
+        );
+    }
+
     fn assert_blank_proxy_peer_uses_shared_validation(peer: &str) {
         let policy = ContainerPolicy::default();
         let containment = process_container_with_proxy_peer(peer);

@@ -72,7 +72,8 @@ pub use provision::{probe_containment, Containment, ContainmentProbeError};
 pub use provision::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, MicroVmContainment, MicroVmProvision,
+    MicroVmProvisionRequest, StateAwareIsolationSession, StateAwareMicroVm,
 };
 pub use provision::{ProvisionPhase, ProvisionRequest};
 pub use provision::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};

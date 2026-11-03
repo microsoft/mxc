@@ -72,7 +72,7 @@ impl CaptureRules<'_> {
 fn capture_rules<'a>(
     request: &ExecutionRequest,
     inputs: &'a ProfileInputs,
-) -> Result<Option<CaptureRules<'a>>, String> {
+) -> Result<Option<CaptureRules<'a>>, ProfileError> {
     let Some(config) = request
         .seatbelt
         .as_ref()
@@ -80,14 +80,30 @@ fn capture_rules<'a>(
     else {
         return Ok(None);
     };
-    let tag = inputs
-        .capture_tag
-        .as_deref()
-        .ok_or_else(|| "Seatbelt: captureDenials log tag was not prepared".to_string())?;
+    let tag = inputs.capture_tag.as_deref().ok_or_else(|| {
+        ProfileError::Host("Seatbelt: captureDenials log tag was not prepared".to_string())
+    })?;
     Ok(Some(CaptureRules {
         tag,
         allow_mode: config.mode == CaptureDenialsMode::Allow,
     }))
+}
+
+/// Why a profile could not be built: the request, or the executor's host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileError {
+    /// The request names something the profile cannot express.
+    Policy(String),
+    /// The executor's environment lacks something the profile needs.
+    Host(String),
+}
+
+impl std::fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Policy(message) | Self::Host(message) => f.write_str(message),
+        }
+    }
 }
 
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
@@ -100,7 +116,7 @@ pub fn build_profile_with_proxy(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
     inputs: &ProfileInputs,
-) -> Result<String, String> {
+) -> Result<String, ProfileError> {
     build_profile_with_terminals(request, proxy_address, inputs, &[])
 }
 
@@ -110,13 +126,13 @@ pub(crate) fn build_profile_with_terminals(
     proxy_address: Option<&ProxyAddress>,
     inputs: &ProfileInputs,
     terminal_paths: &[PathBuf],
-) -> Result<String, String> {
+) -> Result<String, ProfileError> {
     let seatbelt = request.seatbelt.as_ref();
     if let Some(override_profile) = seatbelt.and_then(|c| c.profile_override.as_ref()) {
         if seatbelt.is_some_and(|c| c.capture_denials.is_some()) {
-            return Err(
+            return Err(ProfileError::Policy(
                 "Seatbelt: captureDenials cannot tag a profileOverride profile".to_string(),
-            );
+            ));
         }
         return Ok(override_profile.clone());
     }
@@ -150,9 +166,9 @@ pub(crate) fn build_profile_with_terminals(
     // Keep the controlling terminal usable without granting other host PTYs.
     out.push_str(TTY_ALLOW);
     for path in terminal_paths {
-        let path = path
-            .to_str()
-            .ok_or_else(|| "Seatbelt: assigned terminal path is not valid UTF-8".to_string())?;
+        let path = path.to_str().ok_or_else(|| {
+            ProfileError::Host("Seatbelt: assigned terminal path is not valid UTF-8".into())
+        })?;
         let _ = writeln!(
             out,
             "(allow file-read* file-write* file-ioctl (literal {}))",
@@ -623,13 +639,16 @@ fn write_keychain_rules(
     out: &mut String,
     request: &ExecutionRequest,
     user_keychains: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), ProfileError> {
     let enabled = request.seatbelt.as_ref().is_some_and(|c| c.keychain_access);
     if !enabled {
         return Ok(());
     }
-    let user_keychains = user_keychains
-        .ok_or_else(|| "User keychain directory was not prepared for keychainAccess".to_string())?;
+    let user_keychains = user_keychains.ok_or_else(|| {
+        ProfileError::Host(
+            "User keychain directory was not prepared for keychainAccess".to_string(),
+        )
+    })?;
 
     out.push_str(";; --- keychainAccess: Mach IPC for Keychain (securityd, prefs, XPC, LS) ---\n");
     out.push_str("(allow mach-lookup\n");
@@ -707,14 +726,14 @@ mod tests {
     use super::*;
     use crate::mxc_common::models::{NetworkAction, SeatbeltConfig, UiPolicy};
 
-    fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
+    fn build_profile(request: &ExecutionRequest) -> Result<String, ProfileError> {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
     }
 
     fn build_profile_with_proxy(
         request: &ExecutionRequest,
         proxy_address: Option<&ProxyAddress>,
-    ) -> Result<String, String> {
+    ) -> Result<String, ProfileError> {
         let inputs = ProfileInputs {
             readonly_paths: request.policy.readonly_paths.clone(),
             readwrite_paths: request.policy.readwrite_paths.clone(),
@@ -1790,7 +1809,12 @@ mod tests {
         });
         let error =
             super::build_profile_with_proxy(&request, None, &ProfileInputs::default()).unwrap_err();
-        assert!(error.contains("not prepared for keychainAccess"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("not prepared for keychainAccess"),
+            "{error}"
+        );
     }
 
     fn capture_request(mode: CaptureDenialsMode, gui_access: bool) -> ExecutionRequest {
@@ -1909,13 +1933,19 @@ mod tests {
         let request = capture_request(CaptureDenialsMode::Block, false);
         let error =
             super::build_profile_with_proxy(&request, None, &ProfileInputs::default()).unwrap_err();
-        assert!(error.contains("log tag was not prepared"), "{error}");
+        assert!(
+            matches!(&error, ProfileError::Host(m) if m.contains("log tag was not prepared")),
+            "{error}"
+        );
 
         let mut request = request;
         request.seatbelt.as_mut().unwrap().profile_override = Some("(version 1)".into());
         let error =
             super::build_profile_with_proxy(&request, None, &ProfileInputs::default()).unwrap_err();
-        assert!(error.contains("profileOverride"), "{error}");
+        assert!(
+            matches!(&error, ProfileError::Policy(m) if m.contains("profileOverride")),
+            "{error}"
+        );
     }
 
     #[cfg(target_os = "macos")]

@@ -32,7 +32,7 @@ wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
 link-wslcsdk = ["dep:zip"]
 isolation_session = ["dep:windows-collections", "dep:windows-future"]
 test-support = []
-microvm = []
+microvm = ["dep:libloading", "dep:zip"]
 hyperlight = [
     "dep:hyperlight-unikraft",
     "dep:ureq",
@@ -72,14 +72,16 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 uuid.workspace = true
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
 filetime = "0.2"
+libloading = "0.8"
 quick-xml.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 serial_test.workspace = true
@@ -115,3 +117,8 @@ required-features = ["isolation_session"]
 [[example]]
 name = "sta_probe"
 required-features = ["isolation_session"]
+
+[[example]]
+name = "module_lifetime_fixture"
+path = "tests/fixtures/module_lifetime.rs"
+crate-type = ["cdylib"]

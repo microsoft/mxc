@@ -17,6 +17,69 @@ fn no_phase_selects_one_shot_request() {
 }
 
 #[test]
+fn denied_paths_override_readonly_and_readwrite_grants() {
+    use mxc_sdk::mxc_common::config_parser::load_mxc_request_from_json;
+    use mxc_sdk::mxc_common::logger::{Logger, Mode};
+    use mxc_sdk::mxc_common::state_aware_request::MxcRequest;
+    use std::path::Path;
+
+    // Existing sibling fixture directories avoid host-specific existence warnings.
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("mxc_contract")
+        .join("v1_0_0")
+        .join("fixtures");
+    let [denied, readonly, readwrite] =
+        ["one_shot", "start", "exec"].map(|name| fixtures.join(name).display().to_string());
+
+    for (name, deny_readonly, deny_readwrite) in [
+        ("deny vs readonly", true, false),
+        ("deny vs readwrite", false, true),
+        ("deny vs both allow lists", true, true),
+    ] {
+        let mut readonly_paths = vec![readonly.clone()];
+        let mut readwrite_paths = vec![readwrite.clone()];
+        if deny_readonly {
+            readonly_paths.push(denied.clone());
+        }
+        if deny_readwrite {
+            readwrite_paths.push(denied.clone());
+        }
+        let json = serde_json::json!({
+            "version": "1.0.0",
+            "process": {"commandLine": "echo"},
+            "filesystem": {
+                "readonlyPaths": readonly_paths,
+                "readwritePaths": readwrite_paths,
+                "deniedPaths": [&denied]
+            }
+        });
+        let parsed =
+            load_mxc_request_from_json(&json.to_string(), &mut Logger::new(Mode::Buffer))
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let MxcRequest::OneShot(request) = parsed else {
+            panic!("{name}: expected a create-and-run request");
+        };
+
+        assert_eq!(
+            request.policy.readonly_paths,
+            std::slice::from_ref(&readonly),
+            "{name}"
+        );
+        assert_eq!(
+            request.policy.readwrite_paths,
+            std::slice::from_ref(&readwrite),
+            "{name}"
+        );
+        assert_eq!(
+            request.policy.denied_paths,
+            std::slice::from_ref(&denied),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn isolation_session_one_shot_accepts_canonical_directional_network() {
     let json = r#"{
         "version": "1.0.0",

@@ -8,6 +8,8 @@ pub enum Containment {
     IsolationSession,
     /// Windows Sandbox backend.
     WindowsSandbox,
+    /// MicroVM backend.
+    MicroVm,
     /// WSL container backend.
     Wslc,
 }
@@ -18,6 +20,7 @@ impl Containment {
         match self {
             Containment::IsolationSession => "isolation_session",
             Containment::WindowsSandbox => "windows_sandbox",
+            Containment::MicroVm => "microvm",
             Containment::Wslc => "wslc",
         }
     }
@@ -29,6 +32,7 @@ impl Containment {
         match value {
             "isolation_session" => Some(Containment::IsolationSession),
             "windows_sandbox" => Some(Containment::WindowsSandbox),
+            "microvm" => Some(Containment::MicroVm),
             "wslc" => Some(Containment::Wslc),
             _ => None,
         }

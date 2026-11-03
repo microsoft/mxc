@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -295,7 +295,9 @@
     <ItemGroup>
     <MxcOtherRidNative Include="runtimes/$(MxcOtherWindowsRid)/native/*"
                        Condition="'$(MxcPackSingleRid)' != 'true' and '$(MxcOtherWindowsRid)' != ''" />
-    <TfmSpecificPackageFile Include="@(MxcNativeUnit)">
+    <!-- Native assets are shared by both frameworks; emit them only once. -->
+    <TfmSpecificPackageFile Include="@(MxcNativeUnit)"
+                            Condition="'$(TargetFramework)' == 'net8.0'">
       <PackagePath>runtimes/$(MxcPackageRid)/native/%(Filename)%(Extension)</PackagePath>
     </TfmSpecificPackageFile>
   </ItemGroup>

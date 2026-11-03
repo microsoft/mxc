@@ -772,7 +772,7 @@ fn object_key_ignore_ascii_case(config: &Value, wanted: &str) -> Option<String> 
 /// Existing entries are preserved with their original spelling; the
 /// merged array is deduplicated case-insensitively and sorted. Reserved
 /// learning-mode capability names are dropped (see
-/// [`RESERVED_CAPABILITIES`]) because the schema rejects them.
+/// `RESERVED_CAPABILITIES`) because the schema rejects them.
 ///
 /// Backends that have no capability array (anything that is not a
 /// process container) cannot express capabilities, so the discovered set

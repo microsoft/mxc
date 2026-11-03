@@ -13,6 +13,7 @@ Callers do not supply JSON or a schema version.
 |---|---|---|---|
 | Capture stdout and stderr | `run` | `runInContainer` | `Promise<ExecutionResult>` |
 | Live standard pipes | `spawn` | `spawnInContainer` | `Promise<MxcProcess>` |
+| Live standard pipes with a writable WSLC stdin | `spawnWithStdin` | `spawnInContainerWithStdin` | `Promise<MxcProcess>` |
 | Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `Promise<MxcPtyProcess>` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
@@ -22,7 +23,16 @@ covers IsolationSession, Bubblewrap, LXC, and Seatbelt direct execution.
 Existing-container PTY support remains IsolationSession-only. Seatbelt PTY
 rejects `guiAccess`.
 Terminal handles give the caller explicit input, output, resize, and process
-ownership; there is no separate attached-console launch API or API accepting ["MXC request JSON"](../../../schema.md#mxc-request-json).
+ownership; there is no separate attached-console launch API. Typed V1 does
+not accept ["MXC request JSON"](https://github.com/microsoft/mxc/blob/main/docs/schema.md#mxc-request-json); the
+[V1.Dev exact-JSON API](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
+accepts caller-authored requests separately.
+Captured existing-container execution returns partial text on timeout
+with `timedOut: true`, without waiting for output streams to close.
+Output read failures reject capture without waiting for the workload to exit.
+For executor-backed ProcessContainer PTY, `timeoutMs` reaches `wxc-exec`,
+but its exit channel does not distinguish a timeout from an ordinary exit:
+`wait().timedOut` is `false` when the executor exits in either case.
 
 Read the terminal output concurrently rather than only after waiting. On macOS
 a workload cannot exit while its terminal output is still unread, so a caller
@@ -52,6 +62,13 @@ export async function deprovisionContainer<C extends LifecycleContainmentKind>(c
 ## `@microsoft/mxc-sdk/v1::policy.filesystem.getAvailableToolsPolicy`
 
 Discover tool and SDK directories from the environment and return them as policy paths.
+
+On Windows, finding `pwsh.exe` on `PATH` also grants read-write access to the
+PSReadLine history directory under the supplied `USERPROFILE`. It does not
+implicitly grant read access to a drive root.
+
+For PowerShell startup failures, see
+[troubleshooting](https://github.com/microsoft/mxc/blob/main/docs/troubleshooting.md#powershell-startup).
 
 ```typescript
 export function getAvailableToolsPolicy(environment?: {
@@ -176,20 +193,40 @@ export async function runInContainer<C extends PipedExecuteBackend>(containerId:
 
 ## `@microsoft/mxc-sdk/v1::spawn`
 
-Create a container request and asynchronously return its live process.
+Create a container request and asynchronously return its live process. A WSLC
+command reads end-of-file on stdin.
 
 ```typescript
 export async function spawn(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;
 ```
 
 
+## `@microsoft/mxc-sdk/v1::spawnWithStdin`
+
+`spawn` with a writable `standardInput` whose end gives the command end-of-file.
+
+```typescript
+export async function spawnWithStdin(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;
+```
+
+
 ## `@microsoft/mxc-sdk/v1::spawnInContainer`
 
 Spawn a workload asynchronously inside a started IsolationSession or WSLC
-container with live standard pipes.
+container with live standard pipes. A WSLC workload reads end-of-file on stdin.
 
 ```typescript
 export async function spawnInContainer<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
+```
+
+
+## `@microsoft/mxc-sdk/v1::spawnInContainerWithStdin`
+
+`spawnInContainer` with a writable `standardInput`. Ending it gives the workload
+end-of-file.
+
+```typescript
+export async function spawnInContainerWithStdin<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
 ```
 
 

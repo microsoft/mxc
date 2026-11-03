@@ -7,14 +7,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::mxc_common::models::ExecutionRequest;
-use crate::seatbelt_common::profile_builder::ProfileInputs;
+use crate::seatbelt_common::profile_builder::{ProfileError, ProfileInputs};
 
 const DEVELOPER_DIR_LINKS: [&str; 2] = [
     "/private/var/db/xcode_select_link",
     "/private/var/select/developer_dir",
 ];
 
-pub(crate) fn prepare_profile(request: &ExecutionRequest) -> Result<ProfileInputs, String> {
+pub(crate) fn prepare_profile(request: &ExecutionRequest) -> Result<ProfileInputs, ProfileError> {
     if request
         .seatbelt
         .as_ref()
@@ -31,8 +31,11 @@ pub(crate) fn prepare_profile(request: &ExecutionRequest) -> Result<ProfileInput
     let readwrite_paths = resolve_all(&request.policy.readwrite_paths)?;
     let user_keychains = if request.seatbelt.as_ref().is_some_and(|c| c.keychain_access) {
         let home = std::env::var("HOME").map_err(|_| {
-            "HOME environment variable not set; cannot expand '~/Library/Keychains' for keychainAccess"
-                .to_string()
+            ProfileError::Host(
+                "HOME environment variable not set; cannot expand '~/Library/Keychains' for \
+                 keychainAccess"
+                    .to_string(),
+            )
         })?;
         Some(user_keychains_dir(&home)?)
     } else {
@@ -49,31 +52,47 @@ pub(crate) fn prepare_profile(request: &ExecutionRequest) -> Result<ProfileInput
     })
 }
 
-fn resolve_all(paths: &[String]) -> Result<Vec<String>, String> {
+fn resolve_all(paths: &[String]) -> Result<Vec<String>, ProfileError> {
     paths.iter().map(|p| resolve_policy_path(p)).collect()
 }
 
 /// Seatbelt matches real paths, so a symlinked HOME must be resolved.
-fn user_keychains_dir(home: &str) -> Result<String, String> {
+fn user_keychains_dir(home: &str) -> Result<String, ProfileError> {
     resolve_policy_path(&format!("{home}/Library/Keychains"))
 }
 
 /// Follow symlinks before applying `..`, retaining missing trailing names.
-pub(crate) fn resolve_policy_path(path: &str) -> Result<String, String> {
-    let expanded = expand_tilde(path)?;
-    let resolution_error =
-        |error| format!("Filesystem path '{path}' could not be resolved: {error}");
-    let absolute = std::path::absolute(&expanded).map_err(resolution_error)?;
+pub(crate) fn resolve_policy_path(path: &str) -> Result<String, ProfileError> {
+    let expanded = expand_tilde(path).map_err(ProfileError::Host)?;
+    let absolute = std::path::absolute(&expanded).map_err(|error| {
+        ProfileError::Host(format!(
+            "Filesystem path '{path}' could not be resolved: {error}"
+        ))
+    })?;
     let resolved = crate::mxc_common::filesystem_symlink::resolve_through_symlinks(&absolute)
-        .ok_or_else(|| format!("Filesystem path '{path}' has no resolved target"))?;
+        .ok_or_else(|| {
+            ProfileError::Policy(format!("Filesystem path '{path}' has no resolved target"))
+        })?;
     if let Some(error) = resolved.error {
-        return Err(resolution_error(error));
+        return Err(classify_io_error(
+            format!("Filesystem path '{path}' could not be resolved: {error}"),
+            &error,
+        ));
     }
-    resolved
-        .path
-        .into_os_string()
-        .into_string()
-        .map_err(|_| format!("Filesystem path '{path}' resolves to a non-UTF-8 path"))
+    resolved.path.into_os_string().into_string().map_err(|_| {
+        ProfileError::Policy(format!(
+            "Filesystem path '{path}' resolves to a non-UTF-8 path"
+        ))
+    })
+}
+
+/// Errors a different path would avoid blame the request; anything else is a host fault.
+pub(crate) fn classify_io_error(message: String, error: &std::io::Error) -> ProfileError {
+    if crate::mxc_common::filesystem_symlink::is_policy_path_error(error) {
+        ProfileError::Policy(message)
+    } else {
+        ProfileError::Host(message)
+    }
 }
 
 pub(crate) fn expand_tilde(path: &str) -> Result<String, String> {
@@ -144,7 +163,7 @@ fn enclosing_app_bundle(dir: &Path) -> Option<&Path> {
 /// Expands `~`, validates the output path, and adds `.json` when extensionless.
 pub(crate) fn prepare_capture_output_path(
     request: &ExecutionRequest,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, ProfileError> {
     let Some(path) = request
         .seatbelt
         .as_ref()
@@ -153,11 +172,12 @@ pub(crate) fn prepare_capture_output_path(
     else {
         return Ok(None);
     };
-    let mut expanded = expand_tilde(path)?;
+    let mut expanded = expand_tilde(path).map_err(ProfileError::Host)?;
     crate::learning_mode_core::capture_output::validate_output_path(
         "seatbelt.captureDenials.outputPath",
         Path::new(&expanded),
-    )?;
+    )
+    .map_err(ProfileError::Policy)?;
     if Path::new(&expanded).extension().is_none() {
         expanded = Path::new(&expanded)
             .with_extension("json")
@@ -240,7 +260,10 @@ mod tests {
             for suffix in ["", "child", "../secret"] {
                 let path = link.join(suffix);
                 let error = resolve_policy_path(path.to_str().unwrap()).unwrap_err();
-                assert!(error.contains("could not be resolved"), "{error}");
+                assert!(
+                    matches!(&error, ProfileError::Policy(message) if message.contains("could not be resolved")),
+                    "{error:?}"
+                );
             }
         }
     }
@@ -453,12 +476,21 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let error = prepare_capture_output_path(&with_path(directory.path().to_str().unwrap()))
             .unwrap_err();
-        assert!(error.contains("existing directory"), "{error}");
+        assert!(
+            matches!(&error, ProfileError::Policy(m) if m.contains("existing directory")),
+            "{error}"
+        );
         let error = prepare_capture_output_path(&with_path("denials.json")).unwrap_err();
-        assert!(error.contains("must be an absolute path"), "{error}");
+        assert!(
+            matches!(&error, ProfileError::Policy(m) if m.contains("must be an absolute path")),
+            "{error}"
+        );
         let error =
             prepare_capture_output_path(&with_path("~/mxc-missing-dir/denials.json")).unwrap_err();
-        assert!(error.contains("parent directory does not exist"), "{error}");
+        assert!(
+            matches!(&error, ProfileError::Policy(m) if m.contains("parent directory does not exist")),
+            "{error}"
+        );
         assert_eq!(
             prepare_capture_output_path(&ExecutionRequest::default()).unwrap(),
             None

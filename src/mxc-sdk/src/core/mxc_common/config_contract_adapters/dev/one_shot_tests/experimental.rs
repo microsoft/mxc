@@ -94,10 +94,37 @@ const DEVELOPMENT_CONTAINMENT_CASES: &[DevelopmentContainmentCase] = &[
 #[test]
 fn development_containment_variants_map_expected_wire_values() {
     for case in DEVELOPMENT_CONTAINMENT_CASES {
-        let wire = adapt(&request_with_containment(case.input));
+        let mut json: serde_json::Value =
+            serde_json::from_str(&request_with_containment(case.input)).unwrap();
+        if case.input == "microvm" {
+            json["microvm"] = serde_json::json!({"image": "docker.io/library/python:3.12-alpine"});
+        }
+        let wire = adapt(&json.to_string());
         assert_eq!(
             serde_json::to_value(wire.containment.unwrap()).unwrap(),
             serde_json::json!(case.expected)
         );
+    }
+}
+
+#[test]
+fn microvm_image_and_optional_memory_stay_together() {
+    for (provision, expected_memory) in [
+        (None, None),
+        (Some(serde_json::json!({})), None),
+        (Some(serde_json::json!({"memoryMib": 512})), Some(512)),
+    ] {
+        let mut json: serde_json::Value =
+            serde_json::from_str(&request_with_containment("microvm")).unwrap();
+        json["microvm"] = serde_json::json!({"image": "docker.io/library/python:3.12-alpine"});
+        if let Some(provision) = provision {
+            json["microvm"]["provision"] = provision;
+        }
+        let common = adapt(&json.to_string());
+        let microvm = common
+            .microvm
+            .expect("MicroVM settings should be populated");
+        assert_eq!(microvm.image, "docker.io/library/python:3.12-alpine");
+        assert_eq!(microvm.memory_mib, expected_memory);
     }
 }

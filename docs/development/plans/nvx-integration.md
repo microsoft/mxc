@@ -136,89 +136,11 @@ version matching, signature checks, and checksum checks.
 
 #### 2.4.5 SDK API exposure
 
-MXC will expose MicroVM through `mxc_sdk::v1::experimental` using the existing request, result, and lifecycle types.
-Creation and provision require an image and optionally accept `microvm.provision.memoryMib`.
-In Rust, `memory_mib: None` omits the override.
-
-##### Rust availability check
-
-```rust
-let backends = mxc_sdk::v1::available_backends();
-if !backends
-    .iter()
-    .any(|backend| backend.backend == "microvm")
-{
-    return Err("MicroVM is unavailable on this host".into());
-}
-```
-
-##### Rust `run`
-
-```rust
-use mxc_sdk::v1::{
-    self,
-    ContainerRequest,
-    Containment,
-    WaitResult,
-};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let request = ContainerRequest {
-        containment: Containment::MicroVm {
-            image: "python:3.12-alpine".into(),
-            memory_mib: Some(256),
-        },
-        timeout_ms: Some(30_000),
-        ..ContainerRequest::new("python -c \"print('hello from NVX')\"")
-    };
-
-    let result = v1::experimental::run(request, Default::default())?;
-    print!("{}", String::from_utf8_lossy(&result.stdout));
-    eprint!("{}", String::from_utf8_lossy(&result.stderr));
-
-    match result.outcome {
-        WaitResult::Exited(code) => println!("exit={code}"),
-        WaitResult::TimedOut => println!("timed out"),
-    }
-
-    Ok(())
-}
-```
-
-##### Rust `spawn`
-
-Rust `spawn` uses the same `ContainerRequest` and `Containment::MicroVm`
-fields as `run`.
-
-##### Rust container lifecycle
-
-```rust
-use mxc_sdk::v1::{
-    self,
-    ExecutionRequest,
-    ProvisionRequest,
-};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let provisioned = v1::experimental::container::provision_container(
-        ProvisionRequest::microvm("python:3.12-alpine", Some(512)),
-        Default::default(),
-    )?;
-    let id = provisioned.container_id;
-
-    v1::experimental::container::start_container(&id, Default::default())?;
-    let result = v1::experimental::container::run_in_container(
-        &id,
-        ExecutionRequest::new("echo hello"),
-        Default::default(),
-    )?;
-    println!("{}", String::from_utf8_lossy(&result.stdout));
-    v1::experimental::container::stop_container(&id, Default::default())?;
-    v1::experimental::container::deprovision_container(&id, Default::default())?;
-    Ok(())
-}
-```
-
+The current integration supports captured create-and-run execution through
+development request JSON and the executor. Streaming, lifecycle operations,
+and public SDK MicroVM selection remain unsupported. The JSON creation contract
+requires a fully qualified registry image. Explicit memory overrides remain
+unsupported by this backend.
 [Appendix F.3](#f3-contract-and-sdk-publication) describes contract and SDK
 publication.
 
@@ -282,10 +204,11 @@ network rule limits and rejection behavior.
 
 ### 4.4 Lifecycle
 
-The MXC `1.1.0-alpha` contract does not contain state-aware MicroVM provision
-types. MXC will add these types before the SDKs publish the NVX lifecycle.
+The MXC `1.1.0-alpha` contract defines MicroVM provision requests, but the
+backend currently rejects public lifecycle operations. The lifecycle behavior
+below is proposed future work, not current support.
 
-One-shot and state-aware provision use the same MicroVM configuration.
+Create-and-run and provision requests use the same MicroVM configuration.
 [Appendix F.4](#f4-state-aware-provision-shape) contains the state-aware
 request shape.
 
@@ -360,7 +283,7 @@ For example:
 ```json
 {
   "microvm": {
-    "image": "python:3.12-alpine",
+    "image": "docker.io/library/python:3.12-alpine",
     "provision": {
       "memoryMib": 256
     }
@@ -562,8 +485,8 @@ The NVX native host manages converted images under its state root:
 NVX caches a reference by its text and does not automatically refresh a tag.
 A later provision using that state root can therefore reuse earlier content.
 
-`microvm.image` may reference OCI registries such as Docker Hub. The NVX image
-tool will define how short image references are resolved.
+`microvm.image` may reference OCI registries such as Docker Hub. It must include
+the registry host; MXC does not resolve short image references.
 The NVX image tool handles registry access, image download, and conversion.
 Guest egress restrictions do not bound the host's registry downloads.
 The native reference-pull timeout defaults to 30 minutes.
@@ -728,7 +651,7 @@ It does not start a VM.
 
 | SDK | Required changes |
 | --- | --- |
-| Rust SDK | Explicit experimental V1 entry points and development MicroVM provision types |
+| Rust SDK | Future development JSON entry points with explicit experimental authorization |
 | .NET SDK | Explicit experimental V1 entry points, development `1.1.0-alpha` request writers through `mxc_ffi`, and matching runtime packaging |
 | Node SDK | Explicit experimental V1 entry points, development `1.1.0-alpha` request writers, runtime packaging, and directory registration through `mxc_ffi` |
 
@@ -741,10 +664,8 @@ end-to-end tests over the same `mxc_engine` runner.
 
 #### E.2.1 MXC request and NVX call flow
 
-The SDKs expose typed MXC requests. Node and .NET serialize those requests and
-cross the existing `mxc_ffi` boundary. Rust passes typed requests through
-`mxc-sdk`.
-The engine routes execution to the backend.
+The executor accepts caller-authored MicroVM request JSON and the engine routes
+execution to the backend. The SDK paths below describe the proposed integration.
 
 ```mermaid
 flowchart LR
@@ -824,7 +745,7 @@ identify the associated log path.
   "version": "1.1.0-alpha",
   "containment": "microvm",
   "microvm": {
-    "image": "python:3.12-alpine",
+    "image": "docker.io/library/python:3.12-alpine",
     "provision": {
       "memoryMib": 256
     }
@@ -839,7 +760,6 @@ identify the associated log path.
 
 MicroVM execution also requires experimental authorization.
 For the internal executor path, supply `--experimental`.
-In Rust, use the explicit `v1::experimental` entry points.
 Selecting the development JSON version alone does not grant authorization.
 
 ### F.2 Schema additions
@@ -854,12 +774,12 @@ Require `microvm.image` in create-and-run and provision requests.
 | Start, exec, stop, and deprovision | Use the container ID created during provision. Do not accept image or provision-time policy changes. |
 
 The development MicroVM request types reject unknown fields.
-Missing, empty, whitespace-containing, or control-character image references
-must fail before backend setup.
+Missing image references, references without a registry host and repository,
+and references containing whitespace or control characters must fail before
+backend setup.
 Memory values must also pass backend semantic and capability validation.
 
 Regenerate the registered development schema and generated TypeScript types.
-Add the experimental Rust authoring path.
 Register the MicroVM provision request root with the development contract
 descriptor and its fixture corpus.
 [Appendix F.3](#f3-contract-and-sdk-publication) describes publication.
@@ -868,14 +788,10 @@ request shape.
 
 ### F.3 Contract and SDK publication
 
-Development MicroVM provision and experimental Rust APIs do not modify
-released schemas or advance `sdkMajorTargets`.
-The ordinary V1 methods retain their stable contract.
-The explicit experimental Rust methods use the development contract and
-authorize experimental backend selection.
-Typed Node and .NET MicroVM support will likewise require explicit experimental
-V1 entry points and development `1.1.0-alpha` request writers before promotion
-to a stable contract.
+Development MicroVM provision does not modify released schemas or advance
+`sdkMajorTargets`. Public V1 SDK methods retain their stable contract.
+SDK MicroVM support requires explicit experimental authorization and development
+`1.1.0-alpha` request support before promotion to a stable contract.
 Experimental authorization is not a request JSON field.
 
 Contract publication and host availability remain separate. A published
@@ -895,7 +811,7 @@ provision request.
   "phase": "provision",
   "containment": "microvm",
   "microvm": {
-    "image": "python:3.12-alpine",
+    "image": "docker.io/library/python:3.12-alpine",
     "provision": {
       "memoryMib": 512
     }

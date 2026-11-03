@@ -49,7 +49,7 @@ binary targets of the same publishable package under `src/mxc-sdk/src/bin/`:
 | Windows Sandbox | SDK common/lifecycle modules plus `src/mxc-sdk/src/bin/windows_sandbox_{daemon,guest}/` |
 | WSLC | `src/mxc-sdk/src/backends/wslc/common/` plus `src/mxc-sdk/src/bin/wslc_daemon/` |
 | IsolationSession | SDK bindings and runtime modules under `backends/isolation_session/` |
-| NanVix | SDK common, runner, binary-staging, and build modules under `backends/nanvix/` |
+| NVX MicroVM | SDK backend modules under `backends/nvx/`; signed-bundle staging in `build/build_nvx_bundled.rs` |
 | Windows Learning Mode | `src/mxc-sdk/src/core/learning_mode_windows/` over the shared core module |
 
 Shared parsing and normalization live in the `mxc_common` module; backend-specific policy

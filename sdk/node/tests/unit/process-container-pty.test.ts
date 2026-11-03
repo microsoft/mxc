@@ -13,7 +13,10 @@ import {
   _setProcessContainerPtyDependencies,
   createNodePtyProcess,
   spawnProcessContainerWithPty,
+  spawnProcessContainerWithPtyJson,
 } from '../../src/bindings/process-container-pty.js';
+import { spawnWithPtyJson } from '../../src/v1/dev/index.js';
+import { spawnWithPty } from '../../src/v1/container.js';
 
 class FakePty implements IPty {
   readonly pid = 42;
@@ -145,6 +148,103 @@ describe('ProcessContainer node-pty binding', () => {
       assert.strictEqual(options?.useConpty, true);
       terminal.dispose();
       pty.exit(0);
+    } finally {
+      _setProcessContainerPtyDependencies();
+    }
+  });
+
+  it('transports raw dev JSON byte-for-byte without stable mapping', async () => {
+    const pty = new FakePty();
+    let args: string[] = [];
+    _setProcessContainerPtyDependencies({
+      findExecutable: () => 'C:\\mxc\\wxc-exec.exe',
+      loadNodePty: async () => ({
+        spawn: (_file, spawnArgs) => {
+          args = [...spawnArgs];
+          return pty;
+        },
+      }) as typeof import('node-pty'),
+    });
+    const json = ' { "version":"1.1.0-alpha", "containment":"processcontainer", "process":{"commandLine":"cmd","timeout":1e3},"future":true } ';
+    try {
+      const terminal = process.platform === 'win32'
+        ? await spawnWithPtyJson(json, {
+          experimental: true, size: { rows: 30, columns: 90 },
+        })
+        : await spawnProcessContainerWithPtyJson(json, true, 30, 90);
+      assert.strictEqual(Buffer.from(args[1], 'base64').toString('utf8'), json);
+      assert.deepStrictEqual(args, ['--config-base64', args[1], '--experimental']);
+      terminal.dispose();
+      pty.exit(0);
+    } finally {
+      _setProcessContainerPtyDependencies();
+    }
+  });
+
+  it('routes the historical appcontainer alias through wxc-exec unchanged', {
+    skip: process.platform !== 'win32',
+  }, async () => {
+    const pty = new FakePty();
+    let args: string[] = [];
+    _setProcessContainerPtyDependencies({
+      findExecutable: () => 'C:\\mxc\\wxc-exec.exe',
+      loadNodePty: async () => ({
+        spawn: (_file, spawnArgs) => {
+          args = [...spawnArgs];
+          return pty;
+        },
+      }) as typeof import('node-pty'),
+    });
+    const json = ' { "version":"0.9.0-alpha","containment":"appcontainer","process":{"commandLine":"cmd.exe","timeout":3000} } ';
+    try {
+      const terminal = await spawnWithPtyJson(json, {
+        size: { rows: 25, columns: 80 },
+      });
+      assert.deepStrictEqual(args, [
+        '--config-base64',
+        Buffer.from(json, 'utf8').toString('base64'),
+      ]);
+      terminal.dispose();
+      pty.exit(0);
+    } finally {
+      _setProcessContainerPtyDependencies();
+    }
+  });
+
+  it('uses the same executor timeout outcome for typed and raw PTY calls', {
+    skip: process.platform !== 'win32',
+  }, async () => {
+    const processes: FakePty[] = [];
+    const requests: string[] = [];
+    _setProcessContainerPtyDependencies({
+      findExecutable: () => 'C:\\mxc\\wxc-exec.exe',
+      loadNodePty: async () => ({
+        spawn: (_file, spawnArgs) => {
+          requests.push(Buffer.from(spawnArgs[1], 'base64').toString('utf8'));
+          const pty = new FakePty();
+          processes.push(pty);
+          return pty;
+        },
+      }) as typeof import('node-pty'),
+    });
+    const rawJson = '{"version":"1.0.0","containment":"processcontainer","process":{"commandLine":"cmd.exe","timeout":25}}';
+    try {
+      const typed = await spawnWithPty({
+        containment: { type: 'processcontainer' },
+        command: 'cmd.exe',
+        timeoutMs: 25,
+      });
+      const raw = await spawnWithPtyJson(rawJson);
+      assert.strictEqual(JSON.parse(requests[0]).process.timeout, 25);
+      assert.strictEqual(requests[1], rawJson);
+      processes.forEach((pty) => pty.exit(-1));
+      const outcomes = await Promise.all([typed.wait(), raw.wait()]);
+      assert.deepStrictEqual(outcomes, [
+        { exitCode: -1, timedOut: false },
+        { exitCode: -1, timedOut: false },
+      ]);
+      typed.dispose();
+      raw.dispose();
     } finally {
       _setProcessContainerPtyDependencies();
     }

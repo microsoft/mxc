@@ -281,8 +281,10 @@ try {
 }
 ```
 
-WSLC SDK execution uses standard output/error streams and does not expose a
-caller-controlled PTY or stdin.
+Create-and-run WSLC execution uses separate stdout and stderr pipes, and a stdin
+pipe only when started with stdin, and does not expose a caller-controlled PTY.
+See [Sending input (stdin)](#sending-input-stdin) for how to give a command
+input.
 
 ### Rust SDK
 
@@ -327,13 +329,53 @@ Notes and limits:
 
 - **Windows only.** Selecting `Containment::Wslc` on Linux/macOS, or without the
   `wslc` feature, fails with `ErrorCode::UnsupportedContainment`.
-- **No stdin.** MXC does not forward stdin to a WSL container, so
-  `Sandbox::take_stdin()` returns `None` for it.
+- **Stdin.** `v1::spawn_with_stdin` returns a writable stdin through
+  `MxcProcess::take_stdin()`; drop it to give the command end-of-file.
+  `v1::spawn` and `v1::run` give the command end-of-file at once. See
+  [Sending input (stdin)](#sending-input-stdin).
 - **No host pid.** The process runs inside the WSL VM, so `Sandbox::id()` is `0`;
   use `kill()` (which stops the container and everything in it) to terminate it.
 - **Discovery.** `platform_support()` lists `"wslc"` in `available_methods` only
   when this host can actually run it (`wslcsdk.dll` loads and the WSLC runtime
   reports no missing components).
+
+### Sending input (stdin)
+
+Stdin is forwarded to create-and-run commands and to commands run in a
+provisioned container (container lifecycle operations).
+
+| Flow | Stdin |
+|---|---|
+| CLI: `wxc-exec` with a `wslc` config, or `wxc-exec --operation exec` | The executor's own stdin is forwarded when it is a pipe, a file, or `NUL`, for example `type input.txt \| wxc-exec.exe config.json` or `wxc-exec.exe config.json < input.txt`. A terminal is not forwarded: the command sees end-of-file at once, and the executor prints a warning to stderr. |
+| Create-and-run from an SDK: `spawn_with_stdin` (Rust), `MxcContainer.SpawnWithStdin` (.NET), `spawnWithStdin` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. Waiting on the process closes a stdin the caller did not take. Once the command exits, or is killed, its stdin is closed, so a pending write fails rather than hangs. If forwarding written input fails for any other reason, `wait` reports the failure. |
+| Create-and-run from an SDK: `spawn` (Rust), `MxcContainer.Spawn` (.NET), `spawn` (Node) | Not forwarded. |
+| Lifecycle exec from an SDK: `spawn_in_container_with_stdin` (Rust), `MxcLifecycle.SpawnInContainerWithStdin` (.NET), `spawnInContainerWithStdin` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. |
+| Lifecycle exec from an SDK: `spawn_in_container` (Rust), `MxcLifecycle.SpawnInContainer` (.NET), `spawnInContainer` (Node) | Not forwarded. |
+
+The run-to-completion helpers (`run`, `run_in_container`, `Run`,
+`RunInContainer`, `runInContainer`) take no input, so a command that reads
+stdin sees end-of-file at once.
+
+The executor reads its own stdin on a background thread as the command runs,
+so a stdin that never closes does not delay a command that does not read it.
+A command that exits before reading all its input is not an error. If reading
+the executor's stdin fails while the command runs, the executor stops the
+container before the command's stdin is closed, and reports the run as failed,
+even when the run also timed out. If the stop cannot be confirmed, the command's
+stdin stays open until the container is torn down, so the command never reads
+the cut-short input as complete.
+
+A command that exits while a large amount of its input is still unread (more
+than the few hundred KiB the WSLc SDK buffers) completes late: the SDK reports
+its exit 30 seconds or more after the command ends, and may drop output the
+command wrote after its input backed up. When that happens the executor, or
+the SDK process's warnings, report that output may be incomplete. Even a
+command such as `head -n 1` that stops reading early is delayed this way, so
+keep input to a command that may not read all of it small.
+
+A `timeout` still ends a command that waits on a stdin that never closes.
+
+See [exec stdin](wslc-state-aware.md#exec-stdin) for lifecycle-exec details.
 
 ## Configuration Reference
 
@@ -584,6 +626,11 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+Create-and-run execution and container lifecycle provisioning use the shared
+[filesystem probe deadlines](../../schema.md#filesystem-probe-timeouts) for
+object identity, delegation, and denied-path overlap checks. A stalled probe
+rejects the request before volumes are created.
+
 ### Working directory (`process.cwd`)
 
 Create-and-run execution takes `process.cwd` as a local Windows drive path and maps it the
@@ -692,7 +739,7 @@ Four workload shapes are not:
 
 | Workload type | Why |
 |---|---|
-| Interactive processes (REPLs, shells) | MXC does not pass stdin — execution is fire-and-forget |
+| Interactive processes (REPLs, shells) | Interactive terminal input is not forwarded; only piped or redirected input reaches the command (see [Sending input (stdin)](#sending-input-stdin)) |
 | GUI applications (X11, Wayland) | No display server — MXC captures stdout/stderr only |
 | Long-running daemons (web servers, databases) | MXC expects the process to exit within the configured timeout |
 | Hardware access (USB, serial, Bluetooth) | The micro-VM does not expose host hardware beyond filesystem and network |

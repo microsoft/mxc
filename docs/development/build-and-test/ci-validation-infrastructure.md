@@ -15,9 +15,14 @@ the individual local test scripts are documented in
 
 - Validation tests **never build from source**. They download the artifacts
   produced by `Build.Windows.Job.yml` / `Build.Linux.Job.yml` /
-  `Build.MacOS.Job.yml`, and for ProcessContainer and IsolationSession the
+  `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, and WSLC the
   Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`, in the same
   workflow run, so what gets tested is exactly what got built.
+
+- IsolationSession also downloads `telemetry-test-executor-<target>`, a separate
+  local-only debug executor with `test-support` and `isolation_session`. Shipping
+  release binaries never enable the consent/policy test overrides.
+
 - The matrix is **declarative**. `scripts/ci/validation-test-matrix.json` is the
   only file you edit to change *what runs where*;
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
@@ -31,8 +36,10 @@ the individual local test scripts are documented in
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `.github/workflows/Package.WindowsSdk.TestBundle.Job.yml` | `workflow_call`-only. Builds the Windows SDK test bundle natively on x64 and arm64 and uploads it as `windows-sdk-test-bundle-<target>`. |
-| `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession and ProcessContainer SDK test payloads and checks that each payload discovers its tests. |
+| `scripts/ci/build-windows-sdk-test-bundle.ps1` | Builds the IsolationSession, ProcessContainer, and WSLC SDK test payloads and checks that each payload discovers its tests. |
 | `scripts/ci/stage-isolation-session-test-helpers.ps1` | Inspects staged suites and copies the known helpers they dot-source; a required helper missing from the selected checkout fails packaging. |
+| `scripts/ci/stage-nvx-validation-tests.ps1` | Stages the compiled Windows x64 SDK MicroVM tests in the existing Windows artifact and checks required test discovery. |
+| `scripts/ci/Invoke-CratePackage.ps1 -VerifyMicrovmTests` | Extracts the `mxc-sdk` archive, requires its seven MicroVM fixtures, and compiles `nvx_e2e` with `microvm` on Windows x64 without running a VM. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
@@ -50,7 +57,7 @@ Validation.Tests.Scheduled.yml
       ├─ windows-sdk-bundle         →  Package.WindowsSdk.TestBundle.Job.yml  (upload bundle)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
-                 ├─ windows job (matrix) → download artifact (+ SDK bundle for process/isolation-session) → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
+                 ├─ windows job (matrix) → download artifact (+ SDK bundle for process/isolation-session/wslc) → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
                  ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_backend_validation_tests.sh
                  └─ macos   job (matrix) → download artifact → prepare-macos-host.sh  → run_backend_validation_tests.sh
 ```
@@ -65,8 +72,8 @@ test jobs only ever `download-artifact`.
 | Job | What it does |
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
-| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp and argument generation, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
+| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
@@ -74,22 +81,31 @@ test jobs only ever `download-artifact`.
 
 Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
 
+The standalone bundle builder publishes the .NET tests for `net10.0`.
+The Azure two-branch template evaluates the selected checkout's test project,
+prefers `net10.0`, and falls back to `net8.0` for older branches. It fails if
+neither framework is supported or project evaluation fails. Both builders
+publish self-contained applications with the selected runtime, so validation
+hosts need no installed .NET SDK or runtime. Runtime servicing requires
+rebuilding the bundle.
+
 Build artifacts are kept for 1 day — they exist only to feed these jobs. The
-test jobs need the three builds; a failed SDK bundle fails the ProcessContainer
-and IsolationSession jobs at their bundle download.
+test jobs need the three builds; a failed SDK bundle fails the ProcessContainer,
+IsolationSession, and WSLC jobs at their bundle download.
 
 ### `Validation.Tests.Matrix.Job.yml` — "Create Validation Test Matrix"
 
 | Job | Runner | What it does |
 |-----|--------|--------------|
 | `resolve` | `ubuntu-latest` | Runs the resolver, emits one matrix per OS family plus `has_<family>` flags so an empty family is skipped rather than failing on an empty matrix. |
-| `windows` | `A self-hosted 1ES Pool` | Download artifact (plus the SDK bundle for `process` and `isolation-session`) → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
+| `windows` | `A self-hosted 1ES Pool` | Download artifact (plus the SDK bundle for `process`, `isolation-session`, and `wslc`) → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
 | `linux` | `A self-hosted 1ES Pool` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `prepare-macos-host.sh <backend id>` → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
-the architecture). Job timeout 180 min; host prep 15 min; the test step 45 min
-(60 on macOS), so a hung backend fails while the log is still useful. Logs are
+the architecture). Job timeout 180 min; host prep 15 min (20 on Windows); the
+test step 45 min on Linux and 60 on Windows and macOS, so a hung backend fails
+while the log is still useful. Logs are
 uploaded either way — see [Log collection](#log-collection).
 
 ## The catalog
@@ -125,7 +141,7 @@ Current platforms:
 | `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process, wslc, windows-sandbox, microvm | process, isolation-session |
 | `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | wslc, windows-sandbox, microvm | — |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc | — |
-| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, lxc | — |
+| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `macos-27` | macos | — | runner `xcode-27` (public preview) | — | seatbelt |
@@ -161,6 +177,34 @@ operations are reported as skips, not passing policy assertions.
 `tests/scripts/run_processcontainer_workload_tests.ps1` restores the application
 workloads for manual native-PSEC use only. It is not included in this matrix or
 called by the native policy suite.
+
+`isolation-session` and `wslc` run every suite and report each one. For
+`wslc` that is the command-line suite from the build artifact plus the .NET and
+Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites skip unless
+`MXC_ENABLE_WSLC_TESTS=1`, which the dispatcher sets, and a suite that executed
+no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
+tests.
+
+Bubblewrap, LXC, and WSLC also run the prebuilt
+`mxc-filesystem-probe-tests` executable from their build artifact. These public
+SDK regressions block each policy probe in a subprocess, require a bounded
+path-specific rejection, and check that no workload ran. They cover both shared
+validation and backend-specific deny/mount/overlap probes; WSLC also covers
+container provisioning. LXC mount cases run as root against an empty, stopped
+container in private storage and verify cleanup. The blocked-call hook is test-only. See
+[filesystem probe request deadlines](pull-requests.md#filesystem-probe-request-deadlines)
+for local commands and watchdog behavior.
+
+ProcessContainer's required V1.Dev cases cover capture and bidirectional
+pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
+direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
+against Bubblewrap and Seatbelt in Linux and macOS PR integration jobs.
+
+IsolationSession and WSLC require V1.Dev lifecycle, captured/piped exec,
+validation, and cleanup cases. IsolationSession also covers existing-container
+PTYs; its Rust and Node cases check partial capture on timeout with
+descendant-held pipes. Bundle discovery and runtime result gates require the
+named scenarios to pass.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -210,13 +254,32 @@ get fixed or wired.
 | Backend | Status | Notes |
 |---------|--------|-------|
 | ProcessContainer | ✅ Good | Requires native PSEC; verifies public SDK streaming, filesystem policy and aliases, CLI contract boundaries, DOS/NT final paths, egress/loopback/proxy rules, the functional UI matrix, HANDLES, and global atoms. Unsupported host capabilities must reject requests. Privilege removal uses a host-token control. Application workload tests remain manual-only. |
-| Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. The Linux build job also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. |
+| Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. Private resolver fixtures check host IPC isolation, descriptor-backed snapshots, symlink layouts, filesystem-policy precedence, and nonregular-file rejection. The Linux build explicitly runs the resolver safety unit tests. It also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. The proxy, firewall, and version-gate suites also run with host tools missing from `PATH`, so tool discovery and launch must find them in the standard system directories. |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
-| IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
+| IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, isolated lifecycle ETW capture, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
-| MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
+| MicroVM | Experimental | Windows 25H2 x64 nightly; see [MicroVM validation](#microvm-validation). |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
+
+### MicroVM validation
+
+The nightly job runs the compiled tests from `mxc-sdk/tests/nvx_e2e.rs`.
+They check executor configurations, JSON requests that collect output, image
+selection, file access rules, and network address and port rules. They also
+check that traffic through a proxy works while direct connections are blocked,
+and that interrupting startup or execution removes the VM and its temporary files.
+The executor and captured JSON execution scenarios also check that the guest
+uses the host CPU profile.
+
+The network tests connect to servers controlled by the test. They check that
+the servers are reachable before and after testing the restrictions, so an
+unavailable server cannot be mistaken for a blocked connection. The host needs
+an IPv4 route through a non-loopback interface to an address outside the guest
+network, `10.0.0.0/24`.
+
+Regular Windows x64 PR builds run checks that do not need a VM. They also
+unpack the Rust crate package and check that its tests compile.
 
 ### ProcessContainer SDK streaming
 
@@ -227,10 +290,68 @@ compile or restore SDK dependencies.
 
 The dispatcher explicitly runs the ignored Rust bidirectional-stdio test,
 enables `MXC_E2E_PSEC_CAPABLE_HOST` for the .NET `MxcProcessTests`, and runs the
-Node public `run` and `spawn` integration cases. The .NET suite checks stdin,
+Node public `run`, `spawn`, and tool-discovery filesystem integration cases.
+The tool-discovery case uses a private fixture alongside the packaged Node
+tests rather than under the host temporary directory. It uses a fake
+`pwsh.exe`, applies the discovered policy through public `run`, and checks that
+tool files are readable while a sibling private sentinel remains denied. It
+also checks host readability and denial without a grant. The .NET suite checks stdin,
 stdout, stderr, large output, cancellation, kill, and timeout behavior.
 Required test names and methods must pass; empty selections and skipped
-streaming cases fail the job even when the runner exits successfully.
+required cases fail the job even when the runner exits successfully.
+
+### IsolationSession lifecycle telemetry
+
+Every scheduled `isolation-session` job runs
+`run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle -CheckKeywords -SkipClean` against
+the architecture-matched telemetry test executor. That artifact is built with
+an empty `MXC_TELEMETRY_PROVIDER_GROUP_GUID` input, so the single registration
+has no UTC routing. Consent is granted only in a temporary test store (needed by
+the published contract; development Required collection ignores it) and policy is
+redirected to an isolated HKCU key; real user consent and HKLM policy are not
+modified. The test mode also makes the build eligible for Required collection.
+
+The Windows build job sets `MXC_TELEMETRY_TEST_KEYWORDS=1` only for this debug
+`test-support` artifact. It uses real Measures/Usage and Critical Data/Performance
+metadata while remaining local-only without provider-group routing. Release, non-Windows,
+non-test-support and grouped builds reject this test setting.
+All events use the same `Microsoft.MXC` registration and provider GUID.
+Generated-group and registration tests separately check the shared WinExt
+input, failure/retry, and cleanup. ETW capture verifies both metadata categories,
+not Microsoft ingestion or an MXC Required/Optional consent model.
+
+The existing lifecycle suite runs provision, start, two successful execs, stop
+and deprovision twice, once with published `1.0.0` and once with development
+`1.1.0-alpha`, each phase in a separate executor process. The local
+ETW trace must contain one matching ExecutionStart/ExecutionEnd pair per
+recorded PID, correct phase/backend/mode attribution, one session ID and CV
+root throughout each lifecycle, and fresh attribution after cleanup. Successful
+deprovision must remove the isolated correlation records. Missing privileges,
+unsupported hosts, incomplete scenarios and missing events fail the job.
+
+Keyword checks read actual `System/Keywords` from decoded ETW, require
+ProcessExited for each exec, and check Start, End, Error and ProcessExited
+against the request's contract. Separate valid requests for the Windows-
+unsupported Bubblewrap backend require failure pairs and Error for both
+contracts. The same checks read `PartA_PrivTags`: the four development
+events must carry Performance, and published events must retain Usage.
+Development requests must emit only ExecutionStart, ExecutionEnd, Error and
+ProcessExited; any other emitted event fails the trace oracle.
+Missing, invalid or combined privacy tags fail. Other published event families
+must retain Measures; combined category masks fail.
+The Windows build job also runs paired create-and-run requests and
+these failure cases. Keyword-check mode fails rather than skips without
+Administrator privileges.
+
+ETL, decoded XML and the invocation manifest remain under the suite's redirected
+TEMP for the normal log upload. The HKCU test key and process overrides are
+restored even on failure. No telemetry uploader is started. The offline
+`tests/scripts/test_telemetry_etw_assertions.ps1` regression checks the trace
+oracle, release consent fixture defaults, and the scenario's requests through
+real CLI/backend dry-run validation in each Windows build job. Its missing-network
+control confirms that provision cannot silently inherit a permissive policy.
+Trace fixtures follow `tracerpt` XML: TraceLogging event names are in
+`RenderingInfo/Task`; `System/Task` contains the numeric task ID.
 
 ### IsolationSession Rust test concurrency
 
@@ -254,9 +375,11 @@ every entry.
 
 - `process` — no host mutation; the test requires the native probe to report
   PSEC.
-- `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
-  exclusion for the binary directory, and requires the Windows Hypervisor
-  Platform feature *and* a running hypervisor.
+- `microvm` — asserts the SDK test executable and signed NVX runtime files are
+  in the artifact, adds a Defender exclusion for the binary directory, and
+  requires the Windows Hypervisor Platform feature *and* a running hypervisor.
+  The dispatcher runs the prebuilt SDK tests without Cargo and fails on missing
+  VM completion markers, empty suites, skipped tests, or filtered tests.
 - `wslc` — asserts `wslcsdk.dll` shipped, requires the WSL and
   VirtualMachinePlatform optional features to be baked into the image, then
   installs/updates the WSL runtime (including the pre-release ring) up to the
@@ -311,7 +434,9 @@ compatibility-consent workloads pause at a ready/release handshake so their
 SDDL can also be checked while they are alive. It covers
 learning-mode enforcement, explicit capture paths and warnings, multiple
 capabilities, environment/cwd/exit propagation, and timeout cleanup of a
-ready-signalled grandchild. UI checks cover all four isolation values and use
+ready-signalled grandchild. A copy of `cmd.exe` named `pwsh.exe` checks that an
+intentional nonzero workload exit preserves its stderr without recommending
+drive-root read grants. UI checks cover all four isolation values and use
 uncontained positive controls for clipboard, desktop creation, and a no-op
 mouse-speed setter. Clipboard tests run only for text-only clipboards; non-text
 formats or an unavailable clipboard produce an explicit skip before any change.
@@ -342,7 +467,9 @@ UDP/53 rules remains required.
   LXC after RHEL 7 and ships no replacement. Without the zone assignment the
   default zone rejects the container's IPv4 DHCP, and a container holding only
   an IPv6 address fails every network test.
-- `microvm` — asserts the NanVix payload exists.
+
+The historical Linux `microvm` preparation branch is not scheduled. The
+Phase 1 NVX runtime supports only Windows x64.
 
 Every install above goes through two shared helpers rather than its own
 package-manager chain: `resolve_package_manager` picks the first of `apt-get`,
@@ -454,6 +581,15 @@ also use.
 
 Linux and macOS need none of this — those suites log to stdout, and the run
 step tees that into `$RUNNER_TEMP/mxc-ci.log`.
+
+The Windows SDK test bundle downloads under `artifacts/bin`, outside
+`$RUNNER_TEMP`, so it is not uploaded again with the logs.
+
+MicroVM validation writes `microvm-nvx.log` and `microvm-perf-results.json`
+under the redirected temporary directory, so the normal Windows log upload
+collects both. The signed NVX bundle stays under `artifacts/bin` and is not
+uploaded again. The former standalone `microvm-e2e.yml` workflow is retired;
+real VM execution is scheduled rather than run on each PR.
 
 ## Runbook
 

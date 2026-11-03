@@ -52,10 +52,18 @@ fn ensure_host_supported() -> Result<(), MxcError> {
 /// Spawns the sandboxed process with piped stdio and returns a handle the
 /// caller can write to, read from, wait on, and kill. Backends without a
 /// streaming implementation return [`MxcError::unsupported_containment`].
+///
+/// `stdin` gives a WSLc process a writable stdin rather than end-of-file; the
+/// other backends always provide one.
 pub fn spawn_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    crate::mxc_engine::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
     ensure_host_supported()?;
     // `dry_run` means "validate, don't execute" — there is no process to
     // stream, so reject it rather than silently ignoring it.
@@ -74,7 +82,7 @@ pub fn spawn_runner(
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::Lxc => spawn_lxc(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
-        ContainmentBackend::Wslc => spawn_wslc(request, logger),
+        ContainmentBackend::Wslc => spawn_wslc(request, logger, stdin),
         ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
@@ -276,8 +284,7 @@ fn spawn_process_container(
     use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
     use crate::process_container_common::base_container_runner::BaseContainerRunner;
 
-    let mut backend =
-        BaseContainerRunner::for_request(request).map_err(MxcError::backend_unavailable)?;
+    let mut backend = BaseContainerRunner::for_request(request)?;
     backend
         .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
@@ -298,11 +305,16 @@ fn spawn_process_container(
 fn spawn_wslc(
     request: &ExecutionRequest,
     logger: &mut Logger,
+    stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
     let config = request.wslc.clone().unwrap_or_default();
-    let mut runner = crate::wslc_common::WSLContainerRunner::new(&config);
+    let mut runner = if stdin {
+        crate::wslc_common::WSLContainerRunner::with_piped_stdin(&config)
+    } else {
+        crate::wslc_common::WSLContainerRunner::new(&config)
+    };
     runner
         .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
@@ -312,9 +324,11 @@ fn spawn_wslc(
 fn spawn_wslc(
     _request: &ExecutionRequest,
     _logger: &mut Logger,
+    _stdin: bool,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
+        // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
         Err(MxcError::unsupported_containment(
             "WSLC backend not compiled. Rebuild with --features wslc.",
         ))
@@ -369,6 +383,7 @@ fn spawn_isolation_session(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
+        // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
         Err(MxcError::unsupported_containment(
             "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
         ))
@@ -389,6 +404,7 @@ fn spawn_isolation_session_pty(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     #[cfg(target_os = "windows")]
     {
+        // SDK v2: backend_unavailable. See docs/development/plans/sdk-v2-error-codes.md.
         Err(MxcError::unsupported_containment(
             "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
         ))
@@ -462,7 +478,7 @@ mod tests {
         let mut request = minimal_request();
         request.dry_run = true;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger, false) {
             Ok(_) => panic!("dry_run must be rejected"),
             Err(e) => e,
         };
@@ -477,7 +493,7 @@ mod tests {
         let mut request = minimal_request();
         request.containment = ContainmentBackend::Vm;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger, false) {
             Ok(_) => panic!("Vm must be rejected"),
             Err(e) => e,
         };
@@ -528,7 +544,7 @@ mod tests {
             ..Default::default()
         });
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger, false) {
             Ok(_) => panic!("guiAccess must be rejected"),
             Err(e) => e,
         };
@@ -543,12 +559,25 @@ mod tests {
         let mut request = minimal_request();
         request.containment = ContainmentBackend::Wslc;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger, false) {
             Ok(_) => panic!("WSLC must be rejected off Windows"),
             Err(e) => e,
         };
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
         assert!(err.message.contains("Windows"), "got: {}", err.message);
+    }
+
+    #[cfg(all(target_os = "windows", not(feature = "wslc")))]
+    #[test]
+    fn streaming_matches_run_to_completion_for_a_backend_this_build_omits() {
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Wslc;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_runner(&request, &mut logger, false) {
+            Ok(_) => panic!("a backend this build omits must not spawn"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -559,7 +588,7 @@ mod tests {
         let mut request = minimal_request();
         request.containment = ContainmentBackend::Lxc;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger, false) {
             Ok(_) => panic!("LXC must be rejected off Linux"),
             Err(e) => e,
         };
@@ -580,7 +609,7 @@ mod tests {
         request.lxc_config.distribution = String::new();
         request.lxc_config.release = String::new();
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger, false) {
             Ok(_) => panic!("an LXC request the backend refuses must not spawn"),
             Err(e) => e,
         };
@@ -597,7 +626,7 @@ mod tests {
         request.containment = ContainmentBackend::Wslc;
         request.policy.ui_specified = true;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger, false) {
             Ok(_) => panic!("WSLC must reject an unsupported UI policy"),
             Err(e) => e,
         };

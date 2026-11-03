@@ -24,9 +24,10 @@ use crate::mxc_contract::{probe_version, supported_versions, ContractVersion, Ve
 use std::fs;
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
-/// variant to choose the failure-output convention: state-aware failures
-/// emit a JSON `{"error": ...}` envelope on stdout, while one-shot and
-/// pre-discrimination failures keep the existing diagnostic-on-stderr path.
+/// variant to choose where the failure is written: state-aware failures emit a
+/// JSON `{"error": ...}` envelope on stdout, because there the envelope *is*
+/// the operation's response document, while one-shot and pre-discrimination
+/// failures emit theirs on stderr alongside the diagnostics.
 #[derive(Debug)]
 pub enum ParseError {
     /// I/O, base64-decode, or top-level JSON parse failure — the input could
@@ -42,6 +43,23 @@ pub enum ParseError {
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
+}
+
+impl ParseError {
+    /// The typed error this failure is reported to the caller as.
+    ///
+    /// Every variant resolves to a code, so a request that never reached a
+    /// backend is still classified rather than being reported as an
+    /// unexplained non-zero exit.
+    pub fn to_mxc_error(&self) -> MxcError {
+        match self {
+            ParseError::Decode(error)
+            | ParseError::Version(error)
+            | ParseError::OneShot(error)
+            | ParseError::OneShotMalformed(error) => error.to_mxc_error(),
+            ParseError::StateAware(error) => error.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -552,6 +570,10 @@ fn deserialize_development_request(
                     deserialize_development_root(json, "IsolationSession provision", "1.1", true)
                         .map(ProvisionRequest::IsolationSession)
                 }
+                Containment::MicroVm => {
+                    deserialize_development_root(json, "MicroVM provision", "1.1", true)
+                        .map(ProvisionRequest::MicroVm)
+                }
                 Containment::Wslc => {
                     deserialize_development_root(json, "WSLC provision", "1.1", true)
                         .map(ProvisionRequest::Wslc)
@@ -1059,24 +1081,31 @@ fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
     Ok(())
 }
 
-/// Normalizes cross-list filesystem path constraints by applying
-/// **most-restrictive-wins** precedence (`deny` > `readonly` > `readwrite`):
-///
-/// 1. Same-path conflict: if a path string appears in multiple lists, it is kept
-///    only in the most restrictive list (e.g. a path in both `readwritePaths` and
-///    `deniedPaths` is normalized to denied).
-/// 2. Paths should exist: logs a WARNING for paths that don't exist on the host
-///    (advisory — some backends create mount targets dynamically; not a hard error).
-///
-/// This never rejects the config — conflicting intents are resolved deterministically
-/// rather than erroring, matching the roadmap's most-restrictive-wins decision.
-fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger) {
+fn normalize_filesystem_paths(
+    policy: &mut ContainerPolicy,
+    logger: &mut Logger,
+) -> Result<(), WxcError> {
+    let mut probe = crate::mxc_common::filesystem_probe::FilesystemProbe::default();
+    normalize_filesystem_paths_with(policy, logger, |path| {
+        probe.run(path, |path| {
+            #[cfg(test)]
+            crate::mxc_common::filesystem_probe::launch_tests::stall("parser", path);
+            fs::metadata(path).is_err()
+        })
+    })
+}
+
+fn normalize_filesystem_paths_with(
+    policy: &mut ContainerPolicy,
+    logger: &mut Logger,
+    mut path_missing: impl FnMut(&str) -> Result<bool, String>,
+) -> Result<(), WxcError> {
     if policy.readwrite_paths.is_empty()
         && policy.readonly_paths.is_empty()
         && policy.enumerate_paths.is_empty()
         && policy.denied_paths.is_empty()
     {
-        return;
+        return Ok(());
     }
 
     // 1. Same-path (string) conflict: drop a path from a list if it also appears
@@ -1148,14 +1177,13 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
         }
     });
 
-    // 2. Existence warning (advisory; not a hard gate).
     for (paths, list_name) in [
         (&policy.readwrite_paths, "readwritePaths"),
         (&policy.readonly_paths, "readonlyPaths"),
         (&policy.denied_paths, "deniedPaths"),
     ] {
         for path in paths {
-            if fs::metadata(path).is_err() {
+            if path_missing(path).map_err(WxcError::ConfigParse)? {
                 logger.log_line(&format!(
                     "WARNING: filesystem path '{}' (in '{}') does not exist on the host; \
                      the backend may fail at mount time",
@@ -1165,6 +1193,7 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             }
         }
     }
+    Ok(())
 }
 
 // ---------- Conversion from normalized config input to runtime model ----------
@@ -1284,6 +1313,7 @@ fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment
         "wslc" => Some(wire::Containment::Wslc),
         "wsb" => Some(wire::Containment::WindowsSandbox),
         "iso" => Some(wire::Containment::IsolationSession),
+        "microvm" => Some(wire::Containment::Microvm),
         _ => None,
     }
 }
@@ -1326,6 +1356,8 @@ fn normalize_common_request_ir(
     require_process: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let _ignored_metadata = (&cfg.schema, &cfg.comment);
+    let microvm_memory_mib = cfg.microvm.as_ref().and_then(|config| config.memory_mib);
+    crate::mxc_common::models::MicroVmProvisionConfig::validate_memory_mib(microvm_memory_mib)?;
 
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -1554,7 +1586,7 @@ fn normalize_common_request_ir(
         }
     }
     validate_filesystem_paths(&policy)?;
-    normalize_filesystem_paths(&mut policy, logger);
+    normalize_filesystem_paths(&mut policy, logger)?;
 
     parse_network_policy(
         &mut policy,
@@ -1670,6 +1702,8 @@ fn normalize_common_request_ir(
         test_feature,
         windows_sandbox,
         hyperlight,
+        microvm_image: cfg.microvm.map(|config| config.image),
+        microvm_memory_mib,
         experimental_enabled: false,
         dry_run: false,
     })
@@ -1692,6 +1726,7 @@ fn normalize_state_aware(
                 StateAwareOperation::Provision(provision) => Some(match provision {
                     StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
                     StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
+                    StateAwareProvision::MicroVm(_) => wire::Containment::Microvm,
                     StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
                 }),
                 StateAwareOperation::Start { .. }
@@ -1777,6 +1812,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn filesystem_probe_failure_is_not_a_missing_path_warning() {
+        let mut policy = ContainerPolicy {
+            denied_paths: vec!["slow".to_string()],
+            ..Default::default()
+        };
+        let mut logger = test_logger();
+        let error = normalize_filesystem_paths_with(&mut policy, &mut logger, |path| {
+            Err(format!("probe for {path} timed out"))
+        })
+        .unwrap_err();
+        assert!(matches!(error, WxcError::ConfigParse(_)));
+        assert!(error.to_string().contains("probe for slow timed out"));
+        assert!(logger.get_buffer().is_empty());
+    }
+
+    #[test]
+    fn filesystem_normalization_preserves_missing_path_warnings() {
+        let mut policy = ContainerPolicy {
+            readwrite_paths: vec!["missing".to_string()],
+            readonly_paths: vec!["missing".to_string()],
+            ..Default::default()
+        };
+        let mut logger = test_logger();
+        let mut probes = 0;
+        normalize_filesystem_paths_with(&mut policy, &mut logger, |_| {
+            probes += 1;
+            Ok(true)
+        })
+        .unwrap();
+        assert!(policy.readwrite_paths.is_empty());
+        assert_eq!(policy.readonly_paths, ["missing"]);
+        assert_eq!(probes, 1);
+        assert!(logger.get_buffer().contains("does not exist on the host"));
+    }
+
     fn repository_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -1809,6 +1880,79 @@ mod tests {
 
         let parsed = parse_exact_mxc_request_json(json, &mut test_logger()).unwrap();
         assert!(matches!(parsed, MxcRequest::OneShot(_)));
+    }
+
+    #[test]
+    fn microvm_rejects_process_container_sections_but_accepts_a_minimal_request() {
+        const ERROR: &str = "Configuration parse error: Multiple containment backends configured: \
+            'containment' is 'microvm' (no per-backend section is defined for this backend), but \
+            the config includes backend section(s): processContainer. Only one backend section is \
+            allowed; remove the unused section(s).";
+
+        for process_container in [r#"{}"#, r#"{"leastPrivilege":false}"#] {
+            let json = format!(
+                r#"{{"version":"1.1.0-alpha","containment":"microvm","microvm":{{"image":"docker.io/library/python:3.12-alpine"}},"process":{{"commandLine":"echo hello"}},"processContainer":{process_container}}}"#
+            );
+            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)), "{error:?}");
+            assert_eq!(error.message(), ERROR);
+        }
+
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "microvm",
+            "microvm": {"image": "docker.io/library/python:3.12-alpine"},
+            "process": {"commandLine": "echo hello"}
+        }"#;
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.containment, ContainmentBackend::MicroVm);
+    }
+
+    #[test]
+    fn legacy_fallback_settings_do_not_change_runtime_policy() {
+        for (version, containment) in [
+            ("0.9.0-alpha", "processcontainer"),
+            ("1.0.0", "processcontainer"),
+            ("1.1.0-alpha", "processcontainer"),
+            ("1.1.0-alpha", "microvm"),
+        ] {
+            let mut expected = None;
+            for fallback in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({"allowDaclMutation": true})),
+                Some(serde_json::json!({"allowDaclMutation": false})),
+            ] {
+                let mut json = serde_json::json!({
+                    "version": version,
+                    "containment": containment,
+                    "process": {"commandLine": "echo hello"}
+                });
+                if containment == "microvm" {
+                    json["microvm"] =
+                        serde_json::json!({"image": "docker.io/library/python:3.12-alpine"});
+                }
+                if let Some(fallback) = fallback {
+                    json["fallback"] = fallback;
+                }
+                let MxcRequest::OneShot(request) =
+                    load_mxc_request_from_json(&json.to_string(), &mut test_logger()).unwrap()
+                else {
+                    panic!("expected a create-and-run request");
+                };
+                let serialized = serde_json::to_value(request.policy).unwrap();
+                assert!(serialized.get("fallback").is_none());
+                if let Some(expected) = &expected {
+                    assert_eq!(&serialized, expected);
+                } else {
+                    expected = Some(serialized);
+                }
+            }
+        }
     }
 
     fn parse_exact_for_test(json: &str) -> Result<MxcRequest, ParseError> {
@@ -1874,6 +2018,7 @@ mod tests {
     enum ProvisionSnapshot {
         IsolationSession(Option<Option<String>>),
         WindowsSandbox,
+        MicroVm(Option<Option<u32>>),
         Wslc(Option<(Option<String>, Option<String>)>),
     }
 
@@ -1896,6 +2041,9 @@ mod tests {
                             StateAwareProvision::WindowsSandbox => {
                                 ProvisionSnapshot::WindowsSandbox
                             }
+                            StateAwareProvision::MicroVm(config) => ProvisionSnapshot::MicroVm(
+                                config.as_ref().map(|config| config.memory_mib),
+                            ),
                             StateAwareProvision::Wslc(config) => {
                                 ProvisionSnapshot::Wslc(config.as_ref().map(|config| {
                                     (config.image.clone(), config.image_tar_path.clone())

@@ -13,7 +13,7 @@
 //!   Platform-agnostic for the same reason.
 //! - [`capture_analysis`] parses `captureDenials` log reports; platform-agnostic
 //!   so it is unit-tested everywhere.
-//! - [`seatbelt_runner`] is gated to `target_os = "macos"` since it calls
+//! - `seatbelt_runner` is gated to `target_os = "macos"` since it calls
 //!   `sandbox_init()`.
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
