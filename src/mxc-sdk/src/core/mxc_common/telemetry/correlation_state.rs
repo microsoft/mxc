@@ -116,14 +116,34 @@ fn should_forget_after_deprovision<T>(outcome: &Result<T, MxcError>) -> bool {
     }
 }
 
-/// Recall or atomically establish the lifecycle root, then spin a child.
+/// Recall the lifecycle root and spin a child, or seed an unpersisted root when
+/// no record exists. A missing record is persisted only after the operation
+/// succeeds (see [`on_lifecycle_outcome`]), so dry runs and rejected requests
+/// leave the store unchanged.
 fn phase_vector(sandbox_id: &str) -> String {
     match with_store(|store| store.load_and_prune(sandbox_id)) {
-        Some(root) if is_relayable(&root) => spin(&root),
-        _ => {
+        Ok(Some(root)) if is_relayable(&root) => spin(&root),
+        Ok(_) => seed(),
+        Err(StoreUnavailable) => {
             report_store_failure();
             seed()
         }
+    }
+}
+
+/// After a `start`, `exec` or `stop` succeeds, persist the lifecycle root for a
+/// sandbox that had no record (telemetry enabled after provisioning). An
+/// existing record, including one created by a concurrent request, is kept.
+/// Dry runs and failed operations persist nothing.
+pub fn on_lifecycle_outcome(
+    active: bool,
+    sandbox_id: &str,
+    root: &str,
+    dry_run: bool,
+    succeeded: bool,
+) {
+    if active && !dry_run && succeeded {
+        with_store(|store| store.persist_if_absent(sandbox_id, root));
     }
 }
 
@@ -178,12 +198,17 @@ fn with_store<R>(f: impl FnOnce(&dyn CorrelationStore) -> R) -> R {
     f(&store)
 }
 
+pub(crate) struct StoreUnavailable;
+
 pub(crate) trait CorrelationStore: Send + Sync {
     fn persist(&self, sandbox_id: &str, root: &str);
+    /// Keep an existing record; write `root` only when none exists.
+    fn persist_if_absent(&self, sandbox_id: &str, root: &str);
     #[cfg(test)]
     fn load(&self, sandbox_id: &str) -> Option<String>;
-    /// Load or create under the same operation lock, protecting the active record.
-    fn load_and_prune(&self, sandbox_id: &str) -> Option<String>;
+    /// Load and refresh an existing record, then sweep stale ones, under one
+    /// operation lock. Never creates a record.
+    fn load_and_prune(&self, sandbox_id: &str) -> Result<Option<String>, StoreUnavailable>;
     fn forget(&self, sandbox_id: &str);
     fn prune_stale(&self, protected_sandbox_id: Option<&str>);
 }
@@ -405,27 +430,31 @@ impl CorrelationStore for FilesystemCorrelationStore {
         }
     }
 
+    fn persist_if_absent(&self, sandbox_id: &str, root: &str) {
+        let Some(_lock) = self.operation_lock() else {
+            report_store_failure();
+            return;
+        };
+        let Some(path) = self.record_path(sandbox_id) else {
+            report_store_failure();
+            return;
+        };
+        if self.load_unlocked(sandbox_id).is_none() && !self.write_record(sandbox_id, &path, root) {
+            report_store_failure();
+        }
+    }
+
     #[cfg(test)]
     fn load(&self, sandbox_id: &str) -> Option<String> {
         let _lock = self.operation_lock()?;
         self.load_unlocked(sandbox_id)
     }
 
-    fn load_and_prune(&self, sandbox_id: &str) -> Option<String> {
-        let _lock = self.operation_lock()?;
-        let root = match self.load_unlocked(sandbox_id) {
-            Some(root) => root,
-            None => {
-                let root = seed();
-                let path = self.record_path(sandbox_id)?;
-                if !self.write_record(sandbox_id, &path, &root) {
-                    return None;
-                }
-                root
-            }
-        };
+    fn load_and_prune(&self, sandbox_id: &str) -> Result<Option<String>, StoreUnavailable> {
+        let _lock = self.operation_lock().ok_or(StoreUnavailable)?;
+        let root = self.load_unlocked(sandbox_id);
         self.prune_stale_unlocked(Some(sandbox_id));
-        Some(root)
+        Ok(root)
     }
 
     fn forget(&self, sandbox_id: &str) {
@@ -548,6 +577,14 @@ mod tests {
                 .insert(sandbox_id.to_string(), root.to_string());
         }
 
+        fn persist_if_absent(&self, sandbox_id: &str, root: &str) {
+            self.records
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(sandbox_id.to_owned())
+                .or_insert_with(|| root.to_owned());
+        }
+
         fn load(&self, sandbox_id: &str) -> Option<String> {
             self.records
                 .lock()
@@ -556,16 +593,15 @@ mod tests {
                 .cloned()
         }
 
-        fn load_and_prune(&self, sandbox_id: &str) -> Option<String> {
+        fn load_and_prune(&self, sandbox_id: &str) -> Result<Option<String>, StoreUnavailable> {
             let root = self
                 .records
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .entry(sandbox_id.to_owned())
-                .or_insert_with(seed)
-                .clone();
+                .get(sandbox_id)
+                .cloned();
             self.prune_stale(Some(sandbox_id));
-            Some(root)
+            Ok(root)
         }
 
         fn forget(&self, sandbox_id: &str) {
@@ -764,6 +800,7 @@ mod tests {
 
         // The first later authorized phase establishes a new lifecycle root.
         let a = pre_dispatch_vector(true, Phase::Exec, Some("wsb:abcdef01"));
+        on_lifecycle_outcome(true, "wsb:abcdef01", &a, false, true);
         let b = pre_dispatch_vector(true, Phase::Exec, Some("wsb:abcdef01"));
         assert_eq!(
             a.split('.').next().unwrap(),
@@ -785,6 +822,7 @@ mod tests {
         );
 
         let a = pre_dispatch_vector(true, Phase::Exec, Some("wsb:abcdef01"));
+        on_lifecycle_outcome(true, "wsb:abcdef01", &a, false, true);
         let b = pre_dispatch_vector(true, Phase::Exec, Some("wsb:abcdef01"));
         assert_eq!(a.split('.').next().unwrap(), b.split('.').next().unwrap());
         assert_ne!(
@@ -1068,9 +1106,9 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    FilesystemCorrelationStore::from_store_root(dir)
-                        .load_and_prune("synthetic-container")
-                        .expect("root persisted")
+                    let store = FilesystemCorrelationStore::from_store_root(dir);
+                    store.persist_if_absent("synthetic-container", &seed());
+                    store.load("synthetic-container").expect("root persisted")
                 })
             })
             .collect();
@@ -1079,6 +1117,58 @@ mod tests {
             .map(|worker| worker.join().unwrap())
             .collect();
         assert!(roots.iter().all(|root| root == &roots[0]));
+    }
+
+    #[test]
+    fn dry_run_and_rejected_phases_leave_the_store_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("correlation");
+        let _guard = StoreDirGuard::set(&store_dir);
+        let sandbox_id = "wslc:00000000000000000000000000000000";
+
+        for (dry_run, succeeded) in [(true, true), (false, false), (true, false)] {
+            for phase in [Phase::Start, Phase::Exec, Phase::Stop] {
+                let vector = pre_dispatch_vector(true, phase, Some(sandbox_id));
+                assert!(is_relayable(&vector));
+                on_lifecycle_outcome(true, sandbox_id, &vector, dry_run, succeeded);
+            }
+        }
+        let records = fs::read_dir(&store_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .is_some_and(|ext| ext == RECORD_EXTENSION)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(records, 0, "no record may be created without a success");
+    }
+
+    #[test]
+    fn successful_late_enabled_phase_persists_and_reuses_one_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = StoreDirGuard::set(tmp.path());
+        let sandbox_id = "wslc:00000000000000000000000000000000";
+
+        let first = pre_dispatch_vector(true, Phase::Start, Some(sandbox_id));
+        on_lifecycle_outcome(true, sandbox_id, &first, false, true);
+        let second = pre_dispatch_vector(true, Phase::Exec, Some(sandbox_id));
+        assert_eq!(
+            super::super::session::from_vector(&first),
+            super::super::session::from_vector(&second)
+        );
+        // A later success never replaces the established root.
+        on_lifecycle_outcome(true, sandbox_id, &seed(), false, true);
+        let third = pre_dispatch_vector(true, Phase::Stop, Some(sandbox_id));
+        assert_eq!(
+            super::super::session::from_vector(&first),
+            super::super::session::from_vector(&third)
+        );
     }
 
     #[test]
@@ -1104,6 +1194,7 @@ mod tests {
         };
         let _guard = StoreDirGuard::set(Path::new(&dir));
         let vector = pre_dispatch_vector(true, Phase::Exec, Some("synthetic-container"));
+        on_lifecycle_outcome(true, "synthetic-container", &vector, false, true);
         let mut logger =
             crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let _session = super::super::session::start(true, &vector, None, &mut logger);

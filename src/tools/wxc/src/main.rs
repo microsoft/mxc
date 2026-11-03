@@ -642,6 +642,16 @@ fn run_state_aware_main(
                 &outcome,
             );
         }
+    } else if matches!(phase, "start" | "exec" | "stop") {
+        if let Some(id) = sandbox_id.as_deref() {
+            telemetry::correlation_state::on_lifecycle_outcome(
+                telemetry_active,
+                id,
+                &correlation,
+                dry_run,
+                outcome.is_ok(),
+            );
+        }
     }
 
     // Record only a constant backend marker. Lifecycle ids can contain

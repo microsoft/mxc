@@ -647,6 +647,17 @@ fn exec_state_aware_attached_parsed(
                  a time. Nothing has been run.",
             ))
         });
+    if dispatched.is_ok() {
+        if let Some(id) = sandbox_id.as_deref() {
+            telemetry::correlation_state::on_lifecycle_outcome(
+                telemetry_active,
+                id,
+                &correlation,
+                false,
+                true,
+            );
+        }
+    }
     telemetry::emit_sdk_state_aware_with_kind(
         telemetry_active,
         requested_sandbox_kind,
@@ -734,14 +745,21 @@ fn run_state_aware_envelope(
                 );
             }
         }
+        Phase::Start | Phase::Exec | Phase::Stop => {
+            if let Some(id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    id,
+                    &correlation,
+                    dry_run,
+                    outcome.is_ok(),
+                );
+            }
+        }
 
         // Lifecycle records are keyed by sandbox ID, so a session phase has
         // nothing to persist against and nothing to recall.
-        Phase::ProvisionSession
-        | Phase::DeprovisionSession
-        | Phase::Start
-        | Phase::Exec
-        | Phase::Stop => {}
+        Phase::ProvisionSession | Phase::DeprovisionSession => {}
     }
     telemetry::emit_sdk_state_aware_with_kind(
         telemetry_active,
@@ -826,6 +844,15 @@ fn exec_state_aware_process_parsed(
     );
     match start(parsed) {
         Ok(process) => {
+            if let Some(id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    id,
+                    &correlation,
+                    false,
+                    true,
+                );
+            }
             let process = crate::mxc_engine::ProcessWithWarnings::wrap(process, init_warnings);
             Ok(wrap_state_aware_telemetry_process_with_kind(
                 process,
@@ -927,14 +954,21 @@ pub fn run_typed_state_aware_request(
                 );
             }
         }
+        Phase::Start | Phase::Exec | Phase::Stop => {
+            if let Some(sandbox_id) = sandbox_id.as_deref() {
+                telemetry::correlation_state::on_lifecycle_outcome(
+                    telemetry_active,
+                    sandbox_id,
+                    &correlation,
+                    dry_run,
+                    status.is_ok(),
+                );
+            }
+        }
 
         // Lifecycle records are keyed by sandbox ID, so a session phase has
         // nothing to persist against and nothing to recall.
-        Phase::ProvisionSession
-        | Phase::DeprovisionSession
-        | Phase::Start
-        | Phase::Exec
-        | Phase::Stop => {}
+        Phase::ProvisionSession | Phase::DeprovisionSession => {}
     }
     telemetry::emit_sdk_state_aware_typed(
         telemetry_active,
@@ -1493,6 +1527,7 @@ mod tests {
         let _guard = StoreDirGuard::set(tmp.path());
 
         let a = phase_correlation(true, Phase::Start, Some("wsb:abcdef01"));
+        telemetry::correlation_state::on_lifecycle_outcome(true, "wsb:abcdef01", &a, false, true);
         let b = phase_correlation(true, Phase::Start, Some("wsb:abcdef01"));
 
         assert!(telemetry::correlation_vector::is_relayable(&a));

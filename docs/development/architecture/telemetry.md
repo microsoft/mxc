@@ -382,7 +382,10 @@ documents, general logger text, or free-form error text.
 
 ### Privacy review status
 
-The canonical version 3 `en-US` consent wording is privacy-reviewed. The
+The current `en-US` consent resource is version 4, which is privacy-reviewed.
+The consent wording applies only to the consent-gated optional events of the
+published contracts. The four Required events of the development contract do
+not use it. The
 verbose-event inventory, current WinExt classification, retention, access,
 regional processing, deletion, and localization/accessibility decisions
 require explicit privacy/release review. The canonical wording and presenter
@@ -422,9 +425,12 @@ diagnostic identifiers, not the backend's session identity. This applies to the 
 and typed engine calls. Sandbox operations retain their existing store cleanup.
 
 The per-user store serializes operations with a cross-process file lock and
-atomically replaces records. A missing, corrupt, or pruned record establishes
-and persists a new root under the same lock, so subsequent phases can correlate
-even if telemetry was disabled during provision. That new segment cannot recover
+atomically replaces records. When a record is missing, corrupt, or pruned, the
+phase uses a new root but does not write it. After a successful, non-dry-run
+`start`, `exec`, or `stop`, MXC persists that root under the same lock (keeping
+any record a concurrent request already wrote), so later phases correlate even
+if telemetry was disabled during provision. Dry runs and rejected requests leave
+the store unchanged. That new segment cannot recover
 earlier events' ID. A successful new provision replaces any previous root; if
 telemetry is disabled, it removes stale state rather than linking a reused
 sandbox ID to an old lifecycle.
@@ -496,8 +502,8 @@ request, MXC-owned consent, administrative policy, and provider availability.
 See [`telemetry-consent-design.md`](telemetry-consent-design.md). Local diagnostic
 audit records are a separate operator-selected sink and are not uploaded.
 
-The privacy-reviewed version 3 `en-US` consent wording is the canonical
-disclosure. Its title, body, action labels, and privacy link are documented in
+The privacy-reviewed version 4 `en-US` consent wording is the canonical
+disclosure for the optional events. Its title, body, action labels, and privacy link are documented in
 [Telemetry consent design](telemetry-consent-design.md#canonical-consent-resource)
 and must be rendered verbatim by every EXE and SDK presenter.
 
