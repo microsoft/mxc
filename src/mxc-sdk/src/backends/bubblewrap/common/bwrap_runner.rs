@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::filesystem_symlink::{is_policy_path_error, resolve_through_symlinks};
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use crate::mxc_common::models::{ContainerPolicy, ExecutionRequest, FailurePhase, ScriptResponse};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -168,6 +168,8 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
             None => request,
         };
+        let grants =
+            resolve_granted_paths(&request.policy, logger).map_err(|e| e.into_response())?;
         // The masks are built from the list above, not from the one the caller
         // wrote, so the pin conflict has to be judged against it too.
         if let Err(msg) = check_pin_against_denied_hosts(request) {
@@ -176,11 +178,32 @@ impl SandboxBackend for BubblewrapScriptRunner {
         }
         warn_resolver_mount_hint(request, logger);
         warn_cwd_mount_hint(request, logger);
+
+        // The checks above compare grants as the caller spelled them, which the
+        // recreated grant links keep reachable.
+        let granted;
+        let request = match grants.policy {
+            Some(policy) => {
+                granted = ExecutionRequest {
+                    policy,
+                    ..request.clone()
+                };
+                &granted
+            }
+            None => request,
+        };
         let baseline_links = bwrap_command::baseline_links(host_link_target).map_err(|error| {
             ScriptResponse::failed(FailurePhase::LaunchFailed, &format!("Bubblewrap: {error}"))
         })?;
-        let child =
-            self.spawn_bwrap(request, &plan.files, &baseline_links, launch, logger, stdio)?;
+        let child = self.spawn_bwrap(
+            request,
+            &plan.files,
+            &baseline_links,
+            &grants.aliased,
+            launch,
+            logger,
+            stdio,
+        )?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
     }
 }
@@ -483,11 +506,13 @@ impl BubblewrapScriptRunner {
     /// stdio is piped (the caller drives it); with [`StdioMode::Inherit`] it
     /// inherits the binary's stdio (a TTY when the binary has one); with
     /// [`StdioMode::Pty`] it is attached to a caller-owned Unix PTY.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_bwrap(
         &self,
         request: &ExecutionRequest,
         denied_files: &HashSet<String>,
         baseline_links: &[bwrap_command::BaselineLink],
+        aliased_grants: &[bwrap_command::AliasedGrant],
         launch: ValidatedLaunch,
         logger: &mut Logger,
         stdio: StdioMode,
@@ -610,6 +635,7 @@ impl BubblewrapScriptRunner {
                 return Err(ScriptResponse::failed(FailurePhase::LaunchFailed, &error));
             }
         };
+        let mut unavailable_links = Vec::new();
         let mut args = bwrap_command::build_args_classified_with_mode(
             request,
             proxy_address,
@@ -619,7 +645,20 @@ impl BubblewrapScriptRunner {
             baseline_links,
             &resolver_args,
             &mounts,
+            |mount_args| {
+                let plan = bwrap_command::plan_grant_links(mount_args, aliased_grants);
+                unavailable_links = plan.unavailable;
+                plan.args
+            },
         );
+        for link in &unavailable_links {
+            logger.warning_line(&format!(
+                "WARNING: Bubblewrap: a filesystem grant is named through the symlink {}, \
+                 which cannot be recreated inside the sandbox, so paths through it are \
+                 unavailable there. Use {} instead.",
+                link.path, link.target
+            ));
+        }
 
         if stdio == StdioMode::Inherit {
             args.insert(0, "--new-session".into());
@@ -1348,6 +1387,141 @@ fn is_file_mask_target(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+struct GrantPlan {
+    /// The policy with every grant at its real path, or `None` when none moved.
+    policy: Option<ContainerPolicy>,
+
+    aliased: Vec<bwrap_command::AliasedGrant>,
+}
+
+/// Move each `readwritePaths` and `readonlyPaths` entry to its real path, so a
+/// rule inside a grant lands in the directory the grant mounts.
+fn resolve_granted_paths(
+    policy: &ContainerPolicy,
+    logger: &mut Logger,
+) -> Result<GrantPlan, FilesystemPolicyError> {
+    let mut aliased = Vec::new();
+    let mut moved = false;
+    let mut resolve = |paths: &[String], list: &'static str| {
+        let mut real_paths: Vec<String> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let grant = resolve_granted_path(path, list)?;
+            if grant.path != *path {
+                let _ = writeln!(
+                    logger,
+                    "Bubblewrap: {list} entry '{path}' resolves through a symlink; mounting \
+                     its real path '{}' instead.",
+                    grant.path
+                );
+                moved = true;
+            }
+            if !grant.alias.links.is_empty() {
+                aliased.push(grant.alias);
+            }
+            if !real_paths.contains(&grant.path) {
+                real_paths.push(grant.path);
+            }
+        }
+        Ok::<_, FilesystemPolicyError>(real_paths)
+    };
+    let readwrite_paths = resolve(&policy.readwrite_paths, "readwritePaths")?;
+    let readonly_paths = resolve(&policy.readonly_paths, "readonlyPaths")?;
+    Ok(GrantPlan {
+        policy: moved.then(|| ContainerPolicy {
+            readwrite_paths,
+            readonly_paths,
+            ..policy.clone()
+        }),
+        aliased,
+    })
+}
+
+struct ResolvedGrant {
+    path: String,
+    alias: bwrap_command::AliasedGrant,
+}
+
+fn resolve_granted_path(
+    path: &str,
+    list: &'static str,
+) -> Result<ResolvedGrant, FilesystemPolicyError> {
+    let refuse = |error: std::io::Error| {
+        let message = format!(
+            "Bubblewrap: {list} entry '{path}' could not be resolved ({error}); refusing to start."
+        );
+        if is_policy_path_error(&error) {
+            FilesystemPolicyError::Policy(message)
+        } else {
+            FilesystemPolicyError::Host(message)
+        }
+    };
+    let Some(resolved) = resolve_through_symlinks(Path::new(path)) else {
+        return Ok(ResolvedGrant {
+            path: path.to_owned(),
+            alias: bwrap_command::AliasedGrant::default(),
+        });
+    };
+    if let Some(error) = resolved.error {
+        return Err(refuse(error));
+    }
+    let inner = inner_link(Path::new(path), &resolved.links).map_err(refuse)?;
+
+    let text = |host_path: PathBuf| {
+        host_path.into_os_string().into_string().map_err(|_| {
+            FilesystemPolicyError::Policy(format!(
+                "Bubblewrap: {list} entry '{path}' resolves through a non-UTF-8 host path that \
+                 cannot be mounted; refusing to start."
+            ))
+        })
+    };
+    let grant_link = |(path, target): (PathBuf, PathBuf)| {
+        Ok::<_, FilesystemPolicyError>(bwrap_command::GrantLink {
+            path: text(path)?,
+            target: text(target)?,
+        })
+    };
+    Ok(ResolvedGrant {
+        path: text(resolved.path)?,
+        alias: bwrap_command::AliasedGrant {
+            links: resolved
+                .links
+                .into_iter()
+                .map(grant_link)
+                .collect::<Result<_, FilesystemPolicyError>>()?,
+            inner: inner.map(grant_link).transpose()?,
+        },
+    })
+}
+
+/// The link one level below the first symlink on `path`, paired with its real path.
+fn inner_link(
+    path: &Path,
+    links: &[(PathBuf, PathBuf)],
+) -> std::io::Result<Option<(PathBuf, PathBuf)>> {
+    let Some((first, _)) = links.first() else {
+        return Ok(None);
+    };
+    let path = std::path::absolute(path)?;
+    let Ok(rest) = path.strip_prefix(first) else {
+        return Ok(None);
+    };
+    let mut parts = rest.components();
+    let Some(Component::Normal(next)) = parts.next() else {
+        return Ok(None);
+    };
+    if parts.any(|part| part == Component::ParentDir) {
+        return Ok(None);
+    }
+    let inner = first.join(next);
+    match resolve_through_symlinks(&inner) {
+        Some(resolved) => match resolved.error {
+            Some(error) => Err(error),
+            None => Ok(Some((inner, resolved.path))),
+        },
+        None => Ok(None),
+    }
+}
+
 fn host_link_target(path: &str) -> std::io::Result<Option<PathBuf>> {
     use std::io::ErrorKind::NotFound;
 
@@ -1391,6 +1565,7 @@ mod tests {
             .spawn_bwrap(
                 &request,
                 &HashSet::new(),
+                &[],
                 &[],
                 ValidatedLaunch {
                     egress_plan: None,
@@ -2652,5 +2827,160 @@ mod tests {
             vec![real.join("secret").to_string_lossy().into_owned()],
             "`..` must fold so the mask targets the real denied path, not a bystander"
         );
+    }
+
+    fn text(path: &Path) -> String {
+        path.to_str().unwrap().to_owned()
+    }
+
+    fn grant_link(path: &Path, target: &Path) -> bwrap_command::GrantLink {
+        bwrap_command::GrantLink {
+            path: text(path),
+            target: text(target),
+        }
+    }
+
+    #[test]
+    fn aliased_grants_move_to_their_real_paths() {
+        use crate::mxc_common::logger::Mode;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let real = base.join("real");
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        std::fs::write(real.join("sub/file"), b"x").unwrap();
+        symlink(&real, base.join("alias")).unwrap();
+        symlink("alias", base.join("chain")).unwrap();
+        symlink("real/sub/file", base.join("file-link")).unwrap();
+
+        let policy = ContainerPolicy {
+            readwrite_paths: vec![
+                text(&base.join("alias")),
+                text(&base.join("chain/sub")),
+                text(&real),
+            ],
+            readonly_paths: vec![
+                text(&base.join("file-link")),
+                text(&base.join("alias/missing/../sub")),
+            ],
+            denied_paths: vec![text(&base.join("alias/secret"))],
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let plan = resolve_granted_paths(&policy, &mut logger).unwrap();
+
+        let moved = plan.policy.expect("aliased grants must move");
+        assert_eq!(
+            moved.readwrite_paths,
+            [text(&real), text(&real.join("sub"))]
+        );
+        assert_eq!(
+            moved.readonly_paths,
+            [text(&real.join("sub/file")), text(&real.join("sub"))]
+        );
+        assert_eq!(moved.denied_paths, policy.denied_paths);
+        let alias = bwrap_command::AliasedGrant {
+            links: vec![grant_link(&base.join("alias"), &real)],
+            inner: None,
+        };
+        assert_eq!(
+            plan.aliased,
+            [
+                alias.clone(),
+                bwrap_command::AliasedGrant {
+                    links: vec![grant_link(&base.join("chain"), &real)],
+                    inner: Some(grant_link(&base.join("chain/sub"), &real.join("sub"))),
+                },
+                bwrap_command::AliasedGrant {
+                    links: vec![grant_link(&base.join("file-link"), &real.join("sub/file"))],
+                    inner: None,
+                },
+                alias,
+            ]
+        );
+        assert!(logger.get_buffer().contains("readwritePaths entry"));
+    }
+
+    #[test]
+    fn real_grants_stay_as_written() {
+        use crate::mxc_common::logger::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let policy = ContainerPolicy {
+            readwrite_paths: vec![text(&base)],
+            readonly_paths: vec![text(&base.join("missing/child"))],
+            ..Default::default()
+        };
+        let plan = resolve_granted_paths(&policy, &mut Logger::new(Mode::Buffer)).unwrap();
+        assert!(plan.policy.is_none());
+        assert!(plan.aliased.is_empty());
+    }
+
+    #[test]
+    fn a_grant_below_a_symlinked_directory_records_the_link_one_level_down() {
+        use crate::mxc_common::logger::Mode;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(base.join("var/tmp/project/src")).unwrap();
+        symlink("var/tmp", base.join("tmp")).unwrap();
+
+        let policy = ContainerPolicy {
+            readwrite_paths: vec![text(&base.join("tmp/project/src"))],
+            ..Default::default()
+        };
+        let plan = resolve_granted_paths(&policy, &mut Logger::new(Mode::Buffer)).unwrap();
+        assert_eq!(
+            plan.aliased,
+            [bwrap_command::AliasedGrant {
+                links: vec![grant_link(&base.join("tmp"), &base.join("var/tmp"))],
+                inner: Some(grant_link(
+                    &base.join("tmp/project"),
+                    &base.join("var/tmp/project")
+                )),
+            }]
+        );
+    }
+
+    #[test]
+    fn unresolvable_grants_refuse_to_start() {
+        use crate::mxc_common::logger::Mode;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        symlink(base.join("missing"), base.join("dangling")).unwrap();
+        symlink("loop", base.join("loop")).unwrap();
+
+        for (policy, list, path) in [
+            (
+                ContainerPolicy {
+                    readwrite_paths: vec![text(&base.join("dangling"))],
+                    ..Default::default()
+                },
+                "readwritePaths",
+                base.join("dangling"),
+            ),
+            (
+                ContainerPolicy {
+                    readonly_paths: vec![text(&base.join("loop/child"))],
+                    ..Default::default()
+                },
+                "readonlyPaths",
+                base.join("loop/child"),
+            ),
+        ] {
+            let error = resolve_granted_paths(&policy, &mut Logger::new(Mode::Buffer))
+                .err()
+                .unwrap_or_else(|| panic!("{} must refuse to start", path.display()));
+            let expected = format!("{list} entry '{}' could not be resolved", path.display());
+            assert!(
+                matches!(&error, FilesystemPolicyError::Policy(message) if message.contains(&expected)),
+                "{error:?}"
+            );
+        }
     }
 }

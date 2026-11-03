@@ -21,10 +21,14 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) struct SymlinkResolution {
     pub(crate) path: PathBuf,
     pub(crate) error: Option<std::io::Error>,
+
+    /// Each symlink the path passes through, below real directories, with the real path it leads to.
+    pub(crate) links: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Resolve every symlink in `path` (leaf and ancestors) to a real filesystem
-/// path, tolerating trailing components that do not exist yet.
+/// path, tolerating trailing components that do not exist yet. A relative
+/// `path` starts from the current directory.
 ///
 /// `std::fs::canonicalize` resolves symlinks at every level but requires the
 /// **whole** path to exist. To also cover not-yet-created denied paths under a
@@ -44,18 +48,34 @@ pub(crate) struct SymlinkResolution {
 /// instead of `/real/secret`, so the mask landed on a bystander path and the
 /// real denied target stayed exposed.
 pub(crate) fn resolve_through_symlinks(path: &Path) -> Option<SymlinkResolution> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let path = match std::path::absolute(path) {
+        Ok(path) => path,
+        Err(error) => {
+            return Some(SymlinkResolution {
+                path: path.to_path_buf(),
+                error: Some(error),
+                links: Vec::new(),
+            })
+        }
+    };
     let mut result = PathBuf::new();
     let mut failure = None;
+    let mut links = Vec::new();
     let mut resolve_prefix = |prefix: &Path| {
         // macOS realpath can fold `file/..` (also inside link targets) without
         // checking that file is a directory, so let the kernel follow it first.
         let resolved = match std::fs::symlink_metadata(prefix) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
             Err(error) => Err(error),
-            Ok(_) => std::fs::metadata(prefix).and_then(|_| std::fs::canonicalize(prefix)),
+            Ok(metadata) => std::fs::metadata(prefix)
+                .and_then(|_| std::fs::canonicalize(prefix))
+                .map(|real| (real, metadata.file_type().is_symlink())),
         };
         match resolved {
-            Ok(real) => Some(real),
+            Ok(resolved) => Some(resolved),
             Err(error) => {
                 failure.get_or_insert(error);
                 None
@@ -72,20 +92,20 @@ pub(crate) fn resolve_through_symlinks(path: &Path) -> Option<SymlinkResolution>
             }
             Component::Normal(name) => {
                 result.push(name);
-                if let Some(real) = resolve_prefix(&result) {
-                    result = real;
+                if let Some((real, is_link)) = resolve_prefix(&result) {
+                    let location = std::mem::replace(&mut result, real);
+                    if is_link {
+                        links.push((location, result.clone()));
+                    }
                 }
             }
         }
     }
-    if result.as_os_str().is_empty() {
-        None
-    } else {
-        Some(SymlinkResolution {
-            path: result,
-            error: failure,
-        })
-    }
+    Some(SymlinkResolution {
+        path: result,
+        error: failure,
+        links,
+    })
 }
 
 /// Whether a resolution error is a fault in the policy path itself (missing,
@@ -243,5 +263,38 @@ mod tests {
     #[test]
     fn an_empty_path_has_no_target() {
         assert!(resolve_through_symlinks(Path::new("")).is_none());
+    }
+
+    #[test]
+    fn a_relative_path_starts_from_the_current_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let name = cwd.file_name().expect("the test runs in a named directory");
+        let resolved = resolve_through_symlinks(&Path::new("..").join(name)).unwrap();
+        assert!(resolved.error.is_none(), "{resolved:?}");
+        assert_eq!(resolved.path, std::fs::canonicalize(&cwd).unwrap());
+    }
+
+    #[test]
+    fn the_links_on_a_path_are_reported_with_their_real_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = temp_root(&dir);
+        for directory in ["real/sub", "b", "c/x"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        std::os::unix::fs::symlink(root.join("real"), root.join("alias")).unwrap();
+        std::os::unix::fs::symlink("alias", root.join("chain")).unwrap();
+        std::os::unix::fs::symlink(root.join("c"), root.join("b/inner")).unwrap();
+        std::os::unix::fs::symlink("../../b/inner/x", root.join("real/sub/outer")).unwrap();
+
+        let resolved = resolve_through_symlinks(&root.join("chain/sub/outer/missing")).unwrap();
+        assert!(resolved.error.is_none(), "{resolved:?}");
+        assert_eq!(resolved.path, root.join("c/x/missing"));
+        assert_eq!(
+            resolved.links,
+            [
+                (root.join("chain"), root.join("real")),
+                (root.join("real/sub/outer"), root.join("c/x")),
+            ]
+        );
     }
 }

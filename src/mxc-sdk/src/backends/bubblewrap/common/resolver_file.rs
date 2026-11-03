@@ -618,4 +618,39 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn grant_links_leave_the_resolver_layout_to_the_resolver() {
+        use super::super::bwrap_command::{plan_grant_links, AliasedGrant, GrantLink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        for directory in ["etc", "opt", "srv/dns"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        fs::write(root.join("srv/dns/resolv.conf"), "nameserver 192.0.2.53\n").unwrap();
+        symlink("../srv/dns", root.join("opt/dns")).unwrap();
+        symlink("../opt/dns/resolv.conf", root.join("etc/resolv.conf")).unwrap();
+        let resolver = ResolverFile::from_resolver(
+            &root.join("etc/resolv.conf"),
+            &ContainerPolicy::default(),
+            |_| true,
+        )
+        .unwrap()
+        .unwrap();
+        let mount_args = resolver.mount_args(&mut [], &HashSet::new()).unwrap();
+
+        let link = |path: &str, target: &str| AliasedGrant {
+            links: vec![GrantLink {
+                path: path_text(&root.join(path)).unwrap().into(),
+                target: path_text(&root.join(target)).unwrap().into(),
+            }],
+            inner: None,
+        };
+        let layout_link = link("opt/dns", "srv/dns");
+        let snapshot_link = link("srv/dns/link", "srv");
+        let plan = plan_grant_links(&mount_args, &[layout_link, snapshot_link.clone()]);
+        assert_eq!(plan.args, Vec::<String>::new());
+        assert_eq!(plan.unavailable, snapshot_link.links);
+    }
 }
