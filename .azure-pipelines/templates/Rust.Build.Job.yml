@@ -155,7 +155,7 @@ jobs:
         workingDirectory: $(Build.SourcesDirectory)/src
         condition: and(eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))
 
-      - task: EsrpCodeSigning@5
+      - task: EsrpCodeSigning@6
         displayName: Code Sign
         condition: and(eq(${{ parameters.isOfficialBuild }}, true), eq('${{ item.os }}', 'windows'))
         inputs:

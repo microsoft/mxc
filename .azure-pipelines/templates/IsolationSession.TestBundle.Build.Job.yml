@@ -399,7 +399,7 @@ jobs:
     displayName: 'Assemble test bundle'
 
   # Test sign (CP-230072) the staged binaries so the vpack ships signed binaries.
-  - task: EsrpCodeSigning@5
+  - task: EsrpCodeSigning@6
     displayName: Code Sign
     inputs:
       ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
