@@ -1081,15 +1081,76 @@ fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
     Ok(())
 }
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod filesystem_test_support {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    pub(super) struct Counts {
+        pub(super) normalizations: AtomicUsize,
+        pub(super) metadata: AtomicUsize,
+    }
+
+    thread_local! {
+        static OBSERVER: RefCell<Option<Arc<Counts>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn current() -> Option<Arc<Counts>> {
+        OBSERVER.with(|observer| observer.borrow().clone())
+    }
+
+    /// Count filesystem normalizations and actual metadata calls during one invocation.
+    pub fn observe<T>(run: impl FnOnce() -> T) -> (T, usize, usize) {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                OBSERVER.with(|observer| *observer.borrow_mut() = None);
+            }
+        }
+
+        let counts = Arc::new(Counts::default());
+        OBSERVER.with(|observer| {
+            assert!(observer.borrow().is_none(), "observer is already active");
+            *observer.borrow_mut() = Some(Arc::clone(&counts));
+        });
+        let _reset = Reset;
+        let result = run();
+        (
+            result,
+            counts.normalizations.load(Ordering::Relaxed),
+            counts.metadata.load(Ordering::Relaxed),
+        )
+    }
+}
+
 fn normalize_filesystem_paths(
     policy: &mut ContainerPolicy,
     logger: &mut Logger,
 ) -> Result<(), WxcError> {
+    #[cfg(feature = "test-support")]
+    let observation = filesystem_test_support::current();
+    #[cfg(feature = "test-support")]
+    if let Some(counts) = &observation {
+        counts
+            .normalizations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut probe = crate::mxc_common::filesystem_probe::FilesystemProbe::default();
     normalize_filesystem_paths_with(policy, logger, |path| {
-        probe.run(path, |path| {
+        #[cfg(feature = "test-support")]
+        let observation = observation.clone();
+        probe.run(path, move |path| {
             #[cfg(test)]
             crate::mxc_common::filesystem_probe::launch_tests::stall("parser", path);
+            #[cfg(feature = "test-support")]
+            if let Some(counts) = observation {
+                counts
+                    .metadata
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             fs::metadata(path).is_err()
         })
     })

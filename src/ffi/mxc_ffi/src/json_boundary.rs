@@ -2,16 +2,27 @@
 // Licensed under the MIT License.
 
 use mxc_sdk::mxc_common::config_parser::{load_mxc_request_from_json, ParseError};
+use mxc_sdk::mxc_common::id::parse_sandbox_id_prefix;
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
 use mxc_sdk::mxc_common::models::ContainmentBackend;
 use mxc_sdk::mxc_common::mxc_error::MxcError;
 use mxc_sdk::mxc_common::state_aware_dispatch::resolve_backend;
 use mxc_sdk::mxc_common::state_aware_request::MxcRequest;
+use mxc_sdk::mxc_contract::dev::{probe_phase, Phase};
 use mxc_sdk::v1::{Error, ErrorCode};
 
+#[derive(Clone, Copy)]
 pub(crate) enum JsonSurface {
     OneShotStreaming,
-    Lifecycle,
+    LifecycleEnvelope { dry_run: bool },
+    LifecycleExec,
+}
+
+#[derive(serde::Deserialize)]
+struct RoutingSelectors {
+    containment: Option<String>,
+    #[serde(rename = "sandboxId")]
+    sandbox_id: Option<String>,
 }
 
 pub(crate) fn check_json_surface(
@@ -19,6 +30,36 @@ pub(crate) fn check_json_surface(
     surface: JsonSurface,
     experimental: bool,
 ) -> Result<(), Error> {
+    // This is only a pure prefilter. The authoritative parser still validates
+    // every request, here before exclusion or in the existing operation delegate.
+    let Ok(phase) = probe_phase(json) else {
+        return Ok(());
+    };
+    let applicable = match surface {
+        JsonSurface::OneShotStreaming => phase.is_none(),
+        JsonSurface::LifecycleEnvelope { dry_run } => {
+            phase.is_some() && (dry_run || phase != Some(Phase::Exec))
+        }
+        JsonSurface::LifecycleExec => phase == Some(Phase::Exec),
+    };
+    if !applicable {
+        return Ok(());
+    }
+    let Ok(selectors) = serde_json::from_str::<RoutingSelectors>(json) else {
+        return Ok(());
+    };
+    let selects_microvm = match phase {
+        None | Some(Phase::Provision | Phase::ProvisionSession | Phase::DeprovisionSession) => {
+            selectors.containment.as_deref() == Some("microvm")
+        }
+        Some(_) => selectors
+            .sandbox_id
+            .as_deref()
+            .is_some_and(|id| matches!(parse_sandbox_id_prefix(id), Ok("microvm"))),
+    };
+    if !selects_microvm {
+        return Ok(());
+    }
     #[cfg(test)]
     if let Some(error) = tests::take_injected_failure() {
         return check_parsed_surface(Err(error), surface, experimental);
@@ -58,7 +99,7 @@ mod tests {
             assert!(
                 check_json_surface(one_shot, JsonSurface::OneShotStreaming, experimental,).is_ok()
             );
-            assert!(check_json_surface(exec, JsonSurface::Lifecycle, experimental).is_ok());
+            assert!(check_json_surface(exec, JsonSurface::LifecycleExec, experimental).is_ok());
         }
     }
 
@@ -163,9 +204,10 @@ fn check_parsed_surface(
         {
             ErrorCode::UnsupportedContainment
         }
-        (JsonSurface::Lifecycle, MxcRequest::StateAware(request))
-            if matches!(resolve_backend(&request), Ok(ContainmentBackend::MicroVm)) =>
-        {
+        (
+            JsonSurface::LifecycleEnvelope { .. } | JsonSurface::LifecycleExec,
+            MxcRequest::StateAware(request),
+        ) if matches!(resolve_backend(&request), Ok(ContainmentBackend::MicroVm)) => {
             ErrorCode::UnsupportedPhase
         }
         _ => return Ok(()),

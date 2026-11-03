@@ -158,7 +158,7 @@ fn state_aware_inner(
 
     match crate::json_boundary::check_json_surface(
         request_json,
-        crate::json_boundary::JsonSurface::Lifecycle,
+        crate::json_boundary::JsonSurface::LifecycleEnvelope { dry_run },
         experimental,
     )
     .and_then(|()| run_state_aware_json(request_json, dry_run, experimental))
@@ -306,7 +306,7 @@ unsafe fn exec_streaming(
         };
         crate::json_boundary::check_json_surface(
             request_json,
-            crate::json_boundary::JsonSurface::Lifecycle,
+            crate::json_boundary::JsonSurface::LifecycleExec,
             experimental != 0,
         )
         .and_then(|()| execute(request_json, experimental != 0))
@@ -371,7 +371,7 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
         crate::execute_output(
             crate::json_boundary::check_json_surface(
                 request_json,
-                crate::json_boundary::JsonSurface::Lifecycle,
+                crate::json_boundary::JsonSurface::LifecycleExec,
                 experimental != 0,
             )
             .and_then(|()| execute_lifecycle_json(request_json, experimental != 0))
@@ -441,23 +441,24 @@ pub unsafe extern "C" fn mxc_state_aware_exec_pty(
                 ))
             }
         };
+        let size = MxcPtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        size.validate().map_err(|error| {
+            (
+                status_from_error_code(error.code),
+                MxcErrorDetail::from_error(&error),
+            )
+        })?;
         crate::json_boundary::check_json_surface(
             request_json,
-            crate::json_boundary::JsonSurface::Lifecycle,
+            crate::json_boundary::JsonSurface::LifecycleExec,
             experimental != 0,
         )
-        .and_then(|()| {
-            spawn_in_container_with_pty_json(
-                request_json,
-                MxcPtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                },
-                experimental != 0,
-            )
-        })
+        .and_then(|()| spawn_in_container_with_pty_json(request_json, size, experimental != 0))
         .map(MxcSandbox::new_pty)
         .map_err(|error| {
             (
@@ -569,7 +570,7 @@ pub unsafe extern "C" fn mxc_exec_state_aware_attached_json(
         };
         crate::json_boundary::check_json_surface(
             request_json,
-            crate::json_boundary::JsonSurface::Lifecycle,
+            crate::json_boundary::JsonSurface::LifecycleExec,
             experimental != 0,
         )
         .and_then(|()| exec_attached(request_json, experimental != 0))
