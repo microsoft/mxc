@@ -96,6 +96,19 @@ dotnet build Microsoft.Mxc.Sdk.slnx -c Release
 dotnet test --solution Microsoft.Mxc.Sdk.slnx -c Release --no-build
 ```
 
+To run the same packed-SDK check as CI, use PowerShell 7 from any directory:
+
+```powershell
+& <repo>\scripts\ci\test-dotnet-package.ps1
+```
+
+First build the solution as above to restore its dependencies. The script
+packs the SDK in Release configuration, runs both temporary consumers, and
+removes their isolated package caches and output afterward. Use
+`-Configuration Debug` to pack a Debug build instead. It temporarily clears
+`MXC_FFI_DIR` and restores the caller's value when finished. Both .NET 8 and
+.NET 10 runtimes must be installed.
+
 ### Local Node SDK package validation
 
 From `sdk/node`, run `npm run typecheck` before pushing SDK changes. It builds
