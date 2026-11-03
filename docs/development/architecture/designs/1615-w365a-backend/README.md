@@ -38,9 +38,19 @@ configuration, workload credentials, and permissions. MXC does not establish
 that access or guarantee application SSO; W365A service credentials authorize
 reservation and command execution, not access to every resource inside the guest.
 
-The W365A control plane manages reservations. The data plane provides readiness
-checks and command execution through DesktopControl.Exec, a remote
-command-execution capability that must be available on the Cloud PC.
+MXC uses two distinct W365 service paths:
+
+- **Reservation management (control plane, CP):** `provision` reserves a Cloud
+  PC; `stop` and `deprovision` release it.
+
+- **Readiness and command execution (data plane, DP):** `start` checks readiness;
+  `exec` sends commands through the W365 RemotingInterface service to
+  DesktopControl.Exec on the reserved Cloud PC.
+
+These paths use separate endpoints and resource-specific tokens that are not
+interchangeable. The `cp*`, `dp*` and corresponding environment-variable names
+reflect this distinction. Successful reservation does not establish that
+command execution is ready or authorized.
 
 ### Usage scenario
 
@@ -48,8 +58,8 @@ command-execution capability that must be available on the Cloud PC.
 runs on a machine without access to the organization's internal source
 repository or its Windows build tools. Here, the caller is the agent or client
 application invoking MXC. It supplies a ready-to-use W365A pool GUID, approved
-service coordinates, `HumanUser` identity information, and valid control-plane
-and data-plane tokens. The pool's Cloud PCs are already
+service coordinates, `HumanUser` identity information, and valid W365 service
+tokens. The pool's Cloud PCs are already
 configured with the required corporate connectivity, repository credentials,
 and build tools.
 
@@ -102,14 +112,12 @@ not run on the machine hosting MXC.
 
 | Operation | Service interaction | Observable result |
 | --- | --- | --- |
-| `provision` | Reserves a Cloud PC from the caller-selected pool through the control plane. | One checkout; opaque container ID and checkout metadata on success. |
-| `start` | Polls the reserved Cloud PC's readiness through the data plane. | Returns only on `Ready`, or reports an explicit failure/timeout. |
-| `exec` | Invokes DesktopControl.Exec on the reserved Cloud PC to execute the requested command. | Executor-relayed or SDK-captured/streamed output and remote exit code, or explicit abnormal outcome. |
-| `stop` | Releases the reservation through the control plane. | Terminal checkin request; `releaseRequested: true`, `restartable: false`. |
+| `provision` | Uses W365 reservation management to reserve a Cloud PC from the caller-selected pool. | One checkout; opaque container ID and checkout metadata on success. |
+| `start` | Polls the W365 readiness endpoint for the reserved Cloud PC. | Returns only on `Ready`, or reports an explicit failure/timeout. |
+| `exec` | Uses the W365 execution service to invoke DesktopControl.Exec on the reserved Cloud PC. | Executor-relayed or SDK-captured/streamed output and remote exit code, or explicit abnormal outcome. |
+| `stop` | Uses W365 reservation management to release the reservation. | Terminal checkin request; `releaseRequested: true`, `restartable: false`. |
 | `deprovision` | Same release operation as stop | Cleanup without requiring an earlier successful stop. |
 
-A W365 reservation is not a WSLc placement session:
-`provision-session` and `deprovision-session` are unsupported.
 Defaults and omitted/empty inputs are specified under
 [Contracts, APIs, and compatibility](#contracts-apis-and-compatibility).
 
@@ -134,9 +142,9 @@ When the session ID is valid, a mismatched or malformed computer ID does not
 erase that reservation's cleanup identity. The structured error retains
 `details.poolId`, `details.sessionId` and `details.sandboxId`. The backend
 constructs the cleanup reference as `w365:{poolId}:{sessionId}`; the caller
-passes it unchanged as `sandboxId` to `deprovision` or `stop`, with valid CP
-configuration and credentials. Release targets the session ID, never the
-mismatched computer ID.
+passes it unchanged as `sandboxId` to `deprovision` or `stop`, with valid
+configuration and credentials for releasing the reservation. Release targets
+the session ID, never the mismatched computer ID.
 
 The cleanup reference is not a successful provisioning result or assurance
 that readiness or execution is supported. MXC does not automatically release
@@ -201,7 +209,7 @@ Existing host checks and experimental classifications are retained.
 
 | Backend | Planned support | Required host features and how they are checked | What the probe/availability API reports |
 | --- | --- | --- | --- |
-| `w365_agents` (new) | Yes; lifecycle-only remote backend. | Feature-enabled native build, DNS/TLS access, valid CP/DP credentials and an assigned pool with compatible DesktopControl.Exec. Initial manual target: Windows x64; see host limits below. | `ProbeCoverage::NotDetected`; omitted from local availability results. Local probing cannot determine remote usability. |
+| `w365_agents` (new) | Yes; lifecycle-only remote backend. | Feature-enabled native build, DNS/TLS access, valid W365 service credentials and an assigned pool with compatible DesktopControl.Exec. Initial manual target: Windows x64; see host limits below. | `ProbeCoverage::NotDetected`; omitted from local availability results. Local probing cannot determine remote usability. |
 
 Build feature availability, host support, service capability and authorization
 are separate. Every phase requires the `w365_agents` Cargo feature and runtime
@@ -253,15 +261,15 @@ alternative to omission. Parsers preserve presence; backend code owns defaults.
 | `w365Agents.provision.poolId` | Required string, 36-character hyphenated ASCII-hex GUID (`8-4-4-4-12`). No empty/blank value or automatic selection. |
 | Provision `userType` | `"HumanUser"` when supplied; empty/other values fail. Omission sends no `user-type` header and does not infer a human identity. |
 | Provision `userObjectId` | If supplied, a canonical GUID sent as `user-object-id`; empty/blank fails. Omission sends no header. |
-| Provision/stop/deprovision `cpBaseUrl` | Bare control-plane hostname, no scheme, credentials, query or path; otherwise use `W365A_CONTROLPLANE_URL`. Blank counts as absent. Missing/invalid resolved host fails before a service request. |
+| Provision/stop/deprovision `cpBaseUrl` | Bare W365 service hostname for reservation management, no scheme, credentials, query or path; otherwise use `W365A_CONTROLPLANE_URL`. Blank counts as absent. Missing/invalid resolved host fails before a service request. |
 | Provision/stop/deprovision `cpBearerToken` | Nonblank resource-specific token or `W365A_CP_TOKEN`; blank counts as absent. Missing resolved token fails. Explicit nonblank host requires its own explicit nonblank token. |
 | Start/exec `dpSuffix` | DNS suffix used to construct `{poolId}.{suffix}`, not a URL; otherwise `W365A_DP_SUFFIX`. Blank counts as absent. Same explicit-host/token pairing rule. |
-| Start `dpBearerToken`; exec `bearerToken` | Nonblank data-plane token or `W365A_DP_TOKEN`; blank counts as absent. Missing resolved token fails; no borrowing an ambient token for an explicit host override. |
+| Start `dpBearerToken`; exec `bearerToken` | Nonblank resource-specific token for readiness/execution or `W365A_DP_TOKEN`; blank counts as absent. Missing resolved token fails; no borrowing an ambient token for an explicit host override. |
 | Provision `provisionTimeoutMs` | Optional unsigned 64-bit milliseconds; default 45000. Zero is passed to transport, not treated as infinite. |
 | Start `readyTimeoutMs` | Optional unsigned 64-bit milliseconds; default 120000. Zero performs one status poll. Timeout reports `attach_timeout` with last observed state; no implicit release. |
 | Start `pollIntervalMs` | Optional unsigned 64-bit milliseconds; default 2000. Zero adds no sleep. No automatic retry of a failed HTTP status request. |
 
-Service defaults are HTTPS port 443, CP API `2.0`, DP status API `1.0` and exec
+Service defaults are HTTPS port 443, reservation API `2.0`, readiness API `1.0` and exec
 capability `microsoft.mxc-exec`. Additional protocol/port/capability overrides
 are outside the proposed initial scope.
 
@@ -348,14 +356,14 @@ the Dev APIs, without new typed W365 configuration.
 
 The W365A backend resides in `mxc-sdk` modules under
 `src/mxc-sdk/src/backends/w365agents/common/`. `W365AgentsRunner` implements
-`StatefulSandboxBackend` and delegates configuration, control-plane requests,
+`StatefulSandboxBackend` and delegates configuration, W365 service requests,
 readiness and command relay to those internal modules.
 `mxc_engine` owns experimental authorization, registration, checked dispatch
 and ID routing. Executors remain thin. `mxc_contract` owns contract definitions;
 `mxc_common` provides shared request normalization and the cross-platform
 foundation, not contract or backend implementation.
 
-Command execution reaches the Cloud PC through the W365A data-plane
+Command execution reaches the Cloud PC through the W365
 RemotingInterface service. DesktopControl.Relay on the Cloud PC establishes
 the outbound service connection and carries commands and I/O to and from
 DesktopControl.Exec. The relay transports the data; DesktopControl.Exec
@@ -369,17 +377,20 @@ The W365 backend owns its transport resources.
 sequenceDiagram
     participant C as Caller
     participant M as MXC SDK or executor / engine / W365 backend
-    participant S as W365 control plane
-    participant D as Data plane / Cloud PC
+    participant S as W365 reservation management
+    participant D as W365 readiness and execution
     C->>M: Provision JSON, configuration and tokens
     M->>S: Checkout
     S-->>M: Reservation
     M-->>C: Container ID and metadata
     C->>M: Start via SDK or executor
+    M->>D: Poll readiness
+    D-->>M: Ready or failure
+    M-->>C: Readiness result
     C->>M: Sequential exec via SDK or executor with retained ID
-    M->>D: Readiness / DesktopControl.Exec
-    D-->>M: Status / command output and completion
-    M-->>C: Readiness / captured or streamed output and result
+    M->>D: Relay command to DesktopControl.Exec on Cloud PC
+    D-->>M: Command output and completion
+    M-->>C: Captured or streamed output and result
     C->>M: Stop or deprovision
     M->>S: Delete session
     S-->>M: Release acceptance
@@ -415,7 +426,7 @@ duplicate lifecycle ownership.
 
 | Owner | State/resources and cleanup responsibility |
 | --- | --- |
-| Caller | Chooses pool, identity, coordinates and credentials; persists ID immediately; sequences commands; drains and disposes SDK-spawned process streams/handles or manages executor stdio; retains primary and cleanup results separately; attempts stop/deprovision with renewed CP credentials. |
+| Caller | Chooses pool, identity, coordinates and credentials; persists ID immediately; sequences commands; drains and disposes SDK-spawned process streams/handles or manages executor stdio; retains primary and cleanup results separately; attempts stop/deprovision with renewed credentials for release. |
 | MXC backend adapter | Validates and executes one phase; owns temporary connections, bounded stream buffers and relay workers. It has no durable reservation registry or reservation watchdog. |
 | W365 services / guest | Own reservation, remote command processes, guest files/environment, tenant policy, expiration and reset. Their continued state does not depend on retaining a runner object. |
 
@@ -433,13 +444,13 @@ results outside it.
 | Failure or transition | Remaining state and caller-visible recovery |
 | --- | --- |
 | Request rejected locally | Invalid configuration, policy or ID fails before a service request, so the rejected operation causes no remote action. |
-| Checkout rejected with a known session ID | A mismatched or malformed computer ID does not prevent explicit release of a valid session. The caller retains `details.sandboxId` from the error and passes it unchanged to `deprovision` or `stop` with valid CP credentials. If release fails, it retains the reference and reports the checkout and cleanup failures separately. |
+| Checkout rejected with a known session ID | A mismatched or malformed computer ID does not prevent explicit release of a valid session. The caller retains `details.sandboxId` from the error and passes it unchanged to `deprovision` or `stop` with valid credentials for release. If release fails, it retains the reference and reports the checkout and cleanup failures separately. |
 | Checkout outcome unknown or session ID unavailable | A lost/unparseable response or lost/malformed session ID can leave a reservation without a cleanup reference. Uncertain checkout errors report `possiblySucceeded` and available request context. MXC does not automatically retry checkout, guarantee release, or reconstruct a lost ID. Service-side reconciliation is outside this milestone. |
 | Readiness failure | The reservation is not automatically released or replaced. The caller can retry readiness with the retained ID and valid credentials, or explicitly release it. |
 | Execution failure or caller disconnect | Connection loss, remote `ERROR` and local I/O/protocol failures return structured MXC errors through SDK launch/wait or executor stderr, not synthetic command exits. Failed SDK capture returns an error, not a partial successful result; already-read spawned output remains the caller's. No confirmed remote cleanup is inferred, and commands are never replayed automatically. |
 | SDK process kill, cancellation or disposal | Local resources are closed without checkin or proof of remote termination. Explicit kill reports unsupported remote termination. The caller retains the ID for explicit release. |
 | Executor termination or host exit | Local process/socket resources are reclaimed without checkin. Closing the connection does not prove the remote command stopped. The caller retains the ID for explicit release through the SDK or executor. |
-| Release failure or lost response | The reservation may remain, or release may already have been accepted. The caller retains the ID and deployment/account context, reports cleanup failure separately from the original failure, and retries release against the same ID with valid CP credentials under a separate cleanup budget. |
+| Release failure or lost response | The reservation may remain, or release may already have been accepted. The caller retains the ID and deployment/account context, reports cleanup failure separately from the original failure, and retries release against the same ID with valid credentials for release under a separate cleanup budget. |
 | Release accepted, reservation expired, or later checkout | Release is idempotent, but acceptance does not confirm completed reset/sanitization or reusable capacity. Expired reservations surface service errors, not an implicit replacement or restoration of guest data. A new checkout is independent and does not clean up an old reservation; the caller retains its ID for cleanup, and leaked capacity may cause the new checkout to fail. |
 
 MXC has no durable reservation registry or service-confirmed remote cancellation
@@ -475,7 +486,7 @@ the shared scenarios below.
 | Lifecycle process-input fixture | Command with omitted/empty/supplied `cwd` and omitted/zero/positive `process.timeout`. | The service fixture receives the unchanged command, no `cwd` for omitted/empty input or the supplied guest path otherwise, and `timeoutMs` of 0 for omitted/zero input or the supplied positive millisecond value. |
 | Phase 4 live process-input scenario | Execute through the native lifecycle path in a known guest directory, with known non-sensitive guest-default variables and an override of one using `inheritDefaultEnv: true`. Repeat with omitted env and with `env: []` plus `inheritDefaultEnv: true`; run with omitted and zero `process.timeout`, then run a command whose normal duration exceeds a positive timeout. | Output identifies the selected directory, preserves the unmodified guest-default variable and reflects the override; omitted/empty env preserves guest defaults. Confirm and record guest handling of zero `timeoutMs` and applicable service-side timeout defaults and limits. The positively timed command terminates remotely without reaching normal completion; record the returned exit/error result. A local timeout or disconnect alone does not establish remote termination. |
 | `w365agents_cp_loopback` plus lifecycle fixture | Equal IDs or omitted computer ID; different/malformed computer ID with a valid session ID; lost response, unparseable body or missing/malformed session ID. | Equal/omitted computer IDs produce the same session-based ID. Rejected successful checkout reports `possiblySucceeded`; a valid session ID is retained with the pool ID and opaque `sandboxId` in error details, not a successful container result. An unavailable/invalid session ID produces no fabricated cleanup reference. No second POST occurs. |
-| CP/status/upgrade failure fixtures | 401, 403, 404, 429, 500, other non-success and malformed responses. | Errors retain operation-specific categories/request IDs; 500 checkout reports uncertainty; no automatic retry/fallback/escalation occurs. |
+| Checkout/release/status/upgrade failure fixtures | 401, 403, 404, 429, 500, other non-success and malformed responses. | Errors retain operation-specific categories/request IDs; 500 checkout reports uncertainty; no automatic retry/fallback/escalation occurs. |
 | Readiness fixture | Waiting/Live then Ready, unknown state, expired budget, `readyTimeoutMs: 0`. | Success only on Ready; timeout has last state; zero polls once; no release or replacement on timeout. |
 | `w365agents_loopback` and lifecycle relay fixture | Input/EOF, stdout/stderr frames, EXIT 0, 7 and -1, oversized start payload, oversized/malformed received frames, loss before EXIT, remote ERROR and local output error. | I/O and actual EXIT codes are preserved, including -1. Oversized EXEC_START fails before dial; oversized/malformed received frames fail explicitly. Post-upgrade loss and remote ERROR return `backend_error` with distinct operation-specific codes and appropriate outcome-uncertainty details, not `ExecCompleted`; local failures also surface errors. Native errors go to stderr without altering already-relayed stdout, and commands are never replayed automatically after failure. |
 | Executor relay lifecycle fixture | Concurrent stdout/stderr of at least 1 MiB each, binary data, stdin/EOF and slow/closed output readers through executor relayed exec. | Exact separate output with concurrent draining; bounded relay buffers and explicit local I/O errors. EOF is forwarded without checkout or release. |
@@ -510,7 +521,7 @@ compatible DesktopControl.Exec host; skipped tests do not count as coverage.
 A two-machine execution demo using real MXC and DesktopControl components but
 pre-seeded pool/computer authorization exercises the remote execution path,
 not the complete reservation lifecycle. Simulated checkout does not validate
-control-plane provision, readiness, or release, and is not a substitute for
+W365 service provision, readiness, or release, and is not a substitute for
 the Phase 4 live lifecycle scenarios.
 
 ### Live-test inputs and nightly validation
@@ -546,16 +557,15 @@ follow the [phase settings](#routing-and-phase-settings):
 | Request routing | `version: "1.1.0-alpha"`, `phase: "provision"` and `containment: "w365_agents"`. |
 | `w365Agents.provision.poolId` | Required canonical 36-character pool GUID for an existing, authorized test pool. The harness selects the pool; MXC does not discover or create it. |
 | `userType` and `userObjectId` | The delegated human-user scenario supplies `"HumanUser"` and the selected user's canonical object GUID. Both fields are optional in the proposed MXC contract; omission sends no corresponding header and does not infer a human identity. The caller supplies the identity information required by its service deployment. |
-| `cpBaseUrl` and `cpBearerToken` | An approved bare control-plane hostname and a valid control-plane bearer token. These fields may be omitted only when their required values resolve from `W365A_CONTROLPLANE_URL` and `W365A_CP_TOKEN`. An explicit nonblank hostname requires an explicit nonblank token; an ambient token is not used for a host override. |
+| `cpBaseUrl` and `cpBearerToken` | An approved bare W365 service hostname and a valid resource-specific token for reservation management. These fields may be omitted only when their required values resolve from `W365A_CONTROLPLANE_URL` and `W365A_CP_TOKEN`. An explicit nonblank hostname requires an explicit nonblank token; an ambient token is not used for a host override. |
 | `provisionTimeoutMs` | Optional checkout budget in milliseconds; omission uses 45000. |
 
-Provision uses control-plane (CP) configuration and authorization, not
-data-plane (DP) credentials. Subsequent readiness and exec requests use the
-returned container ID, `dpSuffix` or `W365A_DP_SUFFIX`, and a separate DP token:
+Subsequent readiness and exec requests use the returned container ID,
+`dpSuffix` or `W365A_DP_SUFFIX`, and a separate resource-specific token:
 `dpBearerToken` for start, `bearerToken` for exec, or `W365A_DP_TOKEN`.
-The same explicit-host/token pairing rule applies. Stop/deprovision use CP
-configuration and a valid CP token again, including caller-renewed credentials
-when needed for cleanup.
+The same explicit-host/token pairing rule applies. Stop/deprovision use the
+reservation-management configuration and token again, including caller-renewed
+credentials when needed for cleanup.
 
 Nightly live testing is proposed as follow-up beyond the initial experimental
 milestone. Unattended runs require an authorized test tenant, pool and identity,
@@ -581,8 +591,8 @@ PRs. Implementation PRs use the non-closing reference `Refs #1615`.
 | --- | --- |
 | Phase 1: contracts and generated artifacts | A separate PR introduces development phase types, adapters, fixtures and generated schema/TypeScript artifacts. Published contracts remain unchanged; the unsupported backend stays unavailable until implemented. |
 | SDK error-metadata prerequisite | A separate PR preserves backend details through Rust, native error transport, .NET and Node as specified in [the API proposal](api.md), with compatibility and regression coverage. |
-| Phase 2: checkout and release | This stage establishes the direct-user contract and introduces the internal runner, ID mapping, CP client, fail-closed policy, engine registration/dispatch, feature forwarding and checked binding as a vertical slice. Executor and Dev SDK fixtures verify checkout/release and error-based cleanup with CI wiring. |
-| Phase 3: readiness and execution | This stage introduces DP readiness, TLS upgrade, executor relay and SDK pipe-backed capture/spawn through existing adapters, with cross-SDK execution/recovery and unsupported-mode coverage. |
+| Phase 2: checkout and release | This stage establishes the direct-user contract and introduces the internal runner, ID mapping, W365 service client for reservation management, fail-closed policy, engine registration/dispatch, feature forwarding and checked binding as a vertical slice. Executor and Dev SDK fixtures verify checkout/release and error-based cleanup with CI wiring. |
+| Phase 3: readiness and execution | This stage introduces W365 service readiness checks, TLS upgrade, executor relay and SDK pipe-backed capture/spawn through existing adapters, with cross-SDK execution/recovery and unsupported-mode coverage. |
 | Phase 4: manual examples and documentation | This stage provides executor-only and SDK-only lifecycle/execution examples, sequential guest-state and recovery scenarios, feature-enabled artifacts and backend guide. The accompanying results identify actual manual outcomes and unresolved live-infrastructure limits. |
 | Typed W365 SDK/API stage | Outside this milestone; typed request APIs and contract targets remain unchanged. Future publication/typed API work needs separate agreement. |
 

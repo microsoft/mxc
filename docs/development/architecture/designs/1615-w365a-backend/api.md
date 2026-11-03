@@ -42,7 +42,7 @@ pool and human-user object IDs:
 }
 ```
 
-The caller supplies/renews control-plane (CP) and data-plane (DP) configuration
+The caller supplies/renews W365 service configuration and resource-specific tokens
 through the [documented environment variables](README.md#routing-and-phase-settings).
 Keep tokens out of source, command-line arguments and persisted request files;
 the SDK does not acquire or refresh them.
