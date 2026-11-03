@@ -120,6 +120,25 @@ fn verified_bundle_keeps_its_binary_directory_in_place() {
 }
 
 #[test]
+fn verified_tools_can_execute_while_file_guards_are_held() {
+    let bundle = BundledAgent::discover().expect("crate-staged agent bundle");
+    let _verified = signature_verification::verify_bundle(bundle.directory()).unwrap();
+    for name in ["openvmm.exe", "direct-images.exe"] {
+        let output = std::process::Command::new(bundle.directory().join("bin").join(name))
+            .arg("--help")
+            .output()
+            .expect("verified tool launches without provisioning a VM");
+        assert!(
+            output.status.success(),
+            "{name}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.stdout.is_empty(), "{name} must print its help");
+    }
+}
+
+#[test]
 fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
     const CHILD: &str = "MXC_NVX_SIGNATURE_CHILD";
     if let Some(name) = std::env::var_os(CHILD) {
