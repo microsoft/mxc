@@ -136,11 +136,14 @@ version matching, signature checks, and checksum checks.
 
 #### 2.4.5 SDK API exposure
 
-The current integration supports captured create-and-run execution through
-development request JSON and the executor. Streaming, lifecycle operations,
-and public SDK MicroVM selection remain unsupported. The JSON creation contract
-requires a fully qualified registry image. Explicit memory overrides remain
-unsupported by this backend.
+The current integration supports captured and streaming create-and-run
+execution through development request JSON and the executor. Rust
+`v1::dev` JSON functions also support provision, start, captured or streaming
+exec, stop, and deprovision. Typed V1 MicroVM selection remains unsupported.
+The JSON creation contract requires a fully qualified registry image. Optional
+`microvm.provision.memoryMib` is accepted for create-and-run and provision when
+the verified signed runtime advertises `capabilities.spec.memory`; otherwise
+the request fails closed.
 [Appendix F.3](#f3-contract-and-sdk-publication) describes contract and SDK
 publication.
 
@@ -204,9 +207,10 @@ network rule limits and rejection behavior.
 
 ### 4.4 Lifecycle
 
-The MXC `1.1.0-alpha` contract defines MicroVM provision requests, but the
-backend currently rejects public lifecycle operations. The lifecycle behavior
-below is proposed future work, not current support.
+The MXC `1.1.0-alpha` contract and Rust `v1::dev` JSON API support MicroVM
+lifecycle operations. Typed V1 lifecycle authoring does not expose MicroVM.
+The design below records the proposal that led to the current JSON-only
+integration and remains future-facing where it discusses typed SDK publication.
 
 Create-and-run and provision requests use the same MicroVM configuration.
 [Appendix F.4](#f4-state-aware-provision-shape) contains the state-aware
@@ -219,17 +223,17 @@ request shape.
 | `exec` | Runs a workload in the running VM |
 | `stop` | Stops the VM while retaining provisioned state |
 | `deprovision` | Removes the provisioned state |
-| One-shot | MXC will compose provision, start, exec, stop, and deprovision |
+| Create-and-run | MXC composes provision, start, exec, stop, and deprovision |
 
-MXC will expose container IDs in the following form:
+MXC exposes sandbox IDs in the following form:
 
 ```text
 microvm:<32 lowercase hexadecimal characters>
 ```
 
-MXC will register the `microvm:` prefix in state-aware dispatch so `start`,
+MXC registers the `microvm:` prefix in lifecycle dispatch so `start`,
 `exec`, `stop`, and `deprovision` route back to the NVX runner. The NVX backend
-will translate between this public ID and the native
+translates between this public ID and the native
 `aci-edge-sandboxes:<32 lowercase hexadecimal characters>` ID.
 
 [Appendix F](#appendix-f-schema-and-policy-implementation-details) describes
@@ -251,15 +255,22 @@ ID routing, cleanup behavior, and repeated `exec` calls.
 | `process.env` / `inheritDefaultEnv` | Supported with restrictions | Additive entries only, at most 256 entries and 32 KiB total. An explicit environment requires `inheritDefaultEnv=true`. Reject proxy variables. |
 | `process.timeout` | Supported | Maximum one hour. An omitted value or `0` means no execution deadline. |
 | Separate stdout and stderr | Captured and streaming | Preserve distinct streams and the execution outcome |
-| Live stdin | Supported by the native agent | MXC streaming adapters must expose the pipe and explicit EOF ownership |
+| Live stdin | Unsupported by the MXC integration | The signed agent advertises stdin support, but MicroVM create-and-run and lifecycle JSON reject writable stdin before workload launch. |
 | PTY | Unsupported | Future work needed; Reject before workload launch |
-| Guest memory override | Native capability; development setting | Use optional `microvm.provision.memoryMib` for create-and-run and provision. |
+| Guest memory override | Capability-gated development setting | Optional `microvm.provision.memoryMib` is supported for create-and-run and provision when the verified runtime advertises `capabilities.spec.memory`. |
 | `fallback` | Unsupported | Reject. NVX does not select another backend. |
 
 [Appendix F](#appendix-f-schema-and-policy-implementation-details) describes
 command execution, environment, output, and result behavior.
 
-Open question - The signed agent streams output without a total-output size limit. Capturing all output can therefore consume increasing host memory. Is this an issue?
+The signed agent does not impose a total-output limit. MXC's backend-owned
+create-and-run capture and MicroVM lifecycle `run_in_container_json` enforce a
+64 MiB combined stdout and stderr limit and return `backend_error` rather than
+truncated output when it is exceeded. Lifecycle overflow terminates only the
+running exec, leaving the provisioned container usable. The limit does not
+apply to caller-controlled live streams or unrelated generic streaming
+helpers. A caller that takes a live output stream must keep reading it or close
+it so execution and cleanup can make progress.
 
 NVX lifecycle errors align with the existing
 [MXC SDK error classifications](../../api-reference/rust/v1/types.md). The NVX runner
@@ -731,10 +742,13 @@ missing. The host remains supported. `availableMethods` omits `microvm`.
 The NVX runner will repeat the same runtime checks before launch. A cached
 `PlatformSupport` result will not bypass them.
 
-Missing WHP, disabled hardware virtualisation, absent runtime files,
-incompatible guest/runtime versions, and unsupported architectures will return
-`backend_unavailable` with remediation. OpenVMM startup failures should
-identify the associated log path.
+On a Windows x64 build that includes MicroVM, missing WHP, disabled hardware
+virtualisation, absent runtime files, and incompatible guest/runtime versions
+return `backend_unavailable` with remediation. The current V1 streaming spawn
+surface preserves `unsupported_containment` when MicroVM streaming is not
+compiled for the host or build; lifecycle dispatch similarly reports
+`unsupported_phase` when that implementation is absent. OpenVMM startup
+failures should identify the associated log path.
 
 ## Appendix F: Schema and policy implementation details
 
@@ -794,9 +808,11 @@ SDK MicroVM support requires explicit experimental authorization and development
 `1.1.0-alpha` request support before promotion to a stable contract.
 Experimental authorization is not a request JSON field.
 
-Contract publication and host availability remain separate. A published
-MicroVM backend can still return `backend_unavailable` when the host lacks the
-NVX runtime, WHP, or another required capability.
+Contract publication and host availability remain separate. A compiled
+MicroVM backend can return `backend_unavailable` when a supported Windows x64
+host lacks the NVX runtime, WHP, or another runtime capability. On a host or
+build without the MicroVM streaming implementation, the current V1 spawn
+surface instead preserves `unsupported_containment`.
 
 ### F.4 State-aware provision shape
 

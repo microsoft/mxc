@@ -48,6 +48,9 @@ that a later operation will succeed on a changed host.
 ## `mxc_sdk::v1::available_backends`
 
 Probe the host and return only the backends it can currently run.
+Availability is advisory; a later launch can fail if the host or runtime
+changes. On Windows x64, MicroVM requires the `microvm` feature, a bundle
+manifest and agent library, and an active hypervisor.
 
 ```rust
 pub fn available_backends() -> Vec<AvailableBackend>;

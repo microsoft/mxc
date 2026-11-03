@@ -11,6 +11,11 @@ The backend supports Windows x64 only. Windows ARM64 and Linux hosts do not have
 active MicroVM execution path; support for those platforms is
 future work. Enabling the feature does not make an unsupported host available.
 
+`v1::available_backends` reports MicroVM when the feature is enabled, the
+agent bundle manifest and library are present, and Windows reports an active
+hypervisor. This read-only check is advisory: execution still verifies the
+bundle and the host's runtime requirements.
+
 ## Requirements and quick start
 
 The host needs Windows Hypervisor Platform, hardware virtualization, and a
@@ -68,8 +73,9 @@ let result = dev::run_json(&json, JsonOptions { experimental: true })?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The result contains captured stdout and stderr as bytes; it does not provide
-live streams or a persistent container.
+Use `dev::spawn_json` for live stdout and stderr. The `v1::dev` JSON lifecycle
+functions also support persistent provision, start, exec, stop, and
+deprovision operations. MicroVM remains absent from the typed V1 request API.
 
 Commands run in the guest's POSIX shell, not in a host shell or a Python
 interpreter. Every creation request requires a registry image in
@@ -96,9 +102,8 @@ bundle must be available even when only validating a request.
 
 The table describes this MXC integration, not every capability of NVX. The
 signed agent limits workloads to one hour and constrains their working
-directories and environments as described below. Captured-only execution
-and refusal of UI, memory overrides, and public lifecycle operations
-are restrictions of this MXC integration.
+directories and environments as described below. Refusal of UI, writable
+stdin, and PTY operations are restrictions of this MXC integration.
 The [signed-agent documentation](https://github.com/microsoft/nvx/blob/0430ce79d125203c20f0aa69243480513a774296/aci_edge_sandboxes/README.md#agent-backend-opt-in)
 describes its contract; the direct OpenVMM backend uses a different guest and
 does not define the limits of this integration.
@@ -106,15 +111,18 @@ does not define the limits of this integration.
 | Surface | Support |
 |---|---|
 | Host platforms | Windows x64 with WHP. Windows ARM64 and Linux execution are unavailable. |
-| Execution | Create-and-run development JSON requests with captured stdout, stderr, exit status, and timeout. |
-| Rust SDK API | `v1::dev::run_json` supports captured execution with a MicroVM JSON request; typed V1 operations do not expose MicroVM selection. |
-| Streaming, PTY, and container lifecycle operations | Unsupported. Requests fail explicitly before backend setup. |
+| Execution | Create-and-run development JSON requests with captured output or live stdout and stderr, plus persistent container lifecycle operations. |
+| Rust SDK API | `v1::dev::run_json` and `v1::dev::spawn_json` support MicroVM JSON requests. The `v1::dev` JSON lifecycle functions support provision, start, captured or live exec, stop, and deprovision. Typed V1 operations do not expose MicroVM selection. |
+| C ABI, Node, and .NET | MicroVM streaming and lifecycle JSON requests, including lifecycle validation, are rejected at the C ABI boundary even when the shared engine includes MicroVM. Existing create-and-run captured execution is unchanged. |
+| Executor | MicroVM lifecycle requests through `--operation`, including `--dry-run`, are rejected after parsing and experimental authorization. Existing create-and-run captured execution is unchanged. |
+| Streaming and PTY | Live stdout and stderr are supported. Writable stdin and PTY operations are rejected before workload launch. |
+| Container lifecycle operations | Supported through `v1::dev` JSON only. Network, proxy, filesystem, image, and memory policy are fixed at provision. |
 | Workload image | Required caller-selected registry reference in `microvm.image`. |
-| Guest memory override | The contract defines `microvm.provision.memoryMib`, but explicit overrides return `PolicyValidation` before bundle discovery. Omit it to use the runtime default. |
+| Guest memory override | Optional positive `microvm.provision.memoryMib` on create-and-run and provision requests when the verified runtime advertises `spec.memory`; unsupported runtimes fail closed. |
 | Working directory | Optional absolute POSIX guest path; see the limits below. |
 | Environment | Guest default, optionally extended with additive entries; see below. |
 | Process timeout | `0` means no workload timeout; nonzero values may not exceed 3,600,000 ms. |
-| Captured output | At most 64 MiB (67,108,864 bytes) combined stdout and stderr. |
+| Captured output | Create-and-run capture and lifecycle `run_in_container_json` accept at most 64 MiB (67,108,864 bytes) combined stdout and stderr. Live streams are caller-controlled and do not have this MXC capture limit. |
 | Filesystem policy | Read-only, read-write, and denied paths are mapped to the agent and require the corresponding runtime capabilities. |
 | Network policy | Directional defaults and CIDR/protocol/port rules require the corresponding runtime capabilities. Unsupported ingress or host-loopback allow postures fail closed. |
 | Runtime proxy | `runtimeConfig.networkProxy` requires the runtime's proxy capability. Proxy environment variables remain rejected. |
@@ -153,21 +161,43 @@ host or provisioning a container.
 ### Output, timeout, and cleanup
 
 Output up to the capture limit is returned unchanged, including non-UTF-8
-bytes. Exceeding the combined limit cancels and releases execution, tears down
-the container, and returns `BackendError` rather than truncated output. The
-limit also applies when the workload timeout is zero. Cleanup failures are
-reported alongside the original failure.
+bytes. For create-and-run capture, exceeding the combined limit cancels and
+releases execution, tears down the container, and returns `BackendError`
+rather than truncated output. For lifecycle `run_in_container_json`, overflow
+cancels and releases only that execution; the caller-owned container remains
+provisioned and usable. The limit also applies when the workload timeout is
+zero. Cleanup failures are reported alongside the original failure.
+
+Lifecycle envelope calls, including validation, explicitly close the native
+host. A close failure after successful work returns `BackendError`; a primary
+operation failure keeps its original error code and appends the close failure.
+For calls on an existing container, native error details are withheld because
+the call cannot determine whether the prior provision request included proxy
+credentials. The error code and failed operation are still reported.
+
+If provision succeeds but close fails, MXC retains the provisioned container
+and returns its ID in Rust `Error.details.nvxRecovery.sandboxId`, with
+`details.nvxRecovery.state` recording the last-known state, `"provisioned"`. Use that ID to continue or
+deprovision through Rust `v1::dev` JSON; do not retry provision. The ID is a
+sensitive recovery capability and is not included in ordinary error formatting.
+MXC does not retry an ambiguous native host release or attempt rollback through
+a potentially consumed handle. The shared private state and cache remain
+available for recovery and other containers.
 
 A workload timeout preserves captured partial output and tears down the
-container. Each create-and-run request gets fresh workload state; this phase
-does not offer persistent containers or manual lifecycle operations.
+create-and-run container. Live execution starts its workload deadline only
+after the VM has started and the native exec operation begins. If a caller
+takes a live output stream, MXC does not impose the capture limit; the caller
+must read or close that stream. Timeout and cancellation interrupt a blocked
+relay so cleanup can proceed.
 
-On startup failure, the returned error includes bounded tails of the agent's
-VM log, boot-console log, and outcome report before teardown removes them.
-Each tail is limited to 8 KiB; truncation and unavailable diagnostics are
-identified without replacing the original failure. If the configured proxy URL
-contains credentials, MXC withholds native error details and startup diagnostics
-to avoid exposing them; the error code and failed operation are still reported.
+On create-and-run startup failure, the returned error includes bounded tails of
+the agent's VM log, boot-console log, and outcome report before teardown removes
+them. Each tail is limited to 8 KiB; truncation and unavailable diagnostics are
+identified without replacing the original failure. If the configured proxy
+URL contains credentials, MXC withholds native error details and startup
+diagnostics to avoid exposing them; the error code and failed operation are
+still reported.
 
 In the Windows executor, Ctrl-C and Ctrl-Break request cancellation and allow
 VM shutdown, deprovisioning, and temporary-directory cleanup before exit code
@@ -184,6 +214,23 @@ image registry/cache stored there. MXC coordinates the agent's stop and
 deprovision operations, closes the client, and removes the directory after
 successful deprovisioning; it does not maintain a persistent container database.
 
+Container lifecycle operations use the owner-only
+`%LOCALAPPDATA%\Microsoft\MXC\nvx-v1` state root so separate JSON calls can reopen
+the same signed-agent records. MXC creates the private directories atomically
+with a protected current-user and Local SYSTEM DACL, opens every path component
+without following reparse points, and holds those handles without delete sharing
+while the signed agent uses the path. Existing unsafe roots are rejected.
+Non-verbatim paths with directory components ending in a dot or space are
+rejected before private state creation or native setup because Windows may
+resolve them to a different directory. Set `LOCALAPPDATA` to an unambiguous
+absolute path without those endings, or use an explicit verbatim (`\\?\`)
+absolute path to preserve literal names.
+When the current user is LocalSystem, creation and validation require one
+grant for that unique SID, not duplicate grants. Inherited, duplicate, or
+unexpected ACEs and non-full-control grants remain rejected.
+Deprovision removes the selected container but retains
+the shared state root and runtime cache for other containers and later calls.
+
 If deprovisioning fails, MXC reports the failure and retains the directory,
 including its location in the error. This preserves the agent's resource
 records rather than deleting them while a VM might remain. Retention does not
@@ -199,11 +246,12 @@ Windows 25H2 x64. It consumes the same Windows build artifact, including the
 compiled `nvx_e2e` tests and the complete signed bundle; the validation host
 does not rebuild them.
 
-The SDK suite covers both the executor and captured JSON execution, caller
-image selection, filesystem enforcement, directional network and proxy
-enforcement against controlled reachable host endpoints, binary
-stdout/stderr, exit codes, environment and working-directory settings,
-timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
+The SDK suite covers the executor, captured and live JSON execution, persistent
+JSON lifecycle operations, caller image selection, filesystem enforcement,
+directional network and proxy enforcement against controlled reachable host
+endpoints, binary stdout/stderr, exit codes, environment and working-directory
+settings, timeouts, capture limits, cleanup, and the seven MicroVM config
+fixtures.
 An isolated-console scenario interrupts both startup and running execution,
 then verifies that the owned OpenVMM process has terminated and run storage
 has been removed.

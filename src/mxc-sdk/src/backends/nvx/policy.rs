@@ -5,12 +5,13 @@ use std::path::PathBuf;
 
 use super::abi::{
     Capabilities, EgressPolicy, ExecRequest, FilesystemPolicy, IngressPolicy, NetworkPeer,
-    NetworkPolicy, NetworkPort, NetworkRule, ProvisionRequest, RuntimeConfig, SandboxSpec,
+    NetworkPolicy, NetworkPort, NetworkRule, ProvisionRequest, Resources, RuntimeConfig,
+    SandboxSpec,
 };
 
 use crate::mxc_common::models::{
-    ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer as MxcNetworkPeer,
-    NetworkPort as MxcNetworkPort, NetworkRule as MxcNetworkRule,
+    ExecutionRequest, MicroVmProvisionConfig, NetworkAction, NetworkCidr,
+    NetworkPeer as MxcNetworkPeer, NetworkPort as MxcNetworkPort, NetworkRule as MxcNetworkRule,
 };
 use crate::mxc_common::mxc_error::MxcError;
 
@@ -24,14 +25,31 @@ pub(super) fn provision_request(
     request: &ExecutionRequest,
     capabilities: &Capabilities,
 ) -> Result<(ProvisionRequest, SandboxSpec), MxcError> {
-    validate_request(request)?;
-    let image = request
-        .microvm_image
-        .as_deref()
+    provision_request_with_config(request, None, capabilities)
+}
+
+pub(super) fn provision_request_with_config(
+    request: &ExecutionRequest,
+    config: Option<&MicroVmProvisionConfig>,
+    capabilities: &Capabilities,
+) -> Result<(ProvisionRequest, SandboxSpec), MxcError> {
+    validate_provision_request(request, config)?;
+    let image = config
+        .map(|config| config.image.as_str())
+        .or(request.microvm_image.as_deref())
         .ok_or_else(|| MxcError::malformed_request("microvm.image is required"))?;
-    let spec = super::runtime::sandbox_spec(image)?;
+    let mut spec = super::runtime::sandbox_spec(image)?;
+    let memory_mib = config.map_or(request.microvm_memory_mib, |config| config.memory_mib);
     if !capabilities.spec.image_reference {
         return Err(unsupported("microvm.image"));
+    }
+    if memory_mib.is_some() && !capabilities.spec.memory {
+        return Err(unsupported("microvm.provision.memoryMib"));
+    }
+    if let Some(memory_mib) = memory_mib {
+        spec.resources = Some(Resources {
+            memory_mib: Some(memory_mib),
+        });
     }
     validate_provision_capabilities(request, capabilities)?;
 
@@ -48,11 +66,40 @@ pub(super) fn provision_request(
     Ok((provision, spec))
 }
 
+pub(super) fn validate_provision_request(
+    request: &ExecutionRequest,
+    config: Option<&MicroVmProvisionConfig>,
+) -> Result<(), MxcError> {
+    validate_common_request(request)?;
+    let image = config
+        .map(|config| config.image.as_str())
+        .or(request.microvm_image.as_deref())
+        .ok_or_else(|| MxcError::malformed_request("microvm.image is required"))?;
+    crate::mxc_contract::dev::ImageReference::validate(image).map_err(MxcError::malformed_request)
+}
+
 pub(super) fn exec_request(
     request: &ExecutionRequest,
     capabilities: &Capabilities,
 ) -> Result<ExecRequest, MxcError> {
-    validate_request(request)?;
+    validate_common_request(request)?;
+    validate_process(request)?;
+    build_exec_request(request, capabilities)
+}
+
+pub(super) fn exec_request_for_existing(
+    request: &ExecutionRequest,
+    capabilities: &Capabilities,
+) -> Result<ExecRequest, MxcError> {
+    validate_post_provision_request(request)?;
+    validate_process(request)?;
+    build_exec_request(request, capabilities)
+}
+
+fn build_exec_request(
+    request: &ExecutionRequest,
+    capabilities: &Capabilities,
+) -> Result<ExecRequest, MxcError> {
     if !capabilities.exec.command_line {
         return Err(unsupported("process.commandLine"));
     }
@@ -84,12 +131,29 @@ pub(super) fn exec_request(
     Ok(exec)
 }
 
-pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcError> {
-    if request.microvm_memory_mib.is_some() {
+pub(super) fn validate_post_provision_request(request: &ExecutionRequest) -> Result<(), MxcError> {
+    validate_common_request(request)?;
+    if !request.policy.readonly_paths.is_empty()
+        || !request.policy.readwrite_paths.is_empty()
+        || !request.policy.denied_paths.is_empty()
+    {
         return Err(MxcError::policy_validation(
-            "NVX guest memory overrides are not available in this build",
+            "MicroVM filesystem policy is fixed at provision",
         ));
     }
+    if request.policy.network_specified
+        || request.policy.runtime_network_proxy_specified
+        || request.policy.network_proxy.is_enabled()
+    {
+        return Err(MxcError::policy_validation(
+            "MicroVM network policy is fixed at provision",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcError> {
+    validate_common_request(request)?;
     if !request.lifecycle.destroy_on_exit {
         return Err(MxcError::policy_validation(
             "NVX requires lifecycle.destroyOnExit=true",
@@ -106,6 +170,10 @@ pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcErro
         .ok_or_else(|| MxcError::malformed_request("microvm.image is required"))?;
     crate::mxc_contract::dev::ImageReference::validate(image)
         .map_err(MxcError::malformed_request)?;
+    validate_process(request)
+}
+
+fn validate_common_request(request: &ExecutionRequest) -> Result<(), MxcError> {
     if !request.policy.enumerate_paths.is_empty() {
         return Err(MxcError::policy_validation(
             "NVX does not support filesystem.enumeratePaths",
@@ -121,7 +189,7 @@ pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcErro
             "NVX does not support processContainer.captureDenials",
         ));
     }
-    validate_process(request)
+    Ok(())
 }
 
 fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
@@ -130,6 +198,7 @@ fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
             "NVX process.commandLine and process.cwd must not contain null bytes",
         ));
     }
+
     if request.script_timeout > MAX_TIMEOUT_MS {
         return Err(MxcError::policy_validation(
             "NVX process.timeout must not exceed 3600000 ms (one hour)",
@@ -192,6 +261,10 @@ fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
         }
     }
     Ok(())
+}
+
+pub(super) fn validate_process_request(request: &ExecutionRequest) -> Result<(), MxcError> {
+    validate_process(request)
 }
 
 fn validate_provision_capabilities(
@@ -368,7 +441,32 @@ mod tests {
         capabilities.network.egress_rules = true;
         capabilities.network.network_proxy = true;
         capabilities.spec.image_reference = true;
+        capabilities.spec.memory = true;
         capabilities
+    }
+
+    #[test]
+    fn memory_override_requires_capability_and_maps_to_resources() {
+        let mut request = request();
+        request.microvm_memory_mib = Some(512);
+
+        let mut unsupported = capabilities();
+        unsupported.spec.memory = false;
+        let error = provision_request(&request, &unsupported).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(
+            error.message,
+            "the configured NVX runtime does not support microvm.provision.memoryMib"
+        );
+
+        let (_, spec) = provision_request(&request, &capabilities()).unwrap();
+        assert_eq!(
+            serde_json::to_value(spec).unwrap(),
+            serde_json::json!({
+                "image": {"reference": "docker.io/library/python:3.12-alpine"},
+                "resources": {"memoryMib": 512}
+            })
+        );
     }
 
     fn json_request(json: &serde_json::Value) -> ExecutionRequest {
@@ -401,6 +499,30 @@ mod tests {
                 "deny": [{"to": [{"cidr": "192.0.2.0/24"}], "ports": [{"protocol": "icmp"}]}]
             }}
         }))
+    }
+
+    #[test]
+    fn existing_container_exec_does_not_require_an_image_and_rejects_fixed_policy() {
+        let mut exec = request();
+        exec.microvm_image = None;
+        assert!(exec_request_for_existing(&exec, &capabilities()).is_ok());
+
+        exec.policy.readonly_paths.push("C:\\fixed".to_owned());
+        let error = exec_request_for_existing(&exec, &capabilities()).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(
+            error.message,
+            "MicroVM filesystem policy is fixed at provision"
+        );
+
+        exec.policy.readonly_paths.clear();
+        exec.policy.network_specified = true;
+        let error = exec_request_for_existing(&exec, &capabilities()).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(
+            error.message,
+            "MicroVM network policy is fixed at provision"
+        );
     }
 
     #[test]

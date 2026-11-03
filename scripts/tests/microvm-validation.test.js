@@ -13,7 +13,6 @@ const {
   rmSync,
   writeFileSync,
 } = require("node:fs");
-const { tmpdir } = require("node:os");
 const { delimiter, join, resolve } = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
@@ -56,7 +55,9 @@ function runScript(script, args, env) {
 }
 
 before(() => {
-  scratch = mkdtempSync(join(tmpdir(), "mxc-microvm-validation-"));
+  const target = join(root, "src", "target");
+  mkdirSync(target, { recursive: true });
+  scratch = mkdtempSync(join(target, "mxc-microvm-validation-"));
   tools = join(scratch, "tools");
   mkdirSync(tools);
   fixture = join(scratch, "fixture.exe");
@@ -115,6 +116,21 @@ fn main() {
         return;
     }
     if args == ["--list"] {
+        if mode != "missing-partial-bundle-discovery" {
+            println!("windows_x64::partial_bundle_is_not_reported_as_available: test");
+        }
+        if mode != "missing-private-lifecycle-discovery" {
+            println!("windows_x64::signed_bundle_validates_memory_and_private_lifecycle_state: test");
+        }
+        if mode != "missing-sdk-streaming-discovery" {
+            println!("windows_x64::signed_bundle_sdk_json_streaming: test");
+        }
+        if mode != "missing-sdk-lifecycle-discovery" {
+            println!("windows_x64::signed_bundle_sdk_json_lifecycle: test");
+        }
+        if mode != "missing-sdk-lifecycle-capture-discovery" {
+            println!("windows_x64::signed_bundle_sdk_json_lifecycle_capture_limit: test");
+        }
         if mode != "missing-proxy-discovery" {
             println!("windows_x64::signed_agent_proxy_validation_withholds_credentials: test");
         }
@@ -146,6 +162,9 @@ fn main() {
         if mode != "missing-network-proxy-discovery" {
             println!("windows_network::signed_bundle_deny_default_proxy_policy: test");
         }
+        if mode != "missing-lifecycle-proxy-discovery" {
+            println!("windows_network::signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start: test");
+        }
         return;
     }
     assert!(args.contains(&"--include-ignored".to_owned()));
@@ -164,6 +183,21 @@ fn main() {
     }
     if mode != "missing-sdk-json" {
         println!("VM_EXECUTED SDK JSON binary capture timeout limit and cleanup");
+    }
+    if mode != "missing-sdk-streaming" {
+        println!("VM_EXECUTED SDK JSON live output and cleanup");
+    }
+    if mode != "missing-sdk-lifecycle" {
+        println!("VM_EXECUTED SDK JSON persistent lifecycle live output timeout and cleanup");
+    }
+    if mode != "missing-memory-512" {
+        println!("VM_EXECUTED guest memory 512 MiB MemTotal 512000 KiB and cleanup");
+    }
+    if mode != "missing-memory-1024" {
+        println!("VM_EXECUTED guest memory 1024 MiB MemTotal 1024000 KiB and cleanup");
+    }
+    if mode != "missing-sdk-lifecycle-capture" {
+        println!("VM_EXECUTED SDK JSON lifecycle capture limit boundary cleanup and container reuse");
     }
     if mode != "missing-json-image" {
         println!("VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup");
@@ -188,6 +222,15 @@ fn main() {
     }
     if mode != "missing-network-proxy" {
         println!("VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic");
+    }
+    if mode == "helper-only-lifecycle-proxy" {
+        println!("{}", env::var("MXC_CI_FIXTURE_HELPER_MARKER").unwrap());
+    }
+    if mode != "missing-lifecycle-proxy" && mode != "helper-only-lifecycle-proxy" {
+        println!("VM_EXECUTED lifecycle proxy deadline after VM startup with ordered cleanup");
+    }
+    if mode != "missing-private-lifecycle-completion" {
+        println!("HOST_VALIDATED memory and private lifecycle state six path cases");
     }
     if mode == "skipped" {
         println!("SKIPPED: fixture VM unavailable");
@@ -222,16 +265,31 @@ function artifact() {
   return directory;
 }
 
+function nestedHelperMarker() {
+  const source = readFileSync(
+    join(root, "src", "mxc-sdk", "tests", "nvx_e2e", "network.rs"), "utf8"
+  );
+  const marker = source.match(
+    /fn parent_forwards_nested_child_marker\(\) \{\s*if[^{]+\{\s*println!\("\{([A-Z_]+)\}"\);/
+  );
+  assert.ok(marker, "must identify the marker emitted by the actual forwarding helper");
+  const value = source.match(new RegExp(`const ${marker[1]}: &str =\\s*"([^"]+)";`));
+  assert.ok(value, "must resolve the forwarding helper's actual marker");
+  return value[1];
+}
+
 function dispatch(directory, mode = "", architecture = "x64") {
+  const env = { MXC_CI_FIXTURE_MODE: mode };
+  if (mode === "helper-only-lifecycle-proxy") {
+    env.MXC_CI_FIXTURE_HELPER_MARKER = nestedHelperMarker();
+  }
   return runScript(
     dispatcher,
     [
       "-Backend", "microvm", "-BinaryDirectory", directory, "-Architecture", architecture,
       "-TempDirectory", join(directory, "logs"),
     ],
-    {
-      MXC_CI_FIXTURE_MODE: mode,
-    }
+    env
   );
 }
 
@@ -514,6 +572,11 @@ test("artifact dispatcher executes prebuilt SDK tests and preserves the log", ()
   const log = readFileSync(join(directory, "logs", "microvm-nvx.log"), "utf8");
   assert.match(log, /VM_EXECUTED facade /);
   assert.match(log, /VM_EXECUTED SDK JSON binary capture /);
+  assert.match(log, /VM_EXECUTED SDK JSON live output /);
+  assert.match(log, /VM_EXECUTED SDK JSON persistent lifecycle /);
+  assert.match(log, /VM_EXECUTED guest memory 512 MiB MemTotal /);
+  assert.match(log, /VM_EXECUTED guest memory 1024 MiB MemTotal /);
+  assert.match(log, /VM_EXECUTED SDK JSON lifecycle capture limit boundary cleanup and container reuse/);
   assert.match(log, /VM_EXECUTED JSON selected-image filesystem /);
   assert.match(log, /VM_EXECUTED executor /);
   assert.match(log, /VM_EXECUTED executor console interruption /);
@@ -521,6 +584,26 @@ test("artifact dispatcher executes prebuilt SDK tests and preserves the log", ()
   assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges/);
   assert.match(log, /VM_EXECUTED host-loopback ingress TCP\/UDP allow deny ready listeners and reply controls/);
   assert.match(log, /VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic/);
+  assert.match(log, /VM_EXECUTED lifecycle proxy deadline after VM startup with ordered cleanup/);
+  assert.match(log, /HOST_VALIDATED memory and private lifecycle state six path cases/);
+});
+
+test("private lifecycle host completion matches the real parent test and CI wiring", () => {
+  const name = "windows_x64::signed_bundle_validates_memory_and_private_lifecycle_state";
+  const marker = "HOST_VALIDATED memory and private lifecycle state six path cases";
+  const source = readFileSync(join(root, "src", "mxc-sdk", "tests", "nvx_e2e.rs"), "utf8");
+  const body = source.match(
+    /fn signed_bundle_validates_memory_and_private_lifecycle_state\(\) \{([\s\S]*?)\n    fn executor\(/
+  );
+  assert.ok(body, "must find the real host-only regression test");
+  assert.ok(body[1].includes(`"${name}"`), "child must run the same exact test");
+  assert.equal(body[1].split(marker).length - 1, 1, "only the parent emits completion");
+  assert.match(
+    body[1],
+    /"\{case\}: unexpected private or native artifacts in \{candidate:\?\}"\s*\);\s*\}\s*\}\s*println!\("HOST_VALIDATED memory and private lifecycle state six path cases"\);\s*return;\s*\}/
+  );
+  assert.ok(readFileSync(staging, "utf8").includes(`'${name}'`));
+  assert.ok(readFileSync(dispatcher, "utf8").includes(`$output.Contains('${marker}')`));
 });
 
 for (const [mode, message] of [
@@ -528,6 +611,11 @@ for (const [mode, message] of [
   ["zero-tests", /executed no tests/],
   ["missing-facade", /did not execute the facade VM scenario/],
   ["missing-sdk-json", /did not execute the SDK JSON capture VM scenario/],
+  ["missing-sdk-streaming", /did not execute the SDK JSON streaming VM scenario/],
+  ["missing-sdk-lifecycle", /did not execute the SDK JSON lifecycle VM scenario/],
+  ["missing-memory-512", /did not execute the 512 MiB guest memory VM scenario/],
+  ["missing-memory-1024", /did not execute the 1024 MiB guest memory VM scenario/],
+  ["missing-sdk-lifecycle-capture", /did not execute the SDK JSON lifecycle capture VM scenario/],
   ["missing-json-image", /did not execute the JSON image and policy VM scenario/],
   ["missing-executor", /did not execute the executor VM scenario/],
   ["missing-configs", /did not execute the executor configs VM scenario/],
@@ -536,6 +624,9 @@ for (const [mode, message] of [
   ["missing-network-udp", /did not execute the UDP network rules VM scenario/],
   ["missing-host-loopback", /did not execute the host-loopback ingress VM scenario/],
   ["missing-network-proxy", /did not execute the network proxy VM scenario/],
+  ["missing-lifecycle-proxy", /did not execute the lifecycle network proxy VM scenario/],
+  ["helper-only-lifecycle-proxy", /did not execute the lifecycle network proxy VM scenario/],
+  ["missing-private-lifecycle-completion", /did not complete the memory and private lifecycle state host-only scenario/],
   ["skipped", /skipped or filtered tests/],
   ["ignored", /skipped or filtered tests/],
 ]) {
@@ -543,6 +634,23 @@ for (const [mode, message] of [
     const result = dispatch(artifact(), mode);
     assert.notEqual(result.status, 0, result.output);
     assert.match(result.output, message);
+    if (mode === "helper-only-lifecycle-proxy") {
+      assert.ok(result.output.includes(nestedHelperMarker()), result.output);
+    }
+    if (mode === "missing-private-lifecycle-completion") {
+      assert.match(result.output, /test result: ok\. 7 passed; 0 failed; 0 ignored;/);
+      assert.equal((result.output.match(/VM_EXECUTED /g) || []).length, 16);
+      assert.match(result.output, /VM_EXECUTED guest memory 512 MiB MemTotal /);
+      assert.match(result.output, /VM_EXECUTED guest memory 1024 MiB MemTotal /);
+      assert.match(result.output, /VM_EXECUTED lifecycle proxy deadline after VM startup with ordered cleanup/);
+      assert.doesNotMatch(result.output, /HOST_VALIDATED /);
+    }
+    if (mode === "missing-memory-512" || mode === "missing-memory-1024") {
+      assert.match(result.output, /VM_EXECUTED JSON selected-image filesystem /);
+      assert.match(result.output, /VM_EXECUTED SDK JSON persistent lifecycle /);
+      const other = mode === "missing-memory-512" ? 1024 : 512;
+      assert.ok(result.output.includes(`VM_EXECUTED guest memory ${other} MiB MemTotal `));
+    }
   });
 }
 
@@ -587,6 +695,11 @@ test("staging uses Cargo's reported executable and checks VM test discovery", ()
 for (const [mode, message] of [
   ["cargo-failure", /cargo test --no-run failed with exit code 17/],
   ["cargo-no-artifact", /Expected one nvx_e2e test executable/],
+  ["missing-partial-bundle-discovery", /did not discover windows_x64::partial_bundle_is_not_reported_as_available/],
+  ["missing-private-lifecycle-discovery", /did not discover windows_x64::signed_bundle_validates_memory_and_private_lifecycle_state/],
+  ["missing-sdk-streaming-discovery", /did not discover windows_x64::signed_bundle_sdk_json_streaming/],
+  ["missing-sdk-lifecycle-discovery", /did not discover windows_x64::signed_bundle_sdk_json_lifecycle/],
+  ["missing-sdk-lifecycle-capture-discovery", /did not discover windows_x64::signed_bundle_sdk_json_lifecycle_capture_limit/],
   ["missing-proxy-discovery", /did not discover windows_x64::signed_agent_proxy_validation_withholds_credentials/],
   ["missing-alias-discovery", /did not discover windows_x64::guest_path_resolves_windows_case_alias/],
   ["missing-executor-proxy-discovery", /did not discover windows_x64::signed_executor_proxy_validation_withholds_credentials/],
@@ -596,12 +709,18 @@ for (const [mode, message] of [
   ["missing-network-discovery", /did not discover[\s\S]*windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors/],
   ["missing-host-loopback-discovery", /did not discover[\s\S]*windows_network::signed_bundle_host_loopback_ingress/],
   ["missing-network-proxy-discovery", /did not discover[\s\S]*windows_network::signed_bundle_deny_default_proxy_policy/],
+  ["missing-lifecycle-proxy-discovery", /did not discover[\s\S]*windows_network::signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start/],
 ]) {
   test(`staging rejects ${mode}`, () => {
     const result = stage(mode);
     assert.notEqual(result.status, 0, result.output);
     assert.match(result.output, message);
     if (![
+      "missing-partial-bundle-discovery",
+      "missing-private-lifecycle-discovery",
+      "missing-sdk-streaming-discovery",
+      "missing-sdk-lifecycle-discovery",
+      "missing-sdk-lifecycle-capture-discovery",
       "missing-proxy-discovery",
       "missing-alias-discovery",
       "missing-executor-proxy-discovery",
@@ -611,6 +730,7 @@ for (const [mode, message] of [
       "missing-network-discovery",
       "missing-host-loopback-discovery",
       "missing-network-proxy-discovery",
+      "missing-lifecycle-proxy-discovery",
     ].includes(mode)) {
       assert.equal(existsSync(join(result.directory, "nvx-e2e-tests.exe")), false);
     }

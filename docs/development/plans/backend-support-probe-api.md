@@ -106,6 +106,7 @@ ones.
 | `wslc` | `wslc_common::is_available()` confirms WSL2 and the WSLC runtime are present. | Rust | Resolving `wslcsdk.dll` alone is not sufficient and is not what this checks;<br>`WslcSdk::load()` still runs on the *execute* path. Feature-gated. |
 | `isolation_session` | `IsoSessionOps` activates and reports a `LocalAgentUser` feature level above zero. Queries API-class registration rather than a build number (#761); a `CLASS_E_CLASSNOTAVAILABLE` / `REGDB_E_CLASSNOTREG` activation failure means unavailable. | Rust | |
 | `hyperlight` | Has a hypervisor check on each supported host — `is_whp_available()` on Windows, `is_kvm_available()` on Linux — neither of which boots a VM. | Rust | |
+| `microvm` | On Windows x64, checks the `microvm` feature, the NVX bundle manifest and agent library, and the active hypervisor. | Rust | Advisory; runtime verification occurs when opening the host. |
 
 ### 3.2 Windows ProcessContainer
 
@@ -116,7 +117,6 @@ fallback ladder and no universal Windows floor.
 ## 4. The probe gap today
 
 ### 4.1. Backends with no probe
-- `microvm` needs a probe that checks for: (1) feature compiled, (2) NanVix runtime files staged, and (3) WHP usable on Windows or `/dev/kvm` readable/writable on Linux
 - `vm` is an abstract intent that resolves to a 
   concrete backend per host and is never probed in its own right.
 
@@ -174,10 +174,7 @@ Remaining detector and TypeScript-projection work, one issue each. The
 `windows_sandbox`, `isolation_session`, and `lxc` detectors have landed in Rust
 and are registered as `ProbeCoverage::Detected`.
 
-1. `microvm` - hypervisor-presence probe. `hyperlight` has one per host
-(`is_whp_available()` / `is_kvm_available()`); `microvm`
-is registered as `ProbeCoverage::NotDetected` until its detector lands.
-2. TypeScript projection - make `getPlatformSupport()` read the native backend
+1. TypeScript projection - make `getPlatformSupport()` read the native backend
 availability via a side-effect-free transport (e.g. a new
 `wxc-exec --available-backends` mode or `mxc_ffi`) instead of running its own
 `dism`/`lxc-ls`, so the two layers can't drift (§4.2, step 2). Keep the

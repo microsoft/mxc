@@ -169,14 +169,17 @@ fn sdk_json_rejects_invalid_requests_and_requires_explicit_optin() {
 }
 
 #[test]
-fn sdk_json_rejects_microvm_streaming_pty_and_lifecycle() {
-    let mut request = process_only_request("printf forbidden");
-    let options = dev::JsonOptions { experimental: true };
+fn sdk_json_rejects_microvm_pty_and_unsupported_host_operations() {
+    let request = process_only_request("printf forbidden");
     let json = request.to_string();
-    let error = dev::spawn_json(&json, options)
-        .err()
-        .expect("MicroVM streaming must be rejected");
-    assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
+    #[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
+    {
+        let options = dev::JsonOptions { experimental: true };
+        let error = dev::spawn_json(&json, options)
+            .err()
+            .expect("MicroVM streaming must be rejected on unsupported hosts");
+        assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
+    }
     let error = dev::spawn_with_pty_json(
         &json,
         dev::PtyJsonOptions {
@@ -187,12 +190,17 @@ fn sdk_json_rejects_microvm_streaming_pty_and_lifecycle() {
     .expect_err("MicroVM PTY must be rejected");
     assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
 
-    request.as_object_mut().unwrap().remove("process");
-    request["phase"] = serde_json::json!("provision");
-    let json = request.to_string();
-    for call in [dev::provision_container_json, dev::validate_provision_json] {
-        let error = call(&json, options).unwrap_err();
-        assert_eq!(error.code, ErrorCode::UnsupportedPhase, "{error}");
+    #[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
+    {
+        let options = dev::JsonOptions { experimental: true };
+        let mut request = request;
+        request.as_object_mut().unwrap().remove("process");
+        request["phase"] = serde_json::json!("provision");
+        let json = request.to_string();
+        for call in [dev::provision_container_json, dev::validate_provision_json] {
+            let error = call(&json, options).unwrap_err();
+            assert_eq!(error.code, ErrorCode::UnsupportedPhase, "{error}");
+        }
     }
 }
 
@@ -216,21 +224,29 @@ fn non_microvm_experimental_json_run_and_spawn_require_explicit_optin() {
     }
 }
 
+#[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
 #[test]
-fn declared_microvm_streaming_and_lifecycle_fail_closed() {
-    let mut request = process_only_request("printf forbidden");
-    let error = __ffi::spawn_container_json(&request.to_string(), true)
-        .err()
-        .expect("MicroVM streaming is not implemented");
-    assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
-    assert!(error.message.contains("streaming"), "{error}");
+fn declared_microvm_operations_fail_closed_on_unsupported_hosts() {
+    let request = process_only_request("printf forbidden");
+    #[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
+    {
+        let error = __ffi::spawn_container_json(&request.to_string(), true)
+            .err()
+            .expect("MicroVM streaming is not available on this host");
+        assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
+        assert!(error.message.contains("streaming"), "{error}");
+    }
 
-    request.as_object_mut().unwrap().remove("process");
-    request["phase"] = serde_json::json!("provision");
-    for dry_run in [false, true] {
-        let error = __ffi::run_lifecycle_json(&request.to_string(), dry_run, true).unwrap_err();
-        assert_eq!(error.code, ErrorCode::UnsupportedPhase, "{error}");
-        assert!(error.message.contains("lifecycle"), "{error}");
+    #[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
+    {
+        let mut request = request;
+        request.as_object_mut().unwrap().remove("process");
+        request["phase"] = serde_json::json!("provision");
+        for dry_run in [false, true] {
+            let error = __ffi::run_lifecycle_json(&request.to_string(), dry_run, true).unwrap_err();
+            assert_eq!(error.code, ErrorCode::UnsupportedPhase, "{error}");
+            assert!(error.message.contains("lifecycle"), "{error}");
+        }
     }
 }
 
@@ -268,6 +284,119 @@ mod windows_x64 {
         configured: 'containment' is 'microvm' (no per-backend section is defined for this \
         backend), but the config includes backend section(s): processContainer. Only one backend \
         section is allowed; remove the unused section(s).";
+
+    fn guest_memory_kib(output: &[u8], configured_mib: u64) -> Result<u64, String> {
+        let text = std::str::from_utf8(output).map_err(|error| error.to_string())?;
+        let fields = text
+            .lines()
+            .find(|line| line.starts_with("MemTotal:"))
+            .ok_or_else(|| "guest omitted MemTotal".to_owned())?
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let ["MemTotal:", value, "kB"] = fields.as_slice() else {
+            return Err(format!("invalid guest MemTotal: {fields:?}"));
+        };
+        let observed = value.parse::<u64>().map_err(|error| error.to_string())?;
+        let configured_kib = configured_mib * 1024;
+        // Linux documents MemTotal as usable RAM minus reservations and kernel
+        // code, not installed RAM. Allow 25%; the 512/1024 MiB bands cannot overlap.
+        if !(configured_kib * 3 / 4..=configured_kib).contains(&observed) {
+            return Err(format!(
+                "configured {configured_mib} MiB but guest MemTotal was {observed} KiB; \
+                 expected {}..={configured_kib} KiB including reservation allowance",
+                configured_kib * 3 / 4
+            ));
+        }
+        Ok(observed)
+    }
+
+    #[test]
+    fn guest_memory_controls_reject_an_ignored_override() {
+        let small = format!("MemTotal: {} kB\n", 500 * 1024);
+        let large = format!("MemTotal: {} kB\n", 1000 * 1024);
+        assert_eq!(guest_memory_kib(small.as_bytes(), 512).unwrap(), 500 * 1024);
+        assert_eq!(
+            guest_memory_kib(large.as_bytes(), 1024).unwrap(),
+            1000 * 1024
+        );
+        // Either fixed default fails one of the two independently required scenarios.
+        assert!(guest_memory_kib(small.as_bytes(), 1024).is_err());
+        assert!(guest_memory_kib(large.as_bytes(), 512).is_err());
+        assert!(guest_memory_kib(b"", 512).is_err());
+    }
+
+    fn finish_lifecycle_cleanup(
+        primary: Result<(), String>,
+        started: bool,
+        mut stop: impl FnMut() -> Result<(), String>,
+        mut deprovision: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut cleanup = Vec::new();
+        if started {
+            if let Err(error) = stop() {
+                cleanup.push(format!("stop cleanup failure: {error}"));
+            }
+        }
+        if let Err(error) = deprovision() {
+            cleanup.push(format!("deprovision cleanup failure: {error}"));
+        }
+        match (primary, cleanup.is_empty()) {
+            (Ok(()), true) => Ok(()),
+            (Ok(()), false) => Err(cleanup.join("; ")),
+            (Err(error), true) => Err(error),
+            (Err(error), false) => Err(format!("{error}; {}", cleanup.join("; "))),
+        }
+    }
+
+    #[test]
+    fn lifecycle_failure_cleanup_stops_before_deprovision_and_preserves_errors() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let result = finish_lifecycle_cleanup(
+            Err("primary failure".to_owned()),
+            true,
+            || {
+                events.borrow_mut().push("stop");
+                Err("stop failure".to_owned())
+            },
+            || {
+                events.borrow_mut().push("deprovision");
+                Err("deprovision failure".to_owned())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(*events.borrow(), ["stop", "deprovision"]);
+        for expected in ["primary failure", "stop failure", "deprovision failure"] {
+            assert!(result.contains(expected), "{result}");
+        }
+    }
+
+    #[test]
+    fn partial_bundle_is_not_reported_as_available() {
+        const CHILD: &str = "MXC_NVX_PARTIAL_BUNDLE_PROBE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(!mxc_sdk::v1::available_backends()
+                .iter()
+                .any(|backend| backend.backend == "microvm"));
+            return;
+        }
+
+        let bundle = tempfile::tempdir().unwrap();
+        std::fs::write(bundle.path().join("SOURCE-MANIFEST.json"), "{}").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("windows_x64::partial_bundle_is_not_reported_as_available")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .env(BUNDLE_ENV, bundle.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "probe child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn experimental_opt_in_is_required_before_backend_discovery() {
@@ -337,13 +466,6 @@ mod windows_x64 {
                 json!({"microvm": {"image": "localhost/"}}),
             ),
             ("ui", json!({"ui": {"disable": true}})),
-            (
-                "memory-override",
-                json!({"microvm": {
-                    "image": "docker.io/library/python:3.12-alpine",
-                    "provision": {"memoryMib": 512}
-                }}),
-            ),
             (
                 "capture",
                 json!({"processContainer": {"captureDenials": {}}}),
@@ -455,7 +577,6 @@ mod windows_x64 {
 
     fn process_limit_error(label: &str) -> Option<&'static str> {
         match label {
-            "memory-override" => Some("NVX guest memory overrides are not available in this build"),
             "cwd-limit" | "cwd-multibyte-limit" => {
                 Some("NVX process.cwd must not exceed 4095 UTF-8 bytes")
             }
@@ -529,11 +650,8 @@ mod windows_x64 {
         let mut request = process_only_request("printf forbidden");
         request["microvm"]["provision"] = json!({"memoryMib": 512});
         let error = __ffi::run_json(&request.to_string(), true).unwrap_err();
-        assert_eq!(error.code, ErrorCode::PolicyValidation, "{error}");
-        assert_eq!(
-            error.message,
-            "NVX guest memory overrides are not available in this build"
-        );
+        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+        assert!(error.message.contains("holds no agent bundle"), "{error}");
 
         for (label, patch) in valid_process_boundaries() {
             let error =
@@ -566,8 +684,12 @@ mod windows_x64 {
 
         let streaming = mxc_sdk::__ffi::spawn_container_json(&request, true)
             .err()
-            .expect("P1 must reject streaming");
-        assert_eq!(streaming.code, ErrorCode::UnsupportedContainment);
+            .expect("missing bundle must reject streaming");
+        assert_eq!(streaming.code, ErrorCode::BackendUnavailable);
+        assert!(
+            streaming.message.contains("holds no agent bundle"),
+            "{streaming}"
+        );
         let pty =
             mxc_sdk::__ffi::spawn_with_pty_json(&request, true, Default::default()).unwrap_err();
         assert_eq!(pty.code, ErrorCode::UnsupportedContainment);
@@ -575,6 +697,308 @@ mod windows_x64 {
             "version": "1.1.0-alpha", "phase": "provision", "containment": "microvm"
         });
         assert!(mxc_sdk::__ffi::run_lifecycle_json(&lifecycle.to_string(), false, true).is_err());
+    }
+
+    #[test]
+    fn lifecycle_policy_validation_precedes_bundle_and_state_discovery() {
+        const CHILD: &str = "MXC_NVX_LIFECYCLE_VALIDATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let local_app_data = tempfile::tempdir().expect("isolated LOCALAPPDATA");
+            let missing_bundle = local_app_data.path().join("missing-bundle");
+            let output = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "windows_x64::lifecycle_policy_validation_precedes_bundle_and_state_discovery",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("LOCALAPPDATA", local_app_data.path())
+                .env(BUNDLE_ENV, &missing_bundle)
+                .output()
+                .expect("lifecycle validation child");
+            assert!(
+                output.status.success(),
+                "validation child failed\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let options = dev::JsonOptions { experimental: true };
+        let state_root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+            .join("Microsoft")
+            .join("MXC")
+            .join("nvx-v1");
+        let id = "microvm:0123456789abcdef0123456789abcdef";
+
+        let memory = json!({
+            "version": "1.1.0-alpha",
+            "phase": "provision",
+            "containment": "microvm",
+            "microvm": {
+                "image": "docker.io/library/python:3.12-alpine",
+                "provision": {"memoryMib": 512}
+            }
+        });
+        let error = dev::provision_container_json(&memory.to_string(), options).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+        assert!(error.message.contains("holds no agent bundle"), "{error}");
+        assert!(
+            !state_root.exists(),
+            "memory validation created persistent state"
+        );
+
+        let cases = [
+            (
+                "provision",
+                json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "provision",
+                    "containment": "microvm",
+                    "microvm": {"image": "python:3.12-alpine"}
+                }),
+                ErrorCode::MalformedRequest,
+                "microvm.image",
+            ),
+            (
+                "start",
+                json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "start",
+                    "sandboxId": "microvm:bad"
+                }),
+                ErrorCode::MalformedId,
+                "32 lowercase hexadecimal digits",
+            ),
+            (
+                "exec",
+                json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "exec",
+                    "sandboxId": id,
+                    "process": {"commandLine": "printf forbidden", "cwd": "relative"}
+                }),
+                ErrorCode::PolicyValidation,
+                "NVX process.cwd must be an absolute POSIX guest path",
+            ),
+            (
+                "stop",
+                json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "stop",
+                    "sandboxId": "microvm:bad"
+                }),
+                ErrorCode::MalformedId,
+                "32 lowercase hexadecimal digits",
+            ),
+            (
+                "deprovision",
+                json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "deprovision",
+                    "sandboxId": "microvm:bad"
+                }),
+                ErrorCode::MalformedId,
+                "32 lowercase hexadecimal digits",
+            ),
+        ];
+        for (phase, request, expected_code, expected) in cases {
+            let error = match phase {
+                "provision" => {
+                    dev::provision_container_json(&request.to_string(), options).unwrap_err()
+                }
+                "start" => dev::start_container_json(&request.to_string(), options).unwrap_err(),
+                "exec" => dev::run_in_container_json(&request.to_string(), options).unwrap_err(),
+                "stop" => dev::stop_container_json(&request.to_string(), options).unwrap_err(),
+                "deprovision" => {
+                    dev::deprovision_container_json(&request.to_string(), options).unwrap_err()
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(error.code, expected_code, "{phase}: {error}");
+            assert!(error.message.contains(expected), "{phase}: {error}");
+            assert!(
+                !state_root.exists(),
+                "{phase} validation created persistent state"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_writable_stdin_is_rejected_before_backend_setup() {
+        const CHILD: &str = "MXC_NVX_LIFECYCLE_STDIN_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let local_app_data = tempfile::tempdir().expect("isolated LOCALAPPDATA");
+            let output = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "windows_x64::lifecycle_writable_stdin_is_rejected_before_backend_setup",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("LOCALAPPDATA", local_app_data.path())
+                .env(BUNDLE_ENV, local_app_data.path().join("missing-bundle"))
+                .output()
+                .expect("lifecycle stdin child");
+            assert!(
+                output.status.success(),
+                "stdin child failed\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let request = json!({
+            "version": "1.1.0-alpha",
+            "phase": "exec",
+            "sandboxId": "microvm:0123456789abcdef0123456789abcdef",
+            "process": {"commandLine": "printf MUST_NOT_RUN"}
+        });
+        let error = __ffi::execute_lifecycle_with_stdin_json(&request.to_string(), true)
+            .err()
+            .expect("MicroVM lifecycle stdin must be rejected");
+        assert_eq!(error.code, ErrorCode::UnsupportedContainment, "{error}");
+        assert_eq!(
+            error.message,
+            "MicroVM lifecycle exec does not support writable stdin"
+        );
+        let state_root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+            .join("Microsoft")
+            .join("MXC")
+            .join("nvx-v1");
+        assert!(
+            !state_root.exists(),
+            "stdin rejection reached persistent backend setup"
+        );
+        assert_no_run_state(std::process::id());
+    }
+
+    #[test]
+    #[ignore = "host-only; requires the exact signed official bundle; never creates a VM"]
+    fn signed_bundle_validates_memory_and_private_lifecycle_state() {
+        const CHILD: &str = "MXC_NVX_MEMORY_VALIDATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let local_app_data = tempfile::tempdir().expect("isolated LOCALAPPDATA");
+            let verbatim = local_app_data.path().canonicalize().expect("verbatim base");
+            let mut parts = verbatim.components();
+            let Some(Component::Prefix(prefix)) = parts.next() else {
+                panic!("expected local disk prefix");
+            };
+            let Prefix::VerbatimDisk(drive) = prefix.kind() else {
+                panic!("expected verbatim local disk prefix");
+            };
+            let mut ordinary = PathBuf::from(format!("{}:", char::from(drive)));
+            ordinary.push(parts.as_path());
+            for (case, name, use_verbatim, reject) in [
+                ("ordinary", "root", false, false),
+                ("verbatim", "root", true, false),
+                ("dot", "root.", false, true),
+                ("space", "root ", false, true),
+                ("verbatim-dot", "root.", true, false),
+                ("verbatim-space", "root ", true, false),
+            ] {
+                let fixture = verbatim.join(case);
+                std::fs::create_dir(&fixture).expect("create isolated case");
+                let plain = fixture.join("root");
+                std::fs::create_dir(&plain).expect("create ordinary object");
+                std::fs::write(plain.join("identity"), b"ordinary").unwrap();
+                let literal = fixture.join(name);
+                if name != "root" {
+                    std::fs::create_dir(&literal).expect("create distinct literal object");
+                    std::fs::write(literal.join("identity"), b"literal").unwrap();
+                    assert_ne!(
+                        std::fs::read(plain.join("identity")).unwrap(),
+                        std::fs::read(literal.join("identity")).unwrap()
+                    );
+                }
+                let spelling = if use_verbatim {
+                    literal.clone()
+                } else {
+                    ordinary.join(case).join(name)
+                };
+                let output = Command::new(
+                    std::env::current_exe().expect("current test executable"),
+                )
+                .args([
+                    "--exact",
+                    "windows_x64::signed_bundle_validates_memory_and_private_lifecycle_state",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, if reject { "reject" } else { "accept" })
+                .env("LOCALAPPDATA", spelling)
+                .output()
+                .expect("signed memory validation child");
+                assert!(
+                    output.status.success(),
+                    "{case} validation child failed\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let untouched = if reject {
+                    vec![&plain, &literal]
+                } else if name != "root" {
+                    vec![&plain]
+                } else {
+                    Vec::new()
+                };
+                for candidate in untouched {
+                    let entries = std::fs::read_dir(candidate)
+                        .expect("inspect untouched candidate")
+                        .map(|entry| entry.expect("candidate entry").file_name())
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        entries,
+                        [std::ffi::OsString::from("identity")],
+                        "{case}: unexpected private or native artifacts in {candidate:?}"
+                    );
+                }
+            }
+            println!("HOST_VALIDATED memory and private lifecycle state six path cases");
+            return;
+        }
+
+        let request = json!({
+            "version": "1.1.0-alpha",
+            "phase": "provision",
+            "containment": "microvm",
+            "microvm": {
+                "image": "docker.io/library/python:3.12-alpine",
+                "provision": {"memoryMib": 512}
+            }
+        });
+        let result = dev::validate_provision_json(
+            &request.to_string(),
+            dev::JsonOptions { experimental: true },
+        );
+        if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("reject")) {
+            let error = result.expect_err("ambiguous state path must fail before native setup");
+            assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+            assert!(
+                error
+                    .message
+                    .contains("cannot admit persistent NVX lifecycle state")
+                    && error
+                        .message
+                        .contains("ambiguous non-verbatim directory component"),
+                "{error}"
+            );
+            assert_no_run_state(std::process::id());
+            return;
+        }
+        let result = result.expect("verified signed agent must accept memory resources");
+        let result: Value = serde_json::from_str(&result).expect("validation envelope");
+        assert_eq!(result, json!({"result": {}}));
+        let state_root = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+            .join("Microsoft")
+            .join("MXC")
+            .join("nvx-v1");
+        assert!(
+            state_root.is_dir(),
+            "production path did not create state root"
+        );
     }
 
     fn executor() -> PathBuf {
@@ -623,6 +1047,44 @@ mod windows_x64 {
         let output = child.wait_with_output().expect("MXC executor output");
         assert_no_run_state(pid);
         output
+    }
+
+    #[test]
+    fn host_only_rust_json_streaming_and_lifecycle_remain_available() {
+        let mut request = process_only_request("true");
+        request["process"]["timeout"] = json!(3_600_001);
+        let options = dev::JsonOptions { experimental: true };
+        let error = dev::spawn_json(&request.to_string(), options)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, ErrorCode::PolicyValidation);
+        assert!(error.message.contains("3600000"));
+
+        let request = json!({
+            "version": "1.1.0-alpha", "phase": "exec",
+            "sandboxId": "microvm:invalid", "process": {"commandLine": "true"}
+        })
+        .to_string();
+        for error in [
+            dev::spawn_in_container_json(&request, options)
+                .err()
+                .unwrap(),
+            dev::run_in_container_json(&request, options).unwrap_err(),
+        ] {
+            assert_eq!(error.code, ErrorCode::MalformedId);
+            assert!(error.message.contains("32 lowercase hexadecimal"));
+        }
+        let start = json!({
+            "version": "1.1.0-alpha", "phase": "start", "sandboxId": "microvm:invalid"
+        })
+        .to_string();
+        for error in [
+            dev::validate_start_json(&start, options).unwrap_err(),
+            dev::start_container_json(&start, options).unwrap_err(),
+        ] {
+            assert_eq!(error.code, ErrorCode::MalformedId);
+            assert!(error.message.contains("32 lowercase hexadecimal"));
+        }
     }
 
     #[test]
@@ -759,10 +1221,96 @@ mod windows_x64 {
         request
     }
 
-    fn assert_capture_boundary(stdout: &[u8], stderr: &[u8], stderr_bytes: usize) {
-        assert_eq!(stdout.len(), CAPTURE_LIMIT / 2);
-        assert_eq!(stderr.len(), stderr_bytes);
-        assert!(stdout.iter().chain(stderr).all(|&byte| byte == 0));
+    fn validate_capture_boundary(
+        stdout: &[u8],
+        stderr: &[u8],
+        stdout_bytes: usize,
+        stderr_bytes: usize,
+    ) -> Result<(), String> {
+        for (stream, output, expected) in [
+            ("stdout", stdout, stdout_bytes),
+            ("stderr", stderr, stderr_bytes),
+        ] {
+            if output.len() != expected {
+                return Err(format!(
+                    "capture boundary {stream} length mismatch: expected {expected} bytes, got {}",
+                    output.len()
+                ));
+            }
+            if let Some(offset) = output.iter().position(|&byte| byte != 0) {
+                return Err(format!(
+                    "capture boundary {stream} byte mismatch at offset {offset}: expected 0, got {}",
+                    output[offset]
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_capture_mismatch_stops_before_deprovision_and_preserves_errors() {
+        assert_eq!(validate_capture_boundary(&[0, 0], &[0], 2, 1), Ok(()));
+        for (stdout, stderr, primary_error) in [
+            (
+                &[][..],
+                &[0][..],
+                "capture boundary stdout length mismatch: expected 2 bytes, got 0",
+            ),
+            (
+                &[0, 0][..],
+                &[][..],
+                "capture boundary stderr length mismatch: expected 1 bytes, got 0",
+            ),
+            (
+                &[0, 7][..],
+                &[0][..],
+                "capture boundary stdout byte mismatch at offset 1: expected 0, got 7",
+            ),
+            (
+                &[0, 0][..],
+                &[9][..],
+                "capture boundary stderr byte mismatch at offset 0: expected 0, got 9",
+            ),
+        ] {
+            for cleanup_fails in [false, true] {
+                let events = std::cell::RefCell::new(Vec::new());
+                let primary = (|| -> Result<(), String> {
+                    validate_capture_boundary(stdout, stderr, 2, 1)?;
+                    Err("capture mismatch was not detected".to_owned())
+                })();
+                let error = finish_lifecycle_cleanup(
+                    primary,
+                    true,
+                    || {
+                        events.borrow_mut().push("stop");
+                        if cleanup_fails {
+                            Err("stop failure".to_owned())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    || {
+                        events.borrow_mut().push("deprovision");
+                        if cleanup_fails {
+                            Err("deprovision failure".to_owned())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(*events.borrow(), ["stop", "deprovision"]);
+                let expected = if cleanup_fails {
+                    format!(
+                        "{primary_error}; stop cleanup failure: stop failure; \
+                         deprovision cleanup failure: deprovision failure"
+                    )
+                } else {
+                    primary_error.to_owned()
+                };
+                assert_eq!(error, expected);
+            }
+        }
     }
 
     fn guest_path_for_host_directory(path: &Path) -> String {
@@ -870,12 +1418,17 @@ for operation in ("read", "write"):
     else:
         raise AssertionError("ungranted sibling allowed " + operation)
 (root / "rw" / "result").write_bytes(b"write-ok")
+print(next(line for line in pathlib.Path("/proc/meminfo").read_text().splitlines()
+           if line.startswith("MemTotal:")))
 print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
 '"#;
         let request = json!({
             "version": "1.1.0-alpha",
             "containment": "microvm",
-            "microvm": {"image": "docker.io/library/python:3.12-alpine"},
+            "microvm": {
+                "image": "docker.io/library/python:3.12-alpine",
+                "provision": {"memoryMib": 512}
+            },
             "filesystem": {
                 "readonlyPaths": [ro.to_str().unwrap()],
                 "readwritePaths": [rw.to_str().unwrap()],
@@ -891,18 +1444,350 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         });
         let result = __ffi::run_json(&request.to_string(), true).unwrap();
         assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
-        assert_eq!(result.stdout, b"NVX_JSON_IMAGE_AND_POLICY_OK");
+        let output = std::str::from_utf8(&result.stdout).unwrap();
+        let (memory_line, policy_result) = output.split_once('\n').unwrap();
+        assert_eq!(policy_result, "NVX_JSON_IMAGE_AND_POLICY_OK");
+        let memory_kib = guest_memory_kib(memory_line.as_bytes(), 512).unwrap();
         assert_eq!(std::fs::read(ro.join("input")).unwrap(), b"read-ok");
         assert_eq!(std::fs::read(rw.join("secret")).unwrap(), b"secret");
         assert_eq!(std::fs::read(rw.join("result")).unwrap(), b"write-ok");
         assert_eq!(std::fs::read(&ungranted).unwrap(), b"ungranted-sentinel");
         assert_no_run_state(std::process::id());
+        println!("VM_EXECUTED guest memory 512 MiB MemTotal {memory_kib} KiB and cleanup");
         println!("VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup");
     }
 
     #[test]
     #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
+    fn signed_bundle_sdk_json_streaming() {
+        use std::io::Read;
+
+        let request = process_only_request(
+            "printf STREAM_READY; sleep 5; printf STREAM_DONE; printf STREAM_ERR >&2",
+        );
+        let mut process = dev::spawn_json(
+            &request.to_string(),
+            dev::JsonOptions { experimental: true },
+        )
+        .unwrap();
+        let mut stdout = process.take_stdout().expect("stdout must be available");
+        let mut ready = [0; 12];
+        stdout.read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"STREAM_READY");
+        assert_eq!(process.try_wait().unwrap(), None, "output must arrive live");
+        let mut rest = Vec::new();
+        stdout.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"STREAM_DONE");
+        let mut stderr = Vec::new();
+        process
+            .take_stderr()
+            .expect("stderr must be available")
+            .read_to_end(&mut stderr)
+            .unwrap();
+        assert_eq!(stderr, b"STREAM_ERR");
+        assert_eq!(process.wait().unwrap(), WaitResult::Exited(0));
+        assert_no_run_state(std::process::id());
+
+        let mut timeout = process_only_request("while :; do printf 0123456789; done");
+        timeout["process"]["timeout"] = json!(2_000);
+        let mut process = dev::spawn_json(
+            &timeout.to_string(),
+            dev::JsonOptions { experimental: true },
+        )
+        .unwrap();
+        let held_stdout = process.take_stdout().expect("stdout must be available");
+        let started = Instant::now();
+        assert_eq!(process.wait().unwrap(), WaitResult::TimedOut);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "timeout must not wait for an undrained stream"
+        );
+        drop(held_stdout);
+        assert_no_run_state(std::process::id());
+        println!("VM_EXECUTED SDK JSON live output and cleanup");
+    }
+
+    #[test]
+    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
+    fn signed_bundle_sdk_json_lifecycle() {
+        use std::io::Read;
+
+        let options = dev::JsonOptions { experimental: true };
+        let provision = json!({
+            "version": "1.1.0-alpha",
+            "phase": "provision",
+            "containment": "microvm",
+            "microvm": {
+                "image": "mcr.microsoft.com/azurelinux/base/core:3.0",
+                "provision": {"memoryMib": 1024}
+            }
+        });
+        let provisioned = dev::provision_container_json(&provision.to_string(), options).unwrap();
+        let provisioned: Value = serde_json::from_str(&provisioned).unwrap();
+        let sandbox_id = provisioned["result"]["sandboxId"]
+            .as_str()
+            .expect("provision response sandboxId")
+            .to_owned();
+        assert!(sandbox_id.starts_with("microvm:"), "{sandbox_id}");
+
+        let mut started = false;
+        let mut memory_kib = None;
+        let primary = (|| -> Result<(), String> {
+            let start = json!({
+                "version": "1.1.0-alpha",
+                "phase": "start",
+                "sandboxId": sandbox_id
+            });
+            dev::start_container_json(&start.to_string(), options)
+                .map_err(|error| error.to_string())?;
+            started = true;
+
+            let memory = dev::run_in_container_json(
+                &json!({
+                    "version": "1.1.0-alpha", "phase": "exec", "sandboxId": sandbox_id,
+                    "process": {"commandLine": "cat /proc/meminfo", "timeout": 30_000}
+                })
+                .to_string(),
+                options,
+            )
+            .map_err(|error| error.to_string())?;
+            if memory.outcome != WaitResult::Exited(0) {
+                return Err(format!("guest memory measurement failed: {memory:?}"));
+            }
+            memory_kib = Some(guest_memory_kib(&memory.stdout, 1024)?);
+
+            let exec = json!({
+                "version": "1.1.0-alpha",
+                "phase": "exec",
+                "sandboxId": sandbox_id,
+                "process": {
+                    "commandLine": "printf LIFE_READY; sleep 2; printf LIFE_DONE",
+                    "timeout": 30_000
+                }
+            });
+            let mut process = dev::spawn_in_container_json(&exec.to_string(), options)
+                .map_err(|error| error.to_string())?;
+            let mut stdout = process
+                .take_stdout()
+                .ok_or_else(|| "lifecycle stdout was unavailable".to_owned())?;
+            let mut ready = [0; 10];
+            stdout
+                .read_exact(&mut ready)
+                .map_err(|error| error.to_string())?;
+            if &ready != b"LIFE_READY" {
+                return Err(format!("unexpected live prefix: {ready:?}"));
+            }
+            if process
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                return Err("lifecycle output was not delivered live".to_owned());
+            }
+            let mut rest = Vec::new();
+            stdout
+                .read_to_end(&mut rest)
+                .map_err(|error| error.to_string())?;
+            if rest != b"LIFE_DONE" {
+                return Err(format!("unexpected lifecycle output: {rest:?}"));
+            }
+            if process.wait().map_err(|error| error.to_string())? != WaitResult::Exited(0) {
+                return Err("lifecycle exec did not exit successfully".to_owned());
+            }
+
+            let timeout = json!({
+                "version": "1.1.0-alpha",
+                "phase": "exec",
+                "sandboxId": sandbox_id,
+                "process": {"commandLine": "sleep 120", "timeout": 200}
+            });
+            let result = dev::run_in_container_json(&timeout.to_string(), options)
+                .map_err(|error| error.to_string())?;
+            if result.outcome != WaitResult::TimedOut {
+                return Err(format!("expected lifecycle timeout, got {result:?}"));
+            }
+            Ok(())
+        })();
+
+        let stop_id = sandbox_id.clone();
+        let deprovision_id = sandbox_id.clone();
+        finish_lifecycle_cleanup(
+            primary,
+            started,
+            || {
+                dev::stop_container_json(
+                    &json!({
+                        "version": "1.1.0-alpha",
+                        "phase": "stop",
+                        "sandboxId": stop_id
+                    })
+                    .to_string(),
+                    options,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            },
+            || {
+                dev::deprovision_container_json(
+                    &json!({
+                        "version": "1.1.0-alpha",
+                        "phase": "deprovision",
+                        "sandboxId": deprovision_id
+                    })
+                    .to_string(),
+                    options,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            },
+        )
+        .unwrap();
+        let memory_kib = memory_kib.expect("successful lifecycle must measure guest memory");
+        println!("VM_EXECUTED guest memory 1024 MiB MemTotal {memory_kib} KiB and cleanup");
+        println!("VM_EXECUTED SDK JSON persistent lifecycle live output timeout and cleanup");
+    }
+
+    #[test]
+    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
+    fn signed_bundle_sdk_json_lifecycle_capture_limit() {
+        let options = dev::JsonOptions { experimental: true };
+        let provision = json!({
+            "version": "1.1.0-alpha",
+            "phase": "provision",
+            "containment": "microvm",
+            "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"}
+        });
+        let provisioned = dev::provision_container_json(&provision.to_string(), options).unwrap();
+        let provisioned: Value = serde_json::from_str(&provisioned).unwrap();
+        let sandbox_id = provisioned["result"]["sandboxId"]
+            .as_str()
+            .expect("provision response sandboxId")
+            .to_owned();
+
+        let mut started = false;
+        let primary = (|| -> Result<(), String> {
+            dev::start_container_json(
+                &json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "start",
+                    "sandboxId": sandbox_id
+                })
+                .to_string(),
+                options,
+            )
+            .map_err(|error| error.to_string())?;
+            started = true;
+
+            let request = |stderr_bytes: usize| {
+                json!({
+                    "version": "1.1.0-alpha",
+                    "phase": "exec",
+                    "sandboxId": sandbox_id,
+                    "process": {
+                        "commandLine": format!(
+                            "head -c {} /dev/zero; head -c {stderr_bytes} /dev/zero >&2",
+                            CAPTURE_LIMIT / 2
+                        ),
+                        "timeout": 120_000
+                    }
+                })
+            };
+            for stderr_bytes in [CAPTURE_LIMIT / 2 - 1, CAPTURE_LIMIT / 2] {
+                let result =
+                    dev::run_in_container_json(&request(stderr_bytes).to_string(), options)
+                        .map_err(|error| error.to_string())?;
+                if result.outcome != WaitResult::Exited(0) {
+                    return Err(format!("capture boundary did not exit: {result:?}"));
+                }
+                validate_capture_boundary(
+                    &result.stdout,
+                    &result.stderr,
+                    CAPTURE_LIMIT / 2,
+                    stderr_bytes,
+                )?;
+            }
+
+            let error = match dev::run_in_container_json(
+                &request(CAPTURE_LIMIT / 2 + 1).to_string(),
+                options,
+            ) {
+                Err(error) => error,
+                Ok(_) => {
+                    return Err(
+                        "one byte above the combined lifecycle capture limit succeeded".to_owned(),
+                    )
+                }
+            };
+            if error.code != ErrorCode::BackendError || !error.message.ends_with(CAPTURE_ERROR) {
+                return Err(format!("unexpected lifecycle capture error: {error}"));
+            }
+
+            let after = json!({
+                "version": "1.1.0-alpha",
+                "phase": "exec",
+                "sandboxId": sandbox_id,
+                "process": {"commandLine": "printf after-overflow", "timeout": 30_000}
+            });
+            let result = dev::run_in_container_json(&after.to_string(), options)
+                .map_err(|error| error.to_string())?;
+            if result.outcome != WaitResult::Exited(0)
+                || result.stdout != b"after-overflow"
+                || !result.stderr.is_empty()
+            {
+                return Err(format!(
+                    "container was not reusable after capture overflow: {result:?}"
+                ));
+            }
+            Ok(())
+        })();
+
+        let stop_id = sandbox_id.clone();
+        let deprovision_id = sandbox_id.clone();
+        finish_lifecycle_cleanup(
+            primary,
+            started,
+            || {
+                dev::stop_container_json(
+                    &json!({
+                        "version": "1.1.0-alpha",
+                        "phase": "stop",
+                        "sandboxId": stop_id
+                    })
+                    .to_string(),
+                    options,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            },
+            || {
+                dev::deprovision_container_json(
+                    &json!({
+                        "version": "1.1.0-alpha",
+                        "phase": "deprovision",
+                        "sandboxId": deprovision_id
+                    })
+                    .to_string(),
+                    options,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            },
+        )
+        .unwrap();
+        println!(
+            "VM_EXECUTED SDK JSON lifecycle capture limit boundary cleanup and container reuse"
+        );
+    }
+
+    #[test]
+    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
     fn signed_bundle_sdk_json_capture() {
+        assert!(
+            mxc_sdk::v1::available_backends()
+                .iter()
+                .any(|backend| backend.backend == "microvm"),
+            "a prepared NVX host must report MicroVM as available"
+        );
         let options = dev::JsonOptions { experimental: true };
         let mut invalid_proxy = process_only_request("printf forbidden");
         invalid_proxy["runtimeConfig"] =
@@ -996,7 +1881,13 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         for stderr_bytes in [CAPTURE_LIMIT / 2 - 1, CAPTURE_LIMIT / 2] {
             let result = facade_run(capture_boundary_request(stderr_bytes));
             assert_eq!(result.outcome, WaitResult::Exited(0));
-            assert_capture_boundary(&result.stdout, &result.stderr, stderr_bytes);
+            validate_capture_boundary(
+                &result.stdout,
+                &result.stderr,
+                CAPTURE_LIMIT / 2,
+                stderr_bytes,
+            )
+            .unwrap();
         }
         let error = mxc_sdk::__ffi::run_json(
             &capture_boundary_request(CAPTURE_LIMIT / 2 + 1).to_string(),
@@ -1408,7 +2299,13 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         for stderr_bytes in [CAPTURE_LIMIT / 2 - 1, CAPTURE_LIMIT / 2] {
             let output = executor_output(&capture_boundary_request(stderr_bytes), false);
             assert_eq!(output.status.code(), Some(0));
-            assert_capture_boundary(&output.stdout, &output.stderr, stderr_bytes);
+            validate_capture_boundary(
+                &output.stdout,
+                &output.stderr,
+                CAPTURE_LIMIT / 2,
+                stderr_bytes,
+            )
+            .unwrap();
         }
         let output = executor_output(&capture_boundary_request(CAPTURE_LIMIT / 2 + 1), false);
         assert_eq!(output.status.code(), Some(-1));

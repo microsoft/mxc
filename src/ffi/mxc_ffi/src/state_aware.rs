@@ -156,7 +156,12 @@ fn state_aware_inner(
         }
     };
 
-    match run_state_aware_json(request_json, dry_run, experimental) {
+    match crate::json_boundary::check_json_surface(
+        request_json,
+        crate::json_boundary::JsonSurface::Lifecycle,
+    )
+    .and_then(|()| run_state_aware_json(request_json, dry_run, experimental))
+    {
         Ok(response_json) => MxcStateAwareResult {
             status: MXC_STATUS_SUCCESS,
             response_json_utf8: alloc_cstring(response_json.as_bytes()),
@@ -298,7 +303,12 @@ unsafe fn exec_streaming(
                 ))
             }
         };
-        execute(request_json, experimental != 0).map_err(|e| {
+        crate::json_boundary::check_json_surface(
+            request_json,
+            crate::json_boundary::JsonSurface::Lifecycle,
+        )
+        .and_then(|()| execute(request_json, experimental != 0))
+        .map_err(|e| {
             (
                 status_from_error_code(e.code),
                 MxcErrorDetail::from_error(&e),
@@ -357,7 +367,12 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
             }
         };
         crate::execute_output(
-            execute_lifecycle_json(request_json, experimental != 0).and_then(|process| {
+            crate::json_boundary::check_json_surface(
+                request_json,
+                crate::json_boundary::JsonSurface::Lifecycle,
+            )
+            .and_then(|()| execute_lifecycle_json(request_json, experimental != 0))
+            .and_then(|process| {
                 process.wait_with_output().map_err(|error| {
                     mxc_sdk::v1::Error::new(
                         crate::ErrorCode::BackendError,
@@ -423,16 +438,22 @@ pub unsafe extern "C" fn mxc_state_aware_exec_pty(
                 ))
             }
         };
-        spawn_in_container_with_pty_json(
+        crate::json_boundary::check_json_surface(
             request_json,
-            MxcPtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            },
-            experimental != 0,
+            crate::json_boundary::JsonSurface::Lifecycle,
         )
+        .and_then(|()| {
+            spawn_in_container_with_pty_json(
+                request_json,
+                MxcPtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                experimental != 0,
+            )
+        })
         .map(MxcSandbox::new_pty)
         .map_err(|error| {
             (
@@ -542,7 +563,12 @@ pub unsafe extern "C" fn mxc_exec_state_aware_attached_json(
                 ))
             }
         };
-        exec_attached(request_json, experimental != 0).map_err(|e| {
+        crate::json_boundary::check_json_surface(
+            request_json,
+            crate::json_boundary::JsonSurface::Lifecycle,
+        )
+        .and_then(|()| exec_attached(request_json, experimental != 0))
+        .map_err(|e| {
             (
                 status_from_error_code(e.code),
                 MxcErrorDetail::from_error(&e),

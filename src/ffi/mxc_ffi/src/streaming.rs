@@ -464,7 +464,12 @@ fn spawn_json_inner(
             ))
         }
     };
-    spawn(request_json, experimental).map_err(sdk_error_detail)
+    crate::json_boundary::check_json_surface(
+        request_json,
+        crate::json_boundary::JsonSurface::OneShotStreaming,
+    )
+    .and_then(|()| spawn(request_json, experimental))
+    .map_err(sdk_error_detail)
 }
 
 /// Shared tail of the handle-returning spawn entry points

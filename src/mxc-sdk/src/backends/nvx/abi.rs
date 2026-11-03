@@ -295,6 +295,8 @@ pub(super) struct FilesystemCapabilities {
 #[serde(rename_all = "camelCase")]
 pub(super) struct SpecCapabilities {
     pub image_reference: bool,
+    #[serde(default)]
+    pub memory: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,11 +304,17 @@ pub(super) struct SpecCapabilities {
 pub(super) struct SandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Resources>,
 }
 
 impl SandboxSpec {
     pub fn is_empty(&self) -> bool {
         self.image.is_none()
+            && self
+                .resources
+                .as_ref()
+                .is_none_or(|resources| resources.is_empty())
     }
 }
 
@@ -314,6 +322,19 @@ impl SandboxSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) enum ImageSource {
     Reference(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct Resources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u32>,
+}
+
+impl Resources {
+    fn is_empty(&self) -> bool {
+        self.memory_mib.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1057,6 +1078,7 @@ pub(super) mod tests {
                 image: Some(ImageSource::Reference(
                     "mcr.microsoft.com/azurelinux/base/core:3.0".to_owned(),
                 )),
+                resources: None,
             },
         };
         assert_eq!(

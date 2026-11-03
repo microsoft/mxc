@@ -97,7 +97,7 @@ impl From<MxcErrorCode> for ErrorCode {
 ///
 /// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
 /// literal so future versions can add fields without breaking construction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Error {
     /// The SDK error code.
@@ -113,6 +113,22 @@ pub struct Error {
     pub native_code: Option<String>,
     /// An actionable "how to fix it" hint, when the failure carries one.
     pub remediation: Option<String>,
+    /// Backend-specific structured context. May contain sensitive recovery
+    /// identifiers; inspect it explicitly rather than logging it wholesale.
+    pub details: Option<Box<serde_json::Value>>,
+}
+
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Error")
+            .field("code", &self.code)
+            .field("message", &self.message)
+            .field("operation", &self.operation)
+            .field("native_code", &self.native_code)
+            .field("remediation", &self.remediation)
+            .field("details", &self.details.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Error {
@@ -125,6 +141,7 @@ impl Error {
             operation: None,
             native_code: None,
             remediation: None,
+            details: None,
         }
     }
 }
@@ -163,6 +180,7 @@ impl From<MxcError> for Error {
             operation,
             native_code,
             remediation: error.remediation,
+            details: error.details.map(Box::new),
         }
     }
 }
@@ -176,8 +194,6 @@ impl Error {
     /// MxcError`: a second `MxcError: From<_>` impl makes `?` ambiguous
     /// wherever the error type is inferred.
     ///
-    /// `MxcError::details` has no facade counterpart and does not survive the
-    /// round trip.
     #[doc(hidden)]
     pub fn into_mxc_error(self) -> MxcError {
         let mut error = MxcError::new(self.code.to_internal(), self.message);
@@ -189,6 +205,7 @@ impl Error {
         if let Some(remediation) = self.remediation {
             error = error.with_remediation(remediation);
         }
+        error.details = self.details.map(|details| *details);
         error
     }
 }
@@ -197,6 +214,25 @@ impl Error {
 mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
+
+    #[test]
+    fn structured_details_round_trip_without_implicit_logging() {
+        for details in [
+            serde_json::Value::Null,
+            serde_json::json!({"nvxRecovery":{"sandboxId":"sensitive-recovery-id"}}),
+            serde_json::json!(["sensitive-recovery-id", 1, true]),
+            serde_json::json!("sensitive-recovery-id"),
+        ] {
+            let original =
+                MxcError::backend_error("operation failed").with_details(details.clone());
+            let error = Error::from(original.clone());
+            assert_eq!(error.details.as_deref(), Some(&details));
+            assert!(!format!("{error:?}").contains("sensitive-recovery-id"));
+            assert!(!error.to_string().contains("sensitive-recovery-id"));
+            assert_eq!(error.into_mxc_error(), original);
+        }
+        assert_eq!(Error::new(ErrorCode::BackendError, "failure").details, None);
+    }
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.
     ///

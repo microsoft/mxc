@@ -138,6 +138,10 @@ mod tests {
         error.operation = Some("IsoSessionOps.StopSessionAsync".into());
         error.native_code = Some("0x80070490".into());
         error.remediation = Some("Provision the session first.".into());
+        // Rust-only structured details must not expand the C ABI payload.
+        error.details = Some(Box::new(
+            serde_json::json!({"sandboxId":"must-not-cross-the-C-ABI"}),
+        ));
         error
     }
 

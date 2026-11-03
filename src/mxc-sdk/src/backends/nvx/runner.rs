@@ -4,17 +4,23 @@
 //! Minimal create-and-run adapter for the signed bundled NVX agent.
 
 use std::io::Write;
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::mxc_common::audit::{AuditEvent, AuditEventName};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::proxy_env::proxy_url_has_credentials;
+use crate::mxc_common::sandbox_process::{SandboxProcess, StreamCloser};
 use crate::mxc_common::script_runner::{RunCancellation, ScriptRunner};
+use crate::mxc_common::state_aware_backend::{ExecHandle, ExecOutcome as MxcExecOutcome};
 
+use super::abi::{map_error_body, Event, ExecEnd, ExecOutcome, ProvisionInput};
 #[cfg(test)]
 use super::abi::{Capabilities, ExecRequest};
-use super::abi::{ExecOutcome, ProvisionInput};
 use super::runtime::{NvxClient, SandboxClient};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +123,7 @@ fn open_client(logger: &mut Logger) -> Result<(tempfile::TempDir, NvxClient), Mx
     }
 }
 
-fn request_has_sensitive_proxy(request: &ExecutionRequest) -> bool {
+pub(super) fn request_has_sensitive_proxy(request: &ExecutionRequest) -> bool {
     request
         .policy
         .network_proxy
@@ -182,20 +188,7 @@ fn run_with_client(
 ) -> Result<CapturedRun, MxcError> {
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let protect = |operation, error| protect_native_error(error, operation, sensitive_proxy);
-    let prepared = (|| {
-        let (input, exec) = prepare_request(client, request)?;
-        if let Some(cancellation) = cancellation {
-            cancellation.check()?;
-        }
-        client.probe().map_err(|error| protect("probe", error))?;
-        if let Some(cancellation) = cancellation {
-            cancellation.check()?;
-        }
-        let sandbox_id = client
-            .provision(&input)
-            .map_err(|error| protect("provision", error))?;
-        Ok((sandbox_id, exec))
-    })();
+    let prepared = prepare_and_provision(client, request, cancellation);
     let (sandbox_id, exec) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -223,26 +216,9 @@ fn run_with_client(
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
-        if let Err(error) = client.start(&sandbox_id) {
-            let mut error = protect("start", error);
-            if sensitive_proxy {
-                error.message.push_str("; startup diagnostics withheld");
-            } else {
-                error.message.push_str("; startup diagnostics");
-                match client.diagnostics(&sandbox_id) {
-                    Ok(diagnostics) => {
-                        error
-                            .message
-                            .push_str(&super::runtime::startup_diagnostics(&diagnostics));
-                    }
-                    Err(diagnostic_error) => {
-                        error.message.push_str(" unavailable: ");
-                        error.message.push_str(&diagnostic_error.to_string());
-                    }
-                }
-            }
-            return Err(error);
-        }
+        client
+            .start(&sandbox_id)
+            .map_err(|error| start_error(client, &sandbox_id, error, sensitive_proxy))?;
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
@@ -251,12 +227,556 @@ fn run_with_client(
             .map_err(|error| protect("exec", error))
     })();
 
-    let stop_error = match client.stop(&sandbox_id).err() {
-        Some(error) if primary.is_err() && error.code == MxcErrorCode::AlreadyStopped => None,
+    let cleanup_errors = cleanup_sandbox(
+        client,
+        &sandbox_id,
+        state_root,
+        primary.is_err(),
+        sensitive_proxy,
+        logger,
+    );
+    let output = finish_run(primary, cleanup_errors, logger)?;
+
+    Ok(CapturedRun {
+        outcome: map_outcome(output.outcome)?,
+        warnings: Vec::new(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+fn start_error(
+    client: &impl SandboxClient,
+    sandbox_id: &super::runtime::SandboxId,
+    error: MxcError,
+    sensitive_proxy: bool,
+) -> MxcError {
+    let mut error = protect_native_error(error, "start", sensitive_proxy);
+    if sensitive_proxy {
+        error.message.push_str("; startup diagnostics withheld");
+    } else {
+        error.message.push_str("; startup diagnostics");
+        match client.diagnostics(sandbox_id) {
+            Ok(diagnostics) => error
+                .message
+                .push_str(&super::runtime::startup_diagnostics(&diagnostics)),
+            Err(diagnostic_error) => {
+                error.message.push_str(" unavailable: ");
+                error.message.push_str(&diagnostic_error.to_string());
+            }
+        }
+    }
+    error
+}
+
+fn prepare_and_provision(
+    client: &impl SandboxClient,
+    request: &ExecutionRequest,
+    cancellation: Option<&RunCancellation>,
+) -> Result<(super::runtime::SandboxId, super::abi::ExecRequest), MxcError> {
+    let sensitive_proxy = request_has_sensitive_proxy(request);
+    let (input, exec) = prepare_request(client, request)?;
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
+    client
+        .probe()
+        .map_err(|error| protect_native_error(error, "probe", sensitive_proxy))?;
+    if let Some(cancellation) = cancellation {
+        cancellation.check()?;
+    }
+    let sandbox_id = client
+        .provision(&input)
+        .map_err(|error| protect_native_error(error, "provision", sensitive_proxy))?;
+    Ok((sandbox_id, exec))
+}
+
+struct StreamingSandbox {
+    client: NvxClient,
+    sandbox_id: super::runtime::SandboxId,
+    state_root: Option<tempfile::TempDir>,
+}
+
+impl Drop for StreamingSandbox {
+    fn drop(&mut self) {
+        if let Some(state_root) = self.state_root.take() {
+            let _retained_path = state_root.keep();
+        }
+    }
+}
+
+struct StreamingPipes {
+    stdout_reader: std::io::PipeReader,
+    stderr_reader: std::io::PipeReader,
+    stdout_writer: crate::mxc_common::process_util::InterruptiblePipeWriter,
+    stderr_writer: crate::mxc_common::process_util::InterruptiblePipeWriter,
+    stdout_handle: windows::Win32::Foundation::HANDLE,
+    stderr_handle: windows::Win32::Foundation::HANDLE,
+}
+
+#[derive(Clone, Copy)]
+struct StreamExecutionOptions {
+    timeout: Option<u64>,
+    started: Instant,
+    capture_limit: Option<usize>,
+    sensitive_proxy: bool,
+}
+
+impl StreamingPipes {
+    fn new() -> Result<Self, MxcError> {
+        let (stdout_reader, stdout_writer) = std::io::pipe().map_err(|error| {
+            MxcError::backend_error(format!("cannot create NVX stdout pipe: {error}"))
+        })?;
+        let (stderr_reader, stderr_writer) = std::io::pipe().map_err(|error| {
+            MxcError::backend_error(format!("cannot create NVX stderr pipe: {error}"))
+        })?;
+        let stdout_handle = windows::Win32::Foundation::HANDLE(stdout_reader.as_raw_handle());
+        let stderr_handle = windows::Win32::Foundation::HANDLE(stderr_reader.as_raw_handle());
+        Ok(Self {
+            stdout_reader,
+            stderr_reader,
+            stdout_writer: crate::mxc_common::process_util::InterruptiblePipeWriter::new(
+                std::fs::File::from(OwnedHandle::from(stdout_writer)),
+            ),
+            stderr_writer: crate::mxc_common::process_util::InterruptiblePipeWriter::new(
+                std::fs::File::from(OwnedHandle::from(stderr_writer)),
+            ),
+            stdout_handle,
+            stderr_handle,
+        })
+    }
+
+    fn into_handle(
+        self,
+        execution: super::runtime::StreamingExecution,
+        timeout: Option<u64>,
+        execution_started: Instant,
+        capture_limit: Option<usize>,
+        sensitive_proxy: bool,
+        finish: impl FnOnce(Result<MxcExecOutcome, MxcError>) -> Result<MxcExecOutcome, MxcError>
+            + Send
+            + 'static,
+    ) -> ExecHandle {
+        let Self {
+            stdout_reader,
+            stderr_reader,
+            stdout_writer,
+            stderr_writer,
+            stdout_handle,
+            stderr_handle,
+        } = self;
+        let stdout_cancel = stdout_writer.canceller();
+        let stderr_cancel = stderr_writer.canceller();
+        let deadline_stdout = stdout_cancel.clone();
+        let deadline_stderr = stderr_cancel.clone();
+        let cancel_execution = execution.clone();
+        let waiter = Box::new(move || {
+            drop(stdout_reader);
+            drop(stderr_reader);
+            finish(stream_execution(
+                &execution,
+                stdout_writer,
+                stderr_writer,
+                (deadline_stdout, deadline_stderr),
+                StreamExecutionOptions {
+                    timeout,
+                    started: execution_started,
+                    capture_limit,
+                    sensitive_proxy,
+                },
+            ))
+        });
+        let terminator = Box::new(move || {
+            cancel_execution
+                .cancel()
+                .map_err(|error| protect_native_error(error, "exec", sensitive_proxy))?;
+            stdout_cancel.close();
+            stderr_cancel.close();
+            Ok(())
+        });
+        ExecHandle {
+            stdout: stdout_handle,
+            stderr: stderr_handle,
+            stdin: crate::mxc_common::state_aware_backend::null_pipe_handle(),
+            waiter,
+            terminator,
+            stdin_closer: None,
+        }
+    }
+}
+
+pub(crate) fn spawn_streaming(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    stdin: bool,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    if stdin {
+        return Err(MxcError::unsupported_containment(
+            "MicroVM streaming does not support writable stdin",
+        ));
+    }
+    crate::mxc_common::validator::validate_common(request).map_err(|response| {
+        if request.script_code.is_empty() {
+            MxcError::malformed_request(response.error_message)
+        } else {
+            MxcError::policy_validation(response.error_message)
+        }
+    })?;
+    super::policy::validate_request(request)?;
+    let pipes = StreamingPipes::new()?;
+    let sensitive_proxy = request_has_sensitive_proxy(request);
+    let (state_root, mut client) = open_client(logger)?;
+    let (sandbox_id, exec) = match prepare_and_provision(&client, request, None) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let mut cleanup = Vec::new();
+            if let Err(close) = client.close() {
+                cleanup.push(protect_native_error(close, "close", sensitive_proxy));
+            }
+            if let Err(remove) = state_root.close() {
+                cleanup.push(MxcError::backend_error(format!(
+                    "cannot remove NVX state: {remove}"
+                )));
+            }
+            return finish_run(Err(error), cleanup, logger);
+        }
+    };
+    logger.log_audit_event(
+        &AuditEvent::new(AuditEventName::SandboxIdentity)
+            .str("identity", &sandbox_id.to_string())
+            .str("backend", "microvm")
+            .str("runtime", "signed-bundled-agent"),
+    );
+    let started = client
+        .start(&sandbox_id)
+        .map_err(|error| start_error(&client, &sandbox_id, error, sensitive_proxy))
+        .and_then(|()| {
+            let execution_started = Instant::now();
+            client
+                .start_execution(&sandbox_id, &exec)
+                .map(|execution| (execution, execution_started))
+                .map_err(|error| protect_native_error(error, "exec", sensitive_proxy))
+        });
+    let (execution, execution_started) = match started {
+        Ok(execution) => execution,
+        Err(error) => {
+            let cleanup = cleanup_sandbox(
+                &mut client,
+                &sandbox_id,
+                state_root,
+                true,
+                sensitive_proxy,
+                logger,
+            );
+            return finish_run(Err(error), cleanup, logger);
+        }
+    };
+    let timeout = exec.process.timeout;
+    let state_path = state_root.path().to_owned();
+    let mut sandbox = StreamingSandbox {
+        client,
+        sandbox_id,
+        state_root: Some(state_root),
+    };
+    let handle = pipes.into_handle(
+        execution,
+        timeout,
+        execution_started,
+        None,
+        sensitive_proxy,
+        move |primary| {
+            let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+            let state_root = sandbox
+                .state_root
+                .take()
+                .expect("streaming sandbox owns its state directory");
+            let cleanup = cleanup_sandbox(
+                &mut sandbox.client,
+                &sandbox.sandbox_id,
+                state_root,
+                primary.is_err(),
+                sensitive_proxy,
+                &mut logger,
+            );
+            finish_run(primary, cleanup, &mut logger)
+        },
+    );
+    crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)
+        .map(|process| Box::new(process) as Box<dyn SandboxProcess>)
+        .map_err(|mut error| {
+            if state_path.exists() {
+                error.message.push_str(&format!(
+                    "; NVX state retained for recovery at {}",
+                    state_path.display()
+                ));
+            }
+            error
+        })
+}
+
+pub(super) fn exec_existing(
+    mut client: NvxClient,
+    sandbox_id: super::runtime::SandboxId,
+    request: &super::abi::ExecRequest,
+    stdio: crate::mxc_common::state_aware_backend::ExecStdio,
+    capture_limit: Option<usize>,
+    sensitive_proxy: bool,
+) -> Result<ExecHandle, MxcError> {
+    let prepared = (|| {
+        let pipes = StreamingPipes::new()?;
+        let execution_started = Instant::now();
+        let execution = client
+            .start_execution(&sandbox_id, request)
+            .map_err(|error| protect_native_error(error, "exec", sensitive_proxy))?;
+        Ok((pipes, execution, execution_started))
+    })();
+    let (pipes, execution, execution_started) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let cleanup = client
+                .close()
+                .err()
+                .map(|error| protect_native_error(error, "close", sensitive_proxy))
+                .into_iter()
+                .collect();
+            return finish_run(
+                Err(error),
+                cleanup,
+                &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
+            );
+        }
+    };
+    let timeout = request.process.timeout;
+    Ok(pipes.into_handle(
+        execution,
+        timeout,
+        execution_started,
+        capture_limit,
+        sensitive_proxy,
+        move |primary| {
+            let primary = match (stdio, primary) {
+                (
+                    crate::mxc_common::state_aware_backend::ExecStdio::Relayed,
+                    Ok(MxcExecOutcome::TimedOut),
+                ) => Err(MxcError::backend_error(
+                    "NVX relayed exec timed out; workload deadline elapsed",
+                )),
+                (_, primary) => primary,
+            };
+            let cleanup = client
+                .close()
+                .err()
+                .map(|error| protect_native_error(error, "close", sensitive_proxy))
+                .into_iter()
+                .collect();
+            finish_run(
+                primary,
+                cleanup,
+                &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
+            )
+        },
+    ))
+}
+
+fn stream_execution(
+    execution: &super::runtime::StreamingExecution,
+    mut stdout: impl Write,
+    mut stderr: impl Write,
+    output_cancellers: (
+        crate::mxc_common::process_util::PipeWriteCanceller,
+        crate::mxc_common::process_util::PipeWriteCanceller,
+    ),
+    options: StreamExecutionOptions,
+) -> Result<MxcExecOutcome, MxcError> {
+    let StreamExecutionOptions {
+        timeout,
+        started,
+        capture_limit,
+        sensitive_proxy,
+    } = options;
+    let (stdout_cancel, stderr_cancel) = output_cancellers;
+    let deadline = timeout
+        .filter(|&value| value != 0)
+        .and_then(|value| started.checked_add(Duration::from_millis(value)));
+    let finished = Arc::new((Mutex::new(false), Condvar::new()));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let watchdog = if let Some(deadline) = deadline {
+        let finished = Arc::clone(&finished);
+        let timed_out = Arc::clone(&timed_out);
+        let watchdog_execution = execution.clone();
+        match std::thread::Builder::new()
+            .name("mxc-nvx-deadline".to_owned())
+            .spawn(move || {
+                let (lock, signal) = &*finished;
+                let done = lock.lock().unwrap_or_else(|error| error.into_inner());
+                let (done, _) = signal
+                    .wait_timeout_while(
+                        done,
+                        deadline.saturating_duration_since(Instant::now()),
+                        |done| !*done,
+                    )
+                    .unwrap_or_else(|error| error.into_inner());
+                if *done {
+                    return Ok(());
+                }
+                timed_out.store(true, Ordering::Release);
+                drop(done);
+                let result = watchdog_execution.cancel();
+                stdout_cancel.close();
+                stderr_cancel.close();
+                result
+            }) {
+            Ok(watchdog) => Some(watchdog),
+            Err(error) => {
+                let primary = Err(MxcError::backend_error(format!(
+                    "cannot start NVX deadline worker: {error}"
+                )));
+                let cleanup = [execution.cancel().err(), execution.release().err()]
+                    .into_iter()
+                    .flatten()
+                    .map(|error| protect_native_error(error, "exec", sensitive_proxy))
+                    .collect();
+                return finish_run(
+                    primary,
+                    cleanup,
+                    &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let host_deadline = deadline.and_then(|deadline| deadline.checked_add(Duration::from_secs(30)));
+    let mut captured_bytes = 0usize;
+    let (primary, cancel_needed) = loop {
+        let remaining = host_deadline.map(|deadline| {
+            u64::try_from(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX)
+        });
+        let event = execution.next(remaining, |event| match event {
+            Event::Stdout(bytes) => {
+                write_captured_stream(&mut stdout, bytes, &mut captured_bytes, capture_limit)
+                    .map(|()| None)
+            }
+            Event::Stderr(bytes) => {
+                write_captured_stream(&mut stderr, bytes, &mut captured_bytes, capture_limit)
+                    .map(|()| None)
+            }
+            Event::Exit(bytes) => {
+                serde_json::from_slice::<ExecEnd>(bytes)
+                    .map(Some)
+                    .map_err(|error| {
+                        MxcError::backend_error(format!("invalid NVX execution result: {error}"))
+                    })
+            }
+        });
+        match event {
+            Ok(Some(Ok(None))) => {}
+            Ok(Some(Ok(Some(ExecEnd::Outcome(outcome))))) => {
+                break (
+                    match outcome {
+                        ExecOutcome::Exited(code) => Ok(MxcExecOutcome::Exited(code)),
+                        ExecOutcome::Signaled(signal) => {
+                            Ok(MxcExecOutcome::Exited(128_i32.saturating_add(signal)))
+                        }
+                        ExecOutcome::TimedOut => Ok(MxcExecOutcome::TimedOut),
+                        ExecOutcome::Cancelled => Ok(MxcExecOutcome::Exited(137)),
+                        other => Err(MxcError::backend_error(format!(
+                            "NVX workload did not complete normally: {other}"
+                        ))),
+                    },
+                    false,
+                )
+            }
+            Ok(Some(Ok(Some(ExecEnd::Error(body))))) => break (Err(map_error_body(body)), false),
+            Ok(Some(Err(error))) | Err(error) => break (Err(error), true),
+            Ok(None) => break (Ok(MxcExecOutcome::TimedOut), true),
+        }
+    };
+    let mut cleanup = Vec::new();
+    {
+        let (lock, signal) = &*finished;
+        *lock.lock().unwrap_or_else(|error| error.into_inner()) = true;
+        signal.notify_all();
+    }
+    if let Some(watchdog) = watchdog {
+        match watchdog.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => cleanup.push(protect_native_error(error, "exec", sensitive_proxy)),
+            Err(_) => cleanup.push(MxcError::backend_error("NVX deadline worker panicked")),
+        }
+    }
+    if cancel_needed {
+        if let Err(error) = execution.cancel() {
+            cleanup.push(protect_native_error(error, "exec", sensitive_proxy));
+        }
+    }
+    if let Err(error) = execution.release() {
+        cleanup.push(protect_native_error(error, "exec", sensitive_proxy));
+    }
+    let primary = primary
+        .map(|outcome| {
+            if timed_out.load(Ordering::Acquire) {
+                MxcExecOutcome::TimedOut
+            } else {
+                outcome
+            }
+        })
+        .map_err(|error| protect_native_error(error, "exec", sensitive_proxy));
+    finish_run(
+        primary,
+        cleanup,
+        &mut Logger::new(crate::mxc_common::logger::Mode::Buffer),
+    )
+}
+
+fn write_captured_stream(
+    stream: &mut impl Write,
+    bytes: &[u8],
+    captured_bytes: &mut usize,
+    capture_limit: Option<usize>,
+) -> Result<(), MxcError> {
+    if let Some(limit) = capture_limit {
+        let next = captured_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| super::runtime::capture_limit_error(limit))?;
+        if next > limit {
+            return Err(super::runtime::capture_limit_error(limit));
+        }
+        *captured_bytes = next;
+    }
+    write_stream(stream, bytes)
+}
+
+fn write_stream(writer: &mut impl Write, bytes: &[u8]) -> Result<(), MxcError> {
+    match writer.write_all(bytes) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(MxcError::backend_error(format!(
+            "cannot relay NVX output: {error}"
+        ))),
+    }
+}
+
+fn cleanup_sandbox(
+    client: &mut impl SandboxClient,
+    sandbox_id: &super::runtime::SandboxId,
+    state_root: tempfile::TempDir,
+    primary_failed: bool,
+    sensitive_proxy: bool,
+    logger: &mut Logger,
+) -> Vec<MxcError> {
+    let protect = |operation, error| protect_native_error(error, operation, sensitive_proxy);
+    let stop_error = match client.stop(sandbox_id).err() {
+        Some(error) if primary_failed && error.code == MxcErrorCode::AlreadyStopped => None,
         other => other.map(|error| protect("stop", error)),
     };
     let deprovision_error = client
-        .deprovision(&sandbox_id)
+        .deprovision(sandbox_id)
         .err()
         .map(|error| protect("deprovision", error));
     let retain_state = deprovision_error.is_some();
@@ -278,7 +798,7 @@ fn run_with_client(
     }
     logger.log_audit_event(
         &AuditEvent::new(AuditEventName::SandboxTornDown)
-            .str("identity", &identity)
+            .str("identity", &sandbox_id.to_string())
             .str("backend", "microvm")
             .str(
                 "status",
@@ -290,17 +810,14 @@ fn run_with_client(
             )
             .bool("state_retained", retain_state),
     );
-    let output = finish_run(primary, cleanup_errors, logger)?;
-
-    Ok(CapturedRun {
-        outcome: map_outcome(output.outcome)?,
-        warnings: Vec::new(),
-        stdout: output.stdout,
-        stderr: output.stderr,
-    })
+    cleanup_errors
 }
 
-fn protect_native_error(mut error: MxcError, operation: &str, sensitive_proxy: bool) -> MxcError {
+pub(super) fn protect_native_error(
+    mut error: MxcError,
+    operation: &str,
+    sensitive_proxy: bool,
+) -> MxcError {
     if !sensitive_proxy {
         return error;
     }
@@ -319,19 +836,19 @@ fn protect_native_error(mut error: MxcError, operation: &str, sensitive_proxy: b
         if primary == "execution cancelled" || primary == capture_limit.message {
             if cleanup {
                 error.message = format!(
-                    "{primary}; execution cleanup failed; native error detail withheld because the configured proxy contains credentials"
+                    "{primary}; execution cleanup failed; native error detail withheld to protect potentially sensitive proxy configuration"
                 );
             }
             return error;
         }
     }
     error.message = format!(
-        "NVX {operation} failed; native error detail withheld because the configured proxy contains credentials"
+        "NVX {operation} failed; native error detail withheld to protect potentially sensitive proxy configuration"
     );
     error
 }
 
-fn finish_run<T>(
+pub(super) fn finish_run<T>(
     primary: Result<T, MxcError>,
     cleanup_errors: Vec<MxcError>,
     logger: &mut Logger,
@@ -453,6 +970,31 @@ mod tests {
             microvm_image: Some("docker.io/library/python:3.12-alpine".to_owned()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn lifecycle_capture_limit_counts_binary_bytes_across_both_streams() {
+        let mut captured = 0;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        write_captured_stream(&mut stdout, b"\xff\0\xfe", &mut captured, Some(7)).unwrap();
+        write_captured_stream(&mut stderr, b"\x80\0\x81x", &mut captured, Some(7)).unwrap();
+        assert_eq!(captured, 7);
+        assert_eq!(stdout, b"\xff\0\xfe");
+        assert_eq!(stderr, b"\x80\0\x81x");
+
+        let error = write_captured_stream(&mut stdout, b"z", &mut captured, Some(7)).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::BackendError);
+        assert_eq!(
+            error.message,
+            "NVX signed bundled agent: combined stdout/stderr capture limit of 7 bytes exceeded"
+        );
+        assert_eq!(captured, 7);
+        assert_eq!(stdout, b"\xff\0\xfe");
+
+        let mut unbounded = 0;
+        write_captured_stream(&mut stdout, &[0; 8], &mut unbounded, None).unwrap();
+        assert_eq!(unbounded, 0);
     }
 
     #[test]
@@ -994,11 +1536,17 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.code, MxcErrorCode::PolicyValidation, "{phase}");
             assert!(error.message.contains(phase), "{phase}: {}", error.message);
-            assert!(
-                error.message.contains("withheld"),
-                "{phase}: {}",
-                error.message
+            let expected = format!(
+                "NVX {phase} failed; native error detail withheld to protect potentially sensitive proxy configuration"
             );
+            if phase == "start" {
+                assert_eq!(
+                    error.message,
+                    format!("{expected}; startup diagnostics withheld")
+                );
+            } else {
+                assert_eq!(error.message, expected);
+            }
             assert!(
                 !error.message.contains("synthetic"),
                 "{phase}: {}",
@@ -1099,7 +1647,12 @@ mod tests {
                 assert!(error.message.starts_with(message), "{}", error.message);
                 assert!(!error.message.contains("synthetic"), "{}", error.message);
                 if cleanup_failure {
-                    assert!(error.message.contains("withheld"), "{}", error.message);
+                    assert_eq!(
+                        error.message,
+                        format!(
+                            "{message}; execution cleanup failed; native error detail withheld to protect potentially sensitive proxy configuration"
+                        )
+                    );
                 } else {
                     assert_eq!(error.message, message);
                 }

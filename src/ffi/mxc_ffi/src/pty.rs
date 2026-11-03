@@ -74,16 +74,22 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
                 ));
             }
         };
-        spawn_with_pty_json(
+        crate::json_boundary::check_json_surface(
             request_json,
-            experimental != 0,
-            MxcPtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            },
+            crate::json_boundary::JsonSurface::OneShotStreaming,
         )
+        .and_then(|()| {
+            spawn_with_pty_json(
+                request_json,
+                experimental != 0,
+                MxcPtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+            )
+        })
         .map(MxcSandbox::new_pty)
         .map_err(sdk_error_detail)
     }))

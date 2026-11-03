@@ -20,6 +20,11 @@
 //!   [`mxc_exec_state_aware_json`] runs the exec phase as a live streaming handle
 //!   (reusing the streaming externs).
 //!
+//! MicroVM streaming and lifecycle operations are Rust `mxc_sdk::v1::dev`
+//! JSON-only. This boundary rejects them even when a workspace build enables
+//! MicroVM in the shared engine. MicroVM captured create-and-run execution
+//! through [`mxc_run_json`] retains its existing behavior.
+//!
 //! ## Ingress rule
 //!
 //! Policy and configuration cross this boundary **only** as exact
@@ -84,6 +89,7 @@ use mxc_sdk::v1::{probe, ProbeOutput};
 use mxc_sdk::v1::{ExecutionResult, WaitResult};
 
 mod error_detail;
+mod json_boundary;
 mod pty;
 mod state_aware;
 mod streaming;

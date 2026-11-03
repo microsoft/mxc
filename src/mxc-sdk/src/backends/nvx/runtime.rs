@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
@@ -34,7 +35,7 @@ pub(super) const APPROVED_INITRD_SHA256: &str =
     "5e42d4617c1508e9116df8c330c0ff72243e954d7f132091ecdecfc743d904ed";
 
 const HOST_TIMEOUT_SLACK_MS: u64 = 30_000;
-pub(super) const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const STARTUP_LOG_LIMIT: usize = 8 * 1024;
 const CANCELLATION_POLL_MS: u64 = 100;
 
@@ -45,6 +46,7 @@ pub(super) struct SandboxId {
 
 impl SandboxId {
     const PREFIX: &'static str = "aci-edge-sandboxes";
+    const MXC_PREFIX: &'static str = "microvm";
     const TOKEN_LEN: usize = 32;
 
     pub fn from_token(token: &str) -> Result<Self, MxcError> {
@@ -64,6 +66,21 @@ impl SandboxId {
 
     pub fn token(&self) -> &str {
         &self.full[Self::PREFIX.len() + 1..]
+    }
+
+    pub fn from_mxc(value: &str) -> Result<Self, MxcError> {
+        let token = value.strip_prefix("microvm:").ok_or_else(|| {
+            MxcError::malformed_id("MicroVM sandbox ID must start with 'microvm:'")
+        })?;
+        Self::from_token(token).map_err(|_| {
+            MxcError::malformed_id(
+                "MicroVM sandbox ID must contain 32 lowercase hexadecimal digits",
+            )
+        })
+    }
+
+    pub fn to_mxc_string(&self) -> String {
+        format!("{}:{}", Self::MXC_PREFIX, self.token())
     }
 }
 
@@ -86,6 +103,18 @@ pub(super) trait SandboxClient {
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
     fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError>;
+    fn provision_with_metadata(
+        &self,
+        input: &ProvisionInput,
+    ) -> Result<
+        (
+            SandboxId,
+            Option<serde_json::Map<String, serde_json::Value>>,
+        ),
+        MxcError,
+    > {
+        self.provision(input).map(|sandbox_id| (sandbox_id, None))
+    }
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError>;
     fn exec_and_wait(
@@ -143,6 +172,7 @@ pub(super) struct NvxClient {
     library: &'static AgentLibrary,
     host: u64,
     closed: bool,
+    _state_root_guard: Option<crate::mxc_common::filesystem_security::LockedDirectoryPath>,
 }
 
 impl NvxClient {
@@ -151,6 +181,85 @@ impl NvxClient {
             library,
             host,
             closed: false,
+            _state_root_guard: None,
+        }
+    }
+
+    pub(super) fn start_execution(
+        &self,
+        sandbox_id: &SandboxId,
+        request: &ExecRequest,
+    ) -> Result<StreamingExecution, MxcError> {
+        let handle = self.library.exec(
+            self.host,
+            sandbox_id.token(),
+            &ExecInput {
+                request: request.clone(),
+                stdin: false,
+            },
+        )?;
+        Ok(StreamingExecution(Arc::new(StreamingExecutionInner {
+            library: self.library,
+            handle: Mutex::new(Some(handle)),
+        })))
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct StreamingExecution(Arc<StreamingExecutionInner>);
+
+struct StreamingExecutionInner {
+    library: &'static AgentLibrary,
+    handle: Mutex<Option<u64>>,
+}
+
+impl StreamingExecution {
+    pub(super) fn next<T>(
+        &self,
+        timeout_ms: Option<u64>,
+        deliver: impl FnOnce(Event<'_>) -> T,
+    ) -> Result<Option<T>, MxcError> {
+        let handle = *self
+            .0
+            .handle
+            .lock()
+            .map_err(|_| MxcError::backend_error("NVX execution handle lock was poisoned"))?;
+        let handle = handle.ok_or_else(|| MxcError::backend_error("NVX execution was released"))?;
+        self.0.library.exec_next(handle, timeout_ms, deliver)
+    }
+
+    pub(super) fn cancel(&self) -> Result<(), MxcError> {
+        let handle = self
+            .0
+            .handle
+            .lock()
+            .map_err(|_| MxcError::backend_error("NVX execution handle lock was poisoned"))?;
+        match *handle {
+            Some(handle) => self.0.library.exec_cancel(handle),
+            None => Ok(()),
+        }
+    }
+
+    pub(super) fn release(&self) -> Result<(), MxcError> {
+        let mut handle = self
+            .0
+            .handle
+            .lock()
+            .map_err(|_| MxcError::backend_error("NVX execution handle lock was poisoned"))?;
+        match handle.take() {
+            Some(handle) => self.0.library.exec_release(handle),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for StreamingExecutionInner {
+    fn drop(&mut self) {
+        if let Ok(handle) = self.handle.get_mut() {
+            if let Some(handle) = handle.take() {
+                let _ = self.library.exec_cancel(handle);
+                let _ = self.library.exec_release(handle);
+            }
         }
     }
 }
@@ -165,6 +274,20 @@ impl Drop for NvxClient {
 }
 
 pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
+    create_client_with_guard(state_root, None)
+}
+
+pub(super) fn create_persistent_client(
+    state_root: crate::mxc_common::filesystem_security::LockedDirectoryPath,
+) -> Result<NvxClient, MxcError> {
+    let path = state_root.path().to_path_buf();
+    create_client_with_guard(&path, Some(state_root))
+}
+
+fn create_client_with_guard(
+    state_root: &Path,
+    state_root_guard: Option<crate::mxc_common::filesystem_security::LockedDirectoryPath>,
+) -> Result<NvxClient, MxcError> {
     let bundle_dir = discover_bundle_dir()?;
     let dll_path = bundle_dir.join("bin").join("aci_edge_agent.dll");
     let library = AgentLibrary::load_verified(&dll_path, APPROVED_DLL_SHA256)?;
@@ -180,6 +303,7 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
     };
     let host = library.host_open(&setup)?;
     let mut client = NvxClient::from_library(library, host);
+    client._state_root_guard = state_root_guard;
     let info = match client.library.host_info(client.host) {
         Ok(info) => info,
         Err(mut error) => {
@@ -198,6 +322,32 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
         return Err(error);
     }
     Ok(client)
+}
+
+pub(super) fn lifecycle_state_root(
+) -> Result<crate::mxc_common::filesystem_security::LockedDirectoryPath, MxcError> {
+    let local_app_data = env::var_os("LOCALAPPDATA").ok_or_else(|| {
+        MxcError::backend_unavailable(
+            "cannot resolve LOCALAPPDATA for the persistent NVX lifecycle state",
+        )
+    })?;
+    let local_app_data = PathBuf::from(local_app_data);
+    crate::mxc_common::filesystem_security::lock_owner_only_directory_path(
+        &local_app_data,
+        [
+            std::ffi::OsStr::new("Microsoft"),
+            std::ffi::OsStr::new("MXC"),
+            std::ffi::OsStr::new("nvx-v1"),
+        ]
+        .as_slice(),
+        2,
+    )
+    .map_err(|error| {
+        MxcError::backend_unavailable(format!(
+            "cannot admit persistent NVX lifecycle state below '{}': {error}",
+            local_app_data.display()
+        ))
+    })
 }
 
 fn verify_runtime_digests(info: &HostInfo) -> Result<(), MxcError> {
@@ -232,6 +382,7 @@ pub(super) fn sandbox_spec(image: &str) -> Result<SandboxSpec, MxcError> {
         .map_err(MxcError::malformed_request)?;
     Ok(SandboxSpec {
         image: Some(ImageSource::Reference(image.to_owned())),
+        resources: None,
     })
 }
 
@@ -243,6 +394,26 @@ fn discover_bundle_dir() -> Result<PathBuf, MxcError> {
             discovered.display()
         ))
     })
+}
+
+pub(super) fn agent_bundle_available() -> bool {
+    discover_bundle_dir().is_ok_and(|directory| agent_library_present(&directory))
+}
+
+pub(super) fn require_agent_bundle_present() -> Result<(), MxcError> {
+    let directory = discover_bundle_dir()?;
+    if agent_library_present(&directory) {
+        Ok(())
+    } else {
+        Err(MxcError::backend_unavailable(format!(
+            "NVX signed bundled agent: bundle {} is missing bin\\aci_edge_agent.dll",
+            directory.display()
+        )))
+    }
+}
+
+fn agent_library_present(directory: &Path) -> bool {
+    directory.join("bin").join("aci_edge_agent.dll").is_file()
 }
 
 fn discover_bundle_with(
@@ -505,6 +676,20 @@ impl SandboxClient for NvxClient {
         SandboxId::from_token(&reply.token)
     }
 
+    fn provision_with_metadata(
+        &self,
+        input: &ProvisionInput,
+    ) -> Result<
+        (
+            SandboxId,
+            Option<serde_json::Map<String, serde_json::Value>>,
+        ),
+        MxcError,
+    > {
+        let reply = self.library.provision(self.host, input)?;
+        Ok((SandboxId::from_token(&reply.token)?, reply.metadata))
+    }
+
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
         self.library
             .start(self.host, sandbox_id.token())
@@ -607,6 +792,19 @@ mod tests {
         let err = discover_bundle_with(bad_env, exe_in(&exe_dir)).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
         assert!(err.message.contains("holds no agent bundle"));
+    }
+
+    #[test]
+    fn availability_requires_an_agent_library_file() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = write_bundle_manifest(root.path());
+        assert!(!agent_library_present(&bundle));
+        let library = bundle.join("bin").join("aci_edge_agent.dll");
+        fs::create_dir_all(&library).unwrap();
+        assert!(!agent_library_present(&bundle));
+        fs::remove_dir(&library).unwrap();
+        fs::write(&library, b"placeholder").unwrap();
+        assert!(agent_library_present(&bundle));
     }
 
     #[test]

@@ -144,9 +144,9 @@ pub struct ExecSandboxProcess {
     native_stdio: Option<NativeStdio>,
     /// Whether the caller selected the individual-stream access mode.
     individual_stdio_taken: bool,
-    /// The waiter's outcome once joined, so repeat waits are idempotent. Holds
-    /// the outcome rather than a code because a timeout has no code.
-    exit: Option<ExecOutcome>,
+    /// The waiter's terminal result once joined, so repeat waits preserve both
+    /// successful outcomes and backend cleanup failures.
+    terminal: Option<Result<ExecOutcome, MxcError>>,
     /// Whether a termination request was **refused**. Recorded separately
     /// because `terminator` is consumed on both outcomes, so its absence alone
     /// cannot distinguish "killed" from "the kill was rejected" — and those
@@ -311,7 +311,7 @@ impl ExecSandboxProcess {
             terminator: Some(terminator),
             native_stdio: Some(native_stdio),
             individual_stdio_taken: false,
-            exit: None,
+            terminal: None,
             kill_refused: false,
         })
     }
@@ -321,19 +321,18 @@ impl ExecSandboxProcess {
     /// The outcome is cached rather than the exit code, because a timeout has
     /// no code to cache and repeat calls must still be idempotent.
     fn join_waiter(&mut self) -> std::io::Result<i32> {
-        if let Some(outcome) = self.exit {
-            return outcome_to_io(outcome);
+        if let Some(result) = &self.terminal {
+            return terminal_to_io(result);
         }
         let handle = self
             .waiter
             .take()
             .ok_or_else(|| std::io::Error::other("exec waiter already consumed"))?;
-        let outcome = handle
+        let result = handle
             .join()
-            .map_err(|_| std::io::Error::other("exec waiter thread panicked"))?
-            .map_err(|e: MxcError| std::io::Error::other(e.message))?;
-        self.exit = Some(outcome);
-        outcome_to_io(outcome)
+            .unwrap_or_else(|_| Err(MxcError::backend_error("exec waiter thread panicked")));
+        self.terminal = Some(result);
+        terminal_to_io(self.terminal.as_ref().expect("terminal result was stored"))
     }
 
     /// Drain whatever output the caller did not take, concurrently with the
@@ -367,8 +366,8 @@ impl ExecSandboxProcess {
         self.native_stdio.take();
         self.stdin.take();
 
-        // Deliberately **not** gated on `self.exit`. A cached exit code means a
-        // previous `try_wait` observed the child finish; it says nothing about
+        // Deliberately **not** gated on `self.terminal`. A cached success means
+        // a previous `try_wait` observed the child finish; it says nothing about
         // whether anything drained. Returning early here would let
         // `try_wait()` then `wait()` skip the drain the contract promises.
         let drain_stdout = match spawn_discard_checked(self.stdout.take()) {
@@ -564,8 +563,8 @@ impl SandboxProcess for ExecSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        if let Some(outcome) = self.exit {
-            return outcome_to_io(outcome).map(Some);
+        if let Some(result) = &self.terminal {
+            return terminal_to_io(result).map(Some);
         }
         match &self.waiter {
             Some(handle) if handle.is_finished() => self.join_waiter().map(Some),
@@ -587,7 +586,7 @@ impl SandboxProcess for ExecSandboxProcess {
         // demonstrably dead. Running the terminator here would be equally
         // wrong: it would surface a failure to terminate something that has
         // already terminated.
-        if self.exit.is_some() {
+        if matches!(self.terminal, Some(Ok(_))) {
             self.terminator = None;
             self.kill_refused = false;
             return Ok(());
@@ -639,7 +638,7 @@ impl Drop for ExecSandboxProcess {
         let kill_accepted = match self.terminator.take() {
             // Nothing to terminate once the exit is known; running the
             // terminator over a dead process only invites a spurious failure.
-            _ if self.exit.is_some() => true,
+            _ if matches!(self.terminal, Some(Ok(_))) => true,
             Some(terminator) => terminator().is_ok(),
             // Already killed via `kill()`, whose result the caller has seen —
             // and whose refusal, if it was one, is precisely the case this
@@ -670,6 +669,13 @@ fn outcome_to_io(outcome: ExecOutcome) -> std::io::Result<i32> {
             std::io::ErrorKind::TimedOut,
             "the exec timed out and the sandbox terminated it",
         )),
+    }
+}
+
+fn terminal_to_io(result: &Result<ExecOutcome, MxcError>) -> std::io::Result<i32> {
+    match result {
+        Ok(outcome) => outcome_to_io(*outcome),
+        Err(error) => Err(std::io::Error::other(error.message.clone())),
     }
 }
 
@@ -1570,6 +1576,47 @@ mod tests {
         drop(stdout_r);
     }
 
+    #[test]
+    fn repeated_poll_and_wait_preserve_an_nvx_cleanup_error() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        let handle = ExecHandle {
+            stdin_closer: None,
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| {
+                Err(MxcError::backend_error(
+                    "NVX exec completed; cleanup failure: close failed",
+                ))
+            }),
+            terminator: Box::new(|| Ok(())),
+        };
+        let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+        drop(stdout_r);
+
+        let first = loop {
+            match process.try_wait() {
+                Ok(None) => std::thread::sleep(Duration::from_millis(1)),
+                result => break result.expect_err("the NVX cleanup error must be terminal"),
+            }
+        };
+        let second = process
+            .try_wait()
+            .expect_err("repeat polling must preserve the cleanup error");
+        let waited = process
+            .wait()
+            .expect_err("blocking wait must preserve the cleanup error");
+        for error in [&first, &second, &waited] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("NVX exec completed; cleanup failure: close failed"),
+                "{error}"
+            );
+        }
+        drop(stdout_w);
+    }
+
     /// `wait` must **tear its discard down**, not walk away from it.
     ///
     /// This is the regression the cancellable drain exists for, and the other
@@ -1671,7 +1718,7 @@ mod tests {
 
     /// A prior `try_wait()` must not let `wait()` skip the drain.
     ///
-    /// `self.exit` records that the child finished; it says nothing about
+    /// A successful `self.terminal` records that the child finished; it says nothing about
     /// whether anything was drained. Returning early on it would silently
     /// break the contract for exactly the caller who polls before waiting.
     ///
