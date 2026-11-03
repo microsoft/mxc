@@ -292,9 +292,11 @@ function azureBundleFixture(mode = "") {
   const bundle = join(target, "aci-edge-sandboxes");
   mkdirSync(target);
   mkdirSync(join(outputDirectory, triplet), { recursive: true });
-  const pins = readFileSync(join(root, "src", "mxc-sdk", "build", "build_nvx_bundled.rs"), "utf8");
-  const inventory = [...pins.matchAll(/"([^"\r\n]+)",\s*"([0-9a-f]{64})"/g)].map((match) => match[1]);
-  assert.equal(inventory.length, 18, "fixture must exercise the complete approved bundle inventory");
+  // Verify recursive copying, including files unknown to MXC's packaging logic.
+  const inventory = ["SOURCE-MANIFEST.json", "bundle-manifest.json", "SHA256SUMS",
+    "bin/aci_edge_agent.dll", "bin/direct-images.exe", "bin/openvmm.exe",
+    "guest/vmlinux", "guest/initramfs-edge.cpio.gz", "source/nested/extra.txt"];
+
   if (mode !== "absent") {
     mkdirSync(bundle);
     if (mode !== "empty") {

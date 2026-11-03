@@ -24,12 +24,13 @@ From the repository root, build the executor:
 build.bat --with-microvm
 ```
 
-The build stages the pinned official `aci-edge-sandboxes.zip` release
-`v0.1.0-dev.0430ce79d125`, from NVX revision
-`0430ce79d125203c20f0aa69243480513a774296`. Distribute the complete
-`aci-edge-sandboxes` directory beside the executable, including its manifests,
-runtime binaries, guest images, and provenance files. Do not substitute a
-standalone OpenVMM executable or a partial bundle.
+The `aci_edge_sandboxes` crate, pinned to `0.1.1` with `agent-bundled`,
+downloads and stages its own signed agent bundle. This version pins release
+`v0.1.0-build188642429` (sandbox ABI 3, guest runtime ABI
+`microvm-abi-v2-edge-ramfs-v7`). Distribute the complete `aci-edge-sandboxes`
+directory beside the executable, including its manifests, runtime binaries,
+guest images, and provenance files. Do not substitute a standalone OpenVMM
+executable or a partial bundle.
 
 Windows x64 Azure build artifacts, release ZIPs, and VPack artifacts include
 this complete directory beside the executor. The Node SDK package excludes
@@ -99,7 +100,7 @@ signed agent limits workloads to one hour and constrains their working
 directories and environments as described below. Captured-only execution
 and refusal of UI, memory overrides, and public lifecycle operations
 are restrictions of this MXC integration.
-The [signed-agent documentation](https://github.com/microsoft/nvx/blob/0430ce79d125203c20f0aa69243480513a774296/aci_edge_sandboxes/README.md#agent-backend-opt-in)
+The [signed-agent documentation](https://docs.rs/aci_edge_sandboxes/0.1.1/aci_edge_sandboxes/agent/)
 describes its contract; the direct OpenVMM backend uses a different guest and
 does not define the limits of this integration.
 
@@ -116,8 +117,8 @@ does not define the limits of this integration.
 | Process timeout | `0` means no workload timeout; nonzero values may not exceed 3,600,000 ms. |
 | Captured output | At most 64 MiB (67,108,864 bytes) combined stdout and stderr. |
 | Filesystem policy | Read-only, read-write, and denied paths are mapped to the agent and require the corresponding runtime capabilities. |
-| Network policy | Directional defaults and CIDR/protocol/port rules require the corresponding runtime capabilities. Unsupported ingress or host-loopback allow postures fail closed. |
-| Runtime proxy | `runtimeConfig.networkProxy` requires the runtime's proxy capability. Proxy environment variables remain rejected. |
+| Network policy | Egress defaults and CIDR/protocol/port rules, ingress defaults, and host-loopback postures require the corresponding runtime capabilities and native validation. Host-loopback allow makes guest listeners reachable on the same host loopback port. |
+| Runtime proxy | `runtimeConfig.networkProxy` requires the runtime's proxy capability and a port other than 0 or 53. Proxy environment variables remain rejected. |
 | UI policy | A supplied `ui` section is rejected. |
 | Legacy fallback settings | Accepted and ignored for contract compatibility; they do not enable host-DACL mutation. |
 | Lifecycle options | `destroyOnExit` must be `true` and `preservePolicy` must be `false`. |
@@ -153,10 +154,16 @@ host or provisioning a container.
 ### Output, timeout, and cleanup
 
 Output up to the capture limit is returned unchanged, including non-UTF-8
-bytes. Exceeding the combined limit cancels and releases execution, tears down
-the container, and returns `BackendError` rather than truncated output. The
-limit also applies when the workload timeout is zero. Cleanup failures are
-reported alongside the original failure.
+bytes. Exceeding the combined limit requests cancellation, tears down the
+container, and returns `BackendError` rather than truncated output. The
+limit also applies when the workload timeout is zero. Stop and deprovision
+failures are reported alongside the original failure.
+Explicit host-close failures are reported. An execution-release failure replaces
+an otherwise successful execution outcome. A release failure accompanying an
+execution error, or occurring after an unknown cancellation outcome has been
+returned, may not be visible to the caller. If cancellation fails, the outcome
+may be unknown and the workload may still be running; MXC reports the failure
+and attempts stop and deprovision.
 
 A workload timeout preserves captured partial output and tears down the
 container. Each create-and-run request gets fresh workload state; this phase
@@ -200,9 +207,9 @@ compiled `nvx_e2e` tests and the complete signed bundle; the validation host
 does not rebuild them.
 
 The SDK suite covers both the executor and captured JSON execution, caller
-image selection, filesystem enforcement, directional network and proxy
-enforcement against controlled reachable host endpoints, binary
-stdout/stderr, exit codes, environment and working-directory settings,
+image selection, filesystem enforcement, egress and proxy enforcement against
+controlled reachable host endpoints, host-loopback TCP and UDP allow and deny,
+binary stdout/stderr, exit codes, environment and working-directory settings,
 timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
 An isolated-console scenario interrupts both startup and running execution,
 then verifies that the owned OpenVMM process has terminated and run storage
@@ -225,70 +232,17 @@ cargo test --locked -p mxc-sdk --features microvm --test nvx_e2e --target x86_64
 
 ## Maintainers: updating the bundled runtime
 
-Update the pinned release as one reviewed change. Do not remove verification
-or accept arbitrary replacement files to get an upgrade working.
+The `aci_edge_sandboxes` dependency owns bundle acquisition, verification,
+ABI bindings, and version pins. Update its exact version as a reviewed change;
+check its release, runtime capabilities, validation behavior, and cleanup
+semantics before running the host-only and VM validation above. Do not add a
+second MXC downloader or re-sign the bundle's native binaries.
 
-1. Select an official signed release from
-   [microsoft/nvx releases](https://github.com/microsoft/nvx/releases).
-   Review its signing and provenance records and confirm the supported host
-   architecture and guest image. Hashing a downloaded archive alone does not
-   establish its provenance.
-
-2. Download the candidate archive and inventory its hashes. For example:
-
-   ```powershell
-   $release = 'v0.1.0-dev.0430ce79d125' # Replace with the reviewed candidate.
-   $download = Join-Path $env:TEMP "mxc-nvx-$release"
-   $bundle = Join-Path $download 'bundle'
-   New-Item -ItemType Directory -Force -Path $download | Out-Null
-   gh release download $release --repo microsoft/nvx --pattern aci-edge-sandboxes.zip --dir $download
-   $archive = Join-Path $download 'aci-edge-sandboxes.zip'
-   Get-FileHash -LiteralPath $archive -Algorithm SHA256
-   Expand-Archive -LiteralPath $archive -DestinationPath $bundle
-   Get-ChildItem -LiteralPath $bundle -File -Recurse | ForEach-Object {
-       [pscustomobject]@{
-           Path = $_.FullName.Substring($bundle.Length + 1).Replace('\', '/')
-           SHA256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-       }
-   } | Format-Table -AutoSize
-   ```
-
-3. Check the candidate's C ABI against
-   `src/mxc-sdk/src/backends/nvx/abi.rs`, including
-   `SANDBOX_ABI_VERSION`, required exports, request and response formats,
-   status values, and ownership rules. An incompatible ABI needs adapter
-   changes and coverage, not just a version-constant change.
-
-4. Update `OFFICIAL_BUNDLE_URL`, `OFFICIAL_BUNDLE_ZIP_SHA256`, and the complete
-   `OFFICIAL_BUNDLE_FILES` inventory in
-   `src/mxc-sdk/build/build_nvx_bundled.rs`, including release-specific
-   diagnostics. Synchronize the `APPROVED_*_SHA256` runtime pins in
-   `src/mxc-sdk/src/backends/nvx/runtime.rs`. Keep every manifest, guest,
-   helper, and provenance file in the inventory.
-
-5. Update the pinned-release assertions in
-   `src/mxc-sdk/tests/nvx_bundle_integrity.rs` and the release/revision
-   references in this guide and `src/mxc-sdk/README.md`. Review any changed
-   policy or process limits against the candidate agent before adjusting them.
-
-6. Run the build and three validation commands above against the candidate.
-   Integrity tests must still reject missing, modified, and unlisted files.
-   Confirm both executor and captured JSON VM scenarios actually execute,
-   including timeout, capture-limit, and cleanup checks. From the repository
-   root, also run:
-
-   ```powershell
-   node --test scripts\tests\microvm-validation.test.js
-   node scripts\ci\resolve-validation-test-matrix.mjs --plan nightly
-   ```
-
-For an offline build, set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR` to a directory
-containing the exact pinned archive or its complete extracted contents. The
-build still verifies the pinned archive and/or file hashes. Stage the resulting
-complete `aci-edge-sandboxes` directory with the executor, and validate the
-packaged artifact on a prepared host before accepting the upgrade.
-
-Cargo output directories may be reached through a junction or directory
-symlink. Caller-supplied extracted bundle directories, including their
-ancestors, must not contain links or reparse points; use a direct path to the
-verified bundle instead.
+For an offline build, set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR` to the complete
+**extracted directory**, not a ZIP. The crate checks the bundle manifests and
+file checksums; use an independently trusted bundle for this override. To use
+an archive, `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_URL` accepts a `file://` ZIP and
+checks its hash against the crate's pinned hash unless an explicit approved
+hash is supplied. The runtime override `ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR`
+names a complete staged bundle directory. The agent checks its runtime files
+against the digests compiled into the crate.
