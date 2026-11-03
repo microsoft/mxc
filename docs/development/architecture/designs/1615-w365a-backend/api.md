@@ -327,7 +327,7 @@ and [process](README.md#process-inputs-and-results) rules.
 | Captured exec | `ExecutionResult`: outcome, separate stdout/stderr, warnings and available output metadata. SDK owns transient process cleanup. |
 | Spawned exec | Caller-owned `MxcProcess`; launch or later I/O/wait can fail. Dispose it separately from reservation release. |
 | Nonzero guest exit | Normal command result, including a real EXIT of -1; not a synthetic transport failure. |
-| Unsupported request | Existing SDK error codes: `backend_unavailable` for missing feature/authorization, `policy_validation` for unenforceable policy, or the existing phase/mode refusal. No fallback to a different backend or executor. |
+| Unsupported request | Existing SDK error codes: `backend_unavailable` for missing experimental authorization, `policy_validation` for unenforceable policy, or the existing phase/mode refusal. No fallback to a different backend or executor. |
 
 Rust capture returns bytes and `outcome: WaitResult`; .NET/Node return lossy
 UTF-8 strings and exit-code/timeout properties. Spawned streams preserve bytes.
@@ -362,7 +362,7 @@ Local deadlines/disconnects must not produce `TimedOut: true` or
 Existing callers retain source compatibility and behavior, including error
 constructors, result types and SDK contract targets. Native transport uses
 compatible additive versioned exports/accessors as needed, never in-place
-C ABI struct enlargement. Matching feature-enabled native artifacts are
+C ABI struct enlargement. Matching SDK and native artifact versions are
 required; missing capability fails explicitly rather than dropping metadata.
 
 The SDK passes authored JSON unchanged: no stable-V1 stamping, removed fields,
@@ -390,7 +390,7 @@ Implementation documentation updates:
 - SDK READMEs: [Rust](../../../../../src/mxc-sdk/README.md),
   [.NET](../../../../../sdk/dotnet/README.md), and
   [Node](../../../../../sdk/node/README.md): experimental Dev access,
-  feature-enabled native dependencies, capture/spawn and explicit release.
+  compatible native dependencies, capture/spawn and explicit release.
 - Versioned Dev references linked above: W365 lifecycle/execution support,
   timeout/cancellation limits and recovery examples.
 - Versioned V1 type/error references for

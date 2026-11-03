@@ -96,7 +96,7 @@ not separate reasons to choose W365A.
 
 The proposal adds experimental containment `w365_agents` and the
 `w365Agents` phase settings.
-Callers use MXC request JSON through a feature-enabled executor or the existing
+Callers use MXC request JSON through the executor or the existing
 Rust, .NET, and Node V1.Dev SDK APIs with experimental opt-in. The initial scope
 includes SDK captured execution and pipe-backed process handles as well as
 synchronous executor relay. [The API proposal](api.md) shows both workflows.
@@ -209,19 +209,20 @@ Existing host checks and experimental classifications are retained.
 
 | Backend | Planned support | Required host features and how they are checked | What the probe/availability API reports |
 | --- | --- | --- | --- |
-| `w365_agents` (new) | Yes; lifecycle-only remote backend. | Feature-enabled native build, DNS/TLS access, valid W365 service credentials and an assigned pool with compatible DesktopControl.Exec. Initial manual target: Windows x64; see host limits below. | `ProbeCoverage::NotDetected`; omitted from local availability results. Local probing cannot determine remote usability. |
+| `w365_agents` (new) | Yes; lifecycle-only remote backend. | An MXC-supported client OS and architecture, DNS/TLS access, valid W365 service credentials and an assigned pool with compatible DesktopControl.Exec. No W365-specific client OS or architecture restriction. | `ProbeCoverage::NotDetected`; omitted from local availability results. Local probing cannot determine remote usability. |
 
-Build feature availability, host support, service capability and authorization
-are separate. Every phase requires the `w365_agents` Cargo feature and runtime
+The backend ships in normal executor and SDK native builds, without a separate
+W365 Cargo feature or special build. Every phase still requires runtime
 experimental authorization: `--experimental` for the executor or the Dev SDK's
 `JsonOptions` experimental flag, even when its request contract parses.
-Missing feature or authorization returns `backend_unavailable` before backend
-execution. Configuration JSON cannot grant that authorization.
+Missing authorization returns `backend_unavailable` before backend execution.
+Configuration JSON cannot grant that authorization.
 
-Windows x64 is the initial manual and feature-enabled functional-validation
-target. Other hosts and architectures are unvalidated and subject to owner
-agreement, not a commitment to expand W365 build CI. The TCP/rustls transport
-does not require local virtualization or introduce a new OS gate.
+Client support follows MXC's supported operating systems and architectures.
+The TCP/rustls transport does not require local virtualization or a particular
+Windows build. Guest support is determined independently by the W365 service:
+the caller must have a supported pool with compatible DesktopControl.Exec.
+The client's architecture does not need to match the Cloud PC's architecture.
 Credentials, pool access and exec capability are checked by the relevant
 service operation, not a local probe or trial checkout.
 
@@ -479,7 +480,7 @@ the shared scenarios below.
 | Proposed test group/scenario | Action/input | Required assertion |
 | --- | --- | --- |
 | `mxc_contract_v1_1_0_alpha` W365 fixtures | All five phase requests, missing/empty/null/wrong-phase fields; published 1.0 requests. | Development fields parse only in their phase/version; preserve optional presence, reject unknowns/nulls; published fixtures and schemas unchanged. |
-| Engine authorization/binding tests | Invoke every phase through the executor and Dev APIs, without opt-in, with feature disabled, then authorized. Include relayed/piped exec and unsupported create-and-run, placement-session and PTY requests. | Correct refusal before backend work; no network for unsupported modes, no authorization through JSON; checked dispatch accepts relayed and piped exec. |
+| Engine authorization/binding tests | Invoke every phase through normal executor and Dev SDK builds, without experimental opt-in, then authorized. Include relayed/piped exec and unsupported create-and-run, placement-session and PTY requests. | Backend is included without a W365 Cargo feature; missing opt-in fails before backend work. No network for unsupported modes, no authorization through JSON; checked dispatch accepts relayed and piped exec. |
 | `w365agents_lifecycle` native fixture (new) | Unsupported filesystem/network/UI/clipboard/proxy blocks, including empty/default policy blocks, and malformed IDs. | Contract or backend validation fails before any checkout/status/upgrade/delete request; fixture records zero requests. |
 | Lifecycle/config fixture | Omitted/empty phase settings, blank/whitespace hosts/tokens, missing environment; explicit host plus absent/blank token with an ambient token. | Defaults/presence follow agreed contract; missing configuration fails; no credential leaves for an explicit unpaired host. |
 | Lifecycle environment fixture | Omitted `process.env`, `[]`, and supplied entries, each with omitted/false/true `inheritDefaultEnv`. | Accepted requests forward only supplied entries, with none for omitted/empty env; the inheritance flag is not forwarded. Supplied env with false/omitted fails with `policy_validation` before any remote connection. No MXC host environment is forwarded. Actual guest inheritance and overrides are checked in the Phase 4 live scenario below. |
@@ -490,27 +491,27 @@ the shared scenarios below.
 | Readiness fixture | Waiting/Live then Ready, unknown state, expired budget, `readyTimeoutMs: 0`. | Success only on Ready; timeout has last state; zero polls once; no release or replacement on timeout. |
 | `w365agents_loopback` and lifecycle relay fixture | Input/EOF, stdout/stderr frames, EXIT 0, 7 and -1, oversized start payload, oversized/malformed received frames, loss before EXIT, remote ERROR and local output error. | I/O and actual EXIT codes are preserved, including -1. Oversized EXEC_START fails before dial; oversized/malformed received frames fail explicitly. Post-upgrade loss and remote ERROR return `backend_error` with distinct operation-specific codes and appropriate outcome-uncertainty details, not `ExecCompleted`; local failures also surface errors. Native errors go to stderr without altering already-relayed stdout, and commands are never replayed automatically after failure. |
 | Executor relay lifecycle fixture | Concurrent stdout/stderr of at least 1 MiB each, binary data, stdin/EOF and slow/closed output readers through executor relayed exec. | Exact separate output with concurrent draining; bounded relay buffers and explicit local I/O errors. EOF is forwarded without checkout or release. |
-| Rust/.NET/Node Dev lifecycle fixture (new) | Provision, start, repeated captured/spawned exec, stop and deprovision through each SDK with feature-enabled native libraries; repeat without experimental opt-in. | Same reservation, complete lifecycle responses, separate output and actual exits; no executor subprocess or implicit release. Missing opt-in fails before network activity; PTY/create-and-run remain refused. |
+| Rust/.NET/Node Dev lifecycle fixture (new) | Provision, start, repeated captured/spawned exec, stop and deprovision through each SDK with normal native libraries; repeat without experimental opt-in. | Same reservation, complete lifecycle responses, separate output and actual exits; no executor subprocess or implicit release. Missing opt-in fails before network activity; PTY/create-and-run remain refused. |
 | SDK piped execution fixture | Concurrent large stdout/stderr, binary data, stdin/EOF, slow/untaken readers, launch failures and disposal during blocked I/O. | Exact separate output or explicit output/I/O errors; no host stdio use. EOF and local cleanup complete without release or waiting for remote `EXIT`. |
 | SDK error/recovery fixture | Rejected checkout with valid session ID, readiness/exec launch/wait failures, remote `ERROR`, release failure, explicit kill and local deadline. | SDK errors retain backend details. The error's `sandboxId` permits release through the same SDK; primary and cleanup failures are retained. No fabricated IDs, exits, remote kill or timeout claims. |
 | `w365agents_correlation_loopback` and TLS fixtures | Correlation off/on, secrets in config/metadata, invalid certificates, host/header injection and redirect responses. | No blank correlation header, no leaked token/ticket in diagnostics; TLS cannot be bypassed in production; no redirect or credential forwarding. |
 | Lifecycle release/recovery fixture | Deprovision using `details.sandboxId` from a rejected checkout with a valid session ID; exec fails, release fails/response is lost, caller retries release with retained ID and renewed token; response 200/202/204/404. | Release uses the validated session ID, not the mismatched computer ID, without requiring successful start/exec or another checkout. Primary and cleanup results are both retained; retry targets the same session only; report acceptance without reset completion. |
 | Lifecycle subsequent-creation fixture | After failed cleanup of reservation A, explicitly provision B, then retry cleanup A. | Exactly one new checkout; distinct returned IDs; cleanup A never targets B; no hidden cleanup/reallocation or shared local registry corruption. |
 | Lifecycle process-exit fixture | Kill/exit a test executor during command or after provision; invoke fresh executor with persisted ID. | Local process/socket resources reclaimed; no false claim of remote kill/checkin; fresh request routes same retained ID without checkout. Real guest outcome remains a manual-service assertion. |
-| Probe/registry regressions | Probe with and without W365 feature and compare other backend results. | W365 is not locally asserted available; no auth/network call; existing backend capabilities/experimental classifications unchanged. |
+| Probe/registry regressions | Probe normal builds and compare other backend results; check W365's experimental registration. | W365 is not locally asserted available; no auth/network call; existing backend capabilities/experimental classifications unchanged. |
 
 ### CI suites and hosts
 
-The CI jobs below will explicitly select and run the feature-enabled tests;
-feature-gated test files alone do not provide coverage. The current build
-matrices do not enable `w365_agents`. Proposed additions:
+The CI jobs below will explicitly select and run the W365 tests in normal
+builds, with selected-test/pass-count checks. Existing OS and architecture
+matrices remain in place; W365 tests must not be restricted to Windows x64.
+Proposed additions:
 
 | CI workflow/job | Proposed coverage and prerequisites |
 | --- | --- |
-| `.github/workflows/Build.Windows.Job.yml`, `build` x64 on `windows-2025` | The job will build/test `mxc-sdk`, `mxc_ffi` and the feature-enabled executor for x64 MSVC, then run the contract, engine, error-transport and loopback/native/Rust Dev lifecycle, execution and recovery fixtures above with selected-test/pass-count checks. Feature-disabled refusal coverage remains. Build CI requires no pool or tenant credential. |
-| `.github/workflows/SDK.Unit.Test.Job.yml`, `SDK.Integration.Test.Job.yml` and `SDK.Dotnet.Test.Job.yml`, Windows x64 jobs | Run Node/.NET Dev lifecycle, capture/spawn and recovery fixtures against feature-enabled `mxc_ffi`, with selected/pass-count gates and .NET error-details/AOT coverage. Preserve existing SDK/backend matrices. |
-| Existing Windows arm64, `.github/workflows/Build.Linux.Job.yml` and `.github/workflows/Build.MacOS.Job.yml` jobs | Current backend gates and portable parser/feature-disabled regression checks remain unchanged. Additional W365 feature-enabled targets require owner agreement. |
-| Phase 4 manual examples (new; not scheduled CI) | Prerequisites are Windows x64 feature-enabled executor/SDK/native artifacts, a compatible Windows Cloud PC with DesktopControl.Exec, suitable tenant/pool and approved caller-supplied human identity/tokens. Exercise the complete workflow through the executor and each Dev SDK, including captured/streamed output, the live process-input assertions above, guest-state retention, fresh-process recovery, nonzero exits, expiry/transport failure, cleanup failure/retry and terminal release. Results identify actual outcomes, leftover IDs and scenarios not exercised. |
+| `.github/workflows/Build.Windows.Job.yml`, `Build.Linux.Job.yml` and `Build.MacOS.Job.yml`, existing OS/architecture jobs | Build/test `mxc-sdk`, `mxc_ffi` and executors with W365 included in normal artifacts. Run the contract, engine, error-transport and loopback/native/Rust Dev lifecycle, execution and recovery fixtures above on the existing Windows/Linux x64 and arm64 and macOS arm64 jobs. Retain refusal without experimental opt-in and existing backend coverage. Build CI requires no pool or tenant credential. |
+| `.github/workflows/SDK.Unit.Test.Job.yml`, `SDK.Integration.Test.Job.yml` and `SDK.Dotnet.Test.Job.yml`, existing OS jobs | Run Node/.NET Dev lifecycle, capture/spawn and recovery fixtures against normal `mxc_ffi` artifacts, with selected/pass-count gates and .NET error-details/AOT coverage. Preserve existing SDK/backend matrices. |
+| Phase 4 manual examples (new; not scheduled CI) | Prerequisites are normal executor/SDK/native artifacts for an MXC-supported client, a W365-supported Cloud PC with compatible DesktopControl.Exec, a suitable tenant/pool and approved caller-supplied human identity/tokens. Exercise the complete workflow with experimental opt-in through the executor and each Dev SDK, including captured/streamed output, the live process-input assertions above, guest-state retention, fresh-process recovery, nonzero exits, expiry/transport failure, cleanup failure/retry and terminal release. Results identify actual client/guest platforms, outcomes, leftover IDs and scenarios not exercised. |
 
 Lifecycle fixtures will invoke the normal executor and in-process Dev SDK paths against
 controlled service responses, with test-only trusted TLS that does not weaken
@@ -571,9 +572,9 @@ Nightly live testing is proposed as follow-up beyond the initial experimental
 milestone. Unattended runs require an authorized test tenant, pool and identity,
 secure credential injection that keeps tokens out of checked-in request files,
 command-line arguments and logs, approved token acquisition/refresh arrangements,
-and runner/workflow setup using feature-enabled artifacts. These arrangements
-and their ownership are not yet established. MXC does not acquire or refresh
-tokens, and this plan introduces no new authentication mode.
+and runner/workflow setup using normal artifacts with experimental opt-in.
+These arrangements and their ownership are not yet established. MXC does not
+acquire or refresh tokens, and this plan introduces no new authentication mode.
 
 This deferral requires maintainer agreement in #1615 and an infrastructure
 owner under the [validation runbook](../../../build-and-test/ci-validation-infrastructure.md).
@@ -591,9 +592,9 @@ PRs. Implementation PRs use the non-closing reference `Refs #1615`.
 | --- | --- |
 | Phase 1: contracts and generated artifacts | A separate PR introduces development phase types, adapters, fixtures and generated schema/TypeScript artifacts. Published contracts remain unchanged; the unsupported backend stays unavailable until implemented. |
 | SDK error-metadata prerequisite | A separate PR preserves backend details through Rust, native error transport, .NET and Node as specified in [the API proposal](api.md), with compatibility and regression coverage. |
-| Phase 2: checkout and release | This stage establishes the direct-user contract and introduces the internal runner, ID mapping, W365 service client for reservation management, fail-closed policy, engine registration/dispatch, feature forwarding and checked binding as a vertical slice. Executor and Dev SDK fixtures verify checkout/release and error-based cleanup with CI wiring. |
+| Phase 2: checkout and release | This stage establishes the direct-user contract and introduces the internal runner, ID mapping, W365 service client for reservation management, fail-closed policy, engine registration/dispatch with runtime experimental authorization, normal-build inclusion and checked binding as a vertical slice. Executor and Dev SDK fixtures verify checkout/release and error-based cleanup with CI wiring. |
 | Phase 3: readiness and execution | This stage introduces W365 service readiness checks, TLS upgrade, executor relay and SDK pipe-backed capture/spawn through existing adapters, with cross-SDK execution/recovery and unsupported-mode coverage. |
-| Phase 4: manual examples and documentation | This stage provides executor-only and SDK-only lifecycle/execution examples, sequential guest-state and recovery scenarios, feature-enabled artifacts and backend guide. The accompanying results identify actual manual outcomes and unresolved live-infrastructure limits. |
+| Phase 4: manual examples and documentation | This stage provides executor-only and SDK-only lifecycle/execution examples using normal artifacts with experimental opt-in, sequential guest-state and recovery scenarios, and the backend guide. The accompanying results identify actual client/guest platforms, manual outcomes and unresolved live-infrastructure limits. |
 | Typed W365 SDK/API stage | Outside this milestone; typed request APIs and contract targets remain unchanged. Future publication/typed API work needs separate agreement. |
 
 Implementation includes updates to the canonical documentation: `docs/schema.md`,
