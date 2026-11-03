@@ -154,7 +154,6 @@ pub(crate) fn learning_mode() -> LearningMode {
     capture().learning_mode
 }
 
-#[cfg(any(target_os = "windows", test))]
 pub(crate) fn critical_events() -> bool {
     capture().critical_events
 }

@@ -813,13 +813,13 @@ fn emit_crash(
 /// where the OS reclaims the ETW registration at process exit. It also carries
 /// **no** panic message text, which can contain paths or other PII.
 pub fn emit_panic() {
+    let _session = session::resume_process();
     let Some(auth) = EmissionAuthorization::for_process() else {
         return;
     };
     if already_emitted() {
         return;
     }
-    let _session = session::resume_process();
     let correlation_vector = process_correlation_vector();
     emit_crash(
         &auth,
@@ -848,13 +848,13 @@ pub fn emit_panic() {
 /// tears the process down via `ExitProcess`, and the main thread may still be
 /// live. It is allocation-light and emits no free-form text.
 pub fn emit_cancellation() {
+    let _session = session::resume_process();
     let Some(auth) = EmissionAuthorization::for_process() else {
         return;
     };
     if already_emitted() {
         return;
     }
-    let _session = session::resume_process();
     let correlation_vector = process_correlation_vector();
     emit_crash(
         &auth,

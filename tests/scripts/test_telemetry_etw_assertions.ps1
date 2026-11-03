@@ -299,6 +299,14 @@ function Invoke-StateAware {
 
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ("mxc-lifecycle-requests-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
+# Development requests collect even with telemetry disabled, so keep the
+# correlation records the dry runs write out of the real user's profile.
+$overrideNames = @('MXC_TEST_LOCALAPPDATA_OVERRIDE', 'MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID')
+$previousOverrides = $overrideNames | ForEach-Object { [Environment]::GetEnvironmentVariable($_) }
+$storeScratch = Join-Path $scratch 'local-app-data'
+New-Item -ItemType Directory -Path $storeScratch | Out-Null
+$env:MXC_TEST_LOCALAPPDATA_OVERRIDE = $storeScratch
+$env:MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID = "$PID"
 try {
     $TelemetryResultsPath = Join-Path $scratch 'invocations.json'
     $TelemetryKeywords = $true
@@ -346,5 +354,8 @@ try {
     }
     Write-Host 'PASS: paired keyword failure scenarios reach real CLI/backend rejection without enabling telemetry'
 } finally {
+    for ($i = 0; $i -lt $overrideNames.Count; $i++) {
+        [Environment]::SetEnvironmentVariable($overrideNames[$i], $previousOverrides[$i])
+    }
     Remove-Item -LiteralPath $scratch -Recurse -Force
 }

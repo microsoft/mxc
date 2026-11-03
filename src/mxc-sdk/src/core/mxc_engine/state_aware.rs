@@ -2029,6 +2029,7 @@ mod tests {
                 Phase::Deprovision,
                 Phase::DeprovisionSession,
             ] {
+                let mut development = false;
                 let succeeded = if typed {
                     let mut input = match phase {
                         Phase::ProvisionSession => SdkStateAwareInput::new(
@@ -2073,12 +2074,19 @@ mod tests {
                         _ => serde_json::from_str(&lifecycle_fixture("wslc", id, phase)).unwrap(),
                     };
                     request["telemetry"] = serde_json::json!({ "enabled": true });
+                    development = request["version"] == "1.1.0-alpha";
                     run_state_aware_json(&request.to_string(), true, true).is_ok()
                 };
                 let starts = test_sink::take_starts();
                 let ends = test_sink::take_executions();
-                assert_eq!(starts.len(), 1, "typed={typed}, phase={phase:?}");
-                assert_eq!(ends.len(), 1, "typed={typed}, phase={phase:?}");
+                let expected =
+                    usize::from(!development || crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+                assert_eq!(starts.len(), expected, "typed={typed}, phase={phase:?}");
+                assert_eq!(ends.len(), expected, "typed={typed}, phase={phase:?}");
+                if expected == 0 {
+                    test_sink::take_errors();
+                    continue;
+                }
                 assert_eq!(starts[0].outcome, "started");
                 assert_eq!(
                     ends[0].outcome,
@@ -2127,7 +2135,7 @@ mod tests {
             let starts = test_sink::take_starts();
             assert_eq!(starts.len(), 1);
             assert!(test_sink::take_executions().is_empty());
-            start = Some(starts[0].clone());
+            start = starts.first().cloned();
             Err(MxcError::backend_unavailable("synthetic"))
         });
         assert!(result.is_err());

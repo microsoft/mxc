@@ -325,8 +325,10 @@ mod tests {
                         telemetry::log_process_event("synthetic", 42, ProcessEvent::Exited(7));
                         let events = test_sink::take_requirements();
                         test_sink::clear();
-                        assert_eq!(events.len(), usize::from(active));
-                        if active {
+                        let collected =
+                            active && crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE;
+                        assert_eq!(events.len(), usize::from(collected));
+                        if collected {
                             assert_eq!(
                                 events[0].session_id,
                                 expected_id
