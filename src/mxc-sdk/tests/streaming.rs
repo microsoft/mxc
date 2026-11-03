@@ -659,3 +659,33 @@ fn streaming_honors_sub_500ms_timeout() {
         start.elapsed()
     );
 }
+
+#[test]
+fn seatbelt_capture_failure_after_timeout_is_a_warning() {
+    // The workload removes the report directory, so the report write fails
+    // after the timeout. The timeout stays the result; the failure is a warning.
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).expect("report directory");
+    let request = serde_json::json!({
+        "version": "1.1.0-alpha",
+        "containment": "seatbelt",
+        "process": {
+            "commandLine": format!("rmdir {} && exec sleep 30", out.display()),
+            "timeout": 1000
+        },
+        "filesystem": { "readwritePaths": [dir.path()] },
+        "seatbelt": { "captureDenials": { "outputPath": out.join("denials.json") } }
+    });
+    let mut proc =
+        mxc_sdk::v1::dev::spawn_json(&request.to_string(), Default::default()).expect("spawn");
+    assert_eq!(proc.wait().expect("wait"), WaitResult::TimedOut);
+    let warnings = proc.warnings();
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.contains("captureDenials failed after the run timed out")
+                && warning.contains("failed to create temporary actionable output file")
+        }),
+        "{warnings:?}"
+    );
+}

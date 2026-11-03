@@ -63,11 +63,13 @@ describe('macOS Seatbelt Container', {
     });
     const { support, backends } = JSON.parse(output) as {
       support: { isSupported: boolean; availableMethods: string[]; reason?: string };
-      backends: { backend: string }[];
+      backends: { backend: string; capabilities?: string[] }[];
     };
     assert.ok(support.isSupported, `seatbelt must be supported: ${output}`);
     assert.deepStrictEqual(support.availableMethods, ['seatbelt']);
-    assert.ok(backends.some((entry) => entry.backend === 'seatbelt'), output);
+    const seatbelt = backends.find((entry) => entry.backend === 'seatbelt');
+    assert.ok(seatbelt, output);
+    assert.ok(seatbelt.capabilities?.includes('captureDenials'), output);
   });
 
   it('should execute hello world in seatbelt sandbox', async () => {

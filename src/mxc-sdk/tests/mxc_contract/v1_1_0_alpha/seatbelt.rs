@@ -199,6 +199,7 @@ fn accepts_seatbelt_capture_denials() {
         r#"{}"#,
         r#"{"mode": "block"}"#,
         r#"{"mode": "allow", "outputPath": "/tmp/denials.json"}"#,
+        r#"{"retainEtl": true}"#,
     ] {
         let json = format!(
             r#"{{
@@ -218,7 +219,7 @@ fn rejects_invalid_seatbelt_capture_denials() {
         r#"true"#,
         r#"{"mode": "audit"}"#,
         r#"{"outputPath": 1}"#,
-        r#"{"retainEtl": true}"#,
+        r#"{"retainEtl": "yes"}"#,
     ] {
         let json = format!(
             r#"{{

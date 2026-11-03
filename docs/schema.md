@@ -282,8 +282,10 @@ that can be executed independently.
                                            // Not combinable with profileOverride.
             "mode": "block",               // "block" (default) or "allow" (default-denied access is
                                            // allowed and recorded; explicit denies still apply)
-            "outputPath": "~/denials.json" // Absolute or ~/ path; parent dir must exist. Omit for a
+            "outputPath": "~/denials.json",// Absolute or ~/ path; parent dir must exist. Omit for a
                                            // temp file. Actual path is printed on stderr.
+            "retainEtl": false             // Keep the raw log as a .seatbelt.log and report its
+                                           // path as etlPath
         }
     },
 

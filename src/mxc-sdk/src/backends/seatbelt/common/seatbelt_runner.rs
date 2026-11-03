@@ -20,20 +20,23 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::io::IsTerminal;
 use std::os::fd::AsFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::learning_mode_core::capture_output::{
-    combine_process_and_teardown_results, random_capture_suffix, unique_denials_output_path,
+    combine_capture_and_cleanup_results, combine_process_and_teardown_results,
+    random_capture_suffix, remove_internal_capture_file, unique_denials_output_path,
     write_capture_denials_document,
 };
+use crate::learning_mode_core::capture_sibling_path;
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    CaptureDenialsMode, ExecutionRequest, FailurePhase, ProxyAddress, SandboxOutputMetadata,
-    ScriptResponse,
+    CaptureDenialsMode, CaptureDenialsOutput, ExecutionRequest, FailurePhase, ProxyAddress,
+    SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
@@ -49,7 +52,7 @@ use crate::seatbelt_common::capture_analysis::analyze_events;
 #[cfg(test)]
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
-use crate::seatbelt_common::denial_capture::DenialCollector;
+use crate::seatbelt_common::denial_capture::{CollectedEvents, DenialCollector};
 #[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
 use crate::seatbelt_common::profile_builder::{build_profile_with_terminals, ProfileError};
@@ -492,21 +495,79 @@ fn spawn_exec(
 struct DenialCapturePlan {
     tag: String,
     output_path: PathBuf,
+    /// The `.seatbelt.log` path when `retainEtl` is set.
+    trace_path: Option<PathBuf>,
     allow_mode: bool,
 }
 
 impl DenialCapturePlan {
     fn start(self) -> Result<ActiveDenialCapture, String> {
-        Ok(ActiveDenialCapture {
-            collector: DenialCollector::start(&self.tag)?,
-            output_path: self.output_path,
-        })
+        let trace = match &self.trace_path {
+            // Owner-only, like the reports: the trace holds the same paths.
+            Some(path) => Some(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                    .map_err(|error| {
+                        format!(
+                            "captureDenials could not create trace file {}: {error}",
+                            path.display()
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+        match DenialCollector::start(&self.tag, trace) {
+            Ok(collector) => Ok(ActiveDenialCapture {
+                collector,
+                output_path: self.output_path,
+                trace_path: self.trace_path,
+            }),
+            Err(error) => match self.trace_path.as_deref().map(remove_internal_capture_file) {
+                Some(Err(cleanup)) => Err(format!("{error}; additionally {cleanup}")),
+                _ => Err(error),
+            },
+        }
     }
 }
 
 struct ActiveDenialCapture {
     collector: DenialCollector,
     output_path: PathBuf,
+    trace_path: Option<PathBuf>,
+}
+
+impl ActiveDenialCapture {
+    /// Stops `log stream`. Returns the collected events and the trace path if
+    /// the trace was fully written; a partly written trace is removed.
+    fn stop(self) -> (std::io::Result<CollectedEvents>, PathBuf, Option<PathBuf>) {
+        let collected = self.collector.finish().map_err(|error| {
+            std::io::Error::other(format!("captureDenials failed to collect denials: {error}"))
+        });
+        let Some(trace_path) = self.trace_path else {
+            return (collected, self.output_path, None);
+        };
+        let trace_error = collected
+            .as_ref()
+            .ok()
+            .and_then(|collected| collected.trace_error.clone());
+        match trace_error {
+            None => (collected, self.output_path, Some(trace_path)),
+            Some(error) => {
+                let error = std::io::Error::other(format!(
+                    "captureDenials failed to write trace file {}: {error}",
+                    trace_path.display()
+                ));
+                let result = combine_capture_and_cleanup_results(
+                    Err(error),
+                    remove_internal_capture_file(&trace_path),
+                );
+                (result, self.output_path, None)
+            }
+        }
+    }
 }
 
 /// Picks the log tag and denials file path for a `captureDenials` request.
@@ -521,16 +582,25 @@ fn plan_denial_capture(
         return Ok(None);
     };
     let configured_path = prepare_capture_output_path(request)?;
+    let output_path =
+        unique_denials_output_path(configured_path.as_deref()).map_err(ProfileError::Host)?;
+    let trace_path = config
+        .retain_etl
+        .then(|| capture_sibling_path(&output_path, TRACE_SUFFIX))
+        .transpose()
+        .map_err(|error| ProfileError::Host(format!("captureDenials {error}")))?;
     Ok(Some(DenialCapturePlan {
         tag: format!(
             "mxc-capture-{}",
             random_capture_suffix().map_err(ProfileError::Host)?
         ),
-        output_path: unique_denials_output_path(configured_path.as_deref())
-            .map_err(ProfileError::Host)?,
+        output_path,
+        trace_path,
         allow_mode: config.mode == CaptureDenialsMode::Allow,
     }))
 }
+
+const TRACE_SUFFIX: &str = "seatbelt.log";
 
 const ALLOW_MODE_WARNING: &str = "Seatbelt captureDenials mode 'allow' ran the workload without \
      enforcing default-denied operations; denials.json lists what would have been blocked";
@@ -581,21 +651,47 @@ impl SeatbeltSandboxProcess {
         let Some(capture) = self.capture.take() else {
             return Ok(());
         };
-        let result = self.write_capture(capture, exit_code);
+        let (collected, output_path, trace_path) = capture.stop();
+        let result = collected.and_then(|collected| {
+            if self.termination_error.is_some() {
+                // Caller-visible results carry only the error, so a report here
+                // would be unreachable.
+                return Err(std::io::Error::other(
+                    "captureDenials did not write a report because the workload could not be \
+                     terminated",
+                ));
+            }
+            self.write_capture(collected, &output_path, trace_path.as_deref(), exit_code)
+        });
+        let result = result.map_err(|error| match &trace_path {
+            Some(path) => std::io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; the captureDenials trace was kept at {}",
+                    path.display()
+                ),
+            ),
+            None => error,
+        });
         if let Err(error) = &result {
             self.capture_error = Some((error.kind(), error.to_string()));
+            // SDK `wait` reports only `TimedOut`, so surface the capture failure here too.
+            if self.timed_out {
+                self.capture_warnings.push(format!(
+                    "Seatbelt captureDenials failed after the run timed out: {error}"
+                ));
+            }
         }
         result
     }
 
     fn write_capture(
         &mut self,
-        capture: ActiveDenialCapture,
+        collected: CollectedEvents,
+        output_path: &Path,
+        trace_path: Option<&Path>,
         exit_code: Option<i32>,
     ) -> std::io::Result<()> {
-        let collected = capture.collector.finish().map_err(|error| {
-            std::io::Error::other(format!("captureDenials failed to collect denials: {error}"))
-        })?;
         if !collected.drained {
             self.capture_warnings.push(
                 "Seatbelt captureDenials could not confirm that all sandbox log events were \
@@ -608,13 +704,12 @@ impl SeatbeltSandboxProcess {
             &collected.events,
             collected.events_truncated || !collected.drained,
         );
-        let pointer = write_capture_denials_document(
-            analysis,
-            exit_code.unwrap_or(-1),
-            &capture.output_path,
-        )?;
+        let pointer =
+            write_capture_denials_document(analysis, exit_code.unwrap_or(-1), output_path)?;
+        let mut output = CaptureDenialsOutput::from(pointer);
+        output.etl_path = trace_path.map(|path| path.to_string_lossy().into_owned());
         self.output_metadata = Some(SandboxOutputMetadata {
-            capture_denials: Some(pointer.into()),
+            capture_denials: Some(output),
             capture_denials_error: None,
         });
         Ok(())
@@ -898,6 +993,14 @@ impl Drop for SeatbeltSandboxProcess {
         } else {
             let _ = self.kill();
             let _ = wait_with_timeout(&mut self.child, Some(DROP_REAP_TIMEOUT));
+        }
+        // Without `wait()` the caller never learns the trace path.
+        if let Some(capture) = self.capture.take() {
+            let trace_path = capture.trace_path.clone();
+            drop(capture);
+            if let Some(path) = trace_path {
+                let _ = remove_internal_capture_file(&path);
+            }
         }
     }
 }
@@ -1882,7 +1985,8 @@ os.close(fd)
     }
 
     /// Allow mode lets the read through, still lists it, and reports the
-    /// written file through `output_metadata` once `wait` returns.
+    /// written file and retained trace through `output_metadata` once `wait`
+    /// returns.
     #[test]
     fn capture_denials_allow_mode_reports_after_wait() {
         use crate::mxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
@@ -1896,7 +2000,7 @@ os.close(fd)
         request.seatbelt.as_mut().unwrap().capture_denials = Some(CaptureDenialsConfig {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(directory.join("denials.json").display().to_string()),
-            ..Default::default()
+            retain_etl: true,
         });
         let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
 
@@ -1922,6 +2026,82 @@ os.close(fd)
             .iter()
             .any(|denial| denial["resource"] == secret.display().to_string()
                 && denial["accessType"] == "read"));
+        let trace = pointer.etl_path.as_deref().expect("etlPath");
+        assert_eq!(
+            trace,
+            pointer.output_path.replace(".json", ".seatbelt.log"),
+            "trace shares the report stem"
+        );
+        let trace = std::fs::read_to_string(trace).unwrap();
+        assert!(trace.contains("secret.txt"), "{trace}");
+    }
+
+    fn exited_process_with_capture(output_path: PathBuf, retain: bool) -> SeatbeltSandboxProcess {
+        let trace_path = retain.then(|| capture_sibling_path(&output_path, TRACE_SUFFIX).unwrap());
+        let capture = DenialCapturePlan {
+            tag: format!("mxc-capture-{}", random_capture_suffix().unwrap()),
+            output_path,
+            trace_path,
+            allow_mode: false,
+        }
+        .start()
+        .expect("log stream");
+        SeatbeltSandboxProcess {
+            child: Command::new("/usr/bin/true").spawn().unwrap(),
+            stdin: None,
+            stdout: None,
+            stderr: None,
+            stdout_canceller: None,
+            stderr_canceller: None,
+            pty: None,
+            timeout: None,
+            started: Instant::now(),
+            timed_out: false,
+            termination_error: None,
+            group: false,
+            session_id: None,
+            capture: Some(capture),
+            capture_error: None,
+            capture_warnings: Vec::new(),
+            output_metadata: None,
+        }
+    }
+
+    #[test]
+    fn capture_after_termination_failure_skips_report_and_keeps_trace() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("denials.json");
+        let mut process = exited_process_with_capture(output.clone(), true);
+        process.termination_error = Some("session could not be terminated".to_string());
+
+        let error = process.wait().unwrap_err().to_string();
+
+        let trace = directory.path().join("denials.seatbelt.log");
+        assert!(error.contains("session could not be terminated"), "{error}");
+        assert!(error.contains("did not write a report"), "{error}");
+        assert!(error.contains(&trace.display().to_string()), "{error}");
+        assert!(trace.exists());
+        assert!(!output.exists());
+        assert!(!directory.path().join("denials.verbose.json").exists());
+        assert!(process.output_metadata().is_none());
+    }
+
+    #[test]
+    fn capture_failure_after_timeout_is_a_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("missing").join("denials.json");
+        let mut process = exited_process_with_capture(output, false);
+        process.timed_out = true;
+
+        let error = process.wait().unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("captureDenials"), "{error}");
+        let warnings = process.warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("failed after the run timed out"));
+        process.wait().unwrap_err();
+        assert_eq!(process.warnings().len(), 1, "later waits don't repeat it");
     }
 
     #[test]

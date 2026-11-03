@@ -1275,17 +1275,20 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         capture_denials,
     } = sb;
     // outputPath may start with `~`; the backend expands and validates it.
-    let capture_denials =
-        capture_denials.map(|wire::SeatbeltCaptureDenials { mode, output_path }| {
-            CaptureDenialsConfig {
-                mode: match mode {
-                    Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
-                    Some(wire::CaptureDenialsMode::Block) | None => CaptureDenialsMode::Block,
-                },
-                output_path,
-                retain_etl: false,
-            }
-        });
+    let capture_denials = capture_denials.map(
+        |wire::SeatbeltCaptureDenials {
+             mode,
+             output_path,
+             retain_etl,
+         }| CaptureDenialsConfig {
+            mode: match mode {
+                Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
+                Some(wire::CaptureDenialsMode::Block) | None => CaptureDenialsMode::Block,
+            },
+            output_path,
+            retain_etl: retain_etl.unwrap_or(false),
+        },
+    );
     SeatbeltConfig {
         profile_override,
         gui_access: gui_access.unwrap_or(false),

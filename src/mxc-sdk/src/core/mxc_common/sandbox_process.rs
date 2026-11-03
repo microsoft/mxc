@@ -637,7 +637,7 @@ impl<B: SandboxBackend> Runner<B> {
             Err(response) => return response,
         };
 
-        match child.wait() {
+        let mut response = match child.wait() {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
                     exit_code,
@@ -673,7 +673,9 @@ impl<B: SandboxBackend> Runner<B> {
                 response.output_metadata = child.output_metadata().cloned().map(Box::new);
                 response
             }
-        }
+        };
+        response.extend_warnings(child.warnings());
+        response
     }
 }
 
@@ -722,6 +724,7 @@ mod runner_tests {
     #[derive(Default)]
     struct CompletedProcess {
         wait_error: Option<std::io::Error>,
+        warnings: Vec<String>,
     }
 
     struct NativePipeSource;
@@ -843,6 +846,10 @@ mod runner_tests {
     }
 
     impl SandboxProcess for CompletedProcess {
+        fn warnings(&self) -> Vec<String> {
+            self.warnings.clone()
+        }
+
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
             None
         }
@@ -920,6 +927,7 @@ mod runner_tests {
                 std::io::ErrorKind::TimedOut,
                 diagnostic,
             )),
+            warnings: vec!["capture failed after timeout".to_string()],
         };
 
         let response = runner.wait_for_child(&request, &mut logger, Ok(Box::new(child)));
@@ -930,6 +938,7 @@ mod runner_tests {
             .error_message
             .contains("script timed out after 1000ms"));
         assert!(response.error_message.contains(diagnostic));
+        assert_eq!(response.warnings(), ["capture failed after timeout"]);
         assert!(response.output_metadata.is_none());
     }
 

@@ -8,7 +8,8 @@
 //! starts, and again after the workload exits to drain late events.
 
 use std::ffi::CString;
-use std::io::{BufRead, BufReader, Read};
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -20,6 +21,11 @@ use crate::seatbelt_common::capture_analysis::{
 use crate::seatbelt_common::seatbelt_runner::apply_profile_before_exec;
 
 const LOG_TOOL: &str = "/usr/bin/log";
+// `log stream` only notices a closed stdout when it next writes, so it would
+// outlive a killed MXC. The shell kills it once MXC's end of stdin closes.
+const WATCHDOG_SHELL: &str = "/bin/sh";
+const WATCHDOG_SCRIPT: &str =
+    r#""$@" & pid=$!; exec >/dev/null 2>&1; read _; kill -KILL "$pid"; wait "$pid""#;
 const MARKER_PROBE: &str = "/bin/ls";
 // Must exist: Seatbelt does not report lookups of missing paths.
 const MARKER_TARGET: &str = "/private/var/empty";
@@ -28,8 +34,9 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MARKER_RETRY: Duration = Duration::from_millis(250);
 const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: u64 = 4 * 1024;
-/// Upper bound on retained raw events; later events only set the truncation flag.
+/// Upper bounds on retained raw events; later events only set the truncation flag.
 pub(crate) const MAX_CAPTURED_EVENTS: usize = 100_000;
+pub(crate) const MAX_CAPTURED_BYTES: usize = 16 * 1024 * 1024;
 
 /// Raw events collected for one run.
 #[derive(Debug, Default)]
@@ -38,12 +45,16 @@ pub(crate) struct CollectedEvents {
     pub(crate) events_truncated: bool,
     /// False when the closing marker was not seen, so late events may be missing.
     pub(crate) drained: bool,
+    /// Why the trace file stopped being written, if it did.
+    pub(crate) trace_error: Option<String>,
 }
 
 #[derive(Default)]
 struct State {
     events: Vec<SandboxLogEvent>,
+    stored_bytes: usize,
     events_truncated: bool,
+    trace_error: Option<String>,
     ready: bool,
     done: bool,
     ended: bool,
@@ -81,14 +92,23 @@ pub(crate) struct DenialCollector {
     shared: Arc<Shared>,
 }
 
+/// Whether `/usr/bin/log` is an executable file. Account or MDM policy can
+/// still block `log stream`; each run's readiness check catches that.
+pub(crate) fn log_tool_available() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(LOG_TOOL)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
 impl DenialCollector {
     /// Starts `log stream` and returns once it is confirmed to be receiving
-    /// this run's tagged Seatbelt reports.
-    pub(crate) fn start(tag: &str) -> Result<Self, String> {
-        let mut child = Command::new(LOG_TOOL)
+    /// this run's tagged Seatbelt reports. Raw lines are copied to `trace`.
+    pub(crate) fn start(tag: &str, trace: Option<File>) -> Result<Self, String> {
+        let mut child = Command::new(WATCHDOG_SHELL)
+            .args(["-c", WATCHDOG_SCRIPT, "sh", LOG_TOOL])
             .args(["stream", "--style", "ndjson", "--predicate"])
             .arg(stream_predicate(tag))
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -100,7 +120,14 @@ impl DenialCollector {
         let stdout_reader = {
             let shared = Arc::clone(&shared);
             let tag = tag.to_string();
-            std::thread::spawn(move || read_stream(BufReader::new(stdout), &tag, &shared))
+            std::thread::spawn(move || {
+                read_stream(
+                    BufReader::new(stdout),
+                    &tag,
+                    &shared,
+                    trace.map(BufWriter::new),
+                )
+            })
         };
         let stderr_reader = std::thread::spawn(move || {
             let mut text = String::new();
@@ -148,6 +175,7 @@ impl DenialCollector {
             events: std::mem::take(&mut state.events),
             events_truncated: state.events_truncated,
             drained,
+            trace_error: state.trace_error.take(),
         })
     }
 
@@ -183,7 +211,8 @@ impl DenialCollector {
     /// Kills and reaps `log stream`, returning its captured stderr.
     fn stop(&mut self) -> String {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            // Killing the shell instead would orphan `log stream`.
+            drop(child.stdin.take());
             let _ = child.wait();
         }
         if let Some(reader) = self.stdout_reader.take() {
@@ -206,7 +235,12 @@ fn stream_predicate(tag: &str) -> String {
     format!(r#"sender == "Sandbox" AND eventMessage CONTAINS "{tag}""#)
 }
 
-fn read_stream(mut reader: impl BufRead, tag: &str, shared: &Shared) {
+fn read_stream(
+    mut reader: impl BufRead,
+    tag: &str,
+    shared: &Shared,
+    mut trace: Option<impl Write>,
+) {
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -222,21 +256,45 @@ fn read_stream(mut reader: impl BufRead, tag: &str, shared: &Shared) {
             shared.lock().events_truncated = true;
             continue;
         }
+        if let Some(writer) = trace.as_mut() {
+            if let Err(error) = write_trace_line(writer, &line) {
+                shared.lock().trace_error = Some(error.to_string());
+                trace = None;
+            }
+        }
         let parsed = parse_stream_line(&String::from_utf8_lossy(&line), tag);
         let mut state = shared.lock();
         match parsed {
             StreamLine::Marker(CaptureMarker::Ready) => state.ready = true,
             StreamLine::Marker(CaptureMarker::Done) => state.done = true,
-            StreamLine::Event(event) if state.events.len() < MAX_CAPTURED_EVENTS => {
-                state.events.push(event);
+            StreamLine::Event(event) => {
+                let size = event.message.len() + event.timestamp.as_ref().map_or(0, String::len);
+                if state.events.len() < MAX_CAPTURED_EVENTS
+                    && state.stored_bytes + size <= MAX_CAPTURED_BYTES
+                {
+                    state.stored_bytes += size;
+                    state.events.push(event);
+                } else {
+                    state.events_truncated = true;
+                }
             }
-            StreamLine::Event(_) => state.events_truncated = true,
             StreamLine::Ignored => continue,
         }
         shared.changed.notify_all();
     }
+    if let Some(Err(error)) = trace.as_mut().map(Write::flush) {
+        shared.lock().trace_error = Some(error.to_string());
+    }
     shared.lock().ended = true;
     shared.changed.notify_all();
+}
+
+fn write_trace_line(writer: &mut impl Write, line: &[u8]) -> std::io::Result<()> {
+    writer.write_all(line)?;
+    if !line.ends_with(b"\n") {
+        writer.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 fn skip_line(reader: &mut impl BufRead) -> std::io::Result<()> {
@@ -296,7 +354,7 @@ mod tests {
         });
         let input = format!("{}\n{event}\n", "a".repeat(MAX_LINE_BYTES * 2));
         let shared = Shared::default();
-        read_stream(std::io::Cursor::new(input), tag, &shared);
+        read_stream(std::io::Cursor::new(input), tag, &shared, None::<Vec<u8>>);
         let state = shared.lock();
         assert!(state.events_truncated);
         assert_eq!(state.events.len(), 1);
@@ -304,9 +362,46 @@ mod tests {
     }
 
     #[test]
+    fn byte_budget_stops_storing_but_keeps_reading() {
+        let tag = "mxc-capture-bytetest";
+        let path = format!("/{}", "p".repeat(60 * 1024));
+        let event = serde_json::json!({
+            "eventMessage": format!("Sandbox: cat(7) deny(1) file-read-data {path}\n{tag}"),
+        });
+        let done = serde_json::json!({
+            "eventMessage": format!("Sandbox: ls(8) deny(1) file-read-metadata /private/var/empty\n{tag}:done"),
+        });
+        let lines = MAX_CAPTURED_BYTES / (60 * 1024) + 2;
+        let input = format!("{}{done}\n", format!("{event}\n").repeat(lines));
+        let shared = Shared::default();
+        read_stream(std::io::Cursor::new(input), tag, &shared, None::<Vec<u8>>);
+        let state = shared.lock();
+        assert!(state.events_truncated);
+        assert!(state.events.len() < lines);
+        assert!(state.stored_bytes <= MAX_CAPTURED_BYTES);
+        assert!(state.done, "reading continues past the budget");
+    }
+
+    #[test]
+    fn trace_receives_raw_lines() {
+        let tag = "mxc-capture-tracetest";
+        let input = format!("Filtering the log data\n{{\"eventMessage\":\"x\\n{tag}\"}}");
+        let shared = Shared::default();
+        let mut trace = Vec::new();
+        read_stream(
+            std::io::Cursor::new(input.clone()),
+            tag,
+            &shared,
+            Some(&mut trace),
+        );
+        assert_eq!(String::from_utf8(trace).unwrap(), format!("{input}\n"));
+        assert!(shared.lock().trace_error.is_none());
+    }
+
+    #[test]
     fn collector_sees_tagged_deny_and_drains() {
         let tag = "mxc-capture-collectortest";
-        let collector = match DenialCollector::start(tag) {
+        let collector = match DenialCollector::start(tag, None) {
             Ok(collector) => collector,
             Err(error) => panic!("log stream unavailable on this host: {error}"),
         };

@@ -181,7 +181,7 @@ pub struct SeatbeltConfig {
     pub extra_mach_lookups: Vec<String>,
 
     /// Records sandbox denials through the unified log while the workload
-    /// runs. `retain_etl` is unused on macOS.
+    /// runs. On macOS, `retain_etl` keeps the raw log as `.seatbelt.log`.
     #[serde(rename = "captureDenials", skip_serializing_if = "Option::is_none")]
     pub capture_denials: Option<CaptureDenialsConfig>,
 }
@@ -758,8 +758,9 @@ pub struct CaptureDenialsConfig {
     /// falls back to a managed per-run temporary file and prints its path on
     /// stderr.
     pub output_path: Option<String>,
-    /// Whether to preserve the sealed ETL trace after analysis. Defaults to
-    /// `false`, which deletes the internal trace. Retention is honored only by
+    /// Whether to preserve the sealed ETL trace (on macOS, the raw
+    /// `.seatbelt.log`) after analysis. Defaults to `false`, which deletes the
+    /// internal trace. Retention is honored only by
     /// a terminal wait that leaves structured output observable; abandoning the
     /// process handle deletes the trace.
     pub retain_etl: bool,
@@ -1295,7 +1296,8 @@ pub struct CaptureDenialsOutput {
     pub total_denials: usize,
     /// Whether the emitted denial set was truncated.
     pub denied_resources_truncated: bool,
-    /// Absolute path to the retained ETL trace, when retention was requested.
+    /// Absolute path to the retained ETL trace (on macOS, the `.seatbelt.log`),
+    /// when retention was requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etl_path: Option<String>,
 }

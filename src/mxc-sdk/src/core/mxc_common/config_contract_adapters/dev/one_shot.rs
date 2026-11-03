@@ -200,10 +200,15 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
 fn convert_seatbelt_capture_denials(
     value: contract::SeatbeltCaptureDenials,
 ) -> wire::SeatbeltCaptureDenials {
-    let contract::SeatbeltCaptureDenials { mode, output_path } = value;
+    let contract::SeatbeltCaptureDenials {
+        mode,
+        output_path,
+        retain_etl,
+    } = value;
     wire::SeatbeltCaptureDenials {
         mode: mode.into_option().map(convert_capture_denials_mode),
         output_path: output_path.into_option(),
+        retain_etl: retain_etl.into_option(),
     }
 }
 

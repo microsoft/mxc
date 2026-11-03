@@ -263,36 +263,44 @@ fn report_signature(
     }
 }
 
-fn record_occurrences(
-    summary: &mut CaptureVerboseLoggingSummary,
-    retained_bytes: &mut usize,
-    signature: CaptureVerboseLoggingSignature,
-    occurrences: u64,
-) {
-    let actionable = signature.reason.is_actionable();
-    summary.record_with_byte_budget(
-        signature.clone(),
-        retained_bytes,
-        MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
-    );
-    let extra = occurrences.saturating_sub(1);
-    if extra == 0 {
-        return;
-    }
-    summary.total_occurrences = summary.total_occurrences.saturating_add(extra);
-    match summary
-        .signatures
-        .binary_search_by(|group| group.signature.cmp(&signature))
-    {
-        Ok(index) => {
-            summary.signatures[index].count = summary.signatures[index].count.saturating_add(extra);
+/// Verbose summary plus the state its byte budget and fast path need.
+#[derive(Default)]
+struct VerboseRecorder {
+    summary: CaptureVerboseLoggingSummary,
+    retained_bytes: usize,
+    actionable_only_saturated: bool,
+}
+
+impl VerboseRecorder {
+    fn record(&mut self, signature: CaptureVerboseLoggingSignature, occurrences: u64) {
+        let actionable = signature.reason.is_actionable();
+        self.summary.record_with_saturation(
+            signature.clone(),
+            &mut self.retained_bytes,
+            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+            &mut self.actionable_only_saturated,
+        );
+        let extra = occurrences.saturating_sub(1);
+        if extra == 0 {
+            return;
         }
-        Err(_) => {
-            summary.overflow_occurrences = summary.overflow_occurrences.saturating_add(extra);
-            if actionable {
-                summary.actionable_overflow_occurrences = summary
-                    .actionable_overflow_occurrences
-                    .saturating_add(extra);
+        let summary = &mut self.summary;
+        summary.total_occurrences = summary.total_occurrences.saturating_add(extra);
+        match summary
+            .signatures
+            .binary_search_by(|group| group.signature.cmp(&signature))
+        {
+            Ok(index) => {
+                summary.signatures[index].count =
+                    summary.signatures[index].count.saturating_add(extra);
+            }
+            Err(_) => {
+                summary.overflow_occurrences = summary.overflow_occurrences.saturating_add(extra);
+                if actionable {
+                    summary.actionable_overflow_occurrences = summary
+                        .actionable_overflow_occurrences
+                        .saturating_add(extra);
+                }
             }
         }
     }
@@ -311,11 +319,8 @@ pub(crate) fn analyze_events(
     let mut seen = HashSet::new();
     // Missing events may hide denials, so the report must not claim completeness.
     let mut denied_resources_truncated = events_truncated;
-    let mut summary = CaptureVerboseLoggingSummary {
-        processed_events_truncated: events_truncated,
-        ..Default::default()
-    };
-    let mut retained_bytes = 0usize;
+    let mut recorder = VerboseRecorder::default();
+    recorder.summary.processed_events_truncated = events_truncated;
 
     for event in events {
         let Some(report) = parse_report(&event.message) else {
@@ -334,7 +339,7 @@ pub(crate) fn analyze_events(
                 network_endpoint: None,
                 properties: Vec::new(),
             };
-            record_occurrences(&mut summary, &mut retained_bytes, signature, 1);
+            recorder.record(signature, 1);
             continue;
         };
         let noise = target_path(report.target).is_some_and(|path| NOISE_TARGETS.contains(&path));
@@ -344,12 +349,7 @@ pub(crate) fn analyze_events(
                 CaptureVerboseLoggingOutcomeReason::NotActionable,
                 None,
             );
-            record_occurrences(
-                &mut summary,
-                &mut retained_bytes,
-                signature,
-                report.occurrences,
-            );
+            recorder.record(signature, report.occurrences);
             continue;
         }
 
@@ -359,18 +359,13 @@ pub(crate) fn analyze_events(
             CaptureVerboseLoggingOutcomeReason::Actionable,
             Some((resource_type, access_type)),
         );
-        record_occurrences(
-            &mut summary,
-            &mut retained_bytes,
-            signature,
-            report.occurrences,
-        );
+        recorder.record(signature, report.occurrences);
         if seen.contains(&(resource.clone(), access_type)) {
             continue;
         }
         if denials.len() >= MAX_UNIQUE_DENIALS {
             denied_resources_truncated = true;
-            summary.actionable_limit_reached = true;
+            recorder.summary.actionable_limit_reached = true;
             continue;
         }
         seen.insert((resource.clone(), access_type));
@@ -387,7 +382,7 @@ pub(crate) fn analyze_events(
         denials,
         denied_resources_truncated,
         verbose_logging: VerboseLoggingSummary::default(),
-        network_verbose_logging: summary,
+        network_verbose_logging: recorder.summary,
     }
 }
 

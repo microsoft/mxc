@@ -188,6 +188,36 @@ impl CaptureVerboseLoggingSummary {
         *retained_bytes = retained_bytes.saturating_add(serialized_len);
     }
 
+    /// Records one occurrence. Once every retained group is actionable and the
+    /// summary is full, `actionable_only_saturated` is set and later
+    /// actionable signatures skip the eviction search.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn record_with_saturation(
+        &mut self,
+        signature: CaptureVerboseLoggingSignature,
+        retained_bytes: &mut usize,
+        max_bytes: usize,
+        actionable_only_saturated: &mut bool,
+    ) {
+        let actionable = signature.reason.is_actionable();
+        if *actionable_only_saturated && actionable {
+            self.record_actionable_after_saturation(signature);
+            return;
+        }
+        let overflow_before = self.overflow_occurrences;
+        self.record_with_byte_budget(signature, retained_bytes, max_bytes);
+        if actionable
+            && self.overflow_occurrences > overflow_before
+            && (self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS || *retained_bytes >= max_bytes)
+            && self
+                .signatures
+                .iter()
+                .all(|group| group.signature.reason.is_actionable())
+        {
+            *actionable_only_saturated = true;
+        }
+    }
+
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn record_actionable_after_saturation(
         &mut self,
@@ -968,6 +998,32 @@ mod tests {
             }),
             properties: Vec::new(),
         }
+    }
+
+    #[test]
+    fn full_actionable_summary_switches_to_the_fast_path() {
+        let signature = |pid| CaptureVerboseLoggingSignature {
+            pid,
+            ..network_signature(CaptureVerboseLoggingOutcomeReason::Actionable)
+        };
+        let max_bytes = 2 * serialized_signature_len(&signature(1));
+        let mut summary = CaptureVerboseLoggingSummary::default();
+        let mut bytes = 0;
+        let mut saturated = false;
+        for pid in [1, 2] {
+            summary.record_with_saturation(signature(pid), &mut bytes, max_bytes, &mut saturated);
+        }
+        assert!(!saturated);
+
+        summary.record_with_saturation(signature(3), &mut bytes, max_bytes, &mut saturated);
+        assert!(saturated);
+        summary.record_with_saturation(signature(1), &mut bytes, max_bytes, &mut saturated);
+        summary.record_with_saturation(signature(4), &mut bytes, max_bytes, &mut saturated);
+
+        assert_eq!(summary.signatures.len(), 2);
+        assert_eq!(summary.signatures[0].count, 2);
+        assert_eq!(summary.total_occurrences, 5);
+        assert_eq!(summary.actionable_overflow_occurrences, 2);
     }
 
     #[test]

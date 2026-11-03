@@ -396,8 +396,11 @@ baseline `/Library` and `/System` allows.
 
 Learning mode shows what a workload tried to do that the policy did not
 allow, so you can decide what to grant. The config must use version
-`1.1.0-alpha`. The v1 SDKs send `1.0.0` requests, so they can't turn this on;
-use `mxc-exec-mac` instead.
+`1.1.0-alpha`. The typed v1 SDK settings send `1.0.0` requests, so they can't
+turn this on yet. Use `mxc-exec-mac`, or send a `1.1.0-alpha` request through
+the V1.Dev JSON API for [Rust](../../api-reference/rust/v1/dev.md),
+[.NET](../../api-reference/dotnet/v1/dev.md), or
+[Node](../../api-reference/node/v1/dev.md).
 
 ```json
 "seatbelt": {
@@ -412,6 +415,7 @@ use `mxc-exec-mac` instead.
 |---|---|---|
 | `mode` | `"block"` | `"block"`: blocked accesses stay blocked and are recorded. `"allow"`: accesses the policy would block by default are allowed and recorded, and MXC prints a warning. Explicit denies, such as `deniedPaths` and `ui` denies, are still enforced. |
 | `outputPath` | a temp file | Absolute path, or one starting with `~/`. The parent directory must exist. |
+| `retainEtl` | `false` | Keeps the raw `log stream` output next to the report as `.seatbelt.log`, readable only by you. The pointer line's `etlPath` names it. The field shares its name with Windows; the file isn't an ETL. |
 
 MXC adds a per-run ID to the file name (`denials.json` becomes
 `denials.<pid>_<id>.json`). Names without an extension get `.json` first.
@@ -422,15 +426,37 @@ prints the actual path on stderr as a JSON line:
 {"type":"captureDenials","outputPath":"/Users/me/mxc/denials.53120_9f2c….json","exitCode":0,"totalDenials":4,"deniedResourcesTruncated":false}
 ```
 
-The report uses the [same format as Windows](../../logging-access-denied.md#output-file-the-caller-consumes).
-`deniedResourcesTruncated: true` means some denials may be missing, including
-when a captured report could not be parsed.
-If a workload times out and capture collection or report writing also fails,
-the timeout error includes the capture failure reason.
+The report uses the [same format as Windows](../../learning-mode.md#output-file-the-caller-consumes),
+with these macOS differences:
+
+- `resource` is an absolute path for `file`. Other types use
+  `<operation>:<target>`, for example `network-outbound:remote:*:443` or
+  `mach-lookup:com.apple.CARenderServer`.
+
+- Verbose signatures use `providerGuid` `com.apple.security.sandbox`, event
+  ID `0`, and the Seatbelt operation (for example `file-read-data`) as
+  `eventName`. Any `target` that contains `/` becomes `<REDACTED>`, other
+  values are kept, and values over 256 characters are cut short. There is no
+  account-name replacement or digest.
+
+`deniedResourcesTruncated: true` means some denials may be missing. Delete the
+report, its `.verbose.json` file, and any `.seatbelt.log` when you're done.
+
+Requests that `guiAccess` grants, such as Mach lookups and IOKit opens, aren't
+denials. They appear only in the verbose file, with `"decision": "allowGrant"`.
 
 `mxc-exec-mac --audit config.json` is a shortcut that runs the
 config with `captureDenials` in `"allow"` mode and writes the report to a temp
 file.
+
+**Limits**
+
+MXC stores at most 100,000 log events or 16 MiB of them, whichever comes
+first, and skips any log line over 64 KiB. The report lists at most 10,000
+different denials, and the verbose file at most 4,096 groups. After a limit,
+MXC keeps reading `log stream` so it never blocks, and marks the report as
+truncated. The verbose file sets `processedEventsTruncated` when events were
+dropped. The `.seatbelt.log` has no size limit.
 
 **Limitations**
 
