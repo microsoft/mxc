@@ -1412,6 +1412,37 @@ mod tests {
     }
 
     #[test]
+    fn out_of_band_development_end_uses_required_gate_on_a_fresh_thread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = TelemetryTestEnv::new(tmp.path());
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for emit in [emit_panic as fn(), emit_cancellation as fn()] {
+            reset_for_test();
+            events::test_sink::install();
+            {
+                let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+                let _scope =
+                    session::start(true, "", Some(ContractVersion::V1_1_0Alpha), &mut logger);
+                set_process_context(&ContainmentBackend::ProcessContainer);
+            }
+            // No authorization override: the real gate runs with consent
+            // undetermined, which a development request must not need.
+            let ends = std::thread::spawn(move || {
+                assert!(!session::critical_events());
+                events::test_sink::install();
+                TEST_FORCE_ACTIVE.with(|value| value.set(true));
+                emit();
+                events::test_sink::take_executions()
+            })
+            .join()
+            .unwrap();
+            let expected = usize::from(crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE);
+            assert_eq!(ends.len(), expected);
+        }
+        reset_for_test();
+    }
+
+    #[test]
     fn init_for_request_ignores_request_flag_and_consent_only_for_development() {
         let tmp = tempfile::tempdir().unwrap();
         let _env = TelemetryTestEnv::new(tmp.path());

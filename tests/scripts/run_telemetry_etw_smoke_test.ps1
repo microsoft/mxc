@@ -284,6 +284,49 @@ try {
         $failureInvocations | ConvertTo-Json -Depth 4 |
             Set-Content -LiteralPath (Join-Path $tempDir 'failure-invocations.json')
     }
+
+    # Required diagnostics ignore consent and the request flag but honor
+    # administrative policy; published contracts still need consent.
+    $gatingCases = @()
+    if ($CheckKeywords) {
+        function Set-GatingState([string]$Consent, $Policy) {
+            if ($Consent -eq 'absent') { Remove-Item $consentFile -Force -ErrorAction SilentlyContinue }
+            else {
+                $record = [pscustomobject]@{
+                    schemaVersion = 2; consent = $Consent; source = 'etw-smoke-proof'
+                    promptedMxcVersion = '0.0.0-smoke'; promptResourceVersion = 4
+                    promptLocale = 'en-US'; updatedAtEpoch = 0
+                }
+                [IO.File]::WriteAllText($consentFile, ($record | ConvertTo-Json -Compress),
+                    (New-Object Text.UTF8Encoding $false))
+            }
+            if ($null -eq $Policy) { Remove-ItemProperty -Path $policyPath -Name AllowTelemetry -ErrorAction SilentlyContinue }
+            else { Set-ItemProperty -Path $policyPath -Name AllowTelemetry -Value $Policy -Type DWord }
+        }
+        foreach ($case in @(
+            @{ Name = 'development, consent denied'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 3; Emits = $true },
+            @{ Name = 'development, consent absent'; Version = '1.1.0-alpha'; Consent = 'absent'; Policy = 3; Emits = $true },
+            @{ Name = 'development, no policy'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = $null; Emits = $true },
+            @{ Name = 'development, policy 1'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 1; Emits = $true },
+            @{ Name = 'development, policy 0'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 0; Emits = $false },
+            @{ Name = 'development, unsupported policy'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 7; Emits = $false },
+            @{ Name = 'published, consent denied'; Version = '1.0.0'; Consent = 'denied'; Policy = 3; Emits = $false },
+            @{ Name = 'published, consent absent'; Version = '1.0.0'; Consent = 'absent'; Policy = 3; Emits = $false }
+        )) {
+            Set-GatingState $case.Consent $case.Policy
+            $gatingCases += [pscustomobject]@{
+                Name = $case.Name
+                Emits = $case.Emits
+                Invocation = Invoke-TraceRequest -RequireFailure -Request @{
+                    version = $case.Version
+                    containment = 'bubblewrap'
+                    process = @{ commandLine = 'true' }
+                    telemetry = @{ enabled = $true }
+                }
+            }
+        }
+        Set-GatingState 'granted' 3
+    }
     Start-Sleep -Seconds 2
 
     logman stop $sessionName -ets 2>&1 | Out-Host
@@ -301,6 +344,19 @@ try {
     if ($CheckKeywords) {
         Assert-TelemetryExecutionTrace -XmlText $xml -ProviderGuid $providerGuid `
             -Invocations $failureInvocations -CheckKeywords
+        $traceDoc = [xml]$xml
+        foreach ($case in $gatingCases) {
+            $count = @($traceDoc.SelectNodes("//*[local-name()='Event']") | Where-Object {
+                [int]$_.System.Execution.ProcessID -eq $case.Invocation.ProcessId
+            }).Count
+            if ($case.Emits) {
+                Assert-TelemetryExecutionTrace -XmlText $xml -ProviderGuid $providerGuid `
+                    -Invocations @($case.Invocation) -CheckKeywords
+            } elseif ($count -ne 0) {
+                throw "Gating case '$($case.Name)' emitted $count events but must emit none."
+            }
+            Write-Host "PASS: gating case '$($case.Name)'"
+        }
     }
     Write-Host 'PASSED: isolated MXC ETW capture smoke test' -ForegroundColor Green
 } finally {

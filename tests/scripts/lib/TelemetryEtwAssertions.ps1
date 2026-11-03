@@ -142,6 +142,12 @@ function Assert-TelemetryExecutionTrace {
         if ($starts[0].Timestamp -gt $ends[0].Timestamp) {
             throw 'ExecutionEnd preceded ExecutionStart.'
         }
+        foreach ($event in $emitted) {
+            $eventSession = [string]$event.Fields['mxc.session_id']
+            if ($eventSession -cne $startFields['mxc.session_id']) {
+                throw "$($event.Task) from executor $($invocation.ProcessId) has session ID '$eventSession', not the ExecutionStart session."
+            }
+        }
         if ($RequireLifecycles) {
             if ($startFields['mxc.phase'] -cne $invocation.Phase -or
                 $startFields['mxc.backend'] -cne 'isolation_session' -or

@@ -58,7 +58,7 @@ function New-TestTrace {
                     '0x800000000000'
                 } else { '0x400000000000' }
                 $privacyTag = if ($keyword -eq '0x800000000000') { '16777216' } else { '33554432' }
-                "<Event><System><Provider Guid='{$providerGuid}'/><Keywords>$keyword</Keywords><Execution ProcessID='$($invocation.ProcessId)'/><TimeCreated SystemTime='2026-01-01T00:00:00Z'/></System><EventData><Data Name='PartA_PrivTags'>$privacyTag</Data></EventData><RenderingInfo><Task>$task</Task></RenderingInfo></Event>"
+                "<Event><System><Provider Guid='{$providerGuid}'/><Keywords>$keyword</Keywords><Execution ProcessID='$($invocation.ProcessId)'/><TimeCreated SystemTime='2026-01-01T00:00:00Z'/></System><EventData><Data Name='PartA_PrivTags'>$privacyTag</Data><Data Name='mxc.session_id'>00000000-0000-4000-8000-00000000000$($invocation.Lifecycle)</Data></EventData><RenderingInfo><Task>$task</Task></RenderingInfo></Event>"
             }
         }
     )
@@ -122,15 +122,15 @@ $cases = @(
     @{ Name = 'published event changed to Performance'; Mutate = { Set-TestField $trace 0 'PartA_PrivTags' '16777216' }; Fails = $true },
     @{ Name = 'Core error still tagged Usage'; Mutate = {
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='System']/*[local-name()='Keywords']='0x800000000000'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.Error']")
-        $event.EventData.Data.InnerText = '33554432'
+        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '33554432'
     }; Fails = $true },
     @{ Name = 'Core exit still tagged Usage'; Mutate = {
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='System']/*[local-name()='Keywords']='0x800000000000'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.ProcessExited']")
-        $event.EventData.Data.InnerText = '33554432'
+        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '33554432'
     }; Fails = $true },
     @{ Name = 'other events retain Usage'; Mutate = {
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
-        $event.EventData.Data.InnerText = '16777216'
+        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '16777216'
     }; Fails = $true },
     @{ Name = 'missing privacy tag'; Mutate = {
         $event = $trace.DocumentElement.FirstChild
@@ -144,8 +144,16 @@ $cases = @(
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
         $event.System.Keywords = '0x800000000000'
     }; Fails = $true },
-    @{ Name = 'missing process exit'; Mutate = {
-        foreach ($event in @($trace.SelectNodes("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.ProcessExited']"))) {
+    @{ Name = 'backend event with another session ID'; Mutate = {
+        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
+        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='mxc.session_id']").InnerText = '00000000-0000-4000-8000-000000000009'
+    }; Fails = $true; ErrorPattern = 'not the ExecutionStart session' },
+    @{ Name = 'backend event without a session ID'; Mutate = {
+        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.ProcessExited']")
+        $field = $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='mxc.session_id']")
+        $null = $field.ParentNode.RemoveChild($field)
+    }; Fails = $true; ErrorPattern = 'not the ExecutionStart session' },
+    @{ Name = 'missing process exit'; Mutate = {        foreach ($event in @($trace.SelectNodes("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.ProcessExited']"))) {
             $null = $event.ParentNode.RemoveChild($event)
         }
     }; Fails = $true },
