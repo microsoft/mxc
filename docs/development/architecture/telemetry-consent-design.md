@@ -2,17 +2,23 @@
 
 > **Audience:** MXC developers
 
-This document defines the implemented Windows telemetry-consent contract.
-MXC ships the canonical consent resource, persistent consent storage, and
-consent-management APIs described below. Telemetry remains off by default and
+This document defines the implemented Windows telemetry-consent contract for
+the published `0.9.0-alpha` and `1.0.0` request contracts. MXC ships the
+canonical consent resource, persistent consent storage, and consent-management
+APIs described below. For those contracts, telemetry remains off by default and
 is enabled only when every gate in this contract permits collection.
+
+The development `1.1.0-alpha` contract moves to Required telemetry to keep MXC
+secure, reliable, and up to date. It emits four Required events and is not
+governed by this consent model; only administrative policy can block it. See
+[Telemetry](../../telemetry.md) for that behavior.
 
 The purpose of the MXC Learning Mode Data Loop is to analyze collected data to
 identify usage patterns, improve Windows security, and inform MXC about
 application compatibility in containers with minimal capabilities.
 
-MXC telemetry is Windows-only and fails closed. Collection requires all four
-conditions at the time each event is written:
+MXC telemetry is Windows-only and fails closed. For the published contracts,
+collection requires all four conditions at the time each event is written:
 
 ```text
 per-run telemetry requested

@@ -486,9 +486,14 @@ free-form text.
 
 ## Consent
 
-Telemetry emission is gated by the per-run request, MXC-owned consent,
-administrative policy, and provider availability. See
-[`telemetry-consent-design.md`](telemetry-consent-design.md). Local diagnostic
+The development `1.1.0-alpha` contract emits only the four Required events. MXC
+moved these events to Required telemetry to keep MXC secure, reliable, and up to
+date, so they are gated by administrative policy and provider availability, not
+by the per-run request or MXC consent.
+
+Published contracts keep the optional model: emission is gated by the per-run
+request, MXC-owned consent, administrative policy, and provider availability.
+See [`telemetry-consent-design.md`](telemetry-consent-design.md). Local diagnostic
 audit records are a separate operator-selected sink and are not uploaded.
 
 The privacy-reviewed version 3 `en-US` consent wording is the canonical
