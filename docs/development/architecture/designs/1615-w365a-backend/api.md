@@ -50,7 +50,7 @@ The project and `build.cmd` already exist in `C:\work\project` on the Cloud PC,
 for example after an earlier exec retrieved the source. Local `request` helpers
 are application JSON builders, not new SDK APIs.
 
-### Multiple commands in one reservation
+### Multiple commands on one checked-out Cloud PC
 
 1. Provision once; immediately persist the response's `result.sandboxId` and
    account/deployment context. Pass the opaque ID unchanged.
@@ -116,7 +116,7 @@ let primary = (|| -> Result<(), Box<dyn std::error::Error>> {
 let cleanup = sandbox_id.as_ref().map(|id| {
     dev::deprovision_container_json(&request("deprovision", id, None), options)
 });
-eprintln!("reservation={sandbox_id:?}; work={primary:?}; release={cleanup:?}");
+eprintln!("container={sandbox_id:?}; work={primary:?}; release={cleanup:?}");
 primary?;
 if let Some(release) = cleanup { release?; }
 ```
@@ -252,7 +252,7 @@ try {
 
 ### Spawn instead of capture
 
-Within the same reservation/cleanup scope, replace a captured run with the
+Within the same checkout and cleanup scope, replace a captured run with the
 corresponding spawn call when the application needs live I/O:
 
 | SDK | Existing spawn call |
@@ -263,12 +263,12 @@ corresponding spawn call when the application needs live I/O:
 
 Each returns an `MxcProcess`. Drain its stdout and stderr concurrently, write
 stdin as needed and close it for EOF, then wait for the outcome. Dispose/drop
-the process and streams on success or failure before final reservation release.
+the process and streams on success or failure before final Cloud PC release.
 Rust uses `take_stdin`/`take_stdout`/`take_stderr` and `wait`; .NET uses
 `StandardInput`/`StandardOutput`/`StandardError`, `WaitAsync` and `Dispose`;
 Node uses `standardInput`/`standardOutput`/`standardError`, `wait` and `dispose`.
 Capture owns this local cleanup; spawned handles transfer it to the caller.
-Neither path automatically releases the reservation.
+Neither path automatically releases the Cloud PC.
 
 ## Proposed signatures and types
 
@@ -325,7 +325,7 @@ and [process](README.md#process-inputs-and-results) rules.
 | --- | --- |
 | Provision/start/stop/deprovision | Complete native response JSON string, including provision's existing `result.sandboxId` and backend metadata. |
 | Captured exec | `ExecutionResult`: outcome, separate stdout/stderr, warnings and available output metadata. SDK owns transient process cleanup. |
-| Spawned exec | Caller-owned `MxcProcess`; launch or later I/O/wait can fail. Dispose it separately from reservation release. |
+| Spawned exec | Caller-owned `MxcProcess`; launch or later I/O/wait can fail. Dispose it separately from Cloud PC release. |
 | Nonzero guest exit | Normal command result, including a real EXIT of -1; not a synthetic transport failure. |
 | Unsupported request | Existing SDK error codes: `backend_unavailable` for missing experimental authorization, `policy_validation` for unenforceable policy, or the existing phase/mode refusal. No fallback to a different backend or executor. |
 
@@ -353,7 +353,7 @@ Native transport preserves details for .NET/Node.
 Failed capture returns an error, not partial success; already-read spawned output
 remains the caller's. Kill reports unsupported remote termination. Local
 cancellation/disposal or executor termination does not prove remote exit or
-release the reservation. Do not replay commands after transport loss.
+release the Cloud PC. Do not replay commands after transport loss.
 Local deadlines/disconnects must not produce `TimedOut: true` or
 `WaitResult::TimedOut` without evidence of remote timeout termination.
 
