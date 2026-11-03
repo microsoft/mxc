@@ -159,6 +159,7 @@ fn state_aware_inner(
     match crate::json_boundary::check_json_surface(
         request_json,
         crate::json_boundary::JsonSurface::Lifecycle,
+        experimental,
     )
     .and_then(|()| run_state_aware_json(request_json, dry_run, experimental))
     {
@@ -306,6 +307,7 @@ unsafe fn exec_streaming(
         crate::json_boundary::check_json_surface(
             request_json,
             crate::json_boundary::JsonSurface::Lifecycle,
+            experimental != 0,
         )
         .and_then(|()| execute(request_json, experimental != 0))
         .map_err(|e| {
@@ -370,6 +372,7 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
             crate::json_boundary::check_json_surface(
                 request_json,
                 crate::json_boundary::JsonSurface::Lifecycle,
+                experimental != 0,
             )
             .and_then(|()| execute_lifecycle_json(request_json, experimental != 0))
             .and_then(|process| {
@@ -441,6 +444,7 @@ pub unsafe extern "C" fn mxc_state_aware_exec_pty(
         crate::json_boundary::check_json_surface(
             request_json,
             crate::json_boundary::JsonSurface::Lifecycle,
+            experimental != 0,
         )
         .and_then(|()| {
             spawn_in_container_with_pty_json(
@@ -566,6 +570,7 @@ pub unsafe extern "C" fn mxc_exec_state_aware_attached_json(
         crate::json_boundary::check_json_surface(
             request_json,
             crate::json_boundary::JsonSurface::Lifecycle,
+            experimental != 0,
         )
         .and_then(|()| exec_attached(request_json, experimental != 0))
         .map_err(|e| {

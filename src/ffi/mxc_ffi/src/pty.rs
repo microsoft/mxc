@@ -77,6 +77,7 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
         crate::json_boundary::check_json_surface(
             request_json,
             crate::json_boundary::JsonSurface::OneShotStreaming,
+            experimental != 0,
         )
         .and_then(|()| {
             spawn_with_pty_json(

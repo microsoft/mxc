@@ -467,6 +467,7 @@ fn spawn_json_inner(
     crate::json_boundary::check_json_surface(
         request_json,
         crate::json_boundary::JsonSurface::OneShotStreaming,
+        experimental,
     )
     .and_then(|()| spawn(request_json, experimental))
     .map_err(sdk_error_detail)

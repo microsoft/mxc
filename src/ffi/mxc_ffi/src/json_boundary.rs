@@ -14,13 +14,21 @@ pub(crate) enum JsonSurface {
     Lifecycle,
 }
 
-pub(crate) fn check_json_surface(json: &str, surface: JsonSurface) -> Result<(), Error> {
+pub(crate) fn check_json_surface(
+    json: &str,
+    surface: JsonSurface,
+    experimental: bool,
+) -> Result<(), Error> {
     #[cfg(test)]
     if let Some(error) = tests::take_injected_failure() {
-        return check_parsed_surface(Err(error), surface);
+        return check_parsed_surface(Err(error), surface, experimental);
     }
     let mut logger = Logger::new(Mode::Buffer);
-    check_parsed_surface(load_mxc_request_from_json(json, &mut logger), surface)
+    check_parsed_surface(
+        load_mxc_request_from_json(json, &mut logger),
+        surface,
+        experimental,
+    )
 }
 
 #[cfg(test)]
@@ -43,15 +51,15 @@ mod tests {
 
     #[test]
     fn valid_non_microvm_requests_still_pass_the_surface_check() {
-        assert!(check_json_surface(
-            r#"{"version":"1.1.0-alpha","containment":"process","process":{"commandLine":"true"}}"#,
-            JsonSurface::OneShotStreaming,
-        )
-        .is_ok());
-        assert!(check_json_surface(
-            r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wslc:control","process":{"commandLine":"true"}}"#,
-            JsonSurface::Lifecycle,
-        ).is_ok());
+        let one_shot =
+            r#"{"version":"1.1.0-alpha","containment":"process","process":{"commandLine":"true"}}"#;
+        let exec = r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wslc:control","process":{"commandLine":"true"}}"#;
+        for experimental in [false, true] {
+            assert!(
+                check_json_surface(one_shot, JsonSurface::OneShotStreaming, experimental,).is_ok()
+            );
+            assert!(check_json_surface(exec, JsonSurface::Lifecycle, experimental).is_ok());
+        }
     }
 
     #[test]
@@ -59,54 +67,76 @@ mod tests {
         // The backend-invalid timeout makes an unexpected dispatch safe even
         // in a feature-unified test binary with a signed runtime available.
         let json = CString::new(r#"{"version":"1.1.0-alpha","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"},"process":{"commandLine":"true","timeout":3600001}}"#).unwrap();
-        FAILURE.with(|failure| {
-            *failure.borrow_mut() = Some(ParseError::OneShot(WxcError::ConfigParse(
-                "filesystem probe timed out after 5000ms".to_owned(),
-            )))
-        });
-        for expected in [
-            MXC_STATUS_MALFORMED_REQUEST,
-            MXC_STATUS_UNSUPPORTED_CONTAINMENT,
-        ] {
-            let mut handle = ptr::null_mut();
-            let mut detail = MaybeUninit::uninit();
-            // SAFETY: all pointers reference valid request/output storage.
-            let status =
-                unsafe { mxc_spawn_json(json.as_ptr(), 1, &mut handle, detail.as_mut_ptr()) };
-            assert!(handle.is_null());
-            // SAFETY: the C entry point initialized the error storage.
-            let mut detail = unsafe { detail.assume_init() };
-            // SAFETY: error strings were allocated by this library.
-            unsafe { mxc_error_detail_free(&mut detail) };
-            assert_eq!(
-                status, expected,
-                "first failure must not reach a successful reparse"
-            );
+        for experimental in [0, 1] {
+            FAILURE.with(|failure| {
+                *failure.borrow_mut() = Some(ParseError::OneShot(WxcError::ConfigParse(
+                    "filesystem probe timed out after 5000ms".to_owned(),
+                )))
+            });
+            for expected in [
+                MXC_STATUS_MALFORMED_REQUEST,
+                if experimental == 0 {
+                    MXC_STATUS_BACKEND_UNAVAILABLE
+                } else {
+                    MXC_STATUS_UNSUPPORTED_CONTAINMENT
+                },
+            ] {
+                let mut handle = ptr::null_mut();
+                let mut detail = MaybeUninit::uninit();
+                // SAFETY: all pointers reference valid request/output storage.
+                let status = unsafe {
+                    mxc_spawn_json(
+                        json.as_ptr(),
+                        experimental,
+                        &mut handle,
+                        detail.as_mut_ptr(),
+                    )
+                };
+                assert!(handle.is_null());
+                // SAFETY: the C entry point initialized the error storage.
+                let mut detail = unsafe { detail.assume_init() };
+                // SAFETY: error strings were allocated by this library.
+                unsafe { mxc_error_detail_free(&mut detail) };
+                assert_eq!(
+                    status, expected,
+                    "first failure must not reach a successful reparse"
+                );
+            }
         }
     }
 
     #[test]
     fn public_provision_does_not_retry_a_transient_normalization_failure() {
         let json = CString::new(r#"{"version":"1.1.0-alpha","phase":"provision","containment":"microvm","microvm":{"image":"mcr.microsoft.com/azurelinux/base/core:3.0"}}"#).unwrap();
-        FAILURE.with(|failure| {
-            *failure.borrow_mut() = Some(ParseError::StateAware(MxcError::malformed_request(
-                "filesystem probe timed out after 5000ms",
-            )))
-        });
-        for expected in [MXC_STATUS_MALFORMED_REQUEST, MXC_STATUS_UNSUPPORTED_PHASE] {
-            let mut result = MaybeUninit::<MxcStateAwareResult>::uninit();
-            // SAFETY: request and result storage are valid for this call.
-            let status =
-                unsafe { mxc_run_state_aware_json(json.as_ptr(), 1, 1, result.as_mut_ptr()) };
-            // SAFETY: the entry point initialized the result.
-            let mut result = unsafe { result.assume_init() };
-            assert!(result.response_json_utf8.is_null());
-            // SAFETY: result strings were allocated by this library.
-            unsafe { mxc_state_aware_result_free(&mut result) };
-            assert_eq!(
-                status, expected,
-                "first failure must not reach a successful reparse"
-            );
+        for experimental in [0, 1] {
+            FAILURE.with(|failure| {
+                *failure.borrow_mut() = Some(ParseError::StateAware(MxcError::malformed_request(
+                    "filesystem probe timed out after 5000ms",
+                )))
+            });
+            for expected in [
+                MXC_STATUS_MALFORMED_REQUEST,
+                if experimental == 0 {
+                    MXC_STATUS_BACKEND_UNAVAILABLE
+                } else {
+                    MXC_STATUS_UNSUPPORTED_PHASE
+                },
+            ] {
+                let mut result = MaybeUninit::<MxcStateAwareResult>::uninit();
+                // SAFETY: request and result storage are valid for this call.
+                let status = unsafe {
+                    mxc_run_state_aware_json(json.as_ptr(), 1, experimental, result.as_mut_ptr())
+                };
+                // SAFETY: the entry point initialized the result.
+                let mut result = unsafe { result.assume_init() };
+                assert!(result.response_json_utf8.is_null());
+                // SAFETY: result strings were allocated by this library.
+                unsafe { mxc_state_aware_result_free(&mut result) };
+                assert_eq!(
+                    status, expected,
+                    "first failure must not reach a successful reparse"
+                );
+            }
         }
     }
 }
@@ -114,6 +144,7 @@ mod tests {
 fn check_parsed_surface(
     parsed: Result<MxcRequest, ParseError>,
     surface: JsonSurface,
+    experimental: bool,
 ) -> Result<(), Error> {
     // Never retry a failed normalization: a transient probe failure must not
     // let dispatch parse a forbidden MicroVM request successfully on retry.
@@ -139,6 +170,13 @@ fn check_parsed_surface(
         }
         _ => return Ok(()),
     };
+    // Preserve the engine's authorization error before the binding exclusion.
+    if !experimental {
+        return Err(MxcError::backend_unavailable(
+            "the 'microvm' backend is experimental; enable experimental features to use it",
+        )
+        .into());
+    }
     Err(Error::new(
         code,
         "MicroVM streaming and lifecycle operations are supported only through Rust \

@@ -22,8 +22,9 @@
 //!
 //! MicroVM streaming and lifecycle operations are Rust `mxc_sdk::v1::dev`
 //! JSON-only. This boundary rejects them even when a workspace build enables
-//! MicroVM in the shared engine. MicroVM captured create-and-run execution
-//! through [`mxc_run_json`] retains its existing behavior.
+//! MicroVM in the shared engine. Missing experimental authorization returns
+//! `backend_unavailable` before the Rust-only exclusion. MicroVM captured
+//! create-and-run execution through [`mxc_run_json`] retains its existing behavior.
 //!
 //! ## Ingress rule
 //!

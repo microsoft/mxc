@@ -19,7 +19,12 @@ type Spawn = unsafe extern "C" fn(
     *mut MxcErrorDetail,
 ) -> i32;
 
-fn assert_rejected_detail(status: i32, expected: i32, detail: &mut MxcErrorDetail) {
+fn assert_rejected_detail(
+    status: i32,
+    authorized_status: i32,
+    experimental: i32,
+    detail: &mut MxcErrorDetail,
+) {
     assert!(
         !detail.message_utf8.is_null(),
         "status {status} supplied no error"
@@ -32,8 +37,16 @@ fn assert_rejected_detail(status: i32, expected: i32, detail: &mut MxcErrorDetai
     assert!(detail.native_code_utf8.is_null());
     // SAFETY: detail owns only allocations returned by this library.
     unsafe { mxc_error_detail_free(detail) };
-    assert_eq!(status, expected, "{message}");
-    assert!(message.contains("only through Rust mxc_sdk::v1::dev JSON APIs"));
+    if experimental == 0 {
+        assert_eq!(status, MXC_STATUS_BACKEND_UNAVAILABLE, "{message}");
+        assert_eq!(
+            message,
+            "the 'microvm' backend is experimental; enable experimental features to use it"
+        );
+    } else {
+        assert_eq!(status, authorized_status, "{message}");
+        assert!(message.contains("only through Rust mxc_sdk::v1::dev JSON APIs"));
+    }
 }
 
 fn assert_spawn_rejected(spawn: Spawn, json: &str, expected: i32) {
@@ -53,7 +66,7 @@ fn assert_spawn_rejected(spawn: Spawn, json: &str, expected: i32) {
         assert!(handle.is_null());
         // SAFETY: the entry point initialized detail.
         let mut detail = unsafe { detail.assume_init() };
-        assert_rejected_detail(status, expected, &mut detail);
+        assert_rejected_detail(status, expected, experimental, &mut detail);
     }
 }
 
@@ -78,16 +91,25 @@ fn malformed_contract_version_and_phase_errors_are_preserved() {
         r#"{"version":"1.1.0-alpha","containment":"microvm","unknown":true}"#,
     ] {
         let json = CString::new(json).unwrap();
-        let mut handle = ptr::null_mut();
-        let mut detail = MaybeUninit::uninit();
-        // SAFETY: request and output pointers are valid.
-        let status = unsafe { mxc_spawn_json(json.as_ptr(), 1, &mut handle, detail.as_mut_ptr()) };
-        assert!(handle.is_null());
-        // SAFETY: the entry point initialized detail.
-        let mut detail = unsafe { detail.assume_init() };
-        // SAFETY: detail owns only allocations returned by this library.
-        unsafe { mxc_error_detail_free(&mut detail) };
-        assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+        for experimental in [0, 1] {
+            let mut handle = ptr::null_mut();
+            let mut detail = MaybeUninit::uninit();
+            // SAFETY: request and output pointers are valid.
+            let status = unsafe {
+                mxc_spawn_json(
+                    json.as_ptr(),
+                    experimental,
+                    &mut handle,
+                    detail.as_mut_ptr(),
+                )
+            };
+            assert!(handle.is_null());
+            // SAFETY: the entry point initialized detail.
+            let mut detail = unsafe { detail.assume_init() };
+            // SAFETY: detail owns only allocations returned by this library.
+            unsafe { mxc_error_detail_free(&mut detail) };
+            assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+        }
     }
 }
 
@@ -96,12 +118,24 @@ fn filesystem_validation_preserves_malformed_request_errors() {
     let filesystem = json!({"readonlyPaths": ["\u{0}"]});
     let mut one_shot: serde_json::Value = serde_json::from_str(ONE_SHOT).unwrap();
     one_shot["filesystem"] = filesystem.clone();
-    for spawn in [mxc_spawn_json as Spawn, mxc_spawn_with_stdin_json] {
+    for (spawn, experimental) in [
+        (mxc_spawn_json as Spawn, 0),
+        (mxc_spawn_json as Spawn, 1),
+        (mxc_spawn_with_stdin_json as Spawn, 0),
+        (mxc_spawn_with_stdin_json as Spawn, 1),
+    ] {
         let request = CString::new(one_shot.to_string()).unwrap();
         let mut handle = ptr::null_mut();
         let mut detail = MaybeUninit::uninit();
         // SAFETY: request and output pointers are valid.
-        let status = unsafe { spawn(request.as_ptr(), 1, &mut handle, detail.as_mut_ptr()) };
+        let status = unsafe {
+            spawn(
+                request.as_ptr(),
+                experimental,
+                &mut handle,
+                detail.as_mut_ptr(),
+            )
+        };
         assert!(handle.is_null());
         // SAFETY: the entry point initialized detail.
         let mut detail = unsafe { detail.assume_init() };
@@ -122,18 +156,22 @@ fn filesystem_validation_preserves_malformed_request_errors() {
         .to_string(),
     )
     .unwrap();
-    let mut result = MaybeUninit::<MxcStateAwareResult>::uninit();
-    // SAFETY: request and result storage are valid for this call.
-    let status = unsafe { mxc_run_state_aware_json(provision.as_ptr(), 0, 1, result.as_mut_ptr()) };
-    // SAFETY: the entry point initialized result.
-    let mut result = unsafe { result.assume_init() };
-    assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
-    // SAFETY: the error string is owned by result.
-    assert!(unsafe { CStr::from_ptr(result.error.message_utf8) }
-        .to_string_lossy()
-        .contains("embedded NUL"));
-    // SAFETY: the result was populated by this library.
-    unsafe { mxc_state_aware_result_free(&mut result) };
+    for experimental in [0, 1] {
+        let mut result = MaybeUninit::<MxcStateAwareResult>::uninit();
+        // SAFETY: request and result storage are valid for this call.
+        let status = unsafe {
+            mxc_run_state_aware_json(provision.as_ptr(), 0, experimental, result.as_mut_ptr())
+        };
+        // SAFETY: the entry point initialized result.
+        let mut result = unsafe { result.assume_init() };
+        assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+        // SAFETY: the error string is owned by result.
+        assert!(unsafe { CStr::from_ptr(result.error.message_utf8) }
+            .to_string_lossy()
+            .contains("embedded NUL"));
+        // SAFETY: the result was populated by this library.
+        unsafe { mxc_state_aware_result_free(&mut result) };
+    }
 }
 
 #[test]
@@ -162,23 +200,25 @@ fn pty_exports_reject_microvm() {
         (mxc_state_aware_exec_pty, EXEC, MXC_STATUS_UNSUPPORTED_PHASE),
     ] {
         let request = CString::new(json).unwrap();
-        let mut handle = ptr::dangling_mut();
-        let mut detail = MaybeUninit::uninit();
-        // SAFETY: the string, dimensions, and output locations meet the entry point contract.
-        let status = unsafe {
-            spawn(
-                request.as_ptr(),
-                1,
-                24,
-                80,
-                &mut handle,
-                detail.as_mut_ptr(),
-            )
-        };
-        assert!(handle.is_null());
-        // SAFETY: the entry point initialized detail.
-        let mut detail = unsafe { detail.assume_init() };
-        assert_rejected_detail(status, expected, &mut detail);
+        for experimental in [0, 1] {
+            let mut handle = ptr::dangling_mut();
+            let mut detail = MaybeUninit::uninit();
+            // SAFETY: the string, dimensions, and output locations meet the entry point contract.
+            let status = unsafe {
+                spawn(
+                    request.as_ptr(),
+                    experimental,
+                    24,
+                    80,
+                    &mut handle,
+                    detail.as_mut_ptr(),
+                )
+            };
+            assert!(handle.is_null());
+            // SAFETY: the entry point initialized detail.
+            let mut detail = unsafe { detail.assume_init() };
+            assert_rejected_detail(status, expected, experimental, &mut detail);
+        }
     }
 }
 
@@ -199,17 +239,27 @@ fn lifecycle_envelope_export_rejects_all_microvm_phases_and_dry_runs() {
             .to_string(),
         };
         let request = CString::new(request).unwrap();
-        for dry_run in [0, 1] {
+        for (dry_run, experimental) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             let mut result = MaybeUninit::<MxcStateAwareResult>::uninit();
             // SAFETY: request is valid and result is writable storage.
             let status = unsafe {
-                mxc_run_state_aware_json(request.as_ptr(), dry_run, 1, result.as_mut_ptr())
+                mxc_run_state_aware_json(
+                    request.as_ptr(),
+                    dry_run,
+                    experimental,
+                    result.as_mut_ptr(),
+                )
             };
             // SAFETY: the entry point initialized result.
             let mut result = unsafe { result.assume_init() };
             assert_eq!(status, result.status);
             assert!(result.response_json_utf8.is_null());
-            assert_rejected_detail(status, MXC_STATUS_UNSUPPORTED_PHASE, &mut result.error);
+            assert_rejected_detail(
+                status,
+                MXC_STATUS_UNSUPPORTED_PHASE,
+                experimental,
+                &mut result.error,
+            );
             // SAFETY: the result was populated; its error strings were already freed.
             unsafe { mxc_state_aware_result_free(&mut result) };
         }
@@ -219,30 +269,49 @@ fn lifecycle_envelope_export_rejects_all_microvm_phases_and_dry_runs() {
 #[test]
 fn captured_and_attached_lifecycle_exports_reject_microvm() {
     let request = CString::new(EXEC).unwrap();
-    let mut result = MaybeUninit::<MxcRunResult>::uninit();
-    // SAFETY: request is valid and result is writable storage.
-    let status = unsafe { mxc_run_state_aware_exec_json(request.as_ptr(), 1, result.as_mut_ptr()) };
-    // SAFETY: the entry point initialized result.
-    let mut result = unsafe { result.assume_init() };
-    assert!(result.stdout_utf8.is_null());
-    assert!(result.stderr_utf8.is_null());
-    assert_rejected_detail(status, MXC_STATUS_UNSUPPORTED_PHASE, &mut result.error);
-    // SAFETY: the result was populated; its error strings were already freed.
-    unsafe { mxc_run_result_free(&mut result) };
+    for experimental in [0, 1] {
+        let mut result = MaybeUninit::<MxcRunResult>::uninit();
+        // SAFETY: request is valid and result is writable storage.
+        let status = unsafe {
+            mxc_run_state_aware_exec_json(request.as_ptr(), experimental, result.as_mut_ptr())
+        };
+        // SAFETY: the entry point initialized result.
+        let mut result = unsafe { result.assume_init() };
+        assert!(result.stdout_utf8.is_null());
+        assert!(result.stderr_utf8.is_null());
+        assert_rejected_detail(
+            status,
+            MXC_STATUS_UNSUPPORTED_PHASE,
+            experimental,
+            &mut result.error,
+        );
+        // SAFETY: the result was populated; its error strings were already freed.
+        unsafe { mxc_run_result_free(&mut result) };
 
-    let mut outcome = MxcExecOutcome {
-        timed_out: 42,
-        exit_code: 43,
-    };
-    let mut detail = MaybeUninit::uninit();
-    // SAFETY: request, outcome, and detail are valid for this call.
-    let status = unsafe {
-        mxc_exec_state_aware_attached_json(request.as_ptr(), 1, &mut outcome, detail.as_mut_ptr())
-    };
-    assert_eq!((outcome.timed_out, outcome.exit_code), (42, 43));
-    // SAFETY: the entry point initialized detail.
-    let mut detail = unsafe { detail.assume_init() };
-    assert_rejected_detail(status, MXC_STATUS_UNSUPPORTED_PHASE, &mut detail);
+        let mut outcome = MxcExecOutcome {
+            timed_out: 42,
+            exit_code: 43,
+        };
+        let mut detail = MaybeUninit::uninit();
+        // SAFETY: request, outcome, and detail are valid for this call.
+        let status = unsafe {
+            mxc_exec_state_aware_attached_json(
+                request.as_ptr(),
+                experimental,
+                &mut outcome,
+                detail.as_mut_ptr(),
+            )
+        };
+        assert_eq!((outcome.timed_out, outcome.exit_code), (42, 43));
+        // SAFETY: the entry point initialized detail.
+        let mut detail = unsafe { detail.assume_init() };
+        assert_rejected_detail(
+            status,
+            MXC_STATUS_UNSUPPORTED_PHASE,
+            experimental,
+            &mut detail,
+        );
+    }
 }
 
 #[test]
