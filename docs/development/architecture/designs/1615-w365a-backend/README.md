@@ -270,7 +270,10 @@ are outside the proposed initial scope.
 Only exec takes `process`. `commandLine` is a required nonempty string, executed
 by the remote DesktopControl.Exec host, not by a new local shell.
 `cwd` is an optional guest path; omitted or `""` omits `cwd` from the relay
-payload.
+payload. When omitted, exec currently uses the DesktopControl.Exec host process's
+working directory, normally its executable directory under the DesktopControl
+host launcher. This default is subject to change; specify an absolute guest path
+for predictable behavior.
 
 `process.env` is an optional array of `KEY=VALUE` strings.
 `process.inheritDefaultEnv` defaults to false and controls whether supplied
