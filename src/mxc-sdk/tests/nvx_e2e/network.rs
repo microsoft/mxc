@@ -849,21 +849,20 @@ fn signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start() {
     if std::env::var_os(LIFECYCLE_SETUP_CHILD).is_none() {
         let local_app_data = tempfile::tempdir().expect("isolated lifecycle state");
         let id_file = local_app_data.path().join("sandbox-id");
-        let child = Command::new(std::env::current_exe().expect("current test executable"))
-            .args([
-                "--exact",
-                "windows_network::signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env(LIFECYCLE_SETUP_CHILD, "1")
-            .env(LIFECYCLE_SETUP_ID_FILE, &id_file)
-            .env("LOCALAPPDATA", local_app_data.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("bounded lifecycle setup child");
+        let child = spawn_bounded_child(
+            Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "windows_network::signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(LIFECYCLE_SETUP_CHILD, "1")
+                .env(LIFECYCLE_SETUP_ID_FILE, &id_file)
+                .env("LOCALAPPDATA", local_app_data.path())
+                .stdin(Stdio::null()),
+        )
+        .expect("bounded lifecycle setup child");
         let timeout_cleanup = std::cell::RefCell::new(None);
         let output = wait_for_bounded_child(child, Duration::from_secs(240), || {
             *timeout_cleanup.borrow_mut() = Some(cleanup_published_sandbox(&id_file));
@@ -914,20 +913,19 @@ fn signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start() {
     let options = dev::JsonOptions { experimental: true };
     let id_file =
         std::path::PathBuf::from(std::env::var_os(LIFECYCLE_SETUP_ID_FILE).expect("setup ID file"));
-    let setup = Command::new(std::env::current_exe().expect("current test executable"))
-        .args([
-            "--exact",
-            "windows_network::signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start",
-            "--ignored",
-            "--nocapture",
-        ])
-        .env(LIFECYCLE_SETUP_WORKER, "1")
-        .env(LIFECYCLE_SETUP_PROXY_PORT, port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("separately bounded lifecycle setup worker");
+    let setup = spawn_bounded_child(
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "windows_network::signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(LIFECYCLE_SETUP_WORKER, "1")
+            .env(LIFECYCLE_SETUP_PROXY_PORT, port.to_string())
+            .stdin(Stdio::null()),
+    )
+    .expect("separately bounded lifecycle setup worker");
     let timeout_cleanup = std::cell::RefCell::new(None);
     let setup = wait_for_bounded_child(setup, Duration::from_secs(120), || {
         *timeout_cleanup.borrow_mut() = Some(cleanup_published_sandbox(&id_file));
@@ -1051,20 +1049,54 @@ fn signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start() {
     println!("{LIFECYCLE_PROXY_MARKER}");
 }
 
+struct BoundedChild {
+    child: std::process::Child,
+    stdout: std::fs::File,
+    stderr: std::fs::File,
+}
+
+fn spawn_bounded_child(command: &mut Command) -> io::Result<BoundedChild> {
+    let stdout = tempfile::tempfile()?;
+    let stderr = tempfile::tempfile()?;
+    let child = command
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .spawn()?;
+    Ok(BoundedChild {
+        child,
+        stdout,
+        stderr,
+    })
+}
+
 fn wait_for_bounded_child(
-    mut child: std::process::Child,
+    mut child: BoundedChild,
     timeout: Duration,
     on_timeout: impl FnOnce(),
 ) -> Result<Output, Output> {
     let deadline = Instant::now() + timeout;
     loop {
-        if child.try_wait().expect("poll child").is_some() {
-            return Ok(child.wait_with_output().expect("collect child output"));
+        if child.child.try_wait().expect("poll child").is_some() {
+            return Ok(collect_bounded_output(child));
         }
 
         if Instant::now() >= deadline {
-            child.kill().expect("terminate timed-out child");
-            let output = child.wait_with_output().expect("collect timed-out output");
+            let status = Command::new("taskkill.exe")
+                .args(["/PID", &child.child.id().to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("terminate timed-out worker tree");
+            if !status.success()
+                && child
+                    .child
+                    .try_wait()
+                    .expect("poll timed-out child")
+                    .is_none()
+            {
+                child.child.kill().expect("terminate timed-out child");
+            }
+            let output = collect_bounded_output(child);
             on_timeout();
             return Err(output);
         }
@@ -1072,28 +1104,107 @@ fn wait_for_bounded_child(
     }
 }
 
+pub(super) fn bounded_streaming_scenario(test: &str) -> bool {
+    const CHILD: &str = "MXC_NVX_STREAMING_SCENARIO_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return false;
+    }
+    let directory = tempfile::tempdir().expect("isolated streaming scenario state");
+    let id_file = directory.path().join("sandbox-id");
+    let child = spawn_bounded_child(
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", test, "--ignored", "--nocapture"])
+            .env(CHILD, "1")
+            .env(LIFECYCLE_SETUP_ID_FILE, &id_file)
+            .env("LOCALAPPDATA", directory.path())
+            .stdin(Stdio::null()),
+    )
+    .expect("streaming scenario watchdog worker");
+    let output = match wait_for_bounded_child(child, Duration::from_secs(240), || {}) {
+        Ok(output) => output,
+        Err(output) => {
+            let cleanup = cleanup_published_sandbox(&id_file);
+            let recovery = directory.keep();
+            panic!(
+                "{}; cleanup: {cleanup:?}; recovery: {}",
+                child_output("streaming scenario watchdog expired", &output),
+                recovery.display()
+            );
+        }
+    };
+    if !output.status.success() {
+        let cleanup = cleanup_published_sandbox(&id_file);
+        let recovery = directory.keep();
+        panic!(
+            "{}; cleanup: {cleanup:?}; recovery: {}",
+            child_output("streaming scenario failed", &output),
+            recovery.display()
+        );
+    }
+    forward_child_output(&output).expect("forward streaming scenario markers");
+    true
+}
+
+pub(super) fn publish_streaming_sandbox(id: &str) {
+    std::fs::write(
+        std::env::var_os(LIFECYCLE_SETUP_ID_FILE).expect("streaming watchdog identity file"),
+        id,
+    )
+    .expect("publish lifecycle identity for watchdog recovery");
+}
+
+pub(super) fn retire_streaming_sandbox() {
+    std::fs::remove_file(
+        std::env::var_os(LIFECYCLE_SETUP_ID_FILE).expect("streaming watchdog identity file"),
+    )
+    .expect("retire lifecycle identity after cleanup");
+}
+
+fn collect_bounded_output(mut child: BoundedChild) -> Output {
+    use std::io::{Seek, SeekFrom};
+
+    let status = child.child.wait().expect("reap bounded child");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    // Files avoid pipe backpressure and do not wait for inherited handles to close.
+    for (file, output) in [
+        (&mut child.stdout, &mut stdout),
+        (&mut child.stderr, &mut stderr),
+    ] {
+        file.seek(SeekFrom::Start(0)).expect("rewind child output");
+        let length = file.metadata().expect("child output length").len();
+        file.take(length)
+            .read_to_end(output)
+            .expect("read child output");
+    }
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
 fn cleanup_published_sandbox(id_file: &Path) -> Result<bool, String> {
     let Ok(sandbox_id) = std::fs::read_to_string(id_file) else {
         return Ok(false);
     };
-    let cleanup = Command::new(std::env::current_exe().expect("current test executable"))
-        .args([
-            "--exact",
-            "windows_network::signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start",
-            "--ignored",
-            "--nocapture",
-        ])
-        .env(LIFECYCLE_SETUP_CLEANUP, "1")
-        .env("MXC_NVX_LIFECYCLE_SETUP_SANDBOX_ID", sandbox_id.trim())
-        .env(
-            "LOCALAPPDATA",
-            id_file.parent().expect("setup ID file parent"),
-        )
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("cannot start cleanup worker: {error}"))?;
+    let cleanup = spawn_bounded_child(
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "windows_network::signed_bundle_lifecycle_proxy_timeout_starts_after_vm_start",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(LIFECYCLE_SETUP_CLEANUP, "1")
+            .env("MXC_NVX_LIFECYCLE_SETUP_SANDBOX_ID", sandbox_id.trim())
+            .env(
+                "LOCALAPPDATA",
+                id_file.parent().expect("setup ID file parent"),
+            )
+            .stdin(Stdio::null()),
+    )
+    .map_err(|error| format!("cannot start cleanup worker: {error}"))?;
     let cleanup = wait_for_bounded_child(cleanup, Duration::from_secs(90), || {})
         .map_err(|output| child_output("cleanup timed out", &output))?;
     if !cleanup.status.success() {
@@ -1148,24 +1259,58 @@ fn forward_child_output(output: &Output) -> io::Result<()> {
 }
 
 #[test]
+fn bounded_child_drains_heavy_stdout_and_stderr() {
+    const CHILD: &str = "MXC_NVX_OUTPUT_HEAVY_CHILD";
+    const BYTES: usize = 2 * 1024 * 1024;
+    if std::env::var_os(CHILD).is_some() {
+        std::io::stdout().write_all(&vec![b'O'; BYTES]).unwrap();
+        std::io::stderr().write_all(&vec![b'E'; BYTES]).unwrap();
+        return;
+    }
+    let child = spawn_bounded_child(
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "windows_network::bounded_child_drains_heavy_stdout_and_stderr",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdin(Stdio::null()),
+    )
+    .expect("output-heavy child");
+    let output = wait_for_bounded_child(child, Duration::from_secs(10), || {
+        panic!("output-heavy child must not time out")
+    })
+    .expect("output-heavy child must finish");
+    assert!(output.status.success());
+    assert_eq!(
+        output.stdout.iter().filter(|&&byte| byte == b'O').count(),
+        BYTES
+    );
+    assert_eq!(
+        output.stderr.iter().filter(|&&byte| byte == b'E').count(),
+        BYTES
+    );
+}
+
+#[test]
 fn bounded_child_timeout_is_enforceable() {
     const CHILD: &str = "MXC_NVX_BOUNDED_CHILD_TEST";
     if std::env::var_os(CHILD).is_some() {
         thread::sleep(Duration::from_secs(30));
         return;
     }
-    let child = Command::new(std::env::current_exe().expect("current test executable"))
-        .args([
-            "--exact",
-            "windows_network::bounded_child_timeout_is_enforceable",
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("bounded helper child");
+    let child = spawn_bounded_child(
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "windows_network::bounded_child_timeout_is_enforceable",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdin(Stdio::null()),
+    )
+    .expect("bounded helper child");
     let started = Instant::now();
     let cleanup_called = Arc::new(AtomicBool::new(false));
     let cleanup_observer = Arc::clone(&cleanup_called);
@@ -1185,6 +1330,58 @@ fn bounded_child_timeout_is_enforceable() {
 }
 
 #[test]
+fn bounded_child_timeout_reaps_descendants_with_inherited_output() {
+    const CHILD: &str = "MXC_NVX_DESCENDANT_OUTPUT_CHILD";
+    let test = "windows_network::bounded_child_timeout_reaps_descendants_with_inherited_output";
+    match std::env::var(CHILD).as_deref() {
+        Ok("descendant") => {
+            thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        Ok("worker") => {
+            let mut descendant = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(CHILD, "descendant")
+                .stdin(Stdio::null())
+                .spawn()
+                .expect("descendant with inherited output handles");
+            println!("DESCENDANT_PID={}", descendant.id());
+            std::io::stdout().flush().unwrap();
+            descendant.wait().unwrap();
+            return;
+        }
+        _ => {}
+    }
+    let child = spawn_bounded_child(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, "worker")
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let output = wait_for_bounded_child(child, Duration::from_secs(2), || {})
+        .expect_err("worker and descendant must be terminated");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("DESCENDANT_PID="))
+        .expect("worker published descendant PID")
+        .parse::<u32>()
+        .unwrap();
+    let remaining = Command::new("tasklist.exe")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .unwrap();
+    assert!(remaining.status.success());
+    assert!(
+        !String::from_utf8_lossy(&remaining.stdout).contains(&format!("\",\"{pid}\",\"")),
+        "timed-out descendant {pid} is still running"
+    );
+}
+
+#[test]
 fn nonzero_setup_exit_preserves_failure_and_cleanup_error() {
     const CHILD: &str = "MXC_NVX_SETUP_FAILURE_CHILD";
     if std::env::var_os(CHILD).is_some() {
@@ -1193,18 +1390,17 @@ fn nonzero_setup_exit_preserves_failure_and_cleanup_error() {
 
     let cleanup_called = Arc::new(AtomicBool::new(false));
     let cleanup_observer = Arc::clone(&cleanup_called);
-    let child = Command::new(std::env::current_exe().expect("current test executable"))
-        .args([
-            "--exact",
-            "windows_network::nonzero_setup_exit_preserves_failure_and_cleanup_error",
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("injected setup failure child");
+    let child = spawn_bounded_child(
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "windows_network::nonzero_setup_exit_preserves_failure_and_cleanup_error",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdin(Stdio::null()),
+    )
+    .expect("injected setup failure child");
     let output = wait_for_bounded_child(child, Duration::from_secs(10), || {})
         .expect("failure child must terminate itself");
     let failure = child_success_or_cleanup("provision/start setup", output, move || {
@@ -1231,18 +1427,17 @@ fn parent_forwards_nested_child_marker() {
         println!("{NESTED_CHILD_TEST_MARKER}");
         return;
     }
-    let child = Command::new(std::env::current_exe().expect("current test executable"))
-        .args([
-            "--exact",
-            "windows_network::parent_forwards_nested_child_marker",
-            "--nocapture",
-        ])
-        .env(NESTED_OUTPUT_CHILD, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("nested marker child");
+    let child = spawn_bounded_child(
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "windows_network::parent_forwards_nested_child_marker",
+                "--nocapture",
+            ])
+            .env(NESTED_OUTPUT_CHILD, "1")
+            .stdin(Stdio::null()),
+    )
+    .expect("nested marker child");
     let output = wait_for_bounded_child(child, Duration::from_secs(10), || {})
         .expect("marker child must finish");
     assert!(

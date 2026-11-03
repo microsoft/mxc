@@ -70,6 +70,73 @@ fn one_shot_pipe_and_stdin_exports_reject_microvm() {
 }
 
 #[test]
+fn malformed_contract_version_and_phase_errors_are_preserved() {
+    for json in [
+        "{",
+        r#"{"version":"99.0.0"}"#,
+        r#"{"version":"1.1.0-alpha","phase":"unknown"}"#,
+        r#"{"version":"1.1.0-alpha","containment":"microvm","unknown":true}"#,
+    ] {
+        let json = CString::new(json).unwrap();
+        let mut handle = ptr::null_mut();
+        let mut detail = MaybeUninit::uninit();
+        // SAFETY: request and output pointers are valid.
+        let status = unsafe { mxc_spawn_json(json.as_ptr(), 1, &mut handle, detail.as_mut_ptr()) };
+        assert!(handle.is_null());
+        // SAFETY: the entry point initialized detail.
+        let mut detail = unsafe { detail.assume_init() };
+        // SAFETY: detail owns only allocations returned by this library.
+        unsafe { mxc_error_detail_free(&mut detail) };
+        assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+    }
+}
+
+#[test]
+fn filesystem_validation_preserves_malformed_request_errors() {
+    let filesystem = json!({"readonlyPaths": ["\u{0}"]});
+    let mut one_shot: serde_json::Value = serde_json::from_str(ONE_SHOT).unwrap();
+    one_shot["filesystem"] = filesystem.clone();
+    for spawn in [mxc_spawn_json as Spawn, mxc_spawn_with_stdin_json] {
+        let request = CString::new(one_shot.to_string()).unwrap();
+        let mut handle = ptr::null_mut();
+        let mut detail = MaybeUninit::uninit();
+        // SAFETY: request and output pointers are valid.
+        let status = unsafe { spawn(request.as_ptr(), 1, &mut handle, detail.as_mut_ptr()) };
+        assert!(handle.is_null());
+        // SAFETY: the entry point initialized detail.
+        let mut detail = unsafe { detail.assume_init() };
+        assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+        // SAFETY: the error string is owned by detail.
+        assert!(unsafe { CStr::from_ptr(detail.message_utf8) }
+            .to_string_lossy()
+            .contains("embedded NUL"));
+        // SAFETY: detail owns only allocations returned by this library.
+        unsafe { mxc_error_detail_free(&mut detail) };
+    }
+    let provision = CString::new(
+        json!({
+            "version": "1.1.0-alpha", "phase": "provision", "containment": "microvm",
+            "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"},
+            "filesystem": filesystem
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut result = MaybeUninit::<MxcStateAwareResult>::uninit();
+    // SAFETY: request and result storage are valid for this call.
+    let status = unsafe { mxc_run_state_aware_json(provision.as_ptr(), 0, 1, result.as_mut_ptr()) };
+    // SAFETY: the entry point initialized result.
+    let mut result = unsafe { result.assume_init() };
+    assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
+    // SAFETY: the error string is owned by result.
+    assert!(unsafe { CStr::from_ptr(result.error.message_utf8) }
+        .to_string_lossy()
+        .contains("embedded NUL"));
+    // SAFETY: the result was populated by this library.
+    unsafe { mxc_state_aware_result_free(&mut result) };
+}
+
+#[test]
 fn lifecycle_pipe_and_stdin_exports_reject_microvm() {
     for spawn in [
         mxc_exec_state_aware_json as Spawn,

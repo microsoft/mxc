@@ -187,8 +187,14 @@ fn main() {
     if mode != "missing-sdk-streaming" {
         println!("VM_EXECUTED SDK JSON live output and cleanup");
     }
+    if mode != "missing-sdk-streaming-cancellation" {
+        println!("VM_EXECUTED SDK JSON streaming kill drop undrained output and cleanup");
+    }
     if mode != "missing-sdk-lifecycle" {
         println!("VM_EXECUTED SDK JSON persistent lifecycle live output timeout and cleanup");
+    }
+    if mode != "missing-sdk-lifecycle-cancellation" {
+        println!("VM_EXECUTED SDK JSON lifecycle kill drop undrained output and container reuse");
     }
     if mode != "missing-memory-512" {
         println!("VM_EXECUTED guest memory 512 MiB MemTotal 512000 KiB and cleanup");
@@ -612,7 +618,9 @@ for (const [mode, message] of [
   ["missing-facade", /did not execute the facade VM scenario/],
   ["missing-sdk-json", /did not execute the SDK JSON capture VM scenario/],
   ["missing-sdk-streaming", /did not execute the SDK JSON streaming VM scenario/],
+  ["missing-sdk-streaming-cancellation", /did not execute the SDK JSON streaming cancellation VM scenario/],
   ["missing-sdk-lifecycle", /did not execute the SDK JSON lifecycle VM scenario/],
+  ["missing-sdk-lifecycle-cancellation", /did not execute the SDK JSON lifecycle cancellation VM scenario/],
   ["missing-memory-512", /did not execute the 512 MiB guest memory VM scenario/],
   ["missing-memory-1024", /did not execute the 1024 MiB guest memory VM scenario/],
   ["missing-sdk-lifecycle-capture", /did not execute the SDK JSON lifecycle capture VM scenario/],
@@ -639,7 +647,7 @@ for (const [mode, message] of [
     }
     if (mode === "missing-private-lifecycle-completion") {
       assert.match(result.output, /test result: ok\. 7 passed; 0 failed; 0 ignored;/);
-      assert.equal((result.output.match(/VM_EXECUTED /g) || []).length, 16);
+      assert.equal((result.output.match(/VM_EXECUTED /g) || []).length, 18);
       assert.match(result.output, /VM_EXECUTED guest memory 512 MiB MemTotal /);
       assert.match(result.output, /VM_EXECUTED guest memory 1024 MiB MemTotal /);
       assert.match(result.output, /VM_EXECUTED lifecycle proxy deadline after VM startup with ordered cleanup/);

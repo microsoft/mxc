@@ -259,6 +259,11 @@ and that interrupting startup or execution removes the VM and its temporary file
 
 Rust `v1::dev` JSON scenarios also cover live output, persistent container
 lifecycle operations, and the 67,108,864-byte combined lifecycle capture limit.
+The existing streaming and lifecycle scenarios also kill and drop active
+processes while retaining an undrained caller-owned output stream. They require
+prompt completion, create-and-run state cleanup, and another successful exec
+in the existing container. Separate completion markers enforce both cancellation
+checks, and child-process watchdogs bound hangs independently of workload timeouts.
 Discovery and execution markers are required for these cases and the lifecycle
 proxy-deadline case; missing, skipped, or failed scenarios fail validation.
 These cases use the existing Rust test artifact, not the Node/.NET SDK bundle.

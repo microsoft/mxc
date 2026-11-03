@@ -1462,6 +1462,11 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     fn signed_bundle_sdk_json_streaming() {
         use std::io::Read;
 
+        if super::windows_network::bounded_streaming_scenario(
+            "windows_x64::signed_bundle_sdk_json_streaming",
+        ) {
+            return;
+        }
         let request = process_only_request(
             "printf STREAM_READY; sleep 5; printf STREAM_DONE; printf STREAM_ERR >&2",
         );
@@ -1504,6 +1509,36 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
         );
         drop(held_stdout);
         assert_no_run_state(std::process::id());
+        for dispose in [false, true] {
+            let mut request =
+                process_only_request("printf CANCEL_READY; while :; do printf 0123456789; done");
+            request["process"]["timeout"] = json!(0);
+            let mut process = dev::spawn_json(
+                &request.to_string(),
+                dev::JsonOptions { experimental: true },
+            )
+            .unwrap();
+            let mut held_stdout = process.take_stdout().expect("caller-owned stdout");
+            let mut ready = [0; 12];
+            held_stdout.read_exact(&mut ready).unwrap();
+            assert_eq!(&ready, b"CANCEL_READY");
+            assert_eq!(process.try_wait().unwrap(), None);
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let started = Instant::now();
+            if dispose {
+                drop(process);
+            } else {
+                process.kill().unwrap();
+                assert!(matches!(process.wait().unwrap(), WaitResult::Exited(_)));
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "kill/drop must not wait for caller-owned undrained stdout"
+            );
+            assert_no_run_state(std::process::id());
+            drop(held_stdout);
+        }
+        println!("VM_EXECUTED SDK JSON streaming kill drop undrained output and cleanup");
         println!("VM_EXECUTED SDK JSON live output and cleanup");
     }
 
@@ -1512,6 +1547,11 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     fn signed_bundle_sdk_json_lifecycle() {
         use std::io::Read;
 
+        if super::windows_network::bounded_streaming_scenario(
+            "windows_x64::signed_bundle_sdk_json_lifecycle",
+        ) {
+            return;
+        }
         let options = dev::JsonOptions { experimental: true };
         let provision = json!({
             "version": "1.1.0-alpha",
@@ -1529,6 +1569,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             .expect("provision response sandboxId")
             .to_owned();
         assert!(sandbox_id.starts_with("microvm:"), "{sandbox_id}");
+        super::windows_network::publish_streaming_sandbox(&sandbox_id);
 
         let mut started = false;
         let mut memory_kib = None;
@@ -1606,6 +1647,54 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             if result.outcome != WaitResult::TimedOut {
                 return Err(format!("expected lifecycle timeout, got {result:?}"));
             }
+            for dispose in [false, true] {
+                let exec = json!({
+                    "version": "1.1.0-alpha", "phase": "exec", "sandboxId": sandbox_id,
+                    "process": {
+                        "commandLine": "printf CANCEL_READY; while :; do printf 0123456789; done",
+                        "timeout": 0
+                    }
+                });
+                let mut process = dev::spawn_in_container_json(&exec.to_string(), options)
+                    .map_err(|error| error.to_string())?;
+                let mut held_stdout = process.take_stdout().ok_or("caller-owned stdout missing")?;
+                let mut ready = [0; 12];
+                held_stdout
+                    .read_exact(&mut ready)
+                    .map_err(|error| error.to_string())?;
+                if &ready != b"CANCEL_READY"
+                    || process
+                        .try_wait()
+                        .map_err(|error| error.to_string())?
+                        .is_some()
+                {
+                    return Err("cancellation workload was not running".to_owned());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                let before = Instant::now();
+                if dispose {
+                    drop(process);
+                } else {
+                    process.kill().map_err(|error| error.to_string())?;
+                    process.wait().map_err(|error| error.to_string())?;
+                }
+                if before.elapsed() >= std::time::Duration::from_secs(30) {
+                    return Err("lifecycle kill/drop waited for undrained stdout".to_owned());
+                }
+                let reuse = dev::run_in_container_json(
+                    &json!({
+                        "version": "1.1.0-alpha", "phase": "exec", "sandboxId": sandbox_id,
+                        "process": {"commandLine": "printf after-cancellation", "timeout": 30_000}
+                    })
+                    .to_string(),
+                    options,
+                )
+                .map_err(|error| error.to_string())?;
+                if reuse.outcome != WaitResult::Exited(0) || reuse.stdout != b"after-cancellation" {
+                    return Err(format!("container unusable after kill/drop: {reuse:?}"));
+                }
+                drop(held_stdout);
+            }
             Ok(())
         })();
 
@@ -1642,9 +1731,11 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
             },
         )
         .unwrap();
+        super::windows_network::retire_streaming_sandbox();
         let memory_kib = memory_kib.expect("successful lifecycle must measure guest memory");
         println!("VM_EXECUTED guest memory 1024 MiB MemTotal {memory_kib} KiB and cleanup");
         println!("VM_EXECUTED SDK JSON persistent lifecycle live output timeout and cleanup");
+        println!("VM_EXECUTED SDK JSON lifecycle kill drop undrained output and container reuse");
     }
 
     #[test]
