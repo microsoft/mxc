@@ -257,26 +257,6 @@ selection, file access rules, and network address and port rules. They also
 check that traffic through a proxy works while direct connections are blocked,
 and that interrupting startup or execution removes the VM and its temporary files.
 
-Rust `v1::dev` JSON scenarios also cover live output, persistent container
-lifecycle operations, and the 67,108,864-byte combined lifecycle capture limit.
-The existing streaming and lifecycle scenarios also kill and drop active
-processes while retaining an undrained caller-owned output stream. They require
-prompt completion, create-and-run state cleanup, and another successful exec
-in the existing container. Separate completion markers enforce both cancellation
-checks, and child-process watchdogs bound hangs independently of workload timeouts.
-Discovery and execution markers are required for these cases and the lifecycle
-proxy-deadline case; missing, skipped, or failed scenarios fail validation.
-These cases use the existing Rust test artifact, not the Node/.NET SDK bundle.
-The nested-child output helper uses a separate synthetic marker; its output
-cannot satisfy the lifecycle-proxy VM completion check.
-The required image/filesystem and lifecycle scenarios also measure guest
-`/proc/meminfo` `MemTotal` with 512 and 1024 MiB requests. Each accepts
-75–100% of configured RAM, allowing for the kernel and reserved memory described
-by the [Linux proc documentation](https://docs.kernel.org/filesystems/proc.html).
-The ranges do not overlap, so a fixed default cannot satisfy both. Separate
-completion markers for both measurements are required after scenario cleanup;
-omitting either fails the dispatcher even if the other scenario markers remain.
-
 The network tests connect to servers controlled by the test. They check that
 the servers are reachable before and after testing the restrictions, so an
 unavailable server cannot be mistaken for a blocked connection. The host needs

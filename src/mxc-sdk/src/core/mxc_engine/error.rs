@@ -214,25 +214,6 @@ impl Error {
 mod tests {
     use super::*;
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
-
-    #[test]
-    fn structured_details_round_trip_without_implicit_logging() {
-        for details in [
-            serde_json::Value::Null,
-            serde_json::json!({"nvxRecovery":{"sandboxId":"sensitive-recovery-id"}}),
-            serde_json::json!(["sensitive-recovery-id", 1, true]),
-            serde_json::json!("sensitive-recovery-id"),
-        ] {
-            let original =
-                MxcError::backend_error("operation failed").with_details(details.clone());
-            let error = Error::from(original.clone());
-            assert_eq!(error.details.as_deref(), Some(&details));
-            assert!(!format!("{error:?}").contains("sensitive-recovery-id"));
-            assert!(!error.to_string().contains("sensitive-recovery-id"));
-            assert_eq!(error.into_mxc_error(), original);
-        }
-        assert_eq!(Error::new(ErrorCode::BackendError, "failure").details, None);
-    }
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.
     ///

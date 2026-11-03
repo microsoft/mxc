@@ -44,32 +44,16 @@ pub fn validate_deprovision_json(json: &str, options: JsonOptions) -> Result<Str
 pub fn validate_process_json(json: &str, options: JsonOptions) -> Result<String, Error>;
 ```
 
-`run_json` uses pipe-backed execution or backend-owned capture. On Windows x64,
-MicroVM supports captured create-and-run execution, live stdout and stderr
-through `spawn_json`, and persistent provision, start, exec, stop, and
-deprovision operations through the JSON lifecycle functions above. MicroVM
-does not provide writable stdin or PTY execution. It requires a build with the
-`microvm` Cargo feature, experimental authorization, and the signed NVX bundle
-and host prerequisites described in the
-[MicroVM guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md).
-When the platform or build does not include MicroVM, `run_json` returns
-`BackendUnavailable`, `spawn_json` returns `UnsupportedContainment`, and the
-JSON lifecycle functions return `UnsupportedPhase`. On a supported Windows x64
-build, missing bundle or host runtime prerequisites return
-`BackendUnavailable`.
-
-MicroVM `run_json` and `run_in_container_json` enforce a 67,108,864-byte
-combined stdout and stderr capture limit. Lifecycle capture overflow terminates
-and releases only the running exec, leaving the provisioned container usable.
-`spawn_json` and `spawn_in_container_json` return caller-controlled live
-streams and do not apply this capture limit.
-
-Lifecycle calls explicitly close their native host and report close failures.
-If provision succeeded before close failed, the returned `Error` retains
-`details.nvxRecovery.sandboxId` and a `"provisioned"` recovery state. The
-container remains caller-owned; use that ID to continue or deprovision instead
-of retrying provision. Treat the ID as sensitive. See the
-[MicroVM cleanup guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md#output-timeout-and-cleanup).
+`run_json` uses pipe-backed execution or backend-owned capture. MicroVM supports
+captured and live stdout/stderr and the JSON lifecycle functions above, but
+not writable stdin or PTY. It requires Windows x64, the `microvm` Cargo feature,
+experimental authorization, and the signed NVX bundle. Without platform/build
+support, `run_json` returns `BackendUnavailable`, `spawn_json` returns
+`UnsupportedContainment`, and lifecycle functions return `UnsupportedPhase`.
+Missing runtime prerequisites on a supported build return `BackendUnavailable`.
+See the [MicroVM guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md)
+for the 64 MiB capture limit, caller-owned streams, and sensitive
+`Error.details.nvxRecovery` information when provision succeeds but cleanup fails.
 
 Pipe and PTY spawns and existing-container capture require the selected
 backend's corresponding I/O and lifecycle support. Unsupported modes fail

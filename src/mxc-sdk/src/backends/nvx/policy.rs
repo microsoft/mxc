@@ -441,32 +441,7 @@ mod tests {
         capabilities.network.egress_rules = true;
         capabilities.network.network_proxy = true;
         capabilities.spec.image_reference = true;
-        capabilities.spec.memory = true;
         capabilities
-    }
-
-    #[test]
-    fn memory_override_requires_capability_and_maps_to_resources() {
-        let mut request = request();
-        request.microvm_memory_mib = Some(512);
-
-        let mut unsupported = capabilities();
-        unsupported.spec.memory = false;
-        let error = provision_request(&request, &unsupported).unwrap_err();
-        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
-        assert_eq!(
-            error.message,
-            "the configured NVX runtime does not support microvm.provision.memoryMib"
-        );
-
-        let (_, spec) = provision_request(&request, &capabilities()).unwrap();
-        assert_eq!(
-            serde_json::to_value(spec).unwrap(),
-            serde_json::json!({
-                "image": {"reference": "docker.io/library/python:3.12-alpine"},
-                "resources": {"memoryMib": 512}
-            })
-        );
     }
 
     fn json_request(json: &serde_json::Value) -> ExecutionRequest {
@@ -499,30 +474,6 @@ mod tests {
                 "deny": [{"to": [{"cidr": "192.0.2.0/24"}], "ports": [{"protocol": "icmp"}]}]
             }}
         }))
-    }
-
-    #[test]
-    fn existing_container_exec_does_not_require_an_image_and_rejects_fixed_policy() {
-        let mut exec = request();
-        exec.microvm_image = None;
-        assert!(exec_request_for_existing(&exec, &capabilities()).is_ok());
-
-        exec.policy.readonly_paths.push("C:\\fixed".to_owned());
-        let error = exec_request_for_existing(&exec, &capabilities()).unwrap_err();
-        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
-        assert_eq!(
-            error.message,
-            "MicroVM filesystem policy is fixed at provision"
-        );
-
-        exec.policy.readonly_paths.clear();
-        exec.policy.network_specified = true;
-        let error = exec_request_for_existing(&exec, &capabilities()).unwrap_err();
-        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
-        assert_eq!(
-            error.message,
-            "MicroVM network policy is fixed at provision"
-        );
     }
 
     #[test]

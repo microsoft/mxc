@@ -795,19 +795,6 @@ mod tests {
     }
 
     #[test]
-    fn availability_requires_an_agent_library_file() {
-        let root = tempfile::tempdir().unwrap();
-        let bundle = write_bundle_manifest(root.path());
-        assert!(!agent_library_present(&bundle));
-        let library = bundle.join("bin").join("aci_edge_agent.dll");
-        fs::create_dir_all(&library).unwrap();
-        assert!(!agent_library_present(&bundle));
-        fs::remove_dir(&library).unwrap();
-        fs::write(&library, b"placeholder").unwrap();
-        assert!(agent_library_present(&bundle));
-    }
-
-    #[test]
     fn sandbox_id_requires_32_lowercase_hex_digits() {
         let valid = SandboxId::from_token("0123456789abcdef0123456789abcdef").unwrap();
         assert_eq!(

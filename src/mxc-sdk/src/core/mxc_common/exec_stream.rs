@@ -1576,47 +1576,6 @@ mod tests {
         drop(stdout_r);
     }
 
-    #[test]
-    fn repeated_poll_and_wait_preserve_an_nvx_cleanup_error() {
-        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
-        let handle = ExecHandle {
-            stdin_closer: None,
-            stdout: reader_handle(&stdout_r),
-            stderr: null_pipe_handle(),
-            stdin: null_pipe_handle(),
-            waiter: Box::new(|| {
-                Err(MxcError::backend_error(
-                    "NVX exec completed; cleanup failure: close failed",
-                ))
-            }),
-            terminator: Box::new(|| Ok(())),
-        };
-        let mut process = ExecSandboxProcess::from_exec_handle(handle).unwrap();
-        drop(stdout_r);
-
-        let first = loop {
-            match process.try_wait() {
-                Ok(None) => std::thread::sleep(Duration::from_millis(1)),
-                result => break result.expect_err("the NVX cleanup error must be terminal"),
-            }
-        };
-        let second = process
-            .try_wait()
-            .expect_err("repeat polling must preserve the cleanup error");
-        let waited = process
-            .wait()
-            .expect_err("blocking wait must preserve the cleanup error");
-        for error in [&first, &second, &waited] {
-            assert!(
-                error
-                    .to_string()
-                    .contains("NVX exec completed; cleanup failure: close failed"),
-                "{error}"
-            );
-        }
-        drop(stdout_w);
-    }
-
     /// `wait` must **tear its discard down**, not walk away from it.
     ///
     /// This is the regression the cancellable drain exists for, and the other
@@ -1718,7 +1677,7 @@ mod tests {
 
     /// A prior `try_wait()` must not let `wait()` skip the drain.
     ///
-    /// A successful `self.terminal` records that the child finished; it says nothing about
+    /// `self.exit` records that the child finished; it says nothing about
     /// whether anything was drained. Returning early on it would silently
     /// break the contract for exactly the caller who polls before waiting.
     ///

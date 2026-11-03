@@ -11,10 +11,8 @@ The backend supports Windows x64 only. Windows ARM64 and Linux hosts do not have
 active MicroVM execution path; support for those platforms is
 future work. Enabling the feature does not make an unsupported host available.
 
-`v1::available_backends` reports MicroVM when the feature is enabled, the
-agent bundle manifest and library are present, and Windows reports an active
-hypervisor. This read-only check is advisory: execution still verifies the
-bundle and the host's runtime requirements.
+`v1::available_backends` checks the feature, bundle manifest/library, and active
+hypervisor. Availability is advisory; execution verifies runtime requirements.
 
 ## Requirements and quick start
 
@@ -177,12 +175,10 @@ credentials. The error code and failed operation are still reported.
 
 If provision succeeds but close fails, MXC retains the provisioned container
 and returns its ID in Rust `Error.details.nvxRecovery.sandboxId`, with
-`details.nvxRecovery.state` recording the last-known state, `"provisioned"`. Use that ID to continue or
-deprovision through Rust `v1::dev` JSON; do not retry provision. The ID is a
-sensitive recovery capability and is not included in ordinary error formatting.
-MXC does not retry an ambiguous native host release or attempt rollback through
-a potentially consumed handle. The shared private state and cache remain
-available for recovery and other containers.
+`details.nvxRecovery.state` recording the last-known state, `"provisioned"`.
+Use that ID to continue or deprovision through Rust `v1::dev` JSON; do not retry
+provision. Treat the ID as sensitive; ordinary error formatting omits it.
+Pre-existing error details are retained under `details.primaryDetails`.
 
 A workload timeout preserves captured partial output and tears down the
 create-and-run container. Live execution starts its workload deadline only
@@ -216,20 +212,13 @@ successful deprovisioning; it does not maintain a persistent container database.
 
 Container lifecycle operations use the owner-only
 `%LOCALAPPDATA%\Microsoft\MXC\nvx-v1` state root so separate JSON calls can reopen
-the same signed-agent records. MXC creates the private directories atomically
-with a protected current-user and Local SYSTEM DACL, opens every path component
-without following reparse points, and holds those handles without delete sharing
-while the signed agent uses the path. Existing unsafe roots are rejected.
-Non-verbatim paths with directory components ending in a dot or space are
-rejected before private state creation or native setup because Windows may
-resolve them to a different directory. Set `LOCALAPPDATA` to an unambiguous
-absolute path without those endings, or use an explicit verbatim (`\\?\`)
-absolute path to preserve literal names.
-When the current user is LocalSystem, creation and validation require one
-grant for that unique SID, not duplicate grants. Inherited, duplicate, or
-unexpected ACEs and non-full-control grants remain rejected.
-Deprovision removes the selected container but retains
-the shared state root and runtime cache for other containers and later calls.
+the same signed-agent records. MXC requires a protected owner-only DACL
+(current user and Local SYSTEM), rejects unsafe roots and reparse points,
+and prevents path replacement while in use. Set `LOCALAPPDATA` to an absolute
+path without directory components ending in a dot or space, or use an explicit
+verbatim (`\\?\`) absolute path; ambiguous non-verbatim paths are rejected.
+Deprovision removes only the selected container, retaining the shared state
+root and cache for other containers and later calls.
 
 If deprovisioning fails, MXC reports the failure and retains the directory,
 including its location in the error. This preserves the agent's resource
@@ -246,12 +235,11 @@ Windows 25H2 x64. It consumes the same Windows build artifact, including the
 compiled `nvx_e2e` tests and the complete signed bundle; the validation host
 does not rebuild them.
 
-The SDK suite covers the executor, captured and live JSON execution, persistent
-JSON lifecycle operations, caller image selection, filesystem enforcement,
-directional network and proxy enforcement against controlled reachable host
-endpoints, binary stdout/stderr, exit codes, environment and working-directory
-settings, timeouts, capture limits, cleanup, and the seven MicroVM config
-fixtures.
+The SDK suite covers both the executor and captured JSON execution, caller
+image selection, filesystem enforcement, directional network and proxy
+enforcement against controlled reachable host endpoints, binary
+stdout/stderr, exit codes, environment and working-directory settings,
+timeouts, capture limits, cleanup, and the seven MicroVM config fixtures.
 An isolated-console scenario interrupts both startup and running execution,
 then verifies that the owned OpenVMM process has terminated and run storage
 has been removed.

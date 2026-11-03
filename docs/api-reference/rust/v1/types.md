@@ -204,19 +204,11 @@ impl From<MxcError> for Error {
 
 `Error` is `#[non_exhaustive]`; use `Error::new` to construct it. The constructor
 sets `details` to `None`. Conversions to and from the internal error preserve
-structured details, including their JSON value type. `Display` omits details
-and `Debug` redacts their contents; explicitly inspect the field when needed,
-and do not log recovery identifiers or other sensitive values.
-The optional payload is boxed so adding context does not enlarge every
-`Result<T, Error>` with an inline JSON value. Use `error.details.as_deref()`
-to borrow its JSON value.
-
-For a MicroVM provision that succeeds before native host-close fails,
-`details.nvxRecovery.sandboxId` retains the provisioned container's ID and
-`details.nvxRecovery.state` records the last-known state, `"provisioned"`. Continue or deprovision through
-Rust `v1::dev` JSON using that ID rather than retrying provision.
-If recovery information accompanies pre-existing primary details, those values
-are retained under `details.primaryDetails`.
+structured details, including their JSON value type. Use
+`error.details.as_deref()` to borrow the value. `Display` omits details and
+`Debug` redacts them; do not log sensitive values. See the
+[MicroVM recovery contract](../../../backends/nvx/nvx.md#output-timeout-and-cleanup)
+for `details.nvxRecovery` and `details.primaryDetails`.
 
 
 ## `mxc_sdk::v1::ErrorCode`
