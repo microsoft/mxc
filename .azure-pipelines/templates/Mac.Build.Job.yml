@@ -113,7 +113,7 @@ jobs:
       displayName: 'Zip binaries for ESRP signing'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
 
-    - task: EsrpCodeSigning@5
+    - task: EsrpCodeSigning@6
       displayName: 'Sign macOS binary (ESRP)'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:
@@ -140,7 +140,7 @@ jobs:
             }
           ]
 
-    - task: EsrpCodeSigning@5
+    - task: EsrpCodeSigning@6
       displayName: 'Notarize macOS binary (ESRP)'
       condition: and(succeeded(), eq(${{ parameters.isOfficialBuild }}, true))
       inputs:
