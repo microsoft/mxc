@@ -386,6 +386,7 @@ WSLC-specific settings go under `wslc` in the JSON config:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `image` | string | `"alpine:latest"` | Container image (DockerHub, GHCR, MCR, etc.) |
+| `targetOs` | string | `"linux"` | Container OS for create-and-run execution. Omit it or use `"linux"`; other values are rejected |
 | `cpuCount` | number | Host default | Number of CPU cores for the container |
 | `memoryMb` | number | Host default | Memory limit in MB |
 | `gpu` | boolean | `false` | Enable GPU passthrough |
