@@ -15,8 +15,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::learning_mode_core::capture_diagnostics::CaptureAnalysis;
 use crate::seatbelt_common::capture_analysis::{
-    parse_stream_line, CaptureMarker, SandboxLogEvent, StreamLine,
+    parse_stream_line, CaptureAnalyzer, CaptureMarker, StreamLine,
 };
 use crate::seatbelt_common::seatbelt_runner::apply_profile_before_exec;
 
@@ -34,26 +35,28 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MARKER_RETRY: Duration = Duration::from_millis(250);
 const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: u64 = 4 * 1024;
-/// Upper bounds on retained raw events; later events only set the truncation flag.
-pub(crate) const MAX_CAPTURED_EVENTS: usize = 100_000;
-pub(crate) const MAX_CAPTURED_BYTES: usize = 16 * 1024 * 1024;
 
-/// Raw events collected for one run.
-#[derive(Debug, Default)]
+/// What one run's `log stream` produced.
 pub(crate) struct CollectedEvents {
-    pub(crate) events: Vec<SandboxLogEvent>,
-    pub(crate) events_truncated: bool,
+    analyzer: CaptureAnalyzer,
+    /// An oversized line was skipped.
+    lines_skipped: bool,
     /// False when the closing marker was not seen, so late events may be missing.
     pub(crate) drained: bool,
     /// Why the trace file stopped being written, if it did.
     pub(crate) trace_error: Option<String>,
 }
 
+impl CollectedEvents {
+    pub(crate) fn into_analysis(self) -> CaptureAnalysis {
+        self.analyzer.finish(self.lines_skipped || !self.drained)
+    }
+}
+
 #[derive(Default)]
 struct State {
-    events: Vec<SandboxLogEvent>,
-    stored_bytes: usize,
-    events_truncated: bool,
+    analyzer: CaptureAnalyzer,
+    lines_skipped: bool,
     trace_error: Option<String>,
     ready: bool,
     done: bool,
@@ -172,8 +175,8 @@ impl DenialCollector {
         let drained = drained.map_err(|error| with_log_stderr(error, &stderr))?;
         let mut state = self.shared.lock();
         Ok(CollectedEvents {
-            events: std::mem::take(&mut state.events),
-            events_truncated: state.events_truncated,
+            analyzer: std::mem::take(&mut state.analyzer),
+            lines_skipped: state.lines_skipped,
             drained,
             trace_error: state.trace_error.take(),
         })
@@ -253,7 +256,7 @@ fn read_stream(
             if !line.ends_with(b"\n") && skip_line(&mut reader).is_err() {
                 break;
             }
-            shared.lock().events_truncated = true;
+            shared.lock().lines_skipped = true;
             continue;
         }
         if let Some(writer) = trace.as_mut() {
@@ -267,17 +270,7 @@ fn read_stream(
         match parsed {
             StreamLine::Marker(CaptureMarker::Ready) => state.ready = true,
             StreamLine::Marker(CaptureMarker::Done) => state.done = true,
-            StreamLine::Event(event) => {
-                let size = event.message.len() + event.timestamp.as_ref().map_or(0, String::len);
-                if state.events.len() < MAX_CAPTURED_EVENTS
-                    && state.stored_bytes + size <= MAX_CAPTURED_BYTES
-                {
-                    state.stored_bytes += size;
-                    state.events.push(event);
-                } else {
-                    state.events_truncated = true;
-                }
-            }
+            StreamLine::Event(event) => state.analyzer.add(&event),
             StreamLine::Ignored => continue,
         }
         shared.changed.notify_all();
@@ -355,31 +348,52 @@ mod tests {
         let input = format!("{}\n{event}\n", "a".repeat(MAX_LINE_BYTES * 2));
         let shared = Shared::default();
         read_stream(std::io::Cursor::new(input), tag, &shared, None::<Vec<u8>>);
-        let state = shared.lock();
-        assert!(state.events_truncated);
-        assert_eq!(state.events.len(), 1);
+        let mut state = shared.lock();
+        assert!(state.lines_skipped);
         assert!(state.ended);
+        assert_eq!(
+            std::mem::take(&mut state.analyzer)
+                .finish(false)
+                .denials
+                .len(),
+            1
+        );
     }
 
     #[test]
-    fn byte_budget_stops_storing_but_keeps_reading() {
-        let tag = "mxc-capture-bytetest";
-        let path = format!("/{}", "p".repeat(60 * 1024));
-        let event = serde_json::json!({
-            "eventMessage": format!("Sandbox: cat(7) deny(1) file-read-data {path}\n{tag}"),
-        });
+    fn repeats_are_counted_without_truncating() {
+        const REPEATS: u64 = 150_000;
+        let tag = "mxc-capture-repeattest";
+        let report = |path: &str| {
+            serde_json::json!({
+                "eventMessage": format!("Sandbox: cat(7) deny(1) file-read-data {path}\n{tag}"),
+            })
+            .to_string()
+        };
         let done = serde_json::json!({
             "eventMessage": format!("Sandbox: ls(8) deny(1) file-read-metadata /private/var/empty\n{tag}:done"),
         });
-        let lines = MAX_CAPTURED_BYTES / (60 * 1024) + 2;
-        let input = format!("{}{done}\n", format!("{event}\n").repeat(lines));
+        let input = format!(
+            "{}{}\n{done}\n",
+            format!("{}\n", report("/flood")).repeat(REPEATS as usize),
+            report("/late"),
+        );
         let shared = Shared::default();
         read_stream(std::io::Cursor::new(input), tag, &shared, None::<Vec<u8>>);
-        let state = shared.lock();
-        assert!(state.events_truncated);
-        assert!(state.events.len() < lines);
-        assert!(state.stored_bytes <= MAX_CAPTURED_BYTES);
-        assert!(state.done, "reading continues past the budget");
+        let mut state = shared.lock();
+        assert!(state.done);
+        let analysis = std::mem::take(&mut state.analyzer).finish(false);
+        let resources: Vec<_> = analysis
+            .denials
+            .iter()
+            .map(|d| d.resource.as_str())
+            .collect();
+        assert_eq!(resources, ["/flood", "/late"]);
+        assert!(!analysis.denied_resources_truncated);
+        assert_eq!(
+            analysis.network_verbose_logging.total_occurrences,
+            REPEATS + 1
+        );
     }
 
     #[test]
@@ -418,13 +432,12 @@ mod tests {
 
         let collected = collector.finish().unwrap();
         assert!(collected.drained);
+        let denials = collected.into_analysis().denials;
         assert!(
-            collected.events.iter().any(|event| event
-                .message
-                .contains("deny(1) file-read-data /private/etc/hosts")
-                || event.message.contains("deny(1) file-read-data /etc/hosts")),
-            "events: {:?}",
-            collected.events
+            denials
+                .iter()
+                .any(|d| d.resource == "/private/etc/hosts" || d.resource == "/etc/hosts"),
+            "denials: {denials:?}"
         );
     }
 }

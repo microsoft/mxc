@@ -48,7 +48,6 @@ use crate::mxc_common::validator::{
 };
 use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 
-use crate::seatbelt_common::capture_analysis::analyze_events;
 #[cfg(test)]
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
@@ -699,13 +698,11 @@ impl SeatbeltSandboxProcess {
                     .to_string(),
             );
         }
-        // An undrained stream may have dropped late events.
-        let analysis = analyze_events(
-            &collected.events,
-            collected.events_truncated || !collected.drained,
-        );
-        let pointer =
-            write_capture_denials_document(analysis, exit_code.unwrap_or(-1), output_path)?;
+        let pointer = write_capture_denials_document(
+            collected.into_analysis(),
+            exit_code.unwrap_or(-1),
+            output_path,
+        )?;
         let mut output = CaptureDenialsOutput::from(pointer);
         output.etl_path = trace_path.map(|path| path.to_string_lossy().into_owned());
         self.output_metadata = Some(SandboxOutputMetadata {

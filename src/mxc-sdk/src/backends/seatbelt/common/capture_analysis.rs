@@ -306,25 +306,24 @@ impl VerboseRecorder {
     }
 }
 
-/// Builds the run's denials and verbose diagnostics from collected reports.
+/// Builds the run's denials and verbose diagnostics one report at a time, so
+/// memory grows with unique denials and verbose groups, not with repeats.
 ///
 /// Reports tagged with the run tag are denials (block mode) or would-be
 /// denials (allow mode). `:grant` reports show use of a broad guiAccess grant
 /// and appear only in the verbose document.
-pub(crate) fn analyze_events(
-    events: &[SandboxLogEvent],
-    events_truncated: bool,
-) -> CaptureAnalysis {
-    let mut denials = Vec::new();
-    let mut seen = HashSet::new();
-    // Missing events may hide denials, so the report must not claim completeness.
-    let mut denied_resources_truncated = events_truncated;
-    let mut recorder = VerboseRecorder::default();
-    recorder.summary.processed_events_truncated = events_truncated;
+#[derive(Default)]
+pub(crate) struct CaptureAnalyzer {
+    denials: Vec<DeniedResource>,
+    seen: HashSet<(String, AccessType)>,
+    denied_resources_truncated: bool,
+    recorder: VerboseRecorder,
+}
 
-    for event in events {
+impl CaptureAnalyzer {
+    pub(crate) fn add(&mut self, event: &SandboxLogEvent) {
         let Some(report) = parse_report(&event.message) else {
-            denied_resources_truncated = true;
+            self.denied_resources_truncated = true;
             let signature = CaptureVerboseLoggingSignature {
                 provider: CaptureVerboseLoggingProvider::Seatbelt,
                 provider_guid: SEATBELT_PROVIDER_ID.to_string(),
@@ -339,8 +338,8 @@ pub(crate) fn analyze_events(
                 network_endpoint: None,
                 properties: Vec::new(),
             };
-            recorder.record(signature, 1);
-            continue;
+            self.recorder.record(signature, 1);
+            return;
         };
         let noise = target_path(report.target).is_some_and(|path| NOISE_TARGETS.contains(&path));
         if report.grant || noise {
@@ -349,8 +348,8 @@ pub(crate) fn analyze_events(
                 CaptureVerboseLoggingOutcomeReason::NotActionable,
                 None,
             );
-            recorder.record(signature, report.occurrences);
-            continue;
+            self.recorder.record(signature, report.occurrences);
+            return;
         }
 
         let (resource_type, access_type, resource) = classify(report.operation, report.target);
@@ -359,17 +358,17 @@ pub(crate) fn analyze_events(
             CaptureVerboseLoggingOutcomeReason::Actionable,
             Some((resource_type, access_type)),
         );
-        recorder.record(signature, report.occurrences);
-        if seen.contains(&(resource.clone(), access_type)) {
-            continue;
+        self.recorder.record(signature, report.occurrences);
+        if self.seen.contains(&(resource.clone(), access_type)) {
+            return;
         }
-        if denials.len() >= MAX_UNIQUE_DENIALS {
-            denied_resources_truncated = true;
-            recorder.summary.actionable_limit_reached = true;
-            continue;
+        if self.denials.len() >= MAX_UNIQUE_DENIALS {
+            self.denied_resources_truncated = true;
+            self.recorder.summary.actionable_limit_reached = true;
+            return;
         }
-        seen.insert((resource.clone(), access_type));
-        denials.push(DeniedResource {
+        self.seen.insert((resource.clone(), access_type));
+        self.denials.push(DeniedResource {
             resource,
             resource_type,
             access_type,
@@ -378,17 +377,31 @@ pub(crate) fn analyze_events(
         });
     }
 
-    CaptureAnalysis {
-        denials,
-        denied_resources_truncated,
-        verbose_logging: VerboseLoggingSummary::default(),
-        network_verbose_logging: recorder.summary,
+    /// `events_missing` means some reports never reached `add`, so the
+    /// results must not claim to be complete.
+    pub(crate) fn finish(self, events_missing: bool) -> CaptureAnalysis {
+        let mut summary = self.recorder.summary;
+        summary.processed_events_truncated = events_missing;
+        CaptureAnalysis {
+            denials: self.denials,
+            denied_resources_truncated: self.denied_resources_truncated || events_missing,
+            verbose_logging: VerboseLoggingSummary::default(),
+            network_verbose_logging: summary,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn analyze_events(events: &[SandboxLogEvent], events_missing: bool) -> CaptureAnalysis {
+        let mut analyzer = CaptureAnalyzer::default();
+        for event in events {
+            analyzer.add(event);
+        }
+        analyzer.finish(events_missing)
+    }
 
     const TAG: &str = "mxc-capture-0011aa";
 

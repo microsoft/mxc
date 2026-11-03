@@ -19,15 +19,21 @@ LISTENER_PID=""
 # Unfinished background mxc-exec-mac runs, and a workload left by a killed one.
 BACKGROUND_PIDS=""
 ORPHAN_WORKLOAD=""
+# Kills a workload shell and its children without relying on process groups.
+# Stopping the shell first keeps it from starting new children.
+kill_workload() {
+    kill -STOP "$1" 2>/dev/null || return 0
+    pkill -KILL -P "$1" 2>/dev/null
+    kill -KILL "$1" 2>/dev/null
+    return 0
+}
 cleanup_capture() {
     local pid
     for pid in $LISTENER_PID $BACKGROUND_PIDS; do
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
-    if [ -n "$ORPHAN_WORKLOAD" ]; then
-        kill -KILL -- "-$ORPHAN_WORKLOAD" 2>/dev/null || true
-    fi
+    [ -z "$ORPHAN_WORKLOAD" ] || kill_workload "$ORPHAN_WORKLOAD"
     rm -rf "$TESTDIR" "$SEATBELT_TMP"
 }
 trap cleanup_capture EXIT
@@ -96,7 +102,7 @@ finish_background() {
 
 # Wait until background run MXC has a ready collector and its sentinel
 # workload NAME is running. Sets COLLECTOR to the `log stream` PID and
-# WORKLOAD to the workload's process group.
+# WORKLOAD to the workload shell's PID.
 COLLECTOR=""
 WORKLOAD=""
 wait_for_collector() {
@@ -341,28 +347,30 @@ EOF
     pass "$scenario loopback capture reports denied connections, not explicit grants"
 done
 
-# --- byte budget -------------------------------------------------------------
+# --- repeated denials ---------------------------------------------------------
 
-# 40,000 denials of ~1 KB paths: past the 16 MiB budget, under the
-# 100,000-event limit, so only the byte budget can stop storing them.
+# 40,000 denials of ~1 KB paths (10 files read 4,000 times each), then one new
+# denial. Repeats are counted as they arrive, so none of them may push out the
+# late denial or mark the report truncated.
 LONGDIR="$TESTDIR/ungranted/$(/usr/bin/python3 -c 'print("/".join(["d" * 200] * 4))')"
 mkdir -p "$LONGDIR"
-for i in 0 1 2 3 4 5 6 7 8 9; do echo x >"$LONGDIR/f$i"; done
+for name in f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 late; do echo x >"$LONGDIR/$name"; done
 chmod -R a+rX "$TESTDIR/ungranted"
-run_config "$(render seatbelt_capture_denials_byte_budget.json LONGDIR "$LONGDIR" OUTPUT "$TESTDIR/out/budget.json")"
-expect_ok "a run past the byte budget completes" "CAPTURE_BUDGET_LOOP_DONE"
-read_pointer "a run past the byte budget writes a report"
-[ "$(pointer_field deniedResourcesTruncated)" = True ] ||
-    fail "a report past the byte budget is not marked truncated" "$POINTER"
-pass "a report past the byte budget is marked truncated"
-expect_listed "denials stored before the budget are still listed" file "$LONGDIR/f0" read
-/usr/bin/python3 - "${REPORT%.json}.verbose.json" <<'EOF' || fail "the byte budget did not stop storing events" "$(head -c 2000 "${REPORT%.json}.verbose.json")"
+run_config "$(render seatbelt_capture_denials_repeats.json LONGDIR "$LONGDIR" OUTPUT "$TESTDIR/out/repeats.json")"
+expect_ok "a run with heavy repeated denials completes" "CAPTURE_REPEAT_LOOP_DONE"
+read_pointer "a run with heavy repeated denials writes a report"
+[ "$(pointer_field deniedResourcesTruncated)" = False ] ||
+    fail "repeated denials marked the report truncated" "$POINTER"
+pass "repeated denials don't mark the report truncated"
+expect_listed "a repeated denial is listed" file "$LONGDIR/f9" read
+expect_listed "a denial after heavy repeats is still listed" file "$LONGDIR/late" read
+/usr/bin/python3 - "${REPORT%.json}.verbose.json" <<'EOF' || fail "repeated denials were not all counted" "$(head -c 2000 "${REPORT%.json}.verbose.json")"
 import json, sys
 summary = json.load(open(sys.argv[1]))["summary"]
-assert summary["processedEventsTruncated"], summary
-assert 0 < summary["totalOccurrences"] < 40000, summary
+assert not summary["processedEventsTruncated"], summary
+assert summary["totalOccurrences"] >= 40001, summary
 EOF
-pass "the byte budget stops storing events before the event limit"
+pass "every repeated denial is counted"
 rm -f "$REPORT" "${REPORT%.json}.verbose.json"
 
 # --- overlapping runs with the same outputPath ---------------------------------
@@ -424,12 +432,12 @@ expect_collector_gone "the stalled log stream was stopped" "$COLLECTOR"
 render_sentinel killed "30" "$TESTDIR/out/killed.json"
 start_background "$SENTINEL_CONFIG" "$TESTDIR/killed.out"
 wait_for_collector "the run to kill starts" "$BG_PID" killed "$TESTDIR/killed.out"
-# The workload has its own process group and outlives MXC; clean it up here.
+# The workload outlives a killed MXC; clean it up here.
 ORPHAN_WORKLOAD="$WORKLOAD"
 kill -KILL "$BG_PID"
 finish_background "$BG_PID" "$TESTDIR/killed.out"
 expect_collector_gone "killing mxc-exec-mac stops its log stream" "$COLLECTOR"
-kill -KILL -- "-$ORPHAN_WORKLOAD" 2>/dev/null || true
+kill_workload "$ORPHAN_WORKLOAD"
 ORPHAN_WORKLOAD=""
 
 # --- UI denials under guiAccess ---------------------------------------------

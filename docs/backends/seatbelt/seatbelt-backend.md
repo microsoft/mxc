@@ -451,12 +451,13 @@ file.
 
 **Limits**
 
-MXC stores at most 100,000 log events or 16 MiB of them, whichever comes
-first, and skips any log line over 64 KiB. The report lists at most 10,000
-different denials, and the verbose file at most 4,096 groups. After a limit,
-MXC keeps reading `log stream` so it never blocks, and marks the report as
-truncated. The verbose file sets `processedEventsTruncated` when events were
-dropped. The `.seatbelt.log` has no size limit.
+MXC counts repeated denials as they arrive instead of storing each one, so a
+workload that hits the same denial many times doesn't push other denials out
+of the report. The report lists at most 10,000 different denials, and the
+verbose file at most 4,096 groups; extra groups are only counted. MXC skips
+any log line over 64 KiB and sets `processedEventsTruncated` in the verbose
+file. Reaching the 10,000-denial limit or skipping a line marks the report as
+truncated. The `.seatbelt.log` has no size limit.
 
 **Limitations**
 
