@@ -42,7 +42,7 @@ function Assert-ConsentParseExitCodes {
 $expectedBody = @'
 Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
 
-If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability, including a random session ID that links events from the same container lifecycle. MXC does not send your commands, full file paths, credentials, or other customer content.
 '@ -replace "`r`n", "`n"
 
 function Invoke-Maintenance([string]$Action) {
@@ -76,7 +76,7 @@ function Invoke-ConsentRequest([string]$Decision) {
     if (-not $first.prompt -or -not $first.challenge) {
         throw "Unexpected consent presentation: $firstLine"
     }
-    if ($first.prompt.resourceVersion -ne 3 -or
+    if ($first.prompt.resourceVersion -ne 4 -or
         $first.prompt.locale -ne 'en-US' -or
         $first.prompt.title.text -ne 'Help improve Microsoft Products' -or
         $first.prompt.body.text -ne $expectedBody -or
@@ -187,7 +187,7 @@ try {
             consent = $seed
             source = 'smoke-proof'
             promptedMxcVersion = '0.0.0-smoke'
-            promptResourceVersion = 3
+            promptResourceVersion = 4
             promptLocale = 'en-US'
             updatedAtEpoch = 0
         }
