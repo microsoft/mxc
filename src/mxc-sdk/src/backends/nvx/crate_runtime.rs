@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::script_runner::RunCancellation;
-use aci_edge_sandboxes::agent::{AgentBackend, AgentConfig, ImageDigest, SandboxDiagnostics};
+use aci_edge_sandboxes::agent::{AgentBackend, BundledAgent, ImageDigest, SandboxDiagnostics};
 use aci_edge_sandboxes::{
     AciEdgeSandbox, Backend, Capabilities, Error, ErrorCode, ExecIo, ExecOutcome, ExecRequest,
     ImageSource, OutputSink, ProvisionRequest, SandboxId, SandboxSpec,
@@ -122,15 +122,27 @@ pub(super) fn sandbox_spec(image: &str) -> Result<SandboxSpec, MxcError> {
 struct ClientInner {
     backend: Arc<AgentBackend>,
     client: AciEdgeSandbox,
+    _signatures: super::signature_verification::VerifiedBundle,
 }
 
 pub(super) struct NvxClient(Option<ClientInner>);
 
 pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
-    let config = AgentConfig::bundled(state_root).map_err(map_error)?;
+    let bundle = BundledAgent::discover().map_err(map_error)?;
+    let directory = bundle.directory().canonicalize().map_err(|error| {
+        MxcError::backend_unavailable(format!("cannot resolve NVX bundle: {error}"))
+    })?;
+    let bundle = BundledAgent::from_dir(directory).map_err(map_error)?;
+    let signatures = super::signature_verification::verify_bundle(bundle.directory())
+        .map_err(|error| MxcError::backend_unavailable(error.to_string()))?;
+    let config = bundle.config(bundle.setup(state_root));
     let backend = Arc::new(AgentBackend::new(config).map_err(map_error)?);
     let client = AciEdgeSandbox::from_shared(backend.clone());
-    Ok(NvxClient(Some(ClientInner { backend, client })))
+    Ok(NvxClient(Some(ClientInner {
+        backend,
+        client,
+        _signatures: signatures,
+    })))
 }
 
 impl NvxClient {
@@ -395,7 +407,12 @@ impl SandboxClient for NvxClient {
             .map_err(map_error)
     }
     fn close(&mut self) -> Result<(), MxcError> {
-        let Some(ClientInner { backend, client }) = self.0.take() else {
+        let Some(ClientInner {
+            backend,
+            client,
+            _signatures,
+        }) = self.0.take()
+        else {
             return Ok(());
         };
         drop(client);

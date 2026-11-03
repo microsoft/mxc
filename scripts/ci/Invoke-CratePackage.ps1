@@ -150,6 +150,19 @@ if ($VerifyMicrovmTests)
             --no-default-features --features microvm --test nvx_e2e --no-run
         if ($LASTEXITCODE -ne 0) { throw "packaged MicroVM test compilation failed with exit $LASTEXITCODE" }
         Write-Host 'Compiled the MicroVM test target from the extracted mxc-sdk archive.'
+        $signatureOutput = @(cargo test --offline --locked --release --target x86_64-pc-windows-msvc `
+            --manifest-path (Join-Path $extractedPackage 'Cargo.toml') `
+            --target-dir $metadata.target_directory `
+            --no-default-features --features microvm --test nvx_bundle_integrity `
+            -- --exact crate_staged_bundle_opens_and_rejects_an_unverified_library --nocapture 2>&1)
+        $signatureExit = $LASTEXITCODE
+        $signatureOutput | ForEach-Object { Write-Host $_ }
+        if ($signatureExit -ne 0) {
+            throw "packaged NVX signature verification failed with exit $signatureExit"
+        }
+        if (($signatureOutput -join "`n") -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') {
+            throw 'packaged NVX signature verification did not execute its required test'
+        }
     }
     finally
     {

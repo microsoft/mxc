@@ -38,6 +38,22 @@ it because typed V1 does not support MicroVM targeting. The bundle retains the
 NVX release's signatures and pinned hashes; MXC's executable-signing step does
 not modify it.
 
+MXC also checks the Authenticode signatures of `aci_edge_agent.dll`,
+`openvmm.exe`, and `direct-images.exe` during Windows x64 MicroVM builds and
+before opening the runtime. Windows must trust the signatures and identify
+Microsoft Corporation as the publisher. Valid signing timestamps are honoured.
+The existing archive, file-hash and manifest checks remain in place.
+Packaged-crate and staged Windows artifact validation rerun the same signature
+checks without starting a VM.
+
+Signature validation allows certificate-server access for chain and revocation
+checks. An unsigned, modified, untrusted or non-Microsoft binary is rejected;
+an indeterminate trust result is not accepted. Restore the complete official
+bundle and ensure the build or execution host can establish certificate trust.
+Windows-targeted MicroVM builds require a Windows build host for these checks.
+MXC retains read-only file handles while the runtime uses the verified binaries
+to prevent writing or replacing them after validation.
+
 Use the development `1.1.0-alpha` request contract:
 
 ```json

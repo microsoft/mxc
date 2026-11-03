@@ -629,6 +629,7 @@ fn host_loopback_case(ports: [u16; 2], posture: &str, egress: &str) {
             if readiness != json!({"ports": ports, "local": "reached"}) {
                 return Err(format!("invalid guest listener readiness: {readiness}").into());
             }
+            // The pinned nvx-ingress helper settles UDP listeners for one second.
             thread::sleep(Duration::from_millis(1500));
             let payload = format!("H{nonce}");
             let mut reached = [false; 2];

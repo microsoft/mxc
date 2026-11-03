@@ -105,6 +105,8 @@ windows = { workspace = true, features = [
     "UI",
     "Win32_Globalization",
     "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
     "Win32_Security_WinTrust",
     "Win32_System_EventLog",
 ] }
@@ -115,6 +117,13 @@ winreg.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+] }
 winresource = { version = "0.1.31", default-features = false }
 
 [[example]]

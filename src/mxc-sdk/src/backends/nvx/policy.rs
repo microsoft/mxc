@@ -126,8 +126,7 @@ pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcErro
             "NVX does not support processContainer.captureDenials",
         ));
     }
-    validate_process(request)?;
-    Ok(())
+    validate_process(request)
 }
 
 fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
