@@ -23,6 +23,7 @@ pub(crate) struct SymlinkResolution {
     pub(crate) error: Option<std::io::Error>,
 
     /// Each symlink the path passes through, below real directories, with the real path it leads to.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) links: Vec<(PathBuf, PathBuf)>,
 }
 
