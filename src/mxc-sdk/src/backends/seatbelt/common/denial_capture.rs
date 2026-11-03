@@ -35,6 +35,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MARKER_RETRY: Duration = Duration::from_millis(250);
 const MAX_LINE_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: u64 = 4 * 1024;
+pub(crate) const MAX_TRACE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// What one run's `log stream` produced.
 pub(crate) struct CollectedEvents {
@@ -45,6 +46,8 @@ pub(crate) struct CollectedEvents {
     pub(crate) drained: bool,
     /// Why the trace file stopped being written, if it did.
     pub(crate) trace_error: Option<String>,
+    /// The trace reached `MAX_TRACE_BYTES` and later lines were not written.
+    pub(crate) trace_truncated: bool,
 }
 
 impl CollectedEvents {
@@ -58,6 +61,7 @@ struct State {
     analyzer: CaptureAnalyzer,
     lines_skipped: bool,
     trace_error: Option<String>,
+    trace_truncated: bool,
     ready: bool,
     done: bool,
     ended: bool,
@@ -129,6 +133,7 @@ impl DenialCollector {
                     &tag,
                     &shared,
                     trace.map(BufWriter::new),
+                    MAX_TRACE_BYTES,
                 )
             })
         };
@@ -179,6 +184,7 @@ impl DenialCollector {
             lines_skipped: state.lines_skipped,
             drained,
             trace_error: state.trace_error.take(),
+            trace_truncated: state.trace_truncated,
         })
     }
 
@@ -243,8 +249,10 @@ fn read_stream(
     tag: &str,
     shared: &Shared,
     mut trace: Option<impl Write>,
+    trace_limit: u64,
 ) {
     let mut line = Vec::new();
+    let mut trace_bytes = 0u64;
     loop {
         line.clear();
         let limit = MAX_LINE_BYTES as u64 + 1;
@@ -260,9 +268,19 @@ fn read_stream(
             continue;
         }
         if let Some(writer) = trace.as_mut() {
-            if let Err(error) = write_trace_line(writer, &line) {
+            let line_bytes = line.len() as u64 + u64::from(!line.ends_with(b"\n"));
+            if trace_bytes + line_bytes > trace_limit {
+                let mut state = shared.lock();
+                state.trace_truncated = true;
+                if let Err(error) = writer.flush() {
+                    state.trace_error = Some(error.to_string());
+                }
+                trace = None;
+            } else if let Err(error) = write_trace_line(writer, &line) {
                 shared.lock().trace_error = Some(error.to_string());
                 trace = None;
+            } else {
+                trace_bytes += line_bytes;
             }
         }
         let parsed = parse_stream_line(&String::from_utf8_lossy(&line), tag);
@@ -347,7 +365,13 @@ mod tests {
         });
         let input = format!("{}\n{event}\n", "a".repeat(MAX_LINE_BYTES * 2));
         let shared = Shared::default();
-        read_stream(std::io::Cursor::new(input), tag, &shared, None::<Vec<u8>>);
+        read_stream(
+            std::io::Cursor::new(input),
+            tag,
+            &shared,
+            None::<Vec<u8>>,
+            MAX_TRACE_BYTES,
+        );
         let mut state = shared.lock();
         assert!(state.lines_skipped);
         assert!(state.ended);
@@ -379,7 +403,13 @@ mod tests {
             report("/late"),
         );
         let shared = Shared::default();
-        read_stream(std::io::Cursor::new(input), tag, &shared, None::<Vec<u8>>);
+        read_stream(
+            std::io::Cursor::new(input),
+            tag,
+            &shared,
+            None::<Vec<u8>>,
+            MAX_TRACE_BYTES,
+        );
         let mut state = shared.lock();
         assert!(state.done);
         let analysis = std::mem::take(&mut state.analyzer).finish(false);
@@ -407,9 +437,44 @@ mod tests {
             tag,
             &shared,
             Some(&mut trace),
+            MAX_TRACE_BYTES,
         );
         assert_eq!(String::from_utf8(trace).unwrap(), format!("{input}\n"));
         assert!(shared.lock().trace_error.is_none());
+        assert!(!shared.lock().trace_truncated);
+    }
+
+    #[test]
+    fn trace_stops_at_limit_but_analysis_continues() {
+        let tag = "mxc-capture-tracelimit";
+        let report = |path: &str| {
+            serde_json::json!({
+                "eventMessage": format!("Sandbox: cat(7) deny(1) file-read-data {path}\n{tag}"),
+            })
+            .to_string()
+        };
+        let first = report("/first");
+        let input = format!("{first}\n{}\n", report("/second"));
+        let shared = Shared::default();
+        let mut trace = Vec::new();
+        read_stream(
+            std::io::Cursor::new(input),
+            tag,
+            &shared,
+            Some(&mut trace),
+            first.len() as u64 + 1,
+        );
+        assert_eq!(String::from_utf8(trace).unwrap(), format!("{first}\n"));
+        let mut state = shared.lock();
+        assert!(state.trace_truncated);
+        assert!(state.trace_error.is_none());
+        let analysis = std::mem::take(&mut state.analyzer).finish(false);
+        let resources: Vec<_> = analysis
+            .denials
+            .iter()
+            .map(|d| d.resource.as_str())
+            .collect();
+        assert_eq!(resources, ["/first", "/second"]);
     }
 
     #[test]

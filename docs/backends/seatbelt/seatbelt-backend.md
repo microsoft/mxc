@@ -457,7 +457,8 @@ of the report. The report lists at most 10,000 different denials, and the
 verbose file at most 4,096 groups; extra groups are only counted. MXC skips
 any log line over 64 KiB and sets `processedEventsTruncated` in the verbose
 file. Reaching the 10,000-denial limit or skipping a line marks the report as
-truncated. The `.seatbelt.log` has no size limit.
+truncated. MXC stops writing `.seatbelt.log` at 1 GiB, keeps the file, and
+adds a warning; the report and verbose file are not affected.
 
 **Limitations**
 

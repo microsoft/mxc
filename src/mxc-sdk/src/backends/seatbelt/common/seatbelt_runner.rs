@@ -51,7 +51,7 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 #[cfg(test)]
 use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
-use crate::seatbelt_common::denial_capture::{CollectedEvents, DenialCollector};
+use crate::seatbelt_common::denial_capture::{CollectedEvents, DenialCollector, MAX_TRACE_BYTES};
 #[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
 use crate::seatbelt_common::profile_builder::{build_profile_with_terminals, ProfileError};
@@ -697,6 +697,14 @@ impl SeatbeltSandboxProcess {
                  received; denials.json may be incomplete"
                     .to_string(),
             );
+        }
+        if let (true, Some(path)) = (collected.trace_truncated, trace_path) {
+            self.capture_warnings.push(format!(
+                "Seatbelt captureDenials stopped writing trace file {} at its {} GiB limit; \
+                 the denial report is not affected",
+                path.display(),
+                MAX_TRACE_BYTES >> 30
+            ));
         }
         let pointer = write_capture_denials_document(
             collected.into_analysis(),
