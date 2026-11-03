@@ -135,32 +135,47 @@ pub enum ContainerFirewall {
     Absent,
 }
 
-/// Drop Network capabilities for sandboxing purposes.
 #[cfg(target_os = "linux")]
-fn confine_network_capabilities(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
+fn create_capability_helper_memfd() -> Result<std::fs::File, String> {
+    use nix::fcntl::{fcntl, FcntlArg, SealFlag};
+    use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+    use std::fs::{File, Permissions};
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::PermissionsExt;
 
-    // `libc` does not export these; the values are from linux/capability.h.
-    const CAP_NET_ADMIN: libc::c_ulong = 12;
-    const CAP_NET_RAW: libc::c_ulong = 13;
+    const HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lxc-capability-helper"));
 
-    // SAFETY: `pre_exec` runs between fork and exec, where only
-    // async-signal-safe work is permitted.  `prctl` is a bare syscall, and this
-    // closure allocates nothing and captures nothing.
-    unsafe {
-        command.pre_exec(|| {
-            // Drop CAP_NET_ADMIN and CAP_NET_RAW from the bounding set.
-            if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_ADMIN, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
+    let descriptor = memfd_create(
+        c"mxc-lxc-capabilities",
+        MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING,
+    )
+    .map_err(|error| format!("Failed to create LXC capability helper: {error}"))?;
+    let mut helper = File::from(descriptor);
+    if helper.as_raw_fd() < 3 {
+        let descriptor = fcntl(helper.as_raw_fd(), FcntlArg::F_DUPFD_CLOEXEC(3))
+            .map_err(|error| format!("Failed to move LXC capability helper descriptor: {error}"))?;
 
-            if libc::prctl(libc::PR_CAPBSET_DROP, CAP_NET_RAW, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-
-            Ok(())
-        });
+        // SAFETY: F_DUPFD_CLOEXEC returned a new descriptor owned by this file.
+        helper = unsafe { File::from_raw_fd(descriptor) };
     }
+    helper
+        .write_all(HELPER)
+        .map_err(|error| format!("Failed to write LXC capability helper: {error}"))?;
+    helper
+        .set_permissions(Permissions::from_mode(0o555))
+        .map_err(|error| format!("Failed to make LXC capability helper executable: {error}"))?;
+    fcntl(
+        helper.as_raw_fd(),
+        FcntlArg::F_ADD_SEALS(
+            SealFlag::F_SEAL_WRITE
+                | SealFlag::F_SEAL_GROW
+                | SealFlag::F_SEAL_SHRINK
+                | SealFlag::F_SEAL_SEAL,
+        ),
+    )
+    .map_err(|error| format!("Failed to seal LXC capability helper: {error}"))?;
+    Ok(helper)
 }
 
 /// A `/etc/hosts` helper emits one `mxc:` diagnostic line, so this is far above
@@ -555,17 +570,8 @@ impl LxcContainer {
         // inner shell would ignore Ctrl-C.
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
-        let mut cmd = self.lxc_command("lxc-attach");
-        cmd.args(build_attach_args_with_env_control(
-            env,
-            working_directory,
-            command,
-            force_clear_env,
-        ));
-
-        if firewall == ContainerFirewall::Installed {
-            confine_network_capabilities(&mut cmd);
-        }
+        let cmd =
+            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
@@ -615,22 +621,13 @@ impl LxcContainer {
         use crate::mxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
         use std::process::Stdio;
 
-        let mut cmd = self.lxc_command("lxc-attach");
-        cmd.args(build_attach_args_with_env_control(
-            env,
-            working_directory,
-            command,
-            force_clear_env,
-        ));
+        let mut cmd =
+            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         unblock_fatal_signals(&mut cmd);
-
-        if firewall == ContainerFirewall::Installed {
-            confine_network_capabilities(&mut cmd);
-        }
 
         let mut child = cmd
             .spawn()
@@ -713,7 +710,7 @@ impl LxcContainer {
         use std::process::Stdio;
 
         let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall);
+            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -738,7 +735,7 @@ impl LxcContainer {
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
         let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall);
+            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
         let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, UNBLOCK)
             .map_err(|error| format!("Failed to allocate lxc-attach PTY: {error}"))?;
         let mut child = cmd
@@ -795,18 +792,41 @@ impl LxcContainer {
         env: &[String],
         force_clear_env: bool,
         firewall: ContainerFirewall,
-    ) -> std::process::Command {
+    ) -> Result<std::process::Command, String> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+
         let mut cmd = self.lxc_command("lxc-attach");
-        cmd.args(build_attach_args_with_env_control(
-            env,
-            working_directory,
-            command,
-            force_clear_env,
-        ));
+        let mut args =
+            build_attach_args_with_env_control(env, working_directory, command, force_clear_env);
         if firewall == ContainerFirewall::Installed {
-            confine_network_capabilities(&mut cmd);
+            let helper = create_capability_helper_memfd()?;
+            let descriptor = helper.as_raw_fd();
+            let workload = args
+                .iter()
+                .position(|argument| argument == "--")
+                .ok_or("Missing LXC attach workload separator")?
+                + 1;
+            args.splice(
+                workload..workload,
+                [
+                    format!("/proc/self/fd/{descriptor}"),
+                    descriptor.to_string(),
+                ],
+            );
+
+            // SAFETY: The child only clears CLOEXEC on its owned helper descriptor.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fcntl(helper.as_raw_fd(), libc::F_SETFD, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
-        cmd
+        cmd.args(args);
+        Ok(cmd)
     }
 
     /// Stub for the workspace-wide clippy lane that runs on Windows.
@@ -1455,25 +1475,6 @@ mod tests {
         assert!(
             args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
             "PATH must survive; got {args:?}"
-        );
-    }
-
-    // The attach paths confine the workload only when chains are installed:
-    // dropping a capability is privileged, so applying it to every run costs an
-    // unprivileged caller the whole execution.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn confining_a_command_takes_a_privilege_an_unprivileged_caller_lacks() {
-        // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
-        let running_as_root = unsafe { libc::geteuid() } == 0;
-
-        let mut confined = std::process::Command::new("/bin/true");
-        confine_network_capabilities(&mut confined);
-
-        assert_eq!(
-            confined.status().is_ok(),
-            running_as_root,
-            "a confined command must spawn only for a caller holding CAP_SETPCAP"
         );
     }
 

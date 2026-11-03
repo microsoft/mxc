@@ -24,6 +24,9 @@ Creates an LXC container to provide:
 
 - Linux kernel >= 2.6.32, or >= 3.12 to run unprivileged
 - LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime)
+- Building from source also requires a C compiler and Linux system headers.
+  The capability helper is embedded in MXC; container images need no
+  additional compiler or runtime libraries.
 - Root privileges, or [unprivileged LXC](#running-without-root) for a policy
   that asks for no network.
   Filtering egress or ingress installs iptables rules in the container's
@@ -346,6 +349,7 @@ These failures carry the `backend_error` code and exit `-1`.
   ICMP type through the firewall, but the command MXC runs can originate only Echo
   requests, the ones `ping` sends.
 - **The network restrictions bind only the command MXC runs and its children.**
+  This applies to both privileged and unprivileged containers.
   MXC takes away that command's ability to change the firewall or send raw
   packets, but the container's init process (PID 1) keeps both.  The command
   runs as root inside the container, so it can ask init to start a new process,
