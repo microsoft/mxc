@@ -360,6 +360,9 @@ try {
             throw "Keyword failure scenario for $version did not reach backend dispatch: $failureOutput"
         }
     }
+    # The expected-failure runs above leave a nonzero exit code that a
+    # dot-sourcing caller (CI) would otherwise report as the script's result.
+    $global:LASTEXITCODE = 0
     Write-Host 'PASS: paired keyword failure scenarios reach real CLI/backend rejection without enabling telemetry'
 } finally {
     for ($i = 0; $i -lt $overrideNames.Count; $i++) {
