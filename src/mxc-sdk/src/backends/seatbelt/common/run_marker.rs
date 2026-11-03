@@ -75,16 +75,10 @@ pub(super) struct RunMarker {
 
 impl RunMarker {
     pub(super) fn new() -> std::io::Result<Self> {
-        let mut bytes = [0u8; 16];
-        getrandom::getrandom(&mut bytes).map_err(|error| {
-            std::io::Error::other(format!("Seatbelt: failed to create a run marker: {error}"))
-        })?;
-        let nonce: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let marker = format!("com.microsoft.mxc.run.{nonce}");
-        let control = format!("{marker}.control");
+        // Two independent names, so no wildcard rule can allow one and deny the other.
         Ok(Self {
-            marker: CString::new(marker).map_err(std::io::Error::other)?,
-            control: CString::new(control).map_err(std::io::Error::other)?,
+            marker: random_service_name()?,
+            control: random_service_name()?,
         })
     }
 
@@ -174,6 +168,15 @@ impl RunMarker {
     }
 }
 
+fn random_service_name() -> std::io::Result<CString> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        std::io::Error::other(format!("Seatbelt: failed to create a run marker: {error}"))
+    })?;
+    let nonce: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    CString::new(format!("com.microsoft.mxc.run.{nonce}")).map_err(std::io::Error::other)
+}
+
 fn signal(mut token: AuditToken, signal: libc::c_int, first_error: &mut Option<std::io::Error>) {
     // SAFETY: libproc checks the token's pid version when it looks up the
     // process, so a reused pid is never signalled.
@@ -217,22 +220,119 @@ fn process_audit_token(pid: libc::pid_t) -> std::io::Result<Option<AuditToken>> 
 }
 
 fn list_all_pids() -> std::io::Result<Vec<libc::pid_t>> {
+    const ATTEMPTS: usize = 8;
+
+    // libproc returns 0, not -1, on failure. The list always includes this
+    // process, so 0 can only mean failure.
+    let listing_failed = || {
+        let error = std::io::Error::last_os_error();
+        std::io::Error::new(
+            error.kind(),
+            format!("Seatbelt: failed to list processes: {error}"),
+        )
+    };
     // SAFETY: a null buffer asks libproc for the current process count.
     let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
-    if count < 0 {
-        return Err(std::io::Error::last_os_error());
+    if count <= 0 {
+        return Err(listing_failed());
     }
-    let mut pids = vec![0; count as usize + 128];
-    let buffer_size = pids
-        .len()
-        .checked_mul(std::mem::size_of::<libc::pid_t>())
-        .and_then(|size| libc::c_int::try_from(size).ok())
-        .ok_or_else(|| std::io::Error::other("macOS process list is too large"))?;
-    // SAFETY: `pids` is writable for exactly `buffer_size` bytes.
-    let listed = unsafe { proc_listallpids(pids.as_mut_ptr().cast::<libc::c_void>(), buffer_size) };
-    if listed < 0 {
-        return Err(std::io::Error::last_os_error());
+    let mut capacity = count as usize + 128;
+    for _ in 0..ATTEMPTS {
+        let mut pids = vec![0; capacity];
+        let buffer_size = pids
+            .len()
+            .checked_mul(std::mem::size_of::<libc::pid_t>())
+            .and_then(|size| libc::c_int::try_from(size).ok())
+            .ok_or_else(|| std::io::Error::other("macOS process list is too large"))?;
+        // SAFETY: `pids` is writable for exactly `buffer_size` bytes.
+        let listed =
+            unsafe { proc_listallpids(pids.as_mut_ptr().cast::<libc::c_void>(), buffer_size) };
+        if listed <= 0 {
+            return Err(listing_failed());
+        }
+        // A full buffer may have dropped processes; retry with more room.
+        if (listed as usize) < capacity {
+            pids.truncate(listed as usize);
+            return Ok(pids);
+        }
+        capacity *= 2;
     }
-    pids.truncate((listed as usize).min(pids.len()));
-    Ok(pids)
+    Err(std::io::Error::other(
+        "Seatbelt: the process list kept growing while it was being read",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Child, Command};
+
+    fn sandboxed_sleep(rules: &str) -> Child {
+        let profile = format!("(version 1)\n(allow default)\n{rules}");
+        Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/sleep", "30"])
+            .spawn()
+            .expect("start sandbox-exec")
+    }
+
+    fn token(child: &Child) -> AuditToken {
+        process_audit_token(child.id() as libc::pid_t)
+            .unwrap()
+            .expect("process is running")
+    }
+
+    fn wait_until_sandboxed(child: &Child) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // SAFETY: the token is passed by value and no filter argument is needed.
+        while unsafe {
+            sandbox_check_by_audit_token(token(child), std::ptr::null(), SANDBOX_FILTER_NONE)
+        } != 1
+        {
+            assert!(
+                Instant::now() < deadline,
+                "sandbox-exec never applied its profile"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn kill_members_kills_only_this_runs_processes() {
+        let run = RunMarker::new().unwrap();
+        let mut member = sandboxed_sleep(&run.profile_rules());
+        let mut other_run = sandboxed_sleep(&RunMarker::new().unwrap().profile_rules());
+        let mut lookalike = sandboxed_sleep(
+            "(allow mach-lookup (global-name-prefix \"com.microsoft.mxc.run.\"))\n\
+             (deny mach-lookup (global-name-regex #\"\\.control$\"))\n",
+        );
+        for child in [&member, &other_run, &lookalike] {
+            wait_until_sandboxed(child);
+        }
+
+        let result = run.kill_members(Duration::from_secs(5));
+        let other_running = other_run.try_wait().unwrap().is_none();
+        let lookalike_running = lookalike.try_wait().unwrap().is_none();
+        let _ = other_run.kill();
+        let _ = lookalike.kill();
+        let _ = other_run.wait();
+        let _ = lookalike.wait();
+
+        result.unwrap();
+        assert!(
+            !member.wait().unwrap().success(),
+            "this run's process was not killed"
+        );
+        assert!(other_running, "another run's process was killed");
+        assert!(
+            lookalike_running,
+            "a wildcard profile was treated as this run"
+        );
+    }
+
+    #[test]
+    fn list_all_pids_includes_this_process() {
+        // SAFETY: `getpid` has no preconditions.
+        let current_pid = unsafe { libc::getpid() };
+        assert!(list_all_pids().unwrap().contains(&current_pid));
+    }
 }

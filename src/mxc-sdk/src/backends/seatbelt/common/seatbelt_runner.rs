@@ -290,12 +290,17 @@ fn spawn_exec(
             (out_result, err_result) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = marker.kill_members(CLEANUP_TIMEOUT);
                 let error = out_result.err().or(err_result.err());
-                return Err(launch_failed_response(format!(
+                let mut message = format!(
                     "Seatbelt: failed to wrap stdio pipes: {}",
                     error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
-                )));
+                );
+                if let Err(cleanup) = marker.kill_members(CLEANUP_TIMEOUT) {
+                    message.push_str(&format!(
+                        "; processes it started could not be terminated: {cleanup}"
+                    ));
+                }
+                return Err(launch_failed_response(message));
             }
         };
 
@@ -314,6 +319,7 @@ fn spawn_exec(
         termination_error: None,
         marker,
         members_cleaned: false,
+        cleanup_failures: Vec::new(),
     }))
 }
 
@@ -345,9 +351,15 @@ struct SeatbeltSandboxProcess {
     marker: RunMarker,
     /// The run's remaining processes were killed after the child exited.
     members_cleaned: bool,
+    /// Reported through `warnings()`, so the exit code is kept.
+    cleanup_failures: Vec<String>,
 }
 
 impl SandboxProcess for SeatbeltSandboxProcess {
+    fn warnings(&self) -> Vec<String> {
+        self.cleanup_failures.clone()
+    }
+
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         if let Some(pty) = self.pty.as_ref() {
             let stdio = pty.take_native_stdio()?;
@@ -457,8 +469,8 @@ impl SandboxProcess for SeatbeltSandboxProcess {
                 "Seatbelt: process timed out",
             ));
         }
+        // Status only; `wait`, `kill`, and drop clean up the run.
         if let Some(status) = self.child.try_wait()? {
-            self.clean_up_after_exit()?;
             return Ok(Some(status.code().unwrap_or(-1)));
         }
         if self
@@ -487,9 +499,11 @@ impl SandboxProcess for SeatbeltSandboxProcess {
 
     fn kill(&mut self) -> std::io::Result<()> {
         // Only signal the child while it is unreaped; a reaped pid can be reused.
-        let child_result = match self.child.try_wait()? {
-            Some(_) => Ok(()),
-            None => self.child.kill(),
+        // The marker scan still reaches the child if its status is unknown.
+        let child_result = match self.child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => self.child.kill(),
+            Err(error) => Err(error),
         };
         let members_result = self.marker.kill_members(CLEANUP_TIMEOUT);
         child_result.and(members_result)
@@ -555,9 +569,10 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             ))
         } else {
             match wait_with_timeout(&mut self.child, remaining_timeout) {
-                Ok(status) => self
-                    .clean_up_after_exit()
-                    .map(|()| status.code().unwrap_or(-1)),
+                Ok(status) => {
+                    self.clean_up_after_exit();
+                    Ok(status.code().unwrap_or(-1))
+                }
                 Err(WaitError::Timeout) => {
                     if let Err(error) = self.kill_for_timeout() {
                         let error =
@@ -593,19 +608,19 @@ impl SandboxProcess for SeatbeltSandboxProcess {
 }
 
 impl SeatbeltSandboxProcess {
-    /// Kills what the run left running once its child has exited.
-    fn clean_up_after_exit(&mut self) -> std::io::Result<()> {
+    /// Kills what the run left running once its child has exited. A failure
+    /// becomes a warning so the caller still gets the exit code.
+    fn clean_up_after_exit(&mut self) {
         if self.members_cleaned {
-            return Ok(());
+            return;
         }
-        self.marker.kill_members(CLEANUP_TIMEOUT).map_err(|error| {
-            std::io::Error::other(format!(
-                "Seatbelt: the process exited, but processes it started could not be \
-                     terminated: {error}"
-            ))
-        })?;
         self.members_cleaned = true;
-        Ok(())
+        if let Err(error) = self.marker.kill_members(CLEANUP_TIMEOUT) {
+            self.cleanup_failures.push(format!(
+                "Seatbelt: the process exited, but processes it started could not be \
+                 terminated: {error}"
+            ));
+        }
     }
 }
 

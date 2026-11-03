@@ -461,14 +461,17 @@ still running, so nothing the run started outlives it. This includes:
   `spawn(..., { detached: true })` child, which calls `setsid()`
 - processes whose parent has already exited
 
+A status check (`try_wait`, `TryGetExitCode`) only reports the exit. Cleanup
+runs when you wait, kill, or release the process handle.
+
 ### How MXC finds the run's processes
 
-Each run gets a unique ID. MXC adds two rules for it to the end of the run's
+Each run gets two random IDs. MXC adds a rule for each to the end of the run's
 profile:
 
 ```scheme
-(allow mach-lookup (global-name "com.microsoft.mxc.run.<id>"))
-(deny mach-lookup (global-name "com.microsoft.mxc.run.<id>.control"))
+(allow mach-lookup (global-name "com.microsoft.mxc.run.<id1>"))
+(deny mach-lookup (global-name "com.microsoft.mxc.run.<id2>"))
 ```
 
 Every process in the run inherits the profile and cannot remove it. To clean
@@ -489,8 +492,9 @@ running without special privileges.
 
 - A scan cannot prove that nothing is left. A run that keeps starting very
   short-lived processes can occasionally slip one past a scan.
-- If new processes are still appearing after 5 seconds, MXC stops, and the
-  wait or kill call reports an error instead of an exit code.
+- If new processes are still appearing after 5 seconds, MXC stops. After a
+  normal exit, wait still returns the exit code and the failure is listed in
+  the process warnings. After a timeout or kill, the call reports an error.
 - Programs that macOS starts on the workload's behalf, such as an app opened
   with `open` when `guiAccess` is enabled, run outside the sandbox and are not
   part of the run.
