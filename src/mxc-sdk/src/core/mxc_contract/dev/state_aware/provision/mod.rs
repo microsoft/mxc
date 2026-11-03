@@ -13,12 +13,15 @@ pub enum ProvisionRequest {
     IsolationSession(IsolationSessionProvisionRequest),
     /// A Windows Sandbox provision request.
     WindowsSandbox(WindowsSandboxProvisionRequest),
+    /// A MicroVM provision request.
+    MicroVm(MicroVmProvisionRequest),
     /// A WSLC provision request.
     Wslc(WslcProvisionRequest),
 }
 
 mod containment;
 mod isolation_session;
+mod microvm;
 mod windows_sandbox;
 mod wslc;
 
@@ -27,6 +30,9 @@ pub use isolation_session::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
     IsolationSessionProvisionRequest, StateAwareIsolationSession,
+};
+pub use microvm::{
+    MicroVmContainment, MicroVmProvision, MicroVmProvisionRequest, StateAwareMicroVm,
 };
 pub use windows_sandbox::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
 pub use wslc::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};

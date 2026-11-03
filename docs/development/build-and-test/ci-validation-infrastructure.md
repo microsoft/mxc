@@ -177,6 +177,16 @@ Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites ski
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+Bubblewrap, LXC, and WSLC also run the prebuilt
+`mxc-filesystem-probe-tests` executable from their build artifact. These public
+SDK regressions block each policy probe in a subprocess, require a bounded
+path-specific rejection, and check that no workload ran. They cover both shared
+validation and backend-specific deny/mount/overlap probes; WSLC also covers
+container provisioning. LXC mount cases run as root against an empty, stopped
+container in private storage and verify cleanup. The blocked-call hook is test-only. See
+[filesystem probe request deadlines](pull-requests.md#filesystem-probe-request-deadlines)
+for local commands and watchdog behavior.
+
 ProcessContainer's required V1.Dev cases cover capture and bidirectional
 pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
 direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
@@ -241,8 +251,25 @@ get fixed or wired.
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
 | IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, isolated lifecycle ETW capture, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
-| MicroVM | Experimental | Windows 25H2 x64 nightly runs the prebuilt `mxc-sdk/tests/nvx_e2e.rs` suite, including executor config scenarios, captured JSON execution, and real console interruption during startup and execution with VM/state cleanup assertions. Host-only and extracted-crate compilation checks remain in normal Windows x64 PR builds. |
+| MicroVM | Experimental | Windows 25H2 x64 nightly; see [MicroVM validation](#microvm-validation). |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
+
+### MicroVM validation
+
+The nightly job runs the compiled tests from `mxc-sdk/tests/nvx_e2e.rs`.
+They check executor configurations, JSON requests that collect output, image
+selection, file access rules, and network address and port rules. They also
+check that traffic through a proxy works while direct connections are blocked,
+and that interrupting startup or execution removes the VM and its temporary files.
+
+The network tests connect to servers controlled by the test. They check that
+the servers are reachable before and after testing the restrictions, so an
+unavailable server cannot be mistaken for a blocked connection. The host needs
+an IPv4 route through a non-loopback interface to an address outside the guest
+network, `10.0.0.0/24`.
+
+Regular Windows x64 PR builds run checks that do not need a VM. They also
+unpack the Rust crate package and check that its tests compile.
 
 ### ProcessContainer SDK streaming
 

@@ -12,6 +12,30 @@
             "$ref": "#/definitions/OneShotRequest"
           },
           {
+            "else": {
+              "not": {
+                "required": [
+                  "microvm"
+                ]
+              }
+            },
+            "if": {
+              "properties": {
+                "containment": {
+                  "const": "microvm"
+                }
+              },
+              "required": [
+                "containment"
+              ]
+            },
+            "then": {
+              "required": [
+                "microvm"
+              ]
+            }
+          },
+          {
             "else": true,
             "if": {
               "properties": {
@@ -187,11 +211,26 @@
           "then": {
             "else": {
               "else": {
-                "else": false,
+                "else": {
+                  "else": false,
+                  "if": {
+                    "properties": {
+                      "containment": {
+                        "const": "wslc"
+                      }
+                    },
+                    "required": [
+                      "containment"
+                    ]
+                  },
+                  "then": {
+                    "$ref": "#/definitions/WslcProvisionRequest"
+                  }
+                },
                 "if": {
                   "properties": {
                     "containment": {
-                      "const": "wslc"
+                      "const": "microvm"
                     }
                   },
                   "required": [
@@ -199,7 +238,7 @@
                   ]
                 },
                 "then": {
-                  "$ref": "#/definitions/WslcProvisionRequest"
+                  "$ref": "#/definitions/MicroVmProvisionRequest"
                 }
               },
               "if": {
@@ -484,6 +523,11 @@
         }
       ]
     },
+    "ImageReference": {
+      "minLength": 1,
+      "pattern": "^(?:localhost|[^\\s\\x00-\\x1f\\x7f-\\x9f/][^\\s\\x00-\\x1f\\x7f-\\x9f/.]*\\.[^\\s\\x00-\\x1f\\x7f-\\x9f/]+|[^\\s\\x00-\\x1f\\x7f-\\x9f/]+:[0-9]+)/[^/:\\u0040\\s\\x00-\\x1f\\x7f-\\x9f][^\\s\\x00-\\x1f\\x7f-\\x9f]*(?![\\s\\S])",
+      "type": "string"
+    },
     "IsolationSessionContainment": {
       "enum": [
         "isolation_session"
@@ -634,6 +678,66 @@
       "required": [
         "distribution",
         "release"
+      ],
+      "type": "object"
+    },
+    "MicroVmContainment": {
+      "enum": [
+        "microvm"
+      ],
+      "type": "string"
+    },
+    "MicroVmProvision": {
+      "additionalProperties": false,
+      "description": "MicroVM creation settings shared by create-and-run and provision requests.",
+      "properties": {
+        "memoryMib": {
+          "description": "Guest memory in MiB. Zero is rejected by semantic validation.",
+          "maximum": 4294967295,
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "MicroVmProvisionRequest": {
+      "additionalProperties": false,
+      "description": "A complete development provision request for the MicroVM backend.",
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "_comment": true,
+        "containment": {
+          "$ref": "#/definitions/MicroVmContainment"
+        },
+        "filesystem": {
+          "$ref": "#/definitions/Filesystem"
+        },
+        "microvm": {
+          "$ref": "#/definitions/StateAwareMicroVm"
+        },
+        "network": {
+          "$ref": "#/definitions/Network"
+        },
+        "phase": {
+          "$ref": "#/definitions/ProvisionPhase"
+        },
+        "runtimeConfig": {
+          "$ref": "#/definitions/RuntimeConfig"
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry"
+        },
+        "version": {
+          "$ref": "#/definitions/Version"
+        }
+      },
+      "required": [
+        "containment",
+        "microvm",
+        "phase",
+        "version"
       ],
       "type": "object"
     },
@@ -905,6 +1009,24 @@
       },
       "type": "object"
     },
+    "OneShotMicroVm": {
+      "additionalProperties": false,
+      "description": "Creation settings for the development MicroVM backend.",
+      "properties": {
+        "image": {
+          "$ref": "#/definitions/ImageReference",
+          "description": "Image reference including its registry, resolved by the signed NVX agent."
+        },
+        "provision": {
+          "$ref": "#/definitions/MicroVmProvision",
+          "description": "Optional settings applied when creating the MicroVM."
+        }
+      },
+      "required": [
+        "image"
+      ],
+      "type": "object"
+    },
     "OneShotRequest": {
       "additionalProperties": false,
       "description": "A complete one-shot `1.1.0-alpha` configuration request.",
@@ -943,6 +1065,10 @@
         "lxc": {
           "$ref": "#/definitions/Lxc",
           "description": "Optional LXC distribution settings."
+        },
+        "microvm": {
+          "$ref": "#/definitions/OneShotMicroVm",
+          "description": "Required image selection when containment is MicroVM."
         },
         "network": {
           "$ref": "#/definitions/Network",
@@ -1383,6 +1509,24 @@
           "description": "Optional provision-phase settings."
         }
       },
+      "type": "object"
+    },
+    "StateAwareMicroVm": {
+      "additionalProperties": false,
+      "description": "State-aware MicroVM settings.",
+      "properties": {
+        "image": {
+          "$ref": "#/definitions/ImageReference",
+          "description": "Image reference including its registry, fixed for this container's lifetime."
+        },
+        "provision": {
+          "$ref": "#/definitions/MicroVmProvision",
+          "description": "Optional provision-phase settings."
+        }
+      },
+      "required": [
+        "image"
+      ],
       "type": "object"
     },
     "StateAwareWslc": {

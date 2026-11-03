@@ -106,12 +106,17 @@ impl MxcSandbox {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    pub(crate) fn from_live(inner: Box<dyn LiveSandbox>) -> Self {
+        Self { inner }
+    }
+
     pub(crate) fn resize_pty(&self, size: MxcPtySize) -> std::io::Result<()> {
         self.inner.resize_pty(size)
     }
 }
 
-trait LiveSandbox: Send {
+pub(crate) trait LiveSandbox: Send {
     fn warnings(&self) -> Vec<String>;
     fn output_metadata(&self) -> Option<SandboxOutputMetadata>;
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>>;

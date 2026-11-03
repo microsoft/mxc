@@ -76,6 +76,7 @@ zip = { version = "9", default-features = false, features = ["deflate"], optiona
 
 [dev-dependencies]
 filetime = "0.2"
+libloading = "0.8"
 quick-xml.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
@@ -116,3 +117,8 @@ required-features = ["isolation_session"]
 [[example]]
 name = "sta_probe"
 required-features = ["isolation_session"]
+
+[[example]]
+name = "module_lifetime_fixture"
+path = "tests/fixtures/module_lifetime.rs"
+crate-type = ["cdylib"]

@@ -360,7 +360,10 @@ The executor reads its own stdin on a background thread as the command runs,
 so a stdin that never closes does not delay a command that does not read it.
 A command that exits before reading all its input is not an error. If reading
 the executor's stdin fails while the command runs, the executor stops the
-container and reports the run as failed, even when the run also timed out.
+container before the command's stdin is closed, and reports the run as failed,
+even when the run also timed out. If the stop cannot be confirmed, the command's
+stdin stays open until the container is torn down, so the command never reads
+the cut-short input as complete.
 
 A command that exits while a large amount of its input is still unread (more
 than the few hundred KiB the WSLc SDK buffers) completes late: the SDK reports
@@ -622,6 +625,11 @@ requires explicit host-to-container forwards through `wslc.portMappings`
 Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
+
+Create-and-run execution and container lifecycle provisioning use the shared
+[filesystem probe deadlines](../../schema.md#filesystem-probe-timeouts) for
+object identity, delegation, and denied-path overlap checks. A stalled probe
+rejects the request before volumes are created.
 
 ### Working directory (`process.cwd`)
 

@@ -46,5 +46,4 @@ terms, plain-English alternatives, and guidance on naming specific types.
 
 - [Backend support probe API](plans/backend-support-probe-api.md)
 - [Bubblewrap backend feasibility](plans/bubblewrap-backend.md)
-- [Linux and WSL roadmap](plans/linux-wsl-roadmap-june-2026.md)
 - [Nanvix integration](plans/nanvix-integration.md)

@@ -330,6 +330,19 @@ function Invoke-WslcSuites {
     $env:MXC_ENABLE_WSLC_TESTS = '1'
 
     Invoke-NamedSuites -Backend 'wslc' -Suites ([ordered]@{
+        'filesystem probe deadlines' = {
+            $tests = Join-Path $binaryDirectoryPath 'mxc-filesystem-probe-tests.exe'
+            Assert-File -Path $tests
+            $listed = @(& $tests --list --ignored)
+            if ($LASTEXITCODE -ne 0) { throw 'Listing filesystem probe tests failed.' }
+            foreach ($case in 'wslc_launch_rejects_stalled_paths', 'wslc_provision_rejects_stalled_paths',
+                'wslc_overlap_rejects_stalls', 'wslc_provision_overlap_rejects_stalls') {
+                $name = "core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
+                if ($listed -notcontains "${name}: test") { throw "Missing regression: $name" }
+            }
+            & $tests --ignored filesystem_probe::launch_tests:: | Out-Host
+            if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
+        }
         'command line' = {
             $global:LASTEXITCODE = 0
             & (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -WxcExecPath $wxc | Out-Host
@@ -444,9 +457,15 @@ function Invoke-MicroVmTests {
     }
     $scenarios = [ordered]@{
         'facade' = 'VM_EXECUTED facade sequential '
+        'SDK JSON capture' = 'VM_EXECUTED SDK JSON binary capture timeout limit and cleanup'
+        'JSON image and policy' = 'VM_EXECUTED JSON selected-image filesystem '
         'executor' = 'VM_EXECUTED executor sequential '
         'executor configs' = 'VM_EXECUTED executor configs '
         'executor interruption' = 'VM_EXECUTED executor console interruption '
+        'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement'
+        'UDP network rules' = 'VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges'
+        'host-loopback ingress' = 'VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls'
+        'network proxy' = 'VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic'
     }
     foreach ($scenario in $scenarios.Keys) {
         if (-not $output.Contains($scenarios[$scenario])) {

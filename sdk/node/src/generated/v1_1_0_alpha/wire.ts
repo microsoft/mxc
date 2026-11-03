@@ -140,6 +140,8 @@ export interface Filesystem {
 
 export type HyperlightRuntime = "agent" | "python" | "python-shell" | "node" | "bash" | "dotnet-jit";
 
+export type ImageReference = string;
+
 export type IsolationSessionContainment = "isolation_session";
 
 /**
@@ -260,6 +262,34 @@ export interface Lxc {
   release: string;
 }
 
+export type MicroVmContainment = "microvm";
+
+/**
+ * MicroVM creation settings shared by create-and-run and provision requests.
+ */
+export interface MicroVmProvision {
+  /**
+   * Guest memory in MiB. Zero is rejected by semantic validation.
+   */
+  memoryMib?: number;
+}
+
+/**
+ * A complete development provision request for the MicroVM backend.
+ */
+export interface MicroVmProvisionRequest {
+  $schema?: string;
+  _comment?: unknown;
+  containment: MicroVmContainment;
+  filesystem?: Filesystem;
+  microvm: StateAwareMicroVm;
+  network?: Network;
+  phase: ProvisionPhase;
+  runtimeConfig?: RuntimeConfig;
+  telemetry?: Telemetry;
+  version: Version;
+}
+
 /**
  * Network access policy shared by the stable containment backends.
  */
@@ -371,6 +401,20 @@ export interface OneShotHyperlight {
 }
 
 /**
+ * Creation settings for the development MicroVM backend.
+ */
+export interface OneShotMicroVm {
+  /**
+   * Image reference including its registry, resolved by the signed NVX agent.
+   */
+  image: ImageReference;
+  /**
+   * Optional settings applied when creating the MicroVM.
+   */
+  provision?: MicroVmProvision;
+}
+
+/**
  * A complete one-shot `1.1.0-alpha` configuration request.
  */
 export interface OneShotRequest {
@@ -410,6 +454,10 @@ export interface OneShotRequest {
    * Optional LXC distribution settings.
    */
   lxc?: Lxc;
+  /**
+   * Required image selection when containment is MicroVM.
+   */
+  microvm?: OneShotMicroVm;
   /**
    * Optional network policy.
    */
@@ -723,6 +771,20 @@ export interface StateAwareIsolationSession {
 }
 
 /**
+ * State-aware MicroVM settings.
+ */
+export interface StateAwareMicroVm {
+  /**
+   * Image reference including its registry, fixed for this container's lifetime.
+   */
+  image: ImageReference;
+  /**
+   * Optional provision-phase settings.
+   */
+  provision?: MicroVmProvision;
+}
+
+/**
  * State-aware WSLC settings.
  */
 export interface StateAwareWslc {
@@ -979,4 +1041,4 @@ export interface WslcProvisionSessionRequest {
 /**
  * Exact mutable MXC development configuration contract.
  */
-export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;
+export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | MicroVmProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;

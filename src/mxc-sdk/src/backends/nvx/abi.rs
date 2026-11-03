@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::mxc_common::models::{NetworkAction, NetworkProtocol};
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 
 pub(super) const SANDBOX_ABI_VERSION: u32 = 1;
@@ -157,9 +158,144 @@ pub(super) struct RuntimeDigests {
     pub openvmm: String,
 }
 
+// Native message shapes follow the signed agent's JSON contract, not MXC request JSON.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct ProvisionRequest {}
+pub(super) struct ProvisionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem: Option<FilesystemPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_config: Option<RuntimeConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct FilesystemPolicy {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readonly_paths: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readwrite_paths: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied_paths: Vec<PathBuf>,
+}
+
+impl FilesystemPolicy {
+    pub fn is_empty(&self) -> bool {
+        self.readonly_paths.is_empty()
+            && self.readwrite_paths.is_empty()
+            && self.denied_paths.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct RuntimeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct NetworkPolicy {
+    pub egress: EgressPolicy,
+    pub ingress: IngressPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct EgressPolicy {
+    pub default: NetworkAction,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<NetworkRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<NetworkRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct IngressPolicy {
+    pub default: NetworkAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_loopback: Option<NetworkAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct NetworkRule {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub to: Vec<NetworkPeer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<NetworkPort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct NetworkPeer {
+    pub cidr: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct NetworkPort {
+    pub protocol: NetworkProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_port: Option<u16>,
+}
+
+// Read only the advertised capabilities that this adapter uses; other native features
+// remain internal to the agent and do not expand the MXC API.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Capabilities {
+    pub exec: ExecCapabilities,
+    pub network: NetworkCapabilities,
+    pub filesystem: FilesystemCapabilities,
+    #[serde(default)]
+    pub spec: SpecCapabilities,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ExecCapabilities {
+    pub command_line: bool,
+    pub cwd: bool,
+    pub env: bool,
+    pub max_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct NetworkCapabilities {
+    pub egress_allow: bool,
+    pub egress_deny: bool,
+    pub ingress_allow: bool,
+    pub ingress_deny: bool,
+    pub host_loopback_allow: bool,
+    pub host_loopback_deny: bool,
+    pub egress_rules: bool,
+    #[serde(default)]
+    pub network_proxy: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FilesystemCapabilities {
+    pub readonly_paths: bool,
+    pub readwrite_paths: bool,
+    pub denied_paths: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SpecCapabilities {
+    pub image_reference: bool,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -691,6 +827,20 @@ impl AgentLibrary {
         })
     }
 
+    pub fn capabilities(&self, host: u64) -> Result<Capabilities, MxcError> {
+        decode_json(
+            self.query(self.exports.capabilities, host)?,
+            "capability set",
+        )
+    }
+
+    pub fn validate_provision(&self, host: u64, input: &ProvisionInput) -> Result<(), MxcError> {
+        let encoded = encode_json(input)?;
+        self.call_empty("validate_provision", |out, length| unsafe {
+            (self.exports.validate_provision)(host, encoded.as_ptr(), encoded.len(), out, length)
+        })
+    }
+
     pub fn validate_exec(&self, host: u64, request: &ExecRequest) -> Result<(), MxcError> {
         let encoded = encode_json(request)?;
         self.call_empty("validate_exec", |out, length| unsafe {
@@ -856,6 +1006,31 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn omitted_optional_capabilities_never_grant_image_or_proxy_support() {
+        let payload = serde_json::json!({
+            "backend": "agent",
+            "exec": {"commandLine": true, "cwd": true, "env": true, "maxTimeoutMs": null},
+            "network": {
+                "egressAllow": true, "egressDeny": true,
+                "ingressAllow": false, "ingressDeny": true,
+                "hostLoopbackAllow": false, "hostLoopbackDeny": true,
+                "egressRules": true
+            },
+            "filesystem": {"readonlyPaths": true, "readwritePaths": true, "deniedPaths": true}
+        });
+        let capabilities: Capabilities = serde_json::from_value(payload.clone()).unwrap();
+        assert!(!capabilities.spec.image_reference);
+        assert!(!capabilities.network.network_proxy);
+        let mut malformed = payload;
+        malformed["network"]
+            .as_object_mut()
+            .unwrap()
+            .remove("egressRules");
+        let error = serde_json::from_value::<Capabilities>(malformed).unwrap_err();
+        assert_eq!(error.to_string(), "missing field `egressRules`");
+    }
+
+    #[test]
     fn wire_types_round_trip_with_exact_contract_casing() {
         let setup = SetupConfig {
             schema_version: 1,
@@ -877,7 +1052,7 @@ pub(super) mod tests {
         );
 
         let prov = ProvisionInput {
-            request: ProvisionRequest {},
+            request: ProvisionRequest::default(),
             spec: SandboxSpec {
                 image: Some(ImageSource::Reference(
                     "mcr.microsoft.com/azurelinux/base/core:3.0".to_owned(),

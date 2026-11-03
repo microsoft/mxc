@@ -78,7 +78,7 @@ use serde_json::{Map, Value};
 
 use crate::mxc_common::hashing::sha256_hex;
 use crate::mxc_common::models::{
-    ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    ExecutionRequest, IsolationSessionProvisionConfig, MicroVmProvisionConfig, WslcProvisionConfig,
     WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
@@ -166,9 +166,20 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             Value::Object(config)
         }
+        StateAwareOperation::Provision(StateAwareProvision::MicroVm(Some(
+            MicroVmProvisionConfig { image, memory_mib },
+        ))) => {
+            let mut config = Map::new();
+            config.insert("image".into(), Value::String(image.clone()));
+            if let Some(memory_mib) = memory_mib {
+                config.insert("memoryMib".into(), Value::from(*memory_mib));
+            }
+            Value::Object(config)
+        }
         StateAwareOperation::Provision(
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
+            | StateAwareProvision::MicroVm(None)
             | StateAwareProvision::Wslc(None),
         ) => Value::Null,
 
@@ -242,6 +253,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         seatbelt,
         windows_sandbox,
         hyperlight,
+        microvm_image,
+        microvm_memory_mib,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
@@ -262,6 +275,13 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     } = request;
 
     let mut root = Map::new();
+    if let Some(image) = microvm_image {
+        let mut config = serde_json::json!({"image": image});
+        if let Some(memory) = microvm_memory_mib {
+            config["provision"] = serde_json::json!({"memoryMib": memory});
+        }
+        root.insert("microvm".into(), config);
+    }
 
     root.insert(
         "containment".into(),
@@ -516,6 +536,26 @@ mod tests {
         let mut changed = request();
         changed.source_contract = None;
         assert_eq!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
+    fn creation_memory_is_hashed_at_its_permanent_optional_location() {
+        let mut request = request();
+        request.microvm_image = Some("docker.io/library/python:3.12-alpine".to_owned());
+        let absent = policy_projection(&request);
+        assert_eq!(
+            absent["microvm"],
+            serde_json::json!({"image":"docker.io/library/python:3.12-alpine"})
+        );
+        request.microvm_memory_mib = Some(512);
+        let explicit = policy_projection(&request);
+        assert_eq!(
+            explicit["microvm"],
+            serde_json::json!({
+                "image":"docker.io/library/python:3.12-alpine","provision":{"memoryMib":512}
+            })
+        );
+        assert_ne!(absent, explicit);
     }
 
     #[test]

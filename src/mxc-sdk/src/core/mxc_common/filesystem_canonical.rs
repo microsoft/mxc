@@ -177,6 +177,9 @@ pub fn canonicalize_path(_path: &str) -> PathCanonical {
 pub fn canonicalize_allowing_absent_tail(path: &str) -> PathCanonical {
     use std::path::{Component, Path, PathBuf};
 
+    #[cfg(test)]
+    super::filesystem_probe::launch_tests::stall("wslc-overlap", path);
+
     match canonicalize_path(path) {
         PathCanonical::Canonical(resolved) => return PathCanonical::Canonical(resolved),
         PathCanonical::Unknown => return PathCanonical::Unknown,

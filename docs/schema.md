@@ -8,6 +8,7 @@ MXC uses a JSON configuration file. The current stable schema is at
 For development, the schema for version `1.1.0-alpha` at
 [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
+
 For self-contained references to what each supported version accepts, see
 [containment policy language](containment-policy/README.md).
 
@@ -422,6 +423,45 @@ When paths overlap across `readwritePaths` and `deniedPaths`:
 
 Denying a parent does not cancel a more specific child grant. To block the
 child, remove its grant or add the child itself to `deniedPaths`.
+
+#### Filesystem probe timeouts
+
+Bubblewrap, LXC, and WSLC check filesystem policy just before enforcement.
+Listed aliases of the same object are tightened to the most restrictive intent
+(`denied` > `readonly` > `readwrite`), then delegation checks require read access
+for read-only grants and read/write access for writable grants. Missing paths
+are skipped; other access-check failures reject the request. Object identities
+that cannot be determined reject the request when denied paths are present,
+and otherwise produce a warning. These checks do not eliminate races between
+validation and mounting.
+
+Each policy-path probe has a **five-second deadline**, including time waiting
+for a worker. This also covers the parser's advisory existence probes on all
+backends, Bubblewrap and LXC mask-target resolution, and WSLC overlap
+canonicalization (including missing-tail ancestor lookup). A timeout or worker
+failure **rejects startup**, even without denied paths; it never treats the path
+as missing or skips a security check. The error names the path and the failure.
+Ordinary missing-path warnings and returned filesystem-error handling remain
+unchanged. The deadline is internal and independent of `process.timeout`,
+including when script execution has no timeout.
+
+Blocking filesystem calls cannot be cancelled reliably. A timed-out worker may
+remain blocked until the filesystem recovers, but at most **16 probe workers**
+can exist per process. A blocked worker retains its slot; repeated timeouts do
+not create unlimited threads. If all slots are occupied, later probes fail
+within the same deadline. Restore the inaccessible filesystem or restart the
+host process to recover capacity. Workers are reused within each validation
+pass, and Windows probes retain the caller's impersonation identity.
+
+Before starting a probe worker, MXC keeps its containing native library loaded
+for the rest of the process lifetime. Closing a caller's library handle after a
+timeout therefore cannot unload code beneath a blocked worker. If that lifetime
+protection cannot be established, the probe fails without starting a worker.
+
+On Unix, delegation uses the real UID/GID; a root-running LXC executor still
+checks root's access, not a pre-elevation user's access. These deadlines bound
+policy probes, not total sandbox startup, backend mount operations, or workload
+I/O if the filesystem becomes unavailable after validation.
 
 #### Path grants and root directories for Windows BaseContainer
 
