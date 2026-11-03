@@ -122,7 +122,7 @@ until grep -Fq "MXC_INBOUND_PROBE_READY" "$RUN_LOG" 2>/dev/null; do
     WAITED=$((WAITED + 1))
 done
 
-INBOUND_CHAIN="$(sed -n 's/^.*Creating inbound iptables chain: \([^ ]*\).*$/\1/p' "$RUN_LOG" | head -n 1)"
+INBOUND_CHAIN="$(sed -n 's/^.*Verified inbound iptables chain: \([^ ]*\).*$/\1/p' "$RUN_LOG" | head -n 1)"
 [ -n "$INBOUND_CHAIN" ] || fail "no inbound chain was created; there is no default-deny to probe."
 
 NETNS_PID="$(sed -n 's/^.*Container init PID: \([0-9]*\).*$/\1/p' "$RUN_LOG" | head -n 1)"

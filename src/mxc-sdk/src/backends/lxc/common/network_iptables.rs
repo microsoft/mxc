@@ -267,6 +267,19 @@ pub fn ingress_chain_name_for(container_name: &str) -> String {
     chain_name_with_prefix("MXCI-", INGRESS_CHAIN_SLUG_LEN, container_name)
 }
 
+pub(crate) fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub(crate) fn shell_command(binary: &str, args: &[String]) -> String {
+    std::iter::once(binary)
+        .chain(args.iter().map(String::as_str))
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+        + "\n"
+}
+
 fn chain_name_with_prefix(prefix: &str, slug_len: usize, container_name: &str) -> String {
     let digest = sha256(container_name.as_bytes());
     let hash = base32_lower(&digest[..CHAIN_HASH_BYTES]);
@@ -285,6 +298,78 @@ fn chain_name_with_prefix(prefix: &str, slug_len: usize, container_name: &str) -
 }
 
 impl NetworkIptablesManager {
+    pub(crate) fn startup_rules(
+        container_name: &str,
+        policy: &ContainerPolicy,
+        logger: &mut Logger,
+    ) -> Result<(String, String), String> {
+        let chain = chain_name_for(container_name);
+        logger.log_line(&format!("Creating iptables/ip6tables chain: {chain}"));
+        let policy_rules = Self::build_policy_rules_logged(&chain, policy, logger)?;
+        let default_rule =
+            Self::build_default_policy_rule_arg(&chain, Self::effective_default_policy(policy));
+        logger.log_line(&format!(
+            "Default network policy: {}",
+            default_rule.last().map(String::as_str).unwrap_or("ACCEPT")
+        ));
+        let mut ipv4 = String::new();
+        let mut ipv6 = String::new();
+        for (binary, rules, script) in [
+            ("iptables", policy_rules.ipv4, &mut ipv4),
+            ("ip6tables", policy_rules.ipv6, &mut ipv6),
+        ] {
+            script.push_str(&shell_command(binary, &["-N".into(), chain.clone()]));
+            for rule in Self::build_base_chain_rule_args(&chain)
+                .into_iter()
+                .chain(rules)
+                .chain(std::iter::once(default_rule.clone()))
+                .chain(std::iter::once(vec![
+                    "-I".into(),
+                    "OUTPUT".into(),
+                    "1".into(),
+                    "-j".into(),
+                    chain.clone(),
+                ]))
+            {
+                script.push_str(&shell_command(binary, &rule));
+            }
+        }
+        Ok((ipv4, ipv6))
+    }
+
+    pub(crate) fn adopt_firewall_rules(&mut self, logger: &mut Logger) -> Result<(), String> {
+        let ipv6 = match self.ip6tables_status(logger) {
+            Ip6tablesStatus::Available => true,
+            Ip6tablesStatus::KernelIpv6Disabled => false,
+            Ip6tablesStatus::UnusableButIpv6Active => {
+                return Err(
+                    "Cannot verify the startup firewall with active, unfiltered IPv6.".into(),
+                );
+            }
+        };
+        self.run_iptables(&["-C", "OUTPUT", "-j", &self.chain_name], logger)?;
+        if ipv6 {
+            self.run_ip6tables(&["-C", "OUTPUT", "-j", &self.chain_name], logger)?;
+        }
+        self.created = CreatedResources {
+            v4: FamilyResources {
+                chain: true,
+                hook: true,
+            },
+            v6: FamilyResources {
+                chain: ipv6,
+                hook: ipv6,
+            },
+        };
+        self.rules_applied = true;
+        Self::publish_created(&self.created);
+        logger.log_line(&format!(
+            "OUTPUT hook installed and verified in the container namespace for chain {}.",
+            self.chain_name
+        ));
+        Ok(())
+    }
+
     pub fn new(container_name: &str, hook_point: EgressHookPoint) -> Self {
         Self {
             chain_name: chain_name_for(container_name),
@@ -341,8 +426,8 @@ impl NetworkIptablesManager {
                 "-A",
                 chain_name,
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
@@ -2188,8 +2273,8 @@ mod tests {
                 "-A",
                 chain_name,
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",

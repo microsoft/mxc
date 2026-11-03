@@ -222,6 +222,69 @@ struct IngressRules {
 }
 
 impl IngressManager {
+    pub(crate) fn startup_rules(
+        container_name: &str,
+        policy: &ContainerPolicy,
+    ) -> Result<(String, String), String> {
+        Self::validate_policy(policy)?;
+        let chain = ingress_chain_name_for(container_name);
+        let mut ipv4 = String::new();
+        let mut ipv6 = String::new();
+        for (family, script) in [(IpFamily::V4, &mut ipv4), (IpFamily::V6, &mut ipv6)] {
+            let rules = Self::build_ingress_rules(&chain, family);
+            script.push_str(&super::network_iptables::shell_command(
+                family.binary(),
+                &["-N".into(), chain.clone()],
+            ));
+            for rule in rules.body.into_iter().chain(std::iter::once(rules.hook)) {
+                script.push_str(&super::network_iptables::shell_command(
+                    family.binary(),
+                    &rule,
+                ));
+            }
+        }
+        Ok((ipv4, ipv6))
+    }
+
+    pub(crate) fn adopt_firewall_rules(&mut self, logger: &mut Logger) -> Result<(), String> {
+        let mut runner = NsenterRunner;
+        let ipv6 = match self.container_ip6tables_status(&mut runner, logger) {
+            Ip6tablesStatus::Available => true,
+            Ip6tablesStatus::KernelIpv6Disabled => false,
+            Ip6tablesStatus::UnusableButIpv6Active => {
+                return Err("Cannot verify the startup inbound firewall with active IPv6.".into());
+            }
+        };
+        self.run_logged(
+            &mut runner,
+            "iptables",
+            &["-C", "INPUT", "-j", &self.chain_name],
+            logger,
+        )
+        .map_err(RunError::into_message)?;
+        if ipv6 {
+            self.run_logged(
+                &mut runner,
+                "ip6tables",
+                &["-C", "INPUT", "-j", &self.chain_name],
+                logger,
+            )
+            .map_err(RunError::into_message)?;
+        }
+        self.v4_chain_created = true;
+        self.v4_hooked = true;
+        self.v6_chain_created = ipv6;
+        self.v6_hooked = ipv6;
+        logger.log_line(&format!(
+            "Verified inbound iptables chain: {}",
+            self.chain_name
+        ));
+        logger.log_line(
+            "Inbound (network.ingress) policy: DROP new inbound connections (default-deny)",
+        );
+        Ok(())
+    }
+
     pub fn new(container_name: &str, netns_pid: u32) -> Self {
         Self {
             chain_name: ingress_chain_name_for(container_name),
@@ -325,17 +388,7 @@ impl IngressManager {
             return Ok(true);
         }
 
-        if let Some(field) = Self::permissive_inbound_field(policy) {
-            return Err(format!(
-                "{field} asks for permissive inbound, which is not yet implemented for \
-                 the LXC firewall path. LXC has a single inbound chain and the policy \
-                 carries no way to scope an accept to particular ports, sources, or \
-                 interfaces; the only rule available today would accept new inbound \
-                 connections from every interface and source (LAN and WAN), which is \
-                 broader than requested. Refusing rather than installing an over-broad \
-                 accept."
-            ));
-        }
+        Self::validate_policy(policy)?;
 
         logger.log_line(&format!(
             "Creating inbound iptables chain: {}",
@@ -376,6 +429,22 @@ impl IngressManager {
         }
 
         Ok(true)
+    }
+
+    fn validate_policy(policy: &ContainerPolicy) -> Result<(), String> {
+        if let Some(field) = Self::permissive_inbound_field(policy) {
+            return Err(format!(
+                "{field} asks for permissive inbound, which is not yet implemented for \
+                 the LXC firewall path. LXC has a single inbound chain and the policy \
+                 carries no way to scope an accept to particular ports, sources, or \
+                 interfaces; the only rule available today would accept new inbound \
+                 connections from every interface and source (LAN and WAN), which is \
+                 broader than requested. Refusing rather than installing an over-broad \
+                 accept."
+            ));
+        }
+
+        Ok(())
     }
 
     fn install_family(
@@ -485,8 +554,8 @@ impl IngressManager {
             "-A",
             chain,
             "-m",
-            "state",
-            "--state",
+            "conntrack",
+            "--ctstate",
             "ESTABLISHED,RELATED",
             "-j",
             accept,
@@ -508,7 +577,14 @@ impl IngressManager {
         }
 
         body.push(argv(&[
-            "-A", chain, "-m", "state", "--state", "NEW", "-j", drop,
+            "-A",
+            chain,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "NEW",
+            "-j",
+            drop,
         ]));
 
         body.push(argv(&["-A", chain, "-j", drop]));
@@ -1080,11 +1156,29 @@ mod tests {
         let rules = build();
         assert!(has(
             &rules,
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"]
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP"
+            ]
         ));
         assert!(!has(
             &rules,
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "ACCEPT"]
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "ACCEPT"
+            ]
         ));
     }
 
@@ -1097,8 +1191,8 @@ mod tests {
                 "-A",
                 "MXC-t",
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
@@ -1107,7 +1201,16 @@ mod tests {
         .expect("ESTABLISHED,RELATED rule must be emitted");
         let new = pos(
             &rules,
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP",
+            ],
         )
         .expect("NEW rule must be emitted");
         assert!(
@@ -1165,13 +1268,22 @@ mod tests {
                 "-A",
                 "MXC-t",
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
             ],
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP",
+            ],
             &["-A", "MXC-t", "-j", "DROP"],
             &["-I", "INPUT", "-j", "MXC-t"],
         ];
@@ -1263,7 +1375,16 @@ mod tests {
         let rules = build_family(IpFamily::V6);
         let new = pos(
             &rules,
-            &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+            &[
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP",
+            ],
         )
         .expect("NEW rule must be emitted");
         let terminal = rules
@@ -1324,7 +1445,16 @@ mod tests {
         assert!(
             has(
                 &rules,
-                &["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"]
+                &[
+                    "-A",
+                    "MXC-t",
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "NEW",
+                    "-j",
+                    "DROP"
+                ]
             ),
             "IPv6 chain must still drop NEW inbound by default"
         );
@@ -2054,8 +2184,8 @@ mod tests {
                 "-A",
                 "MXC-t",
                 "-m",
-                "state",
-                "--state",
+                "conntrack",
+                "--ctstate",
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
@@ -2180,7 +2310,16 @@ mod tests {
                 "-j",
                 "ACCEPT",
             ],
-            vec!["-A", "MXC-t", "-m", "state", "--state", "NEW", "-j", "DROP"],
+            vec![
+                "-A",
+                "MXC-t",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "NEW",
+                "-j",
+                "DROP",
+            ],
             vec!["-A", "MXC-t", "-j", "DROP"],
         ];
         let want: Vec<Vec<String>> = want

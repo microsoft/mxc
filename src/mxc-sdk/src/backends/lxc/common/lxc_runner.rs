@@ -35,7 +35,9 @@ use crate::mxc_pty::{LivePty, PtySize as UnixPtySize};
 use crate::lxc_common::availability::LxcTooling;
 use crate::lxc_common::filesystem_mounts;
 use crate::lxc_common::loopback_relay::LoopbackRelay;
-use crate::lxc_common::lxc_bindings::{ContainerFirewall, LxcContainer, StartNetwork};
+use crate::lxc_common::lxc_bindings::{
+    resolve_default_lxcpath, ContainerFirewall, LxcContainer, StartNetwork,
+};
 use crate::lxc_common::network_ingress::IngressManager;
 use crate::lxc_common::network_iptables::{
     needs_network, plan_network, EgressHookPoint, NetworkIptablesManager,
@@ -246,6 +248,8 @@ impl LxcScriptRunner {
 
         while start.elapsed() < timeout {
             let output = std::process::Command::new("lxc-info")
+                .arg("-P")
+                .arg(resolve_default_lxcpath())
                 .arg("-n")
                 .arg(container_name)
                 .arg("-iH")
@@ -345,7 +349,7 @@ impl LxcScriptRunner {
         failures
     }
 
-    fn set_up_network_rules(
+    fn adopt_network_rules(
         &self,
         container_name: &str,
         hook_point: EgressHookPoint,
@@ -354,34 +358,22 @@ impl LxcScriptRunner {
         logger: &mut Logger,
     ) -> Result<(NetworkIptablesManager, Option<IngressManager>), String> {
         let mut fw_manager = NetworkIptablesManager::new(container_name, hook_point);
-        Self::egress_apply_outcome(fw_manager.apply_firewall_rules(policy, logger))?;
-        fw_manager.set_preserve_policy(!self.cleanup_policy);
-
+        if !plan_network(policy).installs_firewall() {
+            return Ok((fw_manager, None));
+        }
+        fw_manager.set_preserve_policy(true);
+        fw_manager.adopt_firewall_rules(logger)?;
         let mut ingress_manager = None;
         if let Some(pid) = netns_pid {
             let mut mgr = IngressManager::new(container_name, pid);
-            Self::ingress_apply_outcome(mgr.apply_firewall_rules(policy, logger))?;
-            mgr.set_preserve_policy(!self.cleanup_policy);
+            mgr.adopt_firewall_rules(logger)?;
             ingress_manager = Some(mgr);
         }
-
+        fw_manager.set_preserve_policy(!self.cleanup_policy);
+        if let Some(mgr) = ingress_manager.as_mut() {
+            mgr.set_preserve_policy(!self.cleanup_policy);
+        }
         Ok((fw_manager, ingress_manager))
-    }
-
-    fn egress_apply_outcome(result: Result<bool, String>) -> Result<(), String> {
-        match result {
-            Ok(true) => Ok(()),
-            Ok(false) => Err("Failed to apply network firewall rules.".to_string()),
-            Err(e) => Err(format!("Network policy error: {}", e)),
-        }
-    }
-
-    fn ingress_apply_outcome(result: Result<bool, String>) -> Result<(), String> {
-        match result {
-            Ok(true) => Ok(()),
-            Ok(false) => Err("Failed to apply inbound network firewall rules.".to_string()),
-            Err(e) => Err(format!("Inbound network policy error: {}", e)),
-        }
     }
 
     fn enforce_network_readiness<P, R>(
@@ -548,18 +540,24 @@ impl LxcScriptRunner {
 
         let plan = plan_network(&request.policy);
 
-        let network = if plan.omits_interface() {
+        if let Err(e) = container.set_network_policy(&request.policy, logger) {
+            if self.destroy_on_exit || container_created {
+                let _ = container.destroy();
+            }
+            return Err(ScriptResponse::failed(
+                FailurePhase::LaunchFailed,
+                &format!("Failed to configure startup network policy: {e}"),
+            ));
+        }
+        if plan.omits_interface() {
             let _ = writeln!(
                 logger,
                 "Policy permits no network; starting the container with no interface."
             );
-            StartNetwork::NoInterface
-        } else {
-            StartNetwork::FromContainerConfig
-        };
+        }
 
         let _ = writeln!(logger, "Starting LXC container...");
-        if let Err(e) = container.start(network) {
+        if let Err(e) = container.start(StartNetwork::FromContainerConfig) {
             if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
@@ -598,7 +596,7 @@ impl LxcScriptRunner {
             return Err(ScriptResponse::failed(
                 FailurePhase::PostLaunchFailed,
                 "Failed to discover the container init PID; cannot enter the container \
-                 network namespace to install its firewall. Aborting rather than \
+                 network namespace to verify its startup firewall. Aborting rather than \
                  running without it.",
             ));
         };
@@ -610,7 +608,7 @@ impl LxcScriptRunner {
             }
         }
 
-        let setup = self.set_up_network_rules(
+        let setup = self.adopt_network_rules(
             &container_name,
             hook_point,
             netns_pid,
@@ -1696,7 +1694,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_egress_apply_tears_down_its_debris_even_under_preserve_policy() {
+    fn a_failed_egress_apply_retries_cleanup_when_rollback_fails() {
         let fake = crate::lxc_common::network_iptables::test_firewall::install();
 
         // Succeed through both chain creations, then refuse the first rule and
@@ -1713,24 +1711,18 @@ mod tests {
             Err("delete refused".to_string()),
         ]);
 
-        let runner = LxcScriptRunner::new(
-            &LxcConfig::default(),
-            "preserve-rollback-test",
-            &LifecycleConfig {
-                preserve_policy: true,
-                ..LifecycleConfig::default()
-            },
-        );
         let policy = egress_policy_for_tests();
         let mut logger = Logger::new(Mode::Buffer);
 
-        let outcome = runner.set_up_network_rules(
-            "preserve-rollback-test",
-            EgressHookPoint::Unhooked,
-            None,
-            &policy,
-            &mut logger,
-        );
+        let outcome = {
+            let mut manager =
+                NetworkIptablesManager::new("preserve-rollback-test", EgressHookPoint::Unhooked);
+            manager
+                .apply_firewall_rules(&policy, &mut logger)
+                .inspect(|_| {
+                    manager.set_preserve_policy(true);
+                })
+        };
         let failure = outcome.err();
 
         assert!(
@@ -1750,6 +1742,44 @@ mod tests {
              own two attempts failed, because preservePolicy preserves a policy and \
              not the debris of one that never applied; \
              chain deletes={chain_deletes}; output={issued:?}"
+        );
+    }
+
+    #[test]
+    fn failed_egress_verification_leaves_boot_rules_in_place() {
+        let fake = crate::lxc_common::network_iptables::test_firewall::install();
+        fake.script_results(vec![Err("verification refused".to_string())]);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let failure = validating_runner()
+            .adopt_network_rules(
+                "validate-test",
+                EgressHookPoint::Unhooked,
+                None,
+                &egress_policy_for_tests(),
+                &mut logger,
+            )
+            .err();
+
+        assert!(
+            failure.is_some(),
+            "input=existing egress rules, verification refused; adoption must report failure; \
+             output={failure:?}"
+        );
+
+        let issued = fake.issued();
+        assert!(
+            issued.iter().flatten().any(|arg| arg == "-C"),
+            "input=existing egress rules, verification refused; adoption must check the \
+             installed protection; output={issued:?}"
+        );
+        assert!(
+            !issued
+                .iter()
+                .flatten()
+                .any(|arg| matches!(arg.as_str(), "-D" | "-F" | "-X")),
+            "input=existing egress rules, verification refused; a possibly live workload must \
+             keep its boot-installed protection; output={issued:?}"
         );
     }
 
@@ -1820,9 +1850,23 @@ mod tests {
 
     #[test]
     fn tear_down_removes_the_rules_before_it_releases_the_container() {
-        let _fake = crate::lxc_common::network_iptables::test_firewall::install();
+        let fake = crate::lxc_common::network_iptables::test_firewall::install();
         let mut prepared = prepared_with_applied_rules("tear-down-order");
         let mut logger = Logger::new(Mode::Buffer);
+
+        let issued = fake.issued();
+        assert!(
+            issued.iter().flatten().any(|arg| arg == "-C"),
+            "input=existing egress rules; adoption must verify the installed protection; \
+             output={issued:?}"
+        );
+        assert!(
+            !issued
+                .iter()
+                .flatten()
+                .any(|arg| matches!(arg.as_str(), "-N" | "-A" | "-I")),
+            "input=existing egress rules; adoption must not reinstall protection; output={issued:?}"
+        );
 
         prepared.tear_down(true, true, &mut logger);
 
@@ -2127,7 +2171,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         let (fw_manager, ingress_manager) = runner
-            .set_up_network_rules(&name, EgressHookPoint::Unhooked, None, &policy, &mut logger)
+            .adopt_network_rules(&name, EgressHookPoint::Unhooked, None, &policy, &mut logger)
             .expect("the fake firewall accepts every command");
         assert!(
             fw_manager.rules_applied(),

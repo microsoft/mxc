@@ -158,10 +158,22 @@ not reachable through `process.env`.
 Directional `network.egress` rules govern port 53 like any other destination;
 there is no implicit DNS exemption.
 
+MXC saves the configured network restrictions before starting the container.
+For a filtered network, a saved `lxc.hook.start-host` script installs the
+inbound and outbound rules before init and boot services run.  The same hook
+runs on ordinary `lxc-start` restarts without MXC.  A failed installation
+prevents startup.  Keep the generated hook beside the container's saved
+configuration.
+
+A policy that permits no network instead saves a configuration with no
+external network interface.  Each MXC run replaces its saved network settings
+from the current request.
+
 `preservePolicy` leaves the inbound and outbound chains in place after the run.
 The chains live in the container's network namespace, so they last only as long
-as the container keeps running; stopping or destroying it takes them with it.  A
-partially installed chain from a failed run is torn down regardless.
+as the container keeps running; stopping or destroying it takes them with it.
+Command-end cleanup does not remove the saved hook; the next start reinstalls
+the configured rules.
 
 ### Proxy
 
@@ -345,9 +357,10 @@ These failures carry the `backend_error` code and exit `-1`.
 - **The workload can send only ICMP Echo.** A `protocol: "icmp"` rule lets every
   ICMP type through the firewall, but the command MXC runs can originate only Echo
   requests, the ones `ping` sends.
-- **The network restrictions bind only the command MXC runs and its children.**
-  MXC takes away that command's ability to change the firewall or send raw
-  packets, but the container's init process (PID 1) keeps both.  The command
+- **Privileged init can bypass the network restrictions.**  Boot services
+  start behind the configured firewall, but the container's init process
+  (PID 1) retains the ability to change it and send raw packets.  MXC takes
+  those abilities away from the command it runs and its children.  The command
   runs as root inside the container, so it can ask init to start a new process,
   for example with `systemd-run` on Ubuntu.  That process is not a child of the
   command, and it can change the firewall and send raw packets.

@@ -3,6 +3,34 @@
 
 const MANAGED_MOUNTS_BEGIN: &str = "# BEGIN MXC managed mounts (rewritten every run)";
 const MANAGED_MOUNTS_END: &str = "# END MXC managed mounts";
+const MANAGED_NETWORK_BEGIN: &str = "# BEGIN MXC managed network";
+const MANAGED_NETWORK_END: &str = "# END MXC managed network";
+const MANAGED_NETWORK_ARTIFACT: &str = "# MXC network hook: ";
+
+fn network_startup_script(
+    name: &str,
+    policy: &crate::mxc_common::models::ContainerPolicy,
+    logger: &mut crate::mxc_common::logger::Logger,
+) -> Result<String, String> {
+    let (egress4, egress6) =
+        super::network_iptables::NetworkIptablesManager::startup_rules(name, policy, logger)?;
+    let (ingress4, ingress6) = super::network_ingress::IngressManager::startup_rules(name, policy)?;
+
+    // Enter only the container's network namespace; use the host's shell and firewall tools.
+    Ok(format!(
+        "#!/bin/sh\nset -eu\n\
+         exec nsenter -t \"${{LXC_PID:?LXC did not supply the init PID}}\" -n /bin/sh -eu <<'MXC_FIREWALL'\n\
+         export LC_ALL=C\n\
+         {egress4}{ingress4}\
+         if ip6tables -S >/dev/null 2>&1; then\n\
+         {egress6}{ingress6}\
+         elif [ ! -d /proc/self/net ] || [ -e /proc/self/net/if_inet6 ]; then\n\
+         echo 'MXC: ip6tables is unusable with active or unknown IPv6; refusing startup.' >&2\n\
+         exit 1\n\
+         fi\n\
+         MXC_FIREWALL\n"
+    ))
+}
 
 /// The filesystem type and options of one kind of `lxc.mount.entry`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -424,6 +452,120 @@ impl LxcContainer {
             .arg("-a")
             .arg(Self::current_arch());
         Self::run_tool(cmd)
+    }
+
+    pub fn set_network_policy(
+        &self,
+        policy: &crate::mxc_common::models::ContainerPolicy,
+        logger: &mut crate::mxc_common::logger::Logger,
+    ) -> Result<(), String> {
+        use std::io::Write;
+        use std::path::Path;
+
+        let config_path = self.config_file_path();
+        let config_path = Path::new(&config_path);
+        let directory = config_path
+            .parent()
+            .ok_or("Container config has no parent directory")?;
+        let existing = std::fs::read_to_string(config_path)
+            .map_err(|e| format!("Failed to read container network config: {e}"))?;
+        let mut out = String::new();
+        let mut inside = false;
+        let mut old_artifacts = Vec::new();
+        for line in existing.lines() {
+            match line.trim() {
+                MANAGED_NETWORK_BEGIN => inside = true,
+                MANAGED_NETWORK_END => inside = false,
+                _ if inside => {
+                    if let Some(name) = line.strip_prefix(MANAGED_NETWORK_ARTIFACT) {
+                        if name.starts_with(".mxc-network-")
+                            && name.ends_with(".sh")
+                            && !name.contains(['/', '\\'])
+                        {
+                            old_artifacts.push(directory.join(name));
+                        }
+                    }
+                }
+                _ => {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+
+        out.push_str(MANAGED_NETWORK_BEGIN);
+        out.push('\n');
+        let mut new_artifact = None;
+        if super::network_iptables::plan_network(policy).omits_interface() {
+            // Clear interfaces from includes as well as the container's own config.
+            out.push_str("lxc.net =\nlxc.net.0.type = empty\nlxc.net.0.flags = up\n");
+        } else {
+            let script = network_startup_script(&self.name, policy, logger)?;
+            let mut artifact = tempfile::Builder::new()
+                .prefix(".mxc-network-")
+                .suffix(".sh")
+                .tempfile_in(directory)
+                .map_err(|e| format!("Failed to create network startup hook: {e}"))?;
+            artifact
+                .write_all(script.as_bytes())
+                .and_then(|_| artifact.as_file().sync_all())
+                .map_err(|e| format!("Failed to write network startup hook: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                artifact
+                    .as_file()
+                    .set_permissions(std::fs::Permissions::from_mode(0o700))
+                    .map_err(|e| format!("Failed to make network startup hook executable: {e}"))?;
+            }
+            let path = artifact.path();
+            out.push_str(MANAGED_NETWORK_ARTIFACT);
+            out.push_str(
+                &path
+                    .file_name()
+                    .ok_or("Startup hook has no filename")?
+                    .to_string_lossy(),
+            );
+            out.push_str("\nlxc.hook.start-host = /bin/sh ");
+            out.push_str(&super::network_iptables::shell_quote(
+                path.to_str().ok_or("Startup hook path is not UTF-8")?,
+            ));
+
+            // Discard the unquoted arguments LXC appends for version-zero hooks.
+            out.push_str(" #\n");
+            let (_, path) = artifact
+                .keep()
+                .map_err(|e| format!("Failed to publish network startup hook: {e}"))?;
+            new_artifact = Some(path);
+        }
+        out.push_str(MANAGED_NETWORK_END);
+        out.push('\n');
+
+        let publish = (|| {
+            let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+            staged
+                .as_file()
+                .set_permissions(std::fs::metadata(config_path)?.permissions())?;
+            staged.write_all(out.as_bytes())?;
+            staged.as_file().sync_all()?;
+            staged.persist(config_path).map_err(|e| e.error)?;
+            Ok::<_, std::io::Error>(())
+        })();
+        if let Err(e) = publish {
+            if let Some(path) = new_artifact {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(format!("Failed to publish container network config: {e}"));
+        }
+        for path in old_artifacts {
+            if let Err(e) = std::fs::remove_file(&path) {
+                logger.log_line(&format!(
+                    "Could not remove superseded startup hook {}: {e}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Removes existing mount points so they do not accumulate on a reused
@@ -863,6 +1005,10 @@ impl LxcContainer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lxc_bindings_network_spec.rs"]
+mod network_spec;
 
 #[cfg(test)]
 mod tests {

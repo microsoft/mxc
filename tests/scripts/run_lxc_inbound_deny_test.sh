@@ -120,7 +120,7 @@ if ! grep -Fq "Container init PID:" <<<"$OUTPUT"; then
     fail "no container init PID was logged, so the inbound chain could not have been namespaced."
 fi
 
-INBOUND_CHAIN="$(sed -n 's/^.*Creating inbound iptables chain: \([^ ]*\).*$/\1/p' <<<"$OUTPUT" | head -n 1)"
+INBOUND_CHAIN="$(sed -n 's/^.*Verified inbound iptables chain: \([^ ]*\).*$/\1/p' <<<"$OUTPUT" | head -n 1)"
 if [ -z "$INBOUND_CHAIN" ]; then
     fail "the inbound chain was never created; default-deny was not applied."
 fi
