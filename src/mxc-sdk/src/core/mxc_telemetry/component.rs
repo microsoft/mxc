@@ -24,6 +24,8 @@ use windows::Win32::System::LibraryLoader::{
 
 const COMPONENT_FILE: &str = "mxc_telemetry.dll";
 const SUPPORTED_ABI: u32 = 2;
+/// Signer the component must carry in release builds.
+const COMPONENT_SIGNER: &str = "Microsoft Corporation";
 
 #[repr(C)]
 struct ExecutionEvent {
@@ -106,10 +108,11 @@ fn module_path() -> Option<PathBuf> {
 
 /// Opens the component so nobody can modify or replace it while it is
 /// verified and loaded. Release builds require its Authenticode signature to be
-/// trusted and to come from the same signer as the module that contains this
-/// code. Debug builds skip the signature check so local builds can use an
+/// trusted and issued to `COMPONENT_SIGNER`; the host's own signer does not
+/// matter, because products that build MXC from source sign with their own
+/// identity. Debug builds skip the signature check so local builds can use an
 /// unsigned component.
-fn open_trusted(path: &Path, host: &Path) -> Option<File> {
+fn open_trusted(path: &Path) -> Option<File> {
     let file = OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ.0)
@@ -118,9 +121,7 @@ fn open_trusted(path: &Path, host: &Path) -> Option<File> {
     if cfg!(debug_assertions) {
         return Some(file);
     }
-    let component_signer = signature::trusted_signer(&file, path)?;
-    let host_signer = signature::trusted_signer(&File::open(host).ok()?, host)?;
-    (component_signer == host_signer).then_some(file)
+    (signature::trusted_signer(&file, path)? == COMPONENT_SIGNER).then_some(file)
 }
 
 fn load() -> Option<Component> {
@@ -131,7 +132,7 @@ fn load() -> Option<Component> {
     }
     // Held until the library is loaded, and the loaded image keeps the file
     // locked afterwards.
-    let _guard = open_trusted(&path, &host)?;
+    let _guard = open_trusted(&path)?;
     let wide: Vec<u16> = path
         .as_os_str()
         .to_string_lossy()
