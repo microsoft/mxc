@@ -860,7 +860,7 @@ mod tests {
                 .matches("u16(\"PartA_PrivacyProduct\", &PRIVACY_PRODUCT_MXC)")
                 .count(),
             11,
-            "every MXC event must carry privacy product 11"
+            "every MXC event must carry the privacy product"
         );
         assert_eq!(
             provider_source
@@ -874,7 +874,7 @@ mod tests {
                 .matches("&PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA")
                 .count(),
             11,
-            "every MXC event must use Client Diagnostic Data category 1"
+            "every MXC event must carry the privacy data category"
         );
         assert_eq!(
             provider_source
@@ -1185,8 +1185,8 @@ mod provider_codegen_tests {
         let definition = generate_provider_def(group);
         assert_eq!(definition.matches("define_provider!").count(), 1);
         let metadata = event_metadata(group, false, None);
-        assert_eq!(metadata.critical_keyword, 0x0000_8000_0000_0000);
-        assert_eq!(metadata.critical_privacy_tag, 0x0000_0000_0100_0000);
+        assert_eq!(metadata.critical_keyword, 0x0000_2000_0000_0000);
+        assert_eq!(metadata.critical_privacy_tag, 0x0000_0000_0002_0000);
     }
 
     #[test]
@@ -1248,10 +1248,10 @@ mod provider_codegen_tests {
     #[test]
     fn valid_guid_yields_telemetry_event_metadata() {
         let m = event_metadata(Some("7f10def4-a258-5fea-510e-2c3bb976687f"), false, None);
-        assert_eq!(m.keyword, 0x0000_4000_0000_0000);
-        assert_eq!(m.critical_keyword, 0x0000_8000_0000_0000);
-        assert_eq!(m.privacy_tag, 0x0000_0000_0200_0000);
-        assert_eq!(m.critical_privacy_tag, 0x0000_0000_0100_0000);
+        assert_eq!(m.keyword, 0x0000_1000_0000_0000);
+        assert_eq!(m.critical_keyword, 0x0000_2000_0000_0000);
+        assert_eq!(m.privacy_tag, 0x0000_0000_0001_0000);
+        assert_eq!(m.critical_privacy_tag, 0x0000_0000_0002_0000);
         assert!(m.eligible);
     }
 
@@ -1299,10 +1299,10 @@ mod provider_codegen_tests {
             .is_err());
         }
         let m = event_metadata(None, true, None);
-        assert_eq!(m.keyword, 0x0000_4000_0000_0000);
-        assert_eq!(m.critical_keyword, 0x0000_8000_0000_0000);
-        assert_eq!(m.privacy_tag, 0x0000_0000_0200_0000);
-        assert_eq!(m.critical_privacy_tag, 0x0000_0000_0100_0000);
+        assert_eq!(m.keyword, 0x0000_1000_0000_0000);
+        assert_eq!(m.critical_keyword, 0x0000_2000_0000_0000);
+        assert_eq!(m.privacy_tag, 0x0000_0000_0001_0000);
+        assert_eq!(m.critical_privacy_tag, 0x0000_0000_0002_0000);
         assert!(generate_provider_def(None).contains("IS_UTC_ROUTED: bool = false"));
     }
 
@@ -1320,10 +1320,10 @@ mod provider_codegen_tests {
             let m = event_metadata(group, false, None);
             let expected = if group.is_some() {
                 (
-                    0x0000_4000_0000_0000,
-                    0x0000_8000_0000_0000,
-                    0x0000_0000_0200_0000,
-                    0x0000_0000_0100_0000,
+                    0x0000_1000_0000_0000,
+                    0x0000_2000_0000_0000,
+                    0x0000_0000_0001_0000,
+                    0x0000_0000_0002_0000,
                 )
             } else {
                 (1, 1, 0, 0)

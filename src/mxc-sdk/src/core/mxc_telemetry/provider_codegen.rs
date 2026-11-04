@@ -144,17 +144,19 @@ fn event_metadata(
             c.critical_keyword,
             c.critical_privacy_tag,
         ),
+        // Placeholder classification for local test builds. Real routing
+        // values come only from the signed telemetry component.
         None if routed => (
-            0x0000_4000_0000_0000,
-            0x0000_0000_0200_0000,
-            0x0000_8000_0000_0000,
-            0x0000_0000_0100_0000,
+            0x0000_1000_0000_0000,
+            0x0000_0000_0001_0000,
+            0x0000_2000_0000_0000,
+            0x0000_0000_0002_0000,
         ),
         None => (1, 0, 1, 0),
     };
     let (privacy_product, privacy_data_category) = component
         .map(|c| (c.privacy_product, c.privacy_data_category))
-        .unwrap_or((11, 1));
+        .unwrap_or((0, 0));
     EventMetadata {
         keyword,
         privacy_tag,

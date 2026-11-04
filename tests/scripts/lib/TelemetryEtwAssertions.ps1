@@ -69,12 +69,12 @@ function Assert-TelemetryExecutionTrace {
                 throw "Missing or unsupported contract attribution for executor $($invocation.ProcessId)."
             }
             foreach ($event in $emitted) {
-                $expectedKeyword = [uint64]0x0000400000000000
-                $expectedPrivacyTag = [uint64]0x02000000
+                $expectedKeyword = [uint64]0x0000100000000000
+                $expectedPrivacyTag = [uint64]0x00010000
                 if ($invocation.ContractVersion -ceq '1.1.0-alpha' -and
                     $event.Task -cin @('MXC.ExecutionStart', 'MXC.ExecutionEnd', 'MXC.Error', 'MXC.ProcessExited')) {
-                    $expectedKeyword = [uint64]0x0000800000000000
-                    $expectedPrivacyTag = [uint64]0x01000000
+                    $expectedKeyword = [uint64]0x0000200000000000
+                    $expectedPrivacyTag = [uint64]0x00020000
                 }
                 if ($event.Keywords -notmatch '^0x[0-9a-fA-F]{1,16}$' -or
                     [Convert]::ToUInt64($event.Keywords.Substring(2), 16) -ne $expectedKeyword) {

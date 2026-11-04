@@ -46,12 +46,12 @@ provider metadata through Rust constants and `write_event!` struct fields.
 | Feature | WIL (`wil/TraceLogging.h`) | Rust `tracelogging` crate | MXC approach |
 |---|---|---|---|
 | **Provider group GUID** | WinExt telemetry group | `group_id("...")` in `define_provider!` | One `Microsoft.MXC` registration uses the WinExt group for all events; see [Private GUID Substitution](#private-guid-substitution-internal-builds) |
-| **Sampling keywords** | Measures / Critical Data constants | Raw `u64` in `keyword(...)` | Generated legacy and Critical Data constants; ordinary local builds use `0x1` for both. Grouped builds select metadata by event and source contract as described below |
+| **Sampling keywords** | Measures / Critical Data constants | Raw `u64` in `keyword(...)` | Supplied at build time by the signed telemetry component (see [Telemetry component](#telemetry-component)); ordinary local builds use `0x1` for both. Grouped builds select metadata by event and source contract as described below |
 | **Common event fields** | `_GENERIC_PARTB_FIELDS_ENABLED` pattern | `struct("Name", { ... })` in `write_event!` | `struct("COMMON_MXC_PARAMS", { Version, Channel, IsDebugging, UTCReplace_AppSessionGuid })` |
 | **Provider lifecycle** | `IMPLEMENT_TRACELOGGING_CLASS` singleton | `define_provider!` static + `register()`/`unregister()` | `OnceLock<ProviderState>` for version/channel, manual lifecycle |
-| **Privacy Product** | Common Schema Part A product | `u16(...)` field | `PartA_PrivacyProduct = 11` (`MXC (Microsoft Execution Containers)`) on all events |
-| **Privacy Data Category** | Common Schema Part A data category | `u16(...)` field | `PartA_PrivacyDataCategory = 1` (`Client Diagnostic Data`) on all events |
-| **Privacy Data Tags** | `TelemetryPrivacyDataTag(PDT_*)` | `u64("PartA_PrivTags", &val)` field | Generated Usage/Performance constants selected with the keyword. Ordinary local builds use `0`; the field and its position remain unchanged |
+| **Privacy Product** | Common Schema Part A product | `u16(...)` field | `PartA_PrivacyProduct` (the privacy-approved MXC product, from the telemetry component) on all events |
+| **Privacy Data Category** | Common Schema Part A data category | `u16(...)` field | `PartA_PrivacyDataCategory` (Client Diagnostic Data, from the telemetry component) on all events |
+| **Privacy Data Tags** | `TelemetryPrivacyDataTag(PDT_*)` | `u64("PartA_PrivTags", &val)` field | Usage/Performance values from the telemetry component, selected with the keyword. Ordinary local builds use `0`; the field and its position remain unchanged |
 | **Activity tracking** | `DEFINE_TELEMETRY_ACTIVITY` | Manual `Opcode` | Not needed for current events |
 
 The remaining gap (activity tracking) is not needed for current events.
@@ -60,12 +60,11 @@ If needed later, it can be added incrementally.
 ### Event keyword and privacy-tag selection
 
 For Windows builds with the WinExt group configured, `MXC.ExecutionStart`, `MXC.ExecutionEnd`,
-`MXC.Error`, and `MXC.ProcessExited` use `MICROSOFT_KEYWORD_CRITICAL_DATA`
-(`0x0000_8000_0000_0000`) and `PDT_ProductAndServicePerformance`
-(`0x01000000`) when the request uses development contract
-`1.1.0-alpha`. Published `0.9.0-alpha` and `1.0.0` requests, and requests
-without source-contract attribution, retain `MICROSOFT_KEYWORD_MEASURES`
-(`0x0000_4000_0000_0000`) and `PDT_ProductAndServiceUsage` (`0x02000000`).
+`MXC.Error`, and `MXC.ProcessExited` use the Critical Data keyword and the Performance
+privacy tag when the request uses development contract `1.1.0-alpha`.
+Published `0.9.0-alpha` and `1.0.0` requests, and requests without source-contract
+attribution, retain the Measures keyword and the Usage privacy tag.
+The numeric values are not in this repository; they come from the telemetry component.
 Published requests retain Measures and Usage for the other event families.
 Development `1.1.0-alpha` requests emit only those four events, suppressing
 VerboseDenials, ProcessTimedOut, ProcessKillFailed, PolicyHash,
@@ -110,13 +109,13 @@ provider-group input. This test input grants no collection authorization.
 ## Common Event Fields (Part A)
 
 Every MXC telemetry event carries the WinExt-required Common Schema fields
-`PartA_PrivacyProduct = 11` and `PartA_PrivacyDataCategory = 1`. The
+`PartA_PrivacyProduct` and `PartA_PrivacyDataCategory`. The
 `PartA_PrivTags` field is also always present. Ordinary public and local
 builds use `0`; grouped builds use Performance for the four development
-events and Usage otherwise, as described above. Product `11` is
-privacy-approved and registered in the
-WinExt product list. The provider-group identifier remains a secure build
-input and must not be copied into source, tests, documentation, or commits.
+events and Usage otherwise, as described above. The product is
+privacy-approved and registered in the WinExt product list. The provider-group
+identifier and these values come from the telemetry component and must not be
+copied into source, tests, documentation, or commits.
 
 ## Common Event Fields (Part C)
 
@@ -857,6 +856,30 @@ with another team's GUID.
 The zero-value default (no group GUID → keyword `0x1`, privacy tag `0`)
 mirrors Microsoft's own public WSL repo, which defines these same telemetry
 constants as literal `0` for non-official builds.
+
+### Telemetry component
+
+Official builds read the group, keywords, privacy tags, product and data
+category from a signed `mxc_telemetry.dll` that is built in a private
+repository. The component only carries data; MXC never loads it at run time.
+
+When `MXC_TELEMETRY_COMPONENT_PATH` names the DLL on a Windows build host, the
+MXC build script:
+
+1. opens the DLL with writers denied and verifies its Authenticode signature
+   and signer name, and fails the build if either is wrong;
+2. loads it and calls the exported `mxc_telemetry_metadata_v1` function, which
+   returns `1;<group>;<keyword>;<privacy tag>;<critical keyword>;<critical privacy tag>;<product>;<data category>`;
+3. passes the numbers to the crate as `MXC_BUILD_*` environment variables read
+   with `env!`, and writes only the group into the generated `provider_def.rs`,
+   because `define_provider!` accepts only a string literal.
+
+Without a component, builds use placeholder values that are never routed. The
+group environment variable cannot be combined with a component. Delete
+`target\` (it holds `provider_def.rs`) before publishing build output from an
+official build. The group is also present in the shipped binary's TraceLogging
+metadata, so this keeps identifiers out of public source and build output; it
+does not make them secret.
 
 ### CI pipeline steps
 
