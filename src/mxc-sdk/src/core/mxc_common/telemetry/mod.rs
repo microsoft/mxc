@@ -115,8 +115,8 @@ fn emit_active() -> bool {
 
 /// Evaluate authorization for one complete logical emission.
 ///
-/// Development-contract requests emit Required diagnostics: no consent or
-/// request opt-in, only build eligibility and administrative policy. Other
+/// Development-contract requests emit Required diagnostics: no consent,
+/// request opt-in or administrative policy, only build eligibility. Other
 /// requests need consent and policy.
 fn authorization_allows_emission() -> bool {
     #[cfg(test)]
@@ -131,7 +131,7 @@ fn authorization_allows_emission() -> bool {
 }
 
 fn required_collection_allowed() -> bool {
-    crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE && policy::required_collection_permitted()
+    crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE
 }
 
 fn invocation_can_emit(active: bool) -> bool {
@@ -247,8 +247,8 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 /// Initialize the provider for one request, selecting the gate by contract.
 ///
 /// Development-contract requests collect Required diagnostics regardless of
-/// the request's telemetry object or MXC consent, when the build is eligible
-/// and administrative policy permits. All other requests use [`init`].
+/// the request's telemetry object, MXC consent or administrative policy, when
+/// the build is eligible. All other requests use [`init`].
 pub fn init_for_request(
     config: Option<&TelemetryConfig>,
     source_contract: Option<ContractVersion>,
@@ -257,10 +257,6 @@ pub fn init_for_request(
     if source_contract == Some(ContractVersion::V1_1_0Alpha) {
         if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
             logger.log_line("telemetry: Required diagnostics are not collected by this build");
-            return false;
-        }
-        if !policy::required_collection_permitted() {
-            logger.log_line("telemetry: Required diagnostics are blocked by administrative policy");
             return false;
         }
         return activate_provider(logger);
@@ -1458,13 +1454,16 @@ mod tests {
             assert!(!init_for_request(None, contract, &mut logger));
         }
 
-        // Development requests need only build eligibility and policy, never
-        // consent, and a blocking policy always wins.
+        // Development requests need only build eligibility, never consent or
+        // administrative policy.
         let dev = Some(ContractVersion::V1_1_0Alpha);
         if !crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE {
             assert!(!init_for_request(None, dev, &mut logger));
         }
-        assert!(!required_collection_allowed() || policy::required_collection_permitted());
+        assert_eq!(
+            required_collection_allowed(),
+            crate::mxc_telemetry::REQUIRED_COLLECTION_ELIGIBLE
+        );
     }
 
     #[test]

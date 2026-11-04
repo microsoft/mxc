@@ -84,13 +84,9 @@ local denial reports and verbose artifacts remain available.
 Development `1.1.0-alpha` requests collect the four Required events by default.
 The request's `telemetry` object (including `enabled: false`) and MXC consent
 are not consulted. Initialization runs for every such request and collection
-requires both:
-
-- a build eligible for Required collection: routed through the internal group,
-  or the debug-only local test mode (`MXC_TELEMETRY_TEST_KEYWORDS=1`); and
-- administrative policy that permits it: an absent value, `1` or `3`. `0`, an
-  unsupported value, a wrong registry type or a read failure blocks. Policy is
-  rechecked for each emission.
+requires only a build eligible for Required collection: routed through the internal
+group, or the debug-only local test mode (`MXC_TELEMETRY_TEST_KEYWORDS=1`).
+Administrative policy is not consulted, so no registry setting disables it.
 
 The gate is selected from the request-scoped contract, so published and
 development requests running concurrently do not share authorization. UTC's
@@ -502,8 +498,8 @@ free-form text.
 
 The development `1.1.0-alpha` contract emits only the four Required events. MXC
 moved these events to Required telemetry to keep MXC secure, reliable, and up to
-date, so they are gated by administrative policy and provider availability, not
-by the per-run request or MXC consent.
+date, so they are gated by build eligibility and provider availability, not
+by the per-run request, MXC consent or administrative policy.
 
 Published contracts keep the optional model: emission is gated by the per-run
 request, MXC-owned consent, administrative policy, and provider availability.
