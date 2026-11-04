@@ -883,11 +883,13 @@ When a DLL is selected on a Windows build host, the MXC build script:
    because `define_provider!` accepts only a string literal.
 
 Without a component, builds use placeholder values that are never routed. The
-group environment variable cannot be combined with a component. Delete
-`target\` (it holds `provider_def.rs`) before publishing build output from an
-official build. The group is also present in the shipped binary's TraceLogging
-metadata, so this keeps identifiers out of public source and build output; it
-does not make them secret.
+group environment variable cannot be combined with a component.
+
+The generated `provider_def.rs` is in the Cargo target directory. Official
+pipeline jobs set `CARGO_TARGET_DIR` outside the source tree and publish only
+copied binaries and symbols, so it is not published. Keep it that way: do not
+publish a target directory. The group is also present in the shipped binary's
+TraceLogging metadata, so this is not a secrecy boundary.
 
 ### CI pipeline steps
 
@@ -901,7 +903,8 @@ Published contracts retain their existing registration, Measures/Usage
 metadata, request opt-in, consent and policy gates. Public/OSS builds omit
 the group input and retain local-only metadata.
 
-The public Windows test artifact explicitly clears the group input. Its local
+The public Windows test artifact explicitly clears the group and component
+inputs. Its local
 metadata tests cannot verify the private pipeline's group value or establish
 Microsoft ingestion.
 
