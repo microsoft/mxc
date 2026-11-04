@@ -159,6 +159,11 @@ Directional `network.egress` rules govern port 53 like any other destination;
 there is no implicit DNS exemption.
 
 MXC saves the configured network restrictions before starting the container.
+It adds one `lxc.include` for its `mxc-network.conf` file beside the saved
+configuration, after the user's network and hook settings.  Later policy updates
+replace only MXC's files unless new user settings require moving its include
+back to the end.
+
 For a filtered network, a saved `lxc.hook.start-host` script installs the
 inbound and outbound rules before init and boot services run.  The same hook
 runs on ordinary `lxc-start` restarts without MXC.  A failed installation
@@ -166,8 +171,7 @@ prevents startup.  Keep the generated hook beside the container's saved
 configuration.
 
 A policy that permits no network instead saves a configuration with no
-external network interface.  Each MXC run replaces its saved network settings
-from the current request.
+external network interface.
 
 `preservePolicy` leaves the inbound and outbound chains in place after the run.
 The chains live in the container's network namespace, so they last only as long

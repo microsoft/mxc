@@ -3,9 +3,28 @@
 
 const MANAGED_MOUNTS_BEGIN: &str = "# BEGIN MXC managed mounts (rewritten every run)";
 const MANAGED_MOUNTS_END: &str = "# END MXC managed mounts";
-const MANAGED_NETWORK_BEGIN: &str = "# BEGIN MXC managed network";
-const MANAGED_NETWORK_END: &str = "# END MXC managed network";
-const MANAGED_NETWORK_ARTIFACT: &str = "# MXC network hook: ";
+const NETWORK_CONFIG_FILE: &str = "mxc-network.conf";
+const NETWORK_HOOK_FILE: &str = "mxc-network.sh";
+
+fn write_file_atomically(
+    directory: &std::path::Path,
+    filename: &str,
+    contents: &str,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let destination = directory.join(filename);
+    let mut staged = tempfile::NamedTempFile::new_in(directory)?;
+    match std::fs::metadata(&destination) {
+        Ok(metadata) => staged.as_file().set_permissions(metadata.permissions())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    staged.write_all(contents.as_bytes())?;
+    staged.as_file().sync_all()?;
+    staged.persist(destination).map_err(|e| e.error)?;
+    Ok(())
+}
 
 fn network_startup_script(
     name: &str,
@@ -459,112 +478,57 @@ impl LxcContainer {
         policy: &crate::mxc_common::models::ContainerPolicy,
         logger: &mut crate::mxc_common::logger::Logger,
     ) -> Result<(), String> {
-        use std::io::Write;
         use std::path::Path;
 
-        let config_path = self.config_file_path();
-        let config_path = Path::new(&config_path);
-        let directory = config_path
-            .parent()
-            .ok_or("Container config has no parent directory")?;
-        let existing = std::fs::read_to_string(config_path)
+        let directory = Path::new(&self.lxc_path).join(&self.name);
+        let mut existing = std::fs::read_to_string(directory.join("config"))
             .map_err(|e| format!("Failed to read container network config: {e}"))?;
-        let mut out = String::new();
-        let mut inside = false;
-        let mut old_artifacts = Vec::new();
-        for line in existing.lines() {
-            match line.trim() {
-                MANAGED_NETWORK_BEGIN => inside = true,
-                MANAGED_NETWORK_END => inside = false,
-                _ if inside => {
-                    if let Some(name) = line.strip_prefix(MANAGED_NETWORK_ARTIFACT) {
-                        if name.starts_with(".mxc-network-")
-                            && name.ends_with(".sh")
-                            && !name.contains(['/', '\\'])
-                        {
-                            old_artifacts.push(directory.join(name));
-                        }
-                    }
-                }
-                _ => {
-                    out.push_str(line);
-                    out.push('\n');
-                }
-            }
-        }
 
-        out.push_str(MANAGED_NETWORK_BEGIN);
-        out.push('\n');
-        let mut new_artifact = None;
-        if super::network_iptables::plan_network(policy).omits_interface() {
+        let network_config = if super::network_iptables::plan_network(policy).omits_interface() {
             // Clear interfaces from includes as well as the container's own config.
-            out.push_str("lxc.net =\nlxc.net.0.type = empty\nlxc.net.0.flags = up\n");
+            "lxc.net =\nlxc.net.0.type = empty\nlxc.net.0.flags = up\n".to_owned()
         } else {
             let script = network_startup_script(&self.name, policy, logger)?;
-            let mut artifact = tempfile::Builder::new()
-                .prefix(".mxc-network-")
-                .suffix(".sh")
-                .tempfile_in(directory)
-                .map_err(|e| format!("Failed to create network startup hook: {e}"))?;
-            artifact
-                .write_all(script.as_bytes())
-                .and_then(|_| artifact.as_file().sync_all())
-                .map_err(|e| format!("Failed to write network startup hook: {e}"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                artifact
-                    .as_file()
-                    .set_permissions(std::fs::Permissions::from_mode(0o700))
-                    .map_err(|e| format!("Failed to make network startup hook executable: {e}"))?;
-            }
-            let path = artifact.path();
-            out.push_str(MANAGED_NETWORK_ARTIFACT);
-            out.push_str(
-                &path
-                    .file_name()
-                    .ok_or("Startup hook has no filename")?
-                    .to_string_lossy(),
-            );
-            out.push_str("\nlxc.hook.start-host = /bin/sh ");
-            out.push_str(&super::network_iptables::shell_quote(
-                path.to_str().ok_or("Startup hook path is not UTF-8")?,
-            ));
+            write_file_atomically(&directory, NETWORK_HOOK_FILE, &script)
+                .map_err(|e| format!("Failed to save network startup hook: {e}"))?;
 
             // Discard the unquoted arguments LXC appends for version-zero hooks.
-            out.push_str(" #\n");
-            let (_, path) = artifact
-                .keep()
-                .map_err(|e| format!("Failed to publish network startup hook: {e}"))?;
-            new_artifact = Some(path);
-        }
-        out.push_str(MANAGED_NETWORK_END);
-        out.push('\n');
+            format!(
+                "lxc.hook.start-host = /bin/sh {} #\n",
+                super::network_iptables::shell_quote(
+                    &directory.join(NETWORK_HOOK_FILE).to_string_lossy()
+                )
+            )
+        };
+        let include = format!(
+            "lxc.include = \"{}\"",
+            directory.join(NETWORK_CONFIG_FILE).display()
+        );
 
-        let publish = (|| {
-            let mut staged = tempfile::NamedTempFile::new_in(directory)?;
-            staged
-                .as_file()
-                .set_permissions(std::fs::metadata(config_path)?.permissions())?;
-            staged.write_all(out.as_bytes())?;
-            staged.as_file().sync_all()?;
-            staged.persist(config_path).map_err(|e| e.error)?;
-            Ok::<_, std::io::Error>(())
-        })();
-        if let Err(e) = publish {
-            if let Some(path) = new_artifact {
-                let _ = std::fs::remove_file(path);
+        // Later network settings or hook resets can override the included policy.
+        let last_network_or_hook_setting = existing.lines().rev().find(|line| {
+            let key = line.split('=').next().unwrap_or_default().trim();
+            key == "lxc.include"
+                || key == "lxc.net"
+                || key.starts_with("lxc.net.")
+                || key == "lxc.hook"
+                || key == "lxc.hook.start-host"
+        });
+        if last_network_or_hook_setting.map(str::trim) != Some(include.as_str()) {
+            existing = existing
+                .split_inclusive('\n')
+                .filter(|line| line.trim() != include)
+                .collect();
+            if !existing.is_empty() && !existing.ends_with('\n') {
+                existing.push('\n');
             }
-            return Err(format!("Failed to publish container network config: {e}"));
+            existing.push_str(&include);
+            existing.push('\n');
+            write_file_atomically(&directory, "config", &existing)
+                .map_err(|e| format!("Failed to register included network config: {e}"))?;
         }
-        for path in old_artifacts {
-            if let Err(e) = std::fs::remove_file(&path) {
-                logger.log_line(&format!(
-                    "Could not remove superseded startup hook {}: {e}",
-                    path.display()
-                ));
-            }
-        }
+        write_file_atomically(&directory, NETWORK_CONFIG_FILE, &network_config)
+            .map_err(|e| format!("Failed to save included network config: {e}"))?;
         Ok(())
     }
 
