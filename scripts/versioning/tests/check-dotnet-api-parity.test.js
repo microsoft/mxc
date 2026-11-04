@@ -19,6 +19,8 @@ const dispatchPath = join(
 const enginePath = join(
   root, "src", "mxc-sdk", "src", "core", "mxc_engine", "state_aware.rs"
 );
+const sharedMicroVmRejection =
+  /if matches!\(surface, LifecycleSurface::Shared\)\s*&& backend == crate::mxc_common::models::ContainmentBackend::MicroVm\s*\{\s*return Err\(MxcError::unsupported_phase\([\s\S]*?\)\);\s*\}/;
 
 function runGate(changedPath, transform) {
   const errors = [];
@@ -53,7 +55,7 @@ function runGate(changedPath, transform) {
   return { status, errors: errors.join("\n") };
 }
 
-test("native-only discovery passes while V1 retains legacy tier readers", () => {
+test("native-only discovery and Rust-only lifecycle preserve managed parity", () => {
   assert.deepEqual(runGate(), { status: 0, errors: "" });
 });
 
@@ -100,17 +102,41 @@ test("supported lifecycle prefixes must remain in the native dispatcher", () => 
   assert.match(result.errors, /state-aware sandbox-id prefixes:.*wslc:Wslc/);
 });
 
-test("new lifecycle support requires managed enum and prefix parity", () => {
+test("new shared lifecycle support requires managed enum and prefix parity", () => {
   const result = runGate(enginePath, (source) => {
-    const marker = "_ => run_state_aware_fallback(parsed, dry_run),";
-    assert.ok(source.includes(marker));
-    return source.replace(
-      marker,
-      "crate::mxc_common::models::ContainmentBackend::MicroVm => unimplemented!(),\n" +
-        `        ${marker}`
-    );
+    assert.match(source, sharedMicroVmRejection);
+    return source.replace(sharedMicroVmRejection, "");
   });
   assert.equal(result.status, 1);
   assert.match(result.errors, /state-aware containment enum:.*MicroVm/);
   assert.match(result.errors, /state-aware sandbox-id prefixes:.*microvm:MicroVm/);
+});
+
+test("the shared entry point cannot delegate to the development surface", () => {
+  const result = runGate(enginePath, (source) => {
+    const marker = "run_state_aware_on_surface(parsed, dry_run, LifecycleSurface::Shared)";
+    assert.ok(source.includes(marker));
+    return source.replace(marker, marker.replace("::Shared", "::RustDevJson"));
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.errors, /expected delegation to LifecycleSurface::Shared/);
+});
+
+test("a development-only rejection cannot hide shared lifecycle support", () => {
+  const result = runGate(enginePath, (source) => {
+    assert.match(source, sharedMicroVmRejection);
+    return source.replace(sharedMicroVmRejection, (guard) =>
+      guard.replace("::Shared", "::RustDevJson")
+    );
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.errors, /state-aware containment enum:.*MicroVm/);
+});
+
+test("discovery backends still require managed parser mappings", () => {
+  const result = runGate(platformPath, (source) =>
+    source.replace(/^\s*"microvm"\s*=>[^\n]+\n/m, "")
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.errors, /discovery backend MicroVm: managed wire "undefined"/);
 });

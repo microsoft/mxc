@@ -474,11 +474,31 @@ const rustStateAware = read(
   "state_aware.rs"
 ).split("#[cfg(test)]")[0];
 const runStateAwareBody = namedBody(rustStateAware, "fn", "run_state_aware");
+if (
+  !/^\s*run_state_aware_on_surface\s*\(\s*parsed,\s*dry_run,\s*LifecycleSurface::Shared\s*\)\s*$/.test(
+    runStateAwareBody
+  )
+) {
+  errors.push("run_state_aware: expected delegation to LifecycleSurface::Shared");
+}
+const surfaceBody = namedBody(rustStateAware, "fn", "run_state_aware_on_surface");
+const backendMatch = /\bmatch\s+backend\s*\{/.exec(surfaceBody);
+if (!backendMatch) {
+  errors.push("state_aware.rs: could not find state-aware backend dispatch");
+}
+// Only an early unsupported-phase return excludes a backend from the shared API.
+const sharedRejections = [
+  ...surfaceBody.slice(0, backendMatch?.index ?? 0).matchAll(
+    /if\s+matches!\(\s*surface,\s*LifecycleSurface::Shared\s*\)\s*&&\s*backend\s*==\s*(?:\w+::)*ContainmentBackend::(\w+)\s*\{\s*return\s+Err\(\s*MxcError::unsupported_phase\([\s\S]*?\)\s*\);\s*\}/g
+  ),
+].map((match) => match[1]);
 const rustBackends = [
-  ...runStateAwareBody.matchAll(/ContainmentBackend::(\w+)\s*=>/g),
+  ...surfaceBody.matchAll(/ContainmentBackend::(\w+)\s*=>/g),
 ]
   .map((match) => match[1])
-  .filter((backend) => backend !== "WindowsSandbox");
+  .filter(
+    (backend) => backend !== "WindowsSandbox" && !sharedRejections.includes(backend)
+  );
 if (rustBackends.length === 0) {
   errors.push("state_aware.rs: could not find state-aware backend dispatch");
 } else {

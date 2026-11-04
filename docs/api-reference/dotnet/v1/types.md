@@ -318,8 +318,12 @@ public enum ContainmentBackend
     IsolationSession,
     Bubblewrap,
     Hyperlight,
+    MicroVm,
 }
 ```
+
+`MicroVm` identifies NVX in host discovery. MicroVM streaming and container
+lifecycle operations remain restricted to Rust development JSON APIs.
 
 
 ## `Microsoft.Mxc.Sdk.V1.DeprovisionOptions`
