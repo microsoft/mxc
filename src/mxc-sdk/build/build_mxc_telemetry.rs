@@ -30,6 +30,38 @@
 include!("../src/core/mxc_telemetry/provider_codegen.rs");
 include!("build_mxc_telemetry_component.rs");
 
+// Picks the telemetry component. `MXC_TELEMETRY_COMPONENT_PATH` names a DLL;
+// set it empty to force an unrouted build. When it is unset, release builds on
+// Windows use the signed DLL bundled in `resources/telemetry-component/` for
+// the build host's architecture. Debug builds stay unrouted so tests and local
+// development never emit under the routing group.
+fn component_path(telemetry_target: bool) -> Option<std::path::PathBuf> {
+    if !telemetry_target {
+        return None;
+    }
+    if let Some(path) = std::env::var_os("MXC_TELEMETRY_COMPONENT_PATH") {
+        return (!path.is_empty()).then(|| std::path::PathBuf::from(path));
+    }
+    if std::env::var("PROFILE").as_deref() != Ok("release") {
+        return None;
+    }
+    let host = std::env::var("HOST").unwrap_or_default();
+    let arch = if host.starts_with("x86_64") {
+        "x64"
+    } else if host.starts_with("aarch64") {
+        "arm64"
+    } else {
+        return None;
+    };
+    let manifest = std::env::var_os("CARGO_MANIFEST_DIR")?;
+    let bundled = std::path::Path::new(&manifest)
+        .join("resources")
+        .join("telemetry-component")
+        .join(arch)
+        .join("mxc_telemetry.dll");
+    bundled.is_file().then_some(bundled)
+}
+
 pub(crate) fn run() {
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_PROVIDER_GROUP_GUID");
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID");
@@ -45,12 +77,13 @@ pub(crate) fn run() {
     // while cross-compiling the Linux/macOS binaries.
     // Single place to extend when another target gains a telemetry provider.
     let telemetry_target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows";
-    let component = match std::env::var_os("MXC_TELEMETRY_COMPONENT_PATH") {
-        Some(path) if telemetry_target && !path.is_empty() => {
+    let component_path = component_path(telemetry_target);
+    let component = match component_path {
+        Some(path) => {
             println!("cargo::rerun-if-changed={}", path.to_string_lossy());
-            Some(read_component_metadata(std::path::Path::new(&path)))
+            Some(read_component_metadata(&path))
         }
-        _ => None,
+        None => None,
     };
     let group_guid = if telemetry_target {
         std::env::var("MXC_TELEMETRY_PROVIDER_GROUP_GUID").ok()

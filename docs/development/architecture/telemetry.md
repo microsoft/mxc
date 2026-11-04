@@ -859,12 +859,20 @@ constants as literal `0` for non-official builds.
 
 ### Telemetry component
 
-Official builds read the group, keywords, privacy tags, product and data
+Release builds read the group, keywords, privacy tags, product and data
 category from a signed `mxc_telemetry.dll` that is built in a private
 repository. The component only carries data; MXC never loads it at run time.
 
-When `MXC_TELEMETRY_COMPONENT_PATH` names the DLL on a Windows build host, the
-MXC build script:
+The signed x64 and ARM64 DLLs are committed under
+`src/mxc-sdk/resources/telemetry-component/<arch>/` so source builds are
+routed too. Release builds on Windows use the DLL for the build host's
+architecture. Debug builds, and builds where that DLL is absent, are unrouted.
+`MXC_TELEMETRY_COMPONENT_PATH` overrides the DLL; set it to an empty value to
+force an unrouted release build. To refresh the DLLs, rebuild them in the
+private pipeline and replace both files. The values are plain data in the DLL,
+so anyone can read them, and forks inherit the routing.
+
+When a DLL is selected on a Windows build host, the MXC build script:
 
 1. opens the DLL with writers denied and verifies its Authenticode signature
    and signer name, and fails the build if either is wrong;
