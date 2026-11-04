@@ -28,11 +28,13 @@
 //! unit-tested from `lib.rs` (Cargo never runs build-script test modules).
 
 include!("../src/core/mxc_telemetry/provider_codegen.rs");
+include!("build_mxc_telemetry_component.rs");
 
 pub(crate) fn run() {
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_PROVIDER_GROUP_GUID");
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID");
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_TEST_KEYWORDS");
+    println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_COMPONENT_PATH");
 
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
@@ -41,13 +43,26 @@ pub(crate) fn run() {
     // for Windows builds so a stray or malformed environment value cannot break
     // cross-platform builds — e.g. a CI host that exports the variable globally
     // while cross-compiling the Linux/macOS binaries.
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let group_guid = if target_os == "windows" {
+    // Single place to extend when another target gains a telemetry provider.
+    let telemetry_target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows";
+    let component = match std::env::var_os("MXC_TELEMETRY_COMPONENT_PATH") {
+        Some(path) if telemetry_target && !path.is_empty() => {
+            println!("cargo::rerun-if-changed={}", path.to_string_lossy());
+            Some(read_component_metadata(std::path::Path::new(&path)))
+        }
+        _ => None,
+    };
+    let group_guid = if telemetry_target {
         std::env::var("MXC_TELEMETRY_PROVIDER_GROUP_GUID").ok()
     } else {
         None
     };
-    if target_os == "windows" {
+    assert!(
+        component.is_none() || group_guid.as_deref().is_none_or(str::is_empty),
+        "set either MXC_TELEMETRY_COMPONENT_PATH or MXC_TELEMETRY_PROVIDER_GROUP_GUID, not both"
+    );
+    let group_guid = component.as_ref().map(|c| c.group.clone()).or(group_guid);
+    if telemetry_target {
         assert!(
             std::env::var_os("MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID")
                 .is_none_or(|value| value.is_empty()),
@@ -58,16 +73,17 @@ pub(crate) fn run() {
 
     let test_keywords = local_keyword_test_enabled(
         std::env::var("MXC_TELEMETRY_TEST_KEYWORDS").ok().as_deref(),
-        target_os == "windows"
+        telemetry_target
             && std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some()
-            && std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some(),
+            && std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some()
+            && component.is_none(),
         group_guid.as_deref(),
     );
-    let mut provider_def = generate_provider_def(group_guid.as_deref());
-    provider_def.push_str(&generate_event_metadata_consts(
-        group_guid.as_deref(),
-        test_keywords,
-    ));
+    let provider_def = generate_provider_def(group_guid.as_deref());
+    let metadata = event_metadata(group_guid.as_deref(), test_keywords, component.as_ref());
+    for directive in metadata_rustc_env(&metadata) {
+        println!("{directive}");
+    }
 
     std::fs::write(out.join("provider_def.rs"), provider_def).unwrap();
 }
