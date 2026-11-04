@@ -7,9 +7,6 @@ Licensed under the MIT License.
 
 > **Audience:** MXC developers
 
-This planning snapshot is historical. For current MicroVM support and limits,
-see the [NVX backend guide](../../backends/nvx/nvx.md).
-
 > **Status:** Design Proposal
 
 ## 1. Purpose

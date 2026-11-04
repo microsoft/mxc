@@ -213,16 +213,6 @@ image registry/cache stored there. MXC coordinates the agent's stop and
 deprovision operations, closes the client, and removes the directory after
 successful deprovisioning; it does not maintain a persistent container database.
 
-Container lifecycle operations use the owner-only
-`%LOCALAPPDATA%\Microsoft\MXC\nvx-v1` state root so separate JSON calls can reopen
-the same signed-agent records. MXC requires a protected owner-only DACL
-(current user and Local SYSTEM), rejects unsafe roots and reparse points,
-and prevents path replacement while in use. Set `LOCALAPPDATA` to an absolute
-path without directory components ending in a dot or space, or use an explicit
-verbatim (`\\?\`) absolute path; ambiguous non-verbatim paths are rejected.
-Deprovision removes only the selected container, retaining the shared state
-root and cache for other containers and later calls.
-
 If deprovisioning fails, MXC reports the failure and retains the directory,
 including its location in the error. This preserves the agent's resource
 records rather than deleting them while a VM might remain. Retention does not

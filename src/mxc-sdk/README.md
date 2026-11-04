@@ -160,9 +160,6 @@ the terminal open. Ordinary `spawn` continues to use separate pipes.
 For host discovery, use
 `mxc_sdk::v1::platform_support` and `mxc_sdk::v1::available_backends`. Errors are
 returned as `mxc_sdk::v1::Error` with an `ErrorCode`.
-The non-exhaustive error also preserves backend-specific JSON in `details`.
-Inspect it explicitly for recovery information; ordinary error formatting does
-not expose its contents. See the [error reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/types.md#mxc_sdkv1error).
 Telemetry and policy helpers are also under `v1`. The
 [launch-choice table](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/api.md#choosing-a-launch-operation)
 compares captured, piped, and terminal execution.

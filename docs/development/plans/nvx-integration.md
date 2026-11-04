@@ -1,8 +1,5 @@
 # NVX integration in MXC
 
-This planning snapshot is historical. For current MicroVM support and limits,
-see the [NVX backend guide](../../backends/nvx/nvx.md).
-
 **Status:** Integration proposal.
 
 Future tense describes work proposed for the MXC integration.
