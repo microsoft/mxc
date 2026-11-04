@@ -12,6 +12,20 @@ Use [Microsoft.Mxc.Sdk.V1.Dev](https://github.com/microsoft/mxc/blob/main/docs/a
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
 
+## Requirements
+
+The SDK targets `net8.0` and `net10.0`. Applications targeting .NET 8 or .NET 9
+use the .NET 8 assembly; applications targeting .NET 10 use the .NET 10 assembly.
+The behavioral tests and Native AOT smoke test validate both .NET 8 and
+.NET 10. Samples and the console driver target .NET 10.
+
+Building from source requires the .NET 10 SDK and the Rust toolchain selected
+by `src/rust-toolchain.toml`. The repository's `global.json` selects the latest
+installed stable .NET 10.0 SDK feature band. Framework-dependent applications
+require the runtime for their application target; self-contained applications
+include their runtime.
+Backend-specific operating-system requirements still apply.
+
 ## Run to completion
 
 ```csharp

@@ -127,6 +127,13 @@ pub(super) struct SetupConfig {
     pub schema_version: u32,
     pub state_root: PathBuf,
     pub runtime: RuntimeSource,
+    pub cpu_profile: CpuProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum CpuProfile {
+    Host,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1041,6 +1048,7 @@ pub(super) mod tests {
                     manifest_sha256: "d5".repeat(32),
                 },
             },
+            cpu_profile: CpuProfile::Host,
         };
         let setup_json = serde_json::to_value(&setup).unwrap();
         assert_eq!(setup_json["schemaVersion"], 1);
@@ -1050,6 +1058,7 @@ pub(super) mod tests {
             setup_json["runtime"]["bundle"]["manifestSha256"],
             "d5".repeat(32)
         );
+        assert_eq!(setup_json["cpuProfile"], "host");
 
         let prov = ProvisionInput {
             request: ProvisionRequest::default(),

@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::script_runner::RunCancellation;
-use aci_edge_sandboxes::agent::{AgentBackend, BundledAgent, ImageDigest, SandboxDiagnostics};
+use aci_edge_sandboxes::agent::{
+    AgentBackend, BundledAgent, CpuProfile, ImageDigest, SandboxDiagnostics, SetupConfig,
+};
 use aci_edge_sandboxes::{
     AciEdgeSandbox, Backend, Capabilities, Error, ErrorCode, ExecIo, ExecOutcome, ExecRequest,
     ImageSource, OutputSink, ProvisionRequest, SandboxId, SandboxSpec,
@@ -127,6 +129,10 @@ struct ClientInner {
 
 pub(super) struct NvxClient(Option<ClientInner>);
 
+fn agent_setup(bundle: &BundledAgent, state_root: &Path) -> SetupConfig {
+    bundle.setup(state_root).with_cpu_profile(CpuProfile::Host)
+}
+
 pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
     let bundle = BundledAgent::discover().map_err(map_error)?;
     let directory = bundle.directory().canonicalize().map_err(|error| {
@@ -138,7 +144,7 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
     // The crate's output pump can outlive an unknown execution outcome and client teardown.
     crate::mxc_common::module_lifetime::pin_current_module()
         .map_err(MxcError::backend_unavailable)?;
-    let config = bundle.config(bundle.setup(state_root));
+    let config = bundle.config(agent_setup(&bundle, state_root));
     let backend = Arc::new(AgentBackend::new(config).map_err(map_error)?);
     let client = AciEdgeSandbox::from_shared(backend.clone());
     Ok(NvxClient(Some(ClientInner {
@@ -431,6 +437,14 @@ mod tests {
     use super::*;
     use aci_edge_sandboxes::ExecControl;
     use std::sync::Condvar;
+
+    #[test]
+    fn agent_setup_selects_host_cpu_profile() {
+        let bundle = BundledAgent::from_dir(r"C:\bundle").unwrap();
+        let setup = agent_setup(&bundle, Path::new(r"C:\state"));
+        assert_eq!(setup.cpu_profile, CpuProfile::Host);
+        assert_eq!(serde_json::to_value(&setup).unwrap()["cpuProfile"], "host");
+    }
 
     struct FakeControl {
         state: Mutex<bool>,
