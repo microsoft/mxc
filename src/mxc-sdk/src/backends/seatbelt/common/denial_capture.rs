@@ -10,6 +10,7 @@
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -24,6 +25,7 @@ use crate::seatbelt_common::seatbelt_runner::apply_profile_before_exec;
 const LOG_TOOL: &str = "/usr/bin/log";
 // `log stream` only notices a closed stdout when it next writes, so it would
 // outlive a killed MXC. The shell kills it once MXC's end of stdin closes.
+// Both run in their own process group so `stop` can kill them together.
 const WATCHDOG_SHELL: &str = "/bin/sh";
 const WATCHDOG_SCRIPT: &str =
     r#""$@" & pid=$!; exec >/dev/null 2>&1; read _; kill -KILL "$pid"; wait "$pid""#;
@@ -118,6 +120,7 @@ impl DenialCollector {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .map_err(|e| format!("captureDenials could not start '{LOG_TOOL} stream': {e}"))?;
 
@@ -220,8 +223,13 @@ impl DenialCollector {
     /// Kills and reaps `log stream`, returning its captured stderr.
     fn stop(&mut self) -> String {
         if let Some(mut child) = self.child.take() {
-            // Killing the shell instead would orphan `log stream`.
             drop(child.stdin.take());
+            // Kills `log stream` even if the shell already died. The unreaped
+            // shell keeps its PID, and so the group ID, from being reused.
+            if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
+                // SAFETY: killpg only sends a signal; it touches no memory.
+                unsafe { libc::killpg(pgid, libc::SIGKILL) };
+            }
             let _ = child.wait();
         }
         if let Some(reader) = self.stdout_reader.take() {

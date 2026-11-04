@@ -37,10 +37,10 @@ cleanup_capture() {
     rm -rf "$TESTDIR" "$SEATBELT_TMP"
 }
 trap cleanup_capture EXIT
-mkdir -p "$TESTDIR/ungranted" "$TESTDIR/denied" "$TESTDIR/out"
+mkdir -p "$TESTDIR/ungranted" "$TESTDIR/denied" "$TESTDIR/out" "$TESTDIR/gate"
 echo "CAPTURE_SECRET_CONTENT" >"$TESTDIR/ungranted/secret.txt"
 echo "CAPTURE_DENIED_CONTENT" >"$TESTDIR/denied/secret.txt"
-for name in overlap_a overlap_b drain killed; do
+for name in overlap_a overlap_b drain killed watchdog; do
     echo "CAPTURE_SENTINEL_CONTENT" >"$TESTDIR/ungranted/$name.txt"
 done
 chmod -R a+rX "$TESTDIR"
@@ -76,10 +76,11 @@ EOF
 }
 
 # Render the sentinel workload to its own file so several can run at once.
+# It reads its file, waits for open_gate NAME, then reads it again.
 SENTINEL_CONFIG=""
 render_sentinel() {
-    local name="$1" pauses="$2" output="$3" rendered
-    rendered="$(render seatbelt_capture_denials_sentinel.json TESTDIR "$TESTDIR" NAME "$name" PAUSES "$pauses" OUTPUT "$output")"
+    local name="$1" output="$2" rendered
+    rendered="$(render seatbelt_capture_denials_sentinel.json TESTDIR "$TESTDIR" NAME "$name" OUTPUT "$output")"
     SENTINEL_CONFIG="$TESTDIR/$name.json"
     cp "$rendered" "$SENTINEL_CONFIG" 2>/dev/null || fail "config was not rendered: $rendered"
 }
@@ -100,10 +101,16 @@ finish_background() {
     OUT="$(cat "$output")"
 }
 
+open_gate() {
+    local name
+    for name in "$@"; do touch "$TESTDIR/gate/$name"; done
+}
+
 # Wait until background run MXC has a ready collector and its sentinel
-# workload NAME is running. Sets COLLECTOR to the `log stream` PID and
-# WORKLOAD to the workload shell's PID.
+# workload NAME is running. Sets COLLECTOR to the `log stream` PID,
+# WATCHDOG to its parent shell's PID, and WORKLOAD to the workload shell's PID.
 COLLECTOR=""
+WATCHDOG=""
 WORKLOAD=""
 wait_for_collector() {
     local label="$1" mxc="$2" name="$3" output="$4" shell
@@ -111,6 +118,7 @@ wait_for_collector() {
     for _ in $(seq 1 150); do
         for shell in $(pgrep -P "$mxc" -f '/usr/bin/log stream'); do
             COLLECTOR="$(pgrep -P "$shell" -f '/usr/bin/log stream')"
+            WATCHDOG="$shell"
         done
         WORKLOAD="$(pgrep -P "$mxc" -f "ungranted/$name.txt")"
         [ -n "$COLLECTOR" ] && [ -n "$WORKLOAD" ] && return
@@ -375,11 +383,11 @@ rm -f "$REPORT" "${REPORT%.json}.verbose.json"
 
 # --- overlapping runs with the same outputPath ---------------------------------
 
-# Each run reads its own sentinel while the other's collector is running, so a
-# collector not filtered to its own run would list both.
-render_sentinel overlap_a "2 1" "$TESTDIR/out/overlap.json"
+# Each run reads its own sentinel again once both collectors are running, so
+# a collector not filtered to its own run would list both reads.
+render_sentinel overlap_a "$TESTDIR/out/overlap.json"
 CONFIG_A="$SENTINEL_CONFIG"
-render_sentinel overlap_b "3 0" "$TESTDIR/out/overlap.json"
+render_sentinel overlap_b "$TESTDIR/out/overlap.json"
 CONFIG_B="$SENTINEL_CONFIG"
 start_background "$CONFIG_A" "$TESTDIR/overlap_a.out"
 PID_A="$BG_PID"
@@ -389,7 +397,7 @@ start_background "$CONFIG_B" "$TESTDIR/overlap_b.out"
 PID_B="$BG_PID"
 wait_for_collector "overlapping run B starts" "$PID_B" overlap_b "$TESTDIR/overlap_b.out"
 COLLECTOR_B="$COLLECTOR"
-kill -0 "$PID_A" 2>/dev/null || fail "run A finished before run B started; the runs did not overlap"
+open_gate overlap_a overlap_b
 
 finish_background "$PID_A" "$TESTDIR/overlap_a.out"
 expect_ok "overlapping run A enforces the policy" "CAPTURE_SENTINEL_BLOCKED"
@@ -413,10 +421,11 @@ expect_collector_gone "overlapping run B's log stream stopped" "$COLLECTOR_B"
 
 # A stopped `log stream` never shows the end marker, so MXC cannot confirm
 # that it received every event.
-render_sentinel drain "3" "$TESTDIR/out/drain.json"
+render_sentinel drain "$TESTDIR/out/drain.json"
 start_background "$SENTINEL_CONFIG" "$TESTDIR/drain.out"
 wait_for_collector "the drain run starts" "$BG_PID" drain "$TESTDIR/drain.out"
 kill -STOP "$COLLECTOR"
+open_gate drain
 finish_background "$BG_PID" "$TESTDIR/drain.out"
 expect_ok "a run whose log stream stalls still completes" "CAPTURE_SENTINEL_BLOCKED"
 expect_marker "the CLI warns that the report may be incomplete" \
@@ -429,7 +438,7 @@ expect_collector_gone "the stalled log stream was stopped" "$COLLECTOR"
 
 # --- mxc-exec-mac killed mid-run -----------------------------------------------
 
-render_sentinel killed "30" "$TESTDIR/out/killed.json"
+render_sentinel killed "$TESTDIR/out/killed.json"
 start_background "$SENTINEL_CONFIG" "$TESTDIR/killed.out"
 wait_for_collector "the run to kill starts" "$BG_PID" killed "$TESTDIR/killed.out"
 # The workload outlives a killed MXC; clean it up here.
@@ -439,6 +448,29 @@ finish_background "$BG_PID" "$TESTDIR/killed.out"
 expect_collector_gone "killing mxc-exec-mac stops its log stream" "$COLLECTOR"
 kill_workload "$ORPHAN_WORKLOAD"
 ORPHAN_WORKLOAD=""
+
+# --- collector's watchdog shell killed mid-run ---------------------------------
+
+# `log stream` keeps running without its parent shell. MXC must still stop it
+# rather than wait forever for its output to close.
+render_sentinel watchdog "$TESTDIR/out/watchdog.json"
+start_background "$SENTINEL_CONFIG" "$TESTDIR/watchdog.out"
+wait_for_collector "the watchdog run starts" "$BG_PID" watchdog "$TESTDIR/watchdog.out"
+kill -KILL "$WATCHDOG"
+open_gate watchdog
+for _ in $(seq 1 300); do
+    kill -0 "$BG_PID" 2>/dev/null || break
+    sleep 0.1
+done
+if kill -0 "$BG_PID" 2>/dev/null; then
+    kill -KILL "$COLLECTOR" 2>/dev/null
+    fail "mxc-exec-mac hung after its log stream lost its watchdog shell" "$(cat "$TESTDIR/watchdog.out")"
+fi
+finish_background "$BG_PID" "$TESTDIR/watchdog.out"
+expect_ok "a run whose watchdog shell was killed completes" "CAPTURE_SENTINEL_BLOCKED"
+read_pointer "a run whose watchdog shell was killed writes a report"
+expect_listed "the report lists the read made after the watchdog died" file "$TESTDIR/ungranted/watchdog.txt" read
+expect_collector_gone "the orphaned log stream was stopped" "$COLLECTOR"
 
 # --- UI denials under guiAccess ---------------------------------------------
 
