@@ -98,8 +98,6 @@ windows = { workspace = true, features = [
     "UI",
     "Win32_Globalization",
     "Win32_Security_Cryptography",
-    "Win32_Security_Cryptography_Catalog",
-    "Win32_Security_Cryptography_Sip",
     "Win32_Security_WinTrust",
     "Win32_System_EventLog",
 ] }
