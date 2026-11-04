@@ -4,6 +4,66 @@
 const MANAGED_MOUNTS_BEGIN: &str = "# BEGIN MXC managed mounts (rewritten every run)";
 const MANAGED_MOUNTS_END: &str = "# END MXC managed mounts";
 
+fn validate_unprivileged_idmaps(idmaps: &str) -> Result<(), String> {
+    let mut mappings: Vec<(&str, std::ops::Range<u32>, std::ops::Range<u32>)> = Vec::new();
+    for line in idmaps
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let [kind, container_start, host_start, count] = fields.as_slice() else {
+            return Err(format!("Invalid lxc.idmap entry: {line}"));
+        };
+        if !["u", "g"].contains(kind) {
+            return Err(format!("Invalid lxc.idmap type: {kind}"));
+        }
+        let parse_id = |value: &str| {
+            value
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid lxc.idmap number: {value}"))
+        };
+        let container_start = parse_id(container_start)?;
+        let host_start = parse_id(host_start)?;
+        let count = parse_id(count)?;
+        if count == 0 || host_start == 0 {
+            return Err(format!(
+                "lxc.idmap must map a nonempty range that excludes host root: {line}"
+            ));
+        }
+        let container_end = container_start
+            .checked_add(count)
+            .ok_or_else(|| format!("lxc.idmap container range exceeds valid IDs: {line}"))?;
+        let host_end = host_start
+            .checked_add(count)
+            .ok_or_else(|| format!("lxc.idmap host range exceeds valid IDs: {line}"))?;
+        let container_range = container_start..container_end;
+        let host_range = host_start..host_end;
+        for (existing_kind, existing_container, existing_host) in &mappings {
+            if kind == existing_kind
+                && ((container_range.start < existing_container.end
+                    && existing_container.start < container_range.end)
+                    || (host_range.start < existing_host.end
+                        && existing_host.start < host_range.end))
+            {
+                return Err(format!("Overlapping lxc.idmap ranges: {line}"));
+            }
+        }
+        mappings.push((kind, container_range, host_range));
+    }
+    for (kind, name) in [("u", "UID"), ("g", "GID")] {
+        if !mappings
+            .iter()
+            .any(|(mapped_kind, range, _)| *mapped_kind == kind && range.start == 0)
+        {
+            return Err(format!(
+                "lxc.idmap must map container root to a nonzero host {name}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The filesystem type and options of one kind of `lxc.mount.entry`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MountShape {
@@ -491,8 +551,57 @@ impl LxcContainer {
         out
     }
 
+    fn unprivileged_start_args(&self) -> Result<Vec<String>, String> {
+        let mut query = self.lxc_command("lxc-info");
+        query.args(["-H", "-c", "lxc.idmap"]);
+        let output = std::process::Command::new("timeout")
+            .args(["--signal=KILL", "10s"])
+            .arg(query.get_program())
+            .args(query.get_args())
+            .env("LC_ALL", "C")
+            .output()
+            .map_err(|error| {
+                format!("Cannot query lxc.idmap with timeout and lxc-info: {error}")
+            })?;
+        if !output.status.success() || !output.stderr.is_empty() {
+            return Err(format!(
+                "Cannot verify lxc.idmap: lxc-info exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let idmaps = std::str::from_utf8(&output.stdout)
+            .map_err(|error| format!("Cannot read lxc.idmap from lxc-info: {error}"))?;
+        validate_unprivileged_idmaps(idmaps)
+            .map_err(|error| format!("Refusing to start LXC container '{}': {error}", self.name))?;
+
+        let mut args = [
+            "-s",
+            "lxc.namespace.clone=",
+            "-s",
+            "lxc.namespace.keep=",
+            "-s",
+            "lxc.namespace.share.user=",
+            "-s",
+            "lxc.idmap=",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        for mapping in idmaps
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            args.push("-s".to_owned());
+            args.push(format!("lxc.idmap={mapping}"));
+        }
+        Ok(args)
+    }
+
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
+        let mapped_args = self.unprivileged_start_args()?;
         let mut cmd = self.lxc_command("lxc-start");
+        cmd.args(mapped_args);
         cmd.args(network.to_start_args(self.configured_interface_count()));
         Self::run_tool(cmd)
     }
@@ -523,7 +632,9 @@ impl LxcContainer {
         _timeout_ms: u32,
     ) -> Result<(i32, String, String), String> {
         // TODO: Implement timeout and working directory support.
+        let mapped_args = self.unprivileged_start_args()?;
         let mut cmd = self.lxc_command("lxc-execute");
+        cmd.args(mapped_args);
         cmd.args(["--", "/bin/sh", "-c", command]);
 
         let output = cmd
@@ -863,6 +974,10 @@ impl LxcContainer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lxc_unprivileged_idmaps_spec.rs"]
+mod unprivileged_idmaps_spec;
 
 #[cfg(test)]
 mod tests {
