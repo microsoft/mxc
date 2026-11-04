@@ -12,7 +12,7 @@
 mod unix_pty_contract;
 
 use mxc_sdk::v1::{
-    run, spawn, spawn_with_pty, ContainerRequest, FilesystemPolicy, SpawnWithPtyOptions, WaitResult,
+    spawn, spawn_with_pty, ContainerRequest, FilesystemPolicy, SpawnWithPtyOptions, WaitResult,
 };
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
@@ -809,6 +809,33 @@ fn read_detached_pid_until_ready(proc: &mut mxc_sdk::v1::MxcProcess) -> u32 {
     }
 }
 
+/// Waits for the run and returns its outcome, stdout, and stderr. Unlike
+/// `run()`, it keeps the handle, so the caller can check what `wait()` alone
+/// cleaned up before dropping the handle cleans up again.
+#[cfg(target_os = "macos")]
+fn wait_keeping_handle(proc: &mut mxc_sdk::v1::MxcProcess) -> (WaitResult, String, String) {
+    use std::io::Read;
+
+    fn capture(stream: Option<Box<dyn Read + Send>>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut stream) = stream {
+                let _ = stream.read_to_string(&mut text);
+            }
+            text
+        })
+    }
+
+    let stdout = capture(proc.take_stdout());
+    let stderr = capture(proc.take_stderr());
+    let outcome = proc.wait().expect("wait");
+    (
+        outcome,
+        stdout.join().expect("stdout reader"),
+        stderr.join().expect("stderr reader"),
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn assert_descendant_gone(pid: u32, when: &str) {
     for _ in 0..100 {
@@ -822,26 +849,45 @@ fn assert_descendant_gone(pid: u32, when: &str) {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn run_kills_detached_descendant_after_normal_exit() {
+fn wait_kills_detached_descendant_after_normal_exit() {
     let scratch = Scratch::new("normal");
     let (command, node_root) = detached_descendant_command(&scratch, "exit 0");
-
-    let result = run(
+    let mut proc = spawn(
         lifetime_request(command, None, &node_root),
         Default::default(),
     )
-    .expect("run");
-    let stdout = String::from_utf8_lossy(&result.stdout);
+    .expect("spawn");
+
+    let (outcome, stdout, stderr) = wait_keeping_handle(&mut proc);
     assert_eq!(
-        result.outcome,
+        outcome,
         WaitResult::Exited(0),
-        "stdout: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&result.stderr)
+        "stdout: {stdout}\nstderr: {stderr}"
     );
     let descendant = detached_pid(&stdout);
     let _guard = KillIfFailing(descendant);
 
-    assert_descendant_gone(descendant, "after run() returned");
+    assert_descendant_gone(descendant, "after wait() returned");
+    drop(proc);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dropping_handle_kills_detached_descendant() {
+    let scratch = Scratch::new("drop");
+    let (command, node_root) = detached_descendant_command(&scratch, "echo READY; sleep 300");
+    let mut proc = spawn(
+        lifetime_request(command, None, &node_root),
+        Default::default(),
+    )
+    .expect("spawn");
+    let descendant = read_detached_pid_until_ready(&mut proc);
+    let _guard = KillIfFailing(descendant);
+    assert!(pid_alive(descendant), "descendant should run before drop");
+
+    drop(proc);
+
+    assert_descendant_gone(descendant, "after the handle was dropped");
 }
 
 #[cfg(target_os = "macos")]
@@ -859,9 +905,9 @@ fn streaming_kill_terminates_detached_descendant() {
     assert!(pid_alive(descendant), "descendant should run before kill");
 
     proc.kill().expect("kill");
-    let _ = proc.wait();
 
     assert_descendant_gone(descendant, "after kill()");
+    let _ = proc.wait();
 }
 
 #[cfg(target_os = "macos")]
@@ -917,16 +963,16 @@ fn streaming_kill_leaves_concurrent_run_running() {
     let _second_guard = KillIfFailing(second_child);
 
     first.kill().expect("kill first run");
-    let _ = first.wait();
     assert_descendant_gone(first_child, "after its run was killed");
+    let _ = first.wait();
     assert!(
         pid_alive(second_child),
         "killing one run also killed {second_child} from a concurrent run"
     );
 
     second.kill().expect("kill second run");
-    let _ = second.wait();
     assert_descendant_gone(second_child, "after its run was killed");
+    let _ = second.wait();
 }
 
 /// Owns a hopping chain's scratch directory. On drop it creates the stop file,
@@ -976,7 +1022,7 @@ fn chain_length(log: &str) -> usize {
 /// the run.
 #[cfg(target_os = "macos")]
 #[test]
-fn run_kills_descendant_chain_that_outpaces_process_scans() {
+fn wait_kills_descendant_chain_that_outpaces_process_scans() {
     let scratch = ChainScratch(Some(Scratch::new("chain")));
     let log = scratch.path("chain.log");
     let command = format!(
@@ -998,13 +1044,13 @@ i=0; while [ $(($(wc -l < "$LOG"))) -lt 200 ] && [ $i -lt 200 ]; do sleep 0.05; 
         ..ContainerRequest::new(command)
     };
 
-    let result = run(request, Default::default()).expect("run");
+    let mut proc = spawn(request, Default::default()).expect("spawn");
+
+    let (outcome, stdout, stderr) = wait_keeping_handle(&mut proc);
     assert_eq!(
-        result.outcome,
+        outcome,
         WaitResult::Exited(0),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
+        "stdout: {stdout}\nstderr: {stderr}"
     );
 
     std::thread::sleep(std::time::Duration::from_millis(250));
@@ -1013,6 +1059,7 @@ i=0; while [ $(($(wc -l < "$LOG"))) -lt 200 ] && [ $i -lt 200 ]; do sleep 0.05; 
     let after = chain_length(&log);
     assert_eq!(
         before, after,
-        "the process chain kept running after run() returned ({before} -> {after} hops)"
+        "the process chain kept running after wait() returned ({before} -> {after} hops)"
     );
+    drop(proc);
 }
