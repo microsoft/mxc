@@ -264,13 +264,13 @@ unsafe fn verify_certificate_chain(
     .map_err(|error| {
         io::Error::other(format!("cannot verify signer certificate chain: {error}"))
     })?;
-    if chain.is_null() {
-        return Err(io::Error::other("no verified signer certificate chain"));
-    }
+    let chain = std::ptr::NonNull::new(chain)
+        .ok_or_else(|| io::Error::other("no verified signer certificate chain"))?;
     // WinTrust supplies the current time or its validated signing timestamp.
     // Revocation and root trust still use current Windows trust data.
-    let status = unsafe { (*chain).TrustStatus.dwErrorStatus };
-    unsafe { CertFreeCertificateChain(chain) };
+    // SAFETY: the successful call allocated this non-null context; release follows the read.
+    let status = unsafe { chain.as_ref().TrustStatus.dwErrorStatus };
+    unsafe { CertFreeCertificateChain(chain.as_ptr()) };
     require_trusted_chain(status)
 }
 
