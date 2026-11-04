@@ -21,6 +21,8 @@ try {
     $required = @(
         'lib/net8.0/Microsoft.Mxc.Sdk.dll',
         'lib/net8.0/Microsoft.Mxc.Sdk.pdb',
+        'lib/net10.0/Microsoft.Mxc.Sdk.dll',
+        'lib/net10.0/Microsoft.Mxc.Sdk.pdb',
         'runtimes/win-x64/native/mxc_ffi.dll',
         'runtimes/win-arm64/native/mxc_ffi.dll',
         'runtimes/linux-x64/native/libmxc_ffi.so',

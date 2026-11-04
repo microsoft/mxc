@@ -18,12 +18,17 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::{PSID, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
 use windows::Win32::System::Pipes::CreatePipe;
-use windows::Win32::System::Threading::WaitForSingleObject;
+use windows::Win32::System::Threading::{
+    QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_FORMAT,
+};
 use windows::Win32::System::IO::CancelIoEx;
 use windows_core::BOOL;
 
@@ -56,6 +61,42 @@ pub fn module_path_for_address(address: *const ()) -> Result<PathBuf, String> {
         return Err("the loaded module path exceeds the Windows path limit".to_string());
     }
     path.truncate(len);
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&path)))
+}
+
+/// Return the direct parent recorded for the current process.
+pub(crate) fn parent_process_id() -> windows::core::Result<u32> {
+    // SAFETY: The snapshot needs no input pointers and is owned until enumeration completes.
+    let snapshot = OwnedHandle::new(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }?);
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: The snapshot is live and entry has the required size and writable storage.
+    unsafe { Process32FirstW(snapshot.get(), &mut entry) }?;
+    loop {
+        if entry.th32ProcessID == std::process::id() {
+            return Ok(entry.th32ParentProcessID);
+        }
+        // SAFETY: The snapshot and entry remain valid for the entire enumeration.
+        unsafe { Process32NextW(snapshot.get(), &mut entry) }?;
+    }
+}
+
+/// Query an image path without opening another process or taking ownership of its handle.
+pub(crate) fn process_image_path(process: HANDLE) -> windows::core::Result<PathBuf> {
+    let mut path = vec![0u16; 32_768];
+    let mut length = path.len() as u32;
+    // SAFETY: Callers keep the process handle live; path is writable for length UTF-16 units.
+    unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(path.as_mut_ptr()),
+            &mut length,
+        )
+    }?;
+    path.truncate(length as usize);
     Ok(PathBuf::from(std::ffi::OsString::from_wide(&path)))
 }
 

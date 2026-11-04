@@ -106,8 +106,36 @@ Write-Output 'LoopbackAnchor.ps1'
         $required.Count -eq 2 -and
         $required[1] -eq (Join-Path 'test_scripts' $helperPaths[0]))
 
-    Write-Host "Passed $passed bundle helper assertions."
+    $template = Get-Content -LiteralPath (
+        Join-Path $repoRoot '.azure-pipelines\templates\IsolationSession.TestBundle.Build.Job.yml') -Raw
+    $selection = [regex]::Match($template, '(?ms)^      \$frameworkProperties =.*?(?=^      \$out =)')
+    if (-not $selection.Success) {
+        throw 'Cannot locate the Azure bundle framework selection.'
+    }
+    $selectFramework = [scriptblock]::Create($selection.Value)
+    $project = Join-Path $scratch 'Frameworks.proj'
+    foreach ($case in @(
+        @{ Name = 'Legacy .NET 8 checkout'; Properties = '<TargetFramework>net8.0</TargetFramework>'; Expected = 'net8.0' },
+        @{ Name = 'Dual-target checkout prefers .NET 10'; Properties = '<TargetFrameworks>net8.0;net10.0</TargetFrameworks>'; Expected = 'net10.0' },
+        @{ Name = 'Single .NET 10 checkout'; Properties = '<TargetFramework>net10.0</TargetFramework>'; Expected = 'net10.0' }
+    )) {
+        Set-Content -LiteralPath $project -Value "<Project><PropertyGroup>$($case.Properties)</PropertyGroup></Project>"
+        . $selectFramework
+        Assert-True $case.Name ($framework -eq $case.Expected)
+    }
+    Set-Content -LiteralPath $project -Value '<Project><PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup></Project>'
+    Assert-Failure 'Unsupported target frameworks fail explicitly' {
+        . $selectFramework
+    } '*must support net10.0 or net8.0*'
+    Set-Content -LiteralPath $project -Value '<Project>'
+    Assert-Failure 'MSBuild evaluation errors are not treated as a fallback' {
+        . $selectFramework
+    } '*Evaluating target frameworks*failed with exit code*'
+
+    Write-Host "Passed $passed bundle compatibility assertions."
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force
 }
+
+exit 0

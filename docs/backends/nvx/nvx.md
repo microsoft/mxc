@@ -21,6 +21,9 @@ running hypervisor. Enable the `HypervisorPlatform` Windows optional feature
 and restart the host before running a workload. In a virtualized host, nested
 virtualization must also be available.
 
+MicroVMs use a host-derived CPU profile that is not pinned and can change
+after host updates. Unsupported hosts still fail at startup.
+
 From the repository root, build the executor:
 
 ```powershell

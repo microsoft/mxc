@@ -132,13 +132,13 @@ jobs:
             exit 1
           fi
 
-      - name: Test Bubblewrap seccomp, resolver, argument-builder, tool lookup, and version modules
+      - name: Test Bubblewrap seccomp, resolver, argument-builder, runner, tool lookup, and version modules
         working-directory: src
         shell: bash
         run: |
           set -uo pipefail
           log="$(mktemp)"
-          for module in seccomp_filter resolver_file bwrap_command host_tools bwrap_version; do
+          for module in seccomp_filter resolver_file bwrap_command bwrap_runner host_tools bwrap_version; do
             cargo test --locked --release --target "${{ matrix.target }}" \
               -p mxc-sdk --lib "backend_modules::bubblewrap::common::$module::" 2>&1 | tee "$log"
             status=${PIPESTATUS[0]}
