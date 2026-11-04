@@ -109,7 +109,7 @@ jobs:
 
   - ${{ if eq(parameters.isOfficialBuild, true) }}:
     - ${{ each framework in split('net8.0,net10.0', ',') }}:
-      - task: EsrpCodeSigning@5
+      - task: EsrpCodeSigning@6
         displayName: Sign Microsoft.Mxc.Sdk.dll (${{ framework }})
         inputs:
           ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
