@@ -390,14 +390,6 @@ fn spawn_exec(
         capture_plan.as_ref().map(|plan| plan.tag.as_str()),
         logger,
     )?;
-    // Fail closed: never run a capture request without a live log stream.
-    if capture_plan.as_ref().is_some_and(|plan| plan.allow_mode) {
-        logger.warning_line(ALLOW_MODE_WARNING);
-    }
-    let capture = capture_plan
-        .map(|plan| plan.start())
-        .transpose()
-        .map_err(launch_failed_response)?;
 
     // Always start from a cleared environment so untrusted sandboxed code never
     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
@@ -419,6 +411,15 @@ fn spawn_exec(
     command.current_dir(cwd);
     command.env("PWD", cwd);
 
+    // Fail closed: never run a capture request without a live log stream.
+    if capture_plan.as_ref().is_some_and(|plan| plan.allow_mode) {
+        logger.warning_line(ALLOW_MODE_WARNING);
+    }
+    let capture = capture_plan
+        .map(|plan| plan.start())
+        .transpose()
+        .map_err(launch_failed_response)?;
+
     match stdio {
         StdioMode::Pipes => {
             command
@@ -437,9 +438,15 @@ fn spawn_exec(
         StdioMode::Pty(_) => {}
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| launch_failed_response(spawn_error(&error)))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return Err(discard_capture(
+                capture,
+                launch_failed_response(spawn_error(&error)),
+            ))
+        }
+    };
 
     let (stdin, stdout, stderr) = match stdio {
         StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
@@ -460,10 +467,13 @@ fn spawn_exec(
                 let _ = child.kill();
                 let _ = child.wait();
                 let error = out_result.err().or(err_result.err());
-                return Err(launch_failed_response(format!(
-                    "Seatbelt: failed to wrap stdio pipes: {}",
-                    error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
-                )));
+                return Err(discard_capture(
+                    capture,
+                    launch_failed_response(format!(
+                        "Seatbelt: failed to wrap stdio pipes: {}",
+                        error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
+                    )),
+                ));
             }
         };
 
@@ -536,6 +546,25 @@ struct ActiveDenialCapture {
     collector: DenialCollector,
     output_path: PathBuf,
     trace_path: Option<PathBuf>,
+}
+
+/// Stops `log stream` and deletes the trace when the workload never ran.
+fn discard_capture(
+    capture: Option<ActiveDenialCapture>,
+    mut response: ScriptResponse,
+) -> ScriptResponse {
+    let Some(capture) = capture else {
+        return response;
+    };
+    drop(capture.collector);
+    if let Some(Err(error)) = capture
+        .trace_path
+        .as_deref()
+        .map(remove_internal_capture_file)
+    {
+        response.error_message = format!("{}; additionally {error}", response.error_message);
+    }
+    response
 }
 
 impl ActiveDenialCapture {
@@ -2070,6 +2099,30 @@ os.close(fd)
             capture_warnings: Vec::new(),
             output_metadata: None,
         }
+    }
+
+    #[test]
+    fn launch_failure_after_capture_start_removes_trace() {
+        let directory = tempfile::tempdir().unwrap();
+        let output_path = directory.path().join("denials.json");
+        let trace_path = capture_sibling_path(&output_path, TRACE_SUFFIX).unwrap();
+        let capture = DenialCapturePlan {
+            tag: format!("mxc-capture-{}", random_capture_suffix().unwrap()),
+            output_path,
+            trace_path: Some(trace_path.clone()),
+            allow_mode: false,
+        }
+        .start()
+        .expect("log stream");
+        assert!(trace_path.exists());
+
+        let response = discard_capture(
+            Some(capture),
+            launch_failed_response("spawn failed".to_string()),
+        );
+
+        assert_eq!(response.error_message, "spawn failed");
+        assert!(!trace_path.exists());
     }
 
     #[test]
