@@ -180,10 +180,16 @@ jobs:
           # a terminating error before the output can be checked.
           $ErrorActionPreference = 'Continue'
           $output = cargo check --locked --release -p mxc-sdk --lib 2>&1 | Out-String
-          if ($LASTEXITCODE -eq 0) { throw 'A tampered telemetry component was accepted.' }
+          $tamperedExit = $LASTEXITCODE
+          Write-Host "Tampered build exit code: $tamperedExit"
+          Write-Host ($output -split "`n" | Select-Object -Last 15 | Out-String)
+          if ($tamperedExit -eq 0) { throw 'A tampered telemetry component was accepted.' }
           if ($output -notmatch 'no valid Authenticode signature') {
             throw "Tampered component failed for an unexpected reason:`n$output"
           }
+
+          # The expected tampered-build failure leaves a nonzero exit status.
+          exit 0
 
       - name: Test telemetry ETW assertions, lifecycle requests and consent fixtures
         shell: pwsh
