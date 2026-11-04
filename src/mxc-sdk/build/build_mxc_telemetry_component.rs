@@ -184,7 +184,7 @@ fn read_component_metadata(path: &std::path::Path) -> ComponentMetadata {
             Ok(metadata) => metadata,
             Err(reason) => panic!(
                 "MXC_TELEMETRY_COMPONENT_PATH could not be used: {reason}. \
-                 Unset it to build without Required telemetry routing."
+                 Set it to an empty value to build without Required telemetry routing."
             ),
         }
     }

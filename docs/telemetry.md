@@ -35,6 +35,20 @@ Automatic Required collection applies only to supported Windows builds configure
 
 Required collection is introduced through a versioned contract. Existing published contracts retain their current explicit opt-in, consent, and administrative-policy behavior, which is unchanged.
 
+## Administrative policy for published contracts
+
+For published contracts, an administrator can restrict collection with the `REG_DWORD` value `AllowTelemetry` under `HKLM\SOFTWARE\Policies\Mxc`. MXC does not read the Windows diagnostic-data setting.
+
+| Value | Effect |
+|---|---|
+| Not set | No restriction. Collection still needs request opt-in and MXC consent. |
+| `0` | Blocks collection. |
+| `1` | Blocks collection. |
+| `3` | Permits collection, subject to request opt-in and MXC consent. |
+| Any other value, wrong type, or read failure | Blocks collection. |
+
+The four Required events of the development contract are not affected by this policy.
+
 ## See also
 
 - [Telemetry architecture](development/architecture/telemetry.md)
