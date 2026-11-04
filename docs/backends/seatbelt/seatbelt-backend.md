@@ -471,6 +471,10 @@ adds a warning; the report and verbose file are not affected.
 
 - Reads of paths that don't exist aren't reported.
 
+- Paths longer than about 900 bytes aren't reported, and the report isn't
+  marked truncated. macOS limits each report to about 1 KB. The access is
+  still blocked in `block` mode and allowed in `allow` mode.
+
 - MXC reads the reports with `log stream`. If it can't collect every report
   before the workload exits, the verbose file sets `processedEventsTruncated`
   to `true`. Accounts that can't run `log stream` haven't been tested.
