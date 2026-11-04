@@ -43,7 +43,7 @@ profile with the lane's target.
 
 The Windows and Linux builds run public SDK requests with a blocked existence,
 object-identity, or delegation probe. Separate cases let those checks finish,
-then block Bubblewrap denied-path resolution, LXC rebound/denied-mount resolution,
+then block Bubblewrap denied- or granted-path resolution, LXC rebound/denied-mount resolution,
 or WSLC overlap canonicalization. Each must return a path-specific timeout
 without executing the workload. WSLC coverage also calls container provisioning.
 A separate process enforces a 15-second watchdog so a missing timeout fails

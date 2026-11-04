@@ -42,7 +42,7 @@ use crate::bwrap_common::{
     bwrap_version, lifetime_spawner, network_rules,
     provider_monitor::ProviderMonitor,
     proxy_network,
-    resolver_file::ResolverFile,
+    resolver_file::{self, ResolverFile},
     seccomp_filter,
 };
 
@@ -200,6 +200,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             &plan.files,
             &baseline_links,
             &grants.aliased,
+            !grants.replaces_private_tmp,
             launch,
             logger,
             stdio,
@@ -513,6 +514,7 @@ impl BubblewrapScriptRunner {
         denied_files: &HashSet<String>,
         baseline_links: &[bwrap_command::BaselineLink],
         aliased_grants: &[bwrap_command::AliasedGrant],
+        private_tmp: bool,
         launch: ValidatedLaunch,
         logger: &mut Logger,
         stdio: StdioMode,
@@ -645,6 +647,7 @@ impl BubblewrapScriptRunner {
             baseline_links,
             &resolver_args,
             &mounts,
+            private_tmp,
             |mount_args| {
                 let plan = bwrap_command::plan_grant_links(mount_args, aliased_grants);
                 unavailable_links = plan.unavailable;
@@ -1392,6 +1395,7 @@ struct GrantPlan {
     policy: Option<ContainerPolicy>,
 
     aliased: Vec<bwrap_command::AliasedGrant>,
+    replaces_private_tmp: bool,
 }
 
 /// Move each `readwritePaths` and `readonlyPaths` entry to its real path, so a
@@ -1400,12 +1404,16 @@ fn resolve_granted_paths(
     policy: &ContainerPolicy,
     logger: &mut Logger,
 ) -> Result<GrantPlan, FilesystemPolicyError> {
+    let mut probe = crate::mxc_common::filesystem_probe::FilesystemProbe::default();
     let mut aliased = Vec::new();
     let mut moved = false;
+    let mut replaces_private_tmp = false;
     let mut resolve = |paths: &[String], list: &'static str| {
         let mut real_paths: Vec<String> = Vec::with_capacity(paths.len());
         for path in paths {
-            let grant = resolve_granted_path(path, list)?;
+            let grant = probe
+                .run(path, move |path| resolve_granted_path(path, list))
+                .map_err(FilesystemPolicyError::Host)??;
             if grant.path != *path {
                 let _ = writeln!(
                     logger,
@@ -1415,6 +1423,11 @@ fn resolve_granted_paths(
                 );
                 moved = true;
             }
+            replaces_private_tmp |= grant
+                .alias
+                .links
+                .iter()
+                .any(|link| link.path == "/tmp" && link.target == grant.path);
             if !grant.alias.links.is_empty() {
                 aliased.push(grant.alias);
             }
@@ -1433,6 +1446,7 @@ fn resolve_granted_paths(
             ..policy.clone()
         }),
         aliased,
+        replaces_private_tmp,
     })
 }
 
@@ -1445,6 +1459,9 @@ fn resolve_granted_path(
     path: &str,
     list: &'static str,
 ) -> Result<ResolvedGrant, FilesystemPolicyError> {
+    #[cfg(test)]
+    crate::mxc_common::filesystem_probe::launch_tests::stall("bwrap-granted", path);
+
     let refuse = |error: std::io::Error| {
         let message = format!(
             "Bubblewrap: {list} entry '{path}' could not be resolved ({error}); refusing to start."
@@ -1474,22 +1491,53 @@ fn resolve_granted_path(
             ))
         })
     };
-    let grant_link = |(path, target): (PathBuf, PathBuf)| {
-        Ok::<_, FilesystemPolicyError>(bwrap_command::GrantLink {
-            path: text(path)?,
-            target: text(target)?,
+    let links = resolved
+        .links
+        .into_iter()
+        .map(|(location, target)| host_link(location, target, 0, &refuse, &text))
+        .collect::<Result<_, _>>()?;
+    let inner = inner
+        .map(|(location, target)| {
+            Ok::<_, FilesystemPolicyError>(bwrap_command::GrantLink {
+                path: text(location)?,
+                target: text(target)?,
+                passes_through: Vec::new(),
+            })
         })
-    };
+        .transpose()?;
     Ok(ResolvedGrant {
         path: text(resolved.path)?,
-        alias: bwrap_command::AliasedGrant {
-            links: resolved
-                .links
-                .into_iter()
-                .map(grant_link)
-                .collect::<Result<_, FilesystemPolicyError>>()?,
-            inner: inner.map(grant_link).transpose()?,
-        },
+        alias: bwrap_command::AliasedGrant { links, inner },
+    })
+}
+
+fn host_link(
+    location: PathBuf,
+    target: PathBuf,
+    depth: usize,
+    refuse: &dyn Fn(std::io::Error) -> FilesystemPolicyError,
+    text: &dyn Fn(PathBuf) -> Result<String, FilesystemPolicyError>,
+) -> Result<bwrap_command::GrantLink, FilesystemPolicyError> {
+    if depth == resolver_file::MAX_SYMLINKS {
+        return Err(refuse(std::io::Error::from_raw_os_error(libc::ELOOP)));
+    }
+    let followed = location
+        .parent()
+        .unwrap_or(Path::new("/"))
+        .join(std::fs::read_link(&location).map_err(refuse)?);
+    let mut passes_through = Vec::new();
+    if let Some(resolved) = resolve_through_symlinks(&followed) {
+        if let Some(error) = resolved.error {
+            return Err(refuse(error));
+        }
+        for (hop, hop_target) in resolved.links {
+            passes_through.push(host_link(hop, hop_target, depth + 1, refuse, text)?);
+        }
+    }
+    Ok(bwrap_command::GrantLink {
+        path: text(location)?,
+        target: text(target)?,
+        passes_through,
     })
 }
 
@@ -1567,6 +1615,7 @@ mod tests {
                 &HashSet::new(),
                 &[],
                 &[],
+                true,
                 ValidatedLaunch {
                     egress_plan: None,
                     bwrap: PathBuf::from("/usr/bin/bwrap"),
@@ -2837,6 +2886,7 @@ mod tests {
         bwrap_command::GrantLink {
             path: text(path),
             target: text(target),
+            passes_through: Vec::new(),
         }
     }
 
@@ -2889,7 +2939,10 @@ mod tests {
             [
                 alias.clone(),
                 bwrap_command::AliasedGrant {
-                    links: vec![grant_link(&base.join("chain"), &real)],
+                    links: vec![bwrap_command::GrantLink {
+                        passes_through: vec![grant_link(&base.join("alias"), &real)],
+                        ..grant_link(&base.join("chain"), &real)
+                    }],
                     inner: Some(grant_link(&base.join("chain/sub"), &real.join("sub"))),
                 },
                 bwrap_command::AliasedGrant {

@@ -437,8 +437,9 @@ validation and mounting.
 
 Each policy-path probe has a **five-second deadline**, including time waiting
 for a worker. This also covers the parser's advisory existence probes on all
-backends, Bubblewrap and LXC mask-target resolution, and WSLC overlap
-canonicalization (including missing-tail ancestor lookup). A timeout or worker
+backends, Bubblewrap and LXC mask-target resolution, Bubblewrap grant
+resolution, and WSLC overlap canonicalization (including missing-tail ancestor
+lookup). A timeout or worker
 failure **rejects startup**, even without denied paths; it never treats the path
 as missing or skips a security check. The error names the path and the failure.
 Ordinary missing-path warnings and returned filesystem-error handling remain

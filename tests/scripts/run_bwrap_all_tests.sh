@@ -22,6 +22,13 @@ strict_exempt() {
     esac
 }
 
+# The symlink-alias regression tests, which CI must not lose.
+declare -A LAST_LINES=(
+    ["Bubblewrap Baseline Aliases"]="Bubblewrap baseline-alias test complete."
+    ["Bubblewrap Grant Aliases"]="Bubblewrap grant-alias test complete."
+)
+declare -A PASSED_TESTS=()
+
 # Check for Windows line endings in test scripts
 check_line_endings() {
     if grep -rPl '\r$' "$SCRIPT_DIR"/run_bwrap_*.sh "$SCRIPT_DIR"/run_linux_process_default_test.sh >/dev/null 2>&1; then
@@ -55,7 +62,19 @@ run_test() {
     local script="$2"
     local rc=0
     echo "=== $name ==="
-    bash "$script" || rc=$?
+    if [ -n "${LAST_LINES[$name]:-}" ]; then
+        local log
+        log=$(mktemp)
+        bash "$script" 2>&1 | tee "$log"
+        rc=${PIPESTATUS[0]}
+        if [ "$rc" = 0 ] && [ "$(tail -n 1 "$log")" != "${LAST_LINES[$name]}" ]; then
+            echo "ERROR: $name exited 0 before printing: ${LAST_LINES[$name]}"
+            rc=1
+        fi
+        rm -f "$log"
+    else
+        bash "$script" || rc=$?
+    fi
     # 77 is "prerequisite absent", the same code run_lxc_all_tests.sh uses. It
     # must be neither PASS nor FAIL: reporting a skipped suite as passing is a
     # false green that hides a test which never ran, and reporting it as failing
@@ -63,6 +82,7 @@ run_test() {
     if [ "$rc" = 0 ]; then
         echo "PASS: $name"
         PASSED=$((PASSED + 1))
+        PASSED_TESTS["$name"]=1
     elif [ "$rc" = 77 ]; then
         echo "SKIPPED: $name"
         SKIPPED=$((SKIPPED + 1))
@@ -128,4 +148,10 @@ if [ "${MXC_BWRAP_TESTS_REQUIRE_EXECUTION:-0}" != "0" ]; then
         echo "environment is supposed to provide. Refusing to report success."
         exit 1
     fi
+    for name in "${!LAST_LINES[@]}"; do
+        if [ -z "${PASSED_TESTS[$name]:-}" ]; then
+            echo "ERROR: strict mode: $name did not run. Refusing to report success."
+            exit 1
+        fi
+    done
 fi

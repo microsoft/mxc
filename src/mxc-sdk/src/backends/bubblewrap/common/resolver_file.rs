@@ -23,7 +23,7 @@ use super::bwrap_command::{
 use super::proxy_network::above_stdio;
 
 // Linux path_resolution(7) limits a lookup to 40 symbolic links.
-const MAX_SYMLINKS: usize = 40;
+pub(crate) const MAX_SYMLINKS: usize = 40;
 
 #[derive(Debug)]
 pub(crate) struct ResolverFile {
@@ -644,6 +644,7 @@ mod tests {
             links: vec![GrantLink {
                 path: path_text(&root.join(path)).unwrap().into(),
                 target: path_text(&root.join(target)).unwrap().into(),
+                passes_through: Vec::new(),
             }],
             inner: None,
         };

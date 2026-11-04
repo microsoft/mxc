@@ -135,6 +135,8 @@ pub(crate) struct GrantLink {
 
     /// The real path the link leads to.
     pub target: String,
+
+    pub passes_through: Vec<GrantLink>,
 }
 
 /// The symlinks that a `readwritePaths` or `readonlyPaths` entry is named through.
@@ -179,6 +181,7 @@ pub(crate) struct GrantLinkPlan {
 enum LinkPlacement {
     Create,
     Present,
+    HostLink,
 
     /// The sandbox creates a directory at the location, so only links inside it can be added.
     CreateInside,
@@ -197,7 +200,7 @@ pub(crate) fn plan_grant_links(mount_args: &[String], grants: &[AliasedGrant]) -
         Some(layout) => link_placement(std::path::Path::new(&link.path), layout),
         None => LinkPlacement::Blocked,
     };
-    let mut decided = HashSet::new();
+    let mut reachable = std::collections::HashMap::new();
     for grant in grants {
         for link in &grant.links {
             let (link, placement) = match place(link) {
@@ -206,29 +209,55 @@ pub(crate) fn plan_grant_links(mount_args: &[String], grants: &[AliasedGrant]) -
                         == Some(std::path::Path::new(&link.path))
                 }) {
                     Some(inner) => match place(inner) {
-                        placement @ (LinkPlacement::Create | LinkPlacement::Present) => {
-                            (inner, placement)
-                        }
+                        placement @ (LinkPlacement::Create
+                        | LinkPlacement::Present
+                        | LinkPlacement::HostLink) => (inner, placement),
                         _ => (link, LinkPlacement::Blocked),
                     },
                     None => (link, LinkPlacement::Blocked),
                 },
                 placement => (link, placement),
             };
-            if !decided.insert(&link.path) {
+            if reachable.contains_key(link.path.as_str()) {
                 continue;
             }
-            match (placement, link_text(link)) {
-                (LinkPlacement::Present, _) => {}
-                (LinkPlacement::Create, Some(text)) => {
-                    plan.args
-                        .extend(["--symlink".into(), text, link.path.clone()]);
-                }
-                _ => plan.unavailable.push(link.clone()),
+            if !make_reachable(link, placement, &place, &mut reachable, &mut plan.args) {
+                plan.unavailable.push(link.clone());
             }
         }
     }
     plan
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn make_reachable<'a>(
+    link: &'a GrantLink,
+    placement: LinkPlacement,
+    place: &dyn Fn(&GrantLink) -> LinkPlacement,
+    reachable: &mut std::collections::HashMap<&'a str, bool>,
+    args: &mut Vec<String>,
+) -> bool {
+    let reaches = match placement {
+        LinkPlacement::Present => true,
+        LinkPlacement::Create => match link_text(link) {
+            Some(text) => {
+                args.extend(["--symlink".into(), text, link.path.clone()]);
+                true
+            }
+            None => false,
+        },
+        LinkPlacement::HostLink => link.passes_through.iter().all(|hop| {
+            // Only the link's target and its parents exist in the sandbox for a hop to lead to.
+            std::path::Path::new(&link.target).starts_with(&hop.target)
+                && match reachable.get(hop.path.as_str()).copied() {
+                    Some(reaches) => reaches,
+                    None => make_reachable(hop, place(hop), place, reachable, args),
+                }
+        }),
+        LinkPlacement::CreateInside | LinkPlacement::Blocked => false,
+    };
+    reachable.insert(&link.path, reaches);
+    reaches
 }
 
 /// The entry each of `mount_args` leaves at its destination, or `None` for an
@@ -289,7 +318,7 @@ fn link_placement(link: &std::path::Path, layout: &[(&str, SandboxEntry)]) -> Li
         } else if link.starts_with(path) {
             // A mount above the link hides whatever was placed under it before.
             match entry {
-                SandboxEntry::HostBind => LinkPlacement::Present,
+                SandboxEntry::HostBind => LinkPlacement::HostLink,
                 SandboxEntry::Tmpfs => LinkPlacement::Create,
                 SandboxEntry::Directory => placement,
                 SandboxEntry::Symlink | SandboxEntry::Closed => LinkPlacement::Blocked,
@@ -659,6 +688,7 @@ pub fn build_args_classified(
         &[],
         &[],
         &policy_mounts(&request.policy),
+        true,
         |_| Vec::new(),
     )
 }
@@ -675,6 +705,7 @@ pub(crate) fn build_args_classified_with_mode(
     baseline_links: &[BaselineLink],
     resolver_args: &[String],
     mounts: &[PolicyMount],
+    private_tmp: bool,
     grant_links: impl FnOnce(&[String]) -> Vec<String>,
 ) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
@@ -740,7 +771,9 @@ pub(crate) fn build_args_classified_with_mode(
     // paths under /dev, /proc, or /tmp survive).
     args.extend(["--dev".into(), "/dev".into()]);
     args.extend(["--proc".into(), "/proc".into()]);
-    args.extend(["--tmpfs".into(), "/tmp".into()]);
+    if private_tmp {
+        args.extend(["--tmpfs".into(), "/tmp".into()]);
+    }
     args.extend_from_slice(resolver_args);
 
     // Policy mounts, emitted in most-specific-path-wins order so a deeper path
@@ -872,6 +905,7 @@ mod tests {
                 &[],
                 &[],
                 &policy_mounts(&request.policy),
+                true,
                 |_| Vec::new(),
             );
             assert_eq!(
@@ -906,6 +940,7 @@ mod tests {
             &[],
             &resolver,
             &policy_mounts(&request.policy),
+            true,
             |_| Vec::new(),
         );
         let temporary = args
@@ -951,6 +986,7 @@ mod tests {
             &[],
             &[],
             &policy_mounts(&request.policy),
+            true,
             |_| Vec::new(),
         );
         assert_eq!(args, expected);
@@ -2246,6 +2282,7 @@ mod tests {
             &[link("/bin", "usr/bin")],
             &[],
             &policy_mounts(&request.policy),
+            true,
             |_| Vec::new(),
         );
 
@@ -2280,6 +2317,7 @@ mod tests {
         GrantLink {
             path: path.into(),
             target: target.into(),
+            passes_through: Vec::new(),
         }
     }
 
@@ -2314,6 +2352,7 @@ mod tests {
             &[link("/bin", "usr/bin")],
             resolver_args,
             mounts,
+            true,
             |layout| {
                 let planned = plan_grant_links(layout, grants);
                 let args = planned.args.clone();
@@ -2388,18 +2427,87 @@ mod tests {
             links: vec![grant_link("/tmp", "/var/tmp")],
             inner: Some(grant_link("/tmp/project", "/var/tmp/project")),
         };
-        let whole_tmp = aliased("/tmp", "/var/tmp");
         let mounts = policy_mounts(&ContainerPolicy {
-            readwrite_paths: vec!["/var/tmp/project".into(), "/var/tmp".into()],
+            readwrite_paths: vec!["/var/tmp/project".into()],
             ..Default::default()
         });
 
-        let plan = plan_for(&mounts, &[], &[project.clone(), project, whole_tmp]);
+        let plan = plan_for(&mounts, &[], &[project.clone(), project]);
         assert_eq!(
             plan.args,
             ["--symlink", "../var/tmp/project", "/tmp/project"]
         );
-        assert_eq!(plan.unavailable, [grant_link("/tmp", "/var/tmp")]);
+        assert_eq!(plan.unavailable, Vec::<GrantLink>::new());
+    }
+
+    #[test]
+    fn a_grant_of_a_whole_symlinked_tmp_replaces_the_private_tmp() {
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec!["/var/tmp".into()];
+        let grants = [aliased("/tmp", "/var/tmp")];
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            None,
+            &[],
+            &[],
+            &policy_mounts(&request.policy),
+            false,
+            |layout| plan_grant_links(layout, &grants).args,
+        );
+
+        assert!(!args.windows(2).any(|w| w == ["--tmpfs", "/tmp"]));
+        let position = |expected: &[&str]| {
+            args.windows(expected.len())
+                .position(|window| window == expected)
+                .unwrap_or_else(|| panic!("{expected:?} missing from {args:?}"))
+        };
+        assert!(
+            position(&["--bind", "/var/tmp", "/var/tmp"])
+                < position(&["--symlink", "var/tmp", "/tmp"])
+        );
+    }
+
+    #[test]
+    fn host_links_seen_through_a_grant_get_the_links_they_pass_through() {
+        let mounts = policy_mounts(&ContainerPolicy {
+            readwrite_paths: vec!["/home/alice".into(), "/data/app".into()],
+            ..Default::default()
+        });
+        let host_link = |path: &str, passes_through: Vec<GrantLink>| GrantLink {
+            passes_through,
+            ..grant_link(path, "/data/app")
+        };
+        let current = host_link("/links/current", Vec::new());
+        let reachable = [
+            host_link("/home/alice/app", vec![current.clone()]),
+            host_link("/home/alice/again", vec![current]),
+            host_link(
+                "/home/alice/release",
+                vec![host_link("/home/alice/current", Vec::new())],
+            ),
+        ];
+        let unavailable = [
+            host_link("/home/alice/proc", vec![host_link("/proc/app", Vec::new())]),
+            host_link(
+                "/home/alice/sideways",
+                vec![grant_link("/links/other", "/data/other")],
+            ),
+        ];
+        let grants: Vec<_> = reachable
+            .iter()
+            .chain(&unavailable)
+            .map(|link| AliasedGrant {
+                links: vec![link.clone()],
+                inner: None,
+            })
+            .collect();
+
+        let plan = plan_for(&mounts, &[], &grants);
+        assert_eq!(plan.args, ["--symlink", "../data/app", "/links/current"]);
+        assert_eq!(plan.unavailable, unavailable);
     }
 
     #[test]
@@ -2541,6 +2649,7 @@ mod tests {
                 &[link("/bin", "usr/bin")],
                 &resolver,
                 &policy_mounts(&request.policy),
+                true,
                 |layout| {
                     assert!(sandbox_layout(layout).is_some(), "{mode:?}: {layout:?}");
                     Vec::new()
@@ -2568,6 +2677,7 @@ mod tests {
             &[],
             &[],
             &policy_mounts(&request.policy),
+            true,
             |layout| {
                 assert!(layout
                     .windows(3)

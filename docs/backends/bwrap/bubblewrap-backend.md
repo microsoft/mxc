@@ -349,7 +349,7 @@ whatever MXC passed.
 
 ### Filesystem Policy
 
-Policy validation and denied-path resolution use the shared
+Policy validation and the resolution of denied and granted paths use the shared
 [filesystem probe deadlines](../../schema.md#filesystem-probe-timeouts).
 A stalled probe rejects startup rather than leaving a policy check unenforced.
 
@@ -400,16 +400,18 @@ policy mounts `/data/repos/app`, masks `/data/repos/app/.env`, and links
 ```
 
 A symlink that is already visible through another mount, such as one inside
-a granted directory, is used as it is. Where the sandbox has its own directory
-at the symlink's path, such as its private `/tmp` on a host whose `/tmp` is a
-symlink to `/var/tmp`, the sandbox keeps that directory and recreates the next
-part of the path inside it, so a grant of `/tmp/project` is still reachable as
-`/tmp/project`. A grant of that `/tmp` itself is reachable only as `/var/tmp`.
-A symlink that cannot be recreated at all, such as one under `/dev` or `/proc`,
-leaves paths through it unavailable inside the sandbox. Whenever a spelling is
-unavailable, Bubblewrap reports a warning naming the real path to use. A grant
-that cannot be resolved, such as a dangling symlink or a symlink loop, stops the
-sandbox from starting.
+a granted directory, is used as it is, and any other symlinks it leads through
+are recreated as well. Where the sandbox has its own directory at the
+symlink's path, such as its private `/tmp` on a host whose `/tmp` is a symlink
+to `/var/tmp`, the sandbox keeps that directory and recreates the next part of
+the path inside it, so a grant of `/tmp/project` is still reachable as
+`/tmp/project`. A grant of that whole `/tmp` replaces the private `/tmp` with
+the symlink, so `/tmp` in the sandbox is the host's `/var/tmp`. A symlink that
+cannot be recreated at all, such as one under `/dev` or `/proc`, leaves paths
+through it unavailable inside the sandbox. Whenever a spelling is unavailable,
+Bubblewrap reports a warning naming the real path to use. A grant that cannot
+be resolved, such as a dangling symlink or a symlink loop, stops the sandbox
+from starting.
 
 Only symlinks are followed. A hard link, or a host bind mount that shows the
 same files under a second path, stays a separate path inside the sandbox: a

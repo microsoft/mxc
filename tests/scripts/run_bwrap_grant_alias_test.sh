@@ -57,6 +57,9 @@ holds() { printf "grep -qx %s '%s' 2>/dev/null" "$2" "$1"; }
 # Print a sandbox command that succeeds when $2 can be written to file $1.
 accepts() { printf "(echo %s >'%s') 2>/dev/null" "$2" "$1"; }
 
+# Run sandbox command $1 for checks made on the host afterwards.
+attempt() { PROBES+="$1; "; }
+
 # Print a sandbox command that succeeds while file $1 holds the bytes whose
 # cksum output is $2.
 same_bytes() { printf "[ \"\$( (cksum <'%s') 2>/dev/null)\" = '%s' ]" "$1" "$2"; }
@@ -174,12 +177,17 @@ for parent in /tmp "$(cd "$HOME" && pwd -P)"; do
     probe WRITE_SIBLING "$(accepts "$R/alias/written.txt" WRITTEN_THROUGH_ALIAS)" OPEN
     probe CWD_IS_REAL "[ \"\$(pwd -P)\" = '$R/real' ]" OPEN
     probe WRITE_CWD "$(accepts cwd.txt WRITTEN_IN_CWD)" OPEN
+    probe READ_PARENT "$(holds "$R/other.txt" OTHER_CONTENT)" BLOCKED
+    attempt "$(accepts "$R/other.txt" MODIFIED_BESIDE_ALIAS)"
+    attempt "$(accepts "$R/created.txt" CREATED_BESIDE_ALIAS)"
     run "denied real path inside an aliased grant" \
         "{\"readwritePaths\":[$(json "$R/alias")],\"deniedPaths\":[$(json "$R/real/secret.txt")]}" \
         "$R/alias"
     host_holds "$R/real/secret.txt" SECRET_CONTENT
     host_holds "$R/real/written.txt" WRITTEN_THROUGH_ALIAS
     host_holds "$R/real/cwd.txt" WRITTEN_IN_CWD
+    host_holds "$R/other.txt" OTHER_CONTENT
+    [ ! -e "$R/created.txt" ] || fail "a write beside the alias created $R/created.txt on the host."
 
     probe RO_REAL "$(accepts "$R/real/protected/hook" MODIFIED)" BLOCKED
     probe RO_ALIAS "$(accepts "$R/alias/protected/hook" MODIFIED_THROUGH_ALIAS)" BLOCKED
@@ -225,6 +233,18 @@ for parent in /tmp "$(cd "$HOME" && pwd -P)"; do
         "{\"readwritePaths\":[$(json "$R/alias")],\"deniedPaths\":[$(json "$R")]}" \
         ""
     host_holds "$R/real/inside.txt" WRITTEN_INSIDE_MASK
+
+    mkdir "$R/home" "$R/links"
+    ln -s "$R/real" "$R/links/current"
+    ln -s "$R/links/current" "$R/home/app"
+    probe CHAIN_READ "$(holds "$R/home/app/protected/hook" HOOK_CONTENT)" OPEN
+    probe CHAIN_SECRET "$(holds "$R/home/app/secret.txt" SECRET_CONTENT)" BLOCKED
+    probe CHAIN_WRITE "$(accepts "$R/home/app/through-links.txt" WRITTEN_THROUGH_LINKS)" OPEN
+    run "link through a link outside a granted directory" \
+        "{\"readwritePaths\":[$(json "$R/home"),$(json "$R/home/app")],\"deniedPaths\":[$(json "$R/real/secret.txt")]}" \
+        "$R/home/app"
+    host_holds "$R/real/through-links.txt" WRITTEN_THROUGH_LINKS
+    host_holds "$R/real/secret.txt" SECRET_CONTENT
 
     mkdir -p "$R/work/sub/shared" "$R/work/shared"
     echo DECOY_CONTENT >"$R/work/sub/shared/m"
@@ -305,12 +325,17 @@ run "grant and cwd below a symlinked /tmp" \
 host_holds "$VAR_TMP/project/written.txt" WRITTEN_THROUGH_TMP
 host_holds "$VAR_TMP/project/secret.txt" SECRET_CONTENT
 
-probe WRITE_VAR_TMP "$(accepts /var/tmp/whole.txt WRITTEN_TO_VAR_TMP)" OPEN
-run "grant of a symlinked /tmp itself" '{"readwritePaths":["/tmp"]}' "" "${OUTER[@]}"
-if ! grep -qF "named through the symlink /tmp, which cannot be recreated" <<<"$OUTPUT" \
-    || ! grep -qF "Use /var/tmp instead." <<<"$OUTPUT"; then
-    fail "granting a symlinked /tmp did not warn that /tmp is unavailable in the sandbox."
+probe CWD_IS_REAL "[ \"\$(pwd -P)\" = /var/tmp/project ]" OPEN
+probe WRITE_TMP "$(accepts /tmp/whole.txt WRITTEN_TO_TMP)" OPEN
+probe READ_TMP "$(holds /tmp/project/secret.txt SECRET_CONTENT)" BLOCKED
+probe READ_VAR_TMP "$(holds /var/tmp/project/secret.txt SECRET_CONTENT)" BLOCKED
+run "grant of a symlinked /tmp itself" \
+    '{"readwritePaths":["/tmp"],"deniedPaths":["/tmp/project/secret.txt"]}' \
+    /tmp/project "${OUTER[@]}"
+if grep -qF "cannot be recreated" <<<"$OUTPUT"; then
+    fail "granting a symlinked /tmp warned that /tmp is unavailable in the sandbox."
 fi
-host_holds "$VAR_TMP/whole.txt" WRITTEN_TO_VAR_TMP
+host_holds "$VAR_TMP/whole.txt" WRITTEN_TO_TMP
+host_holds "$VAR_TMP/project/secret.txt" SECRET_CONTENT
 
 echo "Bubblewrap grant-alias test complete."
