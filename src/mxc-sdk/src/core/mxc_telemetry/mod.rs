@@ -26,11 +26,7 @@
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-mod component;
-
-#[cfg(target_os = "windows")]
 mod provider {
-    use super::component;
     use crate::mxc_common::telemetry::session;
     #[cfg(test)]
     use std::sync::atomic::AtomicU32;
@@ -162,9 +158,6 @@ mod provider {
                 return false;
             }
             ACTIVE.store(true, Ordering::Release);
-            // The optional component takes over the Required events when present;
-            // otherwise the in-process provider keeps writing them.
-            component::init(version, channel);
         }
 
         *registered += 1;
@@ -177,7 +170,6 @@ mod provider {
         if *registered > 1 {
             *registered -= 1;
         } else if *registered == 1 {
-            component::shutdown();
             MXC_PROVIDER.unregister();
             *registered = 0;
             ACTIVE.store(false, Ordering::Release);
@@ -203,24 +195,6 @@ mod provider {
         let mut session_buffer = [0; 36];
         let session_id = session::wire_id(&mut session_buffer);
         let is_debug_build = cfg!(debug_assertions);
-
-        if session::critical_events()
-            && component::write_execution(
-                false,
-                session_id,
-                session::learning_mode().as_str(),
-                backend,
-                sandbox_kind,
-                exit_code,
-                outcome,
-                duration_ms,
-                failure_reason,
-                phase,
-                correlation_vector,
-            )
-        {
-            return;
-        }
 
         write_categorized_event!(
             "MXC.ExecutionStart",
@@ -287,24 +261,6 @@ mod provider {
         // This is NOT a runtime IsDebuggerPresent() check; it mirrors
         // the MXC_CHANNEL logic for cross-platform consistency.
         let is_debug_build = cfg!(debug_assertions);
-
-        if session::critical_events()
-            && component::write_execution(
-                true,
-                session_id,
-                session::learning_mode().as_str(),
-                backend,
-                sandbox_kind,
-                exit_code,
-                outcome,
-                duration_ms,
-                failure_reason,
-                phase,
-                correlation_vector,
-            )
-        {
-            return;
-        }
 
         write_categorized_event!(
             "MXC.ExecutionEnd",
@@ -373,20 +329,6 @@ mod provider {
         let session_id = session::wire_id(&mut session_buffer);
 
         let is_debug_build = cfg!(debug_assertions);
-
-        if session::critical_events()
-            && component::write_error(
-                session_id,
-                backend,
-                sandbox_kind,
-                error_type,
-                exit_code,
-                phase,
-                correlation_vector,
-            )
-        {
-            return;
-        }
 
         write_categorized_event!(
             "MXC.Error",
@@ -494,11 +436,6 @@ mod provider {
         let mut session_buffer = [0; 36];
         let session_id = session::wire_id(&mut session_buffer);
         let (version, channel, debugging, app_session) = common_params(state);
-        if session::critical_events()
-            && component::write_process_exited(session_id, identity, process_id, exit_code)
-        {
-            return;
-        }
         write_categorized_event!(
             "MXC.ProcessExited",
             privacy_tag,
