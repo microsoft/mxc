@@ -515,13 +515,13 @@ impl LxcContainer {
             let [name, unprivileged] = columns.as_slice() else {
                 continue;
             };
-            if *name == self.name && *unprivileged == "true" {
+            if *name == self.name && unprivileged.eq_ignore_ascii_case("true") {
                 return Ok(());
             }
         }
 
         Err(format!(
-            "Refusing to run LXC container '{}': lxc-ls did not report UNPRIVILEGED=true",
+            "lxc-ls reported container '{}' will run privileged.  MXC will not start the container.  Please enable lxc to run unprivileged containers.",
             self.name
         ))
     }
