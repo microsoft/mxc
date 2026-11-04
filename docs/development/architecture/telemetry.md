@@ -879,16 +879,14 @@ When a DLL is selected on a Windows build host, the MXC build script:
 2. loads it and calls the exported `mxc_telemetry_metadata_v1` function, which
    returns `1;<group>;<keyword>;<privacy tag>;<critical keyword>;<critical privacy tag>;<product>;<data category>`;
 3. passes the numbers to the crate as `MXC_BUILD_*` environment variables read
-   with `env!`, and writes only the group into the generated `provider_def.rs`,
-   because `define_provider!` accepts only a string literal.
+   with `env!`.
 
 Without a component, builds use placeholder values that are never routed. The
 group environment variable cannot be combined with a component.
 
-The generated `provider_def.rs` is in the Cargo target directory. Official
-pipeline jobs set `CARGO_TARGET_DIR` outside the source tree and publish only
-copied binaries and symbols, so it is not published. Keep it that way: do not
-publish a target directory. The group is also present in the shipped binary's
+Official pipeline jobs set `CARGO_TARGET_DIR` outside the source tree and
+publish only copied binaries and symbols. Keep it that way: do not publish a
+target directory. The values are also present in the shipped binary's
 TraceLogging metadata, so this is not a secrecy boundary.
 
 ### CI pipeline steps
