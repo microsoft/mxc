@@ -151,14 +151,13 @@ does not start a collection session, upload events, contact a network service,
 or create a background process. Events exist only when a local ETW consumer
 enables the provider.
 
-The provider is defined by the name `Microsoft.MXC`.
-`MXC_TELEMETRY_PROVIDER_GROUP_GUID` supplies its WinExt routing group for all
-events; event metadata is selected from the source contract — see
-[Private GUID Substitution](#private-guid-substitution-internal-builds)
-below. Public/OSS and normal development builds do not set it, so
-`group_id(...)` is omitted, `MXC_EVENT_KEYWORD` is a provider-local bit with
-no UTC meaning, and `MXC_PRIVACY_TAG` is `0`: events are ordinary local ETW
-and are not directed to an upload pipeline by MXC.
+The provider is defined by the name `Microsoft.MXC`. The signed telemetry
+component supplies its WinExt routing group for all events; event metadata is
+selected from the source contract — see
+[Telemetry component](#telemetry-component) below. Debug and unrouted builds
+have no group, so `group_id(...)` is omitted, `MXC_EVENT_KEYWORD` is a
+provider-local bit with no UTC meaning, and `MXC_PRIVACY_TAG` is `0`: events
+are ordinary local ETW and are not directed to an upload pipeline by MXC.
 
 The M-ETW scope is Windows `process_container` and `isolation_session`.
 Linux/macOS retain no-op telemetry stubs and are not requirement-behavior
@@ -830,13 +829,13 @@ or production approval.
 
 | Handle | Private build input | Metadata when configured |
 |---|---|---|
-| `MXC_PROVIDER` | `MXC_TELEMETRY_PROVIDER_GROUP_GUID` | Measures/Usage, or Critical Data/Performance for the four selected development events |
+| `MXC_PROVIDER` | Signed telemetry component | Measures/Usage, or Critical Data/Performance for the four selected development events |
 
-An absent or empty group produces a local-only registration with keyword
-`0x1` and privacy tag `0` for every event. Malformed nonempty GUIDs fail the
-Windows build. The obsolete `MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID` input
-also fails Windows builds when nonempty; clear it rather than substituting
-its value for WinExt. Non-Windows builds ignore group inputs.
+An unrouted build produces a local-only registration with keyword
+`0x1` and privacy tag `0` for every event. The obsolete
+`MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID` and
+`MXC_TELEMETRY_PROVIDER_GROUP_GUID` inputs fail Windows builds when nonempty.
+Non-Windows builds ignore them.
 
 The shared event writer selects the keyword and privacy tag using the event
 and request's source contract, always on the same registration. Field names, types
@@ -881,30 +880,28 @@ When a DLL is selected on a Windows build host, the MXC build script:
 3. passes the numbers to the crate as `MXC_BUILD_*` environment variables read
    with `env!`.
 
-Without a component, builds use placeholder values that are never routed. The
-group environment variable cannot be combined with a component.
+Without a component, builds use placeholder values that are never routed.
+`MXC_TELEMETRY_PROVIDER_GROUP_GUID` is no longer supported: a nonempty value
+fails Windows builds, so routing always comes from the verified component.
 
 ### CI pipeline steps
 
-The private pipeline owner supplies the approved WinExt group through
-`MXC_TELEMETRY_PROVIDER_GROUP_GUID` on the final Windows Cargo build,
-including builds of the SDK/FFI native library. Generation happens before
-compilation; there is no runtime or post-build binary patch.
-Do not copy private values into repository files or logs.
+The private pipeline builds and signs the component DLL; its output is copied
+into `src/mxc-sdk/resources/telemetry-component/`. Do not copy private values
+into repository files or logs.
 
 Published contracts retain their existing registration, Measures/Usage
-metadata, request opt-in, and consent gates. Public/OSS builds omit
-the group input and retain local-only metadata.
+metadata, request opt-in, and consent gates. Debug builds and builds with an
+empty `MXC_TELEMETRY_COMPONENT_PATH` retain local-only metadata.
 
-The public Windows test artifact explicitly clears the group and component
-inputs. Its local
-metadata tests cannot verify the private pipeline's group value or establish
-Microsoft ingestion.
+The public Windows test artifact explicitly clears the component input. Its
+local metadata tests cannot verify the routing values or establish Microsoft
+ingestion.
 
 ### WinExt routing acceptance
 
-On an approved disposable Windows VM, use a build with the approved WinExt
-group injected. For published contracts keep MXC's explicit consent, request
+On an approved disposable Windows VM, use a release build with the signed
+component. For published contracts keep MXC's explicit consent, request
 and opt-in satisfied. Development requests need no
 consent or opt-in. Verify actual collection for both, including successful
 process exit and operational failure; verify published suppression after
@@ -918,13 +915,13 @@ metadata, not acceptance by the Microsoft collection pipeline.
 ### Local developer testing
 
 ```powershell
-# Test with a dummy group GUID (not the real one) — telemetry-mode metadata
-$env:MXC_TELEMETRY_PROVIDER_GROUP_GUID = '00000000-1111-2222-3333-444444444444'
-cargo build -p mxc-sdk
+# Release build with the bundled signed component (routed)
+cargo build --release -p mxc-sdk
 
-# Test without (public build) — local-only metadata
-Remove-Item Env:\MXC_TELEMETRY_PROVIDER_GROUP_GUID
-cargo build -p mxc-sdk
+# Release build without routing (local-only metadata)
+$env:MXC_TELEMETRY_COMPONENT_PATH = ''
+cargo build --release -p mxc-sdk
+Remove-Item Env:\MXC_TELEMETRY_COMPONENT_PATH
 ```
 
 ### What's public vs. private
@@ -933,9 +930,9 @@ cargo build -p mxc-sdk
 |------|---------|-----|
 | Provider name `"Microsoft.MXC"` | Yes | Standard ETW naming |
 | Provider GUID `{7f10def4-a258-5fea-510e-2c3bb976687f}` | Yes | Derived from the name; identifies the provider, harmless |
-| `build.rs` env var mechanism | Yes | Mechanism is public |
-| `MXC_TELEMETRY_PROVIDER_GROUP_GUID` env var name | Yes | Key is public; value is private |
-| Actual Microsoft telemetry group GUID | No | Private - set in CI only |
+| `build.rs` component mechanism | Yes | Mechanism is public |
+| Signed `mxc_telemetry.dll` | Yes | Committed so source builds are routed |
+| Component source and pipeline | No | Private repository |
 
 ## SDK License Override (EULA for npm Package)
 

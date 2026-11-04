@@ -305,7 +305,7 @@ required cases fail the job even when the runner exits successfully.
 Every scheduled `isolation-session` job runs
 `run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle -CheckKeywords -SkipClean` against
 the architecture-matched telemetry test executor. That artifact is built with
-an empty `MXC_TELEMETRY_PROVIDER_GROUP_GUID` input, so the single registration
+an empty `MXC_TELEMETRY_COMPONENT_PATH` input, so the single registration
 has no UTC routing. Consent is granted only in a temporary test store (needed by
 the published contract; development Required collection ignores it); real user consent is not
 modified. The test mode also makes the build eligible for Required collection.

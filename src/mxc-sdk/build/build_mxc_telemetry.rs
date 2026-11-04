@@ -42,7 +42,8 @@ fn component_path(telemetry_target: bool) -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("MXC_TELEMETRY_COMPONENT_PATH") {
         return (!path.is_empty()).then(|| std::path::PathBuf::from(path));
     }
-    if std::env::var("PROFILE").as_deref() != Ok("release") {
+    // The bundled DLL can only be loaded by a Windows build host.
+    if !cfg!(windows) || std::env::var("PROFILE").as_deref() != Ok("release") {
         return None;
     }
     let host = std::env::var("HOST").unwrap_or_default();
@@ -86,15 +87,18 @@ pub(crate) fn run() {
         None => None,
     };
     let group_guid = if telemetry_target {
-        std::env::var("MXC_TELEMETRY_PROVIDER_GROUP_GUID").ok()
+        std::env::var("MXC_TELEMETRY_PROVIDER_GROUP_GUID")
+            .ok()
+            .filter(|group| !group.is_empty())
     } else {
         None
     };
     assert!(
-        component.is_none() || group_guid.as_deref().is_none_or(str::is_empty),
-        "set either MXC_TELEMETRY_COMPONENT_PATH or MXC_TELEMETRY_PROVIDER_GROUP_GUID, not both"
+        group_guid.is_none(),
+        "MXC_TELEMETRY_PROVIDER_GROUP_GUID is no longer supported; routing metadata \
+         comes only from the signed component (MXC_TELEMETRY_COMPONENT_PATH)"
     );
-    let group_guid = component.as_ref().map(|c| c.group.clone()).or(group_guid);
+    let group_guid = component.as_ref().map(|c| c.group.clone());
     if telemetry_target {
         assert!(
             std::env::var_os("MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID")

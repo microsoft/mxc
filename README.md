@@ -146,8 +146,10 @@ consent or per-request opt-in.
 Published `0.9.0-alpha` and `1.0.0` requests keep optional telemetry. It is off
 unless the run opts in, the Windows user has consented.
 
-Local open-source builds are not configured to route telemetry to Microsoft,
-and telemetry is a no-op on non-Windows platforms. See
+Local open-source debug builds are not configured to route telemetry to
+Microsoft. Windows release builds from source use the bundled signed telemetry
+component and are routed; set an empty `MXC_TELEMETRY_COMPONENT_PATH` to build
+without routing. Telemetry is a no-op on non-Windows platforms. See
 [telemetry and consent](docs/telemetry.md) for controls and privacy
 details.
 

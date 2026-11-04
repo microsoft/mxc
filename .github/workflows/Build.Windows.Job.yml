@@ -147,10 +147,39 @@ jobs:
 
       - name: Build debug executor for isolated telemetry smoke tests
         env:
-          MXC_TELEMETRY_PROVIDER_GROUP_GUID: ''
           MXC_TELEMETRY_COMPONENT_PATH: ''
           MXC_TELEMETRY_TEST_KEYWORDS: '1'
         run: cargo build --locked -p wxc --features "test-support isolation_session"
+
+      - name: Verify telemetry component build checks
+        shell: pwsh
+        run: |
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $bundled = Join-Path $PWD "mxc-sdk\resources\telemetry-component\$arch\mxc_telemetry.dll"
+          if (-not (Test-Path $bundled)) { throw "Missing bundled telemetry component: $bundled" }
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'telemetry-component-check'
+          Remove-Item Env:MXC_TELEMETRY_COMPONENT_PATH -ErrorAction SilentlyContinue
+
+          # The default release build verifies and loads the bundled DLL.
+          cargo check --locked --release -p mxc-sdk --lib
+          if ($LASTEXITCODE -ne 0) { throw 'Release build with the bundled telemetry component failed.' }
+
+          # An explicitly empty path builds unrouted without loading a DLL.
+          $env:MXC_TELEMETRY_COMPONENT_PATH = ''
+          cargo check --locked --release -p mxc-sdk --lib
+          if ($LASTEXITCODE -ne 0) { throw 'Unrouted release build failed.' }
+
+          # A modified copy must fail the build before it is loaded.
+          $tampered = Join-Path $env:RUNNER_TEMP 'tampered_mxc_telemetry.dll'
+          $bytes = [IO.File]::ReadAllBytes($bundled)
+          $bytes[2048] = $bytes[2048] -bxor 0xFF
+          [IO.File]::WriteAllBytes($tampered, $bytes)
+          $env:MXC_TELEMETRY_COMPONENT_PATH = $tampered
+          $output = cargo check --locked --release -p mxc-sdk --lib 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0) { throw 'A tampered telemetry component was accepted.' }
+          if ($output -notmatch 'no valid Authenticode signature') {
+            throw "Tampered component failed for an unexpected reason:`n$output"
+          }
 
       - name: Test telemetry ETW assertions, lifecycle requests and consent fixtures
         shell: pwsh

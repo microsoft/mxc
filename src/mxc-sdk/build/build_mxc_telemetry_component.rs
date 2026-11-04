@@ -13,6 +13,7 @@
 // where the numbers are `0x`-prefixed hex.
 
 
+#[cfg(windows)]
 const EXPECTED_SIGNER: &str = "Microsoft Corporation";
 
 #[cfg(windows)]
@@ -123,6 +124,11 @@ mod imp {
     }
 
     pub(super) fn read(path: &Path) -> Result<ComponentMetadata, String> {
+        // Verify and load the same absolute path; a bare file name would let
+        // LoadLibrary search other directories and load an unverified DLL.
+        let path = std::fs::canonicalize(path)
+            .map_err(|e| format!("cannot resolve component path: {e}"))?;
+        let path = path.as_path();
         // Deny writers while the signature is checked and the DLL is loaded,
         // so the verified bytes are the loaded bytes.
         let file = OpenOptions::new()
