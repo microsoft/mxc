@@ -635,36 +635,6 @@ pub fn set_owner_only_dacl(path: &Path, inheritable: bool) -> Result<(), Filesys
     Ok(())
 }
 
-/// Whether a directory has the exact protected owner-only DACL written by
-/// [`set_owner_only_dacl`].
-pub fn is_owner_only_directory(path: &Path) -> Result<bool, FilesystemSecurityError> {
-    let path_wide = wide(path);
-    let mut owner = PSID(ptr::null_mut());
-    let mut dacl: *mut ACL = ptr::null_mut();
-    let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    let result = unsafe {
-        GetNamedSecurityInfoW(
-            PCWSTR(path_wide.as_ptr()),
-            SE_FILE_OBJECT,
-            OBJECT_SECURITY_INFORMATION(OWNER_SECURITY_INFORMATION.0 | DACL_SECURITY_INFORMATION.0),
-            Some(&mut owner),
-            None,
-            Some(&mut dacl),
-            None,
-            &mut descriptor,
-        )
-    };
-    if result != ERROR_SUCCESS {
-        return Err(win32_error(path, "GetNamedSecurityInfoW(DACL)", result));
-    }
-
-    let validation = validate_owner_only_acl(owner, dacl, descriptor, path);
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
-    }
-    validation
-}
-
 fn validate_owner_only_acl(
     owner: PSID,
     dacl: *mut ACL,

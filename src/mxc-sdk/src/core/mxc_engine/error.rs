@@ -91,9 +91,10 @@ impl From<MxcErrorCode> for ErrorCode {
 
 /// An error returned by SDK operations such as [`spawn`](crate::v1::spawn).
 ///
-/// Details such as `operation` and `native_code` are top-level fields, not
-/// nested in another object. The Node and .NET SDKs and errors returned through
-/// `mxc_ffi` expose the same fields.
+/// `operation`, `native_code`, and `remediation` are top-level fields also
+/// exposed by Node, .NET, and `mxc_ffi`. Backend-specific `details` are preserved
+/// in Rust errors and executor JSON error envelopes. The C error structure
+/// does not expose them.
 ///
 /// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
 /// literal so future versions can add fields without breaking construction.
