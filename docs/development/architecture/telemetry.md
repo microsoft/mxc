@@ -905,7 +905,8 @@ component. For published contracts keep MXC's explicit consent, request
 opt-in, and permitting MXC policy satisfied. Development requests need no
 consent or opt-in. Verify actual collection for both, including successful
 process exit and operational failure; verify published suppression after
-consent withdrawal and development suppression at policy value `0`.
+consent withdrawal. Development requests keep emitting at every
+administrative policy value, including `0`.
 
 Windows Required/Optional settings do not authorize or gate these WinExt
 events. Do not use acceptance at a Windows diagnostic-data level as evidence
