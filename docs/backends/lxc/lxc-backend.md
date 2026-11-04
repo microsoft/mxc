@@ -29,6 +29,12 @@ Creates an LXC container to provide:
   Filtering egress or ingress installs iptables rules in the container's
   network namespace, which requires root.
 
+MXC requires LXC to report the container as unprivileged, even when MXC runs
+as root.  A missing container is created first; every container is checked
+with `lxc-ls --fancy` before launch.  MXC refuses to proceed unless the target
+container's `UNPRIVILEGED` value is `true`, including when the status query
+fails.
+
 ### Installation
 
 **Debian/Ubuntu:**
