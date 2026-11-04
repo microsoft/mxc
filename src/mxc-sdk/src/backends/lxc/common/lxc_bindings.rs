@@ -18,8 +18,11 @@ fn validate_unprivileged_status(
     }
 
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut columns = line.split_whitespace();
-        if columns.next() == Some(container_name) && columns.next() == Some("true") {
+        let columns: Vec<_> = line.split_whitespace().collect();
+        let [name, unprivileged] = columns.as_slice() else {
+            continue;
+        };
+        if *name == container_name && *unprivileged == "true" {
             return Ok(());
         }
     }
