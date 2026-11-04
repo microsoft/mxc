@@ -884,11 +884,6 @@ When a DLL is selected on a Windows build host, the MXC build script:
 Without a component, builds use placeholder values that are never routed. The
 group environment variable cannot be combined with a component.
 
-Official pipeline jobs set `CARGO_TARGET_DIR` outside the source tree and
-publish only copied binaries and symbols. Keep it that way: do not publish a
-target directory. The values are also present in the shipped binary's
-TraceLogging metadata, so this is not a secrecy boundary.
-
 ### CI pipeline steps
 
 The private pipeline owner supplies the approved WinExt group through
