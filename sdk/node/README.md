@@ -269,7 +269,7 @@ when the backend produces them.
 Creation telemetry is supplied through `telemetry: { enabled: true }` on
 `RunOptions`, `SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`.
 Omission leaves telemetry disabled; `enabled: false` explicitly disables it.
-Opt-in remains subject to MXC's persisted user consent and administrative policy. Telemetry consent
+Opt-in remains subject to MXC's persisted user consent. Telemetry consent
 APIs and `getPlatformSupport` are exported from `@microsoft/mxc-sdk/v1`.
 
 `getTelemetryConsentStatus` reads stored/effective consent and policy,

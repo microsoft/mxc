@@ -51,8 +51,7 @@ See the launch-choice tables for [Rust](api-reference/rust/v1/api.md#choosing-a-
 
 Explicit validation APIs perform native dry-run validation and return no
 execution result. Backend policy and feature support remain native-engine
-responsibilities. Invocation telemetry cannot grant persisted consent or
-override restrictive administrative policy.
+responsibilities. Invocation telemetry cannot grant persisted consent.
 
 ## Lifecycle
 

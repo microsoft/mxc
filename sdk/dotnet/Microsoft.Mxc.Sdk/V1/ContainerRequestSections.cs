@@ -9,8 +9,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 public sealed class TelemetryConfig
 {
     /// <summary>
-    /// Opt this invocation into telemetry, subject to persisted user consent
-    /// and administrative policy.
+    /// Opt this invocation into telemetry, subject to persisted user consent.
     /// </summary>
     [JsonPropertyName("enabled")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

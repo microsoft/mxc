@@ -39,14 +39,9 @@ public sealed class MxcTelemetryTests : IDisposable
 {
     private const string OverrideEnvVar = "MXC_TEST_LOCALAPPDATA_OVERRIDE";
     private const string OverrideOwnerEnvVar = "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID";
-    private const string PolicyOverrideEnvVar = "MXC_TEST_POLICY_KEY_OVERRIDE";
-    private const string PolicyOverrideOwnerEnvVar = "MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID";
     private readonly string? _originalOverride;
     private readonly string? _originalOverrideOwner;
-    private readonly string? _originalPolicyOverride;
-    private readonly string? _originalPolicyOverrideOwner;
     private readonly string _tempDir;
-    private readonly string _policySubkey;
 
     public MxcTelemetryTests()
     {
@@ -62,23 +57,7 @@ public sealed class MxcTelemetryTests : IDisposable
                 GetParentProcessId().ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
-        // Redirect the administrative policy read to a throwaway HKCU key too,
-        // so these tests are unaffected by a real MXC telemetry policy on the
-        // build machine and can exercise the policy path without elevation.
-        _originalPolicyOverride = Environment.GetEnvironmentVariable(PolicyOverrideEnvVar);
-        _originalPolicyOverrideOwner = Environment.GetEnvironmentVariable(PolicyOverrideOwnerEnvVar);
-        _policySubkey = $@"Software\MxcTelemetryPolicyDotnetTest\{Guid.NewGuid():N}";
-        if (OperatingSystem.IsWindows())
-        {
-            Microsoft.Win32.Registry.CurrentUser.CreateSubKey(_policySubkey)?.Dispose();
-        }
-        Environment.SetEnvironmentVariable(PolicyOverrideEnvVar, _policySubkey);
-        Environment.SetEnvironmentVariable(
-            PolicyOverrideOwnerEnvVar,
-            Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-
         AssertStoreIsRedirected();
-        AssertPolicyKeyIsRedirected();
     }
 
     [Fact]
@@ -99,90 +78,6 @@ public sealed class MxcTelemetryTests : IDisposable
             MxcContainer.SerializeRequest(request, options.Telemetry));
 
         Assert.True(doc.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
-    }
-
-    /// <summary>
-    /// The policy counterpart to <see cref="AssertStoreIsRedirected"/>: prove
-    /// the native library honours <c>MXC_TEST_POLICY_KEY_OVERRIDE</c> before
-    /// any policy test runs. A release-profile <c>mxc_ffi</c> compiles the
-    /// override out and would silently read the machine's real
-    /// <c>HKLM\SOFTWARE\Policies\Mxc</c> key instead, making every
-    /// policy assertion below meaningless — passing or failing on the build
-    /// agent's administrative state rather than on the code under test.
-    ///
-    /// Two probes are used for the same reason as the consent check: a single
-    /// one could coincidentally match the real machine policy, but the real
-    /// policy cannot be both Blocked and Allowed.
-    /// </summary>
-    private void AssertPolicyKeyIsRedirected()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            // Off Windows GetPolicy short-circuits to NotApplicable without
-            // reading any registry, so there is nothing to redirect.
-            return;
-        }
-
-        foreach (var (value, expected) in new[]
-                 {
-                     (0, TelemetryPolicyState.Blocked),
-                     (3, TelemetryPolicyState.Allowed),
-                 })
-        {
-            SetPolicyValue(value);
-            var observed = MxcTelemetry.GetPolicy();
-            if (observed != expected)
-            {
-                throw new InvalidOperationException(
-                    $"telemetry policy key is NOT redirected to 'HKCU\\{_policySubkey}': wrote " +
-                    $"AllowTelemetry={value} there but GetPolicy() returned {observed}. These tests " +
-                    "refuse to run against the real machine policy. The native mxc_ffi library under " +
-                    "test is most likely a release build, which compiles out the " +
-                    PolicyOverrideEnvVar + " override. Rebuild it with " +
-                    "`cargo build -p mxc_ffi --features dotnetsdk,test-support` (debug) and re-run.");
-            }
-        }
-
-        // Leave the fixture in the unmanaged default state.
-        SetPolicyValue(null);
-    }
-
-    /// <summary>
-    /// Writes the administrative <c>AllowTelemetry</c> policy value into the
-    /// redirected key, or removes it when <paramref name="value"/> is null.
-    /// </summary>
-    private void SetPolicyValue(int? value)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(_policySubkey)!;
-        if (value is null)
-        {
-            key.DeleteValue("AllowTelemetry", throwOnMissingValue: false);
-        }
-        else
-        {
-            key.SetValue("AllowTelemetry", value.Value, Microsoft.Win32.RegistryValueKind.DWord);
-        }
-    }
-
-    /// <summary>
-    /// Writes <c>AllowTelemetry</c> as a <c>REG_SZ</c> rather than a
-    /// <c>REG_DWORD</c> — the mistake an administrator makes by typing the
-    /// value in by hand.
-    /// </summary>
-    private void SetPolicyStringValue(string value)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(_policySubkey)!;
-        key.SetValue("AllowTelemetry", value, Microsoft.Win32.RegistryValueKind.String);
     }
 
     /// <summary>
@@ -242,19 +137,6 @@ public sealed class MxcTelemetryTests : IDisposable
     {
         Environment.SetEnvironmentVariable(OverrideEnvVar, _originalOverride);
         Environment.SetEnvironmentVariable(OverrideOwnerEnvVar, _originalOverrideOwner);
-        Environment.SetEnvironmentVariable(PolicyOverrideEnvVar, _originalPolicyOverride);
-        Environment.SetEnvironmentVariable(PolicyOverrideOwnerEnvVar, _originalPolicyOverrideOwner);
-        if (OperatingSystem.IsWindows())
-        {
-            try
-            {
-                Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(_policySubkey, throwOnMissingSubKey: false);
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // Best-effort cleanup; not worth failing the test run over.
-            }
-        }
         try
         {
             Directory.Delete(_tempDir, recursive: true);
@@ -421,68 +303,12 @@ public sealed class MxcTelemetryTests : IDisposable
     }
 
     [Fact]
-    public void GetPolicy_NoPolicyConfigured_IsUnrestrictedOnWindowsAndNotApplicableElsewhere()
+    public void GetPolicy_IsUnrestrictedOnWindowsAndNotApplicableElsewhere()
     {
-        SetPolicyValue(null);
         var expected = OperatingSystem.IsWindows()
             ? TelemetryPolicyState.Unrestricted
             : TelemetryPolicyState.NotApplicable;
         Assert.Equal(expected, MxcTelemetry.GetPolicy());
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(42)]
-    [InlineData(-1)]
-    public void GetPolicy_AnyValueOtherThanOptional_IsBlocked_OnWindows(int value)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        // MXC's data is product-and-service-usage (optional) diagnostic data,
-        // so only level 3 permits it. Unrecognised values fail closed rather
-        // than being treated as "no policy".
-        SetPolicyValue(value);
-        Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
-    }
-
-    [Fact]
-    public void GetPolicy_Optional_IsAllowed_OnWindows()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        SetPolicyValue(3);
-        Assert.Equal(TelemetryPolicyState.Allowed, MxcTelemetry.GetPolicy());
-    }
-
-    /// <summary>
-    /// An administrator who sets <c>AllowTelemetry</c> as a string instead of a
-    /// DWORD has still expressed an intent to manage this machine. The value
-    /// cannot be evaluated, so it must fail closed to Blocked — never be read
-    /// as an unmanaged machine, which would let a prior consent grant
-    /// re-enable the collection the administrator meant to stop.
-    /// </summary>
-    [Theory]
-    [InlineData("0")]
-    [InlineData("3")]
-    [InlineData("")]
-    [InlineData("not-a-number")]
-    public void GetPolicy_WrongValueType_IsBlockedNotUnrestricted_OnWindows(string value)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        SetPolicyStringValue(value);
-        Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
     }
 
     [Fact]
@@ -493,41 +319,9 @@ public sealed class MxcTelemetryTests : IDisposable
             return;
         }
 
-        // An administrator permitting telemetry must not stand in for the
-        // user's own decision: the prompt is still owed.
-        SetPolicyValue(3);
         Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
         Assert.True(MxcTelemetry.NeedsConsentPrompt());
-    }
 
-    [Fact]
-    public void GetPolicy_BlockedSuppressesTheConsentPrompt_OnWindows()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        // There is no point asking a user for permission an administrator has
-        // already refused, but the recorded consent state is left untouched so
-        // relaxing the policy later restores the user's real choice.
-        SetPolicyValue(0);
-        Assert.False(MxcTelemetry.NeedsConsentPrompt());
-        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
-
-        var presented = false;
-        var blocked = MxcTelemetry.RequestConsent(_ =>
-        {
-            presented = true;
-            return TelemetryConsentDecision.Yes;
-        });
-        Assert.False(presented);
-        Assert.Equal(TelemetryConsentActionResult.PolicyBlocked, blocked.Result);
-        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
-        Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
-
-        SetPolicyValue(null);
-        Assert.Equal(TelemetryPolicyState.Unrestricted, MxcTelemetry.GetPolicy());
         var granted = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
         Assert.Equal(TelemetryConsentActionResult.Granted, granted.Result);
         Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());

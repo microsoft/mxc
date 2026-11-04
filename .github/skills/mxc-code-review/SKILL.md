@@ -96,7 +96,7 @@ review or stop after finding one working path.
   errors, and a brief update to existing user guidance when requirements or
   behavior change. Document supported builds, limits, and remedies, not a
   backend implementation walkthrough. SDK/schema versions alone cannot prove
-  host support. Telemetry requires MXC-owned consent and restrictive admin policy.
+  host support. Telemetry requires MXC-owned consent.
 
 ## Keep SDK documentation useful
 

@@ -283,8 +283,7 @@ mod tests {
         use crate::mxc_common::telemetry::{self, events::test_sink, LearningMode, ProcessEvent};
 
         let store = tempfile::tempdir().unwrap();
-        let environment = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        environment.set_policy_value(3);
+        let _environment = telemetry::test_support::TelemetryTestEnv::new(store.path());
         telemetry::consent::set_consent(true, "test").unwrap();
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
         let mut logger = Logger::new(Mode::Buffer);

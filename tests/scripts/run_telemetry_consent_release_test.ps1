@@ -4,20 +4,19 @@
 <#
 .SYNOPSIS
     Exercises the telemetry consent path in a RELEASE wxc-exec, where the
-    debug-only store and policy overrides are compiled out.
+    debug-only store override is compiled out.
 
 .DESCRIPTION
     The debug smoke test redirects the consent store with
-    MXC_TEST_LOCALAPPDATA_OVERRIDE and the policy key with
-    MXC_TEST_POLICY_KEY_OVERRIDE. Both are gated on
+    MXC_TEST_LOCALAPPDATA_OVERRIDE. The override is gated on
     `cfg(any(test, all(feature = "test-support", debug_assertions)))`, so a
-    shipped binary resolves the store through SHGetKnownFolderPath and reads
-    policy from HKLM. That release-only shape has no other coverage.
+    shipped binary resolves the store through SHGetKnownFolderPath. That
+    release-only shape has no other coverage.
 
     Reaching it requires giving up isolation: this test writes the real
-    per-user consent store and the real HKLM policy key. Run it only on a
-    machine you are willing to mutate. Prior state is backed up and restored,
-    but a crash mid-run can leave the store or the policy key modified.
+    per-user consent store. Run it only on a machine you are willing to
+    mutate. Prior state is backed up and restored, but a crash mid-run can
+    leave the store modified.
 
 .PARAMETER BinDir
     Directory holding a release wxc-exec.exe.
@@ -25,24 +24,18 @@
 .PARAMETER AcceptRealMachineMutation
     Required acknowledgement. There is deliberately no CI auto-detection:
     self-hosted runners also set GITHUB_ACTIONS, and those machines persist.
-
-.PARAMETER RequirePolicyCeiling
-    Fails instead of skipping when the session is not elevated. CI passes this
-    so a runner that stops being elevated surfaces as a failure rather than
-    silently dropping the only coverage of the real HKLM policy key.
 #>
 
 [CmdletBinding()]
 param(
     [string]$BinDir,
-    [switch]$AcceptRealMachineMutation,
-    [switch]$RequirePolicyCeiling
+    [switch]$AcceptRealMachineMutation
 )
 
 $ErrorActionPreference = 'Stop'
 
 if (-not $AcceptRealMachineMutation) {
-    throw 'This test mutates the real consent store and HKLM policy. Pass -AcceptRealMachineMutation on an ephemeral machine.'
+    throw 'This test mutates the real consent store. Pass -AcceptRealMachineMutation on an ephemeral machine.'
 }
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -69,8 +62,6 @@ $lockFile = Join-Path $mxcDir 'telemetry-consent.lock'
 # A pending marker means an interrupted withdrawal, which reads fail-closed.
 # Every consent write clears it, so it has to be backed up and restored.
 $withdrawalFile = Join-Path $mxcDir 'telemetry-consent.withdrawal-pending'
-$policySubKey = 'SOFTWARE\Policies\Mxc'
-$policyKey = "HKLM:\$policySubKey"
 
 $expectedBody = @'
 Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
@@ -277,8 +268,6 @@ function Test-OverridesAreCompiledOut {
     $probeDir = Join-Path ([IO.Path]::GetTempPath()) "mxc_release_probe_$([guid]::NewGuid().ToString('N'))"
     $probeStore = Join-Path $probeDir 'mxc'
     New-Item -ItemType Directory -Path $probeStore -Force | Out-Null
-    $probeSubkey = "Software\MxcReleaseProbe\$([guid]::NewGuid().ToString('N'))"
-    $probePath = "HKCU:\$probeSubkey"
     try {
         # A store override, if honored, would report granted instead of denied.
         $record = [pscustomobject]@{
@@ -295,27 +284,17 @@ function Test-OverridesAreCompiledOut {
             ($record | ConvertTo-Json -Compress),
             (New-Object Text.UTF8Encoding $false))
 
-        # A policy override, if honored, would report blocked instead of unrestricted.
-        New-Item -Path $probePath -Force | Out-Null
-        Set-ItemProperty -Path $probePath -Name AllowTelemetry -Value 0 -Type DWord
-
         $status = Invoke-ConsentJson -Arguments '--telemetry-consent status' -Environment @{
             MXC_TEST_LOCALAPPDATA_OVERRIDE           = $probeDir
             MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID = "$PID"
-            MXC_TEST_POLICY_KEY_OVERRIDE             = $probeSubkey
-            MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID   = "$PID"
         }
         if ($status.storedState -ne 'denied') {
             throw "MXC_TEST_LOCALAPPDATA_OVERRIDE redirected a release binary (storedState '$($status.storedState)'). The debug override is not compiled out."
         }
-        if ($status.policy -ne 'unrestricted') {
-            throw "MXC_TEST_POLICY_KEY_OVERRIDE redirected a release binary (policy '$($status.policy)'). The debug override is not compiled out."
-        }
-        Write-Host '  ok: debug store and policy overrides are compiled out'
+        Write-Host '  ok: debug store override is compiled out'
     }
     finally {
         Remove-Item -Recurse -Force $probeDir -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force $probePath -ErrorAction SilentlyContinue
     }
 }
 
@@ -339,40 +318,17 @@ function Test-GrantAndCorruptionRecovery {
     Write-Host '  ok: corrupt and stale-prompt records fail closed at the real path'
 }
 
-function Test-PolicyCeiling {
+function Test-WithdrawalIsIdempotent {
     Write-ConsentRecord -Consent 'granted'
-    Assert-Status (Invoke-ConsentJson -Arguments '--telemetry-consent status') `
-        'granted' 'granted' 'unrestricted' $false 'policy absent'
-
-    New-Item -Path $policyKey -Force | Out-Null
-    Set-ItemProperty -Path $policyKey -Name AllowTelemetry -Value 0 -Type DWord
-    $blocked = Invoke-ConsentRequest -Decision 'yes'
-    if ($blocked.result -ne 'policyBlocked') {
-        throw "Blocked HKLM policy did not suppress presentation: $($blocked | ConvertTo-Json -Compress)"
-    }
-    Assert-Status $blocked 'granted' 'granted' 'blocked' $false 'blocked status'
-
-    Set-ItemProperty -Path $policyKey -Name AllowTelemetry -Value 3 -Type DWord
-    Assert-Status (Invoke-ConsentJson -Arguments '--telemetry-consent status') `
-        'granted' 'granted' 'allowed' $false 'allowed status'
-
-    Set-ItemProperty -Path $policyKey -Name AllowTelemetry -Value 0 -Type DWord
     $withdrawn = Invoke-ConsentJson -Arguments '--telemetry-consent withdraw'
-    if ($withdrawn.result -ne 'withdrawn') { throw 'Withdrawal while blocked did not report withdrawn.' }
-    Assert-Status $withdrawn 'denied' 'denied' 'blocked' $false 'withdrawal while blocked'
+    if ($withdrawn.result -ne 'withdrawn') { throw 'Withdrawal did not report withdrawn.' }
+    Assert-Status $withdrawn 'denied' 'denied' 'unrestricted' $false 'withdrawal status'
     $again = Invoke-ConsentJson -Arguments '--telemetry-consent withdraw'
     if ($again.result -ne 'withdrawn') { throw 'Repeated withdrawal was not idempotent.' }
-    Write-Host '  ok: real HKLM policy ceiling gates presentation and never grants'
+    Write-Host '  ok: withdrawal is idempotent at the real path'
 }
 
 # --- Run -------------------------------------------------------------------
-
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = New-Object Security.Principal.WindowsPrincipal($identity)
-$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if ($RequirePolicyCeiling -and -not $isAdmin) {
-    throw 'HKLM policy ceiling coverage was required but this session is not elevated.'
-}
 
 $mxcDirPreexisted = Test-Path $mxcDir
 $consentBackup = if (Test-Path $consentFile) { [IO.File]::ReadAllBytes($consentFile) } else { $null }
@@ -383,29 +339,9 @@ if (Test-Path $withdrawalFile) {
     $withdrawalBackup = [IO.File]::ReadAllBytes($withdrawalFile)
     $withdrawalBackupWritten = [IO.File]::GetLastWriteTimeUtc($withdrawalFile)
 }
-$policyKeyPreexisted = Test-Path $policyKey
-$policyValueBackup = $null
-# The value kind is part of the state: policy.rs fail-closes on a non-DWORD
-# AllowTelemetry, so restoring a REG_SZ as a DWORD would change the machine.
-$policyValueKind = $null
-if ($policyKeyPreexisted) {
-    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($policySubKey)
-    if ($key) {
-        try {
-            $policyValueBackup = $key.GetValue(
-                'AllowTelemetry', $null,
-                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-            if ($null -ne $policyValueBackup) {
-                $policyValueKind = $key.GetValueKind('AllowTelemetry')
-            }
-        }
-        finally { $key.Dispose() }
-    }
-}
 
 Write-Host "Release executor : $exe"
 Write-Host "Consent store    : $consentFile"
-Write-Host "Policy key       : $policyKey"
 
 try {
     if (-not $mxcDirPreexisted) { New-Item -ItemType Directory -Path $mxcDir -Force | Out-Null }
@@ -416,13 +352,7 @@ try {
     Test-RealStoreLifecycle
     Test-OverridesAreCompiledOut
     Test-GrantAndCorruptionRecovery
-
-    if ($isAdmin) {
-        Test-PolicyCeiling
-    }
-    else {
-        Write-Host '  skipped: HKLM policy ceiling (requires Administrator)' -ForegroundColor Yellow
-    }
+    Test-WithdrawalIsIdempotent
 
     Write-Host 'PASSED: release-path telemetry consent test' -ForegroundColor Green
 }
@@ -450,19 +380,5 @@ finally {
     }
     elseif ($mxcDirPreexisted) {
         Remove-Item -Force $withdrawalFile -ErrorAction SilentlyContinue
-    }
-
-    if ($isAdmin) {
-        if (-not $policyKeyPreexisted) {
-            Remove-Item -Recurse -Force $policyKey -ErrorAction SilentlyContinue
-        }
-        elseif ($null -eq $policyValueKind) {
-            Remove-ItemProperty -Path $policyKey -Name AllowTelemetry -ErrorAction SilentlyContinue
-        }
-        else {
-            $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($policySubKey)
-            try { $key.SetValue('AllowTelemetry', $policyValueBackup, $policyValueKind) }
-            finally { $key.Dispose() }
-        }
     }
 }

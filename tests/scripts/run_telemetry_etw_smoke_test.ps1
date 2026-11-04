@@ -3,8 +3,7 @@
     Isolated ETW capture smoke test for MXC telemetry.
 
 .DESCRIPTION
-    Uses a debug wxc-exec only, proves the debug-only consent and policy
-    redirects before any MXC write, grants consent through the canonical
+    Uses a debug wxc-exec only, proves the debug-only consent store`n    redirect before any MXC write, grants consent through the canonical
     session-bound presenter protocol, captures the public MXC ETW provider,
     and restores all process/machine state in finally.
 
@@ -91,8 +90,6 @@ function Invoke-CanonicalGrant {
     $start.CreateNoWindow = $true
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE'] = $tempDir
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'] = "$PID"
-    $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE'] = $policySubkey
-    $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'] = "$PID"
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
     if (-not $process.Start()) { throw 'Failed to start consent maintenance process.' }
@@ -147,17 +144,11 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $overrideName = 'MXC_TEST_LOCALAPPDATA_OVERRIDE'
 $overrideOwnerName = 'MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'
-$policyOverrideName = 'MXC_TEST_POLICY_KEY_OVERRIDE'
-$policyOverrideOwnerName = 'MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'
 $originalOverride = [Environment]::GetEnvironmentVariable($overrideName)
 $originalOverrideOwner = [Environment]::GetEnvironmentVariable($overrideOwnerName)
-$originalPolicyOverride = [Environment]::GetEnvironmentVariable($policyOverrideName)
-$originalPolicyOverrideOwner = [Environment]::GetEnvironmentVariable($policyOverrideOwnerName)
 $runId = [guid]::NewGuid().ToString('N')
 $tempDir = Join-Path ([IO.Path]::GetTempPath()) "mxc_etw_test_$runId"
 $consentFile = Join-Path $tempDir 'mxc\telemetry-consent.json'
-$policySubkey = "Software\MxcTelemetryEtwSmoke\$runId"
-$policyPath = "HKCU:\$policySubkey"
 $etlDir = Join-Path $tempDir 'etl'
 $etlFile = Join-Path $etlDir 'mxc_trace.etl'
 $xmlFile = Join-Path $etlDir 'mxc_trace.xml'
@@ -193,11 +184,8 @@ function Invoke-TraceRequest {
 try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $consentFile) -Force | Out-Null
     New-Item -ItemType Directory -Path $etlDir -Force | Out-Null
-    New-Item -Path $policyPath -Force | Out-Null
     Set-Item -Path "Env:$overrideName" -Value $tempDir
     Set-Item -Path "Env:$overrideOwnerName" -Value $PID
-    Set-Item -Path "Env:$policyOverrideName" -Value $policySubkey
-    Set-Item -Path "Env:$policyOverrideOwnerName" -Value $PID
 
     foreach ($seed in @('granted', 'denied')) {
         $record = [pscustomobject]@{
@@ -221,10 +209,9 @@ try {
     Remove-Item $consentFile -Force
 
     $grant = Invoke-CanonicalGrant
-    Set-ItemProperty -Path $policyPath -Name AllowTelemetry -Value 3 -Type DWord
     $authorized = Invoke-Status
-    if ($authorized.effectiveState -ne 'granted' -or $authorized.policy -ne 'allowed') {
-        throw 'Consent/policy authorization was not effective before ETW capture.'
+    if ($authorized.effectiveState -ne 'granted' -or $authorized.policy -ne 'unrestricted') {
+        throw 'Consent authorization was not effective before ETW capture.'
     }
 
     $providerGuid = Get-TraceLoggingProviderGuid -Name $providerName
@@ -285,11 +272,10 @@ try {
             Set-Content -LiteralPath (Join-Path $tempDir 'failure-invocations.json')
     }
 
-    # Required diagnostics ignore consent, the request flag and administrative
-    # policy; published contracts still need consent.
+    # Required diagnostics ignore consent and the request flag; published contracts still need consent.
     $gatingCases = @()
     if ($CheckKeywords) {
-        function Set-GatingState([string]$Consent, $Policy) {
+        function Set-GatingState([string]$Consent) {
             if ($Consent -eq 'absent') { Remove-Item $consentFile -Force -ErrorAction SilentlyContinue }
             else {
                 $record = [pscustomobject]@{
@@ -300,20 +286,15 @@ try {
                 [IO.File]::WriteAllText($consentFile, ($record | ConvertTo-Json -Compress),
                     (New-Object Text.UTF8Encoding $false))
             }
-            if ($null -eq $Policy) { Remove-ItemProperty -Path $policyPath -Name AllowTelemetry -ErrorAction SilentlyContinue }
-            else { Set-ItemProperty -Path $policyPath -Name AllowTelemetry -Value $Policy -Type DWord }
         }
         foreach ($case in @(
-            @{ Name = 'development, consent denied'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 3; Emits = $true },
-            @{ Name = 'development, consent absent'; Version = '1.1.0-alpha'; Consent = 'absent'; Policy = 3; Emits = $true },
-            @{ Name = 'development, no policy'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = $null; Emits = $true },
-            @{ Name = 'development, policy 1'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 1; Emits = $true },
-            @{ Name = 'development, policy 0'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 0; Emits = $true },
-            @{ Name = 'development, unsupported policy'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 7; Emits = $true },
-            @{ Name = 'published, consent denied'; Version = '1.0.0'; Consent = 'denied'; Policy = 3; Emits = $false },
-            @{ Name = 'published, consent absent'; Version = '1.0.0'; Consent = 'absent'; Policy = 3; Emits = $false }
+            @{ Name = 'development, consent denied'; Version = '1.1.0-alpha'; Consent = 'denied'; Emits = $true },
+            @{ Name = 'development, consent absent'; Version = '1.1.0-alpha'; Consent = 'absent'; Emits = $true },
+            @{ Name = 'development, consent granted'; Version = '1.1.0-alpha'; Consent = 'granted'; Emits = $true },
+            @{ Name = 'published, consent denied'; Version = '1.0.0'; Consent = 'denied'; Emits = $false },
+            @{ Name = 'published, consent absent'; Version = '1.0.0'; Consent = 'absent'; Emits = $false }
         )) {
-            Set-GatingState $case.Consent $case.Policy
+            Set-GatingState $case.Consent
             $gatingCases += [pscustomobject]@{
                 Name = $case.Name
                 Emits = $case.Emits
@@ -325,7 +306,7 @@ try {
                 }
             }
         }
-        Set-GatingState 'granted' 3
+        Set-GatingState 'granted'
     }
     Start-Sleep -Seconds 2
 
@@ -365,11 +346,6 @@ try {
     else { Set-Item "Env:$overrideName" $originalOverride }
     if ($null -eq $originalOverrideOwner) { Remove-Item "Env:$overrideOwnerName" -ErrorAction SilentlyContinue }
     else { Set-Item "Env:$overrideOwnerName" $originalOverrideOwner }
-    if ($null -eq $originalPolicyOverride) { Remove-Item "Env:$policyOverrideName" -ErrorAction SilentlyContinue }
-    else { Set-Item "Env:$policyOverrideName" $originalPolicyOverride }
-    if ($null -eq $originalPolicyOverrideOwner) { Remove-Item "Env:$policyOverrideOwnerName" -ErrorAction SilentlyContinue }
-    else { Set-Item "Env:$policyOverrideOwnerName" $originalPolicyOverrideOwner }
-    Remove-Item -Recurse -Force $policyPath -ErrorAction SilentlyContinue
     if (-not $SkipClean) { Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue }
 }
 

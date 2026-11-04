@@ -282,7 +282,7 @@ that can be executed independently.
 
     "telemetry": {                         // Telemetry (Windows only)
         "enabled": true                    // Request emission for this run; MXC-owned user consent
-                                           // and a permitting administrative policy are also required
+                                           // is also required
     },
 
     "wslc": {                              // WSL Container settings (v0.9+)

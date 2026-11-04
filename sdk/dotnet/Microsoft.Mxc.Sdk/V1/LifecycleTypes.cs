@@ -32,7 +32,7 @@ public abstract class ProvisionRequest
 
     /// <summary>
     /// Optional per-phase telemetry request. Emission is still gated by the
-    /// MXC-owned user consent and administrative policy.
+    /// MXC-owned user consent.
     /// </summary>
     public TelemetryConfig? Telemetry { get; set; }
 }
@@ -91,7 +91,7 @@ public sealed class ProvisionOptions
 
     /// <summary>
     /// Optional per-phase telemetry request. Emission is still gated by the
-    /// MXC-owned user consent and administrative policy.
+    /// MXC-owned user consent.
     /// </summary>
     public TelemetryConfig? Telemetry { get; set; }
 }

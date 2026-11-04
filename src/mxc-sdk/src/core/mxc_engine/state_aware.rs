@@ -2047,8 +2047,7 @@ mod tests {
         use telemetry::events::test_sink;
 
         let store = tempfile::tempdir().unwrap();
-        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
+        let _env = telemetry::test_support::TelemetryTestEnv::new(store.path());
         telemetry::consent::set_consent(true, "test").unwrap();
         let _correlation_store = StoreDirGuard::set(store.path());
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
@@ -2148,8 +2147,7 @@ mod tests {
         use telemetry::events::test_sink;
 
         let store = tempfile::tempdir().unwrap();
-        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
+        let _env = telemetry::test_support::TelemetryTestEnv::new(store.path());
         telemetry::consent::set_consent(true, "test").unwrap();
         let _correlation_store = StoreDirGuard::set(store.path());
         let _lock = test_sink::TEST_LOCK.lock().unwrap();

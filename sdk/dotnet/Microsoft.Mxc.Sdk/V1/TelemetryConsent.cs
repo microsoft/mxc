@@ -38,7 +38,7 @@ public enum TelemetryConsentActionResult
     NotApplicable = 7,
 }
 
-/// <summary>Persisted and effective consent together with the policy ceiling.</summary>
+/// <summary>Persisted and effective consent together with the policy state.</summary>
 public sealed record TelemetryConsentStatus(
     TelemetryConsentState StoredState,
     TelemetryConsentState EffectiveState,

@@ -1039,18 +1039,18 @@ pub unsafe extern "C" fn mxc_telemetry_needs_consent_prompt(out_needs_prompt: *m
     MXC_STATUS_SUCCESS
 }
 
-/// Read the administrative (MDM / Group Policy) telemetry policy.
+/// Read the telemetry policy state.
 ///
-/// On success, writes one of `"unrestricted"` (no policy configured),
-/// `"allowed"`, `"blocked"`, or `"not-applicable"` (non-Windows hosts) into
-/// `*out_utf8` as a heap-allocated, NUL-terminated UTF-8 string. The caller
-/// must free it with [`mxc_string_free`].
+/// MXC has no administrative telemetry policy, so this currently writes
+/// `"unrestricted"` on Windows and `"not-applicable"` on other hosts into
+/// `*out_utf8` as a heap-allocated, NUL-terminated UTF-8 string. `"allowed"`
+/// and `"blocked"` are retained for compatibility and are not currently
+/// reported. The caller must free the string with [`mxc_string_free`].
 ///
 /// After any non-success return with a non-null `out_utf8`, `*out_utf8` is
 /// null and must not be freed.
 ///
-/// `"allowed"` does not grant user consent; `"blocked"` suppresses collection
-/// and the consent prompt.
+/// Policy never grants user consent.
 ///
 /// Returns [`MXC_STATUS_SUCCESS`] on success, or [`MXC_STATUS_NULL_ARGUMENT`]
 /// without touching `*out_utf8` if `out_utf8` is null.
@@ -1506,16 +1506,13 @@ mod tests {
     fn get_policy_returns_a_valid_state_string() {
         let s = read_policy_string();
         #[cfg(target_os = "windows")]
-        assert!(
-            ["unrestricted", "allowed", "blocked"].contains(&s.as_str()),
-            "unexpected policy state {s:?}"
-        );
+        assert_eq!(s, "unrestricted");
         #[cfg(not(target_os = "windows"))]
         assert_eq!(s, "not-applicable");
     }
 
     /// Calls the export and returns the marshalled string, freeing the
-    /// allocation. Shared by the policy tests below.
+    /// allocation.
     fn read_policy_string() -> String {
         let mut out: *mut c_char = ptr::null_mut();
         // SAFETY: `out` is a valid writable pointer to a local variable.
@@ -1526,35 +1523,6 @@ mod tests {
         let s = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
         unsafe { mxc_string_free(out) };
         s
-    }
-
-    /// Drives every administrative policy state through a redirected registry
-    /// key and asserts the marshaled string. The redirect is debug-only.
-    #[cfg(all(target_os = "windows", debug_assertions))]
-    #[test]
-    fn get_policy_marshals_the_exact_state_for_each_registry_value() {
-        use mxc_common::telemetry::policy::test_support::PolicyKeyGuard;
-
-        let guard = PolicyKeyGuard::new();
-        // No value set: an unmanaged machine.
-        assert_eq!(read_policy_string(), "unrestricted");
-
-        guard.set_value(3);
-        assert_eq!(read_policy_string(), "allowed");
-
-        for blocked in [0u32, 1, 2, 99, u32::MAX] {
-            guard.set_value(blocked);
-            assert_eq!(
-                read_policy_string(),
-                "blocked",
-                "value {blocked} must marshal as blocked"
-            );
-        }
-
-        // A wrong-typed value is a policy we cannot evaluate: it must fail
-        // closed all the way out through the ABI, not read as unmanaged.
-        guard.set_string_value("0");
-        assert_eq!(read_policy_string(), "blocked");
     }
 
     #[test]

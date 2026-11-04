@@ -37,9 +37,7 @@ dotnetsdk = ["dep:csbindgen"]
 test-support = ["mxc-sdk/test-support"]
 
 [dev-dependencies]
-# Gives the FFI tests the policy-key redirector, so they can assert the exact
-# string this layer marshals for each administrative policy state rather than
-# accepting whatever the host machine's real policy happens to produce.
+# Gives the FFI tests the isolated consent store.
 mxc-sdk = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 

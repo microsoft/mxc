@@ -417,7 +417,7 @@ public static bool NeedsConsentPrompt();
 
 ## `Microsoft.Mxc.Sdk.V1.MxcTelemetry` — GetPolicy
 
-Read the administrative telemetry policy.
+Read the telemetry policy state: `Unrestricted` on Windows and `NotApplicable` elsewhere. Failures return `Blocked`.
 
 ```csharp
 public static TelemetryPolicyState GetPolicy();
@@ -449,7 +449,7 @@ public static Task<TelemetryConsentOutcome> RequestConsentAsync(
 
 ## `Microsoft.Mxc.Sdk.V1.MxcTelemetry` — GetConsentStatus
 
-Read stored/effective consent and the administrative ceiling.
+Read stored/effective consent and the policy state.
 
 ```csharp
 public static TelemetryConsentStatus GetConsentStatus();

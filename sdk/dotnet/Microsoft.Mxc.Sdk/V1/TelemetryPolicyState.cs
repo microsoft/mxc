@@ -4,50 +4,40 @@
 namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
-/// The administrative (MDM / Group Policy) telemetry decision for this machine.
-/// See docs/telemetry.md for the admin-facing reference.
+/// The telemetry policy state for this machine.
 ///
-/// An administrator can disable MXC telemetry machine-wide via Intune, another
-/// MDM, or Group Policy. The policy is a <em>ceiling, never a grant</em>: an
-/// administrator who permits telemetry has not consented on the user's behalf,
-/// so an explicit <see cref="TelemetryConsentState.Granted"/> is still
+/// MXC has no administrative telemetry policy; user consent alone governs
+/// collection. <see cref="MxcTelemetry.GetPolicy"/> currently reports
+/// <see cref="Unrestricted"/> on Windows and <see cref="NotApplicable"/>
+/// elsewhere. <see cref="Allowed"/> and <see cref="Blocked"/> are retained for
+/// compatibility and are not currently reported by a successful call. Policy
+/// is never a grant: an explicit <see cref="TelemetryConsentState.Granted"/> is
 /// required before anything is collected.
-///
-/// MXC deliberately does not read the Windows-wide diagnostic data setting:
-/// Microsoft's Policy CSP documentation scopes that policy to Windows itself
-/// and states it does not apply to additional installed apps, and the Windows
-/// privacy guidance for app-classified components requires them to own their
-/// own notice and consent experience.
 /// </summary>
 public enum TelemetryPolicyState
 {
     /// <summary>
-    /// An administrator has denied MXC telemetry, the configured policy value
-    /// could not be understood, or the policy could not be determined at all.
-    /// Nothing is collected regardless of user consent, and hosts must not
-    /// offer a consent prompt.
-    ///
-    /// Because this state also covers "could not be determined", a host should
-    /// word its UI as "telemetry is unavailable on this device" rather than
-    /// asserting that an administrator is responsible.
+    /// Retained for compatibility; not currently reported by a successful
+    /// call. Also the fail-closed value when the policy state could not be
+    /// determined (for example, the native library is unavailable). Nothing is
+    /// collected in this state.
     /// </summary>
     Blocked = 0,
 
     /// <summary>
-    /// No administrative policy is configured. Telemetry is governed solely by
-    /// the user's own consent decision. This is not a grant.
+    /// No policy applies. Telemetry is governed solely by the user's own
+    /// consent decision. This is not a grant. Reported on Windows.
     /// </summary>
     Unrestricted = 1,
 
     /// <summary>
-    /// An administrator has permitted the optional (usage) telemetry category
-    /// MXC emits. Still requires user consent before anything is collected.
+    /// Retained for compatibility; not currently reported. Still requires user
+    /// consent before anything is collected.
     /// </summary>
     Allowed = 2,
 
     /// <summary>
-    /// Not a Windows host. MXC collects no telemetry here, so administrative
-    /// policy is not a meaningful concept.
+    /// Not a Windows host. MXC collects no telemetry here.
     /// </summary>
     NotApplicable = 3,
 }

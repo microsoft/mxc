@@ -347,7 +347,7 @@ export interface TelemetryConfig {
    * Per-invocation telemetry opt-in.
    *
    * `true` requests telemetry for this invocation; emission is still gated by
-   * persisted user consent and administrative policy. `false` (or `undefined`)
+   * persisted user consent. `false` (or `undefined`)
    * disables telemetry for this invocation.
    */
   enabled?: boolean;

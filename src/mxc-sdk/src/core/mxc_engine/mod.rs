@@ -1143,8 +1143,7 @@ mod telemetry_process_tests {
         use telemetry::events::test_sink;
 
         let store = tempfile::tempdir().unwrap();
-        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
+        let _env = telemetry::test_support::TelemetryTestEnv::new(store.path());
         telemetry::consent::set_consent(true, "test").unwrap();
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
         test_sink::install();
@@ -1486,8 +1485,7 @@ mod telemetry_process_tests {
         use telemetry::events::test_sink;
 
         let store = tempfile::tempdir().unwrap();
-        let env = telemetry::test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
+        let _env = telemetry::test_support::TelemetryTestEnv::new(store.path());
         telemetry::consent::set_consent(true, "test").unwrap();
         let _lock = test_sink::TEST_LOCK.lock().unwrap();
         test_sink::install();

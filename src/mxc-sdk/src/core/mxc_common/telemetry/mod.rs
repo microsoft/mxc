@@ -247,7 +247,7 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 /// Initialize the provider for one request, selecting the gate by contract.
 ///
 /// Development-contract requests collect Required diagnostics regardless of
-/// the request's telemetry object, MXC consent or administrative policy, when
+/// the request's telemetry object or MXC consent, when
 /// the build is eligible. All other requests use [`init`].
 pub fn init_for_request(
     config: Option<&TelemetryConfig>,
@@ -285,8 +285,7 @@ fn activate_provider(logger: &mut Logger) -> bool {
 /// Without this an operator who set `telemetry.enabled: true` sees no events
 /// and no reason — every gate fails closed and silently. Each conjunct of
 /// [`is_enabled`] is reported independently so the log distinguishes "the run
-/// never asked" from "the user has not consented" from "an administrator
-/// blocked it".
+/// never asked" from "the user has not consented".
 fn log_suppression_reason(config: &TelemetryConfig, logger: &mut Logger) {
     if config.enabled != Some(true) {
         logger.log_line("telemetry: not requested for this run (telemetry.enabled is not true)");
@@ -1162,45 +1161,19 @@ pub fn emit_sdk_cancellation_with_kind(
 #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 pub mod test_support {
     use super::consent::test_support::LocalAppDataGuard;
-    use super::policy::test_support::PolicyKeyGuard;
 
-    /// A fully isolated telemetry environment: both the administrative policy
-    /// key and the user consent store are redirected to throwaway, per-test
-    /// locations.
-    ///
-    /// This is the **only** supported way to hold both guards at once. They
-    /// protect separate process-global mutexes, so acquiring them in
-    /// inconsistent orders across tests would deadlock under `cargo test`'s
-    /// multithreaded runner. Constructing them here — policy first, then
-    /// consent — is what establishes the total order that makes the pair
-    /// deadlock-free, and a caller cannot get it wrong because a caller never
-    /// sees the individual acquisitions.
-    ///
-    /// Every test that reaches [`super::is_enabled`],
-    /// [`super::consent::needs_consent_prompt`], or [`super::policy::get_policy`]
-    /// must hold this — *including* tests that only care about consent.
-    /// Otherwise they read the real machine policy and fail on an
-    /// administratively managed device.
+    /// An isolated telemetry environment: the user consent store is redirected
+    /// to a throwaway, per-test location for the lifetime of the value.
     pub struct TelemetryTestEnv {
-        // Fields drop in declaration order, so consent is released before
-        // policy: the exact reverse of the acquisition order below.
         _consent: LocalAppDataGuard,
-        policy: PolicyKeyGuard,
     }
 
     impl TelemetryTestEnv {
-        /// Redirects the consent store to `store` and the policy key to a
-        /// fresh, empty one (i.e. an unmanaged machine).
+        /// Redirects the consent store to `store`.
         pub fn new(store: &std::path::Path) -> Self {
-            let policy = PolicyKeyGuard::new();
-            let _consent = LocalAppDataGuard::set(store);
-            Self { _consent, policy }
-        }
-
-        /// Sets the administrative `AllowTelemetry` policy value.
-        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-        pub fn set_policy_value(&self, value: u32) {
-            self.policy.set_value(value);
+            Self {
+                _consent: LocalAppDataGuard::set(store),
+            }
         }
     }
 }
@@ -1522,85 +1495,39 @@ mod tests {
         }));
     }
 
-    /// An administrative denial overrides an explicit user grant. This is the
-    /// MDM/Intune ceiling: policy can only ever subtract.
+    /// Explicit user denial beats an explicit enable.
     #[cfg(target_os = "windows")]
     #[test]
-    fn is_enabled_false_when_policy_blocks_despite_consent() {
+    fn is_enabled_false_when_consent_denied() {
         let tmp = tempfile::tempdir().unwrap();
-        let env = TelemetryTestEnv::new(tmp.path());
-        consent::set_consent(true, "cli").unwrap();
-        env.set_policy_value(0);
+        let _env = TelemetryTestEnv::new(tmp.path());
+        consent::set_consent(false, "cli").unwrap();
 
-        assert!(!is_enabled(&TelemetryConfig {
-            enabled: Some(true),
-            ..Default::default()
-        }));
+        assert!(
+            !is_enabled(&TelemetryConfig {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            "denied consent must win over explicit enable"
+        );
     }
 
-    /// The converse, and the load-bearing privacy invariant: a permissive
-    /// administrative policy is *not* consent. An admin who allows telemetry
-    /// has not decided on the user's behalf.
+    /// A fresh machine has no recorded decision, which must not enable
+    /// telemetry even with an explicit enable.
     #[cfg(target_os = "windows")]
     #[test]
-    fn is_enabled_false_when_policy_allows_but_consent_is_absent() {
+    fn is_enabled_false_when_consent_undetermined() {
         let tmp = tempfile::tempdir().unwrap();
-        let env = TelemetryTestEnv::new(tmp.path());
-        env.set_policy_value(3);
+        let _env = TelemetryTestEnv::new(tmp.path());
 
-        assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
-        assert!(!is_enabled(&TelemetryConfig {
-            enabled: Some(true),
-            ..Default::default()
-        }));
-    }
-
-    /// Explicit user denial must beat every policy state — including a
-    /// permissive one. Completes the consent × policy matrix.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn is_enabled_false_when_consent_denied_under_every_policy() {
-        for policy_value in [None, Some(0u32), Some(1), Some(3)] {
-            let tmp = tempfile::tempdir().unwrap();
-            let env = TelemetryTestEnv::new(tmp.path());
-            consent::set_consent(false, "cli").unwrap();
-            if let Some(value) = policy_value {
-                env.set_policy_value(value);
-            }
-
-            assert!(
-                !is_enabled(&TelemetryConfig {
-                    enabled: Some(true),
-                    ..Default::default()
-                }),
-                "denied consent must win over explicit enable under policy {policy_value:?}"
-            );
-        }
-    }
-
-    /// The policy is a ceiling, never a grant: no policy value may enable
-    /// telemetry for a user who has never recorded a decision. `Denied` is
-    /// covered above; this covers the fresh-machine `Undetermined` case, which
-    /// is the one a permissive policy could plausibly be mistaken for a grant.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn is_enabled_false_when_consent_undetermined_under_every_policy() {
-        for policy_value in [None, Some(0u32), Some(1), Some(3)] {
-            let tmp = tempfile::tempdir().unwrap();
-            let env = TelemetryTestEnv::new(tmp.path());
-            if let Some(value) = policy_value {
-                env.set_policy_value(value);
-            }
-
-            assert_eq!(consent::get_consent(), consent::ConsentState::Undetermined);
-            assert!(
-                !is_enabled(&TelemetryConfig {
-                    enabled: Some(true),
-                    ..Default::default()
-                }),
-                "undetermined consent must block an explicit enable under policy {policy_value:?}"
-            );
-        }
+        assert_eq!(consent::get_consent(), consent::ConsentState::Undetermined);
+        assert!(
+            !is_enabled(&TelemetryConfig {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            "undetermined consent must block an explicit enable"
+        );
     }
 
     #[test]
@@ -1631,14 +1558,13 @@ mod tests {
     /// passing if omission silently started meaning "defer to consent".
     #[cfg(target_os = "windows")]
     #[test]
-    fn is_enabled_false_when_enabled_omitted_despite_consent_and_permissive_policy() {
+    fn is_enabled_false_when_enabled_omitted_despite_consent() {
         let tmp = tempfile::tempdir().unwrap();
-        let env = TelemetryTestEnv::new(tmp.path());
+        let _env = TelemetryTestEnv::new(tmp.path());
         consent::set_consent(true, "cli").unwrap();
-        env.set_policy_value(3);
 
         assert_eq!(consent::get_consent(), consent::ConsentState::Granted);
-        assert_eq!(policy::get_policy(), policy::PolicyState::Allowed);
+        assert_eq!(policy::get_policy(), policy::PolicyState::Unrestricted);
         // Every other gate is open; only the omitted opt-in keeps it off.
         assert!(!is_enabled(&TelemetryConfig {
             enabled: None,
@@ -2592,10 +2518,9 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn live_withdrawal_and_policy_block_suppress_the_next_emission() {
+    fn live_withdrawal_suppresses_the_next_emission() {
         let store = tempfile::tempdir().expect("temp dir");
-        let env = test_support::TelemetryTestEnv::new(store.path());
-        env.set_policy_value(3);
+        let _env = test_support::TelemetryTestEnv::new(store.path());
         consent::set_consent(true, "test").expect("set consent");
 
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2609,18 +2534,6 @@ mod tests {
         assert!(
             events::test_sink::take_executions().is_empty(),
             "withdrawal must suppress the next logical emission"
-        );
-
-        reset_for_test();
-        events::test_sink::install();
-        TEST_FORCE_ACTIVE.with(|f| f.set(true));
-        consent::set_consent(true, "test").expect("restore consent");
-        env.set_policy_value(0);
-
-        emit_cancellation();
-        assert!(
-            events::test_sink::take_executions().is_empty(),
-            "a newly blocking policy must suppress the next logical emission"
         );
 
         reset_for_test();

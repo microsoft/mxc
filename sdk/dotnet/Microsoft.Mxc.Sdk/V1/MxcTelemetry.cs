@@ -394,8 +394,9 @@ public static class MxcTelemetry
     }
 
     /// <summary>
-    /// Read the administrative telemetry policy. Failures return
-    /// <see cref="TelemetryPolicyState.Blocked"/>.
+    /// Read the telemetry policy state: <see cref="TelemetryPolicyState.Unrestricted"/>
+    /// on Windows and <see cref="TelemetryPolicyState.NotApplicable"/> elsewhere.
+    /// Failures return <see cref="TelemetryPolicyState.Blocked"/>.
     /// </summary>
     public static TelemetryPolicyState GetPolicy()
     {
@@ -502,7 +503,7 @@ public static class MxcTelemetry
         return outcome;
     }
 
-    /// <summary>Read stored/effective consent and the administrative ceiling.</summary>
+    /// <summary>Read stored/effective consent and the policy state.</summary>
     public static TelemetryConsentStatus GetConsentStatus()
     {
         if (!IsWindowsHost)

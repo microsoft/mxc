@@ -176,7 +176,7 @@ Creation telemetry is supplied through `telemetry: Option<TelemetryConfig>` on `
 `SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
 leaves telemetry disabled; `TelemetryConfig { enabled: Some(false) }`
 explicitly disables it. Opt-in remains
-subject to MXC's persisted user consent and administrative policy.
+subject to MXC's persisted user consent.
 
 Filesystem discovery helpers and their result/options types live under
 `mxc_sdk::v1::policy::filesystem`. They take `environment: Option<&[(String, String)]>`;

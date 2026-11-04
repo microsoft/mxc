@@ -33,7 +33,7 @@ The Required diagnostic-data notification explains the collection; it does not a
 
 Automatic Required collection applies only to supported Windows builds configured and approved for Microsoft telemetry routing. Local and open-source builds do not acquire automatic Required collection. MXC telemetry remains unavailable on macOS and Linux.
 
-Required collection is introduced through a versioned contract. Existing published contracts retain their current explicit opt-in, consent, and administrative-policy behavior, which is unchanged.
+Required collection is introduced through a versioned contract. Existing published contracts retain their current explicit opt-in and consent behavior, which is unchanged.
 
 ## See also
 
