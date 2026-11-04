@@ -23,8 +23,8 @@ Creates an LXC container to provide:
 ## Prerequisites
 
 - Linux kernel >= 3.12.
-- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime)
-- Root access to run MXC and to configure LXC
+- LXC >= 5.0 installed (`liblxc-dev` for building, `lxc-utils` for runtime).
+- Root access to run MXC and to configure LXC.
   Filtering egress or ingress installs iptables rules in the container's
   network namespace, which requires root.
 - Valid UID and GID root mappings to run LXC containers unprivileged.  See [LXC Getting Started](https://linuxcontainers.org/lxc/getting-started/#create-unprivileged-containers-as-root-with-shared-uid-and-gid-ranges).
