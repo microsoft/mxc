@@ -1443,7 +1443,7 @@ public enum TelemetryConsentState
 
 ## `Microsoft.Mxc.Sdk.V1.TelemetryConsentStatus`
 
-Persisted and effective consent together with the policy state.
+Persisted and effective consent together with the policy ceiling.
 
 ```csharp
 public sealed record TelemetryConsentStatus(
@@ -1459,7 +1459,7 @@ public sealed record TelemetryConsentStatus(
 
 ## `Microsoft.Mxc.Sdk.V1.TelemetryPolicyState`
 
-The telemetry policy state for this machine. MXC has no administrative telemetry policy, so a successful read currently reports `Unrestricted` on Windows and `NotApplicable` elsewhere. `Blocked` and `Allowed` are retained for compatibility and are not currently reported by a successful read.
+The administrative (MDM / Group Policy) telemetry decision for this machine.
 
 ```csharp
 public enum TelemetryPolicyState
@@ -1474,7 +1474,7 @@ public enum TelemetryPolicyState
 
 ## `Microsoft.Mxc.Sdk.V1.TelemetryConfig`
 
-Per-invocation telemetry preference, subject to consent.
+Per-invocation telemetry preference, subject to consent and policy.
 
 ```csharp
 public sealed class TelemetryConfig

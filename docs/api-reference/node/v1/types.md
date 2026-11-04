@@ -965,7 +965,7 @@ export type TelemetryConsentState = (typeof TELEMETRY_CONSENT_STATES)[number];
 
 ## `@microsoft/mxc-sdk/v1::TelemetryPolicyState`
 
-Telemetry policy state. MXC has no administrative telemetry policy, so this currently reports `unrestricted` on Windows and `not-applicable` elsewhere. `allowed` and `blocked` are retained for compatibility and are not currently reported.
+Administrative policy state governing telemetry consent.
 
 ```typescript
 export type TelemetryPolicyState = (typeof TELEMETRY_POLICY_STATES)[number];

@@ -43,7 +43,7 @@ sandbox.
 | `runtimeConfig` | Runtime settings, including a caller-managed network proxy. |
 | `lifecycle` | Optional `destroyOnExit` (default `true`) and `preservePolicy` (default `false`) booleans. |
 | `fallback` | Optional `allowDaclMutation` boolean accepted for 1.x compatibility and ignored. Removing this accepted field requires a new major contract. |
-| `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent. |
+| `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent and a permitting administrative policy. |
 | `processContainer`, `lxc`, `seatbelt`, `wslc`, `windowsSandbox`, `hyperlight` | Backend-specific settings; only the section matching the selected backend is accepted. |
 | `test` | Optional development-only placeholder with an optional string `message`; it has no policy enforcement effect. |
 

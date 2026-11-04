@@ -62,6 +62,8 @@ function Invoke-ConsentRequest([string]$Decision) {
     $start.CreateNoWindow = $true
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE'] = $tempDir
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'] = "$PID"
+    $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE'] = $policySubkey
+    $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'] = "$PID"
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
     if (-not $process.Start()) { throw 'Failed to start consent process.' }
@@ -114,6 +116,8 @@ function Assert-PipedRequestEofFails {
     $start.CreateNoWindow = $true
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE'] = $tempDir
     $start.Environment['MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'] = "$PID"
+    $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE'] = $policySubkey
+    $start.Environment['MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'] = "$PID"
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
     if (-not $process.Start()) { throw 'Failed to start piped consent process.' }
@@ -155,18 +159,27 @@ function Assert-Status(
 
 $overrideName = 'MXC_TEST_LOCALAPPDATA_OVERRIDE'
 $overrideOwnerName = 'MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID'
+$policyOverrideName = 'MXC_TEST_POLICY_KEY_OVERRIDE'
+$policyOverrideOwnerName = 'MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID'
 $originalOverride = [Environment]::GetEnvironmentVariable($overrideName)
 $originalOverrideOwner = [Environment]::GetEnvironmentVariable($overrideOwnerName)
+$originalPolicyOverride = [Environment]::GetEnvironmentVariable($policyOverrideName)
+$originalPolicyOverrideOwner = [Environment]::GetEnvironmentVariable($policyOverrideOwnerName)
 $runId = [guid]::NewGuid().ToString('N')
 $tempDir = Join-Path ([IO.Path]::GetTempPath()) "mxc_consent_smoke_$runId"
 $consentFile = Join-Path $tempDir 'mxc\telemetry-consent.json'
+$policySubkey = "Software\MxcTelemetryConsentSmoke\$runId"
+$policyPath = "HKCU:\$policySubkey"
 
 try {
     Assert-ConsentParseExitCodes
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $consentFile) -Force | Out-Null
+    New-Item -Path $policyPath -Force | Out-Null
     Set-Item "Env:$overrideName" $tempDir
     Set-Item "Env:$overrideOwnerName" $PID
+    Set-Item "Env:$policyOverrideName" $policySubkey
+    Set-Item "Env:$policyOverrideOwnerName" $PID
 
     foreach ($seed in @('granted', 'denied')) {
         $record = [pscustomobject]@{
@@ -205,9 +218,14 @@ try {
     if ($granted.result -ne 'granted') { throw 'Explicit Yes was not persisted as Granted.' }
     Assert-Status (Invoke-Maintenance 'status') 'granted' 'granted' 'unrestricted' $false 'granted status'
 
+    Set-ItemProperty $policyPath -Name AllowTelemetry -Value 0 -Type DWord
+    $blocked = Invoke-ConsentRequest 'yes'
+    if ($blocked.result -ne 'policyBlocked') { throw 'Blocked policy did not suppress presentation.' }
+    Assert-Status $blocked 'granted' 'granted' 'blocked' $false 'blocked status'
+
     $withdrawn = Invoke-Maintenance 'withdraw'
     if ($withdrawn.result -ne 'withdrawn') { throw 'Withdrawal did not report withdrawn.' }
-    Assert-Status $withdrawn 'denied' 'denied' 'unrestricted' $false 'withdrawal status'
+    Assert-Status $withdrawn 'denied' 'denied' 'blocked' $false 'withdrawal while blocked'
     $withdrawnAgain = Invoke-Maintenance 'withdraw'
     if ($withdrawnAgain.result -ne 'withdrawn') { throw 'Repeated withdrawal was not idempotent.' }
 
@@ -217,5 +235,10 @@ try {
     else { Set-Item "Env:$overrideName" $originalOverride }
     if ($null -eq $originalOverrideOwner) { Remove-Item "Env:$overrideOwnerName" -ErrorAction SilentlyContinue }
     else { Set-Item "Env:$overrideOwnerName" $originalOverrideOwner }
+    if ($null -eq $originalPolicyOverride) { Remove-Item "Env:$policyOverrideName" -ErrorAction SilentlyContinue }
+    else { Set-Item "Env:$policyOverrideName" $originalPolicyOverride }
+    if ($null -eq $originalPolicyOverrideOwner) { Remove-Item "Env:$policyOverrideOwnerName" -ErrorAction SilentlyContinue }
+    else { Set-Item "Env:$policyOverrideOwnerName" $originalPolicyOverrideOwner }
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $policyPath -ErrorAction SilentlyContinue
 }

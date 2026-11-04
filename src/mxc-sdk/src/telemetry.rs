@@ -299,14 +299,14 @@ impl From<inner_consent::ConsentActionError> for ConsentError {
     }
 }
 
-/// The telemetry policy state for this machine.
+/// The administrative telemetry policy for this machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PolicyState {
-    /// No policy applies.
+    /// No policy is configured.
     Unrestricted,
-    /// Retained for compatibility; not currently reported.
+    /// A policy is configured and permits collection.
     Allowed,
-    /// Retained for compatibility; not currently reported.
+    /// A policy blocks collection or could not be evaluated.
     Blocked,
     /// Not a Windows host.
     NotApplicable,
@@ -404,16 +404,12 @@ pub fn needs_consent_prompt() -> bool {
     inner_consent::needs_consent_prompt()
 }
 
-/// Read the telemetry policy state.
-///
-/// MXC has no administrative telemetry policy: this reports
-/// [`PolicyState::Unrestricted`] on Windows and [`PolicyState::NotApplicable`]
-/// elsewhere.
+/// Read the administrative telemetry policy.
 pub fn get_policy() -> PolicyState {
     inner_policy::get_policy().into()
 }
 
-/// Whether policy blocks telemetry on this machine. Currently always `false`.
+/// Whether an administrator has blocked telemetry on this machine.
 pub fn is_blocked_by_policy() -> bool {
     inner_policy::is_blocked_by_policy()
 }
@@ -478,7 +474,8 @@ mod tests {
 
         // Only an explicit block denies on the policy side. `NotApplicable`
         // (off Windows) deliberately does *not* deny: the consent gate above
-        // already reports `NotApplicable`.
+        // already reports `NotApplicable`, and denying here too would wrongly
+        // imply an administrator had acted.
         assert!(!PolicyState::Blocked.allows_collection());
         for permitted in [
             PolicyState::Unrestricted,

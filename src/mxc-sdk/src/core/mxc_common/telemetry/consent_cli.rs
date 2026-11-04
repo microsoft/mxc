@@ -918,6 +918,21 @@ mod tests {
             assert_eq!(consent::get_consent().as_str(), "undetermined");
         }
 
+        /// Under an administrative denial the status must still report the
+        /// user's own recorded decision truthfully — the grant is preserved,
+        /// not erased — while advertising the block and suppressing the
+        /// prompt.
+        #[test]
+        fn blocked_policy_is_reported_and_suppresses_the_prompt() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = isolate(tmp.path());
+            env.set_policy_value(0);
+
+            let outcome = handle_consent_command(ConsentAction::Status, None);
+            assert_eq!(outcome.exit_code, 0);
+            assert_status_json(&outcome, "undetermined", "undetermined", "blocked", false);
+        }
+
         /// Previously unreachable in-process: this branch called
         /// `std::process::exit(1)`. A regular *file* named `mxc` where the
         /// store's parent directory belongs makes `create_dir_all` fail, so

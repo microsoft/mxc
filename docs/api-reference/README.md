@@ -56,7 +56,7 @@ environment input. Native validation decides which policies the backend can
 enforce.
 
 Invocation telemetry belongs to operation options and is always subject to
-persisted MXC consent.
+persisted MXC consent and administrative restrictions.
 
 ## Language conventions
 

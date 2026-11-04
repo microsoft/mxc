@@ -604,7 +604,7 @@ impl ExecutionRequest {
 
 ## `mxc_sdk::v1::TelemetryConfig`
 
-Per-invocation telemetry preference, subject to consent.
+Per-invocation telemetry preference, subject to consent and policy.
 
 ```rust
 pub struct TelemetryConfig {
@@ -1210,7 +1210,7 @@ impl From<inner_consent::ConsentStatusReason> for ConsentStatusReason {
 
 ## `mxc_sdk::v1::telemetry::PolicyState`
 
-The telemetry policy state for this machine. `Allowed` and `Blocked` are retained for compatibility and are not currently reported.
+The administrative telemetry policy for this machine.
 
 ```rust
 pub enum PolicyState {

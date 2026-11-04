@@ -309,7 +309,7 @@ pub fn get_consent_status() -> ConsentStatus;
 
 ## `mxc_sdk::v1::telemetry::get_policy`
 
-Read the telemetry policy state: `Unrestricted` on Windows and `NotApplicable` elsewhere.
+Read the administrative telemetry policy.
 
 ```rust
 pub fn get_policy() -> PolicyState;
@@ -318,7 +318,7 @@ pub fn get_policy() -> PolicyState;
 
 ## `mxc_sdk::v1::telemetry::is_blocked_by_policy`
 
-Whether policy blocks telemetry on this machine. Currently always `false`.
+Whether an administrator has blocked telemetry on this machine.
 
 ```rust
 pub fn is_blocked_by_policy() -> bool;

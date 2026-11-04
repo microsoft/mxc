@@ -316,7 +316,8 @@ Backend and phase semantics are validated by the native engine.
 
 Invocation options control experimental authorization and, for lifecycle and
 existing-container operations, optional telemetry. Supplied invocation telemetry
-overrides request telemetry but cannot grant persisted consent. Options do not change the owned wire contract.
+overrides request telemetry but cannot grant persisted consent or override an
+administrative restriction. Options do not change the owned wire contract.
 
 `validateProvision`, `validateStart`, `validateStop`, `validateDeprovision`,
 and `validateProcess` use native dry-run validation and return no execution

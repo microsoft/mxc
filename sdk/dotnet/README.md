@@ -271,7 +271,8 @@ still contains host capability facts.
 Creation telemetry is supplied through `Telemetry` on `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
 leaves telemetry disabled; `new TelemetryConfig { Enabled = false }`
-explicitly disables it. Opt-in is still gated by MXC's persisted user consent.
+explicitly disables it. Opt-in is still gated by MXC's persisted user consent
+and administrative policy.
 
 Filesystem discovery helpers are on `Microsoft.Mxc.Sdk.V1.Policy.Filesystem`
 and return `FilesystemPolicyResult` from the same namespace. They take an

@@ -21,7 +21,7 @@ the individual local test scripts are documented in
 
 - IsolationSession also downloads `telemetry-test-executor-<target>`, a separate
   local-only debug executor with `test-support` and `isolation_session`. Shipping
-  release binaries never enable the consent test override.
+  release binaries never enable the consent/policy test overrides.
 
 - The matrix is **declarative**. `scripts/ci/validation-test-matrix.json` is the
   only file you edit to change *what runs where*;
@@ -307,7 +307,8 @@ Every scheduled `isolation-session` job runs
 the architecture-matched telemetry test executor. That artifact is built with
 an empty `MXC_TELEMETRY_COMPONENT_PATH` input, so the single registration
 has no UTC routing. Consent is granted only in a temporary test store (needed by
-the published contract; development Required collection ignores it); real user consent is not
+the published contract; development Required collection ignores it) and policy is
+redirected to an isolated HKCU key; real user consent and HKLM policy are not
 modified. The test mode also makes the build eligible for Required collection.
 
 The Windows build job sets `MXC_TELEMETRY_TEST_KEYWORDS=1` only for this debug

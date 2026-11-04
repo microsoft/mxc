@@ -42,7 +42,7 @@ sandbox.
 | `runtimeConfig` | Runtime settings, including a caller-managed network proxy. |
 | `lifecycle` | Optional `destroyOnExit` (default `true`) and `preservePolicy` (default `false`) booleans. |
 | `fallback` | Optional `allowDaclMutation` boolean accepted for compatibility and ignored. Windows ProcessContainer uses native PSEC only. |
-| `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent. |
+| `telemetry` | Optional `enabled` boolean. On Windows, emission also requires MXC-owned user consent and a permitting administrative policy. |
 | `processContainer`, `lxc`, `seatbelt`, `wslc` | Backend-specific settings; only the section matching the selected backend is accepted. |
 
 ### Process and filesystem

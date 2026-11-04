@@ -591,8 +591,8 @@ public static class MxcLifecycle
         ["phase"] = phase,
     };
 
-    // Stable, top-level telemetry request for this phase. Consent still
-    // gates emission independently. Never carries a
+    // Stable, top-level telemetry request for this phase. Consent and
+    // administrative policy still gate emission independently. Never carries a
     // caller-supplied correlationVector — that identifier is internal-only.
     private static void ApplyTelemetry(
         JsonObject envelope,

@@ -76,7 +76,7 @@ The selection travels with request-scoped session context, including streaming
 handles and worker threads. The shared writer selects the keyword and tag
 together. Event names, field order and types are unchanged for every contract.
 Published contracts and requests without source-contract attribution retain the
-full inventory, request opt-in, and MXC consent gates.
+full inventory, request opt-in, MXC consent and administrative policy gates.
 Excluded verbose telemetry is not read or prepared for transport; caller-requested
 local denial reports and verbose artifacts remain available.
 
@@ -85,7 +85,7 @@ The request's `telemetry` object (including `enabled: false`) and MXC consent
 are not consulted. Initialization runs for every such request and collection
 requires only a build eligible for Required collection: routed through the internal
 group, or the debug-only local test mode (`MXC_TELEMETRY_TEST_KEYWORDS=1`).
-No registry setting disables it.
+Administrative policy is not consulted, so no registry setting disables it.
 
 The gate is selected from the request-scoped contract, so published and
 development requests running concurrently do not share authorization. UTC's
@@ -138,7 +138,7 @@ the provider. See [Correlating a lifecycle](#correlating-a-lifecycle).
 
 Unreleased consent resource version `4` discloses the random lifecycle session
 inventory, pending privacy/release-owner review, and requires
-explicit re-consent for earlier grants. Per-request
+explicit re-consent for earlier grants. Administrative policy, per-request
 opt-in, emission reauthorization, privacy tags and non-Windows no-ops remain
 unchanged.
 
@@ -497,10 +497,10 @@ free-form text.
 The development `1.1.0-alpha` contract emits only the four Required events. MXC
 moved these events to Required telemetry to keep MXC secure, reliable, and up to
 date, so they are gated by build eligibility and provider availability, not
-by the per-run request or MXC consent.
+by the per-run request, MXC consent or administrative policy.
 
 Published contracts keep the optional model: emission is gated by the per-run
-request, and MXC-owned consent, and provider availability.
+request, MXC-owned consent, administrative policy, and provider availability.
 See [`telemetry-consent-design.md`](telemetry-consent-design.md). Local diagnostic
 audit records are a separate operator-selected sink and are not uploaded.
 
@@ -891,8 +891,8 @@ into `src/mxc-sdk/resources/telemetry-component/`. Do not copy private values
 into repository files or logs.
 
 Published contracts retain their existing registration, Measures/Usage
-metadata, request opt-in, and consent gates. Debug builds and builds with an
-empty `MXC_TELEMETRY_COMPONENT_PATH` retain local-only metadata.
+metadata, request opt-in, consent and policy gates. Debug builds and builds
+with an empty `MXC_TELEMETRY_COMPONENT_PATH` retain local-only metadata.
 
 The public Windows test artifact explicitly clears the component input. Its
 local metadata tests cannot verify the routing values or establish Microsoft
@@ -902,10 +902,10 @@ ingestion.
 
 On an approved disposable Windows VM, use a release build with the signed
 component. For published contracts keep MXC's explicit consent, request
-and opt-in satisfied. Development requests need no
+opt-in, and permitting MXC policy satisfied. Development requests need no
 consent or opt-in. Verify actual collection for both, including successful
 process exit and operational failure; verify published suppression after
-consent withdrawal.
+consent withdrawal and development suppression at policy value `0`.
 
 Windows Required/Optional settings do not authorize or gate these WinExt
 events. Do not use acceptance at a Windows diagnostic-data level as evidence

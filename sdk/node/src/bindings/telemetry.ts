@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Native bindings for telemetry consent and policy state.
+// Native bindings for telemetry consent and administrative policy.
 
 import koffi, { type KoffiFunc } from 'koffi';
 import { loadMxcFfi } from '../native-library.js';

@@ -10,7 +10,7 @@ is enabled only when every gate in this contract permits collection.
 
 The development `1.1.0-alpha` contract moves to Required telemetry to keep MXC
 secure, reliable, and up to date. It emits four Required events and is not
-governed by this consent model. See
+governed by this consent model; only administrative policy can block it. See
 [Telemetry](../../telemetry.md) for that behavior.
 
 The purpose of the MXC Learning Mode Data Loop is to analyze collected data to
@@ -18,18 +18,19 @@ identify usage patterns, improve Windows security, and inform MXC about
 application compatibility in containers with minimal capabilities.
 
 MXC telemetry is Windows-only and fails closed. For the published contracts,
-collection requires all three conditions at the time each event is written:
+collection requires all four conditions at the time each event is written:
 
 ```text
 per-run telemetry requested
 && current-version user consent is Granted
+&& administrative policy does not block
 && the platform/provider is available
 ```
 
 No prompt, no response, the literal string "No", dismissal, withdrawal,
 malformed state, an unknown prompt version, or any read/write failure means no
-telemetry. MXC has no administrative policy; user consent alone governs
-collection.
+telemetry. Administrative policy is a deny-only ceiling: it may block
+collection but can never opt a user in.
 
 ## Canonical consent resource
 
@@ -100,13 +101,14 @@ contract:
    default browser. Do not substitute a different privacy destination.
 6. Return only the typed decision to MXC. MXC persists the decision together
    with the resource version and locale that were actually presented.
-7. Use the typed status API to explain the current stored/effective state.
-   Provide an explicit withdrawal control in the
+7. Use the typed status API to explain the current stored/effective state and
+   administrative ceiling. Provide an explicit withdrawal control in the
    host's settings or other appropriate telemetry-controls surface.
 
 MXC does not invoke the presenter when the result is already determined:
 
 - `AlreadyGranted`: the current resource version is already granted.
+- `PolicyBlocked`: administrative policy prevents collection.
 - `NotApplicable`: telemetry is unavailable on this platform.
 
 If the host never calls the request API, telemetry remains off. A presenter
@@ -168,18 +170,28 @@ version mismatch, unreadable path, or lock/replace failure is treated as
 Recovery is fail-closed: MXC may surface a typed error or status reason to the
 host, but it must not silently recreate a grant from a corrupted file.
 
-## No administrative policy
+## Administrative ceiling
 
-MXC reads no administrative policy. The policy field in the status API is kept
-for compatibility and reports `unrestricted` on Windows and `not-applicable`
-elsewhere; it never creates consent. The `blocked` and `allowed` values and the
-`PolicyBlocked` result are retained but not currently reported.
+Policy is read from:
+
+```text
+HKLM\SOFTWARE\Policies\Mxc\AllowTelemetry (REG_DWORD)
+```
+
+Only value `3` permits MXC optional diagnostic data. Other values, wrong value
+types, unreadable state, and ambiguity fail closed to `blocked`. An absent key
+is `unrestricted`. `allowed` and `unrestricted` merely leave the user's choice
+in control; neither creates consent.
+
+A consent request made while policy is blocked does not invoke the presenter or
+persist dormant consent. Withdrawal remains available while blocked.
 
 ## Per-run enablement and integration boundary
 
 Consent is not an execution switch. Each run must also request telemetry with
 the stable top-level `telemetry.enabled: true` setting. The switch never
-prompts, never persists consent, and never bypasses consent.
+prompts, never persists consent, and never bypasses consent or administrative
+policy.
 
 For SDK container creation, opt-in is an invocation option on `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`, including the asynchronous variants
@@ -201,16 +213,16 @@ defined here:
 
 - request consent through a presenter when a decision is needed
 - withdraw consent by persisting `denied`
-- report stored consent, effective consent, and whether a
+- report stored consent, effective consent, blocking policy, and whether a
   prompt is still required
 
 ## Live enforcement and event compatibility
 
-Consent is checked immediately before each logical telemetry
+Consent and policy are checked immediately before each logical telemetry
 emission. A terminal failure may emit paired `MXC.Error` and `MXC.ExecutionEnd`
 events under the same authorization decision, without a consent-state reread
 between those writes. This does not guarantee collection or delivery of both
-events. A withdrawal stops the next logical
+events. A withdrawal or newly blocking policy stops the next logical
 emission from an already-running process even if the provider was registered
 earlier.
 
@@ -233,7 +245,8 @@ privacy/release-owner review. The provider and privacy classifications are uncha
 
 ## Validation and release gate
 
-Implementations must include deterministic coverage for prompt gating, withdrawal, corruption recovery, and concurrent consent-store
+Implementations must include deterministic coverage for policy evaluation,
+prompt gating, withdrawal, corruption recovery, and concurrent consent-store
 mutation. The checked-in ETW smoke test only validates event emission; it is
 not a substitute for consent-flow coverage.
 

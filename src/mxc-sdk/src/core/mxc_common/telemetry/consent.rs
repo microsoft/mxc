@@ -174,7 +174,8 @@ impl ConsentState {
     /// Whether this consent state represents an absent user decision.
     ///
     /// Policy-blind: this only reflects the stored consent state. Host
-    /// applications should use [`needs_consent_prompt`].
+    /// applications must use [`needs_consent_prompt`], which also suppresses
+    /// the prompt under an administrative block.
     pub fn needs_prompt(&self) -> bool {
         matches!(self, ConsentState::Undetermined)
     }
@@ -184,8 +185,10 @@ impl ConsentState {
 /// consent prompt right now.
 ///
 /// This is [`get_consent`]`().`[`needs_prompt`](ConsentState::needs_prompt)`()`
-/// additionally suppressed if [`super::policy`] ever reports a block. No policy
-/// currently does, so the answer follows the stored consent state.
+/// additionally suppressed when an administrator has denied telemetry via
+/// [`super::policy`]. Prompting under an administrative denial would be asking
+/// the user to decide something MXC would then ignore, so the answer there is
+/// always `false` — regardless of whether a decision has been recorded.
 pub fn needs_consent_prompt() -> bool {
     if super::policy::is_blocked_by_policy() {
         return false;
@@ -514,7 +517,7 @@ fn persist_presented_decision(
 
 /// Idempotently withdraw telemetry consent.
 ///
-/// Withdrawal does not depend on policy. Off
+/// Withdrawal does not require a permitting administrative policy. Off
 /// Windows it succeeds as a typed `NotApplicable` result without storage.
 pub fn withdraw_consent() -> Result<ConsentActionOutcome, ConsentActionError> {
     #[cfg(not(target_os = "windows"))]
@@ -1692,7 +1695,9 @@ mod tests {
         #[test]
         fn needs_consent_prompt_tracks_the_store() {
             let tmp = tempfile::tempdir().unwrap();
-            // The store is isolated so the test never reads real consent state.
+            // Also isolates the policy key: `needs_consent_prompt` consults it,
+            // so without this the test reads the real machine policy and fails
+            // on an administratively managed device.
             let _env =
                 crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
             assert!(needs_consent_prompt(), "fresh store must prompt");
@@ -1705,6 +1710,17 @@ mod tests {
             assert!(
                 !needs_consent_prompt(),
                 "a recorded grant must not re-prompt"
+            );
+        }
+
+        #[test]
+        fn needs_consent_prompt_is_suppressed_by_blocking_policy() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(0);
+            assert!(
+                !needs_consent_prompt(),
+                "a blocking policy must suppress a meaningless prompt"
             );
         }
 
@@ -1777,8 +1793,8 @@ mod tests {
         #[test]
         fn presenter_yes_persists_a_current_version_grant() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
 
             let outcome = request_consent(Some("en-US"), |prompt| {
                 assert_eq!(
@@ -1799,8 +1815,8 @@ mod tests {
         #[test]
         fn async_presenter_yes_persists_a_current_version_grant() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
 
             let outcome = block_on(request_consent_async(Some("en-US"), |prompt| {
                 assert_eq!(
@@ -1821,8 +1837,8 @@ mod tests {
         #[test]
         fn async_presenter_no_persists_a_denial() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
 
             let outcome = block_on(request_consent_async(None, |_| async {
                 Ok(ConsentDecision::No)
@@ -1836,8 +1852,8 @@ mod tests {
         #[test]
         fn async_dismissal_preserves_the_prior_state() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(false, "prompt").unwrap();
 
             let outcome = block_on(request_consent_async(None, |_| async {
@@ -1852,8 +1868,8 @@ mod tests {
         #[test]
         fn async_presenter_error_preserves_the_prior_state() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(false, "prompt").unwrap();
 
             let error = block_on(request_consent_async(None, |_| async {
@@ -1869,10 +1885,41 @@ mod tests {
         }
 
         #[test]
+        fn async_policy_block_skips_the_presenter() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(0);
+
+            let outcome = block_on(request_consent_async(None, |_| async {
+                panic!("blocked policy must not present")
+            }))
+            .expect("blocked result");
+
+            assert_eq!(outcome.result, ConsentActionResult::PolicyBlocked);
+        }
+
+        #[test]
+        fn policy_change_while_presenter_is_open_blocks_stale_grant() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
+
+            let outcome = request_consent(Some("en-US"), |_| {
+                env.set_policy_value(0);
+                Ok(ConsentDecision::Yes)
+            })
+            .expect("policy change should produce a typed outcome");
+
+            assert_eq!(outcome.result, ConsentActionResult::PolicyBlocked);
+            assert_eq!(outcome.status.effective_state, ConsentState::Undetermined);
+            assert_eq!(get_consent(), ConsentState::Undetermined);
+        }
+
+        #[test]
         fn consent_change_while_presenter_is_open_rejects_stale_decision() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
 
             let error = request_consent(Some("en-US"), |_| {
                 set_consent(false, "concurrent-withdrawal").unwrap();
@@ -1893,8 +1940,8 @@ mod tests {
         #[test]
         fn same_state_change_while_presenter_is_open_rejects_stale_decision() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(false, "initial-denial").unwrap();
 
             let error = request_consent(Some("en-US"), |_| {
@@ -1920,8 +1967,8 @@ mod tests {
         #[test]
         fn explicit_denial_withdraws_a_concurrent_grant() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
 
             let outcome = request_consent(Some("en-US"), |_| {
                 set_consent(true, "concurrent-grant").unwrap();
@@ -1936,8 +1983,8 @@ mod tests {
         #[test]
         fn explicit_request_can_replace_a_prior_denial() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(false, "prompt").unwrap();
 
             let outcome = request_consent(None, |_| Ok(ConsentDecision::Yes)).unwrap();
@@ -1949,8 +1996,8 @@ mod tests {
         #[test]
         fn dismissed_or_failed_presenter_does_not_rewrite_prior_state() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(false, "prompt").unwrap();
 
             let dismissed =
@@ -1968,10 +2015,15 @@ mod tests {
         }
 
         #[test]
-        fn current_grant_skips_the_presenter() {
+        fn policy_block_and_current_grant_skip_the_presenter() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(0);
+            let blocked = request_consent(None, |_| panic!("blocked policy must not present"))
+                .expect("blocked result");
+            assert_eq!(blocked.result, ConsentActionResult::PolicyBlocked);
+
+            env.set_policy_value(3);
             set_consent(true, "prompt").unwrap();
             let granted = request_consent(None, |_| panic!("current grant must not re-present"))
                 .expect("already granted result");
@@ -1979,17 +2031,43 @@ mod tests {
         }
 
         #[test]
-        fn withdrawal_is_idempotent() {
+        fn withdrawal_is_idempotent_and_ignores_blocking_policy() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(true, "prompt").unwrap();
+            env.set_policy_value(0);
 
             for _ in 0..2 {
                 let outcome = withdraw_consent().expect("withdrawal");
                 assert_eq!(outcome.result, ConsentActionResult::Withdrawn);
                 assert_eq!(outcome.status.effective_state, ConsentState::Denied);
             }
+        }
+
+        #[test]
+        fn withdrawal_reports_the_current_policy_after_waiting_for_the_store_lock() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
+            set_consent(true, "prompt").unwrap();
+
+            let outcome = std::thread::scope(|scope| {
+                let handle = platform::with_store_lock(|| {
+                    let handle = scope.spawn(|| withdraw_consent().expect("withdrawal"));
+                    env.set_policy_value(0);
+                    Ok(handle)
+                })
+                .expect("store lock");
+                handle.join().unwrap()
+            });
+
+            assert_eq!(outcome.result, ConsentActionResult::Withdrawn);
+            assert_eq!(outcome.status.effective_state, ConsentState::Denied);
+            assert_eq!(
+                outcome.policy,
+                crate::mxc_common::telemetry::PolicyState::Blocked
+            );
         }
 
         #[test]
@@ -2174,8 +2252,8 @@ mod tests {
         #[test]
         fn successful_grant_repairs_a_stale_withdrawal_marker() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             platform::begin_withdrawal().unwrap();
 
             let outcome = request_consent(None, |_| Ok(ConsentDecision::Yes)).unwrap();
@@ -2188,8 +2266,8 @@ mod tests {
         #[test]
         fn stale_withdrawal_marker_recovers_to_denied() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(true, "prompt").unwrap();
             platform::begin_withdrawal().unwrap();
             age_withdrawal_marker(tmp.path());
@@ -2216,8 +2294,8 @@ mod tests {
         #[test]
         fn stale_withdrawal_marker_on_denied_record_is_cleared() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(false, "cli").unwrap();
             platform::begin_withdrawal().unwrap();
             age_withdrawal_marker(tmp.path());
@@ -2239,8 +2317,8 @@ mod tests {
         #[test]
         fn stale_withdrawal_recovery_is_serialized_with_concurrent_writers() {
             let tmp = tempfile::tempdir().unwrap();
-            let _env =
-                crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            let env = crate::mxc_common::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
             set_consent(true, "prompt").unwrap();
             platform::begin_withdrawal().unwrap();
             age_withdrawal_marker(tmp.path());

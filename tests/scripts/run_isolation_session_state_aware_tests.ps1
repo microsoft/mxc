@@ -58,8 +58,9 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if ($TelemetryResultsPath -and
     ($env:MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID -ne "$PID" -or
-     -not $env:MXC_TEST_LOCALAPPDATA_OVERRIDE)) {
-    throw 'Run lifecycle telemetry through run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle for isolated consent.'
+     $env:MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_PID -ne "$PID" -or
+     -not $env:MXC_TEST_LOCALAPPDATA_OVERRIDE -or -not $env:MXC_TEST_POLICY_KEY_OVERRIDE)) {
+    throw 'Run lifecycle telemetry through run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle for isolated consent and policy.'
 }
 
 # Host-side loopback anchor used by the positive network oracle. It serves from
