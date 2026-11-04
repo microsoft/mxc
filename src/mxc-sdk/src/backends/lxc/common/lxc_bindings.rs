@@ -4,34 +4,6 @@
 const MANAGED_MOUNTS_BEGIN: &str = "# BEGIN MXC managed mounts (rewritten every run)";
 const MANAGED_MOUNTS_END: &str = "# END MXC managed mounts";
 
-fn validate_unprivileged_status(
-    container_name: &str,
-    output: std::io::Result<std::process::Output>,
-) -> Result<(), String> {
-    let output = output.map_err(|error| format!("Failed to run lxc-ls: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "lxc-ls failed (exit code {}): {}",
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let columns: Vec<_> = line.split_whitespace().collect();
-        let [name, unprivileged] = columns.as_slice() else {
-            continue;
-        };
-        if *name == container_name && *unprivileged == "true" {
-            return Ok(());
-        }
-    }
-
-    Err(format!(
-        "Refusing to run LXC container '{container_name}': lxc-ls did not report UNPRIVILEGED=true"
-    ))
-}
-
 /// The filesystem type and options of one kind of `lxc.mount.entry`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MountShape {
@@ -528,8 +500,30 @@ impl LxcContainer {
                 "-P",
                 &self.lxc_path,
             ])
-            .output();
-        validate_unprivileged_status(&self.name, output)
+            .output()
+            .map_err(|error| format!("Failed to run lxc-ls: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "lxc-ls failed (exit code {}): {}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let columns: Vec<_> = line.split_whitespace().collect();
+            let [name, unprivileged] = columns.as_slice() else {
+                continue;
+            };
+            if *name == self.name && *unprivileged == "true" {
+                return Ok(());
+            }
+        }
+
+        Err(format!(
+            "Refusing to run LXC container '{}': lxc-ls did not report UNPRIVILEGED=true",
+            self.name
+        ))
     }
 
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
@@ -906,10 +900,6 @@ impl LxcContainer {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "lxc_unprivileged_status_spec.rs"]
-mod unprivileged_status_spec;
 
 #[cfg(test)]
 mod tests {
