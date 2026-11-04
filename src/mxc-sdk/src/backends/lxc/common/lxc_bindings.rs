@@ -551,57 +551,33 @@ impl LxcContainer {
         out
     }
 
-    fn unprivileged_start_args(&self) -> Result<Vec<String>, String> {
-        let mut query = self.lxc_command("lxc-info");
-        query.args(["-H", "-c", "lxc.idmap"]);
-        let output = std::process::Command::new("timeout")
-            .args(["--signal=KILL", "10s"])
-            .arg(query.get_program())
-            .args(query.get_args())
-            .env("LC_ALL", "C")
-            .output()
-            .map_err(|error| {
-                format!("Cannot query lxc.idmap with timeout and lxc-info: {error}")
-            })?;
-        if !output.status.success() || !output.stderr.is_empty() {
-            return Err(format!(
-                "Cannot verify lxc.idmap: lxc-info exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+    fn validate_unprivileged_config(&self) -> Result<(), String> {
+        let path = self.config_file_path();
+        let config = std::fs::read_to_string(&path)
+            .map_err(|error| format!("Cannot read LXC config '{path}': {error}"))?;
+        let mut idmaps = String::new();
+        for line in config.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if key.trim() != "lxc.idmap" {
+                continue;
+            }
+            let mapping = value.trim();
+            if mapping.is_empty() {
+                idmaps.clear();
+            } else {
+                idmaps.push_str(mapping);
+                idmaps.push('\n');
+            }
         }
-        let idmaps = std::str::from_utf8(&output.stdout)
-            .map_err(|error| format!("Cannot read lxc.idmap from lxc-info: {error}"))?;
-        validate_unprivileged_idmaps(idmaps)
-            .map_err(|error| format!("Refusing to start LXC container '{}': {error}", self.name))?;
-
-        let mut args = [
-            "-s",
-            "lxc.namespace.clone=",
-            "-s",
-            "lxc.namespace.keep=",
-            "-s",
-            "lxc.namespace.share.user=",
-            "-s",
-            "lxc.idmap=",
-        ]
-        .map(str::to_owned)
-        .to_vec();
-        for mapping in idmaps
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            args.push("-s".to_owned());
-            args.push(format!("lxc.idmap={mapping}"));
-        }
-        Ok(args)
+        validate_unprivileged_idmaps(&idmaps)
+            .map_err(|error| format!("Refusing to start LXC container '{}': {error}", self.name))
     }
 
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
-        let mapped_args = self.unprivileged_start_args()?;
+        self.validate_unprivileged_config()?;
         let mut cmd = self.lxc_command("lxc-start");
-        cmd.args(mapped_args);
         cmd.args(network.to_start_args(self.configured_interface_count()));
         Self::run_tool(cmd)
     }
@@ -632,9 +608,8 @@ impl LxcContainer {
         _timeout_ms: u32,
     ) -> Result<(i32, String, String), String> {
         // TODO: Implement timeout and working directory support.
-        let mapped_args = self.unprivileged_start_args()?;
+        self.validate_unprivileged_config()?;
         let mut cmd = self.lxc_command("lxc-execute");
-        cmd.args(mapped_args);
         cmd.args(["--", "/bin/sh", "-c", command]);
 
         let output = cmd
@@ -1225,6 +1200,57 @@ mod tests {
             Some(base.path().to_str().expect("temp path must be UTF-8")),
         );
         (base, container, config)
+    }
+
+    #[test]
+    fn unprivileged_mappings_in_the_saved_config_are_accepted() {
+        let (_temp_dir, container, _) = container_with_config(
+            "# lxc.idmap = u 0 0 65536\n\
+             lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n\
+               lxc.idmap = u 0 100000 65536  \n\
+             lxc.idmap=g 0 100000 65536\n",
+        );
+
+        assert_eq!(container.validate_unprivileged_config(), Ok(()));
+    }
+
+    #[test]
+    fn saved_config_must_supply_both_unprivileged_root_mappings() {
+        for config in [
+            "",
+            "# lxc.idmap = u 0 100000 65536\n# lxc.idmap = g 0 100000 65536\n",
+            "other.lxc.idmap = u 0 100000 65536\nother.lxc.idmap = g 0 100000 65536\n",
+            "lxc.idmap = u 0 100000 65536\n",
+            "lxc.idmap = g 0 100000 65536\n",
+            "lxc.idmap = u 0 0 65536\nlxc.idmap = g 0 100000 65536\n",
+            "lxc.idmap = u 0 100000 65536\nlxc.idmap = g 0 0 65536\n",
+        ] {
+            let (_temp_dir, container, _) = container_with_config(config);
+
+            assert!(
+                container.validate_unprivileged_config().is_err(),
+                "accepted a config without both unprivileged root mappings: {config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clearing_idmaps_discards_earlier_root_mappings() {
+        let (_temp_dir, container, _) = container_with_config(
+            "lxc.idmap = u 0 100000 65536\n\
+             lxc.idmap = g 0 100000 65536\n\
+             lxc.idmap =\n",
+        );
+
+        assert!(container.validate_unprivileged_config().is_err());
+    }
+
+    #[test]
+    fn missing_config_is_rejected() {
+        let (_temp_dir, container, config) = container_with_config("");
+        std::fs::remove_file(config).expect("remove saved config");
+
+        assert!(container.validate_unprivileged_config().is_err());
     }
 
     const TEMPLATE_CONFIG: &str = "# Template used to create this container\n\
