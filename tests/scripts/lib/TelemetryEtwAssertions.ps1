@@ -69,6 +69,8 @@ function Assert-TelemetryExecutionTrace {
                 throw "Missing or unsupported contract attribution for executor $($invocation.ProcessId)."
             }
             foreach ($event in $emitted) {
+                # Mock values: they must match the placeholder metadata used by
+                # unrouted test builds, not real telemetry classification values.
                 $expectedKeyword = [uint64]0x0000100000000000
                 $expectedPrivacyTag = [uint64]0x00010000
                 if ($invocation.ContractVersion -ceq '1.1.0-alpha' -and
