@@ -6,9 +6,9 @@
 use aci_edge_sandboxes::agent::{AgentBackend, BundledAgent};
 use aci_edge_sandboxes::ErrorCode;
 
-#[path = "../../build/build_nvx_signatures.rs"]
-mod build_nvx_signatures;
-use build_nvx_signatures::signature_verification;
+#[path = "../../build/verify_nvx_runtime_signatures.rs"]
+mod verify_nvx_runtime_signatures;
+use verify_nvx_runtime_signatures::signature_verification;
 
 #[test]
 fn crate_staged_bundle_opens_and_rejects_an_unverified_library() {
@@ -166,7 +166,7 @@ fn json_execution_rejects_each_unsigned_binary_before_agent_load() {
             "{error}"
         );
         assert!(error.message.contains(&*name.to_string_lossy()), "{error}");
-        let error = build_nvx_signatures::run().unwrap_err();
+        let error = verify_nvx_runtime_signatures::run().unwrap_err();
         assert!(
             error
                 .to_string()

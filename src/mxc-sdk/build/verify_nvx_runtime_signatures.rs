@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+//! Checks Microsoft signatures on both crate-provided and staged NVX runtime files.
+//! Fails Windows x64 MicroVM builds when signature trust cannot be verified.
+
 #[cfg(all(windows, feature = "microvm"))]
 #[path = "../src/backends/nvx/signature_verification.rs"]
 pub(crate) mod signature_verification;
