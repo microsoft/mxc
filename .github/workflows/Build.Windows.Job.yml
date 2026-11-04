@@ -176,6 +176,9 @@ jobs:
           $bytes[2048] = $bytes[2048] -bxor 0xFF
           [IO.File]::WriteAllBytes($tampered, $bytes)
           $env:MXC_TELEMETRY_COMPONENT_PATH = $tampered
+          # The step's default 'Stop' preference would turn cargo's stderr into
+          # a terminating error before the output can be checked.
+          $ErrorActionPreference = 'Continue'
           $output = cargo check --locked --release -p mxc-sdk --lib 2>&1 | Out-String
           if ($LASTEXITCODE -eq 0) { throw 'A tampered telemetry component was accepted.' }
           if ($output -notmatch 'no valid Authenticode signature') {
