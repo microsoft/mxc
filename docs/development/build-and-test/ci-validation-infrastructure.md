@@ -80,6 +80,14 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs. The
 test jobs need the three builds; a failed SDK bundle fails the ProcessContainer,
 IsolationSession, and WSLC jobs at their bundle download.
 
+Windows builds also compile the `module_lifetime_fixture` DLL with the selected
+features. The x64 job requires
+`module_lifetime::nvx_error_keeps_pending_worker_code_loaded` to execute and pass,
+not merely appear in a nonempty suite. Its isolated subprocess exercises a
+production JSON error without filesystem grants or VM provisioning, releases
+the DLL handle, then resumes a simulated pending worker. This checks module
+retention, not a live native cancellation or teardown failure.
+
 ### `Validation.Tests.Matrix.Job.yml` — "Create Validation Test Matrix"
 
 | Job | Runner | What it does |

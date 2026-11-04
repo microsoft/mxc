@@ -135,6 +135,9 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
     let bundle = BundledAgent::from_dir(directory).map_err(map_error)?;
     let signatures = super::signature_verification::verify_bundle(bundle.directory())
         .map_err(|error| MxcError::backend_unavailable(error.to_string()))?;
+    // The crate's output pump can outlive an unknown execution outcome and client teardown.
+    crate::mxc_common::module_lifetime::pin_current_module()
+        .map_err(MxcError::backend_unavailable)?;
     let config = bundle.config(bundle.setup(state_root));
     let backend = Arc::new(AgentBackend::new(config).map_err(map_error)?);
     let client = AciEdgeSandbox::from_shared(backend.clone());

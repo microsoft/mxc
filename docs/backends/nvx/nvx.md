@@ -181,6 +181,11 @@ returned, may not be visible to the caller. If cancellation fails, the outcome
 may be unknown and the workload may still be running; MXC reports the failure
 and attempts stop and deprovision.
 
+Before opening the agent client, MXC keeps its containing native module loaded
+until process exit. This protects background execution workers that can outlive
+an error return, including when cancellation and teardown fail. It does not
+mean that the workload has stopped.
+
 A workload timeout preserves captured partial output and tears down the
 container. Each create-and-run request gets fresh workload state; this phase
 does not offer persistent containers or manual lifecycle operations.
@@ -217,7 +222,10 @@ removing retained storage.
 ## Validation
 
 Host-only policy and bundle-integrity checks run in normal Windows x64 PR
-builds. Actual VM execution runs in the unified nightly validation matrix on
+builds. A subprocess regression also calls the JSON API without filesystem
+grants, receives a native validation error without starting a VM, releases its
+DLL handle, and resumes a simulated pending worker in the retained module.
+Actual VM execution runs in the unified nightly validation matrix on
 Windows 25H2 x64. It consumes the same Windows build artifact, including the
 compiled `nvx_e2e` tests and the complete signed bundle; the validation host
 does not rebuild them.
@@ -257,8 +265,13 @@ second MXC downloader or re-sign the bundle's native binaries.
 For an offline build, set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR` to the complete
 **extracted directory**, not a ZIP. The crate checks the bundle manifests and
 file checksums; use an independently trusted bundle for this override. To use
-an archive, `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_URL` accepts a `file://` ZIP and
-checks its hash against the crate's pinned hash unless an explicit approved
-hash is supplied. The runtime override `ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR`
+an archive, `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_URL` accepts a `file://` ZIP.
+Set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_SHA256` to an independently approved
+archive digest for this override. Without that value, the crate does not
+compare the overridden archive against its default release hash. The archive's
+own manifests and file checksums establish consistency, not its trusted origin.
+Microsoft signature checks on the native binaries do not authenticate the
+complete archive or guest assets.
+The runtime override `ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR`
 names a complete staged bundle directory. The agent checks its runtime files
 against the digests compiled into the crate.

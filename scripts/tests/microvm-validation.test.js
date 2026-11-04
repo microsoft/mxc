@@ -88,6 +88,20 @@ fn main() {
         }
         assert!(args.contains(&"--locked".to_owned()));
         assert!(args.contains(&"--release".to_owned()));
+        if args.windows(2).any(|pair| pair == ["--test", "module_lifetime"]) {
+            assert!(args.windows(2).any(|pair| pair == ["--features", "microvm"]));
+            assert!(args.contains(&"--exact".to_owned()));
+            assert!(args.contains(&"nvx_error_keeps_pending_worker_code_loaded".to_owned()));
+            match mode.as_str() {
+                "module-lifetime-missing" => println!("test result: ok. 0 passed; 0 failed;"),
+                "module-lifetime-ignored" => println!("test nvx_error_keeps_pending_worker_code_loaded ... ignored"),
+                _ => println!("test nvx_error_keeps_pending_worker_code_loaded ... ok"),
+            }
+            if mode == "module-lifetime-failure" {
+                process::exit(19);
+            }
+            return;
+        }
         let signature_check = args.windows(2).any(|pair| pair == ["--test", "nvx_bundle_integrity"]);
         assert!(args.contains(&"--no-run".to_owned()) || signature_check);
         assert!(args.windows(2).any(|pair| pair == ["--test", "nvx_e2e"]) || signature_check);
@@ -604,6 +618,38 @@ function stage(mode = "") {
     }
   );
   return { ...result, directory };
+}
+
+function requireModuleLifetime(mode = "") {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Build.Windows.Job.yml"), "utf8");
+  const block = workflow.match(
+    /      - name: Require NVX module lifetime regression\n[\s\S]*?        run: \|\n((?:          [^\n]*\n)+)/
+  );
+  assert.ok(block, "Windows must require the NVX module lifetime regression");
+  const script = join(mkdtempSync(join(scratch, "module-lifetime-")), "require.ps1");
+  writeFileSync(
+    script,
+    "$ErrorActionPreference = 'Stop'\n" +
+      block[1].replace(/^ {10}/gm, "").replaceAll("${{ matrix.target }}", "x86_64-pc-windows-msvc")
+  );
+  return runScript(script, [], {
+    PATH: tools + delimiter + process.env.PATH,
+    MXC_CI_FIXTURE_MODE: mode,
+  });
+}
+
+test("Windows requires the NVX module lifetime scenario to execute and pass", () => {
+  const result = requireModuleLifetime();
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /test nvx_error_keeps_pending_worker_code_loaded \.\.\. ok/);
+});
+
+for (const mode of ["module-lifetime-missing", "module-lifetime-ignored", "module-lifetime-failure"]) {
+  test(`module lifetime gate rejects ${mode}`, () => {
+    const result = requireModuleLifetime(mode);
+    assert.notEqual(result.status, 0, result.output);
+    assert.match(result.output, /NVX module lifetime regression must execute and pass/);
+  });
 }
 
 test("staging uses Cargo's reported executable and checks VM test discovery", () => {
