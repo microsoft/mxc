@@ -703,6 +703,10 @@ reported, so a phase failure reaches the SDK with the same code that
 create-and-run execution returns for the same host condition. A caller branches on the code
 without matching the message.
 
+When a WSLc SDK call fails, including in an exec that has already started, the
+error envelope also carries the SDK function name in `operation`, and its HRESULT
+in `nativeCode` when the call returned one.
+
 `ErrKind` is additive: a kind a client does not recognize decodes to
 `ErrKind::Unknown` and maps to `backend_error`, so a daemon from a newer
 install degrades to the previous behavior instead of failing the decode. Adding
@@ -727,8 +731,8 @@ success for a request it only partly honoured — a sandbox that is quietly not
 what was asked for. A refusal the caller can see is better.
 
 Upgrading an install that may have a live daemon therefore means stopping the
-old one first. `PROTOCOL_VERSION` is **9** as of the addition of exec stdin
-(the `stdin` flag on `exec` and the `exec_stdin` request).
+old one first. `PROTOCOL_VERSION` is **10** as of the addition of optional WSLc
+SDK failure detail to lifecycle error responses and exec error frames.
 
 ## Daemon idle-timeout env overrides
 

@@ -29,6 +29,7 @@ use serde::de::DeserializeOwned;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::mxc_common::mxc_error::ApiFailure;
 use crate::wslc_common::process_env::EnvScope;
 
 /// Upper bound on a single decoded frame (16 MiB). Guards the decoder against a
@@ -53,7 +54,7 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 ///
 /// Changing this strands whatever a running daemon is holding, since the SDK
 /// offers no way to re-attach to a live session from another process.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Largest payload one [`StreamFrame::Stdin`] may carry.
 pub const MAX_STDIN_CHUNK_BYTES: usize = 64 * 1024;
@@ -315,7 +316,12 @@ pub enum DaemonResponse {
     Pong,
     /// The request failed or was refused. `kind` is a stable machine-readable
     /// token (see [`ErrKind`]); `message` is human-readable detail.
-    Err { kind: ErrKind, message: String },
+    Err {
+        kind: ErrKind,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_failure: Option<DaemonApiFailure>,
+    },
 }
 
 /// Stable, machine-readable classification of a [`DaemonResponse::Err`], so the
@@ -353,6 +359,31 @@ pub enum ErrKind {
     /// A kind this build does not recognize, from a daemon newer than it.
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonApiFailure {
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_code: Option<String>,
+}
+
+impl From<&ApiFailure> for DaemonApiFailure {
+    fn from(failure: &ApiFailure) -> Self {
+        Self {
+            operation: failure.operation.clone(),
+            native_code: failure.native_code.clone(),
+        }
+    }
+}
+
+impl From<DaemonApiFailure> for ApiFailure {
+    fn from(failure: DaemonApiFailure) -> Self {
+        Self {
+            operation: failure.operation,
+            native_code: failure.native_code,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +433,11 @@ pub enum StreamFrame {
     /// Daemon→client: live output was dropped; the terminal frame still follows.
     Truncated,
     /// Daemon→client: terminal frame; the exec failed before or during the run.
-    Error { message: String },
+    Error {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_failure: Option<DaemonApiFailure>,
+    },
 }
 
 /// serde adapter that (de)serializes a `Vec<u8>` as a base64 string rather than
@@ -616,8 +651,18 @@ mod tests {
             roundtrip(DaemonResponse::Err {
                 kind,
                 message: "detail".to_string(),
+                api_failure: None,
             });
         }
+
+        roundtrip(DaemonResponse::Err {
+            kind: ErrKind::Backend,
+            message: "start failed".to_string(),
+            api_failure: Some(DaemonApiFailure {
+                operation: "WslcStartContainer".to_string(),
+                native_code: Some("0x80072740".to_string()),
+            }),
+        });
     }
 
     #[test]
@@ -703,6 +748,7 @@ mod tests {
             DaemonResponse::Err {
                 kind: ErrKind::Unknown,
                 message: "detail".to_string(),
+                api_failure: None,
             }
         );
     }
@@ -762,7 +808,31 @@ mod tests {
         roundtrip(StreamFrame::Truncated);
         roundtrip(StreamFrame::Error {
             message: "spawn failed".to_string(),
+            api_failure: Some(DaemonApiFailure {
+                operation: "WslcCreateContainerProcess".to_string(),
+                native_code: Some("0x80004005".to_string()),
+            }),
         });
+    }
+
+    #[test]
+    fn an_api_failure_travels_under_snake_case_keys() {
+        let encoded = serde_json::to_value(StreamFrame::Error {
+            message: "spawn failed".to_string(),
+            api_failure: Some(DaemonApiFailure {
+                operation: "WslcCreateContainerProcess".to_string(),
+                native_code: Some("0x80004005".to_string()),
+            }),
+        })
+        .expect("encode");
+
+        assert_eq!(
+            encoded["api_failure"],
+            serde_json::json!({
+                "operation": "WslcCreateContainerProcess",
+                "native_code": "0x80004005"
+            })
+        );
     }
 
     #[test]

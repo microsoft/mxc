@@ -49,7 +49,10 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 
 use mxc_sdk::mxc_common::logger::{Logger, Mode};
-use mxc_sdk::mxc_common::models::{FailurePhase, ScriptResponse};
+use mxc_sdk::mxc_common::models::FailurePhase;
+#[cfg(test)]
+use mxc_sdk::mxc_common::models::ScriptResponse;
+use mxc_sdk::mxc_common::mxc_error::ApiFailure;
 use mxc_sdk::wslc_common::container_steps::{
     self, OutStream, OutputSink, ProcessSettings, SessionSizing, StdinConsumer,
 };
@@ -57,6 +60,7 @@ use mxc_sdk::wslc_common::daemon_protocol::{
     DeprovisionConfig, DeprovisionSessionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode,
     PortMapping, ProvisionConfig, ProvisionSessionConfig, StartConfig, StopConfig,
 };
+use mxc_sdk::wslc_common::error::WslcStepError;
 use mxc_sdk::wslc_common::image;
 use mxc_sdk::wslc_common::policy_mapping;
 use mxc_sdk::wslc_common::process_env::EnvScope;
@@ -154,14 +158,22 @@ fn wait_for_in_flight(in_flight: &AtomicUsize, deadline: Instant) -> bool {
     true
 }
 
-/// Convert a step helper's `failure_phase` into a typed failure, since the wire
-/// carries only a message and an [`ErrKind`].
-fn sr_err(resp: ScriptResponse) -> WorkerError {
-    let err = anyhow::anyhow!(resp.error_message);
-    match resp.failure_phase {
-        FailurePhase::BackendUnavailable => WorkerError::Unavailable(err),
-        FailurePhase::Rejected => WorkerError::Rejected(err),
-        _ => WorkerError::Backend(err),
+/// Convert a step helper's `failure_phase` into a typed failure.
+fn sr_err(resp: impl Into<WslcStepError>) -> WorkerError {
+    let WslcStepError {
+        failure_phase,
+        error_message,
+        api_failure,
+    } = resp.into();
+    let kind = match failure_phase {
+        FailurePhase::BackendUnavailable => ErrKind::Unavailable,
+        FailurePhase::Rejected => ErrKind::Rejected,
+        _ => ErrKind::Backend,
+    };
+    WorkerError::Step {
+        kind,
+        error: anyhow::anyhow!(error_message),
+        api_failure,
     }
 }
 
@@ -182,14 +194,17 @@ pub enum WorkerError {
     /// An exec already holds this container's single-flight slot.
     Busy(String),
 
-    /// The host cannot run WSLc at all.
-    Unavailable(anyhow::Error),
-
     /// The request cannot be honored as written.
     Rejected(anyhow::Error),
 
-    /// A backend/SDK-level failure, or an internal worker/channel fault.
+    /// A backend-level failure, or an internal worker/channel fault.
     Backend(anyhow::Error),
+
+    Step {
+        kind: ErrKind,
+        error: anyhow::Error,
+        api_failure: Option<Box<ApiFailure>>,
+    },
 }
 
 impl WorkerError {
@@ -200,9 +215,27 @@ impl WorkerError {
             WorkerError::UnknownSession(_) => ErrKind::NotProvisioned,
             WorkerError::NotStarted(_) => ErrKind::NotStarted,
             WorkerError::Busy(_) => ErrKind::Busy,
-            WorkerError::Unavailable(_) => ErrKind::Unavailable,
             WorkerError::Rejected(_) => ErrKind::Rejected,
             WorkerError::Backend(_) => ErrKind::Backend,
+            WorkerError::Step { kind, .. } => *kind,
+        }
+    }
+
+    pub fn api_failure(&self) -> Option<&ApiFailure> {
+        match self {
+            WorkerError::Step { api_failure, .. } => api_failure.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn backend_with_api_failure(
+        error: anyhow::Error,
+        api_failure: Option<Box<ApiFailure>>,
+    ) -> Self {
+        Self::Step {
+            kind: ErrKind::Backend,
+            error,
+            api_failure,
         }
     }
 }
@@ -214,9 +247,8 @@ impl std::fmt::Display for WorkerError {
             WorkerError::UnknownSession(id) => write!(f, "unknown session {id}"),
             WorkerError::NotStarted(id) => write!(f, "sandbox {id} is not started"),
             WorkerError::Busy(id) => write!(f, "sandbox {id} already has an exec in flight"),
-            WorkerError::Unavailable(e) | WorkerError::Rejected(e) | WorkerError::Backend(e) => {
-                write!(f, "{e:#}")
-            }
+            WorkerError::Rejected(e) | WorkerError::Backend(e) => write!(f, "{e:#}"),
+            WorkerError::Step { error, .. } => write!(f, "{error:#}"),
         }
     }
 }
@@ -265,7 +297,7 @@ pub enum WorkerCommand {
     /// Report a parked provision's pull, from the pull thread or its deadline.
     PullFinished {
         token: u64,
-        outcome: Result<(), ScriptResponse>,
+        outcome: Result<(), WslcStepError>,
     },
     /// Report an off-worker exec, from its run thread.
     ExecFinished {
@@ -322,7 +354,11 @@ pub enum ExecReport {
     Finished(Result<ExecTerminal, WorkerError>),
 
     /// The detail, and the process's stdin if it is still open.
-    Unconfirmed(String, Option<container_steps::StdinHold>),
+    Unconfirmed {
+        detail: String,
+        api_failure: Option<Box<ApiFailure>>,
+        held_stdin: Option<container_steps::StdinHold>,
+    },
 }
 
 /// Everything an off-worker exec needs, in a form that can cross a thread.
@@ -391,9 +427,12 @@ fn start_exec(
 
             // A panic leaves the process's fate unknown, which is what
             // `Unconfirmed` already means.
-            let report = std::panic::catch_unwind(run).unwrap_or_else(|_| {
-                ExecReport::Unconfirmed("the exec thread panicked".to_string(), None)
-            });
+            let report =
+                std::panic::catch_unwind(run).unwrap_or_else(|_| ExecReport::Unconfirmed {
+                    detail: "the exec thread panicked".to_string(),
+                    api_failure: None,
+                    held_stdin: None,
+                });
 
             let _ = worker.send(WorkerCommand::ExecFinished { sandbox_id, report });
         });
@@ -476,13 +515,20 @@ fn run_exec(job: ExecJob, logger: &mut Logger) -> ExecReport {
     };
 
     match outcome.completion {
-        container_steps::ProcessCompletion::TerminationUnconfirmed => ExecReport::Unconfirmed(
-            outcome
-                .post_launch_error
-                .map(|error| error.error_message)
-                .unwrap_or_else(|| "process termination could not be confirmed".to_string()),
-            outcome.held_stdin,
-        ),
+        container_steps::ProcessCompletion::TerminationUnconfirmed => {
+            let (detail, api_failure) = match outcome.post_launch_error {
+                Some(error) => (error.error_message, error.api_failure),
+                None => (
+                    "process termination could not be confirmed".to_string(),
+                    None,
+                ),
+            };
+            ExecReport::Unconfirmed {
+                detail,
+                api_failure,
+                held_stdin: outcome.held_stdin,
+            }
+        }
         container_steps::ProcessCompletion::Confirmed(terminal) => {
             match stdin_failure
                 .lock()
@@ -1157,7 +1203,7 @@ fn start_session_boot(
                     }
                     .map(BootedSession)
                     .map_err(|failure| BootFailure {
-                        error: sr_err(*failure.response),
+                        error: sr_err(failure.response),
                         store_may_be_held: failure.store_may_be_held,
                     })
                 }
@@ -1692,14 +1738,19 @@ impl Worker {
                 }
 
                 let message = e.to_string();
+                let api_failure = e.api_failure().cloned().map(Box::new);
                 if let Some(reply) = reply {
                     let _ = reply.send(Err(e));
                 }
                 for (_, parked_reply) in parked {
-                    let _ = parked_reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                    let error = anyhow::anyhow!(
                         "the WSLc session this provision was waiting for could not be \
                          created: {message}"
-                    ))));
+                    );
+                    let _ = parked_reply.send(Err(WorkerError::backend_with_api_failure(
+                        error,
+                        api_failure.clone(),
+                    )));
                 }
                 return;
             }
@@ -2232,7 +2283,7 @@ impl Worker {
     /// Resume a parked provision once its pull reported, or its deadline did.
     ///
     /// An unknown token is the loser of that race, and has nothing left to do.
-    fn finish_provision(&mut self, token: u64, outcome: Result<(), ScriptResponse>) {
+    fn finish_provision(&mut self, token: u64, outcome: Result<(), WslcStepError>) {
         let Some(PendingProvision {
             config,
             reply,
@@ -2512,10 +2563,15 @@ impl Worker {
 
         let outcome = match report {
             ExecReport::Finished(outcome) => outcome,
-            ExecReport::Unconfirmed(detail, held_stdin) => Err(self.quarantine(
+            ExecReport::Unconfirmed {
+                detail,
+                api_failure,
+                held_stdin,
+            } => Err(self.quarantine(
                 sandbox_id,
                 in_flight.container,
                 &detail,
+                api_failure,
                 in_flight.slot,
                 held_stdin,
             )),
@@ -2539,6 +2595,7 @@ impl Worker {
         sandbox_id: &str,
         container: WslcContainer,
         detail: &str,
+        api_failure: Option<Box<ApiFailure>>,
         slot: Option<ExecSlotGuard>,
         held_stdin: Option<container_steps::StdinHold>,
     ) -> WorkerError {
@@ -2555,38 +2612,55 @@ impl Worker {
             (slot, Some(held_stdin)) => Some(Arc::new((slot, held_stdin)) as ExecSlotGuard),
         };
 
+        self.finish_quarantine(sandbox_id, detail, api_failure, slot, delete_result)
+    }
+
+    fn finish_quarantine(
+        &mut self,
+        sandbox_id: &str,
+        detail: &str,
+        api_failure: Option<Box<ApiFailure>>,
+        slot: Option<ExecSlotGuard>,
+        delete_result: Option<Result<(), WslcStepError>>,
+    ) -> WorkerError {
         match delete_result {
             Some(Ok(())) => {
                 // Deleting the container ends anything still running inside it,
                 // so this exec stops counting against capacity.
                 drop(slot);
                 self.containers.remove(sandbox_id);
-                WorkerError::Backend(anyhow::anyhow!(
+                let error = anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
                      the container was quarantined and deleted"
-                ))
+                );
+                WorkerError::backend_with_api_failure(error, api_failure)
             }
             Some(Err(delete_error)) => {
                 if let Some(entry) = self.containers.get_mut(sandbox_id) {
                     entry.quarantined = true;
                     entry.exec_slot = slot;
                 }
-                WorkerError::Backend(anyhow::anyhow!(
+                let error = anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
                      quarantine deletion failed and the sandbox remains blocked until \
                      deprovision succeeds: {}",
                     delete_error.error_message
-                ))
+                );
+                WorkerError::backend_with_api_failure(
+                    error,
+                    api_failure.or(delete_error.api_failure),
+                )
             }
             None => {
                 if let Some(entry) = self.containers.get_mut(sandbox_id) {
                     entry.quarantined = true;
                     entry.exec_slot = slot;
                 }
-                WorkerError::Backend(anyhow::anyhow!(
+                let error = anyhow::anyhow!(
                     "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
                      the sandbox remains quarantined because no active WSLc SDK is available"
-                ))
+                );
+                WorkerError::backend_with_api_failure(error, api_failure)
             }
         }
     }
@@ -3307,13 +3381,13 @@ mod tests {
         );
     }
 
-    /// The pull and its deadline race, and both report.
-    #[test]
-    fn only_the_first_report_of_a_pull_answers_the_client() {
-        let mut worker = Worker::new();
-        let (reply, mut rx) = oneshot::channel();
+    fn park_provision(
+        worker: &mut Worker,
+        token: u64,
+    ) -> oneshot::Receiver<Result<String, WorkerError>> {
+        let (reply, rx) = oneshot::channel();
         worker.pending.insert(
-            3,
+            token,
             PendingProvision {
                 config: ProvisionConfig {
                     image: "alpine:latest".to_string(),
@@ -3328,6 +3402,14 @@ mod tests {
                 _retire_deadline: std::sync::mpsc::channel().0,
             },
         );
+        rx
+    }
+
+    /// The pull and its deadline race, and both report.
+    #[test]
+    fn only_the_first_report_of_a_pull_answers_the_client() {
+        let mut worker = Worker::new();
+        let mut rx = park_provision(&mut worker, 3);
 
         worker.finish_provision(
             3,
@@ -3338,6 +3420,37 @@ mod tests {
         // The loser of the race: nothing left to answer, and no panic.
         worker.finish_provision(3, Ok(()));
         assert_eq!(worker.live_container_count(), 0);
+    }
+
+    #[test]
+    fn a_failed_pull_answers_with_the_call_that_failed() {
+        let mut worker = Worker::new();
+        let mut timed_out = park_provision(&mut worker, 1);
+        let mut refused = park_provision(&mut worker, 2);
+        let image_not_found =
+            ApiFailure::new("WslcPullSessionImage").with_native_code("0x80040601");
+
+        worker.finish_provision(
+            1,
+            Err(image::pull_deadline_expired("alpine:latest", DRAIN_TIMEOUT)),
+        );
+        worker.finish_provision(
+            2,
+            Err(WslcStepError {
+                failure_phase: FailurePhase::Rejected,
+                error_message: "WSLC image 'nope:1' could not be pulled".to_string(),
+                api_failure: Some(Box::new(image_not_found.clone())),
+            }),
+        );
+
+        let timed_out = timed_out.try_recv().unwrap().unwrap_err();
+        assert_eq!(
+            timed_out.api_failure(),
+            Some(&ApiFailure::new("WslcPullSessionImage"))
+        );
+        let refused = refused.try_recv().unwrap().unwrap_err();
+        assert_eq!(refused.kind(), ErrKind::Rejected);
+        assert_eq!(refused.api_failure(), Some(&image_not_found));
     }
 
     #[test]
@@ -5027,10 +5140,15 @@ mod tests {
         worker.attach_session_reply(TEST_SESSION, session_reply);
         let (reply, mut rx) = oneshot::channel();
         worker.begin_provision(test_provision_config(), reply, &tx);
+        let create_failure = ApiFailure::new("WslcCreateSession").with_native_code("0x800705aa");
 
         worker.finish_session(
             TEST_SESSION,
-            Err(WorkerError::Backend(anyhow::anyhow!("ERROR_NO_SYSTEM_RESOURCES")).into()),
+            Err(WorkerError::backend_with_api_failure(
+                anyhow::anyhow!("ERROR_NO_SYSTEM_RESOURCES"),
+                Some(Box::new(create_failure.clone())),
+            )
+            .into()),
             &tx,
         );
 
@@ -5038,10 +5156,14 @@ mod tests {
             session_rx.try_recv().expect("the session asker").is_err(),
             "the client that asked for the session must be told it failed"
         );
-        assert!(
-            rx.try_recv().expect("the parked provision").is_err(),
+        let parked = rx.try_recv().expect("the parked provision").expect_err(
             "a provision parked behind a boot that failed must be answered, not \
-             left waiting on a session that will never exist"
+             left waiting on a session that will never exist",
+        );
+        assert_eq!(
+            parked.api_failure(),
+            Some(&create_failure),
+            "the parked provision must name the call that failed the boot"
         );
         assert!(
             worker.default_session.is_none(),
@@ -5963,7 +6085,11 @@ mod tests {
 
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
+            ExecReport::Unconfirmed {
+                detail: "the exit callback never fired".to_string(),
+                api_failure: None,
+                held_stdin: None,
+            },
             &tx,
         );
 
@@ -5983,7 +6109,11 @@ mod tests {
         worker.exec_in_flight.get_mut("wslc:busy").unwrap().slot = Some(Arc::new(permit));
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
+            ExecReport::Unconfirmed {
+                detail: "the exit callback never fired".to_string(),
+                api_failure: None,
+                held_stdin: None,
+            },
             &tx,
         );
         assert_eq!(
@@ -6012,13 +6142,100 @@ mod tests {
 
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
+            ExecReport::Unconfirmed {
+                detail: "the exit callback never fired".to_string(),
+                api_failure: Some(Box::new(
+                    ApiFailure::new("WslcGetProcessExitEvent").with_native_code("0x80004005"),
+                )),
+                held_stdin: None,
+            },
             &tx,
         );
 
         let err = done.try_recv().unwrap().unwrap_err();
         assert!(err.to_string().contains("quarantined"), "got {err}");
+        let api_failure = err.api_failure().expect("primary api failure");
+        assert_eq!(api_failure.operation, "WslcGetProcessExitEvent");
+        assert_eq!(api_failure.native_code.as_deref(), Some("0x80004005"));
         assert!(worker.containers["wslc:busy"].quarantined);
+    }
+
+    fn exit_event_failure() -> ApiFailure {
+        ApiFailure::new("WslcGetProcessExitEvent").with_native_code("0x80004005")
+    }
+
+    fn delete_failure() -> WslcStepError {
+        WslcStepError {
+            failure_phase: FailurePhase::LaunchFailed,
+            error_message: "WslcDeleteContainer failed: HRESULT 0x80070005".to_string(),
+            api_failure: Some(Box::new(
+                ApiFailure::new("WslcDeleteContainer").with_native_code("0x80070005"),
+            )),
+        }
+    }
+
+    #[test]
+    fn a_failed_quarantine_delete_keeps_the_exec_failure() {
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:busy".to_string(), started_entry());
+
+        let err = worker.finish_quarantine(
+            "wslc:busy",
+            "the exit event was unavailable",
+            Some(Box::new(exit_event_failure())),
+            None,
+            Some(Err(delete_failure())),
+        );
+
+        assert!(
+            err.to_string().contains("quarantine deletion failed"),
+            "got {err}"
+        );
+        assert_eq!(err.api_failure(), Some(&exit_event_failure()));
+        assert!(worker.containers["wslc:busy"].quarantined);
+    }
+
+    #[test]
+    fn a_failed_quarantine_delete_names_itself_when_the_exec_named_nothing() {
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:busy".to_string(), started_entry());
+
+        let err = worker.finish_quarantine(
+            "wslc:busy",
+            "the exit callback never fired",
+            None,
+            None,
+            Some(Err(delete_failure())),
+        );
+
+        assert_eq!(err.api_failure(), delete_failure().api_failure.as_deref());
+    }
+
+    #[test]
+    fn a_deleted_quarantine_keeps_the_exec_failure() {
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:busy".to_string(), started_entry());
+
+        let err = worker.finish_quarantine(
+            "wslc:busy",
+            "the exit event was unavailable",
+            Some(Box::new(exit_event_failure())),
+            None,
+            Some(Ok(())),
+        );
+
+        assert!(
+            err.to_string().contains("quarantined and deleted"),
+            "got {err}"
+        );
+        assert_eq!(err.api_failure(), Some(&exit_event_failure()));
+        assert!(!worker.containers.contains_key("wslc:busy"));
     }
 
     /// A report can outlive its slot: shutdown drains the run and clears the

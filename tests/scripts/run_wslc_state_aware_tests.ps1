@@ -1338,6 +1338,10 @@ try {
                 $startEnv = Parse-Envelope -Stdout $s.Stdout
                 $code = if ($startEnv) { $startEnv.error.code } else { '<no envelope>' }
                 Assert-True ($code -eq 'backend_error') "the collision surfaced as 'backend_error' (got '$code')"
+                Assert-True ("$($startEnv.error.operation)" -eq 'WslcStartContainer') `
+                    "the collision names WslcStartContainer (got '$($startEnv.error.operation)')"
+                Assert-True ("$($startEnv.error.nativeCode)" -eq '0x80072740') `
+                    "the collision carries nativeCode 0x80072740 (got '$($startEnv.error.nativeCode)')"
                 Assert-True ("$($startEnv.error.message)" -match '0x80072740') `
                     "the message carries the address-in-use HRESULT (got '$($startEnv.error.message)')"
             } else {
