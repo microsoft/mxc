@@ -2503,7 +2503,12 @@ mod tests {
         request.dry_run = true;
         let mut logger = Logger::new(Mode::Buffer);
         let response = ScriptRunner::run(&mut runner, &request, &mut logger);
-        assert_eq!(response.exit_code, -1);
+        // Follow the shared refusal exit code: -1 on this branch, 1 after the
+        // CI merge picks up main's `Rejected` phase mapping.
+        assert_eq!(
+            response.exit_code,
+            WslcError::Rejected(String::new()).into_response().exit_code
+        );
         assert!(
             response
                 .error_message
