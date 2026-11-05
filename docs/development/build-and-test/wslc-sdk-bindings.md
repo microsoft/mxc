@@ -76,7 +76,10 @@ match the pinned SDK.
    ```
 
    This extracts `include/wslcsdk.h` from the new `.nupkg` and rewrites
-   `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs`.
+   `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs`. For an SDK version
+   that is not yet published, pass the header directly with
+   `-HeaderPath <WSL repo>\src\windows\WslcSDK\wslcsdk.h`, and regenerate from
+   the published package once it ships.
 
    If the new header adds an enum, add it to `$bitfieldEnums` (OR-able
    `Wslc*Flags` masks) or `$newtypeEnums` (exclusive values) in the script and

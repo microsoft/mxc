@@ -20,7 +20,7 @@ Native builds still require the `wslc` feature (`build.bat --with-wslc`).
 
 ## Why a daemon
 
-The WSLc SDK (`wslcsdk.dll`, 3.0.3) has **no cross-process session re-attach**: every operation
+The WSLc SDK (`wslcsdk.dll`, 3.0.5) has **no cross-process session re-attach**: every operation
 (`WslcCreateContainer`, `WslcStartContainer`, `WslcCreateContainerProcess`, image pull, stop /
 delete) requires a live in-process `WslcSession` / `WslcContainer` handle, and there is no
 `WslcOpenSession`. Each lifecycle phase runs as a **separate**
