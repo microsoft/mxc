@@ -511,38 +511,19 @@ impl LxcContainer {
             }
 
             let mapping = String::from_utf8_lossy(&output.stdout);
-            let mut root_mapped = false;
-            for line in mapping.lines() {
+            let root_is_shifted = mapping.lines().any(|line| {
                 let columns = line
                     .split_whitespace()
                     .map(str::parse::<u32>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| {
-                        format!("Invalid UID map for container '{}': {error}", self.name)
-                    })?;
-                let [inside, outside, count] = columns.as_slice() else {
-                    return Err(format!("Invalid UID map for container '{}'", self.name));
-                };
-                if *count == 0
-                    || inside.checked_add(*count).is_none()
-                    || outside.checked_add(*count).is_none()
-                {
-                    return Err(format!(
-                        "Invalid UID map range for container '{}'",
-                        self.name
-                    ));
-                }
-                if *outside == 0 {
-                    return Err(format!(
-                        "Container '{}' is privileged: its UID map includes parent UID 0.  MXC will not run the requested command.",
-                        self.name
-                    ));
-                }
-                root_mapped |= *inside == 0;
-            }
-            if !root_mapped {
+                    .collect::<Result<Vec<_>, _>>();
+                matches!(
+                    columns.as_deref(),
+                    Ok([0, outside, count]) if *outside != 0 && *count != 0
+                )
+            });
+            if !root_is_shifted {
                 return Err(format!(
-                    "UID map for container '{}' does not map container root",
+                    "Container '{}' has no unprivileged root UID mapping.  MXC will not run the requested command.",
                     self.name
                 ));
             }

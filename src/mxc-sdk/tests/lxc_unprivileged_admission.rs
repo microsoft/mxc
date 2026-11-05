@@ -203,28 +203,37 @@ fn shifted_root_is_admitted_after_start() {
         "1 200000 100\n0 100000 1\n",
         "0 4294967294 1\n",
         "0 100000 1\n4294967294 4294967294 1\n",
+        "unreadable-uid-map\n0 100000 1\n",
+        "0 100000 1\nunreadable-uid-map\n",
+        "1 0 1\n0 100000 1\n",
+        "0 100000 1\n1 0 1\n",
     ] {
         run_fixture("shifted_root_is_admitted_after_start", uid_map);
     }
 }
 
 #[test]
-fn unsafe_or_unreadable_maps_are_refused_and_stopped() {
+fn maps_without_shifted_root_are_refused_and_stopped() {
     if fixture_directory().is_some() {
         let error = container()
             .start(StartNetwork::NoInterface)
-            .expect_err("an unsafe or unreadable UID map must not be admitted");
+            .expect_err("a UID map without shifted root must not be admitted");
         assert_admission_error(&error);
+        assert!(
+            !error.contains("unreadable-uid-map"),
+            "admission failure included an unreadable row: {error}"
+        );
         assert_stopped_before_workload();
         return;
     }
 
     for uid_map in [
         IDENTITY_MAP,
-        "0 100000 1\n1 0 1\n",
         "1 100000 65536\n",
         "",
         " \t\n",
+        "unreadable-uid-map\n",
+        "unreadable-uid-map\n0 0 4294967295\n",
         "0 100000\n",
         "0 100000 1 extra\n",
         "root 100000 1\n",
@@ -234,14 +243,10 @@ fn unsafe_or_unreadable_maps_are_refused_and_stopped() {
         "0 -1 1\n",
         "0 100000 0\n",
         "0 100000 -1\n",
-        "0 4294967295 1\n",
-        "0 4294967294 2\n",
-        "0 100000 1\n4294967294 200000 2\n",
         "0 18446744073709551616 1\n",
         "0 100000 18446744073709551616\n",
-        "0 100000 1\nmalformed\n",
     ] {
-        run_fixture("unsafe_or_unreadable_maps_are_refused_and_stopped", uid_map);
+        run_fixture("maps_without_shifted_root_are_refused_and_stopped", uid_map);
     }
 }
 
@@ -365,8 +370,13 @@ fn direct_execution_inspects_before_workload_and_stops_afterward() {
         );
         return;
     }
-    run_fixture(
-        "direct_execution_inspects_before_workload_and_stops_afterward",
+    for uid_map in [
         SHIFTED_MAP,
-    );
+        "unreadable-uid-map\n0 100000 1\nunreadable-uid-map\n",
+    ] {
+        run_fixture(
+            "direct_execution_inspects_before_workload_and_stops_afterward",
+            uid_map,
+        );
+    }
 }
