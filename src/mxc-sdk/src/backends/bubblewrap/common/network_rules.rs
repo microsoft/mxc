@@ -958,7 +958,7 @@ struct ChainSection {
 ///   are redirected only once every rule is already installed. Until then the
 ///   custom chains exist but nothing jumps to them.
 /// * **An unsupported rule still fails closed.** A line the host kernel cannot
-///   apply -- the `state` match without `nf_conntrack`, say -- rejects its whole
+///   apply -- the `conntrack` match without `nf_conntrack`, say -- rejects its whole
 ///   transaction, the supervisor aborts, and the workload is never released.
 ///
 /// Later transactions rely on `iptables-restore -n`, which appends rather than
