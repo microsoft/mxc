@@ -13,8 +13,8 @@ use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::script_runner::RunCancellation;
 
 use super::abi::{
-    map_error_body, AgentLibrary, BundleSource, Capabilities, Event, ExecEnd, ExecInput,
-    ExecOutcome, ExecRequest, HostInfo, ImageSource, ProvisionInput, RuntimeSource,
+    map_error_body, AgentLibrary, BundleSource, Capabilities, CpuProfile, Event, ExecEnd,
+    ExecInput, ExecOutcome, ExecRequest, HostInfo, ImageSource, ProvisionInput, RuntimeSource,
     SandboxDiagnostics, SandboxSpec, SetupConfig,
 };
 
@@ -164,11 +164,8 @@ impl Drop for NvxClient {
     }
 }
 
-pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
-    let bundle_dir = discover_bundle_dir()?;
-    let dll_path = bundle_dir.join("bin").join("aci_edge_agent.dll");
-    let library = AgentLibrary::load_verified(&dll_path, APPROVED_DLL_SHA256)?;
-    let setup = SetupConfig {
+fn agent_setup(state_root: &Path, bundle_dir: PathBuf) -> SetupConfig {
+    SetupConfig {
         schema_version: 1,
         state_root: state_root.to_path_buf(),
         runtime: RuntimeSource {
@@ -177,7 +174,15 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
                 manifest_sha256: APPROVED_MANIFEST_SHA256.to_owned(),
             },
         },
-    };
+        cpu_profile: CpuProfile::Host,
+    }
+}
+
+pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
+    let bundle_dir = discover_bundle_dir()?;
+    let dll_path = bundle_dir.join("bin").join("aci_edge_agent.dll");
+    let library = AgentLibrary::load_verified(&dll_path, APPROVED_DLL_SHA256)?;
+    let setup = agent_setup(state_root, bundle_dir);
     let host = library.host_open(&setup)?;
     let mut client = NvxClient::from_library(library, host);
     let info = match client.library.host_info(client.host) {
@@ -1496,6 +1501,27 @@ mod tests {
     }
 
     #[test]
+    fn agent_setup_selects_host_cpu_profile() {
+        let setup = agent_setup(Path::new(r"C:\state"), PathBuf::from(r"C:\bundle"));
+        let json = serde_json::to_value(&setup).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "schemaVersion": 1,
+                "stateRoot": r"C:\state",
+                "runtime": {
+                    "bundle": {
+                        "path": r"C:\bundle",
+                        "manifestSha256": APPROVED_MANIFEST_SHA256,
+                    }
+                },
+                "cpuProfile": "host",
+            })
+        );
+        assert_eq!(serde_json::from_value::<SetupConfig>(json).unwrap(), setup);
+    }
+
+    #[test]
     fn real_staged_dll_loads_verifies_cached_digest_and_rejects_bad_manifest() {
         let bundle_dir = discover_bundle_dir().expect("discover staged NVX bundle");
         let dll_path = bundle_dir.join("bin").join("aci_edge_agent.dll");
@@ -1520,6 +1546,7 @@ mod tests {
                     manifest_sha256: "0".repeat(64),
                 },
             },
+            cpu_profile: CpuProfile::Host,
         };
         let bad_host = lib.host_open(&bad_setup).unwrap_err();
         assert_eq!(bad_host.code, MxcErrorCode::BackendUnavailable);

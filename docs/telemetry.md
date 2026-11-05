@@ -1,170 +1,110 @@
-# MXC administrative telemetry policy
+# MXC diagnostic data and administrative policy
 
-> **Audience:** MXC consumers
+> **Audience:** Developers integrating the MXC SDK into products that ship to Windows devices.
 
-Audience: developers embedding MXC in a product that ships to Windows devices.
+MXC collects Required diagnostic data on supported Windows builds to help keep the component secure, reliable, up to date, and functioning as expected. Administrators can restrict collection through an MXC-specific, machine-wide policy.
 
-MXC supports a single administrative policy that lets an organization prevent
-MXC from collecting diagnostic data on a device, regardless of what the user
-chooses. It is a **ceiling, never a grant** — see
-[Why policy cannot substitute for consent](#why-policy-cannot-substitute-for-consent).
+Existing published contracts retain their current behavior, as described under [Availability and compatibility](#availability-and-compatibility).
 
-The policy is **Windows-only**, because [MXC only ever collects telemetry on
-Windows](telemetry.md). On Linux and macOS there is nothing to restrict.
+## Required diagnostic data
 
-## The setting
+Required diagnostic data describes execution and container lifecycle progress, categorized operational failures, and observed process exits. It includes diagnostic fields and random invocation or lifecycle identifiers used to correlate related events.
 
-| | |
+The following events are Required:
+
+| Event | Purpose |
+|---|---|
+| `MXC.ExecutionStart` | Beginning of an execution or container lifecycle operation. |
+| `MXC.ExecutionEnd` | Completion of an execution or container lifecycle operation. |
+| `MXC.Error` | A categorized operational failure associated with a container run. |
+| `MXC.ProcessExited` | A process exit reported through the diagnostics telemetry helper. |
+
+Required collection does not require user consent or per-request opt-in. Collection remains subject to administrative policy, supported builds, and collection availability.
+
+## Administrative policy
+
+Administrators can permit or block Required diagnostic-data collection using the following machine-wide registry setting:
+
+| Setting | Value |
 |---|---|
 | Key | `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Mxc` |
 | Value name | `AllowTelemetry` |
 | Type | `REG_DWORD` |
-| Scope | Machine (all users on the device) |
+| Scope | Machine: all users on the device |
 
-`HKLM\SOFTWARE\Policies\...` is an administrator-controlled machine-level registry location. MXC deliberately does not honor a per-user (`HKCU`) equivalent.
+This is an administrator-controlled registry location. MXC does not honor a per-user (`HKCU`) equivalent.
 
 ### Values
 
-The values mirror the Windows diagnostic-data scale so administrators do not
-have to learn a second one:
+| Value | Effect on MXC |
+|---|---|
+| Value absent | No administrative restriction. Required collection is permitted. |
+| `0` | Block Required collection. |
+| `1` or `3` | Permit Required collection. |
+| Unsupported value, incorrect registry type, or read failure | Block Required collection. |
 
-| Value | Windows name | Effect on MXC |
-|-------|--------------|---------------|
-| *(value absent)* | — | **Unrestricted.** The user's own choice decides. |
-| `0` | Security / Off | **Blocked.** MXC collects nothing. |
-| `1` | Required (Basic) | **Blocked.** MXC collects nothing. |
-| `3` | Optional (Full) | **Allowed.** MXC may collect *if the user has also consented.* |
-| anything else | — | **Blocked** (fail closed). |
+Value `2` is unsupported and blocks collection.
 
-`1` blocks MXC because everything MXC emits is classified as
-*product-and-service-usage* data — optional diagnostic data in Windows'
-taxonomy. MXC emits no required diagnostic data, so there is nothing left to
-send at level `1`. Value `2` is not a defined level on modern Windows and is
-therefore treated as unrecognized.
+Permitting collection does not enable it on unsupported builds or where collection is unavailable. The administrative policy is a restriction on collection, not a way to enable telemetry outside its supported configuration.
 
-Any value MXC cannot read or cannot parse — a wrong type, a corrupt value, a
-registry error — is treated as `Blocked`. Telemetry collection is never the
-outcome of a failure.
+MXC treats unreadable or invalid settings as blocked. It reports each distinct policy-read or validation failure once per process so operators can distinguish a deployment problem from an intentional block without weakening this fail-closed behavior.
 
-MXC reports each distinct unreadable or unrecognized policy failure once per
-process so operators can distinguish a broken deployment from an intentional
-block without weakening the fail-closed result.
+## Deploying the policy
 
-## Deploying it
+Use an administrative script, installer, or configuration-management package that writes the registry setting directly.
 
-### Registry deployment
+For example, this PowerShell script blocks collection:
 
-Use any deployment mechanism that writes
-HKLM\SOFTWARE\Policies\Mxc\AllowTelemetry directly. For example:
-
-- A startup/admin script:
-
-  ```powershell
-  $key = 'HKLM:\SOFTWARE\Policies\Mxc'
-  New-Item -Path $key -Force | Out-Null
-  Set-ItemProperty -Path $key -Name 'AllowTelemetry' -Value 0 -Type DWord
-  ```
-
-- Any installer or configuration package that writes the same value.
-
-### Verifying
-
-The consent status surface reports the user's recorded choice separately from
-the administrative ceiling. The consent APIs expose the stored and effective
-states, the policy state, and whether a prompt is needed.
-
-For example, if a user previously granted consent and an administrator later
-sets `AllowTelemetry=0`, the status must still make both facts visible:
-
-- the stored user choice remains **granted**
-- the administrative policy is **blocked**
-- effective collection is therefore **off**
-- no prompt is needed while the policy blocks
-
-Keeping those states separate lets hosts explain why telemetry is currently
-disabled without losing the user's prior choice.
-
-## How the policy interacts with user consent
-
-MXC collects diagnostic data only when **every** gate is open:
-
-```
-collect = policy_permits AND user_consented AND build_has_telemetry_enabled
+```powershell
+$key = 'HKLM:\SOFTWARE\Policies\Mxc'
+New-Item -Path $key -Force | Out-Null
+Set-ItemProperty -Path $key -Name 'AllowTelemetry' -Value 0 -Type DWord
 ```
 
-Concretely:
+### Verifying the setting
 
-| Policy | User consent | Result |
-|--------|--------------|--------|
-| unrestricted | granted | collects |
-| unrestricted | denied / undetermined | **no collection** |
-| allowed (`3`) | granted | collects |
-| allowed (`3`) | denied / undetermined | **no collection** |
-| blocked (`0`/`1`/other) | *anything* | **no collection** |
+Read the configured value from an elevated PowerShell session:
 
-Two consequences worth calling out:
+```powershell
+Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Mxc' -Name 'AllowTelemetry'
+```
 
-1. **A blocking policy suppresses the first-run consent prompt.** Asking a user
-   to permit something the administrator has already refused is a question with
-   no meaning. `needsPrompt` reports `false` while the policy blocks.
-2. **A blocking policy does not erase the user's recorded choice.** If a user
-   had already consented and an administrator later blocks telemetry,
-   collection stops immediately but the recorded consent is preserved. If the
-   policy is later relaxed, the user's own prior decision takes effect again
-   rather than the user being re-prompted.
+A value of `0` blocks collection. A value of `1` or `3` permits Required collection, subject to build support and collection availability. An absent value imposes no administrative restriction.
 
-### Why policy cannot substitute for consent
+Registry inspection confirms the configured policy; it does not establish that telemetry is available or being collected.
 
-An administrator setting `AllowTelemetry=3` does **not** cause MXC to start
-collecting. It only removes MXC's administrative restriction; the user is still
-asked, and still decides.
+## Privacy information for products embedding MXC
 
-In particular, **if the user has opted out and the policy permits collection,
-the result is opt-out.** A policy can only ever subtract. There is no policy
-value, and no combination of policy and configuration, that causes MXC to
-collect from a user who has not explicitly granted consent — including a user
-who has never been asked.
+MXC documents its diagnostic-data collection and privacy controls in this documentation. Products integrating the MXC SDK should inform their users that MXC collects Required diagnostic data to help keep the component secure, reliable, and functioning as expected.
 
-This is a product rule MXC holds itself to, not merely a reading of external
-guidance. It is also consistent with that guidance: Microsoft's privacy
-direction for components classified as *apps* (rather than as parts of the
-operating system) requires them to build their own notice-and-consent
-experience and not to rely on the Windows diagnostic-data consent. An
-administrative policy is an availability control, not an expression of a
-user's informed choice, and no Microsoft guidance treats an admin "allow" as
-consent on the user's behalf.
+Products should cover this collection within their existing privacy disclosures and settings, linking to this documentation and the [Microsoft Privacy Statement](https://privacy.microsoft.com/privacystatement).
 
-The implementation stack enforces this rule in one place rather than
-re-deriving it in each host surface. The telemetry gate combines the per-run
-request with the consent and administrative-policy states before each event.
+The Required diagnostic-data notification explains the collection; it does not ask users to opt in.
 
-## Relationship to the Windows `AllowTelemetry` policy
+## Relationship to Windows diagnostic-data settings
 
-MXC reads **only** its own key. It does not read, and is not affected by:
+The MXC policy is stored in the Windows registry, but it belongs to MXC, not Windows diagnostic-data collection:
+
+- **MXC:** `HKLM\SOFTWARE\Policies\Mxc\AllowTelemetry`
+- **Windows:** `HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection\AllowTelemetry`
+
+MXC uses similar numeric values, but reads only its own administrative policy key. It does not read or derive its collection behavior from:
 
 - `HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection\AllowTelemetry`
 - `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection\AllowTelemetry`
-- the Windows Settings → Diagnostics & feedback choice
-- the `System/AllowTelemetry` Policy CSP node
+- The Windows Settings **Diagnostics & feedback** choice
+- The `System/AllowTelemetry` Policy CSP node
 
-Two reasons:
+Windows diagnostic-data settings do not substitute for the MXC-specific administrative policy. Administrators who want to restrict MXC collection must configure `HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Mxc\AllowTelemetry`.
 
-1. **Microsoft documents that it doesn't apply.** The Policy CSP documentation
-   for `System/AllowTelemetry` states that it "impacts the operating system and
-   apps that are considered part of Windows and doesn't apply to any additional
-   apps installed by your organization." MXC is such an app.
-2. **Reading it would leak the user's Windows choice into MXC.** The supported
-   OS APIs for evaluating that policy deliberately combine the administrative
-   setting with the user's own Settings-app selection. Consuming them would
-   make MXC's behaviour depend on Windows consent state, which MXC's design
-   forbids.
+## Availability and compatibility
 
-The dominant pattern among Microsoft first-party applications — Office,
-Visual Studio, Visual Studio Code, WinGet, PowerToys — is likewise an
-application-specific policy under `SOFTWARE\Policies\Microsoft\<app>`.
+Automatic Required collection applies only to supported Windows builds configured and approved for Microsoft telemetry routing. Local and open-source builds do not acquire automatic Required collection. MXC telemetry remains unavailable on macOS and Linux.
+
+Required collection is introduced through a versioned contract. Existing published contracts retain their current explicit opt-in, consent, and administrative-policy behavior. In particular, those contracts continue to block collection at policy value `1`; an absent value or value `3` does not bypass their consent or per-request opt-in requirements.
 
 ## See also
 
 - [Telemetry architecture](development/architecture/telemetry.md)
 - [Lifecycle correlation](development/architecture/telemetry.md#correlating-a-lifecycle)
-- [Telemetry consent design](development/architecture/telemetry-consent-design.md)
+- [Telemetry consent design for existing contracts](development/architecture/telemetry-consent-design.md)

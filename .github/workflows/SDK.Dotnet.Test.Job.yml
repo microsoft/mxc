@@ -25,12 +25,20 @@ jobs:
 
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
-      # The csproj regenerates the P/Invoke layer by invoking cargo, so this
-      # lane needs the Rust toolchain.
-      - name: Setup Rust toolchain
-        run: rustup update stable
+      # Install the pinned toolchain before parallel framework builds invoke rustc.
+      - name: Surface toolchain file at repo root
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: cp src/rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          override: false
+          rustflags: ''
 
       - name: Build .NET SDK
         run: dotnet build Microsoft.Mxc.Sdk.slnx
@@ -52,18 +60,20 @@ jobs:
       - name: Test default backend availability
         shell: pwsh
         run: |
-          $log = Join-Path $env:RUNNER_TEMP 'dotnet-test.log'
-          dotnet test --solution Microsoft.Mxc.Sdk.slnx --no-build 2>&1 | Tee-Object -FilePath $log
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "dotnet test exited $code" }
-          $out = Get-Content -LiteralPath $log -Raw
-          if ($out -notmatch 'succeeded:\s+(\d+)') {
-            throw 'The run exited 0 but its summary could not be parsed, so nothing establishes what ran.'
+          foreach ($framework in @('net8.0', 'net10.0')) {
+            $log = Join-Path $env:RUNNER_TEMP "dotnet-test-$framework.log"
+            dotnet test --solution Microsoft.Mxc.Sdk.slnx --framework $framework --no-build 2>&1 | Tee-Object -FilePath $log
+            $code = $LASTEXITCODE
+            if ($code -ne 0) { throw "$framework dotnet test exited $code" }
+            $out = Get-Content -LiteralPath $log -Raw
+            if ($out -notmatch 'succeeded:\s+(\d+)') {
+              throw "$framework test summary could not be parsed, so nothing establishes what ran."
+            }
+            if ([int]$Matches[1] -eq 0) {
+              throw "$framework passed no tests. A run in which everything skipped is not a pass."
+            }
+            Write-Host "$framework`: $($Matches[1]) tests passed"
           }
-          if ([int]$Matches[1] -eq 0) {
-            throw 'The run passed no tests. A run in which everything skipped also exits 0, so this is a failure rather than a pass.'
-          }
-          Write-Host "$($Matches[1]) tests passed"
 
       # LXC creates, starts, and attaches to a system container, so the suite
       # above can only skip it. This installs the substrate and reruns just
@@ -104,23 +114,24 @@ jobs:
           MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
         run: |
           set -uo pipefail
-          log="$RUNNER_TEMP/dotnet-test-lxc.log"
-          sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME,DOTNET_ROOT \
-            "$(command -v dotnet)" test \
-            --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj \
-            --no-build --no-restore -- --filter-method '*MxcContainerLxcE2ETests*' 2>&1 | tee "$log"
-          # `tee` succeeds even when the run beneath it fails, and a partially
-          # passing run still prints a non-zero succeeded count, so the run's
-          # own status has to be read before the summary is trusted.
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            echo "::error::dotnet test exited $status"
-            exit "$status"
-          fi
-          if ! grep -qE 'succeeded: *[1-9]' "$log"; then
-            echo '::error::The filter selected no LXC test, so this gate verified nothing.'
-            exit 1
-          fi
+          for framework in net8.0 net10.0; do
+            log="$RUNNER_TEMP/dotnet-test-lxc-$framework.log"
+            sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME,DOTNET_ROOT \
+              "$(command -v dotnet)" test \
+              --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj \
+              --framework "$framework" \
+              --no-build --no-restore -- --filter-method '*MxcContainerLxcE2ETests*' 2>&1 | tee "$log"
+            # Read the test command's status, not tee's, before trusting counts.
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              echo "::error::$framework dotnet test exited $status"
+              exit "$status"
+            fi
+            if ! grep -qE 'succeeded: *[1-9]' "$log"; then
+              echo "::error::$framework selected no passing LXC test."
+              exit 1
+            fi
+          done
 
       # This regression requires Linux and a usable Bubblewrap. Install it in
       # the Linux lane and make an unavailable backend fail instead of skip.
@@ -143,21 +154,24 @@ jobs:
           MXC_BWRAP_TESTS_REQUIRE_EXECUTION: "1"
         run: |
           set -uo pipefail
-          log="$RUNNER_TEMP/dotnet-test-bubblewrap.log"
-          dotnet test \
-            --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj \
-            --no-build --no-restore -- \
-            --filter-method '*MxcContainerBubblewrapE2ETests.Spawn_OutlivesTheThreadThatSpawnedIt*' \
-            2>&1 | tee "$log"
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            echo "::error::dotnet test exited $status"
-            exit "$status"
-          fi
-          if ! grep -qE 'total: *1' "$log" || ! grep -qE 'succeeded: *1' "$log"; then
-            echo '::error::The Bubblewrap thread-lifetime regression did not run and pass exactly once.'
-            exit 1
-          fi
+          for framework in net8.0 net10.0; do
+            log="$RUNNER_TEMP/dotnet-test-bubblewrap-$framework.log"
+            dotnet test \
+              --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj \
+              --framework "$framework" \
+              --no-build --no-restore -- \
+              --filter-method '*MxcContainerBubblewrapE2ETests.Spawn_OutlivesTheThreadThatSpawnedIt*' \
+              2>&1 | tee "$log"
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              echo "::error::$framework dotnet test exited $status"
+              exit "$status"
+            fi
+            if ! grep -qE 'total: *1' "$log" || ! grep -qE 'succeeded: *1' "$log"; then
+              echo "::error::$framework Bubblewrap thread-lifetime regression did not run and pass exactly once."
+              exit 1
+            fi
+          done
 
       # Exercise the opt-in backends as one complete native unit. The managed
       # tests dry-run both backends and verify WSLC's daemon + SDK DLL were
@@ -173,18 +187,20 @@ jobs:
         if: matrix.os_label == 'windows'
         shell: pwsh
         run: |
-          $log = Join-Path $env:RUNNER_TEMP 'dotnet-test-optional.log'
-          dotnet test Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --no-build --no-restore -p:MxcWithWslc=true -p:MxcWithIsolationSession=true 2>&1 | Tee-Object -FilePath $log
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "dotnet test exited $code" }
-          $out = Get-Content -LiteralPath $log -Raw
-          if ($out -notmatch 'succeeded:\s+(\d+)') {
-            throw 'The run exited 0 but its summary could not be parsed, so nothing establishes what ran.'
+          foreach ($framework in @('net8.0', 'net10.0')) {
+            $log = Join-Path $env:RUNNER_TEMP "dotnet-test-optional-$framework.log"
+            dotnet test --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --framework $framework --no-build --no-restore -p:MxcWithWslc=true -p:MxcWithIsolationSession=true 2>&1 | Tee-Object -FilePath $log
+            $code = $LASTEXITCODE
+            if ($code -ne 0) { throw "$framework dotnet test exited $code" }
+            $out = Get-Content -LiteralPath $log -Raw
+            if ($out -notmatch 'succeeded:\s+(\d+)') {
+              throw "$framework test summary could not be parsed, so nothing establishes what ran."
+            }
+            if ([int]$Matches[1] -eq 0) {
+              throw "$framework passed no tests. A run in which everything skipped is not a pass."
+            }
+            Write-Host "$framework`: $($Matches[1]) tests passed"
           }
-          if ([int]$Matches[1] -eq 0) {
-            throw 'The run passed no tests. A run in which everything skipped also exits 0, so this is a failure rather than a pass.'
-          }
-          Write-Host "$($Matches[1]) tests passed"
 
       # The count above cannot tell this lane apart from the default one: the
       # feature-specific tests pick their branch with #if, so enabling the
@@ -195,15 +211,17 @@ jobs:
         if: matrix.os_label == 'windows'
         shell: pwsh
         run: |
-          $log = Join-Path $env:RUNNER_TEMP 'dotnet-test-optional-pin.log'
-          dotnet test Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --no-build --no-restore -p:MxcWithWslc=true -p:MxcWithIsolationSession=true -- --filter-method '*BuildSwitch*' 2>&1 | Tee-Object -FilePath $log
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "The backend-switch pin exited $code" }
-          $out = Get-Content -LiteralPath $log -Raw
-          if ($out -notmatch 'succeeded:\s+2' -or $out -notmatch 'skipped:\s+0') {
-            throw 'Expected both backend-switch tests to run and pass with none skipped. The optional-backend lane is no longer verifying the enabled branch.'
+          foreach ($framework in @('net8.0', 'net10.0')) {
+            $log = Join-Path $env:RUNNER_TEMP "dotnet-test-optional-pin-$framework.log"
+            dotnet test --project Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --framework $framework --no-build --no-restore -p:MxcWithWslc=true -p:MxcWithIsolationSession=true -- --filter-method '*BuildSwitch*' 2>&1 | Tee-Object -FilePath $log
+            $code = $LASTEXITCODE
+            if ($code -ne 0) { throw "$framework backend-switch pin exited $code" }
+            $out = Get-Content -LiteralPath $log -Raw
+            if ($out -notmatch 'succeeded:\s+2' -or $out -notmatch 'skipped:\s+0') {
+              throw "$framework must run and pass both backend-switch tests with none skipped."
+            }
+            Write-Host "$framework optional backend switches verified against native availability."
           }
-          Write-Host 'Optional backend switches verified against native availability.'
 
       # Native AOT publish gate for the SDK's JSON layer, on every OS matrix job.
       - name: AOT publish gate (SDK JSON layer)
@@ -218,16 +236,23 @@ jobs:
           }
           elseif ($IsMacOS) { $rid = "osx-$arch"; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest' }
           else { $rid = "win-$arch"; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest.exe' }
-          $log = Join-Path $env:RUNNER_TEMP 'dotnet-aot-publish.log'
-          $pub = Join-Path $env:RUNNER_TEMP 'aot-smoke-publish'
-          dotnet publish Microsoft.Mxc.Sdk.AotSmokeTest -c Release -r $rid -o $pub --nologo 2>&1 | Tee-Object -FilePath $log
-          if ($LASTEXITCODE -ne 0) { throw "AOT publish exited $LASTEXITCODE" }
-          $out = Get-Content -LiteralPath $log -Raw
-          if ($out -match 'warning IL|AOT analysis|Trim analysis') {
-            throw 'AOT publish emitted an IL/AOT/trim warning. The SDK JSON layer is no longer reflection-free.'
+          foreach ($framework in @('net8.0', 'net10.0')) {
+            $log = Join-Path $env:RUNNER_TEMP "dotnet-aot-publish-$framework.log"
+            $pub = Join-Path $env:RUNNER_TEMP "aot-smoke-publish-$framework"
+            dotnet publish Microsoft.Mxc.Sdk.AotSmokeTest -c Release -f $framework -r $rid -o $pub --nologo 2>&1 | Tee-Object -FilePath $log
+            if ($LASTEXITCODE -ne 0) { throw "$framework AOT publish exited $LASTEXITCODE" }
+            $out = Get-Content -LiteralPath $log -Raw
+            if ($out -match 'warning IL|AOT analysis|Trim analysis') {
+              throw "$framework AOT publish emitted an IL/AOT/trim warning. The SDK JSON layer is no longer reflection-free."
+            }
+            $exe = Join-Path $pub $exeName
+            if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Published AOT executable not found: $exe" }
+            & $exe
+            if ($LASTEXITCODE -ne 0) { throw "$framework AOT smoke test exited $LASTEXITCODE" }
+            Write-Host "AOT publish gate passed on ${rid} (${framework}): reflection-free JSON layer verified."
           }
-          $exe = Join-Path $pub $exeName
-          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Published AOT executable not found: $exe" }
-          & $exe
-          if ($LASTEXITCODE -ne 0) { throw "AOT smoke test exited $LASTEXITCODE" }
-          Write-Host "AOT publish gate passed on ${rid}: reflection-free JSON layer verified."
+
+      - name: Test packed .NET SDK outside the checkout
+        shell: pwsh
+        run: |
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci\test-dotnet-package.ps1')

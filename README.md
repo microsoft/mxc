@@ -137,11 +137,17 @@ deny-and-record diagnostics, audit outputs, and supported workflows.
 
 ## Telemetry
 
-Official Microsoft builds can send optional diagnostic telemetry to Microsoft.
-Telemetry is off unless the individual run opts in, the Windows user has
-explicitly consented, administrative policy permits collection, and your
-application enables the telemetry option in a contained workload request. An
-administrator can block telemetry but cannot grant consent for the user.
+Official Microsoft builds send Required diagnostic data to Microsoft for the
+development `1.1.0-alpha` request contract. MXC is moving to Required telemetry
+to keep MXC secure, reliable, and up to date: four events describe execution
+start and end, categorized failures, and process exits. They need no user
+consent or per-request opt-in, and an administrator can block them with
+machine-wide policy.
+
+Published `0.9.0-alpha` and `1.0.0` requests keep optional telemetry. It is off
+unless the run opts in, the Windows user has consented, and administrative
+policy permits collection. An administrator can block that telemetry but cannot
+grant consent for the user.
 
 Local open-source builds are not configured to route telemetry to Microsoft,
 and telemetry is a no-op on non-Windows platforms. See
@@ -193,7 +199,7 @@ build.bat --all             # Release build for current architecture
 | SDK API reference | [`docs/api-reference/`](docs/api-reference/README.md) | Supported V1 operations and types |
 | Container lifecycle | [`docs/container-lifecycle.md`](docs/container-lifecycle.md) | Persistent container lifecycle overview |
 | Logging access denied | [`docs/logging-access-denied.md`](docs/logging-access-denied.md) | Diagnose blocked accesses and author policy |
-| Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Consent and administrative controls |
+| Telemetry | [`docs/telemetry.md`](docs/telemetry.md) | Required diagnostic data and administrative controls |
 | Backend guides | [`docs/backends/`](docs/backends/) | Platform and backend prerequisites and behavior |
 
 Repository contributors should start with the

@@ -51,10 +51,81 @@ pub(crate) const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/usr/lib",
     "/usr/lib32",
     "/usr/lib64",
+    "/usr/libx32",
     "/usr/libexec",
     "/usr/share",
     "/etc",
 ];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BaselineLink {
+    pub path: &'static str,
+    pub relative_target: String,
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn baseline_links(
+    host_link_target: impl Fn(&str) -> std::io::Result<Option<std::path::PathBuf>>,
+) -> Result<Vec<BaselineLink>, String> {
+    let refuse = |reason: String| {
+        format!(
+            "{reason}. Refusing to start: mounting it apart from its target would let it \
+             bypass filesystem.deniedPaths."
+        )
+    };
+    let targets = BASELINE_RO_BIND_PATHS
+        .iter()
+        .map(|path| {
+            host_link_target(path)
+                .map_err(|error| refuse(format!("could not resolve the host's {path} ({error})")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let entries = || BASELINE_RO_BIND_PATHS.iter().zip(&targets);
+    let inside_bound_entry = |target: &std::path::Path| {
+        entries().any(|(entry, link)| link.is_none() && target.starts_with(entry))
+    };
+    let mut links = Vec::new();
+    for (&path, target) in entries() {
+        let Some(target) = target
+            .as_deref()
+            .filter(|target| inside_bound_entry(target))
+        else {
+            continue;
+        };
+
+        // bwrap cannot create later mounts through a sandbox symlink with
+        // an absolute target.
+        let relative_target = std::path::Path::new(path)
+            .parent()
+            .and_then(|parent| relative_path(parent, target))
+            .ok_or_else(|| {
+                refuse(format!(
+                    "the host's {path} points to {}, which cannot be written as a relative link",
+                    target.display()
+                ))
+            })?;
+        links.push(BaselineLink {
+            path,
+            relative_target,
+        });
+    }
+    Ok(links)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn relative_path(from: &std::path::Path, to: &std::path::Path) -> Option<String> {
+    if !from.has_root() || !to.has_root() {
+        return None;
+    }
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts = vec![".."; from.len() - shared];
+    for part in &to[shared..] {
+        parts.push(part.as_os_str().to_str()?);
+    }
+    Some(parts.join("/")).filter(|path| !path.is_empty())
+}
 
 #[cfg(any(target_os = "linux", test))]
 pub(crate) const RESOLVER_DIRS: &[&str] = &[
@@ -397,16 +468,19 @@ pub fn build_args_classified(
         network_mode,
         None,
         &[],
+        &[],
         &policy_mounts(&request.policy),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_args_classified_with_mode(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
     denied_files: &HashSet<String>,
     network_mode: ResolvedNetworkMode,
     seccomp_fd: Option<i32>,
+    baseline_links: &[BaselineLink],
     resolver_args: &[String],
     mounts: &[PolicyMount],
 ) -> Vec<String> {
@@ -444,7 +518,16 @@ pub(crate) fn build_args_classified_with_mode(
     // so they always win when paths overlap (e.g. `readwritePaths:
     // ["/tmp/workspace"]` must beat the standard `--tmpfs /tmp`).
     for path in BASELINE_RO_BIND_PATHS {
-        args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]);
+        // Binding a host symlink would mount its target a second time, where
+        // a mask on the target's real path does not reach.
+        match baseline_links.iter().find(|link| link.path == *path) {
+            Some(link) => args.extend([
+                "--symlink".into(),
+                link.relative_target.clone(),
+                (*path).into(),
+            ]),
+            None => args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]),
+        }
     }
 
     // Recreate the standard `/var/run -> /run` compatibility symlink. Some
@@ -589,6 +672,7 @@ mod tests {
                 mode,
                 Some(17),
                 &[],
+                &[],
                 &policy_mounts(&request.policy),
             );
             assert_eq!(
@@ -620,6 +704,7 @@ mod tests {
             &HashSet::new(),
             ResolvedNetworkMode::Isolated,
             None,
+            &[],
             &resolver,
             &policy_mounts(&request.policy),
         );
@@ -663,6 +748,7 @@ mod tests {
             &HashSet::new(),
             ResolvedNetworkMode::Isolated,
             Some(17),
+            &[],
             &[],
             &policy_mounts(&request.policy),
         );
@@ -1831,5 +1917,160 @@ mod tests {
             policy_bind,
             baseline_etc
         );
+    }
+
+    fn host(
+        links: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> std::io::Result<Option<std::path::PathBuf>> {
+        move |path| {
+            Ok(links
+                .iter()
+                .find(|(link, _)| *link == path)
+                .map(|(_, target)| target.into()))
+        }
+    }
+
+    fn link(path: &'static str, relative_target: &str) -> BaselineLink {
+        BaselineLink {
+            path,
+            relative_target: relative_target.into(),
+        }
+    }
+
+    #[test]
+    fn merged_usr_entries_link_to_their_usr_mounts() {
+        let debian = baseline_links(host(&[
+            ("/bin", "/usr/bin"),
+            ("/sbin", "/usr/sbin"),
+            ("/lib", "/usr/lib"),
+            ("/lib32", "/usr/lib32"),
+            ("/lib64", "/usr/lib64"),
+            ("/libx32", "/usr/libx32"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            debian,
+            [
+                link("/bin", "usr/bin"),
+                link("/sbin", "usr/sbin"),
+                link("/lib", "usr/lib"),
+                link("/lib32", "usr/lib32"),
+                link("/lib64", "usr/lib64"),
+                link("/libx32", "usr/libx32"),
+            ]
+        );
+
+        let arch = baseline_links(host(&[
+            ("/bin", "/usr/bin"),
+            ("/sbin", "/usr/bin"),
+            ("/lib", "/usr/lib"),
+            ("/lib64", "/usr/lib"),
+            ("/usr/sbin", "/usr/bin"),
+            ("/usr/lib64", "/usr/lib"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            arch,
+            [
+                link("/bin", "usr/bin"),
+                link("/sbin", "usr/bin"),
+                link("/lib", "usr/lib"),
+                link("/lib64", "usr/lib"),
+                link("/usr/sbin", "bin"),
+                link("/usr/lib64", "lib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_links_into_a_bound_entry_become_sandbox_links() {
+        assert!(baseline_links(|_| Ok(None)).unwrap().is_empty());
+        let links = baseline_links(host(&[
+            ("/bin", "/usr/bin"),
+            ("/sbin", "/bin/sbin"),
+            ("/lib32", "/opt/lib32"),
+            ("/lib64", "/usr/lib/x86_64-linux-gnu"),
+            ("/usr/lib64", "/lib"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            links,
+            [
+                link("/bin", "usr/bin"),
+                link("/lib64", "usr/lib/x86_64-linux-gnu"),
+                link("/usr/lib64", "../lib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_baseline_entry_refuses_to_start() {
+        let error = baseline_links(|path| match path {
+            "/lib" => Err(std::io::ErrorKind::PermissionDenied.into()),
+            _ => Ok(None),
+        })
+        .unwrap_err();
+        assert!(
+            error.contains("the host's /lib") && error.contains("Refusing to start"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_target_that_cannot_be_written_as_a_link_refuses_to_start() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let error = baseline_links(|path| {
+            Ok((path == "/bin")
+                .then(|| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/usr/bin/\xff"))))
+        })
+        .unwrap_err();
+        assert!(
+            error.contains("the host's /bin") && error.contains("Refusing to start"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn baseline_links_replace_their_binds_before_policy_mounts() {
+        let mut request = base_request();
+        request.policy.readonly_paths = vec!["/bin/ls".into()];
+        let args = build_args_classified_with_mode(
+            &request,
+            None,
+            &HashSet::new(),
+            ResolvedNetworkMode::Isolated,
+            None,
+            &[link("/bin", "usr/bin")],
+            &[],
+            &policy_mounts(&request.policy),
+        );
+
+        let symlink = args
+            .windows(3)
+            .position(|w| w == ["--symlink", "usr/bin", "/bin"])
+            .expect("the linked entry must become a symlink");
+        let grant = args
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/bin/ls", "/bin/ls"])
+            .expect("policy mount missing");
+        assert!(
+            symlink < grant,
+            "a policy mount through the link must follow it"
+        );
+        assert!(!args
+            .windows(3)
+            .any(|w| w[0] == "--ro-bind-try" && w[2] == "/bin"));
+        for path in BASELINE_RO_BIND_PATHS
+            .iter()
+            .filter(|path| **path != "/bin")
+        {
+            assert!(
+                args.windows(3)
+                    .any(|w| w == ["--ro-bind-try", *path, *path]),
+                "{path} must keep its bind"
+            );
+        }
     }
 }
