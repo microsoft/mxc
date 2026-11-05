@@ -3,12 +3,15 @@
 
 //! Finds and kills every process in one Seatbelt run.
 //!
-//! Each run's profile allows a unique Mach service name (the marker) and
-//! denies a second one (the control). Every process in the run inherits the
-//! profile, even after `setsid()`, so the host can find them with
-//! `sandbox_check_by_audit_token`. The control keeps profiles that allow all
-//! Mach lookups from matching. No such service exists, so the marker grants
-//! nothing.
+//! Each run's profile denies every Mach service name under the reserved
+//! prefix except a few random ones (the markers). Every process in the run
+//! inherits the profile, even after `setsid()`, so the host can find them with
+//! `sandbox_check_by_audit_token`: a member allows every marker and denies
+//! random names under the prefix (the controls) that never appear in any
+//! profile. No such service exists, so the markers grant nothing.
+//!
+//! Another MXC run's profile denies this run's markers, so runs never match
+//! each other. Processes that started before this run are never checked.
 //!
 //! This is best effort: a process scan cannot prove that none are left.
 
@@ -70,51 +73,79 @@ struct ProcUniqueIdentifierInfo {
 
 const PROC_PID_UNIQUE_IDENTIFIER_INFO: libc::c_int = 17;
 
+// A sandbox outside MXC that allows or denies names at random matches every
+// name with a chance of at most about 1 in 65 million.
+const MARKER_COUNT: usize = 8;
+const CONTROL_COUNT: usize = 24;
+
 pub(super) struct RunMarker {
-    marker: CString,
-    control: CString,
+    rules: String,
+    markers: Vec<CString>,
+    controls: Vec<CString>,
+    // Every process with this ID or lower existed before the run.
+    newest_before_run: u64,
 }
 
 impl RunMarker {
     pub(super) fn new() -> std::io::Result<Self> {
-        // Independent names: only a rule that looks at the random part of the
-        // names can allow one and deny the other.
+        let mut nonces = HashSet::new();
+        while nonces.len() < MARKER_COUNT + CONTROL_COUNT {
+            nonces.insert(random_nonce()?);
+        }
+        let mut markers: Vec<String> = nonces.into_iter().collect();
+        let controls = markers.split_off(MARKER_COUNT);
+        Self::with_nonces(&markers, &controls)
+    }
+
+    fn with_nonces(markers: &[String], controls: &[String]) -> std::io::Result<Self> {
+        let names = |nonces: &[String]| {
+            nonces
+                .iter()
+                .map(|nonce| {
+                    CString::new(format!("{RUN_MARKER_NAME_PREFIX}{nonce}"))
+                        .map_err(std::io::Error::other)
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        };
+        // The deny comes first so that the allow wins for this run's markers.
+        let rules = format!(
+            "\n;; --- run marker: lets MXC find this run's processes; grants nothing ---\n\
+             (deny mach-lookup (global-name-prefix \"{RUN_MARKER_NAME_PREFIX}\"))\n\
+             (allow mach-lookup (global-name-regex #\"^{}({})$\"))\n",
+            RUN_MARKER_NAME_PREFIX.replace('.', "\\."),
+            markers.join("|")
+        );
         Ok(Self {
-            marker: random_service_name()?,
-            control: random_service_name()?,
+            rules,
+            markers: names(markers)?,
+            controls: names(controls)?,
+            newest_before_run: newest_unique_id()?,
         })
     }
 
     /// Rules to append after the rest of the profile.
     pub(super) fn profile_rules(&self) -> String {
-        format!(
-            "\n;; --- run marker: lets MXC find this run's processes; grants nothing ---\n\
-             (allow mach-lookup (global-name \"{}\"))\n\
-             (deny mach-lookup (global-name \"{}\"))\n",
-            self.marker.to_string_lossy(),
-            self.control.to_string_lossy()
-        )
+        self.rules.clone()
     }
 
     fn is_member(&self, token: AuditToken) -> bool {
-        // SAFETY: the token is passed by value, and the variadic argument is the
-        // NUL-terminated name that `SANDBOX_FILTER_GLOBAL_NAME` expects.
-        unsafe {
-            let flags = SANDBOX_FILTER_GLOBAL_NAME | SANDBOX_CHECK_NO_REPORT;
-            sandbox_check_by_audit_token(token, std::ptr::null(), SANDBOX_FILTER_NONE) == 1
-                && sandbox_check_by_audit_token(
+        let allows = |name: &CString| {
+            // SAFETY: the token is passed by value, and the variadic argument is
+            // the NUL-terminated name that `SANDBOX_FILTER_GLOBAL_NAME` expects.
+            unsafe {
+                sandbox_check_by_audit_token(
                     token,
                     c"mach-lookup".as_ptr(),
-                    flags,
-                    self.marker.as_ptr(),
+                    SANDBOX_FILTER_GLOBAL_NAME | SANDBOX_CHECK_NO_REPORT,
+                    name.as_ptr(),
                 ) == 0
-                && sandbox_check_by_audit_token(
-                    token,
-                    c"mach-lookup".as_ptr(),
-                    flags,
-                    self.control.as_ptr(),
-                ) == 1
-        }
+            }
+        };
+        // SAFETY: the token is passed by value and no filter argument is needed.
+        let sandboxed = unsafe {
+            sandbox_check_by_audit_token(token, std::ptr::null(), SANDBOX_FILTER_NONE) == 1
+        };
+        sandboxed && self.markers.iter().all(allows) && !self.controls.iter().any(allows)
     }
 
     /// Stops, then kills, the run's processes until two scans in a row find
@@ -135,15 +166,18 @@ impl RunMarker {
                 if pid <= 0 || pid == current_pid {
                     continue;
                 }
-                let token = match process_audit_token(pid) {
-                    Ok(Some(token)) => token,
+                let (token, unique_id) = match process_identity(pid) {
+                    Ok(Some(identity)) => identity,
                     Ok(None) => continue,
                     Err(error) => {
                         first_error.get_or_insert(error);
                         continue;
                     }
                 };
-                if killed.contains(&token.identity()) || !self.is_member(token) {
+                if unique_id <= self.newest_before_run
+                    || killed.contains(&token.identity())
+                    || !self.is_member(token)
+                {
                     continue;
                 }
                 // Stop all before killing any, so none can react to another's death.
@@ -171,13 +205,23 @@ impl RunMarker {
     }
 }
 
-fn random_service_name() -> std::io::Result<CString> {
-    let mut bytes = [0u8; 16];
+fn random_nonce() -> std::io::Result<String> {
+    let mut bytes = [0u8; 4];
     getrandom::getrandom(&mut bytes).map_err(|error| {
         std::io::Error::other(format!("Seatbelt: failed to create a run marker: {error}"))
     })?;
-    let nonce: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    CString::new(format!("{RUN_MARKER_NAME_PREFIX}{nonce}")).map_err(std::io::Error::other)
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// The newest process ID that macOS has handed out. These IDs only increase
+/// and survive `exec` and `setsid()`.
+fn newest_unique_id() -> std::io::Result<u64> {
+    Ok(list_all_pids()?
+        .into_iter()
+        .filter_map(|pid| process_identity(pid).ok().flatten())
+        .map(|(_, unique_id)| unique_id)
+        .max()
+        .unwrap_or(0))
 }
 
 fn signal(mut token: AuditToken, signal: libc::c_int, first_error: &mut Option<std::io::Error>) {
@@ -189,7 +233,8 @@ fn signal(mut token: AuditToken, signal: libc::c_int, first_error: &mut Option<s
     }
 }
 
-fn process_audit_token(pid: libc::pid_t) -> std::io::Result<Option<AuditToken>> {
+/// The process's audit token and its never-reused unique ID.
+fn process_identity(pid: libc::pid_t) -> std::io::Result<Option<(AuditToken, u64)>> {
     let mut info = ProcUniqueIdentifierInfo::default();
     let size = libc::c_int::try_from(std::mem::size_of_val(&info))
         .map_err(|_| std::io::Error::other("macOS process identity is too large"))?;
@@ -219,7 +264,7 @@ fn process_audit_token(pid: libc::pid_t) -> std::io::Result<Option<AuditToken>> 
     let mut token = AuditToken { val: [0; 8] };
     token.val[5] = pid as u32;
     token.val[7] = info.id_version as u32;
-    Ok(Some(token))
+    Ok(Some((token, info.unique_id)))
 }
 
 fn list_all_pids() -> std::io::Result<Vec<libc::pid_t>> {
@@ -279,9 +324,10 @@ mod tests {
     }
 
     fn token(child: &Child) -> AuditToken {
-        process_audit_token(child.id() as libc::pid_t)
+        process_identity(child.id() as libc::pid_t)
             .unwrap()
             .expect("process is running")
+            .0
     }
 
     fn wait_until_sandboxed(child: &Child) {
@@ -301,35 +347,55 @@ mod tests {
 
     #[test]
     fn kill_members_kills_only_this_runs_processes() {
-        let run = RunMarker::new().unwrap();
-        let mut member = sandboxed_sleep(&run.profile_rules());
-        let mut other_run = sandboxed_sleep(&RunMarker::new().unwrap().profile_rules());
-        let mut lookalike = sandboxed_sleep(
+        // Markers end in 0 and controls in f, so a profile that denies names
+        // ending in 8-f allows every marker and denies every control.
+        let markers: Vec<String> = (0..MARKER_COUNT).map(|i| format!("{i:07x}0")).collect();
+        let controls: Vec<String> = (0..CONTROL_COUNT).map(|i| format!("{i:07x}f")).collect();
+        let rules = RunMarker::with_nonces(&markers, &controls)
+            .unwrap()
+            .profile_rules();
+        let older = sandboxed_sleep(&rules);
+        wait_until_sandboxed(&older);
+
+        let run = RunMarker::with_nonces(&markers, &controls).unwrap();
+        let member = sandboxed_sleep(&rules);
+        let split_regex_run = sandboxed_sleep(&format!(
+            "(deny mach-lookup (global-name-regex #\"[89a-f]$\"))\n{}",
+            RunMarker::new().unwrap().profile_rules()
+        ));
+        let lookalike = sandboxed_sleep(
             "(allow mach-lookup (global-name-prefix \"com.microsoft.mxc.run.\"))\n\
              (deny mach-lookup (global-name-regex #\"\\.control$\"))\n",
         );
-        for child in [&member, &other_run, &lookalike] {
+        let mut others = [
+            (older, "a process that started before the run"),
+            (split_regex_run, "another run with a split-regex profile"),
+            (lookalike, "a wildcard profile"),
+        ];
+        wait_until_sandboxed(&member);
+        for (child, _) in &others {
             wait_until_sandboxed(child);
         }
 
         let result = run.kill_members(Duration::from_secs(5));
-        let other_running = other_run.try_wait().unwrap().is_none();
-        let lookalike_running = lookalike.try_wait().unwrap().is_none();
-        let _ = other_run.kill();
-        let _ = lookalike.kill();
-        let _ = other_run.wait();
-        let _ = lookalike.wait();
+        let survivors: Vec<bool> = others
+            .iter_mut()
+            .map(|(child, _)| child.try_wait().unwrap().is_none())
+            .collect();
+        for (child, _) in &mut others {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let mut member = member;
 
         result.unwrap();
         assert!(
             !member.wait().unwrap().success(),
             "this run's process was not killed"
         );
-        assert!(other_running, "another run's process was killed");
-        assert!(
-            lookalike_running,
-            "a wildcard profile was treated as this run"
-        );
+        for ((_, what), running) in others.iter().zip(survivors) {
+            assert!(running, "{what} was killed as part of this run");
+        }
     }
 
     #[test]

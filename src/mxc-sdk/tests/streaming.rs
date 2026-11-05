@@ -932,18 +932,26 @@ fn streaming_timeout_kills_detached_descendant() {
     assert_descendant_gone(descendant, "after the timeout");
 }
 
-/// Ending one run must not touch the processes of another run.
+/// Ending one run must not touch the processes of another run, including a
+/// run whose profile allows or denies Mach names by their last character.
 #[cfg(target_os = "macos")]
 #[test]
 fn streaming_kill_leaves_concurrent_run_running() {
+    use mxc_sdk::v1::configs::SeatbeltConfig;
+    use mxc_sdk::v1::Containment;
     use std::io::{BufRead, BufReader};
 
-    fn start() -> (mxc_sdk::v1::MxcProcess, u32) {
-        let mut proc = spawn(
-            seatbelt_request("sleep 300 & echo CHILD=$!; sleep 300", 0),
-            Default::default(),
-        )
-        .expect("spawn");
+    const SPLIT_PROFILE: &str =
+        "(version 1)(allow default)(deny mach-lookup (global-name-regex #\"[89a-f]$\"))";
+
+    fn start(profile_override: Option<&str>) -> (mxc_sdk::v1::MxcProcess, u32, KillIfFailing) {
+        let mut request = seatbelt_request("sleep 300 & echo CHILD=$!; sleep 300", 0);
+        if let Some(profile) = profile_override {
+            let mut config = SeatbeltConfig::default();
+            config.profile_override = Some(profile.to_string());
+            request.containment = Containment::Seatbelt(config);
+        }
+        let mut proc = spawn(request, Default::default()).expect("spawn");
         let mut line = String::new();
         BufReader::new(proc.take_stdout().expect("stdout"))
             .read_line(&mut line)
@@ -954,25 +962,30 @@ fn streaming_kill_leaves_concurrent_run_running() {
             .expect("CHILD= prefix")
             .parse()
             .expect("child pid");
-        (proc, child)
+        (proc, child, KillIfFailing(child))
     }
 
-    let (mut first, first_child) = start();
-    let (mut second, second_child) = start();
-    let _first_guard = KillIfFailing(first_child);
-    let _second_guard = KillIfFailing(second_child);
+    fn end(mut proc: mxc_sdk::v1::MxcProcess, child: u32, survivor: u32) {
+        proc.kill().expect("kill");
+        assert_descendant_gone(child, "after its run was killed");
+        let _ = proc.wait();
+        assert!(
+            pid_alive(survivor),
+            "killing one run also killed {survivor} from a concurrent run"
+        );
+    }
 
-    first.kill().expect("kill first run");
-    assert_descendant_gone(first_child, "after its run was killed");
-    let _ = first.wait();
-    assert!(
-        pid_alive(second_child),
-        "killing one run also killed {second_child} from a concurrent run"
-    );
+    let (first, first_child, _first_guard) = start(None);
+    let (split, split_child, _split_guard) = start(Some(SPLIT_PROFILE));
+    end(first, first_child, split_child);
 
-    second.kill().expect("kill second run");
-    assert_descendant_gone(second_child, "after its run was killed");
-    let _ = second.wait();
+    let (last, last_child, _last_guard) = start(None);
+    end(split, split_child, last_child);
+
+    let mut last = last;
+    last.kill().expect("kill last run");
+    assert_descendant_gone(last_child, "after its run was killed");
+    let _ = last.wait();
 }
 
 /// Owns a hopping chain's scratch directory. On drop it creates the stop file,

@@ -62,7 +62,7 @@ fi
 grep -qF "com.microsoft.mxc.run." <<<"$PROFILE" &&
     fail "the copyable profile carries this run's cleanup rules" "$PROFILE"
 pass "the copyable profile carries no per-run cleanup rules"
-RULES="$(sed -n "/^${END}\$/,\$p" <<<"$OUT" | grep -F "com.microsoft.mxc.run." | sed 's/^Seatbelt: *//')"
+RULES="$(sed -n "/^${END}\$/,\$p" <<<"$OUT" | grep -E '^Seatbelt: +\(' | sed 's/^Seatbelt: *//')"
 [ "$(wc -l <<<"$RULES")" -eq 2 ] || fail "this run's two cleanup rules follow the profile" "$OUT"
 pass "this run's cleanup rules are printed after the profile"
 
@@ -80,7 +80,7 @@ override_config() {
 run_config "$(override_config "$PROFILE" PASTED_PROFILE_OK)"
 expect_ok "the copied profile runs as a profileOverride" "PASTED_PROFILE_OK"
 
-# Another run's cleanup rules would make that run kill this run's processes.
+# Copied cleanup rules could never take effect: this run's own rules override them.
 run_config "$(override_config "$PROFILE"$'\n'"$RULES" COPIED_RULES_RAN)"
 [ "$RC" != 0 ] || fail "a profileOverride with another run's cleanup rules was accepted" "$OUT"
 expect_marker "copied cleanup rules are refused" "MXC reserves for its process cleanup rules"

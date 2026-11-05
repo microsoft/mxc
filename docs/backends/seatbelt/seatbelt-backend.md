@@ -466,24 +466,25 @@ runs when you wait, kill, or release the process handle.
 
 ### How MXC finds the run's processes
 
-Each run gets two random IDs. MXC adds a rule for each to the end of the run's
+Each run gets eight random IDs. MXC adds two rules to the end of the run's
 profile:
 
 ```scheme
-(allow mach-lookup (global-name "com.microsoft.mxc.run.<id1>"))
-(deny mach-lookup (global-name "com.microsoft.mxc.run.<id2>"))
+(deny mach-lookup (global-name-prefix "com.microsoft.mxc.run."))
+(allow mach-lookup (global-name-regex #"^com\.microsoft\.mxc\.run\.(<id1>|...|<id8>)$"))
 ```
 
 Every process in the run inherits the profile and cannot remove it. To clean
-up, MXC scans the system's process list and asks macOS which processes have
-exactly this pair of rules. No service with either name exists, so the rules
-grant nothing. They are added after a `profileOverride` profile too.
+up, MXC scans the system's process list and asks macOS which processes allow
+all eight names and deny other random names under the same prefix. It skips
+processes that existed before the run started. No service under the prefix
+exists, so the rules grant nothing. They are added after a `profileOverride`
+profile too.
 
 `--debug` prints these rules after the end of the generated profile, not inside
 it, so the profile can be copied into `profileOverride` without them. MXC
 rejects a `profileOverride` or `extraMachLookups` entry that uses the
-`com.microsoft.mxc.run.` prefix: another run's rules would make that run's
-cleanup kill this run's processes.
+`com.microsoft.mxc.run.` prefix, because the rules MXC adds would override it.
 
 MXC freezes every matching process before killing any, so a process cannot
 restart one that was just killed. It scans again until two scans in a row find

@@ -45,8 +45,8 @@ pub fn validate_seatbelt_ui_policy(request: &ExecutionRequest) -> Result<(), Str
 /// Mach name prefix reserved for MXC's per-run process cleanup rules.
 pub const RUN_MARKER_NAME_PREFIX: &str = "com.microsoft.mxc.run.";
 
-/// Reject caller-supplied names in the reserved cleanup prefix. A rule copied
-/// from another run would make that run's cleanup kill this run's processes.
+/// Reject caller-supplied names in the reserved cleanup prefix. The rules MXC
+/// appends to every profile override them, so they could never take effect.
 pub fn validate_seatbelt_reserved_names(request: &ExecutionRequest) -> Result<(), String> {
     let Some(config) = request.seatbelt.as_ref() else {
         return Ok(());
