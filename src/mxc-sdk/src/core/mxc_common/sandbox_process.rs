@@ -637,16 +637,7 @@ impl<B: SandboxBackend> Runner<B> {
             Err(response) => return response,
         };
 
-        let result = child.wait();
-        // Teardown failures only exist after the wait, and the executor prints
-        // the logger's warnings.
-        for warning in child.warnings() {
-            if !logger.warnings().contains(&warning) {
-                logger.warning_line(&warning);
-            }
-        }
-
-        match result {
+        let mut response = match child.wait() {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
                     exit_code,
@@ -682,7 +673,10 @@ impl<B: SandboxBackend> Runner<B> {
                 response.output_metadata = child.output_metadata().cloned().map(Box::new);
                 response
             }
-        }
+        };
+        // Backends report failures after exit, such as cleanup, here.
+        response.extend_warnings(child.warnings());
+        response
     }
 }
 
@@ -728,7 +722,9 @@ mod runner_tests {
 
     use super::*;
 
-    struct CompletedProcess(Vec<String>);
+    struct CompletedProcess {
+        warnings: Vec<String>,
+    }
 
     struct NativePipeSource;
 
@@ -849,6 +845,10 @@ mod runner_tests {
     }
 
     impl SandboxProcess for CompletedProcess {
+        fn warnings(&self) -> Vec<String> {
+            self.warnings.clone()
+        }
+
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
             None
         }
@@ -875,10 +875,6 @@ mod runner_tests {
 
         fn wait(&mut self) -> std::io::Result<i32> {
             Ok(0)
-        }
-
-        fn warnings(&self) -> Vec<String> {
-            self.0.clone()
         }
     }
 
@@ -907,8 +903,44 @@ mod runner_tests {
             validate_common(request)?;
             self.validate(request)?;
             self.direct_spawns.fetch_add(1, Ordering::Relaxed);
-            Ok(Box::new(CompletedProcess(Vec::new())))
+            Ok(Box::new(CompletedProcess {
+                warnings: Vec::new(),
+            }))
         }
+    }
+
+    struct CleanupWarningBackend;
+
+    impl SandboxBackend for CleanupWarningBackend {
+        fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+            Ok(())
+        }
+
+        fn spawn(
+            &mut self,
+            _request: &ExecutionRequest,
+            _logger: &mut Logger,
+            _stdio: StdioMode,
+        ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+            Ok(Box::new(CompletedProcess {
+                warnings: vec!["cleanup failed".to_string()],
+            }))
+        }
+    }
+
+    #[test]
+    fn runner_reports_process_warnings_with_the_exit_code() {
+        let mut runner = Runner::new(CleanupWarningBackend);
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.warnings(), ["cleanup failed"]);
     }
 
     #[test]
@@ -931,28 +963,6 @@ mod runner_tests {
         assert_eq!(response.exit_code, 0);
         assert_eq!(validations.load(Ordering::Relaxed), 1);
         assert_eq!(direct_spawns.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn runner_forwards_child_warnings_once() {
-        let runner = Runner::new(CountingBackend {
-            validations: Arc::new(AtomicUsize::new(0)),
-            direct_spawns: Arc::new(AtomicUsize::new(0)),
-            reject_validation: false,
-        });
-        let request = ExecutionRequest::default();
-        let mut logger = Logger::new(Mode::Buffer);
-        let child = || -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-            Ok(Box::new(CompletedProcess(vec![
-                "cleanup failed".to_string()
-            ])))
-        };
-
-        let response = runner.wait_for_child(&request, &mut logger, child());
-        runner.wait_for_child(&request, &mut logger, child());
-
-        assert_eq!(response.exit_code, 0);
-        assert_eq!(logger.warnings(), ["cleanup failed"]);
     }
 
     #[test]

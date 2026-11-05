@@ -1,0 +1,13 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "{{NODE}} {{TESTDIR}}/detach.js {{TESTDIR}}/detached.started",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": ["{{NODE_ROOT}}"],
+        "readwritePaths": ["{{TESTDIR}}"]
+    }
+}
