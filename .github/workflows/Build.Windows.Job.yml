@@ -152,45 +152,6 @@ jobs:
           MXC_TELEMETRY_TEST_KEYWORDS: '1'
         run: cargo build --locked -p wxc --features "test-support isolation_session"
 
-      - name: Verify telemetry component build checks
-        shell: pwsh
-        run: |
-          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
-          $bundled = Join-Path $PWD "mxc-sdk\resources\telemetry-component\$arch\mxc_telemetry.dll"
-          if (-not (Test-Path $bundled)) { throw "Missing bundled telemetry component: $bundled" }
-          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'telemetry-component-check'
-          Remove-Item Env:MXC_TELEMETRY_COMPONENT_PATH -ErrorAction SilentlyContinue
-
-          # The default release build verifies and loads the bundled DLL.
-          cargo check --locked --release -p mxc-sdk --lib
-          if ($LASTEXITCODE -ne 0) { throw 'Release build with the bundled telemetry component failed.' }
-
-          # An explicitly empty path builds unrouted without loading a DLL.
-          $env:MXC_TELEMETRY_COMPONENT_PATH = ''
-          cargo check --locked --release -p mxc-sdk --lib
-          if ($LASTEXITCODE -ne 0) { throw 'Unrouted release build failed.' }
-
-          # A modified copy must fail the build before it is loaded.
-          $tampered = Join-Path $env:RUNNER_TEMP 'tampered_mxc_telemetry.dll'
-          $bytes = [IO.File]::ReadAllBytes($bundled)
-          $bytes[2048] = $bytes[2048] -bxor 0xFF
-          [IO.File]::WriteAllBytes($tampered, $bytes)
-          $env:MXC_TELEMETRY_COMPONENT_PATH = $tampered
-          # The step's default 'Stop' preference would turn cargo's stderr into
-          # a terminating error before the output can be checked.
-          $ErrorActionPreference = 'Continue'
-          $output = cargo check --locked --release -p mxc-sdk --lib 2>&1 | Out-String
-          $tamperedExit = $LASTEXITCODE
-          Write-Host "Tampered build exit code: $tamperedExit"
-          Write-Host ($output -split "`n" | Select-Object -Last 15 | Out-String)
-          if ($tamperedExit -eq 0) { throw 'A tampered telemetry component was accepted.' }
-          if ($output -notmatch 'no valid Authenticode signature') {
-            throw "Tampered component failed for an unexpected reason:`n$output"
-          }
-
-          # The expected tampered-build failure leaves a nonzero exit status.
-          exit 0
-
       - name: Test telemetry ETW assertions, lifecycle requests and consent fixtures
         shell: pwsh
         run: ..\tests\scripts\test_telemetry_etw_assertions.ps1 -WxcExePath target\debug\wxc-exec.exe
@@ -244,3 +205,39 @@ jobs:
             src/target/${{ matrix.target }}/release/aci-edge-sandboxes/
           if-no-files-found: error
           retention-days: 1
+
+  telemetry-component-check:
+    name: Telemetry component (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Surface toolchain file at repo root
+        shell: pwsh
+        run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          override: false
+          rustflags: ''
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target/telemetry-component-check
+          key: telemetry-component-${{ matrix.arch }}
+          cache-on-failure: false
+
+      - name: Verify telemetry component build checks
+        shell: pwsh
+        run: .\scripts\ci\check-telemetry-component.ps1

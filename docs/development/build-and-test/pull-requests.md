@@ -21,6 +21,22 @@ regressions also reject empty selections and skipped SDK streaming cases.
 These checks do not require PSEC; scheduled ProcessContainer hosts execute the
 prebuilt public SDK streaming tests from the Windows SDK test bundle.
 
+### Telemetry component build checks
+
+The Windows workflow also runs a separate `Telemetry component` check on native
+x64 and arm64 hosts. It checks that the default release build loads the bundled
+signed DLL, an empty component path builds without routing, and a tampered DLL
+fails Authenticode verification. Each failure fails the check.
+
+Run locally on Windows from the repository root:
+
+```powershell
+.\scripts\ci\check-telemetry-component.ps1
+```
+
+The script uses `src\target\telemetry-component-check` for its Cargo output,
+removes the tampered copy, and restores the caller's environment.
+
 ### Native module lifetime regression
 
 From `src`, run:
