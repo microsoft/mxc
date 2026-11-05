@@ -13,6 +13,7 @@
 //!   Platform-agnostic for the same reason.
 //! - [`capture_analysis`] parses `captureDenials` log reports; platform-agnostic
 //!   so it is unit-tested everywhere.
+//! - `run_marker` finds every process in a run for cleanup (macOS only).
 //! - `seatbelt_runner` is gated to `target_os = "macos"` since it calls
 //!   `sandbox_init()`.
 
@@ -26,5 +27,7 @@ pub mod seatbelt_policy;
 pub(crate) mod denial_capture;
 #[cfg(target_os = "macos")]
 pub(crate) mod profile_preparation;
+#[cfg(target_os = "macos")]
+mod run_marker;
 #[cfg(target_os = "macos")]
 pub mod seatbelt_runner;

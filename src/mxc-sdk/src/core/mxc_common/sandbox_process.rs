@@ -674,6 +674,7 @@ impl<B: SandboxBackend> Runner<B> {
                 response
             }
         };
+        // Backends report failures after exit, such as cleanup, here.
         response.extend_warnings(child.warnings());
         response
     }
@@ -906,6 +907,41 @@ mod runner_tests {
             self.direct_spawns.fetch_add(1, Ordering::Relaxed);
             Ok(Box::new(CompletedProcess::default()))
         }
+    }
+
+    struct CleanupWarningBackend;
+
+    impl SandboxBackend for CleanupWarningBackend {
+        fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+            Ok(())
+        }
+
+        fn spawn(
+            &mut self,
+            _request: &ExecutionRequest,
+            _logger: &mut Logger,
+            _stdio: StdioMode,
+        ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+            Ok(Box::new(CompletedProcess {
+                warnings: vec!["cleanup failed".to_string()],
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[test]
+    fn runner_reports_process_warnings_with_the_exit_code() {
+        let mut runner = Runner::new(CleanupWarningBackend);
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = runner.run(&request, &mut logger);
+
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(response.warnings(), ["cleanup failed"]);
     }
 
     #[test]

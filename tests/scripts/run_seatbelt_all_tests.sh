@@ -69,6 +69,7 @@ run_test() {
 }
 
 run_test "Seatbelt Basic" "$SCRIPT_DIR/run_seatbelt_basic_test.sh"
+run_test "Seatbelt Process Lifetime" "$SCRIPT_DIR/run_seatbelt_process_lifetime_test.sh"
 run_test "Seatbelt Filesystem" "$SCRIPT_DIR/run_seatbelt_filesystem_test.sh"
 run_test "Seatbelt Path Resolution" "$SCRIPT_DIR/run_seatbelt_path_resolution_test.sh"
 run_test "Seatbelt Symlinks" "$SCRIPT_DIR/run_seatbelt_symlink_test.sh"

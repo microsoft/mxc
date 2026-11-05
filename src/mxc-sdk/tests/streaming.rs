@@ -689,3 +689,420 @@ fn seatbelt_capture_failure_after_timeout_is_a_warning() {
         "{warnings:?}"
     );
 }
+
+// Process lifetime: nothing the workload starts may outlive the run, including
+// a process that leaves MXC's session (`detached: true` calls `setsid()`).
+
+/// The `node` on `PATH` and the directory the sandbox must be able to read for
+/// it to start. Homebrew builds link Homebrew dylibs, so that whole root is
+/// granted for them.
+#[cfg(target_os = "macos")]
+fn node_install() -> (std::path::PathBuf, std::path::PathBuf) {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let node = std::env::split_paths(&path)
+        .map(|dir| dir.join("node"))
+        .find(|candidate| candidate.is_file())
+        .expect("node must be on PATH for the Seatbelt process-lifetime tests");
+    let resolved = std::fs::canonicalize(&node).expect("resolve node");
+    let root = if resolved.starts_with("/opt/homebrew") {
+        std::path::PathBuf::from("/opt/homebrew")
+    } else if resolved.starts_with("/usr/local/Cellar") {
+        std::path::PathBuf::from("/usr/local")
+    } else {
+        resolved
+            .ancestors()
+            .nth(2)
+            .expect("node install prefix")
+            .to_path_buf()
+    };
+    (resolved, root)
+}
+
+/// A per-test directory under `/tmp`, which the sandbox can write.
+#[cfg(target_os = "macos")]
+struct Scratch(std::path::PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::path::PathBuf::from(format!(
+            "/private/tmp/mxc-lifetime-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        Self(dir)
+    }
+
+    fn path(&self, name: &str) -> String {
+        self.0.join(name).display().to_string()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// SIGKILLs a leaked descendant when its test fails, so a failing run does not
+/// leave it on the host. Not done on success: the pid may have been reused.
+#[cfg(target_os = "macos")]
+struct KillIfFailing(u32);
+
+#[cfg(target_os = "macos")]
+impl Drop for KillIfFailing {
+    fn drop(&mut self) {
+        if std::thread::panicking() && pid_alive(self.0) {
+            // SAFETY: this pid was just observed alive as this test's leaked descendant.
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn lifetime_request(
+    command: String,
+    timeout_ms: Option<u32>,
+    node_root: &std::path::Path,
+) -> ContainerRequest {
+    ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec!["/private/tmp".to_string()],
+            readonly_paths: vec![node_root.display().to_string()],
+            denied_paths: vec![],
+            clear_policy_on_exit: None,
+        }),
+        timeout_ms,
+        ..ContainerRequest::new(command)
+    }
+}
+
+/// A shell command that uses Node to start `sleep 300` with
+/// `spawn(..., { detached: true, stdio: 'ignore' })`, prints `DETACHED=<pid>`,
+/// waits until that process has started, then runs `tail`.
+#[cfg(target_os = "macos")]
+fn detached_descendant_command(scratch: &Scratch, tail: &str) -> (String, std::path::PathBuf) {
+    let (node, root) = node_install();
+    let script = scratch.path("detach.js");
+    std::fs::write(
+        &script,
+        r#"const { spawn } = require('child_process');
+const child = spawn('/bin/sh', ['-c', 'echo started > "$0"; exec /bin/sleep 300', process.argv[2]], {
+  detached: true,
+  stdio: 'ignore',
+});
+child.unref();
+console.log(`DETACHED=${child.pid}`);
+"#,
+    )
+    .expect("write detach.js");
+    let marker = scratch.path("started");
+    let command = format!(
+        "'{node}' '{script}' '{marker}' || exit 96; i=0; \
+         while [ ! -s '{marker}' ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; \
+         [ -s '{marker}' ] || {{ echo DETACHED_NOT_STARTED; exit 97; }}; {tail}",
+        node = node.display()
+    );
+    (command, root)
+}
+
+#[cfg(target_os = "macos")]
+fn detached_pid(output: &str) -> u32 {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("DETACHED="))
+        .unwrap_or_else(|| panic!("no DETACHED=<pid> in output: {output}"))
+        .parse()
+        .expect("detached pid")
+}
+
+/// Reads stdout until `READY`, returning the detached descendant's pid.
+#[cfg(target_os = "macos")]
+fn read_detached_pid_until_ready(proc: &mut mxc_sdk::v1::MxcProcess) -> u32 {
+    use std::io::{BufRead, BufReader};
+
+    let mut reader = BufReader::new(proc.take_stdout().expect("stdout"));
+    let mut output = String::new();
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).expect("read stdout");
+        assert!(read != 0, "stdout ended before READY: {output}");
+        output.push_str(&line);
+        if line.trim() == "READY" {
+            return detached_pid(&output);
+        }
+    }
+}
+
+/// Waits for the run and returns its outcome, stdout, and stderr. Unlike
+/// `run()`, it keeps the handle, so the caller can check what `wait()` alone
+/// cleaned up before dropping the handle cleans up again.
+#[cfg(target_os = "macos")]
+fn wait_keeping_handle(proc: &mut mxc_sdk::v1::MxcProcess) -> (WaitResult, String, String) {
+    use std::io::Read;
+
+    fn capture(stream: Option<Box<dyn Read + Send>>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut stream) = stream {
+                let _ = stream.read_to_string(&mut text);
+            }
+            text
+        })
+    }
+
+    let stdout = capture(proc.take_stdout());
+    let stderr = capture(proc.take_stderr());
+    let outcome = proc.wait().expect("wait");
+    (
+        outcome,
+        stdout.join().expect("stdout reader"),
+        stderr.join().expect("stderr reader"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn assert_descendant_gone(pid: u32, when: &str) {
+    for _ in 0..100 {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("detached descendant {pid} is still running {when}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn wait_kills_detached_descendant_after_normal_exit() {
+    let scratch = Scratch::new("normal");
+    let (command, node_root) = detached_descendant_command(&scratch, "exit 0");
+    let mut proc = spawn(
+        lifetime_request(command, None, &node_root),
+        Default::default(),
+    )
+    .expect("spawn");
+
+    let (outcome, stdout, stderr) = wait_keeping_handle(&mut proc);
+    assert_eq!(
+        outcome,
+        WaitResult::Exited(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    let descendant = detached_pid(&stdout);
+    let _guard = KillIfFailing(descendant);
+
+    assert_descendant_gone(descendant, "after wait() returned");
+    drop(proc);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dropping_handle_kills_detached_descendant() {
+    let scratch = Scratch::new("drop");
+    let (command, node_root) = detached_descendant_command(&scratch, "echo READY; sleep 300");
+    let mut proc = spawn(
+        lifetime_request(command, None, &node_root),
+        Default::default(),
+    )
+    .expect("spawn");
+    let descendant = read_detached_pid_until_ready(&mut proc);
+    let _guard = KillIfFailing(descendant);
+    assert!(pid_alive(descendant), "descendant should run before drop");
+
+    drop(proc);
+
+    assert_descendant_gone(descendant, "after the handle was dropped");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_kill_terminates_detached_descendant() {
+    let scratch = Scratch::new("kill");
+    let (command, node_root) = detached_descendant_command(&scratch, "echo READY; sleep 300");
+    let mut proc = spawn(
+        lifetime_request(command, None, &node_root),
+        Default::default(),
+    )
+    .expect("spawn");
+    let descendant = read_detached_pid_until_ready(&mut proc);
+    let _guard = KillIfFailing(descendant);
+    assert!(pid_alive(descendant), "descendant should run before kill");
+
+    proc.kill().expect("kill");
+
+    assert_descendant_gone(descendant, "after kill()");
+    let _ = proc.wait();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_timeout_kills_detached_descendant() {
+    let scratch = Scratch::new("timeout");
+    let (command, node_root) = detached_descendant_command(&scratch, "echo READY; sleep 300");
+    let mut proc = spawn(
+        lifetime_request(command, Some(5_000), &node_root),
+        Default::default(),
+    )
+    .expect("spawn");
+    let descendant = read_detached_pid_until_ready(&mut proc);
+    let _guard = KillIfFailing(descendant);
+    assert!(
+        pid_alive(descendant),
+        "descendant should run before the timeout"
+    );
+
+    assert_eq!(proc.wait().expect("wait"), WaitResult::TimedOut);
+
+    assert_descendant_gone(descendant, "after the timeout");
+}
+
+/// Ending one run must not touch the processes of another run, including a
+/// run whose profile allows or denies Mach names by their last character.
+#[cfg(target_os = "macos")]
+#[test]
+fn streaming_kill_leaves_concurrent_run_running() {
+    use mxc_sdk::v1::configs::SeatbeltConfig;
+    use mxc_sdk::v1::Containment;
+    use std::io::{BufRead, BufReader};
+
+    const SPLIT_PROFILE: &str =
+        "(version 1)(allow default)(deny mach-lookup (global-name-regex #\"[89a-f]$\"))";
+
+    fn start(profile_override: Option<&str>) -> (mxc_sdk::v1::MxcProcess, u32, KillIfFailing) {
+        let mut request = seatbelt_request("sleep 300 & echo CHILD=$!; sleep 300", 0);
+        if let Some(profile) = profile_override {
+            let mut config = SeatbeltConfig::default();
+            config.profile_override = Some(profile.to_string());
+            request.containment = Containment::Seatbelt(config);
+        }
+        let mut proc = spawn(request, Default::default()).expect("spawn");
+        let mut line = String::new();
+        BufReader::new(proc.take_stdout().expect("stdout"))
+            .read_line(&mut line)
+            .expect("read child pid");
+        let child = line
+            .trim()
+            .strip_prefix("CHILD=")
+            .expect("CHILD= prefix")
+            .parse()
+            .expect("child pid");
+        (proc, child, KillIfFailing(child))
+    }
+
+    fn end(mut proc: mxc_sdk::v1::MxcProcess, child: u32, survivor: u32) {
+        proc.kill().expect("kill");
+        assert_descendant_gone(child, "after its run was killed");
+        let _ = proc.wait();
+        assert!(
+            pid_alive(survivor),
+            "killing one run also killed {survivor} from a concurrent run"
+        );
+    }
+
+    let (first, first_child, _first_guard) = start(None);
+    let (split, split_child, _split_guard) = start(Some(SPLIT_PROFILE));
+    end(first, first_child, split_child);
+
+    let (last, last_child, _last_guard) = start(None);
+    end(split, split_child, last_child);
+
+    let mut last = last;
+    last.kill().expect("kill last run");
+    assert_descendant_gone(last_child, "after its run was killed");
+    let _ = last.wait();
+}
+
+/// Owns a hopping chain's scratch directory. On drop it creates the stop file,
+/// waits for the chain to stop writing, and only then removes the directory;
+/// a chain that keeps running keeps its directory and stop file.
+#[cfg(target_os = "macos")]
+struct ChainScratch(Option<Scratch>);
+
+#[cfg(target_os = "macos")]
+impl ChainScratch {
+    fn path(&self, name: &str) -> String {
+        self.0.as_ref().expect("scratch").path(name)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ChainScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.path("stop"), b"");
+        let log = self.path("chain.log");
+        let mut last = chain_length(&log);
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let now = chain_length(&log);
+            if now == last {
+                return;
+            }
+            last = now;
+        }
+        let scratch = self.0.take().expect("scratch");
+        eprintln!("process chain under {} did not stop", scratch.0.display());
+        std::mem::forget(scratch);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn chain_length(log: &str) -> usize {
+    std::fs::read_to_string(log)
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+/// Each process in a chain forks the next and exits at once, so a scan that
+/// lists processes and then inspects them can see a process exit before it is
+/// inspected while its replacement, started after the listing, is missed by
+/// that scan and by the next. Several chains hop in parallel. None may outlive
+/// the run.
+#[cfg(target_os = "macos")]
+#[test]
+fn wait_kills_descendant_chain_that_outpaces_process_scans() {
+    let scratch = ChainScratch(Some(Scratch::new("chain")));
+    let log = scratch.path("chain.log");
+    let command = format!(
+        r#"LOG='{log}' STOP='{stop}' G=0
+hop() {{ [ -e "$STOP" ] && exit 0; [ "$G" -ge 100000 ] && exit 0; G=$((G+1)); echo x >> "$LOG"; ( hop ) </dev/null >/dev/null 2>&1 & exit 0; }}
+: > "$LOG"
+for chain in 1 2 3 4 5 6 7 8; do ( hop ) </dev/null >/dev/null 2>&1 & done
+i=0; while [ $(($(wc -l < "$LOG"))) -lt 200 ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
+[ $(($(wc -l < "$LOG"))) -ge 200 ] || {{ echo CHAIN_NOT_HOPPING; exit 97; }}"#,
+        stop = scratch.path("stop"),
+    );
+    let request = ContainerRequest {
+        filesystem: Some(FilesystemPolicy {
+            readwrite_paths: vec!["/private/tmp".to_string()],
+            readonly_paths: vec![],
+            denied_paths: vec![],
+            clear_policy_on_exit: None,
+        }),
+        ..ContainerRequest::new(command)
+    };
+
+    let mut proc = spawn(request, Default::default()).expect("spawn");
+
+    let (outcome, stdout, stderr) = wait_keeping_handle(&mut proc);
+    assert_eq!(
+        outcome,
+        WaitResult::Exited(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let before = chain_length(&log);
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let after = chain_length(&log);
+    assert_eq!(
+        before, after,
+        "the process chain kept running after wait() returned ({before} -> {after} hops)"
+    );
+    drop(proc);
+}

@@ -156,11 +156,10 @@ jobs:
     displayName: 'Build in-process IsolationSession tests'
 
   # Build the SDK and integration tests so the Node E2E suite can be
-  # included in the test bundle.  The SDK has a native dep (node-pty)
-  # that requires node-gyp; the windows-2022 image has VS build tools.
-  # Populate sdk/node/bin/x64 with the freshly-built wxc-exec.exe so the SDK
-  # resolves its binary at runtime.  (build.bat does this; the pipeline
-  # must replicate it since we only build wxc-exec, not the full repo.)
+  # included in the test bundle.
+  # Populate sdk/node/bin/x64 with the freshly-built wxc-exec.exe and
+  # mxc_ffi.dll so the SDK resolves them at runtime.  (build.bat does this,
+  # but this pipeline does not run it.)
   - powershell: |
       $sdkBin = "$(Build.SourcesDirectory)/sdk/node/bin/x64"
       New-Item -ItemType Directory -Force -Path $sdkBin | Out-Null
@@ -399,7 +398,7 @@ jobs:
     displayName: 'Assemble test bundle'
 
   # Test sign (CP-230072) the staged binaries so the vpack ships signed binaries.
-  - task: EsrpCodeSigning@5
+  - task: EsrpCodeSigning@6
     displayName: Code Sign
     inputs:
       ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
