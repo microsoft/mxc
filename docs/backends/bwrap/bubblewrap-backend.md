@@ -575,8 +575,8 @@ hooked into `INPUT`, for both families:
 
 ```
 -i lo -j ACCEPT
--m state --state ESTABLISHED,RELATED -j ACCEPT
--m state --state NEW -j DROP
+-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-m conntrack --ctstate NEW -j DROP
 -j DROP
 ```
 
