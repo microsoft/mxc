@@ -815,6 +815,45 @@ mod tests {
         );
     }
 
+    /// An embedded NUL in `containerId` must be refused before `start_container`.
+    /// Session-name conversion truncates at the first NUL, so this cannot wait
+    /// until the SDK is loaded.
+    #[test]
+    fn spawn_rejects_embedded_nul_container_id_before_touching_the_wslc_sdk() {
+        let request = ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            container_id: "alpha\0evil".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&crate::mxc_common::models::WslcConfig::default());
+
+        let err = runner
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .err()
+            .expect("an embedded NUL must not produce a live container");
+        assert!(
+            err.error_message
+                .contains("containerId must not contain null bytes"),
+            "the refusal must come from the id check, not bring-up: {}",
+            err.error_message
+        );
+        assert!(
+            !err.error_message.contains('\0'),
+            "the raw id must not be echoed"
+        );
+        assert_eq!(
+            err.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            !logger.get_buffer().contains(START_CONTAINER_BANNER),
+            "guard must run before `start_container`; logger: {}",
+            logger.get_buffer()
+        );
+    }
+
     /// The exact contradiction the streaming contract forbids: a timed-out run
     /// is killed, so the container *has* an exit code to report — and reporting
     /// it would turn `wait`'s `Err(TimedOut)` into a later `Ok(Some(137))`.
