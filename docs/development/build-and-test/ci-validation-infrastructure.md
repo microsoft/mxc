@@ -204,6 +204,11 @@ pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
 direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
 against Bubblewrap and Seatbelt in Linux and macOS PR integration jobs.
 
+Linux Node SDK integration jobs in GitHub Actions and Azure Pipelines run
+`npm test` under `sudo` with an explicit `env "PATH=$PATH"`. This keeps npm
+scripts and worker processes on the job-selected Node runtime instead of the
+image's system Node.
+
 IsolationSession and WSLC require V1.Dev lifecycle, captured/piped exec,
 validation, and cleanup cases. IsolationSession also covers existing-container
 PTYs; its Rust and Node cases check partial capture on timeout with

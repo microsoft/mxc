@@ -108,7 +108,8 @@ jobs:
             sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap slirp4netns iproute2
           displayName: Install LXC, Bubblewrap, and slirp4netns
 
-        - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
+        # sudo resets PATH; retain the Node.js toolchain selected by UseNode.
+        - script: sudo env "PATH=$PATH" MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test (sudo, with LXC)
 
