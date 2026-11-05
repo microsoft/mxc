@@ -279,6 +279,23 @@ mod windows_x64 {
     }
 
     #[test]
+    fn malformed_environment_is_rejected_with_host_loopback_allow() {
+        let mut request = process_only_request("printf forbidden");
+        request["process"]["env"] = json!(["MISSING_EQUALS"]);
+        request["process"]["inheritDefaultEnv"] = json!(true);
+        request["network"] = json!({
+            "ingress": {"default": "deny", "hostLoopback": "allow"}
+        });
+
+        let error = __ffi::run_json(&request.to_string(), true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert_eq!(
+            error.message,
+            "NVX process.env entries must be KEY=VALUE without null bytes"
+        );
+    }
+
+    #[test]
     fn signed_agent_proxy_validation_withholds_credentials() {
         for proxy in [
             "http://synthetic-user:synthetic-secret@[::1]:3128",
@@ -421,6 +438,14 @@ mod windows_x64 {
 
     fn valid_process_boundaries() -> Vec<(&'static str, Value)> {
         vec![
+            (
+                "ingress-allow",
+                json!({"network": {"ingress": {"default": "allow", "hostLoopback": "deny"}}}),
+            ),
+            (
+                "host-loopback-allow",
+                json!({"network": {"ingress": {"default": "deny", "hostLoopback": "allow"}}}),
+            ),
             ("legacy-fallback-empty", json!({"fallback": {}})),
             (
                 "legacy-fallback-true",
@@ -646,6 +671,25 @@ mod windows_x64 {
                 stderr.contains("microvm.provision.memoryMib must be greater than zero"),
                 "{stderr}"
             );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
+        }
+        for (port, accepted) in [(0, false), (53, false), (3128, true)] {
+            let mut request = process_only_request("printf forbidden");
+            request["network"] = json!({"egress": {"default": "deny"}, "ingress": {"default": "deny", "hostLoopback": "deny"}});
+            request["runtimeConfig"] = json!({"networkProxy": format!("http://127.0.0.1:{port}")});
+            let output = executor_output_with_mode(&request, false, true);
+            assert_eq!(
+                output.status.success(),
+                accepted,
+                "proxy {port}: {output:?}"
+            );
+            if !accepted {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(stderr.contains("policy_validation"), "{stderr}");
+                if port == 53 {
+                    assert!(stderr.contains("port other than 53"), "{stderr}");
+                }
+            }
             assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
         }
         for (label, patch) in rejected_requests() {

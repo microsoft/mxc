@@ -3,14 +3,16 @@
 
 use std::path::PathBuf;
 
-use super::abi::{
-    Capabilities, EgressPolicy, ExecRequest, FilesystemPolicy, IngressPolicy, NetworkPeer,
-    NetworkPolicy, NetworkPort, NetworkRule, ProvisionRequest, RuntimeConfig, SandboxSpec,
+use aci_edge_sandboxes::{
+    Access, Capabilities, EgressPolicy, ExecRequest, FilesystemPolicy, IngressPolicy, NetworkPeer,
+    NetworkPolicy, NetworkPort, NetworkRule, Protocol, ProvisionRequest, RuntimeConfig,
+    SandboxSpec,
 };
 
 use crate::mxc_common::models::{
     ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer as MxcNetworkPeer,
-    NetworkPort as MxcNetworkPort, NetworkRule as MxcNetworkRule,
+    NetworkPort as MxcNetworkPort, NetworkProtocol as MxcNetworkProtocol,
+    NetworkRule as MxcNetworkRule,
 };
 use crate::mxc_common::mxc_error::MxcError;
 
@@ -44,6 +46,7 @@ pub(super) fn provision_request(
                     network_proxy: Some(proxy.to_url()),
                 }
             }),
+            ..Default::default()
         };
     Ok((provision, spec))
 }
@@ -73,7 +76,9 @@ pub(super) fn exec_request(
     let mut exec = ExecRequest::command_line(request.script_code.clone())
         .with_inherit_default_env(request.inherit_default_env);
     if request.script_timeout != 0 {
-        exec = exec.with_timeout_ms(u64::from(request.script_timeout));
+        exec = exec.with_timeout(std::time::Duration::from_millis(u64::from(
+            request.script_timeout,
+        )));
     }
     if !request.working_directory.is_empty() {
         exec = exec.with_cwd(request.working_directory.clone());
@@ -286,15 +291,31 @@ fn network_policy(request: &ExecutionRequest) -> Option<NetworkPolicy> {
     let ingress = request.policy.network_ingress.clone().unwrap_or_default();
     Some(NetworkPolicy {
         egress: EgressPolicy {
-            default: egress.default,
+            default: action(egress.default),
             allow: egress.allow.iter().map(network_rule).collect(),
             deny: egress.deny.iter().map(network_rule).collect(),
         },
         ingress: IngressPolicy {
-            default: ingress.default,
-            host_loopback: Some(ingress.host_loopback),
+            default: action(ingress.default),
+            host_loopback: Some(action(ingress.host_loopback)),
         },
     })
+}
+
+fn action(value: NetworkAction) -> Access {
+    match value {
+        NetworkAction::Allow => Access::Allow,
+        NetworkAction::Deny => Access::Deny,
+    }
+}
+
+fn protocol(value: MxcNetworkProtocol) -> Protocol {
+    match value {
+        MxcNetworkProtocol::Tcp => Protocol::Tcp,
+        MxcNetworkProtocol::Udp => Protocol::Udp,
+        MxcNetworkProtocol::Icmp => Protocol::Icmp,
+        MxcNetworkProtocol::Any => Protocol::Any,
+    }
 }
 
 fn cidr(value: &NetworkCidr) -> String {
@@ -310,7 +331,7 @@ fn network_peer(peer: &MxcNetworkPeer) -> NetworkPeer {
 
 fn network_port(port: &MxcNetworkPort) -> NetworkPort {
     NetworkPort {
-        protocol: port.protocol,
+        protocol: protocol(port.protocol),
         port: port.port,
         end_port: port.end_port,
     }
@@ -431,7 +452,7 @@ mod tests {
                 "ingress": {"default": "deny", "hostLoopback": "deny"}
             })
         );
-        assert_eq!(network.egress.default, NetworkAction::Deny);
+        assert_eq!(network.egress.default, Access::Deny);
         assert_eq!(network.egress.allow.len(), 2);
         assert_eq!(network.egress.deny.len(), 1);
         let allow = &network.egress.allow[0];
@@ -444,7 +465,7 @@ mod tests {
             (NetworkProtocol::Udp, Some(53), None),
             (NetworkProtocol::Any, None, None),
         ]) {
-            assert_eq!(actual.protocol, protocol);
+            assert_eq!(actual.protocol, super::protocol(protocol));
             assert_eq!(actual.port, port);
             assert_eq!(actual.end_port, end_port);
         }
@@ -458,7 +479,7 @@ mod tests {
         assert_eq!(deny.to[0].cidr, "192.0.2.0/24");
         assert!(deny.to[0].except.is_empty());
         assert_eq!(deny.ports.len(), 1);
-        assert_eq!(deny.ports[0].protocol, NetworkProtocol::Icmp);
+        assert_eq!(deny.ports[0].protocol, Protocol::Icmp);
         assert_eq!(deny.ports[0].port, None);
         assert_eq!(deny.ports[0].end_port, None);
     }
@@ -517,7 +538,7 @@ mod tests {
         let (_, spec) = provision_request(&request, &capabilities()).unwrap();
         assert_eq!(
             spec.image,
-            Some(super::super::abi::ImageSource::Reference(
+            Some(aci_edge_sandboxes::ImageSource::Reference(
                 "docker.io/library/python:3.12-alpine".to_owned()
             ))
         );
@@ -547,7 +568,7 @@ mod tests {
             let (provision, spec) = provision_request(&prepared, &capabilities()).unwrap();
             assert_eq!(
                 spec.image,
-                Some(super::super::abi::ImageSource::Reference(image.to_owned()))
+                Some(aci_edge_sandboxes::ImageSource::Reference(image.to_owned()))
             );
             let filesystem = provision.filesystem.unwrap();
             assert_eq!(filesystem.readonly_paths, vec![PathBuf::from(r"C:\ro")]);
@@ -557,9 +578,9 @@ mod tests {
                 vec![PathBuf::from(r"C:\rw\secret")]
             );
             let network = provision.network.unwrap();
-            assert_eq!(network.egress.default, NetworkAction::Deny);
-            assert_eq!(network.ingress.default, NetworkAction::Deny);
-            assert_eq!(network.ingress.host_loopback, Some(NetworkAction::Deny));
+            assert_eq!(network.egress.default, Access::Deny);
+            assert_eq!(network.ingress.default, Access::Deny);
+            assert_eq!(network.ingress.host_loopback, Some(Access::Deny));
         }
     }
 
@@ -602,6 +623,64 @@ mod tests {
         });
         let error = provision_request(&request, &capabilities()).unwrap_err();
         assert!(error.message.contains("ingress.default=allow"));
+    }
+
+    #[test]
+    fn malformed_environment_precedes_unadvertised_host_loopback() {
+        let mut request = request();
+        request.policy.network_specified = true;
+        request.policy.network_ingress = Some(NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Allow,
+        });
+        request.inherit_default_env = true;
+        request.env = Some(vec!["MISSING_EQUALS".to_owned()]);
+        let caps = capabilities();
+        assert!(!caps.network.host_loopback_allow);
+
+        let error = provision_request(&request, &caps).unwrap_err();
+        assert_eq!(
+            error.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::MalformedRequest
+        );
+        assert_eq!(
+            error.message,
+            "NVX process.env entries must be KEY=VALUE without null bytes"
+        );
+
+        request.env = Some(vec!["KEY=value".to_owned()]);
+        let error = provision_request(&request, &caps).unwrap_err();
+        assert_eq!(
+            error.code,
+            crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(error.message.contains("network.ingress.hostLoopback=allow"));
+    }
+
+    #[test]
+    fn ingress_postures_follow_advertised_capabilities() {
+        let mut request = request();
+        request.policy.network_specified = true;
+        request.policy.network_ingress = Some(NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+        validate_request(&request).unwrap();
+        let mut caps = capabilities();
+        assert!(provision_request(&request, &caps)
+            .unwrap_err()
+            .message
+            .contains("ingress.default=allow"));
+        caps.network.ingress_allow = true;
+        assert!(provision_request(&request, &caps)
+            .unwrap_err()
+            .message
+            .contains("hostLoopback=allow"));
+        caps.network.host_loopback_allow = true;
+        let (provision, _) = provision_request(&request, &caps).unwrap();
+        let ingress = provision.network.unwrap().ingress;
+        assert_eq!(ingress.default, Access::Allow);
+        assert_eq!(ingress.host_loopback, Some(Access::Allow));
     }
 
     #[test]

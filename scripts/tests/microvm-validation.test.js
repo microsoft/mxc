@@ -88,14 +88,39 @@ fn main() {
         }
         assert!(args.contains(&"--locked".to_owned()));
         assert!(args.contains(&"--release".to_owned()));
-        assert!(args.contains(&"--no-run".to_owned()));
-        assert!(args.windows(2).any(|pair| pair == ["--test", "nvx_e2e"]));
+        if args.windows(2).any(|pair| pair == ["--test", "module_lifetime"]) {
+            assert!(args.windows(2).any(|pair| pair == ["--features", "microvm"]));
+            assert!(args.contains(&"--exact".to_owned()));
+            assert!(args.contains(&"nvx_error_keeps_pending_worker_code_loaded".to_owned()));
+            match mode.as_str() {
+                "module-lifetime-missing" => println!("test result: ok. 0 passed; 0 failed;"),
+                "module-lifetime-ignored" => println!("test nvx_error_keeps_pending_worker_code_loaded ... ignored"),
+                _ => println!("test nvx_error_keeps_pending_worker_code_loaded ... ok"),
+            }
+            if mode == "module-lifetime-failure" {
+                process::exit(19);
+            }
+            return;
+        }
+        let signature_check = args.windows(2).any(|pair| pair == ["--test", "nvx_bundle_integrity"]);
+        assert!(args.contains(&"--no-run".to_owned()) || signature_check);
+        assert!(args.windows(2).any(|pair| pair == ["--test", "nvx_e2e"]) || signature_check);
         assert!(args.windows(2).any(|pair| pair == ["--target", "x86_64-pc-windows-msvc"]));
         if let Some(index) = args.iter().position(|arg| arg == "--manifest-path") {
             let manifest = Path::new(&args[index + 1]);
             assert!(manifest.is_file());
             assert_eq!(manifest.parent().unwrap().file_name().unwrap(), "mxc-sdk-1.0.0");
             assert!(args.contains(&"--offline".to_owned()));
+            if signature_check {
+                assert!(args.iter().any(|arg| arg == "crate_staged_bundle_opens_and_rejects_an_unverified_library"));
+                if mode == "packaged-signature-failure" {
+                    eprintln!("fixture packaged signature failed");
+                    process::exit(31);
+                }
+                let passed = if mode == "packaged-signature-empty" { 0 } else { 1 };
+                println!("test result: ok. {passed} passed; 0 failed; 0 ignored;");
+                return;
+            }
             if mode == "packaged-build-failure" {
                 eprintln!("fixture packaged compilation failed");
                 process::exit(29);
@@ -111,7 +136,19 @@ fn main() {
             let executable = env::var("MXC_CI_FIXTURE_EXECUTABLE").unwrap();
             assert!(Path::new(&executable).is_file());
             println!("{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"nvx_e2e\"}},\"profile\":{{\"test\":true}},\"executable\":{executable:?}}}");
+            if mode != "missing-signature-artifact" {
+                println!("{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"nvx_bundle_integrity\"}},\"profile\":{{\"test\":true}},\"executable\":{executable:?}}}");
+            }
         }
+        return;
+    }
+    if args.iter().any(|arg| arg == "crate_staged_bundle_opens_and_rejects_an_unverified_library") {
+        if mode == "signature-failure" {
+            eprintln!("fixture NVX signature validation failed");
+            process::exit(31);
+        }
+        let passed = if mode == "signature-empty" { 0 } else { 1 };
+        println!("test result: ok. {passed} passed; 0 failed; 0 ignored;");
         return;
     }
     if args == ["--list"] {
@@ -292,9 +329,11 @@ function azureBundleFixture(mode = "") {
   const bundle = join(target, "aci-edge-sandboxes");
   mkdirSync(target);
   mkdirSync(join(outputDirectory, triplet), { recursive: true });
-  const pins = readFileSync(join(root, "src", "mxc-sdk", "build", "build_nvx_bundled.rs"), "utf8");
-  const inventory = [...pins.matchAll(/"([^"\r\n]+)",\s*"([0-9a-f]{64})"/g)].map((match) => match[1]);
-  assert.equal(inventory.length, 18, "fixture must exercise the complete approved bundle inventory");
+  // Verify recursive copying, including files unknown to MXC's packaging logic.
+  const inventory = ["SOURCE-MANIFEST.json", "bundle-manifest.json", "SHA256SUMS",
+    "bin/aci_edge_agent.dll", "bin/direct-images.exe", "bin/openvmm.exe",
+    "guest/vmlinux", "guest/initramfs-edge.cpio.gz", "source/nested/extra.txt"];
+
   if (mode !== "absent") {
     mkdirSync(bundle);
     if (mode !== "empty") {
@@ -327,7 +366,7 @@ function fileDigests(directory, prefix = "") {
     .sort(([left], [right]) => left.localeCompare(right));
 }
 
-test("Azure release artifact includes the complete signed NVX bundle with unchanged hashes", () => {
+test("Azure release artifact recursively copies the NVX bundle unchanged", () => {
   const result = azureBundleFixture();
   assert.equal(result.status, 0, result.output);
   const expected = fileDigests(result.bundle);
@@ -498,12 +537,18 @@ test("package gate compiles MicroVM tests from the extracted archive", () => {
 for (const [mode, message] of [
   ["packaged-missing-fixture", /Packaged MicroVM fixture is missing: microvm_timeout\.json/],
   ["packaged-build-failure", /packaged MicroVM test compilation failed with exit 29/],
+  ["packaged-signature-failure", /packaged NVX signature verification failed with exit 31/],
+  ["packaged-signature-empty", /packaged NVX signature verification did not execute its required test/],
 ]) {
   test(`package gate rejects ${mode}`, () => {
     const result = verifyPackage(mode);
     assert.notEqual(result.status, 0, result.output);
     assert.match(result.output, message);
-    assert.doesNotMatch(result.output, /Compiled the MicroVM test target/);
+    if (mode.startsWith("packaged-signature-")) {
+      assert.match(result.output, /Compiled the MicroVM test target/);
+    } else {
+      assert.doesNotMatch(result.output, /Compiled the MicroVM test target/);
+    }
   });
 }
 
@@ -575,6 +620,38 @@ function stage(mode = "") {
   return { ...result, directory };
 }
 
+function requireModuleLifetime(mode = "") {
+  const workflow = readFileSync(join(root, ".github", "workflows", "Build.Windows.Job.yml"), "utf8");
+  const block = workflow.match(
+    /      - name: Require NVX module lifetime regression\n[\s\S]*?        run: \|\n((?:          [^\n]*\n)+)/
+  );
+  assert.ok(block, "Windows must require the NVX module lifetime regression");
+  const script = join(mkdtempSync(join(scratch, "module-lifetime-")), "require.ps1");
+  writeFileSync(
+    script,
+    "$ErrorActionPreference = 'Stop'\n" +
+      block[1].replace(/^ {10}/gm, "").replaceAll("${{ matrix.target }}", "x86_64-pc-windows-msvc")
+  );
+  return runScript(script, [], {
+    PATH: tools + delimiter + process.env.PATH,
+    MXC_CI_FIXTURE_MODE: mode,
+  });
+}
+
+test("Windows requires the NVX module lifetime scenario to execute and pass", () => {
+  const result = requireModuleLifetime();
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /test nvx_error_keeps_pending_worker_code_loaded \.\.\. ok/);
+});
+
+for (const mode of ["module-lifetime-missing", "module-lifetime-ignored", "module-lifetime-failure"]) {
+  test(`module lifetime gate rejects ${mode}`, () => {
+    const result = requireModuleLifetime(mode);
+    assert.notEqual(result.status, 0, result.output);
+    assert.match(result.output, /NVX module lifetime regression must execute and pass/);
+  });
+}
+
 test("staging uses Cargo's reported executable and checks VM test discovery", () => {
   const result = stage();
   assert.equal(result.status, 0, result.output);
@@ -596,6 +673,9 @@ for (const [mode, message] of [
   ["missing-network-discovery", /did not discover[\s\S]*windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors/],
   ["missing-host-loopback-discovery", /did not discover[\s\S]*windows_network::signed_bundle_host_loopback_ingress/],
   ["missing-network-proxy-discovery", /did not discover[\s\S]*windows_network::signed_bundle_deny_default_proxy_policy/],
+  ["missing-signature-artifact", /Expected one NVX bundle verification executable/],
+  ["signature-failure", /staged NVX artifact failed signature and integrity validation with exit code 31/],
+  ["signature-empty", /staged NVX signature verification did not execute its required test/],
 ]) {
   test(`staging rejects ${mode}`, () => {
     const result = stage(mode);
@@ -611,6 +691,9 @@ for (const [mode, message] of [
       "missing-network-discovery",
       "missing-host-loopback-discovery",
       "missing-network-proxy-discovery",
+      "missing-signature-artifact",
+      "signature-failure",
+      "signature-empty",
     ].includes(mode)) {
       assert.equal(existsSync(join(result.directory, "nvx-e2e-tests.exe")), false);
     }

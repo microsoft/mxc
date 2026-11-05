@@ -12,10 +12,10 @@ use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::proxy_env::proxy_url_has_credentials;
 use crate::mxc_common::script_runner::{RunCancellation, ScriptRunner};
 
+use super::runtime::{NvxClient, PreparedProvision, SandboxClient};
 #[cfg(test)]
-use super::abi::{Capabilities, ExecRequest};
-use super::abi::{ExecOutcome, ProvisionInput};
-use super::runtime::{NvxClient, SandboxClient};
+use aci_edge_sandboxes::{Capabilities, ExecRequest};
+use aci_edge_sandboxes::{ExecOutcome, ExecRequest as NativeExecRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapturedOutcome {
@@ -129,7 +129,7 @@ fn request_has_sensitive_proxy(request: &ExecutionRequest) -> bool {
 fn prepare_request(
     client: &impl SandboxClient,
     request: &ExecutionRequest,
-) -> Result<(ProvisionInput, super::abi::ExecRequest), MxcError> {
+) -> Result<(PreparedProvision, NativeExecRequest), MxcError> {
     let sensitive_proxy = request_has_sensitive_proxy(request);
     let protect = |operation, error| protect_native_error(error, operation, sensitive_proxy);
     let capabilities = client
@@ -137,7 +137,7 @@ fn prepare_request(
         .map_err(|error| protect("capabilities", error))?;
     let (provision, spec) = super::policy::provision_request(request, &capabilities)?;
     let exec = super::policy::exec_request(request, &capabilities)?;
-    let input = ProvisionInput {
+    let input = PreparedProvision {
         request: provision,
         spec,
     };
@@ -316,7 +316,11 @@ fn protect_native_error(mut error: MxcError, operation: &str, sensitive_proxy: b
         };
         let capture_limit =
             super::runtime::capture_limit_error(super::runtime::CAPTURE_LIMIT_BYTES);
-        if primary == "execution cancelled" || primary == capture_limit.message {
+        if primary == "execution cancelled"
+            || primary == capture_limit.message
+            || primary == super::runtime::UNKNOWN_OUTCOME
+            || primary == super::runtime::CANCEL_UNFINISHED
+        {
             if cleanup {
                 error.message = format!(
                     "{primary}; execution cleanup failed; native error detail withheld because the configured proxy contains credentials"
@@ -429,9 +433,10 @@ fn captured_to_script_response(
 mod tests {
     use std::cell::RefCell;
 
-    use super::super::abi::SandboxDiagnostics;
-    use super::super::runtime::{ExecOutput, SandboxId};
+    use super::super::runtime::ExecOutput;
     use super::*;
+    use aci_edge_sandboxes::agent::SandboxDiagnostics;
+    use aci_edge_sandboxes::SandboxId;
 
     fn test_capabilities() -> Capabilities {
         let mut capabilities = Capabilities::default();
@@ -637,8 +642,14 @@ mod tests {
             ..Default::default()
         };
         let mapped = super::super::policy::exec_request(&request, &capabilities).unwrap();
-        assert_eq!(mapped.process.command_line, request.script_code);
-        assert_eq!(mapped.process.timeout, Some(250));
+        assert_eq!(
+            mapped.process.command,
+            aci_edge_sandboxes::Command::CommandLine(request.script_code.clone())
+        );
+        assert_eq!(
+            mapped.process.timeout,
+            Some(std::time::Duration::from_millis(250))
+        );
         assert_eq!(mapped.process.cwd.as_deref(), Some("/tmp"));
         assert_eq!(mapped.process.env, Some(Vec::new()));
         assert_eq!(mapped.process.inherit_default_env, Some(true));
@@ -660,8 +671,8 @@ mod tests {
         calls: RefCell<Vec<&'static str>>,
         validated_request: RefCell<Option<ExecRequest>>,
         executed_request: RefCell<Option<ExecRequest>>,
-        validated_provision: RefCell<Option<ProvisionInput>>,
-        provisioned_input: RefCell<Option<ProvisionInput>>,
+        validated_provision: RefCell<Option<PreparedProvision>>,
+        provisioned_input: RefCell<Option<PreparedProvision>>,
         capabilities_res: Result<Capabilities, MxcError>,
         validate_provision_res: Result<(), MxcError>,
         validate_res: Result<(), MxcError>,
@@ -688,7 +699,8 @@ mod tests {
                 validate_provision_res: Ok(()),
                 validate_res: Ok(()),
                 probe_res: Ok(()),
-                provision_res: SandboxId::from_token("0123456789abcdef0123456789abcdef"),
+                provision_res: SandboxId::from_token("0123456789abcdef0123456789abcdef")
+                    .map_err(super::super::runtime::map_error),
                 start_res: Ok(()),
                 diagnostics_res: Err(MxcError::backend_error("diagnostics unavailable")),
                 exec_res: Ok(ExecOutput {
@@ -719,7 +731,7 @@ mod tests {
             self.capabilities_res.clone()
         }
 
-        fn validate_provision(&self, input: &ProvisionInput) -> Result<(), MxcError> {
+        fn validate_provision(&self, input: &PreparedProvision) -> Result<(), MxcError> {
             self.calls.borrow_mut().push("validate_provision");
             *self.validated_provision.borrow_mut() = Some(input.clone());
             self.validate_provision_res.clone()
@@ -736,7 +748,7 @@ mod tests {
             self.probe_res.clone()
         }
 
-        fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError> {
+        fn provision(&self, input: &PreparedProvision) -> Result<SandboxId, MxcError> {
             self.record("provision");
             *self.provisioned_input.borrow_mut() = Some(input.clone());
             self.provision_res.clone()
@@ -1073,6 +1085,8 @@ mod tests {
         for message in [
             "execution cancelled",
             "NVX signed bundled agent: combined stdout/stderr capture limit of 67108864 bytes exceeded",
+            super::super::runtime::UNKNOWN_OUTCOME,
+            super::super::runtime::CANCEL_UNFINISHED,
         ] {
             for cleanup_failure in [false, true] {
                 let mut client = MockClient::ok();
@@ -1323,11 +1337,11 @@ mod tests {
             client.start_res = Err(MxcError::backend_unavailable("primary start failure")
                 .with_details(serde_json::json!({"phase": "boot"})));
             if !unavailable {
-                client.diagnostics_res = Ok(SandboxDiagnostics {
-                    vmm_log: log,
-                    console_log: state_path.join("missing-console"),
-                    outcome_report: state_path.join("missing-outcome"),
-                });
+                client.diagnostics_res = Ok(SandboxDiagnostics::new(
+                    log,
+                    state_path.join("missing-console"),
+                    state_path.join("missing-outcome"),
+                ));
             }
             let error = run_with_client(
                 &mut client,
@@ -1618,7 +1632,7 @@ mod tests {
         let input = client.provisioned_input.borrow();
         assert_eq!(*input, *client.validated_provision.borrow());
         assert_eq!(
-            serde_json::to_value(input.as_ref().unwrap()).unwrap(),
+            serde_json::json!({"request": input.as_ref().unwrap().request, "spec": input.as_ref().unwrap().spec}),
             serde_json::json!({
                 "request": {
                     "filesystem": {
