@@ -213,8 +213,11 @@ Existing host checks and experimental classifications are retained.
 | --- | --- | --- | --- |
 | `w365_agents` (new) | Yes; lifecycle-only remote backend. | An MXC-supported client OS and architecture, DNS/TLS access, valid W365 service credentials and an assigned pool with compatible DesktopControl.Exec. No W365-specific client OS or architecture restriction. | `ProbeCoverage::NotDetected`; omitted from local availability results. Local probing cannot determine remote usability. |
 
-The backend ships in normal executor and SDK native builds, without a separate
-W365 Cargo feature or special build. Every phase still requires runtime
+As with WSLc, a Cargo feature gates the backend implementation and backend-only
+optional dependencies, not request contracts or generated schemas. Standard
+executor and SDK native release builds enable the feature; builds without it
+return `backend_unavailable` before backend execution.
+Every phase still requires runtime
 experimental authorization: `--experimental` for the executor or the Dev SDK's
 `JsonOptions` experimental flag, even when its request contract parses.
 Missing authorization returns `backend_unavailable` before backend execution.
@@ -483,7 +486,7 @@ the shared scenarios below.
 | Proposed test group/scenario | Action/input | Required assertion |
 | --- | --- | --- |
 | `mxc_contract_v1_1_0_alpha` W365 fixtures | All five phase requests, missing/empty/null/wrong-phase fields; published 1.0 requests. | Development fields parse only in their phase/version; preserve optional presence, reject unknowns/nulls; published fixtures and schemas unchanged. |
-| Engine authorization/binding tests | Invoke every phase through normal executor and Dev SDK builds, without experimental opt-in, then authorized. Include relayed/piped exec and unsupported create-and-run, placement-session and PTY requests. | Backend is included without a W365 Cargo feature; missing opt-in fails before backend work. No network for unsupported modes, no authorization through JSON; checked dispatch accepts relayed and piped exec. |
+| Engine authorization/binding tests | Invoke every phase through normal executor and Dev SDK builds, without experimental opt-in, then authorized. Repeat with the backend omitted. Include relayed/piped exec and unsupported create-and-run, placement-session and PTY requests. | Contract parsing is unchanged when the backend is omitted; missing backend or opt-in fails before backend work. No network for unsupported modes, no authorization through JSON; checked dispatch accepts relayed and piped exec. |
 | `w365agents_lifecycle` native fixture (new) | Unsupported filesystem/network/UI/clipboard/proxy blocks, including empty/default policy blocks, and malformed IDs. | Contract or backend validation fails before any checkout/status/upgrade/delete request; fixture records zero requests. |
 | Lifecycle/config fixture | Omitted/empty phase settings, blank/whitespace hosts/tokens, missing environment; explicit host plus absent/blank token with an ambient token. | Defaults/presence follow agreed contract; missing configuration fails; no credential leaves for an explicit unpaired host. |
 | Lifecycle environment fixture | Omitted `process.env`, `[]`, and supplied entries, each with omitted/false/true `inheritDefaultEnv`. | Accepted requests forward only supplied entries, with none for omitted/empty env; the inheritance flag is not forwarded. Supplied env with false/omitted fails with `policy_validation` before any remote connection. No MXC host environment is forwarded. Actual guest inheritance and overrides are checked in the Phase 4 live scenario below. |
