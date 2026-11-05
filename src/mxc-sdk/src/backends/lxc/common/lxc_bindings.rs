@@ -163,10 +163,9 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     }
 }
 
-/// A `/etc/hosts` helper emits one `mxc:` diagnostic line, so this is far above
-/// any legitimate output.
+// Retain room for all 340 UID-map ranges.
 #[cfg(target_os = "linux")]
-const MAX_CAPTURED_BYTES: u64 = 8 * 1024;
+const MAX_CAPTURED_BYTES: u64 = 16 * 1024;
 
 #[cfg(target_os = "linux")]
 fn read_to_end_on_thread(
@@ -492,45 +491,88 @@ impl LxcContainer {
     }
 
     fn validate_unprivileged(&self) -> Result<(), String> {
-        let output = std::process::Command::new("lxc-ls")
-            .args([
-                "--fancy",
-                "--fancy-format",
-                "NAME,UNPRIVILEGED",
-                "-P",
-                &self.lxc_path,
-            ])
-            .output()
-            .map_err(|error| format!("Failed to run lxc-ls: {error}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "lxc-ls failed (exit code {}): {}",
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let columns: Vec<_> = line.split_whitespace().collect();
-            let [name, unprivileged] = columns.as_slice() else {
-                continue;
-            };
-            if *name == self.name && unprivileged.eq_ignore_ascii_case("true") {
-                return Ok(());
+        let validation = (|| {
+            let (exit_code, stdout, stderr) = self
+                .attach_capture(
+                    "cat /proc/self/uid_map && printf '\\nmxc:uid-map-complete\\n'",
+                    "",
+                    &[],
+                    true,
+                    Some(std::time::Duration::from_secs(10)),
+                    ContainerFirewall::Absent,
+                )
+                .map_err(|error| {
+                    format!(
+                        "Failed to inspect container '{}' UID map: {error}",
+                        self.name
+                    )
+                })?;
+            if exit_code != 0 {
+                return Err(format!(
+                    "Failed to read container '{}' UID map (exit code {exit_code}): {}",
+                    self.name,
+                    stderr.trim()
+                ));
             }
-        }
 
-        Err(format!(
-            "lxc-ls reported container '{}' will run privileged.  MXC will not start the container.  Please enable lxc to run unprivileged containers.",
-            self.name
-        ))
+            // The suffix is lost if capture truncates or abandons a partial read.
+            let mapping = stdout
+                .strip_suffix("\nmxc:uid-map-complete\n")
+                .ok_or_else(|| format!("Incomplete UID map read for container '{}'", self.name))?;
+            let mut root_mapped = false;
+            for line in mapping.lines() {
+                let columns = line
+                    .split_whitespace()
+                    .map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        format!("Invalid UID map for container '{}': {error}", self.name)
+                    })?;
+                let [inside, outside, count] = columns.as_slice() else {
+                    return Err(format!("Invalid UID map for container '{}'", self.name));
+                };
+                if *count == 0
+                    || inside.checked_add(*count).is_none()
+                    || outside.checked_add(*count).is_none()
+                {
+                    return Err(format!(
+                        "Invalid UID map range for container '{}'",
+                        self.name
+                    ));
+                }
+                if *outside == 0 {
+                    return Err(format!(
+                        "Container '{}' is privileged: its UID map includes parent UID 0.  MXC will not run the requested command.",
+                        self.name
+                    ));
+                }
+                root_mapped |= *inside == 0;
+            }
+            if !root_mapped {
+                return Err(format!(
+                    "UID map for container '{}' does not map container root",
+                    self.name
+                ));
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = validation {
+            return match self.stop() {
+                Ok(()) => Err(error),
+                Err(stop_error) => Err(format!(
+                    "{error}; failed to stop rejected container: {stop_error}"
+                )),
+            };
+        }
+        Ok(())
     }
 
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
-        self.validate_unprivileged()?;
         let mut cmd = self.lxc_command("lxc-start");
         cmd.args(network.to_start_args(self.configured_interface_count()));
-        Self::run_tool(cmd)
+        Self::run_tool(cmd)?;
+        self.validate_unprivileged()
     }
 
     /// How many `lxc.net.N` interfaces the container's config declares.
@@ -559,13 +601,23 @@ impl LxcContainer {
         _timeout_ms: u32,
     ) -> Result<(i32, String, String), String> {
         // TODO: Implement timeout and working directory support.
-        self.validate_unprivileged()?;
-        let mut cmd = self.lxc_command("lxc-execute");
+        self.start(StartNetwork::FromContainerConfig)?;
+        let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(["--", "/bin/sh", "-c", command]);
 
         let output = cmd
             .output()
-            .map_err(|e| format!("Failed to run lxc-execute: {}", e))?;
+            .map_err(|e| format!("Failed to run lxc-attach: {}", e));
+        if let Err(stop_error) = self.stop() {
+            return Err(match output {
+                Ok(output) => format!(
+                    "Command exited with code {}; failed to stop container: {stop_error}",
+                    output.status.code().unwrap_or(-1)
+                ),
+                Err(error) => format!("{error}; failed to stop container: {stop_error}"),
+            });
+        }
+        let output = output?;
 
         Ok((
             output.status.code().unwrap_or(-1),

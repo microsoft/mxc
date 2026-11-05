@@ -29,8 +29,12 @@ Creates an LXC container to provide:
   network namespace, which requires root.
 - Valid UID and GID root mappings to run LXC containers unprivileged.  See [LXC Getting Started](https://linuxcontainers.org/lxc/getting-started/#create-unprivileged-containers-as-root-with-shared-uid-and-gid-ranges).
 
-MXC requires LXC containers to run unprivileged.  The check is done with `lxc-ls`.
-MXC will not set up, and will not start, a privileged container.
+MXC requires LXC containers to run unprivileged.  After starting the container,
+MXC uses `lxc-attach` to read `/proc/self/uid_map` before running the requested
+command.  The mapping must include container root and must not map any container
+UID to parent UID 0.  If the container is privileged or its mapping cannot be
+verified, MXC stops it and returns an error without running the requested command.
+The container's own startup processes run before this check.
 
 ### Installation
 
