@@ -20,10 +20,36 @@ import {
 } from '../../bindings/pty.js';
 import { spawnProcessContainerWithPtyJson } from '../../bindings/process-container-pty.js';
 import { runBindingStateAwareRequestAsync } from '../../bindings/state-aware.js';
+import { serializePolicyFailures, type PolicyFailures } from './policy-failures.js';
+
+export {
+  PolicyFailureNativeCodes,
+  PolicyFailureOutcomes,
+  PolicyFailureClasses,
+  PolicyFailureReasons,
+  PolicyFailureActions,
+  PolicyFailureResourceKinds,
+  PolicyFailureValueKinds,
+  PolicyFailureAccessValues,
+  PolicyFailureFlags,
+  parsePolicyFailures,
+  serializePolicyFailures,
+  policyFailuresFromError,
+  policyFailureResourceText,
+  type PolicyFailures,
+  type PolicyFailureResult,
+  type PolicyFailureDetail,
+} from './policy-failures.js';
 
 /** Authorization supplied independently of the JSON contract version. */
 export interface JsonOptions {
   experimental?: boolean;
+}
+
+/** Creation controls supplied independently of the request JSON. */
+export interface CreationJsonOptions extends JsonOptions {
+  /** Caller-owned observations. The backend validates and applies safe restrictions. */
+  policyFailures?: PolicyFailures;
 }
 
 /** Invocation controls for an exact-JSON PTY operation. */
@@ -37,12 +63,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function checkOptions(name: string, options: JsonOptions, pty = false): void {
+function checkOptions(
+  name: string,
+  options: JsonOptions,
+  pty = false,
+  creation = false,
+): void {
   if (!isRecord(options)) {
     throw new MxcError('malformed_request', `${name} options must be an object`);
   }
+  if (!creation && 'policyFailures' in options) {
+    throw new MxcError('malformed_request', `${name} does not support option 'policyFailures'`);
+  }
   for (const [key, value] of Object.entries(options)) {
     if (key === 'experimental' && (value === undefined || typeof value === 'boolean')) continue;
+    if (creation && key === 'policyFailures') continue;
     if (pty && key === 'size') continue;
     throw new MxcError('malformed_request', `${name} does not support option '${key}'`);
   }
@@ -130,18 +165,28 @@ function phaseResult(
   });
 }
 
-/** Capture a one-shot request. */
-export async function runJson(json: string, options: JsonOptions = {}): Promise<ExecutionResult> {
-  checkOptions('runJson', options);
+/** Capture a create-and-run request. */
+export async function runJson(
+  json: string,
+  options: CreationJsonOptions = {},
+): Promise<ExecutionResult> {
+  checkOptions('runJson', options, false, true);
   requestInfo(json, 'runJson');
-  return captureResult(await runRawOneShotJsonAsync(json, options.experimental === true));
+  const feedback = options.policyFailures === undefined
+    ? undefined : serializePolicyFailures(options.policyFailures);
+  return captureResult(await runRawOneShotJsonAsync(json, options.experimental === true, feedback));
 }
 
-/** Spawn a one-shot request with pipes. */
-export async function spawnJson(json: string, options: JsonOptions = {}): Promise<MxcProcess> {
-  checkOptions('spawnJson', options);
+/** Spawn a create-and-run request with pipes. */
+export async function spawnJson(
+  json: string,
+  options: CreationJsonOptions = {},
+): Promise<MxcProcess> {
+  checkOptions('spawnJson', options, false, true);
   const { timeoutMs } = requestInfo(json, 'spawnJson');
-  return spawnBindingSandboxProcessJson(json, options.experimental === true, timeoutMs);
+  const feedback = options.policyFailures === undefined
+    ? undefined : serializePolicyFailures(options.policyFailures);
+  return spawnBindingSandboxProcessJson(json, options.experimental === true, timeoutMs, feedback);
 }
 
 /** Spawn a one-shot request with a PTY. */

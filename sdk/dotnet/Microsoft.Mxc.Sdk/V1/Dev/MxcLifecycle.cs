@@ -9,7 +9,7 @@ using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
 
 namespace Microsoft.Mxc.Sdk.V1.Dev;
 
-/// <summary>Caller-authored exact-JSON execution and lifecycle operations.</summary>
+/// <summary>Execution and container lifecycle operations for caller-authored MXC request JSON.</summary>
 public static class MxcLifecycle
 {
     static MxcLifecycle() => NativeLibraryResolver.Initialize();
@@ -22,6 +22,7 @@ public static class MxcLifecycle
         JsonOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        options?.RejectPolicyFailures(nameof(RunInContainerJson));
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(RunInContainerJson), "exec");
         using var process = await Microsoft.Mxc.Sdk.V1.MxcLifecycle.RunBlockingOperationAsync(
             () => SpawnInContainer(request, timeout, options), late => late.Dispose(), cancellationToken)
@@ -41,6 +42,7 @@ public static class MxcLifecycle
 
     public static MxcProcess SpawnInContainerJson(string json, JsonOptions? options = null)
     {
+        options?.RejectPolicyFailures(nameof(SpawnInContainerJson));
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnInContainerJson), "exec");
         return SpawnInContainer(request, timeout, options);
     }
@@ -176,6 +178,7 @@ public static class MxcLifecycle
     private static string RunPhase(
         string json, string operation, string phase, bool dryRun, JsonOptions? options)
     {
+        options?.RejectPolicyFailures(operation);
         var (request, _) = DevJsonRequest.Prepare(json, operation, phase);
         unsafe
         {

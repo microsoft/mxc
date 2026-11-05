@@ -248,10 +248,33 @@ backend guides under [`docs/`](https://github.com/microsoft/mxc/tree/main/docs).
 See the [SDK API reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/README.md)
 for complete signatures and types.
 
+## Caller-owned creation-policy feedback (V1.Dev)
+
+`runJson` and `spawnJson` from `@microsoft/mxc-sdk/v1/dev` accept optional
+`CreationJsonOptions.policyFailures`, separately from the unchanged MXC request
+JSON. On a native creation-policy refusal, `policyFailuresFromError(error)`
+extracts typed cumulative observations from `MxcError.details.policyFailures`.
+Use `serializePolicyFailures` and `parsePolicyFailures` for application-owned
+storage and pass the feedback on an application-selected later attempt.
+Each invocation creates once; the application owns retry decisions.
+
+Named groups such as `PolicyFailureOutcomes.Blocked` and
+`PolicyFailureReasons.CapabilityNotAllowed` are exported from the Dev subpath
+for readable comparisons. Native codes remain numeric, unsigned 64-bit values
+remain decimal strings,
+and resources retain their UTF-16 code units. `policyFailureResourceText`
+decodes text strictly and throws for malformed UTF-16; decoded text alone does
+not establish a safe policy change. The native backend validates feedback and
+enforces supported restrictions. See the [V1.Dev reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md#caller-owned-creation-policy-feedback)
+for models, limits, and terminal feedback. Other Dev operations and typed V1
+options do not accept this control.
+
 ## Errors, warnings, and telemetry
 
 Native errors are surfaced as `MxcError` with a typed error code and optional
-operation, native status, and remediation. Security and operational warnings
+operation, native status, remediation, and backend-specific `details`.
+Native status decoding retains those details alongside `details.ffiStatus`.
+Security and operational warnings
 are returned in `ExecutionResult.warnings` and `MxcProcess.warnings`.
 Captured `stdout` and `stderr` are workload output; warnings and structured
 denial-capture metadata are not appended to those streams.

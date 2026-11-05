@@ -418,6 +418,9 @@ export interface LxcConfig {
 ## `@microsoft/mxc-sdk/v1::MxcError`
 
 Typed error thrown by the MXC SDK in response to a native JSON error object.
+Native status decoding preserves backend-specific `details` together with
+`details.ffiStatus`. For typed creation-policy observations, use the helpers
+in the [V1.Dev reference](dev.md#caller-owned-creation-policy-feedback).
 
 ```typescript
 export class MxcError extends Error {

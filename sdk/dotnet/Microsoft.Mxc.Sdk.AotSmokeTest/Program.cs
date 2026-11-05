@@ -13,6 +13,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Dev = Microsoft.Mxc.Sdk.V1.Dev;
@@ -36,7 +37,77 @@ static void CheckRoundTrip<T>(T value, Func<T, bool> check, string name)
 
 var initialPtySize = new MxcPtySize(40, 120);
 CheckRoundTrip(new Dev.JsonOptions { Experimental = true },
-    x => x.Experimental, "dev JSON options experimental authorization");
+    x => x.Experimental && x.PolicyFailures is null, "dev JSON options without policy feedback");
+var policyFailures = new Dev.PolicyFailures
+{
+    Results =
+    [
+        new()
+        {
+            Version = 99,
+            MinimumReaderVersion = 98,
+            Outcome = uint.MaxValue,
+            Details =
+            [
+                new()
+                {
+                    FailureClass = uint.MaxValue,
+                    FailureReason = 2,
+                    RequiredAction = 2,
+                    ResourceKind = 1,
+                    ValueKind = 1,
+                    Flags = uint.MaxValue,
+                    RequestedValue = ulong.MaxValue,
+                    RequiredValue = 9_007_199_254_740_993,
+                    Resource = [0xD800, 0],
+                },
+                new() { Resource = [] },
+                new(),
+            ],
+        },
+        new() { Outcome = 2 },
+    ],
+};
+var storedFeedback = policyFailures.ToJson();
+var restoredFeedback = Dev.PolicyFailures.FromJson(storedFeedback);
+Check(restoredFeedback.Results.Length == 2
+    && restoredFeedback.Results[0].Version == 99
+    && restoredFeedback.Results[0].MinimumReaderVersion == 98
+    && restoredFeedback.Results[0].Outcome == uint.MaxValue
+    && restoredFeedback.Results[0].Details[0].RequestedValue == ulong.MaxValue
+    && restoredFeedback.Results[0].Details[0].RequiredValue == 9_007_199_254_740_993
+    && restoredFeedback.Results[0].Details[0].Resource!.SequenceEqual(new ushort[] { 0xD800, 0 })
+    && restoredFeedback.Results[0].Details[1].GetResourceText() == string.Empty
+    && restoredFeedback.Results[0].Details[2].GetResourceText() is null,
+    "public policy-feedback JSON helpers preserve batches, values, and resource presence");
+try
+{
+    _ = restoredFeedback.Results[0].Details[0].GetResourceText();
+    Check(false, "resource text rejects malformed UTF-16");
+}
+catch (DecoderFallbackException)
+{
+}
+CheckRoundTrip(policyFailures, x => x.ToJson() == storedFeedback, "policy-failure feedback root");
+CheckRoundTrip(policyFailures.Results[0],
+    x => x.Version == 99 && x.Details[0].RequestedValue == ulong.MaxValue, "native policy-result root");
+CheckRoundTrip(policyFailures.Results[0].Details[0],
+    x => x.Flags == uint.MaxValue && x.RequiredValue == 9_007_199_254_740_993, "native policy-detail root");
+CheckRoundTrip(new Dev.JsonOptions { Experimental = true, PolicyFailures = restoredFeedback },
+    x => x.Experimental && x.PolicyFailures?.ToJson() == storedFeedback, "dev JSON options with stored feedback");
+var errorDetailsJson = $$$"""{"policyFailures":{{{storedFeedback}}},"other":{"retained":true}}""";
+CheckRoundTrip(MxcJson.Deserialize<JsonElement>(errorDetailsJson),
+    x => x.GetProperty("other").GetProperty("retained").GetBoolean(), "generic backend error details");
+MxcException policyError;
+using (var document = JsonDocument.Parse(errorDetailsJson))
+{
+    policyError = new MxcException(ErrorCode.BackendError, "creation refused",
+        "PSEC.Create", "0x80070005", null, document.RootElement);
+}
+Check(Dev.PolicyFailures.FromException(policyError)?.ToJson() == storedFeedback
+    && policyError.Details!.Value.GetProperty("other").GetProperty("retained").GetBoolean()
+    && policyError.Message == "creation refused",
+    "public feedback extraction retains generic details independently of the original document");
 CheckRoundTrip(new Dev.PtyJsonOptions(),
     x => !x.Experimental && x.Size is null, "dev PTY options without initial dimensions");
 CheckRoundTrip(new Dev.PtyJsonOptions { Experimental = true, Size = initialPtySize },

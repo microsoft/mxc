@@ -73,7 +73,7 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::__ffi::run_json;
+use mxc_sdk::__ffi::run_json_with_policy_failures;
 #[cfg(any(target_os = "windows", test))]
 use mxc_sdk::mxc_common;
 #[cfg(target_os = "windows")]
@@ -382,15 +382,64 @@ pub unsafe extern "C" fn mxc_run_json(
     experimental: i32,
     out: *mut MxcRunResult,
 ) -> i32 {
+    // SAFETY: this is the same caller contract with no feedback.
+    unsafe {
+        run_json_entry(
+            "mxc_run_json",
+            request_json_utf8,
+            experimental,
+            ptr::null(),
+            out,
+        )
+    }
+}
+
+/// Run a request once, applying optional cumulative restrictive policy feedback.
+///
+/// # Safety
+/// As for [`mxc_run_json`]. `policy_failures_json_utf8` must additionally be
+/// null or valid NUL-terminated UTF-8 for the duration of this call.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_run_with_policy_failures_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    policy_failures_json_utf8: *const c_char,
+    out: *mut MxcRunResult,
+) -> i32 {
+    // SAFETY: all pointers satisfy the documented caller contract.
+    unsafe {
+        run_json_entry(
+            "mxc_run_with_policy_failures_json",
+            request_json_utf8,
+            experimental,
+            policy_failures_json_utf8,
+            out,
+        )
+    }
+}
+
+unsafe fn run_json_entry(
+    operation: &str,
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    policy_failures_json_utf8: *const c_char,
+    out: *mut MxcRunResult,
+) -> i32 {
     if out.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
 
-    let result = catch_unwind(|| run_json_inner(request_json_utf8, experimental != 0))
-        .unwrap_or_else(|panic| {
-            report_panic("mxc_run_json", &*panic);
-            MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
-        });
+    let result = catch_unwind(|| {
+        run_json_inner(
+            request_json_utf8,
+            experimental != 0,
+            policy_failures_json_utf8,
+        )
+    })
+    .unwrap_or_else(|panic| {
+        report_panic(operation, &*panic);
+        MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
 
     let status = result.status;
     // SAFETY: `out` is non-null and caller-guaranteed writable.
@@ -398,7 +447,11 @@ pub unsafe extern "C" fn mxc_run_json(
     status
 }
 
-fn run_json_inner(request_json_utf8: *const c_char, experimental: bool) -> MxcRunResult {
+fn run_json_inner(
+    request_json_utf8: *const c_char,
+    experimental: bool,
+    policy_failures_json_utf8: *const c_char,
+) -> MxcRunResult {
     // SAFETY: caller contract on `mxc_run_json`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
         Some(value) => value,
@@ -407,7 +460,31 @@ fn run_json_inner(request_json_utf8: *const c_char, experimental: bool) -> MxcRu
         }
         None => return MxcRunResult::error(MXC_STATUS_INVALID_UTF8, "request JSON is not UTF-8"),
     };
-    execute_output(run_json(request_json, experimental))
+    let feedback = match parse_policy_failures(policy_failures_json_utf8) {
+        Ok(feedback) => feedback,
+        Err(error) => return execute_output(Err(error)),
+    };
+    execute_output(run_json_with_policy_failures(
+        request_json,
+        experimental,
+        feedback.as_ref(),
+    ))
+}
+
+fn parse_policy_failures(
+    pointer: *const c_char,
+) -> Result<Option<mxc_sdk::v1::dev::PolicyFailures>, Error> {
+    if pointer.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: entrypoint callers guarantee a readable NUL-terminated string.
+    let json = unsafe { cstr_to_str(pointer) }.ok_or_else(|| {
+        Error::new(
+            ErrorCode::MalformedRequest,
+            "policy-failure feedback JSON is not UTF-8",
+        )
+    })?;
+    mxc_sdk::__ffi::decode_policy_failures_json(json).map(Some)
 }
 
 fn execute_output(output: Result<ExecutionResult, Error>) -> MxcRunResult {

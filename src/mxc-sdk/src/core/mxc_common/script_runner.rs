@@ -168,6 +168,9 @@ fn backend_error_envelope_line(response: &ScriptResponse) -> Option<String> {
         return None;
     }
 
+    if let Some(error) = response.structured_error() {
+        return serde_json::to_string(&serde_json::json!({ "error": error })).ok();
+    }
     let mut envelope = serde_json::json!({
         "error": {
             "code": response.failure_phase.error_code().as_str(),

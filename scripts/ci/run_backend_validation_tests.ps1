@@ -190,7 +190,7 @@ function Invoke-ProcessContainerStreamingTests {
         Assert-File -Path $file
     }
 
-    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes', 'dev_json_processcontainer_policy_feedback_restricts_current_request') {
         $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-rust-$rustCase.log" `
             -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
         $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase

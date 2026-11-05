@@ -48,6 +48,9 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(SpawnWithPtyOptions))]
 [JsonSerializable(typeof(JsonOptions))]
 [JsonSerializable(typeof(PtyJsonOptions))]
+[JsonSerializable(typeof(PolicyFailures))]
+[JsonSerializable(typeof(PolicyFailureResult))]
+[JsonSerializable(typeof(PolicyFailureDetail))]
 [JsonSerializable(typeof(ProvisionOptions))]
 [JsonSerializable(typeof(StartOptions))]
 [JsonSerializable(typeof(StopOptions))]
@@ -101,6 +104,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(bool?))]
+[JsonSerializable(typeof(JsonElement))]
 internal sealed partial class MxcJsonContext : JsonSerializerContext
 {
 }

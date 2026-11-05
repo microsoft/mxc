@@ -583,6 +583,7 @@ public sealed class MxcException : Exception
     public string? Operation { get; }
     public string? NativeCode { get; }
     public string? Remediation { get; }
+    public System.Text.Json.JsonElement? Details { get; }
 
     public MxcException(ErrorCode code, string message)
     : this(code, message, null, null, null);
@@ -590,6 +591,13 @@ public sealed class MxcException : Exception
     public override string ToString();
 }
 ```
+
+`Details` preserves optional backend data independently of native memory and
+the original JSON document. The
+[V1.Dev feedback helpers](dev.md#caller-owned-creation-policy-feedback)
+provide typed extraction and Native AOT-compatible storage of
+`Details.policyFailures`. Other backend details remain available through
+the `JsonElement`; the exception message does not include them.
 
 
 ## `Microsoft.Mxc.Sdk.V1.MxcLifecycle`

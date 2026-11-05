@@ -179,6 +179,17 @@ fn validate_directional_proxy_policy(policy: &ContainerPolicy) -> Result<(), Wxc
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn validate_process_container_creation_proxy_policy(
+    policy: &ContainerPolicy,
+) -> Result<(), WxcError> {
+    let proxy_enabled = policy.network_proxy.is_enabled();
+    if proxy_enabled {
+        validate_directional_proxy_policy(policy)?;
+    }
+    validate_process_container_proxy_policy(policy, proxy_enabled)
+}
+
 fn convert_action(action: wire::NetworkAction) -> NetworkAction {
     match action {
         wire::NetworkAction::Allow => NetworkAction::Allow,

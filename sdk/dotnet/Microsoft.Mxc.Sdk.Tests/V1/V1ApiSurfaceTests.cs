@@ -32,6 +32,18 @@ public sealed class V1ApiSurfaceTests
             typeof(Dev.PtyJsonOptions),
             typeof(Dev.MxcContainer),
             typeof(Dev.MxcLifecycle),
+            typeof(Dev.PolicyFailures),
+            typeof(Dev.PolicyFailureResult),
+            typeof(Dev.PolicyFailureDetail),
+            typeof(Dev.PolicyFailureNativeCodes),
+            typeof(Dev.PolicyFailureOutcomes),
+            typeof(Dev.PolicyFailureClasses),
+            typeof(Dev.PolicyFailureReasons),
+            typeof(Dev.PolicyFailureActions),
+            typeof(Dev.PolicyFailureResourceKinds),
+            typeof(Dev.PolicyFailureValueKinds),
+            typeof(Dev.PolicyFailureAccessValues),
+            typeof(Dev.PolicyFailureFlags),
         };
         Assert.All(
             exportedTypes,
@@ -75,6 +87,10 @@ public sealed class V1ApiSurfaceTests
             typeof(SpawnInContainerWithPtyOptions),
         };
 
-        Assert.All(optionTypes, type => Assert.Null(type.GetProperty("Experimental")));
+        Assert.All(optionTypes, type =>
+        {
+            Assert.Null(type.GetProperty("Experimental"));
+            Assert.Null(type.GetProperty("PolicyFailures"));
+        });
     }
 }

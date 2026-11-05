@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import { inspect } from 'node:util';
+
 /**
  * Closed set of MXC wire-format error codes. Mirrors `MxcErrorCode` on the
  * Rust side one-for-one and serialises as the same snake_case strings on
@@ -114,13 +116,35 @@ export class MxcError extends Error {
     this.operation = fields.operation;
     this.nativeCode = fields.nativeCode;
     this.remediation = fields.remediation;
-    this.details = fields.details;
+    Object.defineProperty(this, 'details', {
+      value: fields.details, enumerable: false, configurable: true, writable: true,
+    });
     // Restore the prototype chain so `instanceof MxcError` keeps working
     // after the TypeScript ES2020 → ES5-compatible class downlevelling.
     Object.setPrototypeOf(this, new.target.prototype);
     this.name = 'MxcError';
   }
 }
+
+Object.defineProperty(MxcError.prototype, inspect.custom, {
+  configurable: true,
+  writable: true,
+  value(this: MxcError): string {
+    const context = [this.code, this.operation, this.nativeCode]
+      .filter((value) => value !== undefined).join(' ');
+    const header = `${this.name}: ${this.message} [${context}]`;
+    const frames = this.stack?.split('\n').slice(1).join('\n');
+    return frames ? `${header}\n${frames}` : header;
+  },
+});
+
+Object.defineProperty(MxcError.prototype, 'toJSON', {
+  configurable: true,
+  writable: true,
+  value(this: MxcError): Record<string, unknown> {
+    return { ...this, details: this.details };
+  },
+});
 
 /**
  * Constructs an `MxcError` from a wire-format error code. Accepts a plain

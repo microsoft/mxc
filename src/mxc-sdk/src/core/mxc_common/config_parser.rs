@@ -1725,6 +1725,7 @@ fn normalize_common_request_ir(
         microvm_image: cfg.microvm.map(|config| config.image),
         microvm_memory_mib,
         experimental_enabled: false,
+        policy_failures: None,
         dry_run: false,
     })
 }

@@ -99,6 +99,38 @@ pub fn policy_hash(request: &ExecutionRequest) -> String {
     hash_canonical_json(&canonical)
 }
 
+/// Record policy identity without logging request secrets.
+pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut crate::mxc_common::logger::Logger) {
+    use crate::mxc_common::audit::{AuditEvent, AuditEventName};
+    use crate::mxc_common::telemetry;
+
+    if !logger.has_diagnostic_sink() && !telemetry::is_active() {
+        return;
+    }
+    let hash = policy_hash(request);
+    let version = config_schema_version(request);
+    if telemetry::is_active() {
+        telemetry::log_policy_hash(&policy_hash_identity(&request.container_id), &hash, version);
+    }
+    let record = AuditEvent::new(AuditEventName::PolicyHash)
+        .str("backend", request.containment.wire_name())
+        .str("policy_hash", &hash)
+        .str("config_schema_version", version);
+    logger.log_audit_event(&record);
+}
+
+pub(crate) fn config_schema_version(request: &ExecutionRequest) -> &'static str {
+    request.source_contract_version()
+}
+
+pub(crate) fn policy_hash_identity(container_id: &str) -> String {
+    redact_identity(if container_id.is_empty() {
+        "CLI"
+    } else {
+        container_id
+    })
+}
+
 /// Hash the declared lifecycle policy without resolving the session's CPU, memory, or GPU settings.
 pub fn state_aware_policy_hash(
     request: &ExecutionRequest,
@@ -261,6 +293,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         test_feature: _excluded_test_feature,
         // Backend selection authorization is not an enforcement decision.
         experimental_enabled: _excluded_experimental_authorization,
+        // Feedback observations are not the effective policy applied to a process.
+        policy_failures: _excluded_policy_failures,
         // --- deliberately excluded; see the module docs ---
         // The command line is what runs, not the policy it runs under, and it
         // routinely embeds credentials.

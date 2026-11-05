@@ -763,10 +763,9 @@ fn dev_json_lifecycle_preserves_execution_and_caller_ownership() {
         .to_string()
     };
     assert_empty(dev::validate_start_json(&phase("start"), options));
-    assert_empty(dev::start_container_json(
-        &phase("start"),
-        JsonOptions { experimental: true },
-    ));
+    let mut start_options = JsonOptions::default();
+    start_options.experimental = true;
+    assert_empty(dev::start_container_json(&phase("start"), start_options));
     let validation_file = workspace.join("dev-must-not-run.txt");
     assert_empty(dev::validate_process_json(
         &exec(

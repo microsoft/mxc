@@ -43,12 +43,14 @@ fn run_phase(
     dry_run: bool,
     options: JsonOptions,
 ) -> Result<String, Error> {
+    options.reject_creation_feedback()?;
     require_phase(json, expected, operation)?;
     crate::__ffi::run_lifecycle_json(json, dry_run, options.experimental)
 }
 
 /// Capture an exec workload without taking ownership of its container.
 pub fn run_in_container_json(json: &str, options: JsonOptions) -> Result<ExecutionResult, Error> {
+    options.reject_creation_feedback()?;
     require_phase(json, Phase::Exec, "run_in_container_json")?;
     crate::wait_with_output(crate::__ffi::execute_lifecycle_json(
         json,
@@ -58,6 +60,7 @@ pub fn run_in_container_json(json: &str, options: JsonOptions) -> Result<Executi
 
 /// Spawn an exec workload with live pipes; the caller owns the returned process.
 pub fn spawn_in_container_json(json: &str, options: JsonOptions) -> Result<MxcProcess, Error> {
+    options.reject_creation_feedback()?;
     require_phase(json, Phase::Exec, "spawn_in_container_json")?;
     crate::__ffi::execute_lifecycle_json(json, options.experimental)
 }
@@ -245,7 +248,13 @@ mod tests {
         assert_eq!(error.code, ErrorCode::BackendUnavailable);
         assert!(error.message.contains("experimental"), "{error}");
 
-        if let Err(error) = validate_provision_json(json, JsonOptions { experimental: true }) {
+        if let Err(error) = validate_provision_json(
+            json,
+            JsonOptions {
+                experimental: true,
+                ..Default::default()
+            },
+        ) {
             assert_ne!(error.code, ErrorCode::BackendUnavailable, "{error}");
         }
     }

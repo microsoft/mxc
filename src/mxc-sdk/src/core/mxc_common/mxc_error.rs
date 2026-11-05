@@ -140,7 +140,7 @@ impl ApiFailure {
 /// describes the platform call and on `MxcError` when it describes the
 /// failure; *backend-specific* structured data belongs in `details`, which
 /// stays open for that purpose.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MxcError {
     pub code: MxcErrorCode,
@@ -175,6 +175,12 @@ impl fmt::Display for MxcError {
 }
 
 impl std::error::Error for MxcError {}
+
+impl fmt::Debug for MxcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
 
 impl MxcError {
     pub fn new(code: MxcErrorCode, message: impl Into<String>) -> Self {
@@ -304,6 +310,20 @@ pub struct ErrorEnvelope {
     pub native_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub remediation: Option<String>,
+}
+
+impl MxcError {
+    pub(crate) fn from_envelope(error: ErrorEnvelope) -> Self {
+        let mut result = Self::new(error.code, error.message);
+        result.details = error.details;
+        result.remediation = error.remediation;
+        if let Some(operation) = error.operation {
+            let mut api = ApiFailure::new(operation);
+            api.native_code = error.native_code;
+            result = result.with_api_failure(api);
+        }
+        result
+    }
 }
 
 /// Top-level non-exec response envelope: `{"result": <T>}` on success, or

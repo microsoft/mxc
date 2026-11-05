@@ -185,6 +185,7 @@ pub struct Error {
   pub operation: Option<String>,
   pub native_code: Option<String>,
   pub remediation: Option<String>,
+  pub details: Option<Box<serde_json::Value>>,
 }
 
 impl Error {
@@ -199,6 +200,11 @@ impl From<MxcError> for Error {
   fn from(error: MxcError) -> Self;
 }
 ```
+
+`details` preserves backend-specific structured data. `Display` and `Debug`
+render the generic error, operation and status without converting that data
+into text. Creation-policy models and typed extraction are documented in the
+[V1.Dev API](dev.md#caller-owned-creation-policy-feedback).
 
 
 ## `mxc_sdk::v1::ErrorCode`

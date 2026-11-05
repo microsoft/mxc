@@ -196,6 +196,13 @@ describe('in-process asynchronous run routing', () => {
 
   it('rejects invalid requests at the SDK boundary', async () => {
     await assert.rejects(
+      run({ command: 'echo hello' }, {
+        // @ts-expect-error Creation feedback belongs only to V1.Dev JSON operations.
+        policyFailures: { formatVersion: 1, results: [] },
+      }),
+      /does not support option 'policyFailures'/,
+    );
+    await assert.rejects(
       run({ command: 'echo hello' }, { experimental: true } as never),
       /does not support option 'experimental'/,
     );

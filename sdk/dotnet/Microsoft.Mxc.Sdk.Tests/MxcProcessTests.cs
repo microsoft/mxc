@@ -19,26 +19,38 @@ public class MxcProcessTests
         Environment.GetEnvironmentVariable("MXC_E2E_PSEC_CAPABLE_HOST") == "1";
 
     [Theory]
-    [InlineData("1.0.0")]
-    [InlineData("1.1.0-alpha")]
-    public async Task DevJson_CapturesOutputAndStreamsInput(string version)
+    [InlineData("1.0.0", false)]
+    [InlineData("1.1.0-alpha", false)]
+    [InlineData("1.1.0-alpha", true)]
+    public async Task DevJson_CapturesOutputAndStreamsInput(string version, bool withPolicyFailures)
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
+        Assert.SkipUnless(!withPolicyFailures || OperatingSystem.IsWindows(),
+            "creation-policy feedback requires Windows ProcessContainer");
+        var options = new Dev.JsonOptions
+        {
+            PolicyFailures = withPolicyFailures
+                ? Dev.PolicyFailures.FromJson(new Dev.PolicyFailures().ToJson()) : null,
+        };
         var creation = OperatingSystem.IsWindows()
             ? $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"cmd.exe /c \"echo DEV_CAPTURE_OK & echo DEV_CAPTURE_ERR 1>&2 & exit /b 7\"","timeout":30000}}"""
             : $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"printf 'DEV_CAPTURE_OK\\n'; printf 'DEV_CAPTURE_ERR\\n' >&2; exit 7","timeout":30000}}""";
         var result = await Dev.MxcContainer.RunJsonAsync(
-            creation, cancellationToken: TestContext.Current.CancellationToken);
+            creation, options, TestContext.Current.CancellationToken);
         Assert.False(result.TimedOut);
         Assert.Equal(7, result.ExitCode);
         Assert.Contains("DEV_CAPTURE_OK", result.Stdout);
         Assert.Contains("DEV_CAPTURE_ERR", result.Stderr);
+        if (withPolicyFailures)
+        {
+            Assert.Empty(result.Warnings);
+        }
 
         var piped = OperatingSystem.IsWindows()
             ? $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"cmd.exe /v:on /c \"set /p L= & echo DEV_PIPE:!L! & exit /b 9\"","timeout":30000}}"""
             : $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"IFS= read -r line; printf 'DEV_PIPE:%s\\n' \"$line\"; exit 9","timeout":30000}}""";
         using var process = await Dev.MxcContainer.SpawnJsonAsync(
-            piped, new Dev.JsonOptions { Experimental = true },
+            piped, new Dev.JsonOptions { Experimental = true, PolicyFailures = options.PolicyFailures },
             TestContext.Current.CancellationToken);
         using var stdin = process.StandardInput;
         Assert.NotNull(stdin);
@@ -50,6 +62,11 @@ public class MxcProcessTests
         Assert.False(outcome.TimedOut);
         Assert.Equal(9, outcome.ExitCode);
         Assert.Contains("DEV_PIPE:ping-pong", Encoding.UTF8.GetString(stdout));
+        if (withPolicyFailures)
+        {
+            Assert.Empty(process.Warnings);
+            Assert.Empty(options.PolicyFailures!.Results);
+        }
     }
 
     [Theory]

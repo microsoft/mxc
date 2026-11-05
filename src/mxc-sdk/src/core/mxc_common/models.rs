@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 use crate::mxc_common::error::WxcError;
-use crate::mxc_common::mxc_error::MxcErrorCode;
+use crate::mxc_common::mxc_error::{ErrorEnvelope, MxcError, MxcErrorCode};
 
 /// Selects which containment backend to use for script execution.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1011,6 +1011,9 @@ pub struct ExecutionRequest {
     pub microvm_memory_mib: Option<u32>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
+    /// Invocation feedback, never accepted from MXC request JSON.
+    #[serde(skip)]
+    pub policy_failures: Option<std::sync::Arc<crate::mxc_common::policy_failures::PolicyFailures>>,
     /// Dry-run mode: validate config and runner setup then return success
     /// without executing the sandboxed process.
     pub dry_run: bool,
@@ -1231,7 +1234,8 @@ pub struct ScriptResponse {
     /// [`extend_warnings`](ScriptResponse::extend_warnings) rather than the
     /// field, so the "absent" and "empty" spellings cannot drift apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub warnings: Option<Box<Vec<String>>>,
+    #[serde(flatten)]
+    pub diagnostics: Option<Box<ScriptResponseDiagnostics>>,
     /// Structured metadata produced after the sandboxed process exits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_metadata: Option<Box<SandboxOutputMetadata>>,
@@ -1246,10 +1250,21 @@ impl Default for ScriptResponse {
             error_message: String::new(),
             extended_error: String::new(),
             failure_phase: FailurePhase::None,
-            warnings: None,
+            diagnostics: None,
             output_metadata: None,
         }
     }
+}
+
+/// Boxed response diagnostics keep failures small while preserving warning
+/// serialization and the complete structured error.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptResponseDiagnostics {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorEnvelope>,
 }
 
 /// Structured outputs produced by optional sandbox features.
@@ -1349,7 +1364,9 @@ impl ScriptResponse {
 
     /// The non-fatal diagnostics this run recorded.
     pub fn warnings(&self) -> &[String] {
-        self.warnings.as_deref().map_or(&[], Vec::as_slice)
+        self.diagnostics
+            .as_deref()
+            .map_or(&[], |diagnostics| diagnostics.warnings.as_slice())
     }
 
     /// Append diagnostics, allocating only once there is something to record.
@@ -1358,9 +1375,40 @@ impl ScriptResponse {
         if incoming.peek().is_none() {
             return;
         }
-        self.warnings
+        self.diagnostics
             .get_or_insert_with(Box::default)
+            .warnings
             .extend(incoming);
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn with_error(mut self, error: MxcError) -> Self {
+        self.diagnostics.get_or_insert_with(Box::default).error = Some(error.to_envelope());
+        self
+    }
+
+    pub(crate) fn structured_error(&self) -> Option<&ErrorEnvelope> {
+        self.diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.error.as_ref())
+    }
+
+    pub(crate) fn into_mxc_error(mut self) -> MxcError {
+        if let Some(error) = self
+            .diagnostics
+            .as_mut()
+            .and_then(|diagnostics| diagnostics.error.take())
+        {
+            return MxcError::from_envelope(error);
+        }
+        let message = if self.extended_error.is_empty() {
+            self.error_message
+        } else if self.error_message.is_empty() {
+            self.extended_error
+        } else {
+            format!("{} ({})", self.error_message, self.extended_error)
+        };
+        MxcError::new(self.failure_phase.error_code(), message)
     }
 }
 
@@ -1435,7 +1483,7 @@ mod tests {
     fn recording_nothing_allocates_nothing() {
         let mut response = ScriptResponse::default();
         response.extend_warnings(Vec::new());
-        assert!(response.warnings.is_none());
+        assert!(response.diagnostics.is_none());
         assert!(response.warnings().is_empty());
     }
 
@@ -1444,7 +1492,7 @@ mod tests {
     #[test]
     fn the_response_stays_small_enough_to_be_an_error_type() {
         assert!(
-            std::mem::size_of::<ScriptResponse>() <= 128,
+            std::mem::size_of::<ScriptResponse>() < 128,
             "{} bytes",
             std::mem::size_of::<ScriptResponse>()
         );

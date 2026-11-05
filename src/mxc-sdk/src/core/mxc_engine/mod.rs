@@ -124,9 +124,10 @@ pub fn spawn_one_shot_json(
     request_json: &str,
     experimental: bool,
     stdin: bool,
+    policy_failures: Option<&crate::mxc_common::policy_failures::PolicyFailures>,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+    let request = parse_one_shot_json(request_json, experimental, &mut logger, policy_failures)?;
     spawn_execution_request_with_logger(&request, logger, stdin)
 }
 
@@ -134,9 +135,10 @@ pub fn spawn_one_shot_json(
 pub(crate) fn execute_one_shot_json(
     request_json: &str,
     experimental: bool,
+    policy_failures: Option<&crate::mxc_common::policy_failures::PolicyFailures>,
 ) -> Result<OneShotExecution, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+    let request = parse_one_shot_json(request_json, experimental, &mut logger, policy_failures)?;
 
     if request.containment == ContainmentBackend::MicroVm {
         experimental::require_experimental_optin(
@@ -174,6 +176,7 @@ fn parse_one_shot_json(
     request_json: &str,
     experimental: bool,
     logger: &mut Logger,
+    policy_failures: Option<&crate::mxc_common::policy_failures::PolicyFailures>,
 ) -> Result<ExecutionRequest, Error> {
     let mut request = match crate::mxc_common::config_parser::load_mxc_request_from_json(
         request_json,
@@ -190,9 +193,34 @@ fn parse_one_shot_json(
         }
     };
     request.experimental_enabled = experimental;
+    if let Some(feedback) = policy_failures {
+        feedback
+            .validate()
+            .map_err(|message| Error::from(MxcError::malformed_request(message)))?;
+        request.policy_failures = Some(std::sync::Arc::new(feedback.clone()));
+    }
+    validate_creation_feedback(&request).map_err(Error::from)?;
     Ok(request)
 }
 
+pub(crate) fn validate_creation_feedback(request: &ExecutionRequest) -> Result<(), MxcError> {
+    if let Some(feedback) = request.policy_failures.as_deref() {
+        feedback.validate().map_err(MxcError::malformed_request)?;
+        if !cfg!(target_os = "windows")
+            || request.containment != ContainmentBackend::ProcessContainer
+        {
+            return Err(MxcError::unsupported_containment(
+                "policyFailures requires native Windows ProcessContainer creation",
+            ));
+        }
+        if request.dry_run {
+            return Err(MxcError::unsupported_phase(
+                "policyFailures is not supported for validation-only operations",
+            ));
+        }
+    }
+    Ok(())
+}
 fn spawn_execution_request_with_logger(
     request: &ExecutionRequest,
     logger: Logger,
@@ -318,7 +346,7 @@ pub fn spawn_one_shot_pty_json(
     size: crate::mxc_common::sandbox_process::PtySize,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+    let request = parse_one_shot_json(request_json, experimental, &mut logger, None)?;
     spawn_execution_request_with_logger_and(&request, logger, |request, logger| {
         dispatch::spawn_pty_runner(request, logger, size)
     })

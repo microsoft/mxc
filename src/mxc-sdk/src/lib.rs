@@ -394,6 +394,14 @@ pub mod v1 {
 pub mod __ffi {
     use super::*;
     use crate::sandbox::WaitResult;
+    pub const MAX_POLICY_FAILURES_JSON_BYTES: usize =
+        crate::mxc_common::policy_failures::MAX_FEEDBACK_BYTES;
+
+    /// Decode bounded invocation feedback, rather than a terminal stored report.
+    pub fn decode_policy_failures_json(json: &str) -> Result<v1::dev::PolicyFailures, Error> {
+        v1::dev::PolicyFailures::parse(json)
+            .map_err(|message| Error::new(ErrorCode::MalformedRequest, message))
+    }
 
     /// Spawn a raw exact-version JSON container request as a live process.
     ///
@@ -407,7 +415,16 @@ pub mod __ffi {
         request_json: &str,
         experimental: bool,
     ) -> Result<MxcProcess, Error> {
-        crate::mxc_engine::spawn_one_shot_json(request_json, experimental, false)
+        spawn_container_json_with_policy_failures(request_json, experimental, None)
+    }
+
+    /// Internal creation adapter with caller-owned policy feedback.
+    pub fn spawn_container_json_with_policy_failures(
+        request_json: &str,
+        experimental: bool,
+        policy_failures: Option<&v1::dev::PolicyFailures>,
+    ) -> Result<MxcProcess, Error> {
+        crate::mxc_engine::spawn_one_shot_json(request_json, experimental, false, policy_failures)
             .map(MxcProcess::new)
     }
 
@@ -417,7 +434,7 @@ pub mod __ffi {
         request_json: &str,
         experimental: bool,
     ) -> Result<MxcProcess, Error> {
-        crate::mxc_engine::spawn_one_shot_json(request_json, experimental, true)
+        crate::mxc_engine::spawn_one_shot_json(request_json, experimental, true, None)
             .map(MxcProcess::new)
     }
 
@@ -436,7 +453,17 @@ pub mod __ffi {
     /// Run a raw exact-version JSON container request to completion and capture
     /// its output. The JSON and `experimental` rules match [`spawn_container_json`].
     pub fn run_json(request_json: &str, experimental: bool) -> Result<ExecutionResult, Error> {
-        match crate::mxc_engine::execute_one_shot_json(request_json, experimental)? {
+        run_json_with_policy_failures(request_json, experimental, None)
+    }
+
+    /// Internal captured-execution adapter with caller-owned policy feedback.
+    pub fn run_json_with_policy_failures(
+        request_json: &str,
+        experimental: bool,
+        policy_failures: Option<&v1::dev::PolicyFailures>,
+    ) -> Result<ExecutionResult, Error> {
+        match crate::mxc_engine::execute_one_shot_json(request_json, experimental, policy_failures)?
+        {
             #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
             crate::mxc_engine::OneShotExecution::Captured(result) => {
                 Ok(captured_execution_result(result))

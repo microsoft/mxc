@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 using Microsoft.Mxc.Sdk.V1;
 
@@ -33,12 +34,16 @@ internal static unsafe class NativeError
         MxcErrorDetail detail,
         string fallbackMessage)
     {
+        var detailsJson = ToStringOrNull(detail.details_json_utf8);
+        JsonElement? details = detailsJson is null
+            ? null : MxcJson.Deserialize<JsonElement>(detailsJson);
         return new MxcException(
             (ErrorCode)status,
             ToStringOrNull(detail.message_utf8) ?? fallbackMessage,
             ToStringOrNull(detail.operation_utf8),
             ToStringOrNull(detail.native_code_utf8),
-            ToStringOrNull(detail.remediation_utf8));
+            ToStringOrNull(detail.remediation_utf8),
+            details);
     }
 
     /// <summary>

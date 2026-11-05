@@ -249,7 +249,8 @@ for complete signatures and types.
 ## Errors, warnings, and discovery
 
 Native failures are surfaced as `MxcException`; inspect `Code`, `Operation`,
-`NativeCode`, and `Remediation` when available. Security and operational
+`NativeCode`, `Remediation`, and optional `Details` when available. `Details`
+is a `JsonElement` that remains valid after native cleanup. Security and operational
 warnings are available on `ExecutionResult.Warnings` and `MxcProcess.Warnings`.
 Provision returns identity, optional typed metadata, and `ProvisionResult.Warnings`.
 Start, stop, and deprovision return `LifecycleResult.Warnings`. Omitted native
@@ -282,6 +283,63 @@ existing tool directories and excludes system-critical paths; it does not
 inspect ACLs. `GetUserProfilePolicy` uses the supplied environment,
 and `GetTemporaryFilesPolicy` returns existing temporary storage without creating
 directories.
+
+## Caller-owned creation-policy feedback
+
+`Microsoft.Mxc.Sdk.V1.Dev.JsonOptions.PolicyFailures` accepts saved Windows
+ProcessContainer creation-policy observations for `RunJson`, `RunJsonAsync`,
+`SpawnJson`, and `SpawnJsonAsync`. Feedback is separate from MXC request JSON.
+The native backend validates it and applies supported restrictions before one
+creation attempt. The application decides whether to store observations or
+make another call.
+
+```csharp
+using Microsoft.Mxc.Sdk.V1;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
+
+const string requestJson = """
+    {"version":"1.1.0-alpha","containment":"processcontainer",
+     "process":{"commandLine":"cmd.exe /c echo hello","timeout":30000}}
+    """;
+Dev.PolicyFailures? saved = File.Exists("policy-failures.json")
+    ? Dev.PolicyFailures.FromJson(await File.ReadAllTextAsync("policy-failures.json"))
+    : null;
+
+try
+{
+    ExecutionResult result = await Dev.MxcContainer.RunJsonAsync(
+        requestJson, new Dev.JsonOptions { PolicyFailures = saved });
+    Console.WriteLine(result.Stdout);
+}
+catch (MxcException error)
+{
+    if (Dev.PolicyFailures.FromException(error) is { } feedback)
+    {
+        await File.WriteAllTextAsync("policy-failures.json", feedback.ToJson());
+    }
+    throw;
+}
+```
+
+`FromException` reads cumulative observations from `MxcException.Details`
+without changing its code, message, or other backend details. `ToJson` and
+`FromJson` are public, source-generated JSON helpers that also work with
+Native AOT. They preserve native batch boundaries, unknown numeric codes,
+lossless `ulong` values as decimal strings, and optional `ushort[]` resources.
+`PolicyFailureDetail.GetResourceText()` throws `DecoderFallbackException` for
+malformed UTF-16 while leaving the raw units available.
+Named groups such as `Dev.PolicyFailureOutcomes.Blocked` and
+`Dev.PolicyFailureReasons.CapabilityNotAllowed` make comparisons readable
+without changing numeric JSON or discarding unknown values.
+Policy-specific resources, capabilities, and requested or required values
+remain structured rather than appearing in exception text, stacks, or warnings.
+
+Typed V1 creation options and PTY options do not accept feedback. Dev lifecycle
+and validation operations reject a supplied `PolicyFailures`, including an
+empty value. Successful execution keeps the ordinary result, stdin,
+cancellation, warning, and ownership behavior. See the
+[V1.Dev reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md#caller-owned-creation-policy-feedback)
+for storage limits and terminal reports.
 
 ## Package and native library
 

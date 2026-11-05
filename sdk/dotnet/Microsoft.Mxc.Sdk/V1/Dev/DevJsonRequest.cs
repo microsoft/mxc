@@ -12,6 +12,19 @@ internal static class DevJsonRequest
     // The phase/timeout inspection must not reject nesting the native JSON parser accepts.
     private static readonly JsonDocumentOptions InspectionOptions = new() { MaxDepth = 128 };
 
+    internal static byte[]? PreparePolicyFailures(PolicyFailures? feedback)
+    {
+        try
+        {
+            return feedback is null ? null : ToNullTerminatedUtf8(feedback.ToJson());
+        }
+        catch (JsonException error)
+        {
+            throw new MxcException(ErrorCode.MalformedRequest,
+                $"invalid PolicyFailures: {error.Message}", error);
+        }
+    }
+
     internal static (byte[] Request, uint? TimeoutMs) Prepare(
         string json, string operation, string? expectedPhase = null)
     {

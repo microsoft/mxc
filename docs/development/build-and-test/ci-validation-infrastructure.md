@@ -158,6 +158,10 @@ script and then to the dispatcher, which has one `switch`/`case` per id. The
 `process` case requires `wxc-exec --probe` to report an enabled native PSEC
 contract, then runs a filesystem smoke test, public SDK streaming tests, and
 the native network and policy suites against the downloaded artifacts.
+The SDK suite requires the Dev policy-feedback replay test to be discovered
+and executed. It checks read-only enforcement, an unrelated writable control,
+and reuse with a changed request. Its explicit caller-owned feedback does not
+install administrative policy or prove fresh governed refusal capture.
 The network and policy suites delegate their focused loopback and enumeration
 checks to standalone native runners. These retain the host controls and
 enforcement assertions; enumeration also checks live request-probe agreement

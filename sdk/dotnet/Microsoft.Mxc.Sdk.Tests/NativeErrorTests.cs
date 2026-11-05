@@ -3,9 +3,11 @@
 
 using System;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Microsoft.Mxc.Sdk.Native;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
@@ -38,13 +40,15 @@ public unsafe class NativeErrorTests
         string? message,
         string? operation = null,
         string? nativeCode = null,
-        string? remediation = null) =>
+        string? remediation = null,
+        string? detailsJson = null) =>
         new()
         {
             message_utf8 = Utf8(message),
             operation_utf8 = Utf8(operation),
             native_code_utf8 = Utf8(nativeCode),
             remediation_utf8 = Utf8(remediation),
+            details_json_utf8 = Utf8(detailsJson),
         };
 
     /// <summary>
@@ -64,6 +68,7 @@ public unsafe class NativeErrorTests
         Marshal.FreeCoTaskMem((IntPtr)detail.operation_utf8);
         Marshal.FreeCoTaskMem((IntPtr)detail.native_code_utf8);
         Marshal.FreeCoTaskMem((IntPtr)detail.remediation_utf8);
+        Marshal.FreeCoTaskMem((IntPtr)detail.details_json_utf8);
     }
 
     [Fact]
@@ -85,6 +90,7 @@ public unsafe class NativeErrorTests
             Assert.Equal("IsoSessionOps.StopSessionAsync", ex.Operation);
             Assert.Equal("0x80070490", ex.NativeCode);
             Assert.Equal("Provision the session first.", ex.Remediation);
+            Assert.Null(ex.Details);
         }
         finally
         {
@@ -154,6 +160,138 @@ public unsafe class NativeErrorTests
         finally
         {
             Free(detail);
+        }
+    }
+
+    [Fact]
+    public void CumulativeFeedbackAndOtherDetailsOutliveNativeMemory()
+    {
+        const string resourceMarker = "MXC_POLICY_RESOURCE_STRUCTURED_ONLY_7B30AC71";
+        const string capabilityMarker = "MXC_POLICY_CAPABILITY_STRUCTURED_ONLY_2AE56531";
+        var feedback = new Dev.PolicyFailures
+        {
+            Results =
+            [
+                new()
+                {
+                    Outcome = Dev.PolicyFailureOutcomes.Blocked,
+                    Details =
+                    [
+                        new()
+                        {
+                            RequestedValue = ulong.MaxValue,
+                            RequiredValue = 9_007_199_254_740_993,
+                            Resource = resourceMarker.Select(static character => (ushort)character).ToArray(),
+                        },
+                    ],
+                },
+                new()
+                {
+                    Version = 99,
+                    MinimumReaderVersion = 98,
+                    Outcome = uint.MaxValue,
+                    Details = [new() { FailureClass = uint.MaxValue, Resource = [0xD800, 0] }],
+                },
+            ],
+        };
+        var detailsJson = $$$"""
+            {"policyFailures":{{{feedback.ToJson()}}},"policyFeedbackError":{"code":"feedbackLimitExceeded","reason":"result limit"},
+             "policyResultUnavailable":"no new result",
+             "other":{"native":[true,18446744073709551615],"capability":"{{{capabilityMarker}}}"}}
+            """;
+        var detail = Detail("creation refused", "CreateProcessSecurityEnvironment",
+            Dev.PolicyFailureNativeCodes.PolicyBlocked, "check policy", detailsJson);
+        var warnings = Utf8("""["ordinary native warning"]""");
+        MxcException exception;
+        ExecutionResult success;
+        try
+        {
+            var result = new MxcRunResult
+            {
+                error = detail,
+                exit_code = 7,
+                warnings_json_utf8 = warnings,
+            };
+            exception = Assert.Throws<MxcException>(
+                () => Dev.MxcContainer.ReadRunResult((int)ErrorCode.BackendError, result));
+            // Even a success-shaped result must not turn its error details into warnings.
+            success = Dev.MxcContainer.ReadRunResult((int)ErrorCode.Success, result);
+        }
+        finally
+        {
+            Free(detail);
+            Marshal.FreeCoTaskMem((IntPtr)warnings);
+        }
+
+        Assert.Equal(ErrorCode.BackendError, exception.Code);
+        Assert.Equal("creation refused", exception.Message);
+        Assert.Equal("CreateProcessSecurityEnvironment", exception.Operation);
+        Assert.Equal("0x800704EC", exception.NativeCode);
+        Assert.Equal("check policy", exception.Remediation);
+        Assert.DoesNotContain("policyFailures", exception.ToString());
+        Assert.NotNull(exception.StackTrace);
+        Assert.Equal(7, success.ExitCode);
+        Assert.Equal(new[] { "ordinary native warning" }, success.Warnings);
+        var rendered = new[] { exception.Message, exception.ToString(), exception.StackTrace! }
+            .Concat(success.Warnings);
+        foreach (var text in rendered)
+        {
+            Assert.DoesNotContain(resourceMarker, text);
+            Assert.DoesNotContain(capabilityMarker, text);
+            Assert.DoesNotContain("18446744073709551615", text);
+            Assert.DoesNotContain("9007199254740993", text);
+            Assert.DoesNotContain("feedbackLimitExceeded", text);
+            Assert.DoesNotContain("result limit", text);
+            Assert.DoesNotContain(feedback.ToJson(), text);
+        }
+        var details = exception.Details!.Value;
+        var terminal = details.GetProperty("policyFeedbackError");
+        Assert.Equal("feedbackLimitExceeded", terminal.GetProperty("code").GetString());
+        Assert.Equal("result limit", terminal.GetProperty("reason").GetString());
+        Assert.Equal("no new result", details.GetProperty("policyResultUnavailable").GetString());
+        Assert.Equal(ulong.MaxValue, details.GetProperty("other").GetProperty("native")[1].GetUInt64());
+        Assert.Equal(capabilityMarker, details.GetProperty("other").GetProperty("capability").GetString());
+        var extracted = Dev.PolicyFailures.FromException(exception);
+        Assert.NotNull(extracted);
+        Assert.Equal(2, extracted.Results.Length);
+        Assert.Equal(resourceMarker, extracted.Results[0].Details[0].GetResourceText());
+        Assert.Equal(uint.MaxValue, extracted.Results[1].Outcome);
+        Assert.Equal(new ushort[] { 0xD800, 0 }, extracted.Results[1].Details[0].Resource);
+        Assert.Equal(feedback.ToJson(), Dev.PolicyFailures.FromJson(extracted.ToJson()).ToJson());
+        Assert.Equal(resourceMarker,
+            Dev.PolicyFailures.FromJson(extracted.ToJson()).Results[0].Details[0].GetResourceText());
+    }
+
+    [Fact]
+    public void FeedbackExtractionDistinguishesAbsenceFromInvalidFeedback()
+    {
+        Assert.Null(Dev.PolicyFailures.FromException(new MxcException(ErrorCode.BackendError, "ordinary error")));
+        foreach (var json in new[]
+        {
+            """{"other":"retained"}""",
+            """{"other":"retained","policyFailures":null}""",
+            """{"other":"retained","policyFailures":{"formatVersion":2,"results":[]}}""",
+        })
+        {
+            var detail = Detail("original error", detailsJson: json);
+            try
+            {
+                var exception = NativeError.ToException((int)ErrorCode.BackendError, detail, "unused");
+                if (json.Contains("policyFailures", StringComparison.Ordinal))
+                {
+                    Assert.Throws<JsonException>(() => Dev.PolicyFailures.FromException(exception));
+                }
+                else
+                {
+                    Assert.Null(Dev.PolicyFailures.FromException(exception));
+                }
+                Assert.Equal("original error", exception.Message);
+                Assert.Equal("retained", exception.Details!.Value.GetProperty("other").GetString());
+            }
+            finally
+            {
+                Free(detail);
+            }
         }
     }
 }

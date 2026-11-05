@@ -97,7 +97,7 @@ impl From<MxcErrorCode> for ErrorCode {
 ///
 /// This type is `#[non_exhaustive]`. Use [`Error::new`] rather than a struct
 /// literal so future versions can add fields without breaking construction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Error {
     /// The SDK error code.
@@ -113,6 +113,9 @@ pub struct Error {
     pub native_code: Option<String>,
     /// An actionable "how to fix it" hint, when the failure carries one.
     pub remediation: Option<String>,
+    /// Backend-specific structured information. Experimental creation-policy
+    /// values are accessed through the V1.Dev API.
+    pub details: Option<Box<serde_json::Value>>,
 }
 
 impl Error {
@@ -125,6 +128,7 @@ impl Error {
             operation: None,
             native_code: None,
             remediation: None,
+            details: None,
         }
     }
 }
@@ -148,6 +152,12 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl std::fmt::Debug for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
 impl From<MxcError> for Error {
     fn from(error: MxcError) -> Self {
         let (operation, native_code) = match error.api_failure {
@@ -163,6 +173,7 @@ impl From<MxcError> for Error {
             operation,
             native_code,
             remediation: error.remediation,
+            details: error.details.map(Box::new),
         }
     }
 }
@@ -176,11 +187,10 @@ impl Error {
     /// MxcError`: a second `MxcError: From<_>` impl makes `?` ambiguous
     /// wherever the error type is inferred.
     ///
-    /// `MxcError::details` has no facade counterpart and does not survive the
-    /// round trip.
     #[doc(hidden)]
     pub fn into_mxc_error(self) -> MxcError {
         let mut error = MxcError::new(self.code.to_internal(), self.message);
+        error.details = self.details.map(|details| *details);
         if let Some(operation) = self.operation {
             let mut failure = ApiFailure::new(operation);
             failure.native_code = self.native_code;
@@ -196,7 +206,33 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn policy_feedback_error_debug_does_not_render_structured_resources() {
+        let payload =
+            serde_json::json!({ "policyFailures": { "resource": "POLICY_RESOURCE_MARKER" } });
+        let inner = MxcError::backend_error("Creation refused.").with_details(payload);
+        assert!(!format!("{inner:?}").contains("POLICY_RESOURCE_MARKER"));
+        let error = Error::from(inner);
+        assert!(!format!("{error:?}").contains("POLICY_RESOURCE_MARKER"));
+        assert!(error
+            .details
+            .as_deref()
+            .unwrap()
+            .get("policyFailures")
+            .is_some());
+    }
     use crate::mxc_common::mxc_error::{ApiFailure as InnerFailure, MxcError};
+
+    #[test]
+    fn policy_feedback_structured_details_survive_both_sdk_conversions() {
+        let payload =
+            serde_json::json!({ "policyFailures": { "formatVersion": 1, "results": [] } });
+        let original = MxcError::backend_error("Creation refused.").with_details(payload.clone());
+        let converted = Error::from(original);
+        assert_eq!(converted.details.as_deref(), Some(&payload));
+        assert_eq!(converted.into_mxc_error().details, Some(payload));
+        assert!(std::mem::size_of::<Error>() < 128);
+    }
     /// The conversion carries the API detail across, rather than keeping only
     /// the code and message.
     ///

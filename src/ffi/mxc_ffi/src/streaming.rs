@@ -446,7 +446,7 @@ pub unsafe extern "C" fn mxc_spawn_with_stdin_json(
 fn spawn_json_inner(
     request_json_utf8: *const c_char,
     experimental: bool,
-    spawn: fn(&str, bool) -> Result<MxcProcess, mxc_sdk::v1::Error>,
+    spawn: impl FnOnce(&str, bool) -> Result<MxcProcess, mxc_sdk::v1::Error>,
 ) -> Result<MxcProcess, (i32, MxcErrorDetail)> {
     // SAFETY: caller contract on `mxc_spawn_json`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
@@ -465,6 +465,55 @@ fn spawn_json_inner(
         }
     };
     spawn(request_json, experimental).map_err(sdk_error_detail)
+}
+
+/// Spawn a request once with optional cumulative restrictive policy feedback.
+///
+/// # Safety
+/// As for [`mxc_spawn_json`]. `policy_failures_json_utf8` must additionally be
+/// null or valid NUL-terminated UTF-8 for the duration of this call.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_spawn_with_policy_failures_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    policy_failures_json_utf8: *const c_char,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    if !out_handle.is_null() {
+        // SAFETY: caller-guaranteed writable storage with no live handle.
+        unsafe { *out_handle = ptr::null_mut() };
+    }
+    if !out_error.is_null() {
+        // SAFETY: caller-guaranteed writable storage with no live strings.
+        unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
+    }
+    if out_handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        spawn_json_inner(
+            request_json_utf8,
+            experimental != 0,
+            |request, experimental| {
+                let feedback = crate::parse_policy_failures(policy_failures_json_utf8)?;
+                mxc_sdk::__ffi::spawn_container_json_with_policy_failures(
+                    request,
+                    experimental,
+                    feedback.as_ref(),
+                )
+            },
+        )
+    }))
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_spawn_with_policy_failures_json", &*panic);
+        Err((
+            MXC_STATUS_PANIC,
+            MxcErrorDetail::from_message("the mxc engine panicked"),
+        ))
+    });
+    // SAFETY: out_handle is non-null and both output contracts were checked.
+    unsafe { finish_spawn(outcome, out_handle, out_error) }
 }
 
 /// Shared tail of the handle-returning spawn entry points

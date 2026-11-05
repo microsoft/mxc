@@ -8,7 +8,7 @@ using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
 
 namespace Microsoft.Mxc.Sdk.V1.Dev;
 
-/// <summary>One-shot caller-authored exact-JSON entry points.</summary>
+/// <summary>Creation entry points for caller-authored MXC request JSON.</summary>
 public static class MxcContainer
 {
     static MxcContainer() => NativeLibraryResolver.Initialize();
@@ -16,35 +16,18 @@ public static class MxcContainer
     public static ExecutionResult RunJson(string json, JsonOptions? options = null)
     {
         var (request, _) = DevJsonRequest.Prepare(json, nameof(RunJson));
+        var feedback = DevJsonRequest.PreparePolicyFailures(options?.PolicyFailures);
         unsafe
         {
             fixed (byte* requestPtr = request)
+            fixed (byte* feedbackPtr = feedback)
             {
                 MxcRunResult result = default;
-                var status = NativeMethods.mxc_run_json(
-                    requestPtr, options?.Experimental == true ? 1 : 0, &result);
+                var status = NativeMethods.mxc_run_with_policy_failures_json(
+                    requestPtr, options?.Experimental == true ? 1 : 0, feedbackPtr, &result);
                 try
                 {
-                    if (status != (int)ErrorCode.Success)
-                    {
-                        throw NativeError.ToException(status, result.error, "running exact JSON failed");
-                    }
-
-                    var metadataJson = PtrToString(result.output_metadata_json_utf8);
-                    var warningsJson = PtrToString(result.warnings_json_utf8);
-                    return new ExecutionResult
-                    {
-                        ExitCode = result.exit_code,
-                        TimedOut = result.timed_out != 0,
-                        Stdout = PtrToString(result.stdout_utf8) ?? string.Empty,
-                        Stderr = PtrToString(result.stderr_utf8) ?? string.Empty,
-                        OutputMetadata = string.IsNullOrEmpty(metadataJson)
-                            ? null : MxcJson.Deserialize<ExecutionMetadata>(metadataJson),
-                        Warnings = string.IsNullOrEmpty(warningsJson)
-                            ? Array.Empty<string>() : MxcJson.Deserialize<string[]>(warningsJson)
-                                ?? throw new MxcException(ErrorCode.BackendError,
-                                    "native runtime returned null warnings"),
-                    };
+                    return ReadRunResult(status, result);
                 }
                 finally
                 {
@@ -52,6 +35,30 @@ public static class MxcContainer
                 }
             }
         }
+    }
+
+    internal static unsafe ExecutionResult ReadRunResult(int status, MxcRunResult result)
+    {
+        if (status != (int)ErrorCode.Success)
+        {
+            throw NativeError.ToException(status, result.error, "running exact JSON failed");
+        }
+
+        var metadataJson = PtrToString(result.output_metadata_json_utf8);
+        var warningsJson = PtrToString(result.warnings_json_utf8);
+        return new ExecutionResult
+        {
+            ExitCode = result.exit_code,
+            TimedOut = result.timed_out != 0,
+            Stdout = PtrToString(result.stdout_utf8) ?? string.Empty,
+            Stderr = PtrToString(result.stderr_utf8) ?? string.Empty,
+            OutputMetadata = string.IsNullOrEmpty(metadataJson)
+                ? null : MxcJson.Deserialize<ExecutionMetadata>(metadataJson),
+            Warnings = string.IsNullOrEmpty(warningsJson)
+                ? Array.Empty<string>() : MxcJson.Deserialize<string[]>(warningsJson)
+                    ?? throw new MxcException(ErrorCode.BackendError,
+                        "native runtime returned null warnings"),
+        };
     }
 
     public static Task<ExecutionResult> RunJsonAsync(
@@ -64,14 +71,16 @@ public static class MxcContainer
     public static MxcProcess SpawnJson(string json, JsonOptions? options = null)
     {
         var (request, timeout) = DevJsonRequest.Prepare(json, nameof(SpawnJson));
+        var feedback = DevJsonRequest.PreparePolicyFailures(options?.PolicyFailures);
         unsafe
         {
             fixed (byte* requestPtr = request)
+            fixed (byte* feedbackPtr = feedback)
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_json(
-                    requestPtr, options?.Experimental == true ? 1 : 0, &handle, &error);
+                var status = NativeMethods.mxc_spawn_with_policy_failures_json(
+                    requestPtr, options?.Experimental == true ? 1 : 0, feedbackPtr, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try

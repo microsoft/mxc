@@ -19,12 +19,16 @@ use super::{JsonOptions, PtyJsonOptions};
 /// Nonzero workload exit and timeout are results, not API errors. Parser,
 /// launch, and output-read failures return [`Error`].
 pub fn run_json(json: &str, options: JsonOptions) -> Result<ExecutionResult, Error> {
-    crate::__ffi::run_json(json, options.experimental)
+    crate::__ffi::run_json_with_policy_failures(json, options.experimental, options.policy_failures)
 }
 
 /// Spawn a caller-authored exact-version one-shot request with live pipes.
 pub fn spawn_json(json: &str, options: JsonOptions) -> Result<MxcProcess, Error> {
-    crate::__ffi::spawn_container_json(json, options.experimental)
+    crate::__ffi::spawn_container_json_with_policy_failures(
+        json,
+        options.experimental,
+        options.policy_failures,
+    )
 }
 
 /// Spawn a caller-authored exact-version one-shot request with a PTY.
@@ -36,6 +40,22 @@ pub fn spawn_with_pty_json(json: &str, options: PtyJsonOptions) -> Result<MxcPty
 mod tests {
     use super::*;
     use crate::mxc_engine::ErrorCode;
+
+    #[test]
+    fn policy_feedback_dev_options_reject_unsupported_backend_and_lifecycle() {
+        let feedback = super::super::PolicyFailures::default();
+        let options = JsonOptions {
+            policy_failures: Some(&feedback),
+            ..Default::default()
+        };
+        let json = r#"{"version":"1.0.0","containment":"bubblewrap","process":{"commandLine":"must-not-run"}}"#;
+        let error = run_json(json, options).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedContainment);
+        assert!(error.message.contains("policyFailures"));
+        let lifecycle = r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:unused"}"#;
+        let error = crate::v1::dev::start_container_json(lifecycle, options).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedPhase);
+    }
 
     #[test]
     fn one_shot_spawns_use_exact_parser() {
@@ -77,7 +97,14 @@ mod tests {
     fn run_json_experimental_option_does_not_select_a_contract_version() {
         let json = r#"{"version":"999.0.0","process":{"commandLine":"echo must-not-run"}}"#;
         for experimental in [false, true] {
-            let error = crate::v1::dev::run_json(json, JsonOptions { experimental }).unwrap_err();
+            let error = crate::v1::dev::run_json(
+                json,
+                JsonOptions {
+                    experimental,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
             assert_eq!(error.code, ErrorCode::MalformedRequest);
         }
     }

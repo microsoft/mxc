@@ -21,6 +21,16 @@ Use [mxc_sdk::v1::dev](https://github.com/microsoft/mxc/blob/main/docs/api-refer
 for caller-authored MXC request JSON. It supports execution, container
 lifecycle operations, and validation through the in-process engine.
 
+For native Windows ProcessContainer, Dev creation options accept caller-owned
+`PolicyFailures`. A refusal returns cumulative structured data, and a later
+call can apply supported restrictive changes to a private request copy. The
+application owns its retry loop and JSON storage; each call attempts creation
+once. Specific policy failures are not formatted into error or warning text.
+Use names such as `PolicyFailureResult::OUTCOME_BLOCKED` and
+`PolicyFailureDetail::REASON_CAPABILITY_NOT_ALLOWED` to inspect numeric codes.
+See the [Dev feedback reference](https://github.com/microsoft/mxc/blob/main/docs/api-reference/rust/v1/dev.md#caller-owned-creation-policy-feedback)
+and [Rust caller example](examples/policy_feedback.rs).
+
 ## Run to completion and spawn
 
 Build a `ContainerRequest` directly, then choose captured output with `run` or
@@ -202,8 +212,8 @@ For PowerShell startup failures, see
 
 Enable the `microvm` Cargo feature on Windows x64 for experimental captured
 create-and-run execution with `v1::dev::run_json`. Supply a MicroVM JSON
-request and set `JsonOptions { experimental: true }`. Typed V1 APIs do not
-expose MicroVM selection. Distribute the complete staged `aci-edge-sandboxes/`
+request and set `options.experimental = true` on `JsonOptions::default()`.
+Typed V1 APIs do not expose MicroVM selection. Distribute the complete staged `aci-edge-sandboxes/`
 directory beside the application executable. See the
 [NVX backend guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nvx/nvx.md)
 for host requirements, image references, and supported operations and policy.

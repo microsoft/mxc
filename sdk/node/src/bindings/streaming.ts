@@ -27,6 +27,7 @@ import {
 } from './native-stdio.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   decodeString,
   nativeStatusError,
   parseStringArray,
@@ -85,6 +86,7 @@ export interface StreamingNativeFacade extends LifecycleNativeFacade {
     outHandle: Pointer[],
     error: AbiErrorDetail,
     completion: NativeSpawnCompletion,
+    policyFailuresJson?: string | null,
   ): void;
   spawnWithStdin(
     request: string,
@@ -147,6 +149,24 @@ function bindStreamingNativeFacade(
     parameters: [
       'const char *',
       'int32_t',
+      koffi.out(koffi.pointer(AbiSandbox, 2)),
+      koffi.out(koffi.pointer(AbiErrorDetailType)),
+    ],
+  });
+
+  const spawnWithPolicyFailuresBinding = bindNativeFunction<KoffiFunc<(
+    request: string,
+    experimental: number,
+    policyFailuresJson: string | null,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ) => number>>(handle, {
+    symbol: 'mxc_spawn_with_policy_failures_json',
+    result: 'int32_t',
+    parameters: [
+      'const char *',
+      'int32_t',
+      'const char *',
       koffi.out(koffi.pointer(AbiSandbox, 2)),
       koffi.out(koffi.pointer(AbiErrorDetailType)),
     ],
@@ -219,8 +239,14 @@ function bindStreamingNativeFacade(
       return spawnAsyncBinding(request, experimental, outHandle, error);
     },
 
-    spawn(request, experimental, outHandle, error, completion) {
-      spawnAsyncBinding.async(request, experimental, outHandle, error, completion);
+    spawn(request, experimental, outHandle, error, completion, policyFailuresJson) {
+      if (policyFailuresJson === undefined) {
+        spawnAsyncBinding.async(request, experimental, outHandle, error, completion);
+      } else {
+        spawnWithPolicyFailuresBinding.async(
+          request, experimental, policyFailuresJson, outHandle, error, completion,
+        );
+      }
     },
 
     spawnWithStdin(request, experimental, outHandle, error, completion) {
@@ -554,21 +580,25 @@ export async function createStreamingDriverFromJson(
   factory: NativeStreamFactory,
   experimental = false,
   stdin = false,
+  policyFailuresJson?: string | null,
 ): Promise<NativeLifecycleDriver> {
+  if (stdin && policyFailuresJson !== undefined) {
+    throw new MxcError('malformed_request', 'creation policyFailures do not support writable-stdin spawn');
+  }
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
-  const spawn = stdin ? native.spawnWithStdin.bind(native) : native.spawn.bind(native);
+  const error = createAbiErrorDetail();
   const status = await new Promise<number>((resolve, reject) => {
-    spawn(
-      requestJson,
-      experimental ? 1 : 0,
-      outHandle,
-      error,
-      (failure, nativeStatus) => {
-        if (failure !== null) reject(failure);
-        else resolve(nativeStatus);
-      },
-    );
+    const completion: NativeSpawnCompletion = (failure, nativeStatus) => {
+      if (failure !== null) reject(failure);
+      else resolve(nativeStatus);
+    };
+    if (stdin) {
+      native.spawnWithStdin(requestJson, experimental ? 1 : 0, outHandle, error, completion);
+    } else {
+      native.spawn(
+        requestJson, experimental ? 1 : 0, outHandle, error, completion, policyFailuresJson,
+      );
+    }
   });
   return createNativeLifecycleDriver(
     native,
@@ -585,7 +615,7 @@ export function createStreamingDriverSync(
   experimental = false,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.spawnSync(
     JSON.stringify(request),
     experimental ? 1 : 0,
@@ -645,7 +675,12 @@ export async function spawnBindingSandboxProcess(
 }
 
 let rawOneShotProcessFactory:
-  | ((requestJson: string, experimental: boolean, timeoutMs?: number) => Promise<MxcProcess>)
+  | ((
+      requestJson: string,
+      experimental: boolean,
+      timeoutMs?: number,
+      policyFailuresJson?: string,
+    ) => Promise<MxcProcess>)
   | undefined;
 
 /** @internal Replaces raw one-shot process creation for unit tests. */
@@ -659,9 +694,10 @@ export async function spawnBindingSandboxProcessJson(
   requestJson: string,
   experimental: boolean,
   timeoutMs?: number,
+  policyFailuresJson?: string,
 ): Promise<MxcProcess> {
   if (rawOneShotProcessFactory !== undefined) {
-    return rawOneShotProcessFactory(requestJson, experimental, timeoutMs);
+    return rawOneShotProcessFactory(requestJson, experimental, timeoutMs, policyFailuresJson);
   }
   ensureSupportedNodeVersion();
   const driver = await createStreamingDriverFromJson(
@@ -669,6 +705,8 @@ export async function spawnBindingSandboxProcessJson(
     getStreamingNative(),
     nodeStreamFactory,
     experimental,
+    false,
+    policyFailuresJson ?? null,
   );
   return createSandboxProcess(driver, timeoutMs);
 }
@@ -714,7 +752,7 @@ export function createStateAwareStreamingDriver(
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const status = native.stateAwareExec(
     requestJson,
     experimental ? 1 : 0,
@@ -784,7 +822,7 @@ export async function createStateAwareStreamingDriverAsync(
   stdin = false,
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
+  const error = createAbiErrorDetail();
   const exec = stdin
     ? native.stateAwareExecWithStdinAsync.bind(native)
     : native.stateAwareExecAsync.bind(native);

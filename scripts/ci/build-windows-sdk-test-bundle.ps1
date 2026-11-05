@@ -268,7 +268,7 @@ foreach ($test in 'dev_json_one_shot_pty_supports_interactive_input', 'dev_json_
 Assert-Discovery 'SDK helper tests' '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$' {
     & (Join-Path $inproc 'mxc-sdk-helpers-tests.exe') --list
 }
-foreach ($test in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+foreach ($test in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes', 'dev_json_processcontainer_policy_feedback_restricts_current_request') {
     Assert-Discovery "ProcessContainer $test" "(?m)^${test}: test\r?$" {
         & (Join-Path $inproc 'mxc-sdk-process-container-streaming-tests.exe') --list --ignored --exact $test
     }

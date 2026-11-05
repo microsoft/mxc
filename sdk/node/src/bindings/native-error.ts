@@ -12,6 +12,8 @@ export interface AbiErrorDetail {
   operation: unknown | null;
   nativeCode: unknown | null;
   remediation: unknown | null;
+  /** Released by the owning result or out-error free, never independently. */
+  detailsJson: unknown | null;
 }
 
 export const AbiErrorDetailType = koffi.struct('MxcNodeJsonErrorDetail', {
@@ -19,7 +21,12 @@ export const AbiErrorDetailType = koffi.struct('MxcNodeJsonErrorDetail', {
   operation: 'void *',
   nativeCode: 'void *',
   remediation: 'void *',
+  detailsJson: 'void *',
 });
+
+export function createAbiErrorDetail(): AbiErrorDetail {
+  return { message: null, operation: null, nativeCode: null, remediation: null, detailsJson: null };
+}
 
 export function decodeString(pointer: unknown): string | undefined {
   if (pointer === null || pointer === undefined || pointer === 0 || pointer === 0n) {
@@ -56,13 +63,28 @@ export function nativeStatusError(
   detail: Partial<AbiErrorDetail> = {},
   fallback = `native runtime failed with status ${status}`,
 ): MxcError {
+  const json = decodeString(detail.detailsJson);
+  let details: Record<string, unknown> = {};
+  if (json !== undefined) {
+    try {
+      const value: unknown = JSON.parse(json);
+      if (!isRecord(value)) throw new Error('expected a JSON object');
+      details = value;
+    } catch (error) {
+      throw new MxcError({
+        code: 'backend_error',
+        message: 'native runtime returned malformed error details',
+        details: { ffiStatus: status, cause: error instanceof Error ? error.message : String(error) },
+      });
+    }
+  }
   return new MxcError({
     code: _errorCodeForNativeStatus(status),
     message: decodeString(detail.message) ?? fallback,
     operation: decodeString(detail.operation),
     nativeCode: decodeString(detail.nativeCode),
     remediation: decodeString(detail.remediation),
-    details: { ffiStatus: status },
+    details: { ...details, ffiStatus: status },
   });
 }
 

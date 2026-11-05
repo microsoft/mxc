@@ -6,6 +6,12 @@ use mxc_sdk::{
     v1::{dev, ErrorCode},
 };
 
+fn json_options(experimental: bool) -> dev::JsonOptions<'static> {
+    let mut options = dev::JsonOptions::default();
+    options.experimental = experimental;
+    options
+}
+
 #[cfg(all(windows, target_arch = "x86_64", feature = "microvm"))]
 #[path = "nvx_e2e/network.rs"]
 mod windows_network;
@@ -81,7 +87,7 @@ fn zero_microvm_memory_is_malformed_in_json_sdk_creation_and_provision() {
     let mut request = process_only_request("printf forbidden");
     request["microvm"]["provision"] = serde_json::json!({"memoryMib": 0});
     for experimental in [false, true] {
-        let options = dev::JsonOptions { experimental };
+        let options = json_options(experimental);
         let error = dev::run_json(&request.to_string(), options).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
         assert!(
@@ -145,7 +151,7 @@ fn sdk_json_rejects_invalid_requests_and_requires_explicit_optin() {
     assert!(error.message.contains("experimental"), "{error}");
 
     for experimental in [false, true] {
-        let options = dev::JsonOptions { experimental };
+        let options = json_options(experimental);
         for invalid in [
             "{ not json".to_owned(),
             r#"{"version":"999.0.0","process":{"commandLine":"echo"}}"#.to_owned(),
@@ -162,7 +168,7 @@ fn sdk_json_rejects_invalid_requests_and_requires_explicit_optin() {
 
     #[cfg(not(all(windows, target_arch = "x86_64", feature = "microvm")))]
     {
-        let error = dev::run_json(&json, dev::JsonOptions { experimental: true }).unwrap_err();
+        let error = dev::run_json(&json, json_options(true)).unwrap_err();
         assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
         assert!(error.message.contains("Windows x64"), "{error}");
     }
@@ -171,7 +177,7 @@ fn sdk_json_rejects_invalid_requests_and_requires_explicit_optin() {
 #[test]
 fn sdk_json_rejects_microvm_streaming_pty_and_lifecycle() {
     let mut request = process_only_request("printf forbidden");
-    let options = dev::JsonOptions { experimental: true };
+    let options = json_options(true);
     let json = request.to_string();
     let error = dev::spawn_json(&json, options)
         .err()
@@ -630,11 +636,7 @@ mod windows_x64 {
     fn host_only_executor_request_matrix() {
         let mut zero_memory = process_only_request("printf forbidden");
         zero_memory["microvm"]["provision"] = json!({"memoryMib": 0});
-        let sdk_error = dev::run_json(
-            &zero_memory.to_string(),
-            dev::JsonOptions { experimental: true },
-        )
-        .unwrap_err();
+        let sdk_error = dev::run_json(&zero_memory.to_string(), json_options(true)).unwrap_err();
         assert_eq!(sdk_error.code, ErrorCode::MalformedRequest);
         for dry_run in [false, true] {
             let output = executor_output_with_mode(&zero_memory, true, dry_run);
@@ -911,7 +913,7 @@ print("NVX_JSON_IMAGE_AND_POLICY_OK", end="")
     #[test]
     #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
     fn signed_bundle_sdk_json_capture() {
-        let options = dev::JsonOptions { experimental: true };
+        let options = json_options(true);
         let mut invalid_proxy = process_only_request("printf forbidden");
         invalid_proxy["runtimeConfig"] =
             json!({"networkProxy": "http://synthetic-user:synthetic-password@[::1]:3128"});

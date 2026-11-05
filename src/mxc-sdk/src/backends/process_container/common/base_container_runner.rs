@@ -10,7 +10,6 @@ use std::ffi::c_void;
 use std::fmt::Write;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::ptr;
 use std::sync::Arc;
 
 use crate::learning_mode_core::{capture_diagnostics::CaptureAnalysis, AnalyzeError};
@@ -40,8 +39,8 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::log_symbols::EMOJI_SECTION;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
-    FailurePhase, SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainerPolicy, ContainmentBackend,
+    ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::process_util::{
@@ -70,9 +69,10 @@ use crate::process_container_common::launch_diagnostics::{
     validate_required_child_env,
 };
 use crate::process_container_common::native_capture::CaptureSession;
+use crate::process_container_common::policy_mutation::{self, PreparedPolicy};
 use crate::process_container_common::secenv::{
-    self, ProcessSecurityEnvironment, SecurityEnvironmentStartupInfo, SecurityEnvironmentSupport,
-    SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    self, CreationError, ProcessSecurityEnvironment, SecurityEnvironmentStartupInfo,
+    SecurityEnvironmentSupport, SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     SECURITY_ENVIRONMENT_API_SET,
 };
 
@@ -192,7 +192,7 @@ fn is_api_not_implemented(err: u32) -> bool {
     err == ERROR_CALL_NOT_IMPLEMENTED.0 || err == E_NOTIMPL.0 as u32
 }
 
-trait CaptureSessionOps {
+pub(crate) trait CaptureSessionOps {
     fn environment(&self) -> HANDLE;
     fn finish(
         self: Box<Self>,
@@ -213,7 +213,7 @@ impl CaptureSessionOps for CaptureSession {
     }
 }
 
-trait CaptureSessionFactory: Send + Sync {
+pub(crate) trait CaptureSessionFactory: Send + Sync {
     fn trace_sources(
         &self,
     ) -> Result<LearningModeTraceSources, crate::learning_mode_windows::LearningModeError>;
@@ -222,7 +222,18 @@ trait CaptureSessionFactory: Send + Sync {
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Box<dyn CaptureSessionOps>, crate::learning_mode_windows::LearningModeError>;
+        policy: &ContainerPolicy,
+        capture_network_decisions: bool,
+    ) -> Result<Box<dyn CaptureSessionOps>, CreationError>;
+
+    fn begin_with_environment(
+        &self,
+        environment: ProcessSecurityEnvironment,
+    ) -> Result<Box<dyn CaptureSessionOps>, CreationError> {
+        CaptureSession::begin_with_environment(environment)
+            .map(|session| Box::new(session) as Box<dyn CaptureSessionOps>)
+            .map_err(Into::into)
+    }
 }
 
 struct RealCaptureSessionFactory;
@@ -238,9 +249,16 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Box<dyn CaptureSessionOps>, crate::learning_mode_windows::LearningModeError> {
-        CaptureSession::begin(sandbox_specification, flags)
-            .map(|session| Box::new(session) as Box<dyn CaptureSessionOps>)
+        policy: &ContainerPolicy,
+        capture_network_decisions: bool,
+    ) -> Result<Box<dyn CaptureSessionOps>, CreationError> {
+        let environment = secenv::create_with_diagnostics(
+            sandbox_specification,
+            flags,
+            Some(policy),
+            capture_network_decisions,
+        )?;
+        self.begin_with_environment(environment)
     }
 }
 
@@ -294,6 +312,8 @@ impl BaseContainerRequestDecision {
 pub struct BaseContainerRunner {
     capture_factory: Arc<dyn CaptureSessionFactory>,
     request_serviceability_confirmed: bool,
+    #[cfg(test)]
+    process_launcher: fn(BaseProcessLaunch<'_>) -> windows_core::Result<()>,
 }
 
 impl Default for BaseContainerRunner {
@@ -301,6 +321,8 @@ impl Default for BaseContainerRunner {
         Self {
             capture_factory: Arc::new(RealCaptureSessionFactory),
             request_serviceability_confirmed: false,
+            #[cfg(test)]
+            process_launcher: create_base_process,
         }
     }
 }
@@ -324,18 +346,28 @@ impl BaseContainerRunner {
     }
 
     #[cfg(test)]
-    fn with_capture_factory(capture_factory: Arc<dyn CaptureSessionFactory>) -> Self {
+    pub(crate) fn with_capture_factory(capture_factory: Arc<dyn CaptureSessionFactory>) -> Self {
         Self {
             capture_factory,
             request_serviceability_confirmed: true,
+            process_launcher: create_base_process,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_process_launcher(
+        mut self,
+        launcher: fn(BaseProcessLaunch<'_>) -> windows_core::Result<()>,
+    ) -> Self {
+        self.process_launcher = launcher;
+        self
     }
 
     fn build_capture_aware_security_environment_spec(
         &self,
         request: &ExecutionRequest,
         version: SecurityEnvironmentVersion,
-    ) -> Result<Vec<u8>, ScriptResponse> {
+    ) -> Result<(Vec<u8>, bool), ScriptResponse> {
         let capture_network_decisions = match request.policy.capture_denials.as_ref() {
             Some(_) => self
                 .capture_factory
@@ -348,9 +380,8 @@ impl BaseContainerRunner {
                 .includes_network(),
             None => false,
         };
-        Ok(build_psec_v1_security_environment_spec(
-            request,
-            version,
+        Ok((
+            build_psec_v1_security_environment_spec(request, version, capture_network_decisions),
             capture_network_decisions,
         ))
     }
@@ -499,6 +530,21 @@ impl BaseContainerRunner {
 }
 
 impl BaseContainerRunner {
+    fn supported_security_environment_version(
+        request: &ExecutionRequest,
+    ) -> Result<SecurityEnvironmentVersion, ScriptResponse> {
+        let version = Self::choose_min_required_psec_version_for_request(request);
+        let supported = secenv::supports_version(version).map_err(|error| {
+            ScriptResponse::unavailable(&format!(
+                "failed to query Process Security Environment contract support: {error}"
+            ))
+        })?;
+        if !supported {
+            return Err(Self::unsupported_psec_version_response(request, version));
+        }
+        Ok(version)
+    }
+
     /// Set up and launch the BaseContainer child, returning a [`BaseChild`] the
     /// caller runs to completion (blocking) or wraps in a streaming handle. When
     /// `capture` is set the child's stdio is wired to pipes the caller drives
@@ -509,6 +555,63 @@ impl BaseContainerRunner {
         request: &ExecutionRequest,
         logger: &mut Logger,
         capture: bool,
+    ) -> Result<BaseChild, ScriptResponse> {
+        if request.policy_failures.is_none() {
+            return self.spawn_base_with_environment(request, logger, capture, None);
+        }
+        let working_directory =
+            crate::process_container_common::working_directory::launch_working_directory(request);
+        let negotiated = policy_mutation::create_environment(
+            request,
+            |effective| {
+                let version = Self::supported_security_environment_version(effective)?;
+                let (specification, capture_network_decisions) =
+                    self.build_capture_aware_security_environment_spec(effective, version)?;
+                Ok(PreparedPolicy {
+                    specification,
+                    capture_network_decisions,
+                    version,
+                })
+            },
+            |prepared, policy| {
+                secenv::create_with_diagnostics(
+                    &prepared.specification,
+                    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                    Some(policy),
+                    prepared.capture_network_decisions,
+                )
+            },
+            |effective| {
+                crate::mxc_common::validator::validate_common(effective)?;
+                self.validate(effective)?;
+                if !Self::can_backend_service_request(effective).can_service_request() {
+                    return Err(ScriptResponse::rejected(
+                        "the revised request cannot be enforced by the selected native \
+                         BaseContainer backend; policy mutation does not permit tier fallback",
+                    ));
+                }
+                Ok(())
+            },
+        )?;
+        crate::mxc_common::policy_identity::log_policy_hash(&negotiated.request, logger);
+        self.spawn_base_with_environment(
+            &negotiated.request,
+            logger,
+            capture,
+            Some(PrecreatedEnvironment {
+                environment: negotiated.environment,
+                prepared: negotiated.prepared,
+                working_directory,
+            }),
+        )
+    }
+
+    fn spawn_base_with_environment(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        capture: bool,
+        mut precreated: Option<PrecreatedEnvironment>,
     ) -> Result<BaseChild, ScriptResponse> {
         let _ = writeln!(
             logger,
@@ -523,18 +626,10 @@ impl BaseContainerRunner {
             logger,
         );
 
-        let psec_version = Self::choose_min_required_psec_version_for_request(request);
-        let version_supported = secenv::supports_version(psec_version).map_err(|error| {
-            ScriptResponse::unavailable(&format!(
-                "failed to query Process Security Environment contract support: {error}"
-            ))
-        })?;
-        if !version_supported {
-            return Err(Self::unsupported_psec_version_response(
-                request,
-                psec_version,
-            ));
-        }
+        let psec_version = match &precreated {
+            Some(precreated) => precreated.prepared.version,
+            None => Self::supported_security_environment_version(request)?,
+        };
 
         if let Some(addr) = request.policy.network_proxy.address.as_ref() {
             let _ = writeln!(logger, "effective proxy: {}", addr.to_url());
@@ -550,8 +645,15 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let process_security_environment_spec =
-            self.build_capture_aware_security_environment_spec(request, psec_version)?;
+        let (process_security_environment_spec, capture_network_decisions) = match precreated
+            .as_mut()
+        {
+            Some(precreated) => (
+                std::mem::take(&mut precreated.prepared.specification),
+                precreated.prepared.capture_network_decisions,
+            ),
+            None => self.build_capture_aware_security_environment_spec(request, psec_version)?,
+        };
         let _ = writeln!(
             logger,
             "process security environment spec built (PSEC {}.{}, {} bytes)",
@@ -584,15 +686,20 @@ impl BaseContainerRunner {
         let mut cmd_wide = string_util::to_wide(&request.script_code);
 
         // Always pass a concrete directory rather than inheriting the parent's cwd.
-        let working_directory =
-            crate::process_container_common::working_directory::launch_working_directory(request);
+        let working_directory = precreated.as_ref().map_or_else(
+            || {
+                crate::process_container_common::working_directory::launch_working_directory(
+                    request,
+                )
+            },
+            |created| created.working_directory.clone(),
+        );
         let _ = writeln!(
             logger,
             "working directory: {}",
             working_directory.describe()
         );
         let cwd_wide = string_util::to_wide(&working_directory.path);
-        let cwd_ptr = cwd_wide.as_ptr();
 
         let identity = "<process-security-environment>".to_string();
 
@@ -748,10 +855,6 @@ impl BaseContainerRunner {
             ))
         })?;
 
-        let env_ptr = env_block
-            .as_ref()
-            .map(|b| b.as_ptr() as *const c_void)
-            .unwrap_or(ptr::null());
         // Suppress the empty console window for console-subsystem children when
         // stdio is piped (no console is shared). In console-sharing mode (ConPTY)
         // the child inherits the parent's live console for interactive I/O, so
@@ -770,7 +873,6 @@ impl BaseContainerRunner {
         let _ = writeln!(logger, "launching: {}", request.script_code);
         let _ = writeln!(logger, "identity: {identity}");
 
-        let current_env_ptr = env_ptr;
         let current_creation_flags = creation_flags;
 
         let mut capture_session: Option<Box<dyn CaptureSessionOps>> = None;
@@ -778,10 +880,18 @@ impl BaseContainerRunner {
         {
             let psec_spec = process_security_environment_spec.as_slice();
             if capture_denials.is_some() {
-                match self
-                    .capture_factory
-                    .begin(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
-                {
+                let result = match precreated.take() {
+                    Some(precreated) => self
+                        .capture_factory
+                        .begin_with_environment(precreated.environment),
+                    None => self.capture_factory.begin(
+                        psec_spec,
+                        PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                        &request.policy,
+                        capture_network_decisions,
+                    ),
+                };
+                match result {
                     Ok(session) => {
                         let _ = writeln!(
                             logger,
@@ -790,8 +900,7 @@ impl BaseContainerRunner {
                         capture_session = Some(session);
                     }
                     Err(e) => {
-                        let msg =
-                            format!("captureDenials: failed to start learning-mode capture: {e}");
+                        let msg = e.message(true);
                         let _ = writeln!(logger, "Error: {msg}");
                         log_base_network_policy_audit(
                             request,
@@ -799,16 +908,19 @@ impl BaseContainerRunner {
                             OperationStatus::Failure,
                             logger,
                         );
-                        let failure_phase = if e.is_api_unavailable() {
-                            FailurePhase::BackendUnavailable
-                        } else {
-                            FailurePhase::LaunchFailed
-                        };
-                        return Err(ScriptResponse::failed(failure_phase, &msg));
+                        return Err(e.response(true, request.policy_failures.as_deref()));
                     }
                 }
             } else {
-                let result = secenv::create(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE);
+                let result = match precreated.take() {
+                    Some(precreated) => Ok(precreated.environment),
+                    None => secenv::create_with_diagnostics(
+                        psec_spec,
+                        PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                        Some(&request.policy),
+                        capture_network_decisions,
+                    ),
+                };
                 match result {
                     Ok(environment) => {
                         let _ = writeln!(
@@ -818,8 +930,7 @@ impl BaseContainerRunner {
                         security_environment = Some(environment);
                     }
                     Err(error) => {
-                        let msg =
-                            format!("failed to create the process security environment: {error}");
+                        let msg = error.message(false);
                         let _ = writeln!(logger, "Error: {msg}");
                         log_base_network_policy_audit(
                             request,
@@ -827,12 +938,7 @@ impl BaseContainerRunner {
                             OperationStatus::Failure,
                             logger,
                         );
-                        let failure_phase = if error.is_api_unavailable() {
-                            FailurePhase::BackendUnavailable
-                        } else {
-                            FailurePhase::LaunchFailed
-                        };
-                        return Err(ScriptResponse::failed(failure_phase, &msg));
+                        return Err(error.response(false, request.policy_failures.as_deref()));
                     }
                 }
             }
@@ -888,21 +994,21 @@ impl BaseContainerRunner {
                     return Err(ScriptResponse::failed(failure_phase, &msg));
                 }
             };
-        let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
-        let result = unsafe {
-            CreateProcessW(
-                PCWSTR::null(),
-                Some(PWSTR(cmd_wide.as_mut_ptr())),
-                None,
-                None,
-                !inherited_handles.is_empty(),
-                PROCESS_CREATION_FLAGS(current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0),
-                environment,
-                PCWSTR(cwd_ptr),
-                &extended_startup.startup_info().StartupInfo,
-                &mut pi,
-            )
+        let launch = BaseProcessLaunch {
+            command_line: &mut cmd_wide,
+            working_directory: &cwd_wide,
+            environment: env_block.as_deref(),
+            inherit_handles: !inherited_handles.is_empty(),
+            creation_flags: PROCESS_CREATION_FLAGS(
+                current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0,
+            ),
+            startup: &extended_startup,
+            process_information: &mut pi,
         };
+        #[cfg(not(test))]
+        let result = create_base_process(launch);
+        #[cfg(test)]
+        let result = (self.process_launcher)(launch);
         let (success, last_error) = if result.is_ok() {
             (1, None)
         } else {
@@ -1115,6 +1221,43 @@ impl BaseContainerRunner {
     }
 }
 
+struct PrecreatedEnvironment {
+    environment: ProcessSecurityEnvironment,
+    prepared: PreparedPolicy,
+    working_directory: crate::process_container_common::working_directory::LaunchWorkingDirectory,
+}
+
+pub(crate) struct BaseProcessLaunch<'a> {
+    pub(crate) command_line: &'a mut [u16],
+    pub(crate) working_directory: &'a [u16],
+    pub(crate) environment: Option<&'a [u16]>,
+    pub(crate) inherit_handles: bool,
+    pub(crate) creation_flags: PROCESS_CREATION_FLAGS,
+    pub(crate) startup: &'a SecurityEnvironmentStartupInfo,
+    pub(crate) process_information: &'a mut PROCESS_INFORMATION,
+}
+
+fn create_base_process(launch: BaseProcessLaunch<'_>) -> windows_core::Result<()> {
+    // SAFETY: all buffers and startup attributes are borrowed from live launch
+    // owners; process_information is the caller's sole writable output.
+    unsafe {
+        CreateProcessW(
+            PCWSTR::null(),
+            Some(PWSTR(launch.command_line.as_mut_ptr())),
+            None,
+            None,
+            launch.inherit_handles,
+            launch.creation_flags,
+            launch
+                .environment
+                .map(|block| block.as_ptr().cast::<c_void>()),
+            PCWSTR(launch.working_directory.as_ptr()),
+            &launch.startup.startup_info().StartupInfo,
+            launch.process_information,
+        )
+    }
+}
+
 /// A BaseContainer child launched by [`BaseContainerRunner::spawn_base`].
 /// `spawn_base` resumes it only after job assignment. This owns the process
 /// handle, parent-side pipe ends, and per-run state it tears down once the
@@ -1158,6 +1301,12 @@ impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
+        if request.policy_failures.is_some() {
+            crate::mxc_common::network_parser::validate_process_container_creation_proxy_policy(
+                &request.policy,
+            )
+            .map_err(|error| ScriptResponse::rejected(&error.to_string()))?;
+        }
         if has_conflicting_proxy_identity(&request.policy) {
             return Err(ScriptResponse::rejected(
                 "processContainer.network.allowedProxyPeer grants loopback access only to the \
@@ -2217,12 +2366,14 @@ mod tests {
             &self,
             _sandbox_specification: &[u8],
             _flags: u32,
-        ) -> Result<Box<dyn CaptureSessionOps>, crate::learning_mode_windows::LearningModeError>
-        {
+            _policy: &ContainerPolicy,
+            _capture_network_decisions: bool,
+        ) -> Result<Box<dyn CaptureSessionOps>, CreationError> {
             self.begin_calls.fetch_add(1, Ordering::SeqCst);
             if let Some((function, code)) = self.begin_error {
                 return Err(
-                    crate::learning_mode_windows::LearningModeError::HResultCall { function, code },
+                    crate::learning_mode_windows::LearningModeError::HResultCall { function, code }
+                        .into(),
                 );
             }
             Ok(Box::new(FakeCaptureSession {
@@ -2248,6 +2399,7 @@ mod tests {
             Self::with_capture_factory(fake_capture_factory())
                 .build_capture_aware_security_environment_spec(request, version)
                 .unwrap()
+                .0
         }
     }
 
@@ -2645,10 +2797,12 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_factory(factory.clone());
 
-        let error = match runner
-            .capture_factory
-            .begin(&[], PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
-        {
+        let error = match runner.capture_factory.begin(
+            &[],
+            PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+            &ContainerPolicy::default(),
+            false,
+        ) {
             Ok(_) => panic!("fake begin must fail"),
             Err(error) => error,
         };
@@ -2673,7 +2827,12 @@ mod tests {
         let runner = BaseContainerRunner::with_capture_factory(factory.clone());
         let session = runner
             .capture_factory
-            .begin(&[], PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+            .begin(
+                &[],
+                PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                &ContainerPolicy::default(),
+                false,
+            )
             .expect("fake begin");
 
         let error = session.finish(None).expect_err("fake finish must fail");
@@ -3027,7 +3186,7 @@ mod tests {
                 finish_calls: Arc::new(AtomicUsize::new(0)),
             });
             let runner = BaseContainerRunner::with_capture_factory(factory);
-            let bytes = runner
+            let (bytes, capture_network_decisions) = runner
                 .build_capture_aware_security_environment_spec(
                     &request,
                     SecurityEnvironmentVersion::V1_0,
@@ -3036,6 +3195,10 @@ mod tests {
             let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
 
             assert_eq!(spec.capabilities(), expected_capabilities);
+            assert_eq!(
+                capture_network_decisions,
+                capture_enabled && trace_sources.includes_network()
+            );
             let egress = spec.network_policy().unwrap().egress().unwrap();
             assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
             assert!(egress.allow().is_none());

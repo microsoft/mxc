@@ -51,6 +51,18 @@ struct Cli {
     #[arg(long)]
     experimental: bool,
 
+    /// Apply caller-owned restrictive creation-policy feedback from a JSON file.
+    #[arg(
+        long = "policy-failures",
+        value_name = "PATH",
+        conflicts_with_all = [
+            "dry_run", "operation", "probe", "setup_hyperlight",
+            "setup_wslc", "force", "force_reclaim", "telemetry_consent"
+        ]
+    )]
+    #[cfg_attr(target_os = "windows", arg(conflicts_with_all = ["audit", "audit_verbose"]))]
+    policy_failures: Option<String>,
+
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
     dry_run: bool,
@@ -276,6 +288,20 @@ fn parse_cli() -> Cli {
             error.exit();
         }
     }
+}
+
+fn load_policy_failures(path: &str) -> Result<mxc_sdk::v1::dev::PolicyFailures, MxcError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|error| {
+        MxcError::malformed_request(format!("cannot open policy-failure feedback: {error}"))
+    })?;
+    let mut json = String::new();
+    file.take((mxc_sdk::__ffi::MAX_POLICY_FAILURES_JSON_BYTES + 1) as u64)
+        .read_to_string(&mut json)
+        .map_err(|error| {
+            MxcError::malformed_request(format!("cannot read policy-failure feedback: {error}"))
+        })?;
+    mxc_sdk::__ffi::decode_policy_failures_json(&json).map_err(|error| error.into_mxc_error())
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -1271,6 +1297,11 @@ fn main() {
     let mut request = request;
     request.experimental_enabled = cli.experimental;
     request.dry_run = cli.dry_run;
+    if let Some(path) = &cli.policy_failures {
+        request.policy_failures = Some(std::sync::Arc::new(
+            load_policy_failures(path).unwrap_or_else(|error| emit_mxc_error_exit(&error)),
+        ));
+    }
 
     // ── Telemetry init ──────────────────────────────────────────────
     let telemetry_active = telemetry::init_for_request(
@@ -1636,6 +1667,61 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_feedback_cli_parses_input_and_rejects_non_creation_modes() {
+        let cli = Cli::try_parse_from([
+            "wxc-exec",
+            "request.json",
+            "--policy-failures",
+            "failures.json",
+        ])
+        .unwrap();
+        assert_eq!(cli.policy_failures.as_deref(), Some("failures.json"));
+        for mode in ["--dry-run", "--probe", "--audit", "--setup-wslc"] {
+            assert!(
+                Cli::try_parse_from([
+                    "wxc-exec",
+                    "request.json",
+                    "--policy-failures",
+                    "failures.json",
+                    mode,
+                ])
+                .is_err(),
+                "{mode}"
+            );
+        }
+        assert!(Cli::try_parse_from([
+            "wxc-exec",
+            "--policy-failures",
+            "failures.json",
+            "--operation",
+            "exec",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn policy_feedback_cli_file_errors_are_explicit_and_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("feedback.json");
+        std::fs::write(&path, br#"{"formatVersion":1,"results":[]}"#).unwrap();
+        assert!(load_policy_failures(path.to_str().unwrap())
+            .unwrap()
+            .results
+            .is_empty());
+        std::fs::write(&path, b"{ invalid").unwrap();
+        assert!(load_policy_failures(path.to_str().unwrap()).is_err());
+        std::fs::write(
+            &path,
+            vec![b' '; mxc_sdk::__ffi::MAX_POLICY_FAILURES_JSON_BYTES + 1],
+        )
+        .unwrap();
+        assert!(load_policy_failures(path.to_str().unwrap()).is_err());
+        assert!(
+            load_policy_failures(directory.path().join("missing.json").to_str().unwrap()).is_err()
+        );
+    }
 
     use clap::{CommandFactory, Parser};
     use mxc_sdk::mxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext};

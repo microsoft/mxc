@@ -13,6 +13,7 @@ import type { ExecutionMetadata } from '../v1/types.js';
 import { bindNativeFunction } from './native-function.js';
 import {
   AbiErrorDetailType,
+  createAbiErrorDetail,
   decodeString,
   nativeStatusError,
   parseStringArray,
@@ -38,6 +39,13 @@ type RunFunction = (
   experimental: number,
   result: AbiRunResult,
 ) => number;
+type PolicyRunFunction = (
+  request: string,
+  experimental: number,
+  policyFailuresJson: string | null,
+  result: AbiRunResult,
+) => number;
+type RunCompletion = (error: Error | null, status: number) => void;
 type FreeFunction = (result: AbiRunResult) => void;
 
 export interface BindingRunResult {
@@ -63,25 +71,65 @@ const AbiRunResultType = koffi.struct('MxcNodeJsonRunResult', {
 function bindRunFunctions(
   native: ReturnType<typeof loadMxcFfi>,
   symbol = 'mxc_run_json',
+  policyFailuresJson?: string,
 ): {
-  run: ReturnType<typeof bindNativeFunction<RunFunction>>;
-  free: ReturnType<typeof bindNativeFunction<FreeFunction>>;
+  run: RunFunction;
+  runAsync: (
+    request: string, experimental: number, result: AbiRunResult, completion: RunCompletion,
+  ) => void;
+  free: FreeFunction;
 } {
-  return {
-    run: bindNativeFunction<RunFunction>(native.handle, {
+  const free = bindNativeFunction<FreeFunction>(native.handle, {
+    symbol: 'mxc_run_result_free',
+    result: 'void',
+    parameters: [koffi.pointer(AbiRunResultType)],
+  });
+  if (symbol === 'mxc_run_with_policy_failures_json') {
+    const run = bindNativeFunction<PolicyRunFunction>(native.handle, {
       symbol,
       result: 'int32_t',
       parameters: [
         'const char *',
         'int32_t',
+        'const char *',
         koffi.out(koffi.pointer(AbiRunResultType)),
       ],
-    }),
-    free: bindNativeFunction<FreeFunction>(native.handle, {
-      symbol: 'mxc_run_result_free',
-      result: 'void',
-      parameters: [koffi.pointer(AbiRunResultType)],
-    }),
+    });
+    return {
+      run: (request, experimental, result) =>
+        run(request, experimental, policyFailuresJson ?? null, result),
+      runAsync: (request, experimental, result, completion) =>
+        run.async(request, experimental, policyFailuresJson ?? null, result, completion),
+      free,
+    };
+  }
+  const run = bindNativeFunction<RunFunction>(native.handle, {
+    symbol,
+    result: 'int32_t',
+    parameters: [
+      'const char *',
+      'int32_t',
+      koffi.out(koffi.pointer(AbiRunResultType)),
+    ],
+  });
+  return {
+    run,
+    runAsync: (request, experimental, result, completion) =>
+      run.async(request, experimental, result, completion),
+    free,
+  };
+}
+
+function createAbiRunResult(): AbiRunResult {
+  return {
+    status: 0,
+    exitCode: 0,
+    timedOut: 0,
+    stdout: null,
+    stderr: null,
+    error: createAbiErrorDetail(),
+    outputMetadata: null,
+    warnings: null,
   };
 }
 
@@ -114,7 +162,7 @@ function runJsonNative(
   const native = loadMxcFfi();
   try {
     const { run, free } = bindRunFunctions(native, symbol);
-    const result = {} as AbiRunResult;
+    const result = createAbiRunResult();
     let filled = false;
     try {
       const status = run(requestJson, experimental ? 1 : 0, result);
@@ -177,21 +225,33 @@ async function runOneShotJsonAsyncNative(
   request: OneShotRequest,
   experimental: boolean,
 ): Promise<BindingRunResult> {
-  return runRawOneShotJsonAsyncNative(JSON.stringify(request), experimental);
+  return runJsonAsyncNative(JSON.stringify(request), experimental, 'mxc_run_json');
 }
 
 async function runRawOneShotJsonAsyncNative(
   requestJson: string,
   experimental: boolean,
+  policyFailuresJson?: string,
+): Promise<BindingRunResult> {
+  return runJsonAsyncNative(
+    requestJson, experimental, 'mxc_run_with_policy_failures_json', policyFailuresJson,
+  );
+}
+
+async function runJsonAsyncNative(
+  requestJson: string,
+  experimental: boolean,
+  symbol: string,
+  policyFailuresJson?: string,
 ): Promise<BindingRunResult> {
   const native = loadMxcFfi();
   try {
-    const { run, free } = bindRunFunctions(native);
-    const result = {} as AbiRunResult;
+    const { runAsync, free } = bindRunFunctions(native, symbol, policyFailuresJson);
+    const result = createAbiRunResult();
     let filled = false;
     try {
       const status = await new Promise<number>((resolve, reject) => {
-        run.async(
+        runAsync(
           requestJson,
           experimental ? 1 : 0,
           result,
@@ -254,6 +314,7 @@ export function runOneShotJsonAsync(
 export function runRawOneShotJsonAsync(
   requestJson: string,
   experimental: boolean,
+  policyFailuresJson?: string,
 ): Promise<BindingRunResult> {
-  return rawAsyncRunImplementation(requestJson, experimental).catch(rethrowRunError);
+  return rawAsyncRunImplementation(requestJson, experimental, policyFailuresJson).catch(rethrowRunError);
 }

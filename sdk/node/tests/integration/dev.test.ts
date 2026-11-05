@@ -3,7 +3,10 @@
 
 import assert from 'node:assert/strict';
 import { it } from 'node:test';
-import { runJson, spawnJson, spawnWithPtyJson, validateProcessJson } from '@microsoft/mxc-sdk/v1/dev';
+import {
+  runJson, spawnJson, spawnWithPtyJson, validateProcessJson,
+  parsePolicyFailures, serializePolicyFailures, type CreationJsonOptions, type PolicyFailures,
+} from '@microsoft/mxc-sdk/v1/dev';
 import { MxcError } from '@microsoft/mxc-sdk/v1';
 import { isLinuxRoot, sandboxSkipReason } from './test-helpers.js';
 
@@ -11,6 +14,8 @@ const windows = process.platform === 'win32';
 const creationSkip = windows ? sandboxSkipReason
   : process.platform === 'linux' ? (isLinuxRoot ? undefined : 'Bubblewrap requires root')
   : process.platform === 'darwin' ? undefined : 'Unsupported host';
+const creationOptions: CreationJsonOptions = windows
+  ? { policyFailures: { formatVersion: 1, results: [] } } : {};
 
 async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
   let text = '';
@@ -28,7 +33,8 @@ for (const version of ['1.0.0', '1.1.0-alpha']) {
   it(`V1.Dev runJson captures output and exit status (${version})`, { skip: creationSkip }, async () => {
     const result = await runJson(request(windows
       ? 'cmd.exe /c "echo DEV_CAPTURE_OK & echo DEV_CAPTURE_ERR 1>&2 & exit /b 7"'
-      : "printf 'DEV_CAPTURE_OK\\n'; printf 'DEV_CAPTURE_ERR\\n' >&2; exit 7"));
+      : "printf 'DEV_CAPTURE_OK\\n'; printf 'DEV_CAPTURE_ERR\\n' >&2; exit 7"),
+    creationOptions);
     assert.equal(result.exitCode, 7);
     assert.equal(result.timedOut, false);
     assert.ok(result.stdout.includes('DEV_CAPTURE_OK'));
@@ -40,7 +46,7 @@ for (const version of ['1.0.0', '1.1.0-alpha']) {
     const proc = await spawnJson(request(windows
       ? 'cmd.exe /v:on /c "set /p L= & echo DEV_PIPE:!L! & echo DEV_PIPE_ERR 1>&2 & exit /b 9"'
       : 'IFS= read -r line; printf "DEV_PIPE:%s\\n" "$line"; printf "DEV_PIPE_ERR\\n" >&2; exit 9'),
-    { experimental: true });
+    { ...creationOptions, experimental: true });
     try {
       assert.ok(proc.standardInput);
       assert.ok(proc.standardOutput);
@@ -97,4 +103,26 @@ it('V1.Dev rejects unknown fields and unregistered exact versions through native
     validateProcessJson(unknownField),
     (error: unknown) => error instanceof MxcError && error.code === 'malformed_request',
   );
+});
+
+it('V1.Dev forwards terminal feedback to native creation input limits', async () => {
+  const report: PolicyFailures = {
+    formatVersion: 1,
+    results: Array.from({ length: 65 }, (_, outcome) => ({
+      version: 1, minimumReaderVersion: 1, outcome, details: [],
+    })),
+  };
+  const restored = parsePolicyFailures(serializePolicyFailures(report));
+  assert.deepEqual(restored, report);
+  // An unregistered version also prevents creation if feedback is incorrectly ignored.
+  const request = '{"version":"999.0.0","process":{"commandLine":"echo must-not-run"}}';
+  for (const create of [runJson, spawnJson]) {
+    await assert.rejects(create(request, { policyFailures: restored }), (error: unknown) => {
+      assert.ok(error instanceof MxcError);
+      assert.equal(error.code, 'malformed_request');
+      assert.equal(error.details?.ffiStatus, 1);
+      assert.match(error.message, /result limit/);
+      return true;
+    });
+  }
 });

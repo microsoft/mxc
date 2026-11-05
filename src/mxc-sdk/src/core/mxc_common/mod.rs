@@ -28,6 +28,7 @@ pub(crate) mod module_lifetime;
 pub mod mxc_error;
 pub mod network_blocks;
 pub(crate) mod network_parser;
+pub(crate) mod policy_failures;
 pub mod policy_identity;
 pub use network_parser::host_is_canonical_loopback;
 pub mod proxy_env;
