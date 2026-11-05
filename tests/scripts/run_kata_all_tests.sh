@@ -57,7 +57,16 @@ HOST_KERNEL="$(uname -r)"
 PASSED=0
 FAILED=0
 FAILURES=""
-cleanup() { rm -rf "$WORK"; }
+LEAKED=0
+# Keep the work directory if anything leaked: it holds the state needed to
+# reclaim the sandbox, and a leftover mount must not be traversed by rm.
+cleanup() {
+    if [ "$LEAKED" -ne 0 ] || grep -q "$WORK" /proc/self/mountinfo; then
+        echo "Leaked resources; keeping $WORK"
+        return
+    fi
+    rm -rf "$WORK"
+}
 trap cleanup EXIT
 
 fail() {
@@ -92,6 +101,7 @@ assert_clean() {
         fi
     done
     if [ -n "$problems" ]; then
+        LEAKED=1
         fail "$label left behind:$problems"
         return 1
     fi
