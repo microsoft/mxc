@@ -32,10 +32,7 @@ Creates an LXC container to provide:
 MXC requires LXC containers to run unprivileged.  After starting the container,
 MXC uses `lxc-attach` to read `/proc/self/uid_map` before running the requested
 command.  MXC accepts the container when a readable range maps container root to
-a nonzero parent UID.  Unreadable lines are ignored.  If no such range is found
-or the inspection fails, MXC stops the container and returns an error without
-running the requested command.
-The container's own startup processes run before this check.
+a nonzero parent UID.
 
 ### Installation
 
