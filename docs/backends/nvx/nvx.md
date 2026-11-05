@@ -45,17 +45,19 @@ MXC also checks the Authenticode signatures of `aci_edge_agent.dll`,
 `openvmm.exe`, and `direct-images.exe` during Windows x64 MicroVM builds and
 before opening the runtime. Windows must trust the signatures and identify
 Microsoft Corporation as the publisher. Valid signing timestamps are honoured.
-The existing archive, file-hash and manifest checks remain in place.
+MXC also checks the entire bundle, including the guest kernel, initramfs,
+guest agent and supporting files, against independently approved release hashes.
+Build and runtime overrides cannot replace that approved file set or its hashes.
 Packaged-crate and staged Windows artifact validation rerun the same signature
-checks without starting a VM.
+and whole-bundle checks without starting a VM.
 
 Signature validation allows certificate-server access for chain and revocation
 checks. An unsigned, modified, untrusted or non-Microsoft binary is rejected;
 an indeterminate trust result is not accepted. Restore the complete official
 bundle and ensure the build or execution host can establish certificate trust.
 Windows-targeted MicroVM builds require a Windows build host for these checks.
-MXC retains read-only file handles while the runtime uses the verified binaries
-to prevent writing or replacing them after validation.
+MXC retains read-only file handles for every verified bundle file to prevent
+writing or replacing it while the client holds the verification guards.
 
 Use the development `1.1.0-alpha` request contract:
 
@@ -184,12 +186,18 @@ returned, may not be visible to the caller. If cancellation fails, the outcome
 may be unknown and the workload may still be running; MXC reports the failure
 and attempts stop and deprovision.
 
+After requesting cancellation, MXC allows two seconds for the cancellation call
+and execution result to arrive. It does not wait indefinitely for either worker.
+If the result remains missing, MXC returns `BackendError` with an unknown outcome
+and attempts teardown; it does not claim the workload stopped. This grace period
+bounds result observation, not every native teardown call.
+
 Before opening the agent client, MXC keeps its containing native module loaded
 until process exit. This protects background execution workers that can outlive
 an error return, including when cancellation and teardown fail. It does not
 mean that the workload has stopped.
 
-A workload timeout preserves captured partial output and tears down the
+A confirmed workload timeout preserves captured partial output and tears down the
 container. Each create-and-run request gets fresh workload state; this phase
 does not offer persistent containers or manual lifecycle operations.
 
@@ -259,22 +267,32 @@ cargo test --locked -p mxc-sdk --features microvm --test nvx_e2e --target x86_64
 
 ## Maintainers: updating the bundled runtime
 
-The `aci_edge_sandboxes` dependency owns bundle acquisition, verification,
-ABI bindings, and version pins. Update its exact version as a reviewed change;
-check its release, runtime capabilities, validation behavior, and cleanup
-semantics before running the host-only and VM validation above. Do not add a
-second MXC downloader or re-sign the bundle's native binaries.
+The `aci_edge_sandboxes` dependency owns bundle acquisition, ABI bindings and its
+release pins. MXC separately pins the SHA-256 of the approved release's
+`SHA256SUMS` file in `signature_verification.rs`. Only after checking that pin
+does MXC use the list to verify the exact file inventory and every file hash.
+Update the dependency and MXC's independent pin as a reviewed release change.
+Obtain the new pin from an independently approved archive, never from an
+unchecked override. Review capabilities and cleanup semantics, then run the
+host-only and VM validation above. Do not add a second downloader or re-sign
+the native binaries.
 
-For an offline build, set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR` to the complete
-**extracted directory**, not a ZIP. The crate checks the bundle manifests and
-file checksums; use an independently trusted bundle for this override. To use
-an archive, `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_URL` accepts a `file://` ZIP.
+To avoid downloading the runtime bundle, set
+`ACI_EDGE_SANDBOXES_AGENT_BUNDLE_DIR` to the complete **extracted directory**,
+not a ZIP. The crate checks the bundle manifests and
+file checksums; MXC additionally requires its independently approved contents.
+This does not disable certificate checks. A disconnected build or execution
+host needs usable certificate-chain and revocation data already cached by
+Windows. Missing, stale or otherwise unverifiable revocation data causes
+verification to fail; provide certificate-server access to refresh it.
+
+To use an archive, `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_URL` accepts a `file://` ZIP.
 Set `ACI_EDGE_SANDBOXES_AGENT_BUNDLE_SHA256` to an independently approved
 archive digest for this override. Without that value, the crate does not
 compare the overridden archive against its default release hash. The archive's
 own manifests and file checksums establish consistency, not its trusted origin.
-Microsoft signature checks on the native binaries do not authenticate the
-complete archive or guest assets.
+MXC's separate approved-file checks still apply to every extracted file.
 The runtime override `ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR`
-names a complete staged bundle directory. The agent checks its runtime files
-against the digests compiled into the crate.
+may relocate the complete approved bundle, not select different contents.
+MXC checks its independent pins before loading the agent, which also checks
+the runtime against the digests compiled into the crate.

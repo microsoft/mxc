@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Seek};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
@@ -10,6 +11,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use windows::core::{PCSTR, PCWSTR};
 use windows::Win32::Foundation::{FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Cryptography::{
@@ -31,12 +33,16 @@ const FILE_SHARE_WRITE: u32 = 2;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+// SHA256SUMS from the independently approved v0.1.0-build188642429 archive.
+// Its archive SHA-256 is cad4db7c574a73aaa1c5a07e7a740cd2b01d5b83c62c81b2196d63bad9ecc126.
+const APPROVED_CHECKSUMS_SHA256: &str =
+    "24d6fcbd2fc22b7618045680c6313db74de3129872c170c25316c12c20145c29";
 
 /// Keeps the checked files from being overwritten or deleted while the runtime uses them.
 #[derive(Debug)]
 pub(crate) struct VerifiedBundle {
-    _files: [File; 3],
-    _directories: [File; 2],
+    files: Vec<File>,
+    directories: Vec<File>,
 }
 
 pub(crate) fn verify_bundle(directory: &Path) -> io::Result<VerifiedBundle> {
@@ -44,14 +50,119 @@ pub(crate) fn verify_bundle(directory: &Path) -> io::Result<VerifiedBundle> {
     let root = lock_directory(&directory)?;
     let bin = lock_directory(&directory.join("bin"))?;
     let [agent, vmm, images] = BINARIES.map(|name| directory.join("bin").join(name));
-    Ok(VerifiedBundle {
-        _files: [
+    let mut verified = VerifiedBundle {
+        files: vec![
             verify_file(&agent)?,
             verify_file(&vmm)?,
             verify_file(&images)?,
         ],
-        _directories: [bin, root],
-    })
+        directories: vec![bin, root],
+    };
+    verify_bundle_files(&directory, &mut verified)?;
+    Ok(verified)
+}
+
+fn file_digest(file: &mut File) -> io::Result<String> {
+    file.rewind()?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let length = file.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        hash.update(&buffer[..length]);
+    }
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn bundle_inventory(
+    root: &Path,
+    directory: &Path,
+    directories: &mut Vec<File>,
+    files: &mut BTreeSet<String>,
+) -> io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            directories.push(lock_directory(&path)?);
+            bundle_inventory(root, &path, directories, files)?;
+        } else {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(io::Error::other)?
+                .to_str()
+                .ok_or_else(|| io::Error::other("NVX bundle has a non-UTF-8 file name"))?
+                .replace('\\', "/");
+            files.insert(relative);
+        }
+    }
+    Ok(())
+}
+
+fn verify_bundle_files(directory: &Path, verified: &mut VerifiedBundle) -> io::Result<()> {
+    let mut checksums = open_bundle_file(&directory.join("SHA256SUMS"))?;
+    let actual = file_digest(&mut checksums)?;
+    if actual != APPROVED_CHECKSUMS_SHA256 {
+        return Err(io::Error::other(format!(
+            "NVX bundle checksum manifest is not approved: expected {APPROVED_CHECKSUMS_SHA256}, got {actual}"
+        )));
+    }
+    // Only this independently pinned list may define trusted files, never an override's own pins.
+    checksums.rewind()?;
+    let mut text = String::new();
+    checksums.read_to_string(&mut text)?;
+    let mut expected = BTreeMap::new();
+    for line in text.lines() {
+        let (hash, name) = line
+            .split_once("  ")
+            .ok_or_else(|| io::Error::other("invalid approved NVX checksum entry"))?;
+        if hash.len() != 64
+            || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || name.split('/').any(|part| {
+                part.is_empty() || matches!(part, "." | "..") || part.contains(['\\', ':'])
+            })
+            || expected.insert(name.to_owned(), hash.to_owned()).is_some()
+        {
+            return Err(io::Error::other("invalid approved NVX checksum entry"));
+        }
+    }
+    let mut expected_files: BTreeSet<_> = expected.keys().cloned().collect();
+    expected_files.insert("SHA256SUMS".to_owned());
+    let mut actual_files = BTreeSet::new();
+    bundle_inventory(
+        directory,
+        directory,
+        &mut verified.directories,
+        &mut actual_files,
+    )?;
+    if actual_files != expected_files {
+        return Err(io::Error::other(format!(
+            "NVX bundle inventory differs from the approved release: missing {:?}, unexpected {:?}",
+            expected_files.difference(&actual_files).collect::<Vec<_>>(),
+            actual_files.difference(&expected_files).collect::<Vec<_>>(),
+        )));
+    }
+    for (name, expected_hash) in expected {
+        let path = name
+            .split('/')
+            .fold(directory.to_path_buf(), |path, part| path.join(part));
+        let mut file = open_bundle_file(&path)?;
+        let actual = file_digest(&mut file)?;
+        if actual != expected_hash {
+            return Err(io::Error::other(format!(
+                "NVX bundle file {name} has a SHA-256 mismatch: expected {expected_hash}, got {actual}"
+            )));
+        }
+        verified.files.push(file);
+    }
+    verified.files.push(checksums);
+    Ok(())
 }
 
 fn lock_directory(path: &Path) -> io::Result<File> {
@@ -74,7 +185,7 @@ fn reject_reparse_point(file: &File, path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn verify_file(path: &Path) -> io::Result<File> {
+fn open_bundle_file(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ)
@@ -84,12 +195,17 @@ pub(crate) fn verify_file(path: &Path) -> io::Result<File> {
             io::Error::new(
                 error.kind(),
                 format!(
-                    "cannot open NVX binary {} for signature verification: {error}",
+                    "cannot open NVX file {} for verification: {error}",
                     path.display()
                 ),
             )
         })?;
     reject_reparse_point(&file, path)?;
+    Ok(file)
+}
+
+pub(crate) fn verify_file(path: &Path) -> io::Result<File> {
+    let file = open_bundle_file(path)?;
     let path = path.canonicalize().map_err(|error| {
         io::Error::new(
             error.kind(),

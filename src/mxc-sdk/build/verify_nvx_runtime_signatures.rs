@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Checks Microsoft signatures on both crate-provided and staged NVX runtime files.
-//! Fails Windows x64 MicroVM builds when signature trust cannot be verified.
+//! Checks approved file hashes and Microsoft signatures on the crate-provided and staged runtime.
+//! Fails Windows x64 MicroVM builds when bundle integrity or signature trust cannot be verified.
 
 #[cfg(all(windows, feature = "microvm"))]
 #[path = "../src/backends/nvx/signature_verification.rs"]
@@ -29,12 +29,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             .nth(3)
             .ok_or("cannot locate the Cargo profile for NVX validation")?;
         for directory in [artifacts, profile.join("aci-edge-sandboxes")] {
-            for name in ["aci_edge_agent.dll", "openvmm.exe", "direct-images.exe"] {
-                println!(
-                    "cargo:rerun-if-changed={}",
-                    directory.join("bin").join(name).display()
-                );
-            }
+            println!("cargo:rerun-if-changed={}", directory.display());
             let _verified = signature_verification::verify_bundle(&directory)?;
         }
         Ok(())

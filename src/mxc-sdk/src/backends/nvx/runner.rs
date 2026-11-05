@@ -316,7 +316,11 @@ fn protect_native_error(mut error: MxcError, operation: &str, sensitive_proxy: b
         };
         let capture_limit =
             super::runtime::capture_limit_error(super::runtime::CAPTURE_LIMIT_BYTES);
-        if primary == "execution cancelled" || primary == capture_limit.message {
+        if primary == "execution cancelled"
+            || primary == capture_limit.message
+            || primary == super::runtime::UNKNOWN_OUTCOME
+            || primary == super::runtime::CANCEL_UNFINISHED
+        {
             if cleanup {
                 error.message = format!(
                     "{primary}; execution cleanup failed; native error detail withheld because the configured proxy contains credentials"
@@ -1081,6 +1085,8 @@ mod tests {
         for message in [
             "execution cancelled",
             "NVX signed bundled agent: combined stdout/stderr capture limit of 67108864 bytes exceeded",
+            super::super::runtime::UNKNOWN_OUTCOME,
+            super::super::runtime::CANCEL_UNFINISHED,
         ] {
             for cleanup_failure in [false, true] {
                 let mut client = MockClient::ok();

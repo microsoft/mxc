@@ -21,6 +21,13 @@ pub(super) const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const STARTUP_LOG_LIMIT: usize = 8 * 1024;
 const HOST_TIMEOUT_SLACK_MS: u64 = 30_000;
 const POLL: Duration = Duration::from_millis(100);
+const CANCEL_GRACE: Duration = Duration::from_secs(2);
+pub(super) const UNKNOWN_OUTCOME: &str =
+    "NVX execution outcome is unknown after the 2-second cancellation grace period; \
+     the workload may still be running";
+pub(super) const CANCEL_UNFINISHED: &str =
+    "NVX cancellation did not finish within the 2-second grace period; \
+     a background native call may still be running";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PreparedProvision {
@@ -204,6 +211,18 @@ pub(super) fn capture_limit_error(limit: usize) -> MxcError {
     ))
 }
 
+fn execution_failure(primary: Option<MxcError>, cleanup: MxcError) -> MxcError {
+    match primary {
+        Some(mut primary) => {
+            primary
+                .message
+                .push_str(&format!("; cleanup failure: {cleanup}"));
+            primary
+        }
+        None => cleanup,
+    }
+}
+
 fn collect_execution(
     control: Arc<dyn aci_edge_sandboxes::ExecControl>,
     captured: Arc<Mutex<Captured>>,
@@ -213,41 +232,80 @@ fn collect_execution(
 ) -> Result<ExecOutput, MxcError> {
     let (sender, receiver) = mpsc::channel();
     let waiting = control.clone();
-    let waiter = match std::thread::Builder::new()
+    // Workers retain their controls; the caller must not join an unresponsive native call.
+    let _waiter = std::thread::Builder::new()
         .name("mxc-nvx-wait".to_owned())
         .spawn(move || {
             let _ = sender.send(waiting.wait());
-        }) {
-        Ok(waiter) => waiter,
-        Err(error) => {
-            let mut primary =
-                MxcError::backend_error(format!("cannot start NVX wait thread: {error}"));
-            if let Err(cleanup) = control.cancel().map_err(map_error) {
-                primary
-                    .message
-                    .push_str(&format!("; cleanup failure: {cleanup}"));
-            }
-            if let Err(cleanup) = control.wait().map_err(map_error) {
-                primary
-                    .message
-                    .push_str(&format!("; cleanup failure: {cleanup}"));
-            }
-            return Err(primary);
-        }
-    };
+        })
+        .map_err(|error| {
+            MxcError::backend_error(format!(
+                "cannot start NVX wait thread: {error}; execution outcome is unknown"
+            ))
+        })?;
     let mut failure = None;
     let mut host_timeout = false;
+    let mut observed = None;
+    let mut cancel_deadline: Option<Instant> = None;
+    let mut cancel_result: Option<mpsc::Receiver<Result<(), MxcError>>> = None;
     let outcome = loop {
-        match receiver.recv_timeout(POLL) {
-            Ok(result) => break result.map_err(map_error),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break Err(MxcError::backend_error(
-                    "NVX wait thread terminated without an outcome",
-                ))
+        match cancel_result.as_ref().map(mpsc::Receiver::try_recv) {
+            Some(Ok(result)) => {
+                cancel_result = None;
+                if let Err(error) = result {
+                    failure = Some(execution_failure(failure, error));
+                }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                cancel_result = None;
+                failure = Some(execution_failure(
+                    failure,
+                    MxcError::backend_error("NVX cancellation worker terminated without a result"),
+                ));
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
         }
-        if failure.is_none() && !host_timeout {
+        if cancel_result.is_none() {
+            if let Some(outcome) = observed.take() {
+                break outcome;
+            }
+        }
+        if cancel_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let message = if observed.is_some() {
+                CANCEL_UNFINISHED
+            } else {
+                UNKNOWN_OUTCOME
+            };
+            // Do not wait for capture locks or worker destruction after this deadline.
+            let mut error = MxcError::backend_error(message);
+            if let Some(primary) = failure {
+                error = execution_failure(Some(error), primary);
+            }
+            if let Some(Err(native)) = observed {
+                error = execution_failure(Some(error), native);
+            }
+            return Err(error);
+        }
+        let pause = cancel_deadline.map_or(POLL, |deadline| {
+            POLL.min(deadline.saturating_duration_since(Instant::now()))
+        });
+        if observed.is_none() {
+            match receiver.recv_timeout(pause) {
+                Ok(result) => observed = Some(result.map_err(map_error)),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    observed = Some(Err(MxcError::backend_error(
+                        "NVX wait thread terminated without an outcome",
+                    )));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        } else {
+            std::thread::sleep(pause);
+        }
+        if observed.is_some() {
+            continue;
+        }
+        if cancel_deadline.is_none() {
             match captured.lock() {
                 Ok(capture) if capture.overflow => failure = Some(capture_limit_error(limit)),
                 Err(_) => failure = Some(MxcError::backend_error("NVX capture lock poisoned")),
@@ -262,21 +320,27 @@ fn collect_execution(
                 host_timeout = true;
             }
             if failure.is_some() || host_timeout {
-                if let Err(cleanup) = control.cancel().map_err(map_error) {
-                    if let Some(primary) = failure.as_mut() {
-                        primary
-                            .message
-                            .push_str(&format!("; cleanup failure: {cleanup}"));
-                    } else {
-                        failure = Some(cleanup);
+                cancel_deadline = Some(Instant::now() + CANCEL_GRACE);
+                let cancelling = control.clone();
+                let (sender, receiver) = mpsc::channel();
+                match std::thread::Builder::new()
+                    .name("mxc-nvx-cancel".to_owned())
+                    .spawn(move || {
+                        let _ = sender.send(cancelling.cancel().map_err(map_error));
+                    }) {
+                    Ok(_worker) => cancel_result = Some(receiver),
+                    Err(error) => {
+                        failure = Some(execution_failure(
+                            failure,
+                            MxcError::backend_error(format!(
+                                "cannot start NVX cancellation worker: {error}"
+                            )),
+                        ));
                     }
                 }
             }
         }
     };
-    if waiter.join().is_err() {
-        return Err(MxcError::backend_error("NVX wait thread panicked"));
-    }
     let mut captured = captured
         .lock()
         .map_err(|_| MxcError::backend_error("NVX capture lock poisoned"))?;
@@ -609,6 +673,118 @@ mod tests {
             error.message.contains("native cancellation failed"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn cancellation_is_bounded_even_without_an_outcome_or_cancel_return() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Clone, Copy)]
+        enum Cancel {
+            Accept,
+            Fail,
+            Block,
+            BlockWithOutcome,
+        }
+        struct StalledControl {
+            release: Mutex<bool>,
+            wake: Condvar,
+            attempted: AtomicBool,
+            cancel: Cancel,
+        }
+        impl StalledControl {
+            fn wait_for_release(&self) {
+                let mut release = self.release.lock().unwrap();
+                while !*release {
+                    release = self.wake.wait(release).unwrap();
+                }
+            }
+        }
+        impl ExecControl for StalledControl {
+            fn wait(&self) -> aci_edge_sandboxes::Result<ExecOutcome> {
+                if matches!(self.cancel, Cancel::BlockWithOutcome) {
+                    let mut release = self.release.lock().unwrap();
+                    while !self.attempted.load(Ordering::Acquire) {
+                        release = self.wake.wait(release).unwrap();
+                    }
+                    return Ok(ExecOutcome::Exited(7));
+                }
+                self.wait_for_release();
+                Ok(ExecOutcome::Cancelled)
+            }
+            fn cancel(&self) -> aci_edge_sandboxes::Result<()> {
+                {
+                    let _release = self.release.lock().unwrap();
+                    self.attempted.store(true, Ordering::Release);
+                    self.wake.notify_all();
+                }
+                match self.cancel {
+                    Cancel::Accept => Ok(()),
+                    Cancel::Fail => Err(Error::new(ErrorCode::BackendError, "cancel failed")),
+                    Cancel::Block | Cancel::BlockWithOutcome => {
+                        self.wait_for_release();
+                        Ok(())
+                    }
+                }
+            }
+        }
+
+        for cancel in [
+            Cancel::Accept,
+            Cancel::Fail,
+            Cancel::Block,
+            Cancel::BlockWithOutcome,
+        ] {
+            let control = Arc::new(StalledControl {
+                release: Mutex::new(false),
+                wake: Condvar::new(),
+                attempted: AtomicBool::new(false),
+                cancel,
+            });
+            let worker_control = control.clone();
+            let (sender, receiver) = mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                let cancellation = RunCancellation::default();
+                if matches!(cancel, Cancel::Accept | Cancel::BlockWithOutcome) {
+                    cancellation.request();
+                }
+                let captured = Captured {
+                    overflow: matches!(cancel, Cancel::Block),
+                    ..Default::default()
+                };
+                let result = collect_execution(
+                    worker_control,
+                    Arc::new(Mutex::new(captured)),
+                    matches!(cancel, Cancel::Fail).then(Instant::now),
+                    Some(&cancellation),
+                    5,
+                );
+                let _ = sender.send(result);
+            });
+            let result = receiver.recv_timeout(Duration::from_secs(4));
+            let attempted = control.attempted.load(Ordering::Acquire);
+            // Release fake native calls even when the bounded-return assertion fails.
+            *control.release.lock().unwrap() = true;
+            control.wake.notify_all();
+            caller.join().unwrap();
+            assert!(attempted, "the cancellation path was not reached");
+            let error = result
+                .expect("cancellation must return before the independent watchdog")
+                .unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::BackendError);
+            if matches!(cancel, Cancel::BlockWithOutcome) {
+                assert!(error.message.starts_with(CANCEL_UNFINISHED), "{error}");
+                assert!(!error.message.contains("outcome is unknown"), "{error}");
+            } else {
+                assert!(error.message.starts_with(UNKNOWN_OUTCOME), "{error}");
+            }
+            let primary = match cancel {
+                Cancel::Accept | Cancel::BlockWithOutcome => "execution cancelled",
+                Cancel::Fail => "cancel failed",
+                Cancel::Block => "capture limit of 5",
+            };
+            assert!(error.message.contains(primary), "{error}");
+        }
     }
 
     #[test]
