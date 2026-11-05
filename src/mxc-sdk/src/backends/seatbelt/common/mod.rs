@@ -11,6 +11,7 @@
 //!   everywhere even though only macOS can execute them.
 //! - [`default_env`] resolves the schema-0.9 default `process.env` block.
 //!   Platform-agnostic for the same reason.
+//! - `run_marker` finds every process in a run for cleanup (macOS only).
 //! - `seatbelt_runner` is gated to `target_os = "macos"` since it calls
 //!   `sandbox_init()`.
 
@@ -20,5 +21,7 @@ pub mod seatbelt_policy;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod profile_preparation;
+#[cfg(target_os = "macos")]
+mod run_marker;
 #[cfg(target_os = "macos")]
 pub mod seatbelt_runner;
