@@ -73,8 +73,8 @@ struct ProcUniqueIdentifierInfo {
 
 const PROC_PID_UNIQUE_IDENTIFIER_INFO: libc::c_int = 17;
 
-// A sandbox outside MXC that allows or denies names at random matches every
-// name with a chance of at most about 1 in 65 million.
+// Only a profile with a pattern that splits random names can match by
+// mistake, with a chance of at most about 1 in 65 million.
 const MARKER_COUNT: usize = 8;
 const CONTROL_COUNT: usize = 24;
 
