@@ -595,10 +595,10 @@ mod tests {
         let events: Vec<_> = (0..=MAX_UNIQUE_DENIALS)
             .map(|i| event(&format!("Sandbox: a(1) deny(1) file-read-data /f{i}")))
             .collect();
-        let analysis = analyze_events(&events, true);
+        let analysis = analyze_events(&events, false);
         assert_eq!(analysis.denials.len(), MAX_UNIQUE_DENIALS);
         assert!(analysis.denied_resources_truncated);
         assert!(analysis.network_verbose_logging.actionable_limit_reached);
-        assert!(analysis.network_verbose_logging.processed_events_truncated);
+        assert!(!analysis.network_verbose_logging.processed_events_truncated);
     }
 }
