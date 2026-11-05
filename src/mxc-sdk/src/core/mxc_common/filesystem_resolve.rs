@@ -62,17 +62,17 @@ pub struct ResolvedMount {
     pub intent: FsIntent,
 }
 
-/// A path split into its non-empty components, so `/data` and `/data/` compare
-/// equal and `/data/secrets` is recognized as a descendant of `/data`. Splits on
-/// both `/` and `\` so Windows-style host paths compare the same way.
+/// Unix path components, excluding empty and current-directory segments.
+/// These mounts target Unix backends even when tests run on Windows;
+/// backslashes remain part of filenames.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 struct PathKey(Vec<String>);
 
 impl PathKey {
     fn from_path(path: &str) -> Self {
         Self(
-            path.split(['/', '\\'])
-                .filter(|component| !component.is_empty())
+            path.split('/')
+                .filter(|component| !component.is_empty() && *component != ".")
                 .map(str::to_string)
                 .collect(),
         )
@@ -385,12 +385,72 @@ mod tests {
     }
 
     #[test]
-    fn backslash_paths_are_compared_by_components() {
-        let resolved = plan(&["C:\\workspace"], &["C:\\workspace\\.git\\"], &[]);
+    fn current_directory_components_preserve_nested_policy_order() {
+        let parent = "/work/././";
+        for (rw, ro, intent) in [
+            (vec![parent], vec![], FsIntent::ReadWrite),
+            (vec![], vec![parent], FsIntent::ReadOnly),
+        ] {
+            let resolved = plan(&rw, &ro, &["/work/secret"]);
+            assert_eq!(
+                order(&resolved),
+                vec![(parent, intent), ("/work/secret", FsIntent::Denied)]
+            );
+        }
+
+        let resolved = plan(&["/work/./public"], &[], &[parent]);
         assert_eq!(
-            effective_intent(&resolved, "C:\\workspace\\.git\\config"),
-            Some(FsIntent::ReadOnly)
+            order(&resolved),
+            vec![
+                (parent, FsIntent::Denied),
+                ("/work/./public", FsIntent::ReadWrite),
+            ]
         );
+    }
+
+    #[test]
+    fn current_directory_aliases_keep_most_restrictive_last() {
+        let resolved = plan(&["/work/././"], &["/work"], &["/work/."]);
+        assert_eq!(
+            order(&resolved),
+            vec![
+                ("/work/././", FsIntent::ReadWrite),
+                ("/work", FsIntent::ReadOnly),
+                ("/work/.", FsIntent::Denied),
+            ]
+        );
+    }
+
+    #[test]
+    fn backslashes_and_dotted_names_are_literal_unix_components() {
+        let resolved = plan(
+            &[r"/work/team\notes\archive"],
+            &["/work/.config"],
+            &["/work/team/secret"],
+        );
+        assert_eq!(
+            order(&resolved),
+            vec![
+                (r"/work/team\notes\archive", FsIntent::ReadWrite),
+                ("/work/.config", FsIntent::ReadOnly),
+                ("/work/team/secret", FsIntent::Denied),
+            ]
+        );
+        assert_eq!(
+            effective_intent(&resolved, "/work/team/notes/archive/file"),
+            None
+        );
+        assert_eq!(
+            effective_intent(&resolved, r"/work/team\notes\archive/file"),
+            Some(FsIntent::ReadWrite)
+        );
+
+        for child in ["/work/.config", "/work/report..txt", r"/work/team\."] {
+            assert_eq!(
+                order(&plan(&[child], &[], &["/work"])),
+                vec![("/work", FsIntent::Denied), (child, FsIntent::ReadWrite)]
+            );
+        }
     }
 
     #[test]

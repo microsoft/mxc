@@ -121,6 +121,9 @@ without `..`; MXC does not remove it automatically because symbolic links
 can change where the path leads. This keeps parent mounts from hiding
 restrictions on their children. Filenames such as `report..txt` remain valid.
 
+`.` segments and repeated `/` separators do not change parent/child policy
+precedence. Backslashes are filename characters, not path separators.
+
 ### Supported Distributions
 
 Any combination that lxc-create supports.

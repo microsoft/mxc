@@ -367,6 +367,9 @@ a parent grant after a child's restriction and hide that restriction.
 MXC does not remove `..` automatically because symbolic links can change its
 meaning. Filenames containing dots, such as `report..txt`, are still accepted.
 
+`.` segments and repeated `/` separators do not change parent/child policy
+precedence. Backslashes are filename characters, not path separators.
+
 A denied path is classified by its own on-disk type (via `symlink_metadata`,
 no symlink-follow): a directory is masked with a read-only `--tmpfs`, while a
 regular file is masked by binding `/dev/null` over it (masking a file with a

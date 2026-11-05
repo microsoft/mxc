@@ -55,24 +55,30 @@ run_policy() {
 EOF
 }
 
-OUTPUT=$(run_policy "\"readwritePaths\":[\"$POLICY_DIR/work\"],\"deniedPaths\":[\"$POLICY_DIR/work/secret\"]" 2>&1 || true)
-if ! grep -q WORKLOAD_STARTED <<< "$OUTPUT" ||
-    grep -q HOST_ORIGINAL <<< "$OUTPUT" ||
-    [[ $(cat "$CANARY") != HOST_ORIGINAL ]]; then
-    echo "FAIL: a canonical parent grant must preserve its child's deny."
-    echo "$OUTPUT"
-    exit 1
-fi
+for path in "$POLICY_DIR/work" "$POLICY_DIR/work/././"; do
+    OUTPUT=$(run_policy "\"readwritePaths\":[\"$path\"],\"deniedPaths\":[\"$POLICY_DIR/work/secret\"]" 2>&1 || true)
+    if ! grep -q WORKLOAD_STARTED <<< "$OUTPUT" ||
+        grep -q HOST_ORIGINAL <<< "$OUTPUT" ||
+        [[ $(cat "$CANARY") != HOST_ORIGINAL ]]; then
+        echo "FAIL: parent grant $path must preserve its child's deny."
+        echo "$OUTPUT"
+        exit 1
+    fi
+    echo "PASS: parent grant $path preserves its child's deny."
+done
 
-OUTPUT=$(run_policy "\"readwritePaths\":[\"$POLICY_DIR/work/secret\"],\"deniedPaths\":[\"$POLICY_DIR/work\"]" 2>&1)
-if ! grep -q WORKLOAD_STARTED <<< "$OUTPUT" ||
-    ! grep -q HOST_ORIGINAL <<< "$OUTPUT" ||
-    [[ $(cat "$CANARY") != MODIFIED ]]; then
-    echo "FAIL: an explicit child grant must remain usable inside a denied parent."
-    echo "$OUTPUT"
-    exit 1
-fi
-echo HOST_ORIGINAL > "$CANARY"
+for path in "$POLICY_DIR/work/secret" "$POLICY_DIR/work/./secret"; do
+    OUTPUT=$(run_policy "\"readwritePaths\":[\"$path\"],\"deniedPaths\":[\"$POLICY_DIR/work\"]" 2>&1)
+    if ! grep -q WORKLOAD_STARTED <<< "$OUTPUT" ||
+        ! grep -q HOST_ORIGINAL <<< "$OUTPUT" ||
+        [[ $(cat "$CANARY") != MODIFIED ]]; then
+        echo "FAIL: child grant $path must remain usable inside a denied parent."
+        echo "$OUTPUT"
+        exit 1
+    fi
+    echo HOST_ORIGINAL > "$CANARY"
+    echo "PASS: child grant $path remains readable and writable."
+done
 
 for field in readwritePaths readonlyPaths deniedPaths; do
     for path in "$POLICY_DIR/work/secret/.." "$POLICY_DIR/work/a/../b/../" "$POLICY_DIR/work/./secret/../a"; do

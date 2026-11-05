@@ -402,6 +402,10 @@ path segment before creating a sandbox. Supply a fully resolved path without
 can change where they lead. This restriction applies to policy paths, not to
 paths used by the contained command.
 
+For these two backends, `.` segments and repeated `/` separators do not change
+parent/child policy precedence. Backslashes are filename characters, not path
+separators.
+
 Backend support for filesystem policy is described in each backend guide; see
 the [NVX capability table](backends/nvx/nvx.md#supported-operations-and-policy)
 for MicroVM. Backend-specific sections, including
