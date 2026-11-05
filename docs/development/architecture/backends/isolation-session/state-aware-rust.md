@@ -415,6 +415,11 @@ waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
 service serialises (or rejects, depending on session state) at its own layer.
 
+`Relayed` execution uses the same [timeout cleanup](oneshot.md#os-api-dependency)
+as create-and-run execution: stop input copying before closing stdin, or skip
+stdin-close if the thread has not exited within one second. SDK `Piped` and
+explicit PTY operations keep their existing shutdown behavior.
+
 ### Deprovision and concurrent sandboxes
 
 `deprovision` removes only its own agent user (`deprovision_agent_user`).

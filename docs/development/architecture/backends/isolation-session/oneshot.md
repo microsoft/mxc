@@ -163,6 +163,14 @@ exit-wait and exit code, console resize, and the graceful-shutdown ladder
 (close stdin → send-ctrl-close → terminate). It sets the interactive-console
 flag when `wxc-exec`'s stdout is a TTY.
 
+On timeout, MXC stops its input-copying thread and waits up to one second for
+it to release its pipe handle before calling `CloseStandardInput`. If the thread
+is still running, MXC skips that step and continues with console-close and
+termination, still reporting a timeout once the workload is confirmed stopped.
+
+A failed Windows thread wait is an error, unlike a wait whose time limit expires.
+The OS client must also close its input handle for the workload to receive EOF.
+
 ## Bindings Workflow
 
 **Why a private WinMD.** The OS-side API ships its WinMD as part of an

@@ -185,6 +185,10 @@ Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites ski
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+The IsolationSession command-line suite also checks that piped and file stdin
+reach the workload when stdout is a console. A workload reads one line and
+returns a distinct exit code only if the line matches.
+
 Bubblewrap, LXC, and WSLC also run the prebuilt
 `mxc-filesystem-probe-tests` executable from their build artifact. These public
 SDK regressions block each policy probe in a subprocess, require a bounded
