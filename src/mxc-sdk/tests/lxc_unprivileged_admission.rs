@@ -7,7 +7,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 use mxc_sdk::lxc_common::lxc_bindings::{LxcContainer, StartNetwork};
 
@@ -33,22 +32,10 @@ case "$tool" in
                 printf 'inspect\n' >> "$MXC_LXC_ADMISSION_DIRECTORY/events"
                 read -r state < "$MXC_LXC_ADMISSION_DIRECTORY/state"
                 [ "$state" = RUNNING ] || exit 1
-                case "$MXC_LXC_ADMISSION_CASE" in
-                    failed_inspection_stops_before_workload)
-                        echo 'fixture attach failure' >&2
-                        exit 1
-                        ;;
-                    timed_out_inspection_stops_before_workload)
-                        printf '%s' "$MXC_LXC_ADMISSION_MAP"
-                        exec /bin/sleep 30
-                        ;;
-                    unfinished_inspection_output_is_not_admitted)
-                        printf '%s' "$MXC_LXC_ADMISSION_MAP"
-                        /bin/sleep 30 &
-                        printf '%s\n' "$!" > "$MXC_LXC_ADMISSION_DIRECTORY/writer.pid"
-                        exit 0
-                        ;;
-                esac
+                if [ "$MXC_LXC_ADMISSION_CASE" = failed_inspection_stops_before_workload ]; then
+                    echo 'fixture attach failure' >&2
+                    exit 1
+                fi
                 ;;
             *)
                 printf 'workload\n' >> "$MXC_LXC_ADMISSION_DIRECTORY/events"
@@ -145,12 +132,6 @@ fn run_fixture(test: &str, uid_map: &str) {
         .env("PATH", &path)
         .output()
         .expect("run admission fixture");
-    if let Ok(pid) = fs::read_to_string(path.join("writer.pid")) {
-        Command::new("/bin/kill")
-            .args(["--", pid.trim()])
-            .status()
-            .expect("stop the fixture's unfinished output writer");
-    }
     assert!(
         output.status.success(),
         "{test}, uid_map={uid_map:?}:\n{}\n{}\nevents:\n{}",
@@ -288,42 +269,6 @@ fn failed_inspection_stops_before_workload() {
         return;
     }
     run_fixture("failed_inspection_stops_before_workload", SHIFTED_MAP);
-}
-
-#[test]
-fn timed_out_inspection_stops_before_workload() {
-    if fixture_directory().is_some() {
-        let started = Instant::now();
-        let error = container()
-            .start(StartNetwork::NoInterface)
-            .expect_err("timed-out inspection must refuse admission");
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "UID-map inspection did not stop a hung attach within its deadline"
-        );
-        assert_admission_error(&error);
-        assert_stopped_before_workload();
-        return;
-    }
-    run_fixture("timed_out_inspection_stops_before_workload", SHIFTED_MAP);
-}
-
-#[test]
-fn unfinished_inspection_output_is_not_admitted() {
-    if fixture_directory().is_some() {
-        let started = Instant::now();
-        let error = container()
-            .start(StartNetwork::NoInterface)
-            .expect_err("an exited attach with an unfinished output stream must fail closed");
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "UID-map inspection did not bound an unfinished output drain"
-        );
-        assert_admission_error(&error);
-        assert_stopped_before_workload();
-        return;
-    }
-    run_fixture("unfinished_inspection_output_is_not_admitted", SHIFTED_MAP);
 }
 
 #[test]

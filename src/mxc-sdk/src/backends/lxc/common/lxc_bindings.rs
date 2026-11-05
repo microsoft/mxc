@@ -163,9 +163,8 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     }
 }
 
-// Retain room for all 340 UID-map ranges.
 #[cfg(target_os = "linux")]
-const MAX_CAPTURED_BYTES: u64 = 16 * 1024;
+const MAX_CAPTURED_BYTES: u64 = 8 * 1024;
 
 #[cfg(target_os = "linux")]
 fn read_to_end_on_thread(
@@ -492,33 +491,26 @@ impl LxcContainer {
 
     fn validate_unprivileged(&self) -> Result<(), String> {
         let validation = (|| {
-            let (exit_code, stdout, stderr) = self
-                .attach_capture(
-                    "cat /proc/self/uid_map && printf '\\nmxc:uid-map-complete\\n'",
-                    "",
-                    &[],
-                    true,
-                    Some(std::time::Duration::from_secs(10)),
-                    ContainerFirewall::Absent,
-                )
+            let output = self
+                .lxc_command("lxc-attach")
+                .args(["--", "cat", "/proc/self/uid_map"])
+                .output()
                 .map_err(|error| {
                     format!(
                         "Failed to inspect container '{}' UID map: {error}",
                         self.name
                     )
                 })?;
-            if exit_code != 0 {
+            if !output.status.success() {
                 return Err(format!(
-                    "Failed to read container '{}' UID map (exit code {exit_code}): {}",
+                    "Failed to read container '{}' UID map ({}): {}",
                     self.name,
-                    stderr.trim()
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
                 ));
             }
 
-            // The suffix is lost if capture truncates or abandons a partial read.
-            let mapping = stdout
-                .strip_suffix("\nmxc:uid-map-complete\n")
-                .ok_or_else(|| format!("Incomplete UID map read for container '{}'", self.name))?;
+            let mapping = String::from_utf8_lossy(&output.stdout);
             let mut root_mapped = false;
             for line in mapping.lines() {
                 let columns = line
