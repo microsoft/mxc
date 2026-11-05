@@ -211,7 +211,7 @@ const VERSION_FILE: &str = "VERSION";
 
 /// Pinned to the `hyperlight-unikraft` release in Cargo.toml: a rootfs
 /// only boots on the kernel and driver protocol of its own release.
-const ROOTFS_TAG: &str = "initrd-v0.17.0";
+const ROOTFS_TAG: &str = "initrd-v0.21.0";
 const ROOTFS_PATH_IN_IMAGE: &str = "/initrd.cpio";
 /// Where host directories appear in the guest: `/host/<basename>`.
 const GUEST_MOUNT_ROOT: &str = "/host";
