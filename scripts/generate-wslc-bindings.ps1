@@ -37,7 +37,10 @@ param(
     # runs on ARM64 dev machines without an override.
     [string] $Target = $(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }),
     # Generate into a temporary file and fail if the committed bindings differ.
-    [switch] $Check
+    [switch] $Check,
+    # Read wslcsdk.h from this path instead of the vendored package, for SDK
+    # versions that are not yet published.
+    [string] $HeaderPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -128,24 +131,33 @@ Write-Host "  WinSDK  : $sdkInc"
 $verLine = Select-String -Path $buildWslcCommon -Pattern 'WSLC_SDK_VERSION\s*:\s*&str\s*=\s*"([^"]+)"' | Select-Object -First 1
 if (-not $verLine) { Fail "Could not read WSLC_SDK_VERSION from '$buildWslcCommon'." }
 $wslcVersion = $verLine.Matches[0].Groups[1].Value
-$nupkgPath = Join-Path $vendorDir "Microsoft.WSL.Containers.$wslcVersion.nupkg"
-if (-not (Test-Path $nupkgPath)) {
-    Fail "Vendored package for WSLC_SDK_VERSION=$wslcVersion not found at '$nupkgPath'."
+if ($HeaderPath) {
+    if (-not (Test-Path $HeaderPath -PathType Leaf)) { Fail "Header not found at '$HeaderPath'." }
+    Write-Host "  Header  : $HeaderPath (WSLC_SDK_VERSION=$wslcVersion)"
+} else {
+    $nupkgPath = Join-Path $vendorDir "Microsoft.WSL.Containers.$wslcVersion.nupkg"
+    if (-not (Test-Path $nupkgPath)) {
+        Fail "Vendored package for WSLC_SDK_VERSION=$wslcVersion not found at '$nupkgPath'. Pass -HeaderPath for an unpublished SDK."
+    }
+    $nupkg = Get-Item $nupkgPath
+    Write-Host "  Package : $($nupkg.Name)"
 }
-$nupkg = Get-Item $nupkgPath
-Write-Host "  Package : $($nupkg.Name)"
 
 $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("wslc-bindgen-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 try {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg.FullName)
-    try {
-        $entry = $zip.Entries | Where-Object { $_.FullName -ieq "include/wslcsdk.h" } | Select-Object -First 1
-        if (-not $entry) { Fail "include/wslcsdk.h not found inside '$($nupkg.Name)'." }
-        $headerPath = Join-Path $staging "wslcsdk.h"
-        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $headerPath, $true)
-    } finally { $zip.Dispose() }
+    $stagedHeader = Join-Path $staging "wslcsdk.h"
+    if ($HeaderPath) {
+        Copy-Item -Path $HeaderPath -Destination $stagedHeader
+    } else {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($nupkg.FullName)
+        try {
+            $entry = $zip.Entries | Where-Object { $_.FullName -ieq "include/wslcsdk.h" } | Select-Object -First 1
+            if (-not $entry) { Fail "include/wslcsdk.h not found inside '$($nupkg.Name)'." }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $stagedHeader, $true)
+        } finally { $zip.Dispose() }
+    }
 
     # bindgen needs the header findable by a stable include; write a wrapper.
     $wrapper = Join-Path $staging "wrapper.h"
@@ -169,7 +181,7 @@ try {
     # newtypes via --bitfield-enum; exclusive-value enums become opaque
     # newtypes via --newtype-enum. Both keep the C ABI while avoiding UB from
     # out-of-range discriminants that a plain Rust `enum` would allow.
-    $bitfieldEnums = 'Wslc(ContainerFlags|SessionFeatureFlags|ContainerStartFlags|DeleteContainerFlags|ComponentFlags|VhdRequirementsFlags|ProcessFlags)'
+    $bitfieldEnums = 'Wslc(ContainerFlags|SessionFeatureFlags|ContainerStartFlags|DeleteContainerFlags|ComponentFlags|VhdRequirementsFlags|ProcessFlags|NetworkFlags)'
     $newtypeEnums  = 'Wslc(PortProtocol|Signal|ProcessIOHandle|ContainerNetworkingMode|VhdType|SessionTerminationReason|ContainerState|ProcessState|ImageProgressStatus)'
 
     $generatedFile = if ($Check) { Join-Path $staging "wslcsdk_sys.rs" } else { $outFile }

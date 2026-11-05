@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Pinned WSLC SDK version. Override with the `WSLC_SDK_VERSION` env var.
-const WSLC_SDK_VERSION: &str = "3.0.3";
+const WSLC_SDK_VERSION: &str = "3.0.5";
 
 /// Direct anonymous content URL for a package version on the public
 /// MxcDependencies Azure Artifacts feed (mirrors nuget.org; reachable from the
