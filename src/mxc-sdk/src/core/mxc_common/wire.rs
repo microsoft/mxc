@@ -24,7 +24,7 @@ pub enum Phase {
 pub enum Containment {
     /// OS-native process sandbox (resolved per host).
     Process,
-    /// Windows AppContainer / BaseContainer.
+    /// Windows native ProcessContainer (PSEC).
     #[serde(rename = "processcontainer", alias = "appcontainer")]
     ProcessContainer,
     /// VM-class isolation (resolved per host).
@@ -292,14 +292,6 @@ pub struct Filesystem {
     pub denied_paths: Option<Vec<String>>,
 }
 
-/// AppContainer DACL-mutation fallback policy.
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Fallback {
-    /// Allow the runner to mutate DACLs as a fallback.
-    pub allow_dacl_mutation: Option<bool>,
-}
-
 /// Network access policy.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -466,6 +458,13 @@ pub struct Hyperlight {
     /// Guest runtime that `process.commandLine` is source for; `agent` is
     /// the default.
     pub runtime: Option<crate::mxc_common::models::HyperlightRuntime>,
+}
+
+/// MicroVM creation settings retained by contract adapters before normalization.
+#[derive(Debug, Clone)]
+pub(crate) struct MicroVm {
+    pub(crate) image: String,
+    pub(crate) memory_mib: Option<u32>,
 }
 
 /// WSL container backend config.

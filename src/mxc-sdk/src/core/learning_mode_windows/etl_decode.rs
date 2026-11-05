@@ -24,7 +24,7 @@
 //! direction; shared generic TDH primitives can be extracted later if another
 //! runtime consumer needs them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
@@ -33,21 +33,18 @@ use crate::learning_mode_core::{
         CaptureAnalysis, CaptureVerboseLoggingOutcomeReason, CaptureVerboseLoggingProvider,
         CaptureVerboseLoggingSignature, CaptureVerboseLoggingSummary,
     },
-    AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource, ProcessLifetime,
-    VerboseLoggingOutcomeReason, VerboseLoggingProvider, VerboseLoggingSignature,
-    VerboseLoggingSummary, MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+    AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource, VerboseLoggingOutcomeReason,
+    VerboseLoggingProvider, VerboseLoggingSignature, VerboseLoggingSummary,
+    MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
 use windows::core::PWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
-    CloseTrace, EventTraceGuid, OpenTraceW, ProcessTrace, EVENT_RECORD, EVENT_TRACE_LOGFILEW,
+    CloseTrace, OpenTraceW, ProcessTrace, EVENT_RECORD, EVENT_TRACE_LOGFILEW,
     PROCESS_TRACE_MODE_EVENT_RECORD,
 };
 
 use crate::learning_mode_windows::extractors::{
     extract_denial, is_learning_mode_event, is_process_scoped_event, DecodedEventParts, RawDenial,
-};
-use crate::learning_mode_windows::process_lifetime::{
-    attested_process_lifetimes, JobMembershipSnapshot,
 };
 use crate::learning_mode_windows::{path_norm, tdh_decode};
 
@@ -55,16 +52,7 @@ use crate::learning_mode_windows::{path_norm, tdh_decode};
 const INVALID_PROCESSTRACE_HANDLE: u64 = u64::MAX;
 const MAX_UNIQUE_DENIALS: usize = 10_000;
 const MAX_PROCESSED_EVENTS: usize = 1_000_000;
-
-pub(crate) fn is_process_scoped_relog_candidate(
-    provider: windows::core::GUID,
-    event_id: u16,
-) -> bool {
-    is_process_scoped_event(provider, event_id)
-        || (crate::learning_mode_windows::extractors::verbose_logging_provider_for_guid(provider)
-            .is_some()
-            && !is_learning_mode_event(provider, event_id))
-}
+const MAX_ANALYSIS_BYTES: usize = 64 * 1024 * 1024;
 
 /// One decoded ETW event, retaining the header context the extractors need.
 #[cfg(test)]
@@ -78,81 +66,18 @@ struct CollectedEvent {
 enum CollectionMode {
     Analyze,
     Raw,
-    SelectForRelogging,
 }
 
 type RawEventVisitor<'a> = dyn FnMut(&DecodedEventParts) -> std::io::Result<()> + 'a;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LifetimeRange {
-    start_filetime: u64,
-    end_filetime: u64,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct ProcessLifetimeIndex {
-    ranges_by_pid: HashMap<u32, Vec<LifetimeRange>>,
-}
-
-pub(crate) struct RelogSelection {
-    pub(crate) selected_event_indices: Vec<usize>,
-    pub(crate) selected_event_pids: Vec<u32>,
-    pub(crate) total_event_count: usize,
-}
-
-impl ProcessLifetimeIndex {
-    pub(crate) fn new(process_lifetimes: &[ProcessLifetime]) -> Self {
-        let mut ranges_by_pid =
-            HashMap::<u32, Vec<LifetimeRange>>::with_capacity(process_lifetimes.len());
-        for lifetime in process_lifetimes {
-            ranges_by_pid
-                .entry(lifetime.pid)
-                .or_default()
-                .push(LifetimeRange {
-                    start_filetime: lifetime.start_filetime,
-                    end_filetime: lifetime.end_filetime,
-                });
-        }
-
-        for ranges in ranges_by_pid.values_mut() {
-            ranges.sort_unstable_by_key(|range| range.start_filetime);
-            let mut merged = Vec::<LifetimeRange>::with_capacity(ranges.len());
-            for range in ranges.drain(..) {
-                if let Some(previous) = merged.last_mut() {
-                    if range.start_filetime <= previous.end_filetime {
-                        previous.end_filetime = previous.end_filetime.max(range.end_filetime);
-                        continue;
-                    }
-                }
-                merged.push(range);
-            }
-            *ranges = merged;
-        }
-
-        Self { ranges_by_pid }
-    }
-
-    pub(crate) fn contains(&self, pid: u32, filetime: u64) -> bool {
-        let Some(ranges) = self.ranges_by_pid.get(&pid) else {
-            return false;
-        };
-        let candidate = ranges.partition_point(|range| range.start_filetime <= filetime);
-        candidate > 0 && filetime <= ranges[candidate - 1].end_filetime
-    }
-}
 
 /// Accumulates bounded analysis results or streams raw diagnostic events
 /// during a `ProcessTrace` pass.
 struct Accumulator<'visitor> {
     mode: CollectionMode,
-    process_lifetimes: Option<ProcessLifetimeIndex>,
     denials: Vec<DeniedResource>,
     seen: HashSet<(String, crate::learning_mode_core::AccessType)>,
     truncated: bool,
     raw_visitor: Option<&'visitor mut RawEventVisitor<'visitor>>,
-    relog_selected_event_indices: Vec<usize>,
-    relog_selected_event_pids: Vec<u32>,
-    relog_event_count: usize,
     raw_event_count: usize,
     processed_event_count: usize,
     processing_limit_reached: bool,
@@ -162,7 +87,6 @@ struct Accumulator<'visitor> {
     schema_cache: tdh_decode::EventSchemaCache,
     verbose_logging: VerboseLoggingSummary,
     verbose_logging_signature_bytes: usize,
-    skip_relog_header: bool,
     verbose_logging_actionable_only_saturated: bool,
     network_verbose_logging: CaptureVerboseLoggingSummary,
     network_verbose_logging_signature_bytes: usize,
@@ -173,14 +97,10 @@ impl<'visitor> Accumulator<'visitor> {
     fn analyze() -> Self {
         Self {
             mode: CollectionMode::Analyze,
-            process_lifetimes: None,
             denials: Vec::new(),
             seen: HashSet::new(),
             truncated: false,
             raw_visitor: None,
-            relog_selected_event_indices: Vec::new(),
-            relog_selected_event_pids: Vec::new(),
-            relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
             processing_limit_reached: false,
@@ -190,32 +110,20 @@ impl<'visitor> Accumulator<'visitor> {
             schema_cache: tdh_decode::EventSchemaCache::default(),
             verbose_logging: VerboseLoggingSummary::default(),
             verbose_logging_signature_bytes: 0,
-            skip_relog_header: false,
             verbose_logging_actionable_only_saturated: false,
             network_verbose_logging: CaptureVerboseLoggingSummary::default(),
             network_verbose_logging_signature_bytes: 0,
             network_verbose_logging_actionable_only_saturated: false,
-        }
-    }
-
-    fn analyze_for_process_lifetimes(process_lifetimes: &[ProcessLifetime]) -> Self {
-        Self {
-            process_lifetimes: Some(ProcessLifetimeIndex::new(process_lifetimes)),
-            ..Self::analyze()
         }
     }
 
     fn raw(visitor: &'visitor mut RawEventVisitor<'visitor>) -> Self {
         Self {
             mode: CollectionMode::Raw,
-            process_lifetimes: None,
             denials: Vec::new(),
             seen: HashSet::new(),
             truncated: false,
             raw_visitor: Some(visitor),
-            relog_selected_event_indices: Vec::new(),
-            relog_selected_event_pids: Vec::new(),
-            relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
             processing_limit_reached: false,
@@ -225,47 +133,10 @@ impl<'visitor> Accumulator<'visitor> {
             schema_cache: tdh_decode::EventSchemaCache::default(),
             verbose_logging: VerboseLoggingSummary::default(),
             verbose_logging_signature_bytes: 0,
-            skip_relog_header: false,
             verbose_logging_actionable_only_saturated: false,
             network_verbose_logging: CaptureVerboseLoggingSummary::default(),
             network_verbose_logging_signature_bytes: 0,
             network_verbose_logging_actionable_only_saturated: false,
-        }
-    }
-
-    fn select_for_relogging(process_lifetimes: &[ProcessLifetime]) -> Self {
-        Self {
-            mode: CollectionMode::SelectForRelogging,
-            process_lifetimes: Some(ProcessLifetimeIndex::new(process_lifetimes)),
-            denials: Vec::new(),
-            seen: HashSet::new(),
-            truncated: false,
-            raw_visitor: None,
-            relog_selected_event_indices: Vec::new(),
-            relog_selected_event_pids: Vec::new(),
-            relog_event_count: 0,
-            raw_event_count: 0,
-            processed_event_count: 0,
-            processing_limit_reached: false,
-            stop_requested: false,
-            decode_error: None,
-            panic_payload: None,
-            schema_cache: tdh_decode::EventSchemaCache::default(),
-            verbose_logging: VerboseLoggingSummary::default(),
-            verbose_logging_signature_bytes: 0,
-            skip_relog_header: false,
-            verbose_logging_actionable_only_saturated: false,
-            network_verbose_logging: CaptureVerboseLoggingSummary::default(),
-            network_verbose_logging_signature_bytes: 0,
-            network_verbose_logging_actionable_only_saturated: false,
-        }
-    }
-
-    fn selects(&self, provider: windows::core::GUID, event_id: u16) -> bool {
-        if self.process_lifetimes.is_some() {
-            is_process_scoped_relog_candidate(provider, event_id)
-        } else {
-            is_learning_mode_event(provider, event_id)
         }
     }
 
@@ -278,9 +149,6 @@ impl<'visitor> Accumulator<'visitor> {
     }
 
     fn add_raw_denial_impl(&mut self, raw: RawDenial, record_legacy_verbose: bool) {
-        if !self.event_in_scope(raw.pid, raw.filetime) {
-            return;
-        }
         let resource = if raw.resource_type == crate::learning_mode_core::ResourceType::File {
             match path_norm::to_user_visible(&raw.object_name) {
                 Some(resource) if path_norm::is_user_visible_absolute(&resource) => resource,
@@ -522,12 +390,6 @@ impl<'visitor> Accumulator<'visitor> {
         }
     }
 
-    fn event_in_scope(&self, pid: u32, filetime: u64) -> bool {
-        self.process_lifetimes
-            .as_ref()
-            .is_none_or(|lifetimes| lifetimes.contains(pid, filetime))
-    }
-
     fn begin_event(&mut self) -> bool {
         if self.processed_event_count >= MAX_PROCESSED_EVENTS {
             self.processing_limit_reached = true;
@@ -685,11 +547,6 @@ impl<'visitor> Accumulator<'visitor> {
         if let Some(error) = self.decode_error {
             return Err(AnalyzeError::Decode(error));
         }
-        if self.skip_relog_header {
-            return Err(AnalyzeError::Decode(
-                "relogged trace has no transport header".into(),
-            ));
-        }
         Ok(CaptureAnalysis {
             denials: self.denials,
             denied_resources_truncated: self.truncated,
@@ -700,12 +557,10 @@ impl<'visitor> Accumulator<'visitor> {
 
     fn into_analysis(self) -> Result<AnalysisResult, AnalyzeError> {
         let mut result = self.into_capture_analysis()?.into_legacy();
-        match result.fit_verbose_logging_within_serialized_bytes(
-            crate::learning_mode_windows::guarded_wpr_protocol::MAX_ANALYSIS_BYTES as usize,
-        ) {
+        match result.fit_verbose_logging_within_serialized_bytes(MAX_ANALYSIS_BYTES) {
             Ok(true) => Ok(result),
             Ok(false) => Err(AnalyzeError::Decode(
-                "actionable Learning Mode analysis exceeds the guarded transport limit".to_string(),
+                "actionable Learning Mode analysis exceeds the supported size limit".to_string(),
             )),
             Err(error) => Err(AnalyzeError::Decode(format!(
                 "failed to size Learning Mode analysis: {error}"
@@ -732,77 +587,13 @@ impl EtlDenialAnalyzer {
         process_trace_file(source_path, &mut accumulator)?;
         accumulator.into_capture_analysis()
     }
-
-    /// Analyzes only events belonging to the supplied process lifetimes.
-    ///
-    /// This is the mandatory decode path for host-wide WPR fallback traces.
-    /// An empty lifetime set intentionally yields an empty analysis rather than
-    /// exposing unscoped host events.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AnalyzeError`] if the trace cannot be opened or decoded.
-    pub fn analyze_for_process_lifetimes(
-        &self,
-        source_path: &Path,
-        process_lifetimes: &[ProcessLifetime],
-    ) -> Result<AnalysisResult, AnalyzeError> {
-        let mut accumulator = Accumulator::analyze_for_process_lifetimes(process_lifetimes);
-        process_trace_file(source_path, &mut accumulator)?;
-        accumulator.into_analysis()
-    }
-
-    /// Analyzes denials only for exact process generations attested by retained
-    /// handles belonging to the sandbox job.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AnalyzeError`] when job evidence is incomplete or inconsistent,
-    /// or when the trace cannot be decoded.
-    pub fn analyze_for_job_membership(
-        &self,
-        source_path: &Path,
-        membership: &JobMembershipSnapshot,
-    ) -> Result<AnalysisResult, AnalyzeError> {
-        let process_lifetimes = attested_process_lifetimes(membership)?;
-        self.analyze_for_process_lifetimes(source_path, &process_lifetimes)
-    }
-
-    pub fn analyze_relogged_for_job_membership(
-        &self,
-        source_path: &Path,
-        membership: &JobMembershipSnapshot,
-    ) -> Result<AnalysisResult, AnalyzeError> {
-        let lifetimes = attested_process_lifetimes(membership)?;
-        self.analyze_relogged_for_process_lifetimes(source_path, &lifetimes)
-    }
-
-    pub(crate) fn analyze_relogged_for_process_lifetimes(
-        &self,
-        source_path: &Path,
-        lifetimes: &[ProcessLifetime],
-    ) -> Result<AnalysisResult, AnalyzeError> {
-        let mut accumulator = Accumulator::analyze_for_process_lifetimes(lifetimes);
-        accumulator.skip_relog_header = true;
-        process_trace_file(source_path, &mut accumulator)?;
-        accumulator.into_analysis()
-    }
 }
 
 impl DenialAnalyzer for EtlDenialAnalyzer {
     fn analyze(&self, source_path: &Path) -> Result<AnalysisResult, AnalyzeError> {
-        let mut result = self.analyze_capture(source_path)?.into_legacy();
-        match result.fit_verbose_logging_within_serialized_bytes(
-            crate::learning_mode_windows::guarded_wpr_protocol::MAX_ANALYSIS_BYTES as usize,
-        ) {
-            Ok(true) => Ok(result),
-            Ok(false) => Err(AnalyzeError::Decode(
-                "actionable Learning Mode analysis exceeds the guarded transport limit".to_string(),
-            )),
-            Err(error) => Err(AnalyzeError::Decode(format!(
-                "failed to size Learning Mode analysis: {error}"
-            ))),
-        }
+        let mut accumulator = Accumulator::analyze();
+        process_trace_file(source_path, &mut accumulator)?;
+        accumulator.into_analysis()
     }
 }
 
@@ -815,31 +606,12 @@ impl DenialAnalyzer for EtlDenialAnalyzer {
 /// provider manifests registered on the machine).
 #[cfg(test)]
 fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
-    capture_resources_from_events_for_process_lifetimes(events, None).into_legacy()
-}
-
-#[cfg(test)]
-fn resources_from_events_for_process_lifetimes(
-    events: &[CollectedEvent],
-    process_lifetimes: Option<&[ProcessLifetime]>,
-) -> AnalysisResult {
-    capture_resources_from_events_for_process_lifetimes(events, process_lifetimes).into_legacy()
+    capture_resources_from_events(events).into_legacy()
 }
 
 #[cfg(test)]
 fn capture_resources_from_events(events: &[CollectedEvent]) -> CaptureAnalysis {
-    capture_resources_from_events_for_process_lifetimes(events, None)
-}
-
-#[cfg(test)]
-fn capture_resources_from_events_for_process_lifetimes(
-    events: &[CollectedEvent],
-    process_lifetimes: Option<&[ProcessLifetime]>,
-) -> CaptureAnalysis {
-    let mut accumulator = match process_lifetimes {
-        Some(lifetimes) => Accumulator::analyze_for_process_lifetimes(lifetimes),
-        None => Accumulator::analyze(),
-    };
+    let mut accumulator = Accumulator::analyze();
     accumulate_collected_events(events, &mut accumulator);
     accumulator
         .into_capture_analysis()
@@ -879,26 +651,6 @@ pub fn visit_raw_events(
         return Err(AnalyzeError::Decode(error));
     }
     Ok(accumulator.raw_event_count)
-}
-
-/// Builds a bounded decision vector for known-provider Learning Mode events in
-/// source order. `ProcessTrace` normalizes each timestamp to FILETIME before
-/// the exact process-generation test, so Trace Relogger can replay these
-/// decisions without comparing its raw trace-clock timestamps.
-pub(crate) fn select_learning_mode_events_for_relogging(
-    source_path: &Path,
-    process_lifetimes: &[ProcessLifetime],
-) -> Result<RelogSelection, AnalyzeError> {
-    let mut accumulator = Accumulator::select_for_relogging(process_lifetimes);
-    process_trace_file(source_path, &mut accumulator)?;
-    if let Some(error) = accumulator.decode_error {
-        return Err(AnalyzeError::Decode(error));
-    }
-    Ok(RelogSelection {
-        selected_event_indices: accumulator.relog_selected_event_indices,
-        selected_event_pids: accumulator.relog_selected_event_pids,
-        total_event_count: accumulator.relog_event_count,
-    })
 }
 
 /// De-duplicates raw denials by `(user-visible resource, accessType)`,
@@ -1053,46 +805,6 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
 
-    if acc.skip_relog_header {
-        acc.skip_relog_header = false;
-        if provider != EventTraceGuid || event_id != 0 || header.EventDescriptor.Opcode != 0 {
-            acc.decode_error = Some("relogged trace has an invalid transport header".into());
-        }
-        return;
-    }
-
-    if matches!(acc.mode, CollectionMode::SelectForRelogging) {
-        if !acc.selects(provider, event_id) {
-            return;
-        }
-        let event_index = acc.relog_event_count;
-        let Some(next_event_count) = acc.relog_event_count.checked_add(1) else {
-            acc.decode_error =
-                Some("trace contained too many Learning Mode events to index".to_string());
-            acc.stop_requested = true;
-            return;
-        };
-        acc.relog_event_count = next_event_count;
-        let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
-            return;
-        };
-        if event_id == crate::learning_mode_windows::extractors::CAPABILITY_DENIAL_EVENT_ID {
-            let process_id = unsafe {
-                tdh_decode::decode_event_property(event_record, &mut acc.schema_cache, "ProcessId")
-            };
-            select_capability_decode_result_for_relogging(
-                acc,
-                event_index,
-                process_id,
-                header.ProcessId,
-                filetime,
-            );
-        } else {
-            select_event_for_relogging(acc, event_index, header.ProcessId, filetime);
-        }
-        return;
-    }
-
     let mut analyze_filetime = None;
 
     if matches!(acc.mode, CollectionMode::Analyze) {
@@ -1108,18 +820,9 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
             return;
         };
-        if is_network && acc.process_lifetimes.is_some() {
-            return;
-        }
-        if !is_network
-            && event_id != crate::learning_mode_windows::extractors::CAPABILITY_DENIAL_EVENT_ID
-            && !acc.event_in_scope(header.ProcessId, filetime)
-        {
-            return;
-        }
         analyze_filetime = Some(filetime);
         if !is_learning_mode_event(provider, event_id) {
-            if !acc.event_in_scope(header.ProcessId, filetime) || !acc.begin_event() {
+            if !acc.begin_event() {
                 return;
             }
             // A known provider, but outside its supported event vocabulary:
@@ -1163,11 +866,9 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
                     acc.visit_raw_event(&parts);
                 }
             }
-            CollectionMode::SelectForRelogging => unreachable!("relogging returns before decode"),
         },
         Err(error) => {
             if matches!(acc.mode, CollectionMode::Analyze) {
-                let filetime = analyze_filetime.expect("analyze mode has normalized FILETIME");
                 let pid = if event_id
                     == crate::learning_mode_windows::extractors::CAPABILITY_DENIAL_EVENT_ID
                 {
@@ -1189,18 +890,11 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
                         .ok()
                         .flatten()
                     };
-                    decode_error_effective_pid(
-                        process_id.as_deref(),
-                        header.ProcessId,
-                        acc.event_in_scope(header.ProcessId, filetime),
-                    )
+                    decode_error_effective_pid(process_id.as_deref(), header.ProcessId)
                 } else {
-                    Some(header.ProcessId)
+                    header.ProcessId
                 };
-                let Some(pid) = pid else {
-                    return;
-                };
-                if !acc.event_in_scope(pid, filetime) || !acc.begin_event() {
+                if !acc.begin_event() {
                     return;
                 }
                 acc.record_event_decode_error(provider, event_id, pid, error);
@@ -1213,79 +907,9 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     }
 }
 
-fn decode_error_effective_pid(
-    process_id: Option<&str>,
-    header_pid: u32,
-    header_in_scope: bool,
-) -> Option<u32> {
+fn decode_error_effective_pid(process_id: Option<&str>, header_pid: u32) -> u32 {
     crate::learning_mode_windows::extractors::effective_capability_event_pid(process_id)
-        .or_else(|| header_in_scope.then_some(header_pid))
-}
-
-fn select_capability_decode_result_for_relogging(
-    acc: &mut Accumulator<'_>,
-    event_index: usize,
-    process_id: Result<Option<String>, tdh_decode::DecodeError>,
-    header_pid: u32,
-    filetime: u64,
-) {
-    match process_id {
-        Ok(process_id) => select_capability_event_for_relogging(
-            acc,
-            event_index,
-            process_id.as_deref(),
-            header_pid,
-            filetime,
-        ),
-        Err(tdh_decode::DecodeError::Schema(_) | tdh_decode::DecodeError::SchemaNotFound) => {
-            acc.decode_error =
-                Some("could not scope brokered capability event: schema unavailable".into());
-            acc.stop_requested = true;
-        }
-        Err(_) => {
-            select_capability_event_for_relogging(acc, event_index, None, header_pid, filetime);
-        }
-    }
-}
-
-fn select_capability_event_for_relogging(
-    acc: &mut Accumulator<'_>,
-    event_index: usize,
-    process_id: Option<&str>,
-    header_pid: u32,
-    filetime: u64,
-) {
-    let Some(effective_pid) =
-        crate::learning_mode_windows::extractors::effective_capability_event_pid(process_id)
-    else {
-        // The event cannot be attributed to a workload without its brokered
-        // payload PID. Retain it only when the emitter itself is in scope so
-        // the analysis pass can classify the malformed payload.
-        select_event_for_relogging(acc, event_index, header_pid, filetime);
-        return;
-    };
-    select_event_for_relogging(acc, event_index, effective_pid, filetime);
-}
-
-fn select_event_for_relogging(
-    acc: &mut Accumulator<'_>,
-    event_index: usize,
-    pid: u32,
-    filetime: u64,
-) {
-    if !acc.event_in_scope(pid, filetime) {
-        return;
-    }
-    if acc.relog_selected_event_indices.len() >= MAX_PROCESSED_EVENTS {
-        acc.decode_error = Some(format!(
-            "trace exceeded the {MAX_PROCESSED_EVENTS}-event process-scoped relogging limit; \
-             rerun a smaller workload or split it into multiple captureDenials runs"
-        ));
-        acc.stop_requested = true;
-        return;
-    }
-    acc.relog_selected_event_indices.push(event_index);
-    acc.relog_selected_event_pids.push(pid);
+        .unwrap_or(header_pid)
 }
 
 /// Extracts denials from one decoded, in-vocabulary event and feeds them
@@ -1302,7 +926,7 @@ fn handle_decoded_event(
 ) {
     if parts.provider == crate::learning_mode_windows::network_extractors::NETWORK_DECISION_PROVIDER
     {
-        if !acc.event_in_scope(0, filetime) || !acc.begin_event() {
+        if !acc.begin_event() {
             return;
         }
         let analysis =
@@ -1330,7 +954,7 @@ fn handle_decoded_event(
         return;
     };
     if !is_learning_mode_event(parts.provider, parts.event_id) {
-        if acc.event_in_scope(header_pid, filetime) && acc.begin_event() {
+        if acc.begin_event() {
             acc.record_exclusion(
                 category,
                 parts.event_id,
@@ -1344,7 +968,7 @@ fn handle_decoded_event(
     let Some(pid) =
         crate::learning_mode_windows::extractors::effective_event_pid(parts, header_pid)
     else {
-        if acc.event_in_scope(header_pid, filetime) && acc.begin_event() {
+        if acc.begin_event() {
             acc.record_outcome(
                 category,
                 parts.event_id,
@@ -1356,7 +980,7 @@ fn handle_decoded_event(
         }
         return;
     };
-    if !acc.event_in_scope(pid, filetime) || !acc.begin_event() {
+    if !acc.begin_event() {
         return;
     }
 
@@ -1411,12 +1035,10 @@ mod tests {
     use crate::learning_mode_core::{AccessType, ResourceType};
 
     const SCOPED_PID: u32 = 42;
-    const SCOPED_START_FILETIME: u64 = 100;
-    const SCOPED_END_FILETIME: u64 = 200;
     const SCOPED_EVENT_FILETIME: u64 = 150;
 
     #[test]
-    fn network_decision_is_retained_only_in_unscoped_native_analysis() {
+    fn network_decision_is_retained_in_native_analysis() {
         let provider = windows::core::GUID::from_u128(0x301ec03d_2951_5efb_6d99_59c64628bbfc);
         assert!(is_learning_mode_event(provider, 1));
         for event_id in [0, 2, 14, 28] {
@@ -1459,50 +1081,28 @@ mod tests {
         assert_eq!(capture_property(signature, "ApplicationId"), "<REDACTED>");
         assert_eq!(capture_property(signature, "RemoteAddress"), "203.0.113.10");
 
-        let lifetimes = [ProcessLifetime {
-            pid: SCOPED_PID,
-            start_filetime: SCOPED_START_FILETIME,
-            end_filetime: SCOPED_END_FILETIME,
-        }];
-        let scoped = resources_from_events_for_process_lifetimes(&[event], Some(&lifetimes));
-        assert!(scoped.verbose_logging.is_empty());
-
-        for mut accumulator in [
-            Accumulator::analyze(),
-            Accumulator::analyze_for_process_lifetimes(&lifetimes),
-            Accumulator::select_for_relogging(&lifetimes),
-        ] {
-            let native = accumulator.process_lifetimes.is_none();
-            let mut record = EVENT_RECORD::default();
-            record.EventHeader.ProviderId = provider;
-            record.EventHeader.EventDescriptor.Id = 1;
-            record.EventHeader.ProcessId = SCOPED_PID;
-            record.EventHeader.TimeStamp = SCOPED_EVENT_FILETIME as i64;
-            let payload = 100u32.to_le_bytes();
-            record.UserData = payload.as_ptr().cast_mut().cast();
-            record.UserDataLength = payload.len() as u16;
-            if native {
-                accumulator
-                    .schema_cache
-                    .insert_test_schema(&record, &["Reason"]);
-            }
-            unsafe { process_event_record(&mut record, &mut accumulator) };
-            assert_eq!(accumulator.schema_cache.schema_loads, 0);
-            assert_eq!(
-                accumulator.network_verbose_logging.total_occurrences,
-                u64::from(native)
-            );
-            if native {
-                assert_eq!(
-                    accumulator.network_verbose_logging.signatures[0]
-                        .signature
-                        .pid,
-                    0
-                );
-            }
-            assert!(accumulator.relog_selected_event_indices.is_empty());
-            assert!(!accumulator.truncated);
-        }
+        let mut accumulator = Accumulator::analyze();
+        let mut record = EVENT_RECORD::default();
+        record.EventHeader.ProviderId = provider;
+        record.EventHeader.EventDescriptor.Id = 1;
+        record.EventHeader.ProcessId = SCOPED_PID;
+        record.EventHeader.TimeStamp = SCOPED_EVENT_FILETIME as i64;
+        let payload = 100u32.to_le_bytes();
+        record.UserData = payload.as_ptr().cast_mut().cast();
+        record.UserDataLength = payload.len() as u16;
+        accumulator
+            .schema_cache
+            .insert_test_schema(&record, &["Reason"]);
+        unsafe { process_event_record(&mut record, &mut accumulator) };
+        assert_eq!(accumulator.schema_cache.schema_loads, 0);
+        assert_eq!(accumulator.network_verbose_logging.total_occurrences, 1);
+        assert_eq!(
+            accumulator.network_verbose_logging.signatures[0]
+                .signature
+                .pid,
+            0
+        );
+        assert!(!accumulator.truncated);
     }
 
     #[test]
@@ -1551,41 +1151,32 @@ mod tests {
                 false,
             ),
         ] {
-            let lifetime = ProcessLifetime {
-                pid: SCOPED_PID,
-                start_filetime: SCOPED_START_FILETIME,
-                end_filetime: SCOPED_END_FILETIME,
-            };
-            for mut accumulator in [
-                Accumulator::analyze(),
-                Accumulator::analyze_for_process_lifetimes(&[lifetime]),
-            ] {
-                let mut record = EVENT_RECORD::default();
-                record.EventHeader.ProviderId = provider;
-                record.EventHeader.EventDescriptor.Id = event_id;
-                record.EventHeader.ProcessId = SCOPED_PID;
-                record.EventHeader.TimeStamp = SCOPED_EVENT_FILETIME as i64;
-                let payload = SCOPED_PID.to_le_bytes();
-                record.UserData = payload.as_ptr().cast_mut().cast();
-                record.UserDataLength = payload.len() as u16;
-                if retained {
-                    accumulator
-                        .schema_cache
-                        .insert_test_schema(&record, &["ProcessId"]);
-                }
-                unsafe { process_event_record(&mut record, &mut accumulator) };
-                assert_eq!(
-                    accumulator.schema_cache.schema_loads, 0,
-                    "{provider:?} {event_id}"
-                );
-                assert_eq!(accumulator.processed_event_count, usize::from(retained));
-                let analysis = accumulator.into_analysis().unwrap();
-                assert_eq!(
-                    analysis.verbose_logging.total_occurrences,
-                    u64::from(retained)
-                );
-                assert!(!analysis.denied_resources_truncated);
+            let mut accumulator = Accumulator::analyze();
+            let mut record = EVENT_RECORD::default();
+            record.EventHeader.ProviderId = provider;
+            record.EventHeader.EventDescriptor.Id = event_id;
+            record.EventHeader.ProcessId = SCOPED_PID;
+            record.EventHeader.TimeStamp = SCOPED_EVENT_FILETIME as i64;
+            let payload = SCOPED_PID.to_le_bytes();
+            record.UserData = payload.as_ptr().cast_mut().cast();
+            record.UserDataLength = payload.len() as u16;
+            if retained {
+                accumulator
+                    .schema_cache
+                    .insert_test_schema(&record, &["ProcessId"]);
             }
+            unsafe { process_event_record(&mut record, &mut accumulator) };
+            assert_eq!(
+                accumulator.schema_cache.schema_loads, 0,
+                "{provider:?} {event_id}"
+            );
+            assert_eq!(accumulator.processed_event_count, usize::from(retained));
+            let analysis = accumulator.into_analysis().unwrap();
+            assert_eq!(
+                analysis.verbose_logging.total_occurrences,
+                u64::from(retained)
+            );
+            assert!(!analysis.denied_resources_truncated);
         }
     }
 
@@ -1714,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_resource_dedup_preserves_provider_identity_and_process_scope() {
+    fn unknown_resource_dedup_preserves_provider_identity() {
         let properties = [
             ("ObjectType", "FutureObject"),
             ("ObjectName", "future-resource"),
@@ -1727,8 +1318,6 @@ mod tests {
             event_with_provider(first, 14, 42, 151, &properties),
             event_with_provider(second, 14, 42, 152, &properties),
             event_with_provider(second, 4907, 42, 153, &properties),
-            event_with_provider(first, 14, 99, 150, &[("ProcessId", "42")]),
-            event_with_provider(first, 14, 42, 201, &properties),
             kernel_event(
                 14,
                 42,
@@ -1740,14 +1329,7 @@ mod tests {
                 ],
             ),
         ];
-        let analysis = resources_from_events_for_process_lifetimes(
-            &events,
-            Some(&[ProcessLifetime {
-                pid: 42,
-                start_filetime: 100,
-                end_filetime: 200,
-            }]),
-        );
+        let analysis = resources_from_events(&events);
         let groups = &analysis.verbose_logging.signatures;
         assert_eq!(groups.len(), 4);
         assert_eq!(analysis.verbose_logging.total_occurrences, 5);
@@ -1784,147 +1366,6 @@ mod tests {
     }
 
     #[test]
-    fn process_lifetime_index_matches_pid_and_merged_time_ranges() {
-        let index = ProcessLifetimeIndex::new(&[
-            ProcessLifetime {
-                pid: 7,
-                start_filetime: 20,
-                end_filetime: 30,
-            },
-            ProcessLifetime {
-                pid: 7,
-                start_filetime: 10,
-                end_filetime: 25,
-            },
-            ProcessLifetime {
-                pid: 7,
-                start_filetime: 40,
-                end_filetime: 50,
-            },
-            ProcessLifetime {
-                pid: 8,
-                start_filetime: 15,
-                end_filetime: 45,
-            },
-        ]);
-
-        assert!(index.contains(7, 10));
-        assert!(index.contains(7, 30));
-        assert!(!index.contains(7, 35));
-        assert!(index.contains(7, 40));
-        assert!(!index.contains(7, 51));
-        assert!(index.contains(8, 35));
-        assert!(!index.contains(9, 20));
-    }
-
-    #[test]
-    fn empty_process_lifetime_index_fails_closed() {
-        let index = ProcessLifetimeIndex::new(&[]);
-
-        assert!(!index.contains(7, 10));
-    }
-
-    #[test]
-    fn relog_selection_tracks_known_provider_ordinals_and_exact_lifetimes() {
-        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }]);
-
-        let mut visit = |provider, event_id, pid, filetime| {
-            // SAFETY: these fixtures avoid the brokered capability event, so
-            // selection reads only the initialized POD header fields below.
-            let mut record: EVENT_RECORD = unsafe { core::mem::zeroed() };
-            record.EventHeader.ProviderId = provider;
-            record.EventHeader.EventDescriptor.Id = event_id;
-            record.EventHeader.ProcessId = pid;
-            record.EventHeader.TimeStamp = filetime;
-            // SAFETY: `record` remains live for this synchronous call.
-            unsafe { process_event_record(&mut record, &mut accumulator) };
-        };
-
-        visit(
-            crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
-            14,
-            42,
-            100,
-        );
-        visit(windows::core::GUID::from_u128(1), 14, 42, 150);
-        visit(
-            crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
-            27,
-            42,
-            201,
-        );
-        visit(
-            crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
-            999,
-            42,
-            200,
-        );
-        visit(
-            crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
-            14,
-            43,
-            150,
-        );
-        visit(
-            windows::core::GUID::from_u128(0x2cb15d1d_5fc1_11d2_abe1_00a0c911f518),
-            0,
-            42,
-            150,
-        );
-        visit(EventTraceGuid, 0, 42, 150);
-        visit(
-            windows::core::GUID::from_u128(0x3d6fa8d0_fe05_11d0_9dda_00c04fd7ba7c),
-            0,
-            42,
-            150,
-        );
-        visit(windows::core::GUID::from_u128(1), 18, 42, 150);
-        visit(
-            windows::core::GUID::from_u128(0xb675ec37_bdb6_4648_bc92_f3fdc74d3ca2),
-            18,
-            42,
-            150,
-        );
-        visit(
-            windows::core::GUID::from_u128(0xb675ec37_bdb6_4648_bc92_f3fdc74d3ca2),
-            19,
-            42,
-            150,
-        );
-
-        assert_eq!(accumulator.relog_event_count, 4);
-        assert_eq!(accumulator.relog_selected_event_indices, [0, 2]);
-        assert!(accumulator.decode_error.is_none());
-    }
-
-    #[test]
-    fn relogged_analysis_requires_a_valid_transport_header() {
-        for (provider, event_id, valid) in [
-            (EventTraceGuid, 0, true),
-            (
-                crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
-                14,
-                false,
-            ),
-        ] {
-            let mut accumulator = Accumulator::analyze_for_process_lifetimes(&[]);
-            accumulator.skip_relog_header = true;
-            let mut record = EVENT_RECORD::default();
-            record.EventHeader.ProviderId = provider;
-            record.EventHeader.EventDescriptor.Id = event_id;
-            unsafe { process_event_record(&mut record, &mut accumulator) };
-            assert_eq!(accumulator.into_analysis().is_ok(), valid);
-        }
-        let mut absent = Accumulator::analyze_for_process_lifetimes(&[]);
-        absent.skip_relog_header = true;
-        assert!(absent.into_analysis().is_err());
-    }
-
-    #[test]
     fn process_trace_cancellation_succeeds_only_when_requested() {
         assert!(process_trace_succeeded(0, false));
         assert!(process_trace_succeeded(1223, true));
@@ -1933,50 +1374,8 @@ mod tests {
     }
 
     #[test]
-    fn relog_selection_scopes_brokered_capability_events_by_payload_pid() {
-        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }]);
-        select_capability_event_for_relogging(&mut accumulator, 0, Some("42"), 9000, 150);
-
-        assert_eq!(accumulator.relog_selected_event_indices, [0]);
-    }
-
-    #[test]
-    fn relog_selection_skips_unscopable_brokered_capability_without_payload_pid() {
-        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }]);
-        select_capability_event_for_relogging(&mut accumulator, 0, None, 9000, 150);
-
-        assert!(accumulator.relog_selected_event_indices.is_empty());
-        assert!(!accumulator.stop_requested);
-        assert!(accumulator.decode_error.is_none());
-    }
-
-    #[test]
-    fn relog_selection_retains_malformed_capability_from_in_scope_emitter() {
-        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }]);
-        select_capability_event_for_relogging(&mut accumulator, 0, None, 42, 150);
-
-        assert_eq!(accumulator.relog_selected_event_indices, [0]);
-    }
-
-    #[test]
-    fn scoped_analysis_classifies_malformed_capability_from_in_scope_emitter() {
-        let mut accumulator = Accumulator::analyze_for_process_lifetimes(&[ProcessLifetime {
-            pid: SCOPED_PID,
-            start_filetime: SCOPED_START_FILETIME,
-            end_filetime: SCOPED_END_FILETIME,
-        }]);
+    fn analysis_classifies_malformed_capability_event() {
+        let mut accumulator = Accumulator::analyze();
         let parts = DecodedEventParts {
             provider: crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
             event_name: None,
@@ -1999,50 +1398,16 @@ mod tests {
     }
 
     #[test]
-    fn relog_selection_skips_payload_decode_failure_from_unrelated_emitter() {
-        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }]);
-        let error = tdh_decode::DecodeError::event(
-            tdh_decode::EventDecodeKind::PayloadMalformed,
-            "truncated ProcessId".to_string(),
-            None,
-        );
-
-        select_capability_decode_result_for_relogging(&mut accumulator, 0, Err(error), 9000, 150);
-
-        assert!(accumulator.relog_selected_event_indices.is_empty());
-        assert!(!accumulator.stop_requested);
-        assert!(accumulator.decode_error.is_none());
-    }
-
-    #[test]
-    fn brokered_schema_failure_marks_incomplete_before_pid_resolution() {
+    fn brokered_schema_failure_marks_analysis_incomplete() {
         for (provider, event_id, incomplete) in [
             (
                 crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
                 28,
                 true,
             ),
-            (
-                crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER,
-                14,
-                false,
-            ),
-            (
-                crate::learning_mode_windows::extractors::PRIVACY_LEARNING_MODE_PROVIDER,
-                28,
-                false,
-            ),
             (windows::core::GUID::from_u128(1), 28, false),
         ] {
-            let mut accumulator = Accumulator::analyze_for_process_lifetimes(&[ProcessLifetime {
-                pid: 42,
-                start_filetime: 100,
-                end_filetime: 200,
-            }]);
+            let mut accumulator = Accumulator::analyze();
             let mut record = EVENT_RECORD::default();
             record.EventHeader.ProviderId = provider;
             record.EventHeader.EventDescriptor.Id = event_id;
@@ -2065,14 +1430,8 @@ mod tests {
                         | tdh_decode::DecodeError::SchemaNotFound)
                 ));
             }
-            let schema_loads = accumulator.schema_cache.schema_loads;
             unsafe { process_event_record(&mut record, &mut accumulator) };
-            assert_eq!(
-                accumulator.schema_cache.schema_loads - schema_loads,
-                usize::from(incomplete)
-            );
             assert_eq!(accumulator.truncated, incomplete);
-            assert!(accumulator.verbose_logging.is_empty());
             assert!(!accumulator.stop_requested);
             assert!(accumulator.decode_error.is_none());
 
@@ -2091,53 +1450,14 @@ mod tests {
             assert_eq!(analysis.denied_resources_truncated, incomplete);
             assert_eq!(analysis.denials.len(), 1);
             assert_eq!(analysis.denials[0].resource, r"C:\kept.txt");
-            assert_eq!(analysis.verbose_logging.total_occurrences, 1);
         }
     }
 
     #[test]
-    fn relog_selection_rejects_unattributable_capability_schema_failure() {
-        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }]);
-        let mut record = EVENT_RECORD::default();
-        record.EventHeader.ProviderId =
-            crate::learning_mode_windows::extractors::KERNEL_GENERAL_PROVIDER;
-        record.EventHeader.EventDescriptor.Id =
-            crate::learning_mode_windows::extractors::CAPABILITY_DENIAL_EVENT_ID;
-        record.EventHeader.EventDescriptor.Version = u8::MAX;
-        record.EventHeader.ProcessId = 9000;
-        record.EventHeader.TimeStamp = 150;
-        unsafe { process_event_record(&mut record, &mut accumulator) };
-
-        assert!(accumulator.relog_selected_event_indices.is_empty());
-        assert!(accumulator.relog_selected_event_pids.is_empty());
-        assert!(accumulator.verbose_logging.is_empty());
-        assert!(accumulator.stop_requested);
-        assert_eq!(
-            accumulator.decode_error.as_deref(),
-            Some("could not scope brokered capability event: schema unavailable")
-        );
-    }
-
-    #[test]
-    fn capability_decode_error_prefers_payload_pid_and_fails_closed_without_scope() {
-        assert_eq!(
-            decode_error_effective_pid(Some("42"), 9000, false),
-            Some(42)
-        );
-        assert_eq!(
-            decode_error_effective_pid(Some("\"broker\""), 42, true),
-            Some(42)
-        );
-        assert_eq!(
-            decode_error_effective_pid(Some("\"broker\""), 9000, false),
-            None
-        );
-        assert_eq!(decode_error_effective_pid(None, 42, true), Some(42));
-        assert_eq!(decode_error_effective_pid(None, 9000, false), None);
+    fn capability_decode_error_prefers_payload_pid() {
+        assert_eq!(decode_error_effective_pid(Some("42"), 9000), 42);
+        assert_eq!(decode_error_effective_pid(Some("\"broker\""), 9000), 9000);
+        assert_eq!(decode_error_effective_pid(None, 9000), 9000);
     }
 
     #[test]
@@ -2528,49 +1848,6 @@ mod tests {
     }
 
     #[test]
-    fn out_of_scope_events_are_excluded_before_consuming_the_budget() {
-        let lifetimes = [ProcessLifetime {
-            pid: 7,
-            start_filetime: 100,
-            end_filetime: 200,
-        }];
-        let events = [
-            kernel_event(
-                14,
-                9,
-                150,
-                &[
-                    ("ObjectType", "\"File\""),
-                    ("ObjectName", "\"C:\\unrelated.txt\""),
-                    ("AccessMask", "0x1"),
-                ],
-            ),
-            kernel_event(
-                14,
-                7,
-                150,
-                &[
-                    ("ObjectType", "\"File\""),
-                    ("ObjectName", "\"C:\\owned.txt\""),
-                    ("AccessMask", "0x1"),
-                ],
-            ),
-        ];
-        let mut accumulator = Accumulator {
-            processed_event_count: MAX_PROCESSED_EVENTS - 1,
-            ..Accumulator::analyze_for_process_lifetimes(&lifetimes)
-        };
-
-        accumulate_collected_events(&events, &mut accumulator);
-
-        assert_eq!(accumulator.processed_event_count, MAX_PROCESSED_EVENTS);
-        assert!(!accumulator.processing_limit_reached);
-        assert!(!accumulator.stop_requested);
-        assert_eq!(accumulator.denials.len(), 1);
-        assert_eq!(accumulator.denials[0].resource, r"C:\owned.txt");
-    }
-
-    #[test]
     fn analyze_missing_file_returns_open_error() {
         let analyzer = EtlDenialAnalyzer;
         let err = analyzer
@@ -2952,39 +2229,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn process_lifetime_scope_excludes_broker_emitted_network_events() {
-        let event = network_event(
-            777,
-            150,
-            &[
-                ("SchemaVersion", "1"),
-                ("SourceDomain", "2"),
-                ("Mode", "1"),
-                ("NormalDecision", "1"),
-                ("EffectiveDecision", "1"),
-                ("Reason", "100"),
-                ("FieldFlags", "16"),
-                ("OriginalTimestamp", "150"),
-                ("FilterId", "9001"),
-                ("Direction", "0"),
-                ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
-                ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
-                ("RemoteAddress", "203.0.113.10"),
-            ],
-        );
-        let lifetimes = [ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }];
-
-        let analysis = resources_from_events_for_process_lifetimes(&[event], Some(&lifetimes));
-
-        assert!(analysis.denials.is_empty());
-        assert!(analysis.verbose_logging.signatures.is_empty());
-    }
-
     /// Mirrors the real `Mode="Normal"` (`block`) capture: an actionable file
     /// check, a non-actionable registry check, and a compact capability denial.
     #[test]
@@ -3321,71 +2565,7 @@ mod tests {
     }
 
     #[test]
-    fn process_lifetimes_filter_unrelated_events_and_pid_reuse() {
-        let events = vec![
-            kernel_event(
-                14,
-                42,
-                99,
-                &[
-                    ("ObjectType", "\"File\""),
-                    ("ObjectName", "\"C:\\before.txt\""),
-                    ("AccessMask", "0x1"),
-                ],
-            ),
-            kernel_event(9999, 43, 150, &[("Marker", "\"host\"")]),
-            kernel_event(9999, 42, 151, &[("Marker", "\"owned\"")]),
-            kernel_event(
-                14,
-                42,
-                150,
-                &[
-                    ("ObjectType", "\"File\""),
-                    ("ObjectName", "\"C:\\owned.txt\""),
-                    ("AccessMask", "0x1"),
-                ],
-            ),
-            kernel_event(
-                14,
-                43,
-                150,
-                &[
-                    ("ObjectType", "\"File\""),
-                    ("ObjectName", "\"C:\\unrelated.txt\""),
-                    ("AccessMask", "0x1"),
-                ],
-            ),
-            kernel_event(
-                14,
-                42,
-                201,
-                &[
-                    ("ObjectType", "\"File\""),
-                    ("ObjectName", "\"C:\\reused-pid.txt\""),
-                    ("AccessMask", "0x1"),
-                ],
-            ),
-        ];
-        let lifetimes = [ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }];
-
-        let analysis = resources_from_events_for_process_lifetimes(&events, Some(&lifetimes));
-
-        assert_eq!(analysis.denials.len(), 1);
-        assert_eq!(analysis.denials[0].resource, r"C:\owned.txt");
-        assert_eq!(analysis.verbose_logging.signatures.len(), 2);
-        assert!(analysis
-            .verbose_logging
-            .signatures
-            .iter()
-            .all(|group| group.signature.pid == 42));
-    }
-
-    #[test]
-    fn brokered_capability_uses_payload_pid_for_process_scope() {
+    fn brokered_capability_uses_payload_pid() {
         let events = vec![kernel_event(
             28,
             900,
@@ -3396,13 +2576,8 @@ mod tests {
                 ("CapabilityName", "\"internetClient\""),
             ],
         )];
-        let lifetimes = [ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        }];
 
-        let analysis = resources_from_events_for_process_lifetimes(&events, Some(&lifetimes));
+        let analysis = resources_from_events(&events);
 
         assert_eq!(analysis.denials.len(), 1);
         assert_eq!(analysis.denials[0].pid, 42);
@@ -3419,25 +2594,6 @@ mod tests {
             group.signature.resource_type,
             Some(ResourceType::Capability)
         );
-    }
-
-    #[test]
-    fn empty_process_lifetimes_fail_closed() {
-        let events = vec![kernel_event(
-            14,
-            42,
-            150,
-            &[
-                ("ObjectType", "\"File\""),
-                ("ObjectName", "\"C:\\host.txt\""),
-                ("AccessMask", "0x1"),
-            ],
-        )];
-
-        let analysis = resources_from_events_for_process_lifetimes(&events, Some(&[]));
-
-        assert!(analysis.denials.is_empty());
-        assert!(analysis.verbose_logging.is_empty());
     }
 
     #[test]

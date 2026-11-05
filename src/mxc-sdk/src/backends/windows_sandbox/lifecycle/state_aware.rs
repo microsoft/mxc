@@ -210,10 +210,12 @@ fn is_valid_sandbox_token(token: &str) -> bool {
 }
 
 /// Map a [`OneShotError`] from policy planning to the wire error model. Policy
-/// rejections become `policy_validation`; anything else is a backend error.
+/// rejections become `policy_validation`, a missing host feature becomes
+/// `backend_unavailable`, and anything else is a backend error.
 fn map_policy_error(e: OneShotError) -> MxcError {
     match e {
         OneShotError::Policy(msg) => MxcError::policy_validation(msg),
+        OneShotError::SandboxUnavailable(msg) => MxcError::backend_unavailable(msg),
         other => MxcError::backend_error(format!("{other:?}")),
     }
 }
@@ -1323,6 +1325,12 @@ mod tests {
     fn map_policy_error_maps_policy_to_validation() {
         let err = map_policy_error(OneShotError::Policy("nope".into()));
         assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn map_policy_error_blames_the_host_for_a_missing_sandbox_feature() {
+        let err = map_policy_error(OneShotError::SandboxUnavailable("feature off".into()));
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
     }
 
     #[test]

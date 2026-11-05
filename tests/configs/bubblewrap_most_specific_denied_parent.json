@@ -4,10 +4,10 @@
   "containerId": "CLI-Bubblewrap-MostSpecific-DeniedParent",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "D=/mnt/msptest/data; if cat \"$D/secret_child/keep.txt\" 2>/dev/null | grep -q CHILD_KEPT; then echo CHILD_OK; else echo CHILD_MISSING; fi; if echo w > \"$D/secret_child/written.txt\" 2>/dev/null && grep -q w \"$D/secret_child/written.txt\" 2>/dev/null; then echo CHILD_WRITE_OK; else echo CHILD_WRITE_FAIL; fi; if cat \"$D/sibling.txt\" 2>/dev/null | grep -q PARENT_SECRET; then echo PARENT_LEAK; else echo PARENT_MASKED_OK; fi"
+    "commandLine": "D=/mnt/msptest/data; if cat \"$D/deep/secret_child/keep.txt\" 2>/dev/null | grep -q CHILD_KEPT; then echo CHILD_OK; else echo CHILD_MISSING; fi; if echo w > \"$D/deep/secret_child/written.txt\" 2>/dev/null && grep -q w \"$D/deep/secret_child/written.txt\" 2>/dev/null; then echo CHILD_WRITE_OK; else echo CHILD_WRITE_FAIL; fi; if cat \"$D/sibling.txt\" 2>/dev/null | grep -q PARENT_SECRET; then echo PARENT_LEAK; else echo PARENT_MASKED_OK; fi; if (echo w > \"$D/new.txt\") 2>/dev/null; then echo PARENT_WRITE_FAIL; else echo PARENT_WRITE_BLOCKED; fi"
   },
   "filesystem": {
-    "readwritePaths": ["/mnt/msptest/data/secret_child"],
+    "readwritePaths": ["/mnt/msptest/data/deep/secret_child"],
     "deniedPaths": ["/mnt/msptest/data"]
   }
 }

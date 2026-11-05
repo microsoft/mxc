@@ -5,9 +5,6 @@
 param(
     [string]$WxcExec,
     [string]$SecondaryDriveWorkDirectory,
-    [string]$HostPrepExe,
-    [string]$DisposableVolumeRoot,
-    [switch]$IncludeDestructive,
     [switch]$InstallMissingDependencies,
     [switch]$RunWithMissingDependencies,
     [switch]$PassThru
@@ -43,8 +40,7 @@ if ($missingDependencies -and -not $RunWithMissingDependencies) {
 # Run every cataloged test in issue order.
 $results = foreach ($entry in $manifest.GetEnumerator() | Sort-Object { [int]$_.Key }) {
     Invoke-RegressionTestCase -Issue $entry.Key -Metadata $entry.Value -RegressionRoot $PSScriptRoot -Shell $shell `
-        -WxcExec $WxcExec -SecondaryDriveWorkDirectory $SecondaryDriveWorkDirectory -HostPrepExe $HostPrepExe `
-        -DisposableVolumeRoot $DisposableVolumeRoot -IncludeDestructive:$IncludeDestructive `
+        -WxcExec $WxcExec -SecondaryDriveWorkDirectory $SecondaryDriveWorkDirectory `
         -RunWithMissingDependencies:$RunWithMissingDependencies
 }
 

@@ -48,6 +48,21 @@ review or stop after finding one working path.
   maintenance risk and recommend smaller, reviewable vertical slices with
   behavior coverage. Do not demand a rewrite for a local problem.
 
+- When an approved design exists, check that the implementation matches its
+  behavior, compatibility guarantees, backend support, and acceptance criteria.
+
+- For a spec-only PR, use the
+  [feature spec review checklist](../../../docs/development/architecture/designs/feature-spec-template.md#review-checklist).
+  Review the proposed behavior and validation plan; do not require completed
+  implementation or present planned tests as results. Check each backend's
+  applicability and proposed capability probes and availability results.
+  Review public API changes against the
+  [API proposal checklist](../../../docs/development/architecture/designs/api-spec-template.md#review-checklist).
+
+- Check that public APIs promise only behavior the intended backends provide,
+  with functional validation coverage. Contract changes must not publish or
+  silently accept unenforced policy.
+
 ## Check MXC rules
 
 - **Rust package boundaries:** Inspect `src/Cargo.toml` workspace members and

@@ -115,18 +115,23 @@ given path. `deniedPaths` sits outside that ordering and always outranks.
 
 Before a path reaches the profile, MXC:
 
-1. **Expands `~`** against `$HOME`.
-2. **Collapses** `//`, `/./`, and trailing `/`. Rejects `..` (see above).
-3. **Resolves symlinked roots** — `/etc`, `/tmp`, `/var` → `/private/…`;
-   `/home` → `/System/Volumes/Data/home`.
+1. **Expands `~`** against `$HOME` and resolves relative paths from MXC's
+   working directory.
+2. **Resolves symlinks**, including files, directory ancestors, chains, and
+   macOS roots such as `/tmp` → `/private/tmp`.
+3. **Applies `..` after following symlinks** and collapses redundant separators
+   and `.` segments. Missing trailing components are supported.
 4. **Re-applies precedence** (`denied` > `readonly` > `readwrite`) to the
    *resolved* paths.
 
-Steps 3 and 4 aren't cosmetic. Those roots are symlinks, and the kernel fully
-resolves a path before matching it — a rule written against the unresolved path
-is silently dead. Step 4 catches two spellings of the same path
-(`readonlyPaths: ["/private/tmp/x"]` vs `readwritePaths: ["/tmp/x"]`) that the
-shared parser can't see are identical.
+For example, if `/work/link` points to `/data/nested`,
+`/work/link/../secret.txt` applies to `/data/secret.txt`, not
+`/work/secret.txt`. A deny on a symlink protects its real target and other
+symlink aliases, even under a broader read-write grant.
+
+Paths are resolved before launch. Dangling symlinks, symlink loops, inaccessible
+ancestors, and targets whose resolved names cannot be represented as UTF-8 are
+rejected rather than producing rules that might not protect the intended path.
 
 `/Users` needs no rewriting — it's a firmlink, not a symlink.
 
@@ -450,7 +455,11 @@ adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
 
 `process.cwd`, if omitted, resolves to the first of: `readwritePaths[0]` →
 `readonlyPaths[0]` → `/`. A `~` default is tilde-expanded the same way policy
-paths are. `PWD` is exported to the resolved directory.
+paths are. The directory must already exist; a missing path (including one
+hidden by `..`) fails before launch, even with `--dry-run`. It is then resolved
+through symlinks and `..`, and `PWD`
+and the default `HOME` use that physical path (for example, `/tmp` becomes
+`/private/tmp`).
 
 A relative `cwd` is resolved against the MXC process's directory.
 
@@ -588,7 +597,6 @@ once you can see the rules that were emitted.
 | Command not found, or a tool can't find its libraries | The environment is always cleared and `PATH` resets to `/usr/bin:/bin:/usr/sbin:/sbin` | Add `process.env`, and `readonlyPaths` for the install prefix (e.g. `/opt/homebrew`) |
 | A client is configured with `HTTP_PROXY` but reaches nothing | It's ignoring the proxy vars. Outbound is kernel-scoped to the proxy port, so it can't connect anywhere else | Use a proxy-aware client — see [Proxy support](#proxy-support-what-is-and-isnt-enforced) |
 | A test runner or build tool fails spawning workers | `nestedPty: false`, or its IPC socket sits under a `readonlyPaths`/`deniedPaths` entry | Leave `nestedPty` at `true`; put socket directories in `readwritePaths` |
-| The same config runs on Linux but is rejected on macOS | A `..` segment in a path — Seatbelt-only rejection | Pass the fully resolved path |
 
 ### What gets rejected
 
@@ -618,12 +626,8 @@ rejected before Seatbelt validation.
 
 | Config | Why it's rejected | Do this instead |
 |---|---|---|
-| Any path containing a `..` segment | macOS resolves `..` *after* following symlinks, so a lexically-resolved rule can silently point elsewhere (`/tmp/..` is `/private`, not `/`) | Pass the fully resolved path |
-
-This one is **Seatbelt-only** — the shared parser accepts `..`, so a
-cross-backend policy using it will run on Linux and fail on macOS. That's
-deliberate: the alternative is a rule that matches nothing, which for
-`deniedPaths` would fail *open*.
+| A dangling symlink, symlink loop, or inaccessible path | The target cannot be resolved reliably for a Seatbelt path filter | Repair the link or make the path accessible to MXC |
+| A path resolving to a non-UTF-8 name | The profile cannot represent the target faithfully | Use a target with a UTF-8 name |
 
 #### Streaming / GUI
 

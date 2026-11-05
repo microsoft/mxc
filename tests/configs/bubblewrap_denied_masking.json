@@ -4,10 +4,10 @@
   "containerId": "CLI-Bubblewrap-Denied-Masking",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "B=/mnt/masktest; if cat \"$B/visible.txt\" 2>/dev/null | grep -q VISIBLE_SECRET; then echo VISIBLE_OK; else echo VISIBLE_MISSING; fi; if cat \"$B/secret_file.txt\" 2>/dev/null | grep -q FILE_SECRET; then echo FILE_LEAK; else echo FILE_MASKED_OK; fi; if [ -d \"$B/secret_file.txt\" ]; then echo FILE_IS_DIR_BUG; else echo FILE_NOT_DIR_OK; fi; if ls \"$B/secret_dir\" 2>/dev/null | grep -q .; then echo DIR_LEAK; else echo DIR_MASKED_OK; fi"
+    "commandLine": "B=/mnt/masktest; if cat \"$B/visible.txt\" 2>/dev/null | grep -q VISIBLE_SECRET && (echo writable > \"$B/control_write\") 2>/dev/null && (echo writable > /tmp/deny-mask-control) 2>/dev/null; then echo VISIBLE_OK; else echo VISIBLE_MISSING; fi; if cat \"$B/secret_file.txt\" 2>/dev/null | grep -q FILE_SECRET; then echo FILE_LEAK; else echo FILE_MASKED_OK; fi; if [ -d \"$B/secret_file.txt\" ]; then echo FILE_IS_DIR_BUG; else echo FILE_NOT_DIR_OK; fi; if ls \"$B/secret_dir\" 2>/dev/null | grep -q inner.txt; then echo DIR_LEAK; else echo DIR_MASKED_OK; fi; for path in secret_dir secret_dir/nested missing; do if [ ! -d \"$B/$path\" ] || (echo data > \"$B/$path/written\") 2>/dev/null || mkdir \"$B/$path/newdir\" 2>/dev/null || chmod u+w \"$B/$path\" 2>/dev/null; then echo DENIED_WRITE_FAIL:$path; else echo DENIED_WRITE_OK:$path; fi; done"
   },
   "filesystem": {
     "readwritePaths": ["/mnt/masktest"],
-    "deniedPaths": ["/mnt/masktest/secret_file.txt", "/mnt/masktest/secret_dir"]
+    "deniedPaths": ["/mnt/masktest/secret_file.txt", "/mnt/masktest/secret_dir", "/mnt/masktest/secret_dir/nested", "/mnt/masktest/missing"]
   }
 }

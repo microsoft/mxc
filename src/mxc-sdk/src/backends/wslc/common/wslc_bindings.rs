@@ -18,7 +18,7 @@
 //!   [`WslcProcessGuard`]) that release their handle on drop.
 //! - [`check_hresult`] and the [`S_OK`] sentinel.
 //! - [`WslcSdk::shared`] — the process-wide, never-unloaded SDK instance.
-//! - [`ComApartment`] and [`is_available`] — per-call COM apartment handling
+//! - `ComApartment` and [`is_available`] — per-call COM apartment handling
 //!   and the host-capability probe behind `platform_support()`.
 
 pub use crate::wslc_common::wslcsdk_sys::*;
@@ -106,7 +106,7 @@ impl WslcSdk {
     /// that would otherwise only surface as a panic on first use. To fail fast
     /// against an incompatible SDK runtime (version skew), `load` additionally
     /// validates that every function actually called by this crate resolved,
-    /// via [`ensure_required_symbols`](Self::ensure_required_symbols).
+    /// via `ensure_required_symbols`.
     pub fn load() -> Result<Self, String> {
         let dll_path =
             crate::mxc_common::process_util::module_path_for_address(Self::load as *const ())?
@@ -138,9 +138,10 @@ impl WslcSdk {
     /// missing exports instead of panicking later at the call site.
     ///
     /// The list below must mirror the SDK functions invoked by
-    /// `wsl_container_runner.rs` and the RAII guards. Intentionally excludes
-    /// header-declared functions this crate never calls, since SDK headers may
-    /// declare exports ahead of what the shipping runtime implements.
+    /// `wsl_container_runner.rs` and the RAII guards, plus exports that mark the
+    /// minimum SDK version this build requires. Intentionally excludes other
+    /// header-declared functions, since SDK headers may declare exports ahead of
+    /// what the shipping runtime implements.
     fn ensure_required_symbols(&self, dll_path: &std::path::Path) -> Result<(), String> {
         let mut missing: Vec<&'static str> = Vec::new();
         macro_rules! require {
@@ -184,6 +185,8 @@ impl WslcSdk {
             WslcLoadSessionImageFromFile,
             WslcListSessionImages,
             WslcGetMissingComponents,
+            // Present only in SDKs that can open a process's stdin.
+            WslcSetProcessSettingsFlags,
         );
         if missing.is_empty() {
             return Ok(());

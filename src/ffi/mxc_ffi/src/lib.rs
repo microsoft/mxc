@@ -87,6 +87,8 @@ mod error_detail;
 mod pty;
 mod state_aware;
 mod streaming;
+#[cfg(feature = "test-support")]
+mod test_fake_sandbox;
 pub use error_detail::*;
 pub use pty::*;
 pub use state_aware::*;

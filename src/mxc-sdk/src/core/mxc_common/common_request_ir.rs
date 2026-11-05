@@ -21,7 +21,6 @@ pub(crate) struct CommonRequestIR {
     pub(crate) lxc: Option<wire::Lxc>,
     pub(crate) wslc: Option<wire::Wslc>,
     pub(crate) filesystem: Option<wire::Filesystem>,
-    pub(crate) fallback: Option<wire::Fallback>,
     pub(crate) network: Option<wire::Network>,
     pub(crate) runtime_config: Option<wire::RuntimeConfig>,
     pub(crate) ui: Option<wire::Ui>,
@@ -30,4 +29,5 @@ pub(crate) struct CommonRequestIR {
     pub(crate) test_feature: Option<wire::TestFeature>,
     pub(crate) windows_sandbox: Option<wire::WindowsSandbox>,
     pub(crate) hyperlight: Option<wire::Hyperlight>,
+    pub(crate) microvm: Option<wire::MicroVm>,
 }

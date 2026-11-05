@@ -23,12 +23,12 @@ see [Windows OS-version policy support](../../backends/process-container/os-vers
 
 ## Architecture recap
 
-For the BaseContainer tier, the flow is:
+For native Windows ProcessContainer, the executor flow is:
 
 ```text
-SandboxPolicy
-  -> SDK: createConfigFromPolicy() -> ContainerConfig JSON
-    -> wxc-exec: parses ContainerConfig
+MXC request JSON
+  -> wxc-exec: version-specific parsing and request binding
+    -> mxc_engine: native ProcessContainer eligibility
       -> BaseContainerRunner: builds a PSEC FlatBuffer
         -> CreateProcessSecurityEnvironment (processmodel.dll)
           -> CreateProcessW with PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT
@@ -74,13 +74,13 @@ artifacts by hand.
 Update the helpers under
 `src/mxc-sdk/src/backends/process_container/common/base_container_helpers.rs` to encode
 the runtime policy into the PSEC FlatBuffer. Update
-`BaseContainerRunner::can_backend_service_request()` so the BaseContainer tier
-is selected only when the single request-level decision reports that the
+`BaseContainerRunner::can_backend_service_request()` so the native runner
+is constructed only when the single request-level decision reports that the
 runtime OS can enforce the complete request.
 
-If PSEC cannot represent the request, selection must continue to an
-AppContainer tier that can fully enforce it. Never silently omit a requested
-restriction.
+If PSEC cannot represent or enforce the request, reject it before creating a
+container and return an actionable error. Do not fall back to AppContainer,
+filesystem brokering, or host-DACL mutation, or silently omit a restriction.
 
 ### 5. Test end-to-end
 
@@ -92,8 +92,11 @@ Use a Windows build containing the processmodel change.
 3. Exercise the corresponding SDK policy and verify the complete
    policy-to-OS flow.
 4. Verify omission applies the intended secure default.
-5. Verify an unsupported host selects a compatible AppContainer tier or returns
-   an actionable error without weakening policy.
+5. Verify an unsupported host rejects the request before container creation
+   with an actionable error and without weakening policy.
+6. Wire functional coverage into scheduled backend validation. For networking,
+   extend `tests/scripts/run_base_container_network_tests.ps1`, including
+   positive and negative controls.
 
 ## Summary of files to touch
 
@@ -105,5 +108,5 @@ Use a Windows build containing the processmodel change.
 | MXC specification builder | mxc | `src/mxc-sdk/src/backends/process_container/common/base_container_helpers.rs` |
 | MXC executor and capability selection | mxc | `src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs` |
 | MXC Config schema | mxc | `schemas/dev/mxc-config.schema.*.json` |
-| MXC SDK mapping | mxc | `sdk/node/src/sandbox.ts` |
-| MXC SDK types | mxc | `sdk/node/src/types.ts` |
+| MXC SDK mapping | mxc | `sdk/node/src/v1/container.ts` |
+| MXC SDK types | mxc | `sdk/node/src/v1/types.ts` |

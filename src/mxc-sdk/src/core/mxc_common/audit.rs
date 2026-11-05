@@ -14,7 +14,7 @@
 //! One record = one line = one JSON object:
 //!
 //! ```text
-//! {"event":"mxc.ProcessExited","backend":"processcontainer","identity":"sandbox-a3f1c8e40029bd17","pid":1234,"exit_code":0}
+//! {"event":"mxc.ProcessExited","backend":"processcontainer","identity":"redacted","pid":1234,"exit_code":0}
 //! ```
 //!
 //! Invariants, all enforced by this module:
@@ -56,8 +56,6 @@ pub enum AuditEventName {
     /// A kill/terminate call failed. Emitted only on failure, so a healthy run
     /// produces none.
     ProcessKillFailed,
-    /// The preferred isolation tier was not selected.
-    EnforcementDegraded,
     /// The canonical hash of the effective policy at launch.
     PolicyHash,
     /// Network policy was installed (or failed to install) for a sandbox.
@@ -77,7 +75,6 @@ impl AuditEventName {
             Self::ProcessExited => "mxc.ProcessExited",
             Self::ProcessTimedOut => "mxc.ProcessTimedOut",
             Self::ProcessKillFailed => "mxc.ProcessKillFailed",
-            Self::EnforcementDegraded => "mxc.EnforcementDegraded",
             Self::PolicyHash => "mxc.PolicyHash",
             Self::NetworkPolicyApplied => "mxc.NetworkPolicyApplied",
             Self::SandboxTornDown => "mxc.SandboxTornDown",
@@ -94,8 +91,8 @@ impl AuditEventName {
     /// * M-ETW-1 — `ProcessExited (identity, processId, exitCode)`,
     ///   `ProcessTimedOut (identity, processId, timeoutMs)`,
     ///   `ProcessKillFailed (identity, processId, error)`.
-    /// * M-ETW-2 — `identity, tier, needsDaclAugmentation, degradationReasons[],
-    ///   effectiveEnforcementLevel`.
+    /// * M-ETW-2 — not applicable: no current backend selects among
+    ///   enforcement levels, so there is no degradation record.
     /// * M-ETW-3 — a stable `policyHash` on the policy event.
     /// * M-ETW-4 — `identity, enforcementMode, defaultPolicy, proxyPort`.
     /// * M-ETW-5 — `identity, status`, and what was released.
@@ -118,13 +115,6 @@ impl AuditEventName {
             Self::ProcessKillFailed => &["identity", "pid", "error_code"],
             Self::ProcessExited => &["identity", "pid", "exit_code"],
             Self::ProcessTimedOut => &["identity", "pid", "timeout_ms"],
-            Self::EnforcementDegraded => &[
-                "identity",
-                "tier",
-                "needs_dacl_augmentation",
-                "degradation_reasons",
-                "effective_enforcement_level",
-            ],
             Self::PolicyHash => &["policy_hash"],
             Self::NetworkPolicyApplied => &[
                 "identity",
@@ -225,32 +215,6 @@ impl OperationStatus {
         match self {
             Self::Success => "success",
             Self::Failure => "failure",
-        }
-    }
-}
-
-/// Closed vocabulary for the effective process-container enforcement level.
-///
-/// This is derived from the selected isolation tier and whether host-DACL
-/// augmentation was required. It describes the enforcement mechanism MXC
-/// selected; it does not claim any additional OS telemetry state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EffectiveEnforcementLevel {
-    BaseContainer,
-    BaseContainerDaclAugmented,
-    AppContainerBfs,
-    AppContainerBfsDaclAugmented,
-    AppContainerDacl,
-}
-
-impl EffectiveEnforcementLevel {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::BaseContainer => "base-container",
-            Self::BaseContainerDaclAugmented => "base-container-dacl-augmented",
-            Self::AppContainerBfs => "appcontainer-bfs",
-            Self::AppContainerBfsDaclAugmented => "appcontainer-bfs-dacl-augmented",
-            Self::AppContainerDacl => "appcontainer-dacl",
         }
     }
 }
@@ -450,22 +414,17 @@ fn is_bare_json_key(key: &str) -> bool {
 }
 
 /// Maximum length of a sanitized identity. Long enough for the MXC-minted
-/// shapes (`sandbox-<16 hex>` = 24 chars, `iso:`/`wsb:` state-aware ids),
-/// short enough that a caller cannot smuggle a payload through the field.
+/// `iso:`/`wsb:` state-aware ids, short enough that a caller cannot smuggle a
+/// payload through the field.
 const MAX_IDENTITY_LEN: usize = 64;
 
 /// Placeholder written when a caller-supplied identity is not an opaque token.
 pub const REDACTED_IDENTITY: &str = "redacted";
 
-/// Literal identity written by `AppContainerRunner`/`BaseContainerRunner` when
-/// the caller left `containerId` empty. Not caller-controlled, so it is always
-/// safe to log.
+/// Literal identity used for policy-hash and state-aware records when the
+/// caller left `containerId` empty. Not caller-controlled, so it is always safe
+/// to log.
 const DEFAULT_CLI_IDENTITY: &str = "CLI";
-
-/// Length of the hex portion of a `sandbox-<hex>` identity minted by
-/// `sandbox_tracking::generate_sandbox_identity` (8 bytes of CSPRNG
-/// randomness rendered as lowercase hex).
-const SANDBOX_ID_HEX_LEN: usize = 16;
 
 /// The current process's correlation id, minted on first use.
 ///
@@ -488,10 +447,9 @@ pub fn process_correlation_id() -> &'static str {
 
 /// Render a sandbox identity so it is safe to write to a diagnostic log file.
 ///
-/// **Sandbox identities are not always MXC-minted.** On the Windows
-/// ProcessContainer path with `destroy_on_exit = false`, the identity is the
-/// AppContainer profile name, which is the caller-supplied `containerId`
-/// straight out of the config. That makes it a *config value*, and config values
+/// **Sandbox identities are not always MXC-minted.** A non-empty identity can be
+/// the caller-supplied `containerId` straight out of the config. That makes it
+/// a *config value*, and config values
 /// must never reach a record (see the module-level content rules) — a caller can
 /// otherwise put a UPN, a path, a ticket number, or any other arbitrary string
 /// into the audit stream. Character and length checks alone cannot distinguish
@@ -504,9 +462,6 @@ pub fn process_correlation_id() -> &'static str {
 ///
 /// * [`DEFAULT_CLI_IDENTITY`] — the literal default used when `containerId`
 ///   is empty;
-/// * `sandbox-<16 lowercase hex>` — minted by
-///   `sandbox_tracking::generate_sandbox_identity` for the BaseContainer
-///   backend;
 /// * `iso:<token>` / `wsb:<token>` — state-aware sandbox ids minted by the
 ///   IsolationSession / Windows Sandbox backends, bounded by
 ///   [`MAX_IDENTITY_LEN`] and restricted to opaque token characters.
@@ -520,16 +475,6 @@ pub fn sanitize_identity(identity: &str) -> &str {
     }
     if identity == DEFAULT_CLI_IDENTITY {
         return identity;
-    }
-    if let Some(hex) = identity.strip_prefix("sandbox-") {
-        if hex.len() == SANDBOX_ID_HEX_LEN
-            && hex
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return identity;
-        }
-        return REDACTED_IDENTITY;
     }
     // Length cap applies before shape-checking the `iso:`/`wsb:` prefix. Without
     // this bound a caller who chose an overlong `containerId` could still
@@ -583,13 +528,13 @@ mod tests {
     fn fields_keep_declaration_order() {
         let line = AuditEvent::new(AuditEventName::ProcessExited)
             .str("backend", "processcontainer")
-            .str("identity", "sandbox-0123456789abcdef")
+            .str("identity", "CLI")
             .u64("pid", 4242)
             .i64("exit_code", -1)
             .to_json_line();
         assert_eq!(
             line,
-            r#"{"event":"mxc.ProcessExited","backend":"processcontainer","identity":"sandbox-0123456789abcdef","pid":4242,"exit_code":-1}"#
+            r#"{"event":"mxc.ProcessExited","backend":"processcontainer","identity":"CLI","pid":4242,"exit_code":-1}"#
         );
     }
 
@@ -661,36 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn effective_enforcement_levels_are_stable() {
-        assert_eq!(
-            EffectiveEnforcementLevel::BaseContainer.as_str(),
-            "base-container"
-        );
-        assert_eq!(
-            EffectiveEnforcementLevel::BaseContainerDaclAugmented.as_str(),
-            "base-container-dacl-augmented"
-        );
-        assert_eq!(
-            EffectiveEnforcementLevel::AppContainerBfs.as_str(),
-            "appcontainer-bfs"
-        );
-        assert_eq!(
-            EffectiveEnforcementLevel::AppContainerBfsDaclAugmented.as_str(),
-            "appcontainer-bfs-dacl-augmented"
-        );
-        assert_eq!(
-            EffectiveEnforcementLevel::AppContainerDacl.as_str(),
-            "appcontainer-dacl"
-        );
-    }
-
-    #[test]
     fn event_names_are_unique_and_prefixed() {
         let names = [
             AuditEventName::ProcessExited,
             AuditEventName::ProcessTimedOut,
             AuditEventName::ProcessKillFailed,
-            AuditEventName::EnforcementDegraded,
             AuditEventName::PolicyHash,
             AuditEventName::NetworkPolicyApplied,
             AuditEventName::SandboxTornDown,
@@ -712,7 +632,6 @@ mod tests {
             AuditEventName::ProcessExited,
             AuditEventName::ProcessTimedOut,
             AuditEventName::ProcessKillFailed,
-            AuditEventName::EnforcementDegraded,
             AuditEventName::PolicyHash,
             AuditEventName::NetworkPolicyApplied,
             AuditEventName::SandboxTornDown,
@@ -735,7 +654,7 @@ mod tests {
     fn field_keys_must_be_bare_snake_case() {
         assert!(is_bare_json_key("exit_code"));
         assert!(is_bare_json_key("pid"));
-        assert!(is_bare_json_key("degradation_reason_count"));
+        assert!(is_bare_json_key("firewall_removal_ok"));
         assert!(!is_bare_json_key(""));
         assert!(!is_bare_json_key("Exit-Code"));
         assert!(!is_bare_json_key("quote\"key"));
@@ -743,19 +662,13 @@ mod tests {
 
     #[test]
     fn mxc_minted_identities_pass_sanitization_unchanged() {
-        for id in [
-            "sandbox-a3f1c8e40029bd17",
-            "iso:wxc-abcd1234",
-            "wsb:deadbeef",
-            "CLI",
-            "",
-        ] {
+        for id in ["iso:wxc-abcd1234", "wsb:deadbeef", "CLI", ""] {
             assert_eq!(sanitize_identity(id), id);
         }
     }
 
-    /// A caller-supplied `containerId` becomes the AppContainer profile name and
-    /// therefore the sandbox identity. It is a config value, so it must always be
+    /// A caller-supplied `containerId` can become the sandbox identity. It is a
+    /// config value, so it must always be
     /// redacted regardless of shape — character/length checks cannot prove a
     /// value is opaque rather than caller-chosen (e.g. `alice`, `ticket-1234`,
     /// or a standalone `wxc-`-looking token that did not come through the
@@ -784,12 +697,12 @@ mod tests {
         }
     }
 
-    /// A `sandbox-` prefix alone does not grant a pass: the hex portion must be
-    /// exactly [`SANDBOX_ID_HEX_LEN`] lowercase hex characters, matching
-    /// `sandbox_tracking::generate_sandbox_identity`'s output shape.
+    /// MXC does not mint `sandbox-` identities, so even a well-formed
+    /// `sandbox-<16 hex>` value is caller-supplied and redacted.
     #[test]
-    fn malformed_sandbox_prefixed_identities_are_redacted() {
+    fn sandbox_prefixed_identities_are_redacted() {
         for id in [
+            "sandbox-a3f1c8e40029bd17",
             "sandbox-",
             "sandbox-abc",
             "sandbox-A3F1C8E40029BD17",
@@ -804,8 +717,7 @@ mod tests {
         }
     }
 
-    /// The length cap applies to both accepted identity shapes, including the
-    /// prefixed `iso:` / `wsb:` shape. Without the bound on the prefixed shape
+    /// The length cap applies to the prefixed `iso:` / `wsb:` shape. Without the bound on the prefixed shape
     /// a caller could still smuggle a payload of arbitrary length through the
     /// record by tagging it with a recognised prefix.
     #[test]
@@ -870,19 +782,19 @@ mod requirement_conformance {
     fn process_outcome_records_carry_identity_pid_and_outcome() {
         assert_conformant(
             &AuditEvent::new(AuditEventName::ProcessExited)
-                .str("identity", "sandbox-0123456789abcdef")
+                .str("identity", "CLI")
                 .u64("pid", 1234)
                 .i64("exit_code", 3),
         );
         assert_conformant(
             &AuditEvent::new(AuditEventName::ProcessTimedOut)
-                .str("identity", "sandbox-0123456789abcdef")
+                .str("identity", "CLI")
                 .u64("pid", 1234)
                 .u64("timeout_ms", 5000),
         );
         assert_conformant(
             &AuditEvent::new(AuditEventName::ProcessKillFailed)
-                .str("identity", "sandbox-0123456789abcdef")
+                .str("identity", "CLI")
                 .u64("pid", 1234)
                 .str("kill_method", KillMethod::TerminateProcess.as_str())
                 .i64("error_code", -2147024891),
@@ -906,36 +818,6 @@ mod requirement_conformance {
                 "exit_code {code} did not survive"
             );
         }
-    }
-
-    /// Enforcement degradation (M-ETW-2): "identity, tier, needsDaclAugmentation, degradationReasons[],
-    /// effectiveEnforcementLevel".
-    #[test]
-    fn enforcement_degradation_carries_tier_and_reasons() {
-        assert_conformant(
-            &AuditEvent::new(AuditEventName::EnforcementDegraded)
-                .str("identity", "CLI")
-                .str("tier", "appcontainer-dacl")
-                .str(
-                    "effective_enforcement_level",
-                    EffectiveEnforcementLevel::AppContainerDacl.as_str(),
-                )
-                .bool("needs_dacl_augmentation", true)
-                .str("degradation_reasons", "base_container_unavailable")
-                .u64("degradation_reason_count", 1),
-        );
-    }
-
-    /// Enforcement degradation regression guard (M-ETW-2): `identity` was absent from the first
-    /// implementation, which is the field the requirement lists first.
-    #[test]
-    fn enforcement_degradation_without_identity_is_non_conformant() {
-        let event = AuditEvent::new(AuditEventName::EnforcementDegraded)
-            .str("tier", "appcontainer-dacl")
-            .str("effective_enforcement_level", "appcontainer-dacl")
-            .bool("needs_dacl_augmentation", true)
-            .str("degradation_reasons", "base_container_unavailable");
-        assert_eq!(event.missing_required_fields(), vec!["identity"]);
     }
 
     /// Network policy (M-ETW-4): "identity, enforcementMode (capabilities|firewall|both),
@@ -1013,7 +895,6 @@ mod requirement_conformance {
             AuditEventName::ProcessExited,
             AuditEventName::ProcessTimedOut,
             AuditEventName::ProcessKillFailed,
-            AuditEventName::EnforcementDegraded,
             AuditEventName::PolicyHash,
             AuditEventName::NetworkPolicyApplied,
             AuditEventName::SandboxTornDown,

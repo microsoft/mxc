@@ -34,9 +34,6 @@ $configJson = @"
         "readwritePaths": $((ConvertTo-Json -InputObject @($WorkDirectory) -Compress)),
         "readonlyPaths": []
     },
-    "fallback": {
-        "allowDaclMutation": true
-    },
     "ui": {
         "disable": false
     }

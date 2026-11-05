@@ -9,6 +9,10 @@ The package root exports no public APIs. These APIs use the SDK-selected contrac
 version; callers do not select it. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md)
 for terminology.
 
+Use [@microsoft/mxc-sdk/v1/dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/node/v1/dev.md)
+for MXC request JSON with a caller-declared contract version and separate
+experimental backend authorization.
+
 ```bash
 npm install @microsoft/mxc-sdk
 ```
@@ -43,6 +47,20 @@ console.log(output.stdout, output.exitCode);
 `run` returns a `Promise<ExecutionResult>` containing captured stdout, stderr,
 the workload exit code, timeout state, warnings, and optional output metadata.
 
+On Windows, `getPlatformSupport` reports ProcessContainer only when native PSEC
+is available; other backends are detected independently. `probe(request)` from
+`@microsoft/mxc-sdk/v1` checks request compatibility without creating a container.
+If native ProcessContainer cannot serve the request, `tier` is omitted and
+`error` explains why; `probes` still contains host capability facts.
+V1 result types and readers retain the historical `appcontainer-bfs` and
+`appcontainer-dacl` tier values for compatibility with older native results.
+Current native ProcessContainer execution reports only `base-container`.
+Windows discovery also includes WSLC when the packaged native library reports
+that the feature is available. Probe failures are reported with their cause and
+retried rather than cached as permanent lack of host support. Request probing
+reports host-capability serviceability; launch still validates the environment,
+network policy, and required PSEC contract version.
+
 ## Spawn with streaming output
 
 ```typescript
@@ -62,8 +80,10 @@ try {
 ```
 
 `spawn` returns a `Promise<MxcProcess>` with standard pipes, wait, termination,
-and disposal operations. Access output streams before awaiting completion; any
-untaken streams are drained internally to avoid pipe-buffer deadlocks.
+and disposal operations. A WSLC command started by `spawn` reads end-of-file on
+stdin; `spawnWithStdin` gives it a writable `standardInput`. Access output
+streams before awaiting completion; any untaken streams are drained internally
+to avoid pipe-buffer deadlocks.
 Each operation accepts its own optional options type: `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`.
 Execution options do not support `dryRun`.
@@ -107,6 +127,9 @@ Terminal stderr is merged into `output`. Closing `input` requests terminal EOF
 when supported; raw-mode applications must use their own completion protocol.
 Seatbelt rejects PTY mode with `guiAccess`.
 Unsupported combinations are rejected before sandbox creation.
+ProcessContainer PTY passes `timeoutMs` to `wxc-exec`, but the executor
+channel reports only an exit code: `terminal.wait().timedOut` is `false`
+even if that timeout ended the workload.
 
 ## Lifecycle API
 
@@ -152,6 +175,10 @@ try {
 
 `spawnInContainer` returns a `Promise<MxcProcess>` with live standard pipes;
 `runInContainer` returns a `Promise<ExecutionResult>` with captured output.
+On timeout, it returns partial captured text without waiting for a
+descendant-held output stream to close.
+A WSLC command started by `spawnInContainer` reads end-of-file on stdin;
+`spawnInContainerWithStdin` gives it a writable `standardInput`.
 `spawnInContainerWithPty(containerId, request, options?)` starts an
 IsolationSession exec with a caller-driven terminal and returns a
 `Promise<MxcPtyProcess>`. Set `options.size` for initial dimensions; it defaults
@@ -267,3 +294,9 @@ is bounded to five seconds per directory; failures retain the directory and
 emit a diagnostic warning. `getUserProfilePolicy` uses the supplied environment,
 and `getTemporaryFilesPolicy` returns existing temporary storage without creating
 directories.
+
+On Windows, finding `pwsh.exe` on `PATH` adds the PSReadLine history directory
+as read-write. Discovery does not implicitly grant read access to a drive root.
+
+For PowerShell startup failures, see
+[troubleshooting](https://github.com/microsoft/mxc/blob/main/docs/troubleshooting.md#powershell-startup).

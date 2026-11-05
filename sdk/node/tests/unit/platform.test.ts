@@ -18,6 +18,7 @@ import {
   _mapBwrapHelperResult,
   _bwrapProbeDeadlines,
   _runBwrapVersionCommand,
+  _setBwrapFallbackDirectories,
   _setBwrapProbeWorkerFactory,
   _setBwrapVersionRunner,
   _probeBubblewrapNetwork,
@@ -27,6 +28,7 @@ import {
   _linuxProbeTimeouts,
   _setLxcAvailabilityProbe,
   _setDarwinBackendsReader,
+  _setWindowsBackendDetectors,
   _setPlatformDiagnosticLogger,
   findWxcExecutable,
   _resetWxcExecutableCache,
@@ -70,6 +72,16 @@ describe('native backend discovery', () => {
     }])), [{
       backend: 'unknown', tier: 'unknown', capabilities: ['unknown'], warnings: [],
     }]);
+  });
+
+  it('preserves historical V1 discovery tiers', () => {
+    for (const tier of ['appcontainer-bfs', 'appcontainer-dacl']) {
+      assert.deepStrictEqual(parseAvailableBackends(JSON.stringify([{
+        backend: 'processcontainer', tier,
+      }])), [{
+        backend: 'processcontainer', tier, capabilities: [], warnings: [],
+      }]);
+    }
   });
 
   it('reports identity-less loopback proxy support without general ingress support', () => {
@@ -214,6 +226,37 @@ function directZombieChildren(): Set<number> {
   return zombies;
 }
 
+function writeFakeBwrap(directory: string, version: string, mode = 0o755): string {
+  const bwrap = path.join(directory, 'bwrap');
+  fs.writeFileSync(bwrap, `#!/bin/sh\necho 'bubblewrap ${version}'\n`);
+  fs.chmodSync(bwrap, mode);
+  return bwrap;
+}
+
+function withBwrapSearch<T>(
+  searchPath: string | undefined,
+  fallbackDirectories: readonly string[],
+  run: () => T,
+): T {
+  const originalPath = process.env.PATH;
+  if (searchPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = searchPath;
+  }
+  _setBwrapFallbackDirectories(fallbackDirectories);
+  try {
+    return run();
+  } finally {
+    _setBwrapFallbackDirectories(null);
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+  }
+}
+
 const allUiCapabilities = {
   canBlockClipboardRead: true,
   canBlockClipboardWrite: true,
@@ -262,10 +305,12 @@ describe('getPlatformSupport on macOS', { skip: os.platform() !== 'darwin' }, ()
 describe('getPlatformSupport probe integration', () => {
   beforeEach(() => {
     _resetPlatformSupportCache();
+    _setWindowsBackendDetectors(() => [], () => false);
   });
 
   afterEach(() => {
     _setProbeRunner(null);
+    _setWindowsBackendDetectors();
     _resetPlatformSupportCache();
   });
 
@@ -300,20 +345,15 @@ describe('getPlatformSupport probe integration', () => {
     _setProbeRunner(() => {
       calls += 1;
       return JSON.stringify({
-        tier: 'appcontainer-bfs',
-        needsDaclAugmentation: false,
-        warnings: ['BaseContainer API not present'],
-        probes: { baseContainerApiPresent: false, bfscfgPresent: true },
+        tier: 'base-container',
+        warnings: [],
+        probes: { baseContainerApiPresent: true },
       });
     });
     const support = getPlatformSupport();
-    if (!support.isSupported) {
-      // Host build doesn't satisfy the version gate; the probe path is
-      // not taken on this machine. Skip the assertion.
-      return;
-    }
-    assert.strictEqual(support.isolationTier, 'appcontainer-bfs');
-    assert.deepStrictEqual(support.isolationWarnings, ['BaseContainer API not present']);
+    assert.strictEqual(support.isSupported, true);
+    assert.strictEqual(support.isolationTier, 'base-container');
+    assert.ok(support.availableMethods.includes('processcontainer'));
     assert.strictEqual(calls, 1);
   });
 
@@ -324,6 +364,94 @@ describe('getPlatformSupport probe integration', () => {
     const support = getPlatformSupport();
     assert.strictEqual(support.isolationTier, undefined);
     assert.strictEqual(support.isolationWarnings, undefined);
+    assert.strictEqual(support.isSupported, false);
+    assert.match(support.reason ?? '', /probe failed: boom/);
+  });
+
+  it('retries a transient Windows probe failure instead of caching unsupported', { skip: !isWindows }, () => {
+    let calls = 0;
+    _setProbeRunner(() => {
+      if (++calls === 1) throw new Error('cold start timeout');
+      return JSON.stringify({ tier: 'base-container', probes: { baseContainerApiPresent: true } });
+    });
+    const failed = getPlatformSupport();
+    assert.strictEqual(failed.isSupported, false);
+    assert.match(failed.reason ?? '', /cold start timeout/);
+    const recovered = getPlatformSupport();
+    assert.strictEqual(recovered.isSupported, true);
+    assert.deepStrictEqual(recovered.availableMethods, ['processcontainer']);
+    assert.strictEqual(getPlatformSupport(), recovered);
+    assert.strictEqual(calls, 2);
+  });
+
+  it('caches a valid no-PSEC result and reports the host requirement', { skip: !isWindows }, () => {
+    let calls = 0;
+    _setProbeRunner(() => {
+      calls++;
+      return JSON.stringify({ probes: { baseContainerApiPresent: false } });
+    });
+
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, false);
+    assert.deepStrictEqual(support.availableMethods, []);
+    assert.match(support.reason ?? '', /requires PSEC/);
+    assert.strictEqual(getPlatformSupport(), support);
+    assert.strictEqual(calls, 1);
+  });
+
+  it('does not publish or cache partial Windows facts from malformed output', { skip: !isWindows }, () => {
+    for (const probes of [[], null, { baseContainerApiPresent: 'true' }]) {
+      _resetPlatformSupportCache();
+      let calls = 0;
+      _setProbeRunner(() => JSON.stringify({
+        tier: 'base-container',
+        warnings: ['partial warning'],
+        probes: ++calls === 1 ? probes : { baseContainerApiPresent: true },
+      }));
+      const failed = getPlatformSupport();
+      assert.strictEqual(failed.isSupported, false);
+      assert.strictEqual(failed.isolationTier, undefined);
+      assert.strictEqual(failed.isolationWarnings, undefined);
+      assert.match(failed.reason ?? '', /probe failed/);
+      assert.strictEqual(getPlatformSupport().isSupported, true);
+      assert.strictEqual(calls, 2);
+    }
+  });
+
+  it('supports a Windows host with only native feature-enabled WSLC', { skip: !isWindows }, () => {
+    _setProbeRunner(() => JSON.stringify({ probes: { baseContainerApiPresent: false } }));
+    _setWindowsBackendDetectors(
+      () => [{ backend: 'wslc', capabilities: [], warnings: [] }],
+      () => false,
+    );
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, true);
+    assert.deepStrictEqual(support.availableMethods, ['wslc']);
+  });
+
+  it('retries failed native Windows discovery and reports its cause', { skip: !isWindows }, () => {
+    let calls = 0;
+    _setProbeRunner(() => JSON.stringify({ probes: { baseContainerApiPresent: false } }));
+    _setWindowsBackendDetectors(() => {
+      if (++calls === 1) throw new Error('native discovery temporarily unavailable');
+      return [{ backend: 'wslc', capabilities: [], warnings: [] }];
+    }, () => false);
+    assert.match(getPlatformSupport().reason ?? '', /native discovery temporarily unavailable/);
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, true);
+    assert.deepStrictEqual(support.availableMethods, ['wslc']);
+    assert.strictEqual(getPlatformSupport(), support);
+    assert.strictEqual(calls, 2);
+  });
+
+  it('preserves historical V1 platform tiers', { skip: !isWindows }, () => {
+    for (const tier of ['appcontainer-bfs', 'appcontainer-dacl']) {
+      _resetPlatformSupportCache();
+      _setProbeRunner(() => JSON.stringify({ tier, probes: { baseContainerApiPresent: true } }));
+      const support = getPlatformSupport();
+      assert.strictEqual(support.isSupported, true);
+      assert.strictEqual(support.isolationTier, tier);
+    }
   });
 
   it('omits isolationTier when probe returns malformed JSON', { skip: !isWindows }, () => {
@@ -338,7 +466,7 @@ describe('getPlatformSupport probe integration', () => {
       JSON.stringify({
         tier: 'future-tier',
         warnings: [],
-        probes: { baseContainerApiPresent: true, bfscfgPresent: true },
+        probes: { baseContainerApiPresent: true },
       }),
     );
     const support = getPlatformSupport();
@@ -350,17 +478,16 @@ describe('getPlatformSupport probe integration', () => {
     _setProbeRunner(() => {
       calls += 1;
       return JSON.stringify({
-        tier: 'appcontainer-bfs',
+        tier: 'base-container',
         warnings: [],
-        probes: { baseContainerApiPresent: false, bfscfgPresent: true },
+        probes: { baseContainerApiPresent: true },
       });
     });
     const a = getPlatformSupport();
     const b = getPlatformSupport();
     assert.strictEqual(a, b, 'cached object identity');
-    if (a.isSupported) {
-      assert.strictEqual(calls, 1, 'probe should be invoked exactly once');
-    }
+    assert.strictEqual(a.isSupported, true);
+    assert.strictEqual(calls, 1, 'probe should be invoked exactly once');
   });
 
   it('still returns base PlatformSupport shape on non-Windows', { skip: isWindows }, () => {
@@ -377,10 +504,12 @@ describe('getPlatformSupport probe integration', () => {
   // `populateIsolationFromProbe` is the single point of contact; the
   // tests below stress it via `_setProbeRunner`.
   it('handles probe JSON with only `tier`', { skip: !isWindows }, () => {
-    _setProbeRunner(() => JSON.stringify({ tier: 'appcontainer-dacl' }));
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { baseContainerApiPresent: true } }),
+    );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
-    assert.strictEqual(support.isolationTier, 'appcontainer-dacl');
+    assert.strictEqual(support.isSupported, true);
+    assert.strictEqual(support.isolationTier, 'base-container');
     assert.strictEqual(
       support.isolationWarnings,
       undefined,
@@ -391,7 +520,6 @@ describe('getPlatformSupport probe integration', () => {
   it('handles probe JSON with only `warnings`', { skip: !isWindows }, () => {
     _setProbeRunner(() => JSON.stringify({ warnings: ['msg-1', 'msg-2'] }));
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
     // No `tier` field → isolationTier stays unset; warnings still
     // surface so callers can observe degraded-detection state.
     assert.strictEqual(support.isolationTier, undefined);
@@ -401,7 +529,6 @@ describe('getPlatformSupport probe integration', () => {
   it('handles empty probe JSON object', { skip: !isWindows }, () => {
     _setProbeRunner(() => JSON.stringify({}));
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
     assert.strictEqual(support.isolationTier, undefined);
     assert.strictEqual(support.isolationWarnings, undefined);
   });
@@ -409,25 +536,27 @@ describe('getPlatformSupport probe integration', () => {
   it('filters non-string entries out of warnings array', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-bfs',
+        tier: 'base-container',
+        probes: { baseContainerApiPresent: true },
         warnings: ['ok', 42, null, { not: 'a string' }, 'ok2'],
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.deepStrictEqual(support.isolationWarnings, ['ok', 'ok2']);
   });
 
   it('omits isolationWarnings when filtered warnings array is empty', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-bfs',
+        tier: 'base-container',
+        probes: { baseContainerApiPresent: true },
         warnings: [42, null], // every entry is non-string → empty after filter
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
-    assert.strictEqual(support.isolationTier, 'appcontainer-bfs');
+    assert.strictEqual(support.isSupported, true);
+    assert.strictEqual(support.isolationTier, 'base-container');
     assert.strictEqual(support.isolationWarnings, undefined);
   });
 
@@ -444,26 +573,24 @@ describe('getPlatformSupport probe integration', () => {
   it('surfaces portable UI capabilities from probes', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
           uiCapabilities: allUiCapabilities,
         },
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.deepStrictEqual(support.uiCapabilities, allUiCapabilities);
   });
 
   it('reports input-injection blocking unsupported from probe capabilities', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
           uiCapabilities: {
             ...allUiCapabilities,
             canBlockInputInjection: false,
@@ -472,7 +599,7 @@ describe('getPlatformSupport probe integration', () => {
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.strictEqual(support.uiCapabilities?.canBlockInputInjection, false);
     assert.strictEqual(support.uiCapabilities?.canBlockInputMethodChanges, true);
   });
@@ -480,10 +607,9 @@ describe('getPlatformSupport probe integration', () => {
   it('reports input-method and input-injection blocking unsupported from probe capabilities', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
           uiCapabilities: {
             ...allUiCapabilities,
             canBlockInputInjection: false,
@@ -493,7 +619,7 @@ describe('getPlatformSupport probe integration', () => {
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.strictEqual(support.uiCapabilities?.canBlockInputInjection, false);
     assert.strictEqual(support.uiCapabilities?.canBlockInputMethodChanges, false);
     assert.strictEqual(support.uiCapabilities?.canBlockClipboardRead, true);
@@ -501,34 +627,31 @@ describe('getPlatformSupport probe integration', () => {
   });
 
   it('omits UI capabilities when probes block is absent', { skip: !isWindows }, () => {
-    _setProbeRunner(() => JSON.stringify({ tier: 'appcontainer-dacl' }));
+    _setProbeRunner(() => JSON.stringify({ tier: 'base-container' }));
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
     assert.strictEqual(support.uiCapabilities, undefined);
   });
 
   it('omits UI capabilities when probe omits them', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
         },
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.strictEqual(support.uiCapabilities, undefined);
   });
 
   it('omits UI capabilities when probe returns a partial capability object', { skip: !isWindows }, () => {
     _setProbeRunner(() =>
       JSON.stringify({
-        tier: 'appcontainer-dacl',
+        tier: 'base-container',
         probes: {
-          baseContainerApiPresent: false,
-          bfscfgPresent: false,
+          baseContainerApiPresent: true,
           uiCapabilities: {
             canBlockClipboardRead: true,
           },
@@ -536,7 +659,7 @@ describe('getPlatformSupport probe integration', () => {
       }),
     );
     const support = getPlatformSupport();
-    if (!support.isSupported) return;
+    assert.strictEqual(support.isSupported, true);
     assert.strictEqual(support.uiCapabilities, undefined);
   });
 });
@@ -691,17 +814,20 @@ describe('isolation_session availability gate', () => {
       throw new Error('probe failed');
     });
     const support = getPlatformSupport();
-    assert.ok(support.isSupported, 'Windows support is independent of the probe');
+    assert.ok(!support.availableMethods.includes('processcontainer'));
     assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
-  it('always reports processcontainer as the default on Windows (no build gate)', { skip: !isWindows }, () => {
-    // The runtime gate lives in the native binary; the SDK reports Windows
-    // support regardless of isolation-session availability.
-    _setProbeRunner(() => JSON.stringify({ probes: { isolationSessionAvailable: false } }));
+  it('reports processcontainer when the native probe confirms PSEC', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({
+        tier: 'base-container',
+        probes: { baseContainerApiPresent: true, isolationSessionAvailable: false },
+      }),
+    );
     const support = getPlatformSupport();
     assert.ok(support.isSupported);
-    assert.strictEqual(support.availableMethods[0], 'processcontainer');
+    assert.ok(support.availableMethods.includes('processcontainer'));
   });
 });
 
@@ -911,6 +1037,7 @@ describe('bwrap subprocess helpers', () => {
     assert.deepStrictEqual(
       _mapBwrapHelperResult({
         kind: 'completed',
+        path: '/usr/bin/bwrap',
         status: 124,
         signal: null,
         stdout: '',
@@ -921,12 +1048,24 @@ describe('bwrap subprocess helpers', () => {
     assert.deepStrictEqual(
       _mapBwrapHelperResult({
         kind: 'completed',
+        path: '/usr/bin/bwrap',
         status: 126,
         signal: null,
         stdout: '',
         stderr: '',
       }),
       { kind: 'failed', status: 126, detail: '' },
+    );
+    assert.deepStrictEqual(
+      _mapBwrapHelperResult({
+        kind: 'completed',
+        path: '/usr/bin/bwrap',
+        status: 0,
+        signal: null,
+        stdout: 'bubblewrap 0.5.0\n',
+        stderr: '',
+      }),
+      { kind: 'output', path: '/usr/bin/bwrap', stdout: 'bubblewrap 0.5.0\n' },
     );
   });
 
@@ -939,6 +1078,7 @@ describe('bwrap subprocess helpers', () => {
       const existingZombies = directZombieChildren();
       try {
         process.env.PATH = dir;
+        _setBwrapFallbackDirectories([]);
         for (let i = 0; i < 5; i += 1) {
           assert.deepStrictEqual(_runBwrapVersionCommand(1000), { kind: 'notFound' });
         }
@@ -957,6 +1097,7 @@ describe('bwrap subprocess helpers', () => {
         );
         assert.deepStrictEqual(newZombies, [], 'probe anchors must be reaped');
       } finally {
+        _setBwrapFallbackDirectories(null);
         if (originalPath === undefined) {
           delete process.env.PATH;
         } else {
@@ -1131,6 +1272,7 @@ describe('bwrap subprocess helpers', () => {
         const result = _runBwrapVersionCommand(1000);
         assert.deepStrictEqual(result, {
           kind: 'output',
+          path: wrapper,
           stdout: 'bubblewrap 0.5.0\n',
         });
         descendantPid = readPidFileEventually(pidFile);
@@ -1282,28 +1424,24 @@ describe('bwrap subprocess helpers', () => {
     { skip: os.platform() !== 'linux' },
     () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-missing-interpreter-'));
-      const originalPath = process.env.PATH;
+      const fallback = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-fallback-'));
       try {
         const wrapper = path.join(dir, 'bwrap');
         fs.writeFileSync(wrapper, '#!/this/interpreter/does/not/exist\n');
         fs.chmodSync(wrapper, 0o755);
-        // Keep execvp from falling through to a real system bwrap after the
-        // synthetic wrapper's missing shebang interpreter returns ENOENT.
-        process.env.PATH = dir;
 
-        const result = _runBwrapVersionCommand(1000);
+        // A working copy later in the search must not replace the broken one.
+        writeFakeBwrap(fallback, '0.9.0');
+
+        const result = withBwrapSearch(dir, [fallback], () => _runBwrapVersionCommand(1000));
         assert.strictEqual(result.kind, 'failed');
         if (result.kind === 'failed') {
           assert.strictEqual(result.status, null);
           assert.match(result.detail, /missing interpreter or loader/i);
         }
       } finally {
-        if (originalPath === undefined) {
-          delete process.env.PATH;
-        } else {
-          process.env.PATH = originalPath;
-        }
         fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(fallback, { recursive: true, force: true });
       }
     },
   );
@@ -1313,16 +1451,124 @@ describe('bwrap subprocess helpers', () => {
     { skip: os.platform() !== 'linux' },
     () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-missing-'));
-      const originalPath = process.env.PATH;
       try {
-        process.env.PATH = dir;
-        assert.deepStrictEqual(_runBwrapVersionCommand(1000), { kind: 'notFound' });
+        assert.deepStrictEqual(
+          withBwrapSearch(dir, [], () => _runBwrapVersionCommand(1000)),
+          { kind: 'notFound' },
+        );
       } finally {
-        if (originalPath === undefined) {
-          delete process.env.PATH;
-        } else {
-          process.env.PATH = originalPath;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'finds bwrap in a fallback directory that PATH leaves out',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-path-'));
+      const fallback = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-fallback-'));
+      try {
+        const bwrap = writeFakeBwrap(fallback, '0.9.0');
+        const expected = { kind: 'output', path: bwrap, stdout: 'bubblewrap 0.9.0\n' };
+
+        assert.deepStrictEqual(
+          withBwrapSearch(dir, [fallback], () => _runBwrapVersionCommand(3000)),
+          expected,
+        );
+        assert.deepStrictEqual(
+          withBwrapSearch(undefined, [fallback], () => _runBwrapVersionCommand(3000)),
+          expected,
+          'an unset PATH must still search the fallback directories',
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(fallback, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'prefers the bwrap on PATH over a fallback directory',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-path-'));
+      const fallback = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-fallback-'));
+      try {
+        const preferred = writeFakeBwrap(dir, '0.6.0');
+        writeFakeBwrap(fallback, '0.9.0');
+
+        assert.deepStrictEqual(
+          withBwrapSearch(dir, [fallback], () => _runBwrapVersionCommand(3000)),
+          { kind: 'output', path: preferred, stdout: 'bubblewrap 0.6.0\n' },
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(fallback, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'follows symlinks before `..` in a PATH entry, as the native lookup does',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-dotdot-'));
+      try {
+        const release = path.join(root, 'srv', 'releases', 'v1');
+        fs.mkdirSync(release, { recursive: true });
+        fs.mkdirSync(path.join(root, 'srv', 'releases', 'bin'));
+        fs.mkdirSync(path.join(root, 'opt', 'bin'), { recursive: true });
+        fs.symlinkSync(release, path.join(root, 'opt', 'current'));
+        writeFakeBwrap(path.join(root, 'srv', 'releases', 'bin'), '0.6.0');
+        writeFakeBwrap(path.join(root, 'opt', 'bin'), '0.9.0');
+        const entry = `${root}/opt/current/../bin`;
+
+        assert.deepStrictEqual(
+          withBwrapSearch(entry, [], () => _runBwrapVersionCommand(3000)),
+          { kind: 'output', path: `${entry}/bwrap`, stdout: 'bubblewrap 0.6.0\n' },
+        );
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'ignores a relative PATH entry',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-relative-'));
+      try {
+        writeFakeBwrap(dir, '0.9.0');
+
+        assert.deepStrictEqual(
+          withBwrapSearch(path.relative(process.cwd(), dir), [], () =>
+            _runBwrapVersionCommand(3000),
+          ),
+          { kind: 'notFound' },
+        );
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'reports a bwrap file that is not executable',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-unexecutable-'));
+      try {
+        writeFakeBwrap(dir, '0.9.0', 0o644);
+
+        const result = withBwrapSearch(dir, [], () => _runBwrapVersionCommand(3000));
+        assert.strictEqual(result.kind, 'failed');
+        if (result.kind === 'failed') {
+          assert.match(result.detail, /not executable/);
+          assert.ok(result.detail.includes(dir), result.detail);
         }
+      } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
     },
@@ -1416,7 +1662,7 @@ describe('bwrap minimum-version gate', () => {
   });
 
   const withVersion = (stdout: string) =>
-    _setBwrapVersionRunner(() => ({ kind: 'output', stdout }));
+    _setBwrapVersionRunner(() => ({ kind: 'output', path: '/usr/bin/bwrap', stdout }));
 
   it('accepts a version exactly at the floor', () => {
     withVersion('bubblewrap 0.5.0\n');
@@ -1435,7 +1681,7 @@ describe('bwrap minimum-version gate', () => {
     assert.strictEqual(probe.available, false);
     assert.strictEqual(
       probe.reason,
-      'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+      'Bubblewrap (bwrap) 0.4.1 at /usr/bin/bwrap is too old: version 0.5.0 or newer is required ' +
         '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
     );
   });
@@ -1451,7 +1697,7 @@ describe('bwrap minimum-version gate', () => {
     withVersion('bubblewrap 0.5.0+really0.4.1\n');
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
-    assert.match(probe.reason, /0\.4\.1 is too old/);
+    assert.match(probe.reason, /0\.4\.1 at \/usr\/bin\/bwrap is too old/);
   });
 
   it('fails closed on unparsable probe output', () => {
@@ -1478,7 +1724,8 @@ describe('bwrap minimum-version gate', () => {
     assert.strictEqual(probe.available, false);
     assert.strictEqual(
       probe.reason,
-      'Bubblewrap (bwrap) is not installed or not on PATH. ' +
+      'Bubblewrap (bwrap) is not installed: it was not found on PATH or in ' +
+        '/usr/local/sbin, /usr/local/bin, /usr/sbin, /usr/bin, /sbin, /bin. ' +
         'Install it via your package manager (e.g., apt install bubblewrap). ' +
         'Version 0.5.0 or newer is required.',
     );
@@ -1557,11 +1804,11 @@ describe('bwrap minimum-version gate', () => {
       assert.strictEqual(support.reason, '');
       assert.deepStrictEqual(support.unavailableReasons, {
         bubblewrap:
-          'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          'Bubblewrap (bwrap) 0.4.1 at /usr/bin/bwrap is too old: version 0.5.0 or newer is required ' +
           '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
       });
       assert.strictEqual(logs.length, 1);
-      assert.match(logs[0], /0\.4\.1 is too old/i);
+      assert.match(logs[0], /0\.4\.1 at \/usr\/bin\/bwrap is too old/i);
     },
   );
 
@@ -1579,13 +1826,13 @@ describe('bwrap minimum-version gate', () => {
       assert.deepStrictEqual(support.unavailableReasons, {
         lxc: 'LXC is not installed or not available on this system.',
         bubblewrap:
-          'Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          'Bubblewrap (bwrap) 0.4.1 at /usr/bin/bwrap is too old: version 0.5.0 or newer is required ' +
           '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.',
       });
       assert.strictEqual(
         support.reason,
         'Neither LXC nor Bubblewrap is available on this system ' +
-          '(Bubblewrap (bwrap) 0.4.1 is too old: version 0.5.0 or newer is required ' +
+          '(Bubblewrap (bwrap) 0.4.1 at /usr/bin/bwrap is too old: version 0.5.0 or newer is required ' +
           '(the sandbox uses `--clearenv`, added in bwrap 0.5.0). Upgrade the bubblewrap package.)',
       );
     },

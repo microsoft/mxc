@@ -46,7 +46,7 @@ const PULL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// back by the SDK as the pull's own result.
 const E_ABORT: HRESULT = 0x8000_4004u32 as HRESULT;
 
-/// How long a pull may run, honouring [`PULL_TIMEOUT_ENV`].
+/// How long a pull may run, honouring `PULL_TIMEOUT_ENV`.
 pub fn pull_budget() -> Duration {
     std::env::var(PULL_TIMEOUT_ENV)
         .ok()
@@ -60,7 +60,7 @@ pub fn pull_budget() -> Duration {
 /// How long a pull the daemon is waiting on may run.
 ///
 /// Capped under the client's response deadline, so raising
-/// [`PULL_TIMEOUT_ENV`] past that gap takes effect only once the client
+/// `PULL_TIMEOUT_ENV` past that gap takes effect only once the client
 /// deadline is raised with it.
 pub fn daemon_pull_budget() -> Duration {
     capped_for_daemon(
@@ -276,7 +276,7 @@ where
 ///
 /// A caller holding several sessions needs to know whether a pull is still
 /// using *this* session, which the process-wide count cannot answer. `counter`
-/// is kept alongside [`PULLS_IN_FLIGHT`], never in place of it.
+/// is kept alongside `PULLS_IN_FLIGHT`, never in place of it.
 ///
 /// `counter` is released only once `on_done` has returned, so a caller that
 /// observes it at zero can rely on the report having been delivered.

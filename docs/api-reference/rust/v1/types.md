@@ -302,8 +302,9 @@ pub struct LifecycleResult {
 
 ## `mxc_sdk::v1::MxcProcess`
 
-A live container process, returned by `v1::spawn` and
-`v1::container::spawn_in_container`.
+A live container process, returned by `v1::spawn`, `v1::spawn_with_stdin`,
+`v1::container::spawn_in_container`, and
+`v1::container::spawn_in_container_with_stdin`.
 
 ```rust
 pub struct MxcProcess {
@@ -527,7 +528,7 @@ pub struct PlatformSupport {
 
 ## `mxc_sdk::v1::ProbeFacts`
 
-Raw machine facts gathered prior to running tier selection.
+Host capability facts, returned even when the supplied request is incompatible.
 
 ```rust
 pub struct ProbeFacts {
@@ -552,7 +553,11 @@ pub struct ProbeFacts {
 
 ## `mxc_sdk::v1::ProbeOutput`
 
-JSON output emitted by wxc-execution --probe.
+Host capabilities and request compatibility for Windows ProcessContainer.
+
+When native ProcessContainer cannot serve the request, `tier` and
+`needs_dacl_augmentation` are `None` and `error` explains why. `probes` still
+contains host capability facts.
 
 ```rust
 pub struct ProbeOutput {

@@ -295,7 +295,6 @@ meaning for this backend.
 | `policy.ui` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `lifecycle.destroyOnExit` | `true` accepted; `false` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected | rejected (whole section) | rejected | rejected | rejected | rejected |
-| `fallback.allowDaclMutation` | n/a | n/a | n/a | n/a | n/a | n/a |
 | `containerId` | accepted, no effect | rejected | rejected | rejected | rejected | rejected |
 | `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `process.{cwd,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
@@ -316,11 +315,6 @@ Notes on the rows that are not a simple accept/reject:
   filesystem and network policy are rejected outright, leaving nothing to
   preserve. On the state-aware path the parser rejects the whole `lifecycle`
   section for every backend, so no per-value handling applies.
-- **`fallback`** is `n/a` rather than `rejected`. `allowDaclMutation` gates an
-  AppContainer-only DACL fallback this backend never performs, so either value
-  is vacuously satisfied and neither asserts anything untrue. Bringing it under
-  the single-backend-section check uniformly across backends is tracked
-  separately.
 - **Foreign or mis-slotted experimental payloads** are rejected by the exact
   request root, not silently ignored. Only provision defines the
   `isolationSession.provision` input. Exact adaptation carries
@@ -502,13 +496,11 @@ State-aware exec (and other phases) use OS-level cancellation in v1:
 - On the `wxc-exec` route, cancellation is process termination.
 - The agent process's pipes EOF, the relay threads exit.
 - The OS-side service's per-process timer (set from
-  `process.timeout`) reaps the agent if the runner does not. On the
-  streaming path that timer is armed with a **margin** past the caller's
-  deadline, so it acts purely as a watchdog: the service kills with an
-  ordinary exit code (the host suite pins it as exit code 1), so if it
-  fired first a genuine timeout would be indistinguishable from a normal
-  exit and could not be reported as one. The run-to-completion path arms
-  it unchanged — it has no timeout channel to report through.
+  `process.timeout`) reaps the agent if the runner does not. That timer is
+  armed with a **margin** past the caller's deadline, so it acts purely as
+  a watchdog: the service kills with an ordinary exit code, so if it fired
+  first a genuine timeout would be indistinguishable from a normal exit
+  and could not be reported as one.
 - The runner's existing 3-tier shutdown (`CloseStandardInput` →
   `SendCtrlClose` → `Terminate`) handles the timeout case from inside the
   agent process before returning.

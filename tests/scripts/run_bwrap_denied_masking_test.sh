@@ -108,6 +108,16 @@ else
     FAIL=1
 fi
 
+for path in secret_dir secret_dir/nested missing; do
+    if echo "$OUTPUT" | grep -qFx "DENIED_WRITE_OK:$path" \
+        && ! echo "$OUTPUT" | grep -qFx "DENIED_WRITE_FAIL:$path"; then
+        echo "PASS: denied path $path cannot be modified."
+    else
+        echo "FAIL: denied path $path is writable or its permissions can be changed."
+        FAIL=1
+    fi
+done
+
 # --- Denied-symlink masking ----------------------------------------------------
 # Denying a symlink masks the object it points to: the runner rewrites a denied
 # symlink to its canonical target so the mask lands on the real file/dir (bwrap
@@ -159,6 +169,40 @@ else
     echo "FAIL: denied symlink -> file target not masked correctly."
     FAIL=1
 fi
+
+# --- Broken denied symlinks ------------------------------------------------------
+# Unresolvable deniedPaths must stop startup; otherwise `..` after a broken link
+# could move the mask onto an unrelated path. The successful launches above are
+# the controls for this fixture tree.
+sudo ln -s "$SYMBASE/missing_target" "$SYMBASE/dangling"
+sudo ln -s "$SYMBASE/loop" "$SYMBASE/loop"
+sudo chown -h "$(id -u):$(id -g)" "$SYMBASE/dangling" "$SYMBASE/loop"
+
+for denied in \
+    "$SYMBASE/dangling" \
+    "$SYMBASE/dangling/../real_file.txt" \
+    "$SYMBASE/loop" \
+    "$SYMBASE/loop/../real_file.txt"; do
+    config=$(printf '{"version":"1.0.0","containment":"bubblewrap","process":{"commandLine":"echo BROKEN_LINK_RAN"},"filesystem":{"readwritePaths":["%s"],"deniedPaths":["%s"]}}' \
+        "$SYMBASE" "$denied")
+    echo "Running Bubblewrap broken denied symlink test: $denied"
+    if BROKEN_OUT=$("$LXC_EXEC" --experimental \
+        --config-base64 "$(printf '%s' "$config" | base64 -w0)" 2>&1); then
+        BROKEN_EXIT=0
+    else
+        BROKEN_EXIT=$?
+    fi
+    if [ "$BROKEN_EXIT" -ne 0 ] \
+        && ! echo "$BROKEN_OUT" | grep -q "BROKEN_LINK_RAN" \
+        && echo "$BROKEN_OUT" | grep -q "could not be resolved" \
+        && echo "$BROKEN_OUT" | grep -qF "$denied"; then
+        echo "PASS: broken denied symlink rejected before launch: $denied"
+    else
+        echo "$BROKEN_OUT"
+        echo "FAIL: broken denied symlink was not rejected (exit $BROKEN_EXIT): $denied"
+        FAIL=1
+    fi
+done
 
 if [ "$FAIL" -ne 0 ]; then
     exit 1

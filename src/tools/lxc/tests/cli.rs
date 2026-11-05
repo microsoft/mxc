@@ -27,3 +27,20 @@ fn writes_config_parse_error_to_log_file() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn a_setup_usage_error_is_a_typed_envelope() {
+    let output = Command::new(env!("CARGO_BIN_EXE_lxc-exec"))
+        .args(["--setup-hyperlight", "python"])
+        .output()
+        .expect("run lxc-exec");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with('{') && line.contains(r#""code":"malformed_request""#)),
+        "no malformed_request envelope on stderr:\n{stderr}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}

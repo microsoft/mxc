@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, ProxyAddress, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ProxyAddress, ScriptResponse};
 use crate::mxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, PtySize,
@@ -43,7 +43,10 @@ use crate::seatbelt_common::default_env::DEFAULT_SANDBOX_PATH;
 use crate::seatbelt_common::default_env::{env_pairs, resolved_env};
 #[cfg(test)]
 use crate::seatbelt_common::profile_builder::build_profile_with_proxy;
-use crate::seatbelt_common::profile_builder::build_profile_with_terminals;
+use crate::seatbelt_common::profile_builder::{build_profile_with_terminals, ProfileError};
+use crate::seatbelt_common::profile_preparation::{
+    classify_io_error, expand_tilde, prepare_profile, resolve_policy_path,
+};
 
 #[link(name = "proc")]
 unsafe extern "C" {
@@ -282,9 +285,12 @@ impl SandboxBackend for SeatbeltScriptRunner {
         // Seatbelt's own invariants — the only home for them, so a caller that
         // builds an ExecutionRequest directly gets the same rules.
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
-            .map_err(error_response)?;
+            .map_err(rejected_response)?;
         crate::seatbelt_common::seatbelt_policy::validate_seatbelt_ui_policy(request)
-            .map_err(error_response)?;
+            .map_err(rejected_response)?;
+        // Dry runs never reach spawn, so reject unresolvable paths here too.
+        prepare_profile(request).map_err(profile_error_response)?;
+        resolved_working_directory_opt(request).map_err(profile_error_response)?;
 
         Ok(())
     }
@@ -340,7 +346,7 @@ fn spawn_exec(
         } else {
             "a caller-owned PTY"
         };
-        return Err(error_response(format!(
+        return Err(rejected_response(format!(
             "Seatbelt guiAccess requires inherited stdio and cannot use {mode}"
         )));
     }
@@ -372,30 +378,21 @@ fn spawn_exec(
     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
     // vars are injected here (and caller-supplied proxy vars stripped).
     //
-    // The cwd is anchored first: `current_dir` resolves a relative value against
-    // the launching process, so `HOME` must name that same absolute path.
-    let resolved_cwd = resolved_working_directory_opt(request);
-    let cwd = match absolute_working_directory(
-        resolved_cwd
-            .as_deref()
-            .unwrap_or(UNRESOLVED_WORKING_DIRECTORY),
-    ) {
-        Ok(cwd) => cwd,
-        Err(e) => {
-            return Err(error_response(format!(
-                "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
-            )))
-        }
-    };
-    let home_dir = resolved_cwd.as_ref().map(|_| cwd.as_str());
+    // The cwd is anchored and resolved to its physical path so `PWD` and the
+    // default `HOME` match the directory the child actually starts in.
+    let resolved_cwd = resolved_working_directory_opt(request).map_err(profile_error_response)?;
+    let cwd = resolved_cwd
+        .as_deref()
+        .unwrap_or(UNRESOLVED_WORKING_DIRECTORY);
+    let home_dir = resolved_cwd.as_deref();
     apply_clean_environment(&mut command, request, proxy_address, home_dir);
 
     // Also export `PWD` so the child's `getcwd()` uses its
     // fast `$PWD` path (a single stat) instead of walking parent directories
     // the sandbox may not let it read — which otherwise leaks
     // "getcwd: ... Operation not permitted" to stderr.
-    command.current_dir(&cwd);
-    command.env("PWD", &cwd);
+    command.current_dir(cwd);
+    command.env("PWD", cwd);
 
     match stdio {
         StdioMode::Pipes => {
@@ -417,7 +414,7 @@ fn spawn_exec(
 
     let mut child = command
         .spawn()
-        .map_err(|error| error_response(spawn_error(&error)))?;
+        .map_err(|error| launch_failed_response(spawn_error(&error)))?;
 
     let (stdin, stdout, stderr) = match stdio {
         StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
@@ -438,7 +435,7 @@ fn spawn_exec(
                 let _ = child.kill();
                 let _ = child.wait();
                 let error = out_result.err().or(err_result.err());
-                return Err(error_response(format!(
+                return Err(launch_failed_response(format!(
                     "Seatbelt: failed to wrap stdio pipes: {}",
                     error.map_or_else(|| "unknown error".to_string(), |e| e.to_string()),
                 )));
@@ -834,24 +831,28 @@ fn build_sandbox_command(
                 },
                 &[],
             )
-            .map_err(|error| error_response(format!("Seatbelt: failed to allocate PTY: {error}")))
+            .map_err(|error| {
+                launch_failed_response(format!("Seatbelt: failed to allocate PTY: {error}"))
+            })
         })
         .transpose()?;
 
     let terminal_paths = match &pty {
         Some(pty) => vec![pty.secondary_path().to_path_buf()],
         None if !new_session => inherited_terminal_paths().map_err(|error| {
-            error_response(format!(
+            launch_failed_response(format!(
                 "Seatbelt: failed to resolve inherited terminals: {error}"
             ))
         })?,
         None => Vec::new(),
     };
-    let profile = build_profile_with_terminals(request, proxy_address, &terminal_paths)
-        .map_err(error_response)?;
+    let inputs = prepare_profile(request).map_err(profile_error_response)?;
+    let profile = build_profile_with_terminals(request, proxy_address, &inputs, &terminal_paths)
+        .map_err(profile_error_response)?;
     log_generated_profile(&profile, logger);
-    let profile_cstr = CString::new(profile)
-        .map_err(|e| error_response(format!("seatbelt profile contains embedded NUL byte: {e}")))?;
+    let profile_cstr = CString::new(profile).map_err(|e| {
+        rejected_response(format!("seatbelt profile contains embedded NUL byte: {e}"))
+    })?;
     let _ = writeln!(logger, "Seatbelt: applying sandbox via sandbox_init");
 
     // SAFETY: The closure runs after fork(), before exec(). We only call
@@ -910,11 +911,22 @@ fn log_generated_profile(profile: &str, logger: &mut Logger) {
     let _ = writeln!(logger, "{PROFILE_LOG_END}");
 }
 
-fn error_response(message: String) -> ScriptResponse {
-    ScriptResponse {
-        exit_code: -1,
-        error_message: message,
-        ..Default::default()
+/// A request this backend refuses.
+// SDK v2: rejected (policy_validation). See docs/development/plans/sdk-v2-error-codes.md.
+fn rejected_response(message: String) -> ScriptResponse {
+    ScriptResponse::failed(FailurePhase::None, &message)
+}
+
+/// A fault while bringing the sandboxed child up, after the request was
+/// accepted.
+fn launch_failed_response(message: String) -> ScriptResponse {
+    ScriptResponse::failed(FailurePhase::LaunchFailed, &message)
+}
+
+fn profile_error_response(error: ProfileError) -> ScriptResponse {
+    match error {
+        ProfileError::Policy(message) => rejected_response(message),
+        ProfileError::Host(message) => launch_failed_response(message),
     }
 }
 
@@ -953,14 +965,44 @@ const UNRESOLVED_WORKING_DIRECTORY: &str = "/";
 ///
 /// The same value feeds the environment, so the default `HOME` cannot name a
 /// directory the child never entered.
-fn resolved_working_directory_opt(request: &ExecutionRequest) -> Option<String> {
-    let expand = |path: &str| {
-        crate::seatbelt_common::profile_builder::expand_tilde(path)
-            .unwrap_or_else(|_| path.to_string())
-    };
-    request
+fn resolved_working_directory_opt(
+    request: &ExecutionRequest,
+) -> Result<Option<String>, ProfileError> {
+    let expand = |path: &str| expand_tilde(path).unwrap_or_else(|_| path.to_string());
+    let Some(selected) = request
         .resolved_working_directory_with(|path| Path::new(&expand(path)).is_dir())
         .map(|resolved| expand(resolved.path))
+    else {
+        return Ok(None);
+    };
+    let absolute = absolute_working_directory(&selected).map_err(|e| {
+        ProfileError::Host(format!(
+            "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
+        ))
+    })?;
+    // Let the kernel walk the original path so `missing/..` cannot be folded away.
+    match std::fs::metadata(&absolute) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(ProfileError::Policy(format!(
+                "Seatbelt working directory '{absolute}' is not a directory"
+            )))
+        }
+        Err(e) => {
+            return Err(classify_io_error(
+                format!("Seatbelt working directory '{absolute}' is not usable: {e}"),
+                &e,
+            ))
+        }
+    }
+    resolve_policy_path(&absolute)
+        .map(Some)
+        .map_err(|error| match error {
+            ProfileError::Policy(e) => {
+                ProfileError::Policy(format!("Seatbelt working directory: {e}"))
+            }
+            ProfileError::Host(e) => ProfileError::Host(format!("Seatbelt working directory: {e}")),
+        })
 }
 
 /// Anchor a resolved working directory to the launcher's directory when it is
@@ -1219,6 +1261,19 @@ os.close(fd)
         .err()
         .expect("guiAccess PTY must be rejected");
         assert!(error.error_message.contains("caller-owned PTY"));
+        assert_eq!(error.failure_phase, FailurePhase::None);
+        assert_eq!(error.exit_code, FailurePhase::None.failure_exit_code());
+    }
+
+    #[test]
+    fn a_failed_launch_keeps_the_generic_backend_error_code() {
+        let response = launch_failed_response("failed to spawn sandboxed process".into());
+        assert_eq!(response.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(
+            response.failure_phase.error_code(),
+            crate::mxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+        assert_eq!(response.exit_code, -1);
     }
 
     #[test]
@@ -1307,7 +1362,8 @@ os.close(fd)
         // Guards the seam: a re-derived or stale profile must not be logged.
         let mut request = base_request();
         request.policy.readonly_paths = vec!["/tmp/mxc-profile-log-probe".into()];
-        let profile = build_profile_with_proxy(&request, None).expect("profile builds");
+        let inputs = prepare_profile(&request).expect("profile inputs resolve");
+        let profile = build_profile_with_proxy(&request, None, &inputs).expect("profile builds");
 
         assert_eq!(
             extract_profile(&logged_profile(&profile)),
@@ -1401,6 +1457,8 @@ os.close(fd)
         assert!(response.error_message.contains("hostLoopback='allow'"));
         assert!(response.error_message.contains("default='deny'"));
         assert!(!response.error_message.contains("inherit 'default'"));
+        assert_eq!(response.failure_phase, FailurePhase::None);
+        assert_eq!(response.exit_code, FailurePhase::None.failure_exit_code());
     }
 
     /// The other divergent pair is expressible and must be accepted: it is the
@@ -1567,21 +1625,50 @@ os.close(fd)
     }
 
     /// An explicit directory wins; otherwise the first policy grant is used.
+    /// Either is reported as its physical path.
     #[test]
     fn working_directory_resolves_explicit_then_policy_grant() {
+        let dir = tempfile::tempdir().unwrap();
         let mut explicit = base_request();
-        explicit.working_directory = "/tmp/explicit".into();
+        explicit.working_directory = dir.path().to_str().unwrap().into();
+        let real = std::fs::canonicalize(dir.path()).unwrap();
         assert_eq!(
-            resolved_working_directory_opt(&explicit).as_deref(),
-            Some("/tmp/explicit")
+            resolved_working_directory_opt(&explicit)
+                .unwrap()
+                .as_deref(),
+            real.to_str()
         );
 
         let mut policy_fallback = base_request();
         policy_fallback.policy.readwrite_paths = vec!["/tmp".into()];
         assert_eq!(
-            resolved_working_directory_opt(&policy_fallback).as_deref(),
-            Some("/tmp")
+            resolved_working_directory_opt(&policy_fallback)
+                .unwrap()
+                .as_deref(),
+            Some("/private/tmp")
         );
+    }
+
+    #[test]
+    fn a_broken_working_directory_fails_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("project")).unwrap();
+        std::fs::write(dir.path().join("file"), b"x").unwrap();
+        std::os::unix::fs::symlink("missing", dir.path().join("dangling")).unwrap();
+        std::os::unix::fs::symlink("loop", dir.path().join("loop")).unwrap();
+        for cwd in ["dangling", "loop", "missing", "missing/../project", "file"] {
+            let mut request = base_request();
+            request.working_directory = dir.path().join(cwd).to_str().unwrap().into();
+            let response = SeatbeltScriptRunner::new()
+                .validate(&request)
+                .expect_err("dry runs must reject an unusable cwd");
+            assert_eq!(response.failure_phase, FailurePhase::None, "{cwd}");
+            let error = response.error_message;
+            assert!(
+                error.contains("Seatbelt working directory"),
+                "{cwd}: {error}"
+            );
+        }
     }
 
     /// With nothing to resolve, the child still has to start somewhere, but
@@ -1589,7 +1676,7 @@ os.close(fd)
     #[test]
     fn an_unresolved_working_directory_does_not_become_home() {
         let request = base_request();
-        assert_eq!(resolved_working_directory_opt(&request), None);
+        assert_eq!(resolved_working_directory_opt(&request), Ok(None));
         assert_eq!(UNRESOLVED_WORKING_DIRECTORY, "/");
 
         let pairs = resolve_environment(&request, None, None);
@@ -1620,9 +1707,8 @@ os.close(fd)
         );
     }
 
-    /// An absolute directory is passed through spelled exactly as written —
-    /// symlinks stay unresolved so `PWD` matches what `spawn_exec` exports —
-    /// and needs no launch directory. `chdir` accepts it even from a launcher
+    /// An absolute directory is passed through spelled exactly as written and
+    /// needs no launch directory. `chdir` accepts it even from a launcher
     /// whose own directory has been removed, so a failure to read that
     /// directory must not fail the request: the panicking closure asserts it is
     /// never consulted.

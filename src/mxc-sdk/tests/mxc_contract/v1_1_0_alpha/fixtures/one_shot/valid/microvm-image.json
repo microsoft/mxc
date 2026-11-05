@@ -1,0 +1,10 @@
+{
+  "version": "1.1.0-alpha",
+  "containment": "microvm",
+  "microvm": {
+    "image": "docker.io/library/python:3.12-alpine"
+  },
+  "process": {
+    "commandLine": "echo hello"
+  }
+}

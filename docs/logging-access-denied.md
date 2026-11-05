@@ -14,9 +14,8 @@ capabilities are the *inputs* to learning mode; the machinery that collects and
 surfaces the resulting denial events is layered on top in later work.
 
 > **Platform support.** Learning-mode capabilities are **Windows-only** and
-> apply to the AppContainer-based backends (classic AppContainer and
-> BaseContainer, which share `backends/process_container/common`). On other platforms
-> the capability strings are ignored.
+> apply to the Windows ProcessContainer backend, which requires native PSEC
+> support.
 
 ## The two capabilities
 
@@ -41,7 +40,7 @@ it answers "what would this workload touch if nothing were blocked?" but it does
 so by **not enforcing deny-by-default** for the duration of the run.
 
 Because it relaxes containment, `permissiveLearningMode` is **security-sensitive**:
-whenever it is present, both the AppContainer and BaseContainer runners record a
+whenever it is present, the native ProcessContainer runner records a
 **security warning**. The library does not write it to the host's stderr — it
 must not write to an embedding process's terminal behind its back — so each
 surface delivers it explicitly:
@@ -102,11 +101,10 @@ stays enforced:
    It is also mutually exclusive with `captureDenials`; use
    `captureDenials.mode: "allow"` for permissive application-driven capture.
    It is a compatibility wrapper over `captureDenials.mode: "allow"` with ETL
-   retention forced on, and injects `permissiveLearningMode`. The selected
-   ProcessContainer capture backend owns the trace lifecycle: compatible PSEC
-   hosts use native capture without PLM or UAC, while incompatible tiers use
-   the session-scoped guarded-WPR fallback and elevate only its fixed-operation
-   guardian. The CLI consumes the returned JSON and ETL paths,
+   retention forced on, and injects `permissiveLearningMode`. Native
+   ProcessContainer capture owns the native trace lifecycle without UAC.
+   Hosts without compatible native capture fail before the workload starts.
+   The CLI consumes the returned JSON and ETL paths,
    relocates the policy output, its verbose logging sibling, and the trace to
    `denials.json`, `denials.verbose.json`, and `trace.etl`, and generates the
    source snapshot and `Adjusted_*.json` from the policy denials without decoding
@@ -146,10 +144,9 @@ ungranted access is handled while it is recorded:
 > `CloseProcessSecurityEnvironment`. If the option-aware export exists but its
 > call fails, MXC reports the failure rather than silently downgrading. When
 > native capture is unavailable or cannot fully honor the requested policy,
-> MXC retains the highest compatible legacy
-> AppContainer containment tier (AppContainer+BFS or AppContainer+DACL) and pairs it
-> with the guarded WPR capture provider. Unsupported hosts return
-> `backend_unavailable` only when neither path can preserve the full policy.
+> MXC rejects the request with `backend_unavailable` before creating a container.
+> There is no fallback to AppContainer filesystem brokering, host-DACL mutation,
+> or WPR capture.
 >
 > Internal validation found no native capture support on build `26657.1002`
 > and the complete option-aware contract on build `26663.1000`. These are
@@ -158,18 +155,17 @@ ungranted access is handled while it is recorded:
 >
 > Native PSEC capture cannot represent `processContainer.leastPrivilege`
 > because the process security-environment API does not expose an LPAC token
-> option. MXC therefore uses a compatible AppContainer tier with guarded WPR
-> instead of weakening or rejecting the requested policy.
+> option. Requests with `processContainer.leastPrivilege: true` are rejected
+> rather than weakening the requested policy.
 >
 > Native PSEC capture represents `runtimeConfig.networkProxy` with the PSEC
 > proxy endpoint and either the requested proxy AppContainer peer identity or
-> MXC's reserved unrestricted-loopback sentinel. Other proxy policies remain
-> on a compatible AppContainer tier with guarded WPR capture.
+> MXC's reserved unrestricted-loopback sentinel. Legacy `network.proxy` policies
+> are rejected; use `runtimeConfig.networkProxy`.
 >
 > Native capture uses `filesystem.deniedPaths` only when
 > `QueryProcessSecurityEnvironmentSupport` advertises `PSE_SUPPORT_FS_DENY`.
-> Otherwise MXC selects a compatible AppContainer+BFS or AppContainer+DACL tier
-> and uses guarded WPR.
+> Otherwise the request is rejected before creating a container.
 
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.
@@ -388,9 +384,8 @@ application paths are redacted there as `<REDACTED>`; timestamps are omitted
 from the signature so repeated observations can aggregate.
 
 This source is available only through option-aware native managed broker
-capture. The guarded-WPR fallback filters ETW by exact workload process
-generations, while the normalized network event's ETW header identifies the
-broker process, so guarded-WPR analysis intentionally excludes it.
+capture. Access-only `StartLearningModeTrace` capture does not collect
+NetworkDecision events.
 
 The public Rust `DenialAnalyzer` contract remains source-compatible with MXC
 1.x. It returns actionable WFP capability and reason-`100` network records
@@ -461,8 +456,7 @@ and `schemaUnavailable` outcome used by scoped verbose diagnostics. Version
 reason, reason-specific configuration recommendation, and exact endpoint
 components. All native PSEC `captureDenials` results write version 5,
 including legacy access-only `StartLearningModeTrace` capture and traces
-with no WFP occurrences. The guarded-WPR fallback currently writes version 4
-through the legacy verbose writer. MXC readers that consume captured
+with no WFP occurrences. MXC readers that consume captured
 artifacts dispatch versions 3, 4, and 5 to separate closed contracts. They
 reject unknown fields, newer providers/reasons under an older version label,
 and every unsupported version rather than interpreting newer vocabulary with
@@ -526,8 +520,7 @@ the event has no supported actionable extractor. Native NetworkDecision analysis
 emits actionable denials or diagnostic outcomes according to the
 [network denial contract](#network-denial-sources) above, with PID 0. Local
 verbose logging retains sanitized network properties, including remote
-endpoints, while telemetry drops those properties. Guarded-WPR analysis
-excludes brokered NetworkDecision records.
+endpoints, while telemetry drops those properties.
 
 Per-event TDH failures use these predefined diagnostic reasons:
 `eventPayloadMalformed` means the payload is malformed or conflicts with its declared schema,
@@ -541,8 +534,7 @@ obtained. For non-network Learning Mode events, analysis continues but sets
 NetworkDecision provider schema failures are recorded diagnostically without
 setting that flag or producing an actionable record; successfully decoded
 network events can still produce the actionable denials described above.
-Schema failures remain fatal for raw decoding and for scoping brokered
-capability events in guarded traces.
+Schema failures remain fatal for raw event decoding.
 
 To keep diagnostics bounded, verbose logging retains at most 4,096 distinct
 signatures, 24 sorted properties per signature, and 256 characters per property
@@ -590,25 +582,10 @@ waiting. The C# SDK exposes it through `ExecutionResult.OutputMetadata` and
 By default, the intermediate ETW `.etl` trace is an internal, runner-managed
 file in a protected per-run temporary directory that MXC deletes after
 analysis. Set `captureDenials.retainEtl` to `true` to preserve the sealed trace
-for diagnostics after a terminal wait. Both native PSEC capture and the
-guarded-WPR fallback honor retention. Native retention begins under
+for diagnostics after a terminal wait. Native retention begins under
 `%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and moves to a protected
 per-run directory under `capture-denials\retained` only after sealing
 succeeds.
-
-WPR's source ETL is host-wide, so the elevated guarded-WPR helper never
-transfers that file across the privilege boundary for `captureDenials` or
-`--audit`. After the sandbox process tree terminates, the helper uses the
-retained, job-attested process handles and their exact PID/creation/exit
-`FILETIME` ranges to relog a second ETL. The
-retained ETL contains only supported Learning Mode events whose event header
-falls inside one of those attested process generations. Guarded analysis and
-retention both consume that same filtered ETL; filtering failure transfers no
-trace. The host-wide source remains in protected elevated scratch and is
-deleted with that scratch. The unelevated caller writes the filtered retained
-ETL beside its unique denials JSON output. Both paths contain the same run
-identifier and remain distinct even when the configured output path has no
-extension or already ends in `.etl`.
 
 Abandoning or disposing a process without a terminal wait deletes or discards
 the internal trace because no caller can observe its structured path. When
@@ -620,10 +597,7 @@ absolute `etlPath`:
 ```
 
 If native post-seal analysis fails while retention is enabled, MXC preserves
-the ETL and exposes its path through `captureDenialsError`. Guarded WPR
-transfers the filtered ETL only after process-scoped analysis succeeds; if a
-later JSON output step fails, the same error metadata identifies the
-transferred trace.
+the ETL and exposes its path through `captureDenialsError`.
 ETL traces can contain sensitive resource paths and identifiers; callers that
-retain them are responsible for deleting the ETL and, for native managed
-retention, its now-empty per-run parent directory when no longer needed.
+retain them are responsible for deleting the ETL and its now-empty per-run
+parent directory when no longer needed.

@@ -136,13 +136,9 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 #                  be reported as a skip.
 #
 # stdout and stderr are captured SEPARATELY. Merging them would let any stderr
-# line corrupt the JSON, and stderr is not hypothetical here: wxc-exec runs a
-# best-effort DACL-recovery pass BEFORE the `--probe` arm and reports it on
-# stderr (`tools/wxc/src/main.rs`), so a host carrying leftover state from a
-# crashed prior run would emit unparseable output and be judged "unavailable"
-# while being perfectly capable. That failure mode is inverted with respect to
-# risk — the dirtier the host, the likelier the false skip — which is exactly
-# the kind of silent green this gate exists to prevent.
+# line corrupt the JSON. A native-command diagnostic on stderr must not turn
+# a valid probe response into an "unavailable" result or hide an infrastructure
+# failure behind a skip.
 function Get-IsolationSessionProbe {
     param([string]$Exe)
 
@@ -151,7 +147,7 @@ function Get-IsolationSessionProbe {
     try {
         # This script runs under `$ErrorActionPreference = "Stop"`, which turns
         # a native command's stderr output into a terminating error. The probe
-        # is expected to write to stderr on a host carrying leftover state, so
+        # may write diagnostics to stderr, so
         # relax it for the duration of the call — the same idiom used around
         # the wxc-exec invocation in Run-IsolationSessionTest below.
         $ErrorActionPreference = "Continue"
@@ -232,9 +228,10 @@ function Run-IsolationSessionTest {
     param(
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
-        [int[]]$ExpectedExitAnyOf = @(),
         [string[]]$OutputContains = @(),
         [string[]]$OutputLineNotEqual = @(),
+        [string]$ExpectedErrorCode,
+        [string]$ExpectedErrorMessageContains,
         [hashtable]$Request,
         [switch]$DryRun
     )
@@ -280,12 +277,7 @@ function Run-IsolationSessionTest {
     $pass = $true
     $reason = ""
 
-    if ($ExpectedExitAnyOf.Count -gt 0) {
-        if ($ExpectedExitAnyOf -notcontains $exitCode) {
-            $pass = $false
-            $reason = "Expected exit one of $($ExpectedExitAnyOf -join ', '), got $exitCode"
-        }
-    } elseif ($exitCode -ne $ExpectedExit) {
+    if ($exitCode -ne $ExpectedExit) {
         $pass = $false
         $reason = "Expected exit $ExpectedExit, got $exitCode"
     }
@@ -310,6 +302,25 @@ function Run-IsolationSessionTest {
                 $reason = "Output has line equal to '$needle'"
                 break
             }
+        }
+    }
+
+    if ($pass -and $ExpectedErrorCode) {
+        $envelope = $null
+        foreach ($line in ($output -split "`r?`n")) {
+            if (-not $line.Trim().StartsWith('{"error"')) { continue }
+            try { $envelope = $line | ConvertFrom-Json } catch { $envelope = $null }
+        }
+        if ($null -eq $envelope) {
+            $pass = $false
+            $reason = "No error envelope in output"
+        } elseif ($envelope.error.code -ne $ExpectedErrorCode) {
+            $pass = $false
+            $reason = "Expected error code '$ExpectedErrorCode', got '$($envelope.error.code)'"
+        } elseif ($ExpectedErrorMessageContains -and
+                  -not ([string]$envelope.error.message).Contains($ExpectedErrorMessageContains)) {
+            $pass = $false
+            $reason = "Error message missing '$ExpectedErrorMessageContains': $($envelope.error.message)"
         }
     }
 
@@ -365,11 +376,12 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stderr.json" `
 # must appear in the captured output (proves streams aren't crossed or dropped mid-run).
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_interleaved.json" `
     -OutputContains @("OUT_A", "ERR_A", "OUT_B", "ERR_B", "OUT_C")))
-# Timeout: ping runs ~30s against a 1500ms deadline. The service-side timer and
-# the local wait report different codes, and either can win the race to end the
-# run.
+# Timeout: ping runs ~30s against a 1500ms deadline. The service timer is armed
+# with a grace margin, so the local wait ends the run and reports the timeout.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
-    -ExpectedExitAnyOf 1, -1))
+    -ExpectedExit -1 `
+    -ExpectedErrorCode "backend_error" `
+    -ExpectedErrorMessageContains "script timed out after 1500ms"))
 
 # Any IsolationSession-specific object is rejected at the same closed exact
 # contract boundary, before the command can run.

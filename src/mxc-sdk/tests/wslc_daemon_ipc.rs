@@ -116,6 +116,7 @@ fn stamped_exec(exec_id: &str, sandbox_id: &str, seconds: u32) -> ExecConfig {
         env: Vec::new(),
         env_scope: EnvScope::Merge,
         timeout_ms: 60_000,
+        stdin: false,
     }
 }
 
@@ -318,6 +319,7 @@ fn full_lifecycle_over_pipe() {
             env: Vec::new(),
             env_scope: EnvScope::Merge,
             timeout_ms: 30_000,
+            stdin: false,
         })
         .expect("first exec");
     assert_eq!(result.exit_code, 0, "echo hi should exit 0");
@@ -334,6 +336,7 @@ fn full_lifecycle_over_pipe() {
             env: Vec::new(),
             env_scope: EnvScope::Merge,
             timeout_ms: 30_000,
+            stdin: false,
         })
         .expect("second exec");
     assert_eq!(result.exit_code, 7, "exit 7 should propagate its exit code");

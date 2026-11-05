@@ -250,7 +250,6 @@ the rationale for each disposition, and the error mapping live in
 | `ui` | rejected if supplied — no `ui` posture is truthful here (see below); an omitted `ui` is accepted and applies no restriction |
 | `lifecycle.destroyOnExit` | `true` accepted (matches behavior); `false` rejected |
 | `lifecycle.preservePolicy` | `false` accepted; `true` rejected |
-| `fallback.allowDaclMutation` | n/a — AppContainer-only; this backend never mutates DACLs, so either value is vacuously satisfied |
 | `containerId` | accepted, no effect (a label; the backend addresses sandboxes by the OS-assigned agent user name) |
 | `isolationSession` / one-shot `appId` | rejected as `malformed_request` — IsolationSession one-shot configuration uses only the stable top-level policy |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
@@ -280,9 +279,9 @@ The full field-by-field table is in
 **Deferred to follow-up work:**
 
 - **C# one-shot SDK support.** The Rust SDK already supports one-shot `run` and
-  `spawn_sandbox` behind the `isolation_session` feature. The Node JSON/config
-  path (`spawnSandboxFromConfig`) and
-  `wxc-exec` support the required network posture. The C# SDK still reaches
+  `spawn_sandbox` behind the `isolation_session` feature. The Node v1
+  create-and-run operations (`run`, `spawn`, `spawnWithPty`) and `wxc-exec`
+  support the required network posture. The C# SDK still reaches
   IsolationSession only through the state-aware lifecycle APIs.
 
 ## Test Plan

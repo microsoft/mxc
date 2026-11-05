@@ -4,21 +4,16 @@
 //! Build script for `mxc_telemetry`.
 //!
 //! Generates `provider_def.rs` containing the `define_provider!` invocation
-//! plus the paired event-metadata constants (`MXC_EVENT_KEYWORD`,
-//! `MXC_PRIVACY_TAG`). The `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment
-//! variable is the single switch that drives all three together:
+//! plus event-metadata constants (`MXC_EVENT_KEYWORD`,
+//! `MXC_CRITICAL_EVENT_KEYWORD`, `MXC_PRIVACY_TAG`, `MXC_CRITICAL_PRIVACY_TAG`).
+//! All events use one `Microsoft.MXC` registration. The private
+//! `MXC_TELEMETRY_PROVIDER_GROUP_GUID` input supplies its WinExt group.
+//! Event and request-contract selection controls Measures/Usage versus
+//! Critical Data/Performance metadata, not provider routing or consent.
+//! Without a group, ordinary local builds use keyword 1 and privacy tag 0.
 //!
-//! - **Unset** (default: public/OSS/local dev builds) — no `group_id(...)`,
-//!   plain local ETW only; `MXC_EVENT_KEYWORD` is a provider-local bit and
-//!   `MXC_PRIVACY_TAG` is `0` (not telemetry-classified).
-//! - **Set** to the real Microsoft telemetry group GUID (internal builds
-//!   that deliberately opt into routing these events through UTC) —
-//!   `group_id(...)` is present and `MXC_EVENT_KEYWORD`/`MXC_PRIVACY_TAG`
-//!   become the Measures keyword and the Product-and-Service-Usage privacy
-//!   tag, matching WIL's conventions.
-//!
-//! Tying all three to one signal means a build can never end up
-//! telemetry-routed-but-untagged or tagged-but-not-routed.
+//! `MXC_TELEMETRY_TEST_KEYWORDS=1` enables category-mask and privacy-tag validation
+//! only in local-only Windows debug test-support builds. It never enables routing.
 //!
 //! The provider GUID itself is **not** specified here. The `tracelogging`
 //! crate derives it deterministically from the provider name
@@ -36,6 +31,8 @@ include!("../src/core/mxc_telemetry/provider_codegen.rs");
 
 pub(crate) fn run() {
     println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_PROVIDER_GROUP_GUID");
+    println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID");
+    println!("cargo::rerun-if-env-changed=MXC_TELEMETRY_TEST_KEYWORDS");
 
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
@@ -50,9 +47,27 @@ pub(crate) fn run() {
     } else {
         None
     };
+    if target_os == "windows" {
+        assert!(
+            std::env::var_os("MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID")
+                .is_none_or(|value| value.is_empty()),
+            "MXC_TELEMETRY_CORE_PROVIDER_GROUP_GUID is no longer supported; \
+             configure the WinExt group through MXC_TELEMETRY_PROVIDER_GROUP_GUID"
+        );
+    }
 
+    let test_keywords = local_keyword_test_enabled(
+        std::env::var("MXC_TELEMETRY_TEST_KEYWORDS").ok().as_deref(),
+        target_os == "windows"
+            && std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some()
+            && std::env::var_os("CARGO_FEATURE_TEST_SUPPORT").is_some(),
+        group_guid.as_deref(),
+    );
     let mut provider_def = generate_provider_def(group_guid.as_deref());
-    provider_def.push_str(&generate_event_metadata_consts(group_guid.as_deref()));
+    provider_def.push_str(&generate_event_metadata_consts(
+        group_guid.as_deref(),
+        test_keywords,
+    ));
 
     std::fs::write(out.join("provider_def.rs"), provider_def).unwrap();
 }

@@ -67,7 +67,9 @@ export function _setRequestProbeDependencies(
 }
 
 /**
- * Probe which Windows ProcessContainer tier can serve an optional request.
+ * Report native Windows ProcessContainer host-capability serviceability for
+ * an optional request. Launch performs additional environment, network-policy,
+ * and PSEC-version validation.
  *
  * The probe is synchronous and does not create a container. It calls the
  * packaged `mxc_ffi` native library in process.

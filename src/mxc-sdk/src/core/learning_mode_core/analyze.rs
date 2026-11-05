@@ -33,31 +33,6 @@ pub struct AnalysisResult {
     pub verbose_logging: VerboseLoggingSummary,
 }
 
-/// Inclusive process-lifetime window used to scope a host-wide capture.
-///
-/// Windows WPR fallback capture observes a host-wide provider stream. The
-/// elevated analyzer accepts only denial events whose PID and timestamp fall
-/// within one of these job-observed lifetimes, preventing unrelated host
-/// activity and PID reuse from entering the caller's output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessLifetime {
-    /// Process identifier assigned by the OS.
-    pub pid: u32,
-    /// Process creation time in the normalized capture clock.
-    pub start_filetime: u64,
-    /// Process exit time in the normalized capture clock.
-    pub end_filetime: u64,
-}
-
-impl ProcessLifetime {
-    /// Returns whether the event belongs to this exact process lifetime.
-    #[must_use]
-    pub fn contains(self, pid: u32, filetime: u64) -> bool {
-        self.pid == pid && filetime >= self.start_filetime && filetime <= self.end_filetime
-    }
-}
-
 impl AnalysisResult {
     /// Creates a complete, non-truncated result.
     #[must_use]
@@ -284,21 +259,6 @@ mod tests {
         assert!(AnalyzeError::Unsupported
             .to_string()
             .contains("not supported"));
-    }
-
-    #[test]
-    fn process_lifetime_is_inclusive_and_pid_specific() {
-        let lifetime = ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
-        };
-
-        assert!(lifetime.contains(42, 100));
-        assert!(lifetime.contains(42, 200));
-        assert!(!lifetime.contains(42, 99));
-        assert!(!lifetime.contains(42, 201));
-        assert!(!lifetime.contains(43, 150));
     }
 
     #[test]

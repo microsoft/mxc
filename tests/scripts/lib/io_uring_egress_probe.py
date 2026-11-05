@@ -25,7 +25,9 @@ def io_uring_socket(family, kind, protocol):
     params = ctypes.create_string_buffer(120)
     ring = libc.syscall(425, 1, params)
     if ring < 0:
-        raise SystemExit("MXC_IO_URING_SETUP_FAILED errno=%d" % ctypes.get_errno())
+        error = ctypes.get_errno()
+        print(next((line.strip() for line in open("/proc/self/status") if line.startswith("Seccomp:")), "Seccomp: unknown"), flush=True)
+        raise SystemExit("MXC_IO_URING_SETUP_FAILED errno=%d" % error)
     _, sq_tail, _, _, _, _, sq_array = struct.unpack_from("7I", params, 40)
     sq = mmap.mmap(ring, sq_array + 4, offset=0)
     sqes = mmap.mmap(ring, 64, offset=0x10000000)
