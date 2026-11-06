@@ -1,363 +1,363 @@
-# Feature design: Windows creation-policy diagnostics and restrictive correction
+# Feature design: caller-owned Windows creation-policy feedback
 
 > **Audience:** MXC developers
 
 - **Status:** Proposed
 - **Issue:** [#1634](https://github.com/microsoft/mxc/issues/1634)
 - **Contributor:** @rossnichols
-- **Implementation PRs:** Not started; maintainer scope acceptance and spec approval are pending.
+- **Implementation PRs:** None submitted; maintainer scope acceptance and spec approval remain pending.
 
-This draft proposes native Windows creation diagnostics and caller-authorized
-restrictive correction. Public declarations and caller examples are in the
-separate [API proposal](api.md). Neither document grants implementation or
-release approval.
+Return structured native creation-policy failures and optionally accept them
+on a caller-selected later creation. The application owns storage, retry
+limits and the decision to accept restrictions. MXC owns interpreting supported
+native observations and proving each applied change restrictive.
+Public declarations and caller examples are in the [API proposal](api.md).
+An [exploratory implementation](https://github.com/microsoft/mxc/commit/6e04aa415e6e1f1bf901bfb76b7ebdc957bc6083)
+illustrates the contract; it is not API, release or implementation-PR approval.
 
 ## Problem and scope
 
-An application or coding agent can request an MXC container that Windows
-administrative policy refuses. A generic creation error does not explain which
-permission caused the conflict. Callers need useful guidance and, when they
-explicitly authorize it, a way to accept fewer permissions without implementing
-Windows policy negotiation themselves.
+An application or coding agent can request a container that Windows
+administrative policy refuses. It needs machine-readable reasons without
+parsing error text, and control over whether a reduced request still serves
+its task. MXC must not decide to retry or retain restrictions for that caller.
 
 Two usage scenarios:
 
-1. **Explain a strict refusal.** A request grants read-write access to
-   `C:\work\repo`, but the creator is governed by a read-only ceiling there.
-   Ordinary creation fails without launching the command. Its existing error
-   includes the native failure and, when available, the conflicting grant and
-   guidance to narrow it. No caller object or file changes.
+1. **Inspect a strict refusal.** A request grants read-write access to
+   `C:\work\repo`, but the creator has a read-only ceiling there. Creation fails
+   without launching the command. Its ordinary error retains policy-specific
+   high-level guidance, native operation and HRESULT; structured details
+   identify the observation. The caller can stop or author a different request
+   and submit it strictly. No request object or file changes.
 
-2. **Create with fewer permissions and live input.** The same request opts
-   into correction and starts a command that reads stdin and only needs to read
-   the repository. MXC lowers the matching grant to read-only, creates the
-   environment, launches once, and returns a live process plus correction text.
-   The caller writes input, closes stdin, drains output, waits and releases the
-   process. A later opted-in invocation in the same creator context can reuse
-   that restriction while retaining its current certificate and proxy inputs.
+2. **Resubmit and reuse observations.** A first call returns failure A. The
+   application decides that its restrictions are acceptable, stores A, and
+   makes a new call with the original request plus A. MXC applies supported
+   safe restrictions and attempts creation once. A further refusal returns
+   cumulative A+B; a later caller-selected call can succeed. Stored feedback
+   can also be supplied with a changed request or another creator; MXC checks
+   that request afresh and Windows evaluates its current creator.
 
-Non-goals: overriding administrative policy; switching isolation tier/backend
-to evade refusal; changing workload code; relaxing permissions to obtain success;
-mutation during container lifecycle operations; a public typed policy-change
-report; disk-persisted decisions; or a caller-owned cache API.
+Supplying feedback is explicit permission to apply its supported restrictive
+constraints, not proof that the resulting behavior meets the application's
+needs. A restrictive change can still make a task impossible. Callers that
+require direct control can inspect the failures, edit their own request and
+omit feedback instead.
+
+Non-goals: automatic retries; MXC-owned storage or a creator-scoped cache;
+policy approval tokens; successful-creation change reports; policy details
+in ordinary error/warning text; bypassing policy or switching containment;
+changing workload code; or redesigning stdin, PTY or lifecycle operations.
 
 ## Proposed behavior
 
-### Strict creation
+### Strict creation and structured refusal
 
-- Default behavior remains strict. No correction or cached restriction is
-  applied unless that invocation opts in.
-- On `CreateProcessSecurityEnvironment` policy refusal
-  (`0x800704EC`), add basic administrative-policy guidance to the existing
-  error. Preserve the native operation, HRESULT and failure category.
-- When Windows advertises the versioned policy-result API, request diagnostic
-  capture internally before creation. This diagnostic opt-in is not permission
-  to mutate, enable denial tracing or use an experimental backend.
-- Retrieve refusal details on the failed native thread before cleanup,
-  callbacks or another creation can replace its snapshot. Successful creation
-  and non-policy errors do not query that snapshot.
-- Validate the result before producing actionable guidance. Missing, invalid,
-  incomplete or unknown details cannot replace the creation failure or become
-  guessed instructions.
+- Omitted feedback means strict creation. Do not apply a remembered restriction
+  or edit the caller's MXC request JSON.
+- On native `CreateProcessSecurityEnvironment` policy refusal, preserve the
+  error category, operation and HRESULT. The ordinary message retains
+  high-level IT-managed-policy, permission-review and administrator guidance.
+  Specific capabilities, paths, failure-class/reason/action codes and observed
+  values belong only in structured details, never error, debug/console or
+  warning text.
+- Resolve the optional
+  `Experimental_GetLastProcessSecurityEnvironmentPolicyResult` from the same
+  System32 `processmodel.dll` used for creation. Request V1 PSEP capture only
+  when the getter exists and Windows advertises capture support. This is
+  separate from feedback authorization, denial tracing and experimental-backend
+  authorization.
+- For the policy-refusal HRESULT, retrieve the snapshot synchronously on the
+  failing native thread before cleanup/callbacks can replace it. Do not query
+  it for success or unrelated failures. Validate the identifier, bounds,
+  versions and resources, copy owned observations and free every native output
+  with `CoTaskMemFree`, including unexpected non-null failure output.
+- Expose available observations as `Error.details.policyFailures` and typed
+  V1.Dev extraction/storage helpers. Unavailable diagnostics do not replace the
+  authoritative native error or become a guessed failure.
 
-The proposed optional getter is
-`Experimental_GetLastProcessSecurityEnvironmentPolicyResult`, resolved from
-the same System32 `processmodel.dll` used for creation. Request its V1 PSEP
-format; verify the identifier, structure, version/minimum-reader version,
-flags and resource encoding before copying details. Guard every returned
-allocation with `CoTaskMemFree`, including unexpected non-null failure output.
+### Caller-selected resubmission
 
-### Caller-authorized correction
+Feedback is an invocation option, not an MXC request JSON field or a blanket
+boolean mutation mode. It is supported only by V1.Dev JSON creation APIs and
+the corresponding Windows CLI input described in [api.md](api.md).
 
-Authorization belongs to the API call's options or `wxc-exec --mutate-policy`,
-not MXC request JSON. Omitted authorization and `false` both mean strict
-creation; an empty request is still invalid under the existing contract.
+For each supplied value:
 
-For an opted-in, serviceable native ProcessContainer request:
+1. Parse the unchanged request through its registered contract and select the
+   ordinary backend. Validate feedback shape, format and limits. Explicit
+   feedback requires the serviceable native Windows ProcessContainer path;
+   never ignore it or obtain a fallback backend.
+2. Prepare a fresh request, including current certificate/proxy inputs and
+   permissions derived from capture. Apply only recognized constraints to a
+   private copy, retaining unrelated grants and restrictive exceptions.
+3. Revalidate and rebuild derived state. Make at most one native creation
+   attempt. Invalid feedback or an unsafe required change fails before that
+   attempt. Only successful creation can launch the workload, at most once.
+4. On refusal, return the cumulative observations. On success, use the normal
+   output/process path with its existing warnings and ownership. Do not add a
+   policy-correction warning or a successful-creation report.
 
-| Recognized constraint | Permitted correction |
+| Recognized constraint | Permitted restrictive application |
 | --- | --- |
 | Forbidden effective capability | Remove the capability and every understood enabling network/capture setting. Removing a proxy must not activate direct-network allowances that were ineffective in proxy mode. |
-| Forbidden permissive learning or logging | Disable the corresponding behavior, or change capture from allow to block when that satisfies the constraint. |
+| Forbidden permissive learning or logging | Disable the behavior, or change capture from allow to block when that satisfies the constraint. |
 | Read-only filesystem ceiling | Lower an existing matching writable path to read-only; do not introduce a grant from a diagnostic witness or downgrade an unrelated ancestor. |
-| No-access filesystem ceiling | Add a deny exception and remove only coincident grants, preserving other restrictive exceptions. |
+| No-access filesystem ceiling | Add a safe deny exception and remove only coincident grants, preserving other restrictive exceptions. |
 | Path-count ceiling | Remove exact duplicate entries only; never discard distinct restrictive rules or broaden a grant. |
 
-Only a recognized blocked-policy result with complete, actionable details
-can authorize repair; evaluation failure is not a correction instruction.
-Apply the whole understood batch to a private request copy and revalidate it
-before retrying. Unknown actions, contradictory constraints, unsafe aliases,
-malformed paths, unresolved canonicalization and unsupported policy stop the
-repair. Enumeration-only paths remain unchanged and outside the data-access
-path-count remedy. Normal backend validation still applies to them.
+Unknown versions/outcomes/actions/flags, evaluation failures, contradictory
+constraints within one native batch, incomplete resources, unsafe aliases,
+malformed paths and unresolved safety checks cannot authorize application.
+Enumeration-only paths retain their separate semantics. Preserve the workload,
+environment and original inferred working directory. Recheck all combined
+constraints so one reduction cannot reintroduce a previously removed permission.
 
-The proposed bounds are eight creation attempts including the first; 128 KiB
-of native result bytes; 64 details; 32,768 UTF-16 resource-accounting units;
-256 KiB of added refusal text; and 1 MiB of correction text. Filesystem
-resolution uses the existing five-second per-probe wait and bounded worker
-pool. These are limits on work and retained data, not a hard end-to-end startup
-deadline: native creation/getter calls and lock acquisition remain synchronous.
+### Cumulative observations and bounds
 
-Success returns the ordinary result or process. Newly negotiated corrections
-appear as strings beginning `Sandbox configuration updated due to IT policy`.
-Failure returns the ordinary error, with why correction stopped and any earlier
-attempted changes; it does not return a successfully created process.
-These descriptions are text, not stable typed change records.
+`PolicyFailures` is an owned value containing distinct native batches, not the
+complete administrative policy. A further refusal returns all known supplied
+observations plus the new batch, deduplicating identical whole batches. Keep
+batch boundaries, order, native versions, unknown codes/flag bits, observed
+values and resource presence. Combine compatible ceilings conservatively for
+application; do not rewrite historical observations as current-request facts.
 
-SDK error/warning fields are separate from workload streams. CLI envelopes
-share stderr with workload output; JSON shape does not authenticate their
-origin. Callers must not scrape that mixed stream as a trusted control channel.
+| Bound | Invocation feedback | JSON storage |
+| --- | ---: | ---: |
+| UTF-8 bytes | 4 MiB | 4.5 MiB |
+| Native batches | 64 | 65 |
+| Total details | 1,024 | 1,088 |
+| Resource accounting units | 262,144 | 294,912 |
 
-### In-process reuse
+Each batch has at most 64 details and 32,768 resource accounting units.
+Each present resource counts its UTF-16 array length plus one, including an
+empty array. A fresh native result is separately bounded to 128 KiB.
+The larger storage bounds retain one final native batch in full, never a
+truncated report. `policyFeedbackError: { code, reason }` marks unsafe
+application or overflow; automatic callers stop on its presence, including
+unknown codes. Parsing stored feedback does not establish replay eligibility.
 
-- Remember successful narrowing hints, not whole requests or creation approval.
-  Partition them by process/effective token identities and modification IDs.
-- Reapply only applicable restrictions to each fresh opted-in request, then
-  validate and create through Windows again. Keep unrelated grants, certificate
-  paths, proxy values, command, environment and identity from that request.
-- Reuse alone emits no correction warning. Further refusals can add restrictions;
-  report only the new corrections. Strict calls bypass this state.
-- Learn only after successful native environment creation. A later launch,
-  trace or workload failure does not invalidate the restriction or cause replay.
-  Failed negotiation must not replace a successful entry.
-- Bound retained hints to 16 entries and 4 MiB per loaded native module.
-  Eviction, identity changes, process exit or module unload require fresh
-  negotiation. Cache problems are reported without bypassing Windows creation.
+When fresh diagnostics cannot be obtained, retain supplied observations and
+add structured `policyResultUnavailable` context. An unchanged cumulative
+snapshot is not progress. The application decides its budget and stops on
+terminal markers, unsupported outcomes or unrelated errors. An eight-call
+budget in an example is application policy, not an MXC retry limit.
+
+MXC retains no observations between calls. Caller-owned storage can cross
+processes and creators because feedback is untrusted advisory data, not cached
+approval. Every edit is proved against the current request and Windows
+reevaluates creation. Stale feedback may remain stricter than current policy;
+the application decides whether to omit it.
 
 ## Execution and container lifecycle support
 
 | Operation | Planned behavior |
 | --- | --- |
-| Captured create-and-run | Strict diagnostics and opted-in correction; ordinary output/timeout results remain. |
-| Create with live pipes, including stdin | Same correction semantics. Prepare stdio/environment/capture from the effective request and launch once. |
-| Create with a PTY | No mutation control; explicitly reject attempted authorization. Existing non-mutation behavior remains. |
-| Provision, start, execute in an existing container, stop, deprovision | Unchanged; no correction option. This proposal does not add a persistent ProcessContainer lifecycle. |
-| Probe, discovery, dry-run validation | No negotiation or policy changes. Existing advisory availability remains; dry-run mutation is rejected. |
-| Denial capture | Supported on the native creation path only when its existing trace prerequisites are met; repairs account for capture-derived permissions. |
-| Audit/setup/management CLI modes | No mutation option; reject conflicting CLI combinations. |
+| Dev captured create-and-run | Structured refusal and optional supplied feedback; ordinary output/timeout results remain. |
+| Dev creation with live pipes | Same creation semantics; prepare streams/capture from the effective request and transfer the normal process handle. Existing stdin behavior is unchanged. |
+| Typed V1 creation | No feedback option in this proposal. Generic error details may carry a native refusal; typed extraction belongs to V1.Dev. |
+| Creation with a PTY | No feedback option; reject an attempted shared-options feedback value. Existing PTY behavior remains. |
+| Provision, start, execute in an existing container, stop, deprovision | Unchanged; supplied creation feedback is rejected. No persistent ProcessContainer lifecycle is added. |
+| Probe, discovery, dry-run validation | No feedback application or creation retry; supplied feedback is rejected. |
+| Denial capture | Existing native trace prerequisites remain; safe application accounts for capture-derived permissions. |
+| Audit/setup/management CLI modes | No feedback input; reject conflicting CLI combinations. |
 
-No persistent container ID is introduced. Create-and-run still owns setup,
-execution and teardown. A live process transfers the existing pipe/wait/disposal
-responsibilities to the caller, not responsibility for a negotiation session.
+No persistent container or negotiation-session ID is introduced.
+Create-and-run owns execution and teardown; returned live handles retain their
+normal caller disposal/stream/wait responsibilities.
 
 ## Backend applicability and availability
 
-This table concerns the new feature, not whether the backend itself can run.
-Unchanged discovery results must not be interpreted as mutation support.
+This table concerns the feature, not whether a backend can otherwise run.
 
 | Backend | Planned support | Required host features and how they are checked | What the probe/availability API reports |
 | --- | --- | --- | --- |
-| ProcessContainer | Yes, native Windows path only | Existing native PSEC/request-version checks. Resolve the optional versioned getter and advertised policy-result capture support before creation. Denial capture retains its separate export checks. | Existing available/unavailable/request-error results. Availability does not predict administrative approval or promise actionable refusal details. |
-| WSLC | No; different creation/enforcement system | No new checks; mutation requests rejected before launch. | Existing backend availability, not feature support. |
-| LXC | No; no Windows creation-policy result | Same. | Unchanged. |
-| Bubblewrap | No; no Windows creation-policy result | Same. | Unchanged. |
-| Seatbelt | No; no Windows creation-policy result | Same. | Unchanged. |
+| ProcessContainer | Yes, native Windows path only | Existing PSEC/request-version checks. Resolve the optional getter and advertised capture support for fresh diagnostics; denial capture retains separate checks. | Existing serviceability/request-error results, not policy approval or guaranteed diagnostic availability. |
+| WSLC | No; different creation/enforcement system | Reject supplied feedback before creation; no new host checks. | Unchanged backend availability. |
+| LXC | No; no Windows policy result | Same. | Unchanged. |
+| Bubblewrap | No; no Windows policy result | Same. | Unchanged. |
+| Seatbelt | No; no Windows policy result | Same. | Unchanged. |
 | IsolationSession | No; persistent lifecycle is outside this proposal | Same. | Unchanged. |
 | Windows Sandbox | No; VM lifecycle is outside this proposal | Same. | Unchanged. |
-| MicroVM | No; no Windows ProcessContainer negotiation | Same. | Unchanged. |
-| Hyperlight | No; no Windows ProcessContainer negotiation | Same. | Unchanged. |
-| VM containment intent | Not applicable; routes to a concrete backend | Resolve through the existing engine; it does not authorize mutation on the selected VM backend. | Existing resolved-backend result. |
+| MicroVM | No; not the native ProcessContainer path | Same. | Unchanged. |
+| Hyperlight | No; not the native ProcessContainer path | Same. | Unchanged. |
+| VM containment intent | Not applicable; selects a concrete backend | Existing routing does not authorize feedback on that backend. | Existing resolved-backend result. |
 
-A host may support ProcessContainer but lack policy-result capture. Strict
-creation still works. An opted-in request can succeed unchanged; after refusal,
-absent actionable details mean failure without guessed correction. A failed
-support query/getter only adds unavailable-diagnostic context when applicable.
-There is no new minimum Windows build inferred from SDK/schema versions.
+ProcessContainer can be available while fresh refusal reporting is unavailable.
+An otherwise valid native creation still works without the optional getter.
+Supplied observations remain subject to normal request/serviceability and
+safety checks; a refusal without a usable fresh result retains prior feedback
+with unavailable-diagnostic context. Do not infer governance or a minimum
+Windows build from a schema version or export/support bit.
 
-No new backend or change to a backend's experimental status is proposed.
-Wrong-backend authorization is rejected before launch; native unavailability
-and unenforceable requests retain their existing error classifications.
-No new public feature-availability API is proposed; whether one is needed is
-an [open question](#open-questions).
+No new public feature probe, backend, or experimental-backend status change
+is proposed. Unsupported policy and unsupported feedback paths fail explicitly
+before creation, without fallback or permission weakening.
 
 ## Contracts, APIs, and compatibility
 
-- **MXC request fields/defaults change: No.** Existing published contracts and
-  generated schemas remain immutable. The option never appears in authored
-  request JSON or contributes to the requested policy hash.
-- **Public APIs change: Yes.** See [api.md](api.md) for all three SDKs,
-  stdin composition, compatibility and the Rust placement decision.
-- **Runtime behavior changes: Yes, compatibly.** Default errors gain diagnostic
-  text without changing their category. Only explicit authorization permits
-  restrictive retries; warnings remain strings in existing result fields.
-- The internal Windows PSEC request and PSEP refusal-result formats are
-  distinct from MXC request contracts. Register their experimental schema
-  provenance and generated definitions with the existing pinned-codegen gate.
-  Keep allocation/version/flag handling internal.
-- This is new feature/API behavior and needs at least a minor SDK release
-  under [versioning policy](../../versioning.md#versioning-follows-semver).
-  Release number and OS-contract shipping eligibility require maintainer
-  agreement; changing package versions does not change JSON contract versions.
+- **MXC request fields/defaults change: No.** Feedback is outside the request
+  JSON; published contracts/generated request schemas remain unchanged.
+- **Public APIs change: Yes.** V1.Dev owns the typed observations,
+  extraction/storage helpers and creation option. Stable typed V1 creation
+  signatures/options remain unchanged. See [api.md](api.md).
+- **Rust Dev source break: Yes, intentional.** Extending `JsonOptions` and
+  making it non-exhaustive breaks existing Dev struct literals. Construct with
+  `Default`; feedback DTOs are also non-exhaustive. This is an explicit
+  Dev-only compatibility exception for maintainer approval, not a claim that
+  all existing Rust Dev callers still compile.
+- **Runtime behavior changes:** refusal errors gain structured details while
+  retaining high-level policy guidance, category, operation and native status.
+  Only supplying feedback authorizes restrictive application on a later call.
+  There is no automatic retry or hidden reuse.
+- PSEC requests, PSEP native results, MXC feedback `formatVersion` and MXC
+  request `version` are separate contracts. Pin/generate the experimental
+  native schema through the existing provenance gate; do not change released
+  request schemas to carry feedback.
+- Native library and adapters are co-versioned. Change structured-error/
+  feedback transport, generated C# bindings, Node layouts and freeing
+  contracts together; do not promise arbitrary old/new FFI interoperability.
+  SDK release version and OS-contract shipping eligibility require maintainer
+  agreement under the [versioning policy](../../versioning.md).
 
 ## Design and security
 
-`mxc_engine` remains the single router and invocation-authorization gate.
-SDKs/FFI carry the option; binaries do not add backend dispatch. The
-ProcessContainer module owns diagnostics, effective-request preparation,
-conservative repairs and bounded creator-scoped hint reuse. Use existing
-filesystem probes, logger/error types and environment/process owners.
-No new implementation crate or broad refactor is proposed.
+`mxc_engine` remains the single router. SDKs/FFI transport caller-owned feedback
+and structured error details; the ProcessContainer backend owns preparation,
+validation and restrictive application. Shared DTOs stay passive. Binaries
+delegate routing, and no new implementation crate or parallel launch path is
+needed.
 
 ```mermaid
-flowchart TD
-    request["Request + per-call authorization"]
-    prepare["Validate; apply applicable hints only if opted in"]
-    create["Windows: create native environment"]
-    result{"Creation outcome"}
-    details["Copy and validate same-thread policy result"]
-    repair{"Authorized safe progress within limits?"}
-    narrow["Narrow private request and revalidate"]
-    launch["Adopt owned environment; launch once"]
-    success["Ordinary result/process and correction text"]
-    error["Ordinary error; no workload"]
-
-    request --> prepare --> create --> result
-    result -->|Success| launch --> success
-    result -->|Policy refusal| details --> repair
-    result -->|Other failure| error
-    repair -->|No| error
-    repair -->|Yes| narrow --> create
+sequenceDiagram
+    participant App as Application
+    participant MXC
+    participant Windows
+    App->>MXC: Creation(request JSON, optional prior feedback)
+    MXC->>MXC: Validate; safely restrict a private request if supplied
+    MXC->>Windows: One native creation attempt
+    alt Policy refusal
+        Windows-->>MXC: Native failure and optional observations
+        MXC-->>App: Error with cumulative structured feedback
+        App->>App: Inspect, store, decide whether to make a new call
+    else Creation succeeds
+        Windows-->>MXC: Owned environment
+        MXC-->>App: Normal execution result or live process
+    end
 ```
 
-Changing the effective requested permissions is intentional and opt-in;
-administrative enforcement remains with Windows. A diagnostic path is a
-comparison witness, not a pinned filesystem object or complete policy ceiling.
-Reject unsafe path interpretations, including malformed UNC prefixes, without
-panics or partial edits. Alias checks do not promise immunity to later
-filesystem changes; Windows evaluates the actual creation.
+Feedback is not an authorization token from Windows. Resource text is a
+comparison witness, not a pinned object or complete policy ceiling. Reuse
+normal filesystem probes and literal-path/alias/root checks; preserve
+restrictive exceptions and prove effective access cannot increase. Probes
+retain their bounded waits/workers, but synchronous native creation/getter
+calls do not acquire a new end-to-end cancellation/deadline guarantee.
 
-Bounded negotiation is serialized within one loaded native module; release
-that lock before trace startup, workload launch and wait. Workloads can run
-concurrently. Result allocations are independently owned, verified and copied
-before release; failures never cross the C ABI as unwinds.
+Observations can contain sensitive paths/capability names. Do not render them
+into ordinary error, debug/console or warning text. The application controls
+storage and access to explicit structured serialization. This feature adds
+no telemetry consent or data collection.
 
-Correction text and resource paths can be sensitive. Escape/control-bound all
-text, do not log proxy credentials, and keep hints private in memory. This
-feature adds no telemetry consent or data collection; existing explicit
-MXC-owned consent and restrictive administrative policy remain authoritative.
-
-The main alternative is diagnostics-only guidance and caller-managed retries.
-It preserves caller control but requires every client to reproduce conservative
-native permission analysis and retry limits. This design retains that strict
-workflow and adds bounded opt-in correction; it does not make correction the
-default.
+The main alternative is diagnostics-only operation with caller-edited request
+JSON. That remains available by omitting feedback. The proposed feedback
+option keeps native permission interpretation and safety checks in MXC while
+leaving every resubmission and task-appropriateness decision with the caller;
+the authorization boundary remains a review question below.
 
 ## Resource ownership and failure recovery
 
-Windows owns policy evaluation and native enforcement. MXC owns each native
-result allocation, environment handle, optional trace and process/job/pipe
-resources until transfer to the normal result/process path. The caller owns
-returned live-process disposal. No remote service, durable container state,
-policy file, host ACL change or stored approval is created by negotiation.
+Windows owns policy evaluation/enforcement. MXC independently owns/frees each
+native result buffer and owns environments, traces, jobs, pipes and processes
+until transfer through the existing runner. SDK extractors copy feedback before
+native memory is freed. The caller owns stored observations and returned live
+handles. No host policy/ACL change, remote service state or stored approval is
+created by feedback application.
 
 | Failure stage | Recovery and caller-visible outcome |
 | --- | --- |
-| Support/query/decode/unsafe repair | Retain authoritative creation failure, with diagnostic/stop context. Free result buffers and any failed native outputs; launch nothing. |
-| Partial correction or retry limit | Discard private request edits; retain prior successful cache entries. Report attempted corrections as error text, not success. |
-| Trace setup, pipe/job preparation or process creation after environment success | Release all owned resources through the existing runner/capture cleanup path. Never negotiate or launch again. |
-| Workload timeout, wait failure or caller disposal | Use existing process-tree termination, wait and teardown behavior; retain output/error/warning semantics. No replay. |
-| Cancellation or creator exit | Preserve existing SDK cancellation contracts from [api.md](api.md#inputs-results-and-sdk-differences). Late unclaimed process results must be disposed. Process exit loses hints; existing OS handle/job cleanup applies. |
-| Cleanup also fails | Preserve the primary error and report observable trace/process/cleanup failures through existing errors/warnings with available operation/artifact context. Do not claim native-close success beyond what the OS API exposes. |
+| Invalid/unsafe supplied feedback | Fail before native creation; discard private edits. Preserve inspectable observations and structured terminal context where applicable. No workload. |
+| Native policy refusal | Free failed outputs and return the original failure plus cumulative observations or unavailable-diagnostic context. Do not retry internally. |
+| Cumulative limit exceeded | Preserve the complete bounded terminal report, mark it terminal, and stop replay; never silently truncate or replace it with only the newest batch. |
+| Trace, pipe/job preparation or launch after environment success | Normal cleanup releases owned resources; preserve the primary failure. No feedback-driven relaunch. |
+| Workload timeout, wait failure or caller disposal | Existing termination/wait/cleanup behavior and output semantics remain; never interpret as a safe policy retry. |
+| Cancellation or creator exit | Existing SDK cancellation contracts apply; dispose late unclaimed handles. Caller storage is independent and survives only when the caller persists it. |
+| Cleanup also fails | Preserve the primary error and observable cleanup context through existing errors/warnings, without policy specifics. Do not invent a successful close result or recovery ID. |
 
-The next creation uses a new environment/normal per-invocation resources and
-Windows evaluation; cached hints hold no handles. It does not reuse a partial
-environment or wait for a failed workload to finish. Poisoned disposable cache
-state is cleared and reported, not treated as approval. A later host/service
-failure remains an actionable native error.
-
-There is no partially updated persistent container to resume or deprovision.
-Callers should explicitly dispose a returned process and inspect its existing
-cleanup warnings; capture artifacts follow existing retention settings. If
-termination or trace cleanup cannot finish, use the existing process/artifact
-context for operational cleanup. The native environment-close API has no
-returned status, so this proposal cannot promise an additional close-error
-report or a new recovery identifier.
+Each later creation uses a fresh environment and current Windows evaluation;
+feedback owns no native handles or partial container. There is no partially
+mutated persistent container to resume. Callers use normal process disposal
+and existing artifact/operational cleanup; the native close API exposes no
+additional close status. See [SDK differences](api.md#inputs-results-and-sdk-differences).
 
 ## Acceptance criteria and validation plan
 
-All rows below are **planned**, not test results for this documentation PR.
-Unit tests complement, rather than replace, native enforcement.
+These are implementation acceptance requirements, not results from this
+documentation-only PR. Unit/injected tests complement native enforcement.
 
-| Scenario and proposed/extended test | Input/action and exact assertion |
+| Scenario | Input/action and exact assertion |
 | --- | --- |
-| `creation_policy_strict_refusal`, proposed native/public-SDK case | Govern the actual creator, request a forbidden grant, omit authorization: one refused native attempt, original category/HRESULT plus available guidance, unchanged request and zero workload markers. |
-| `creation_policy_corrected_stdio`, proposed public-SDK case | Opt in to a safe reduction with writable stdin: corrected access is enforced, input/output works, ordinary process/result and warning text are returned, one workload marker. |
-| `creation_policy_reuse_fresh_inputs`, proposed native/SDK case | Repeat in one stable creator context with new CA/proxy/unrelated grants: applicable restriction is reused silently, submitted PSEC has current values, Windows is called once. Further narrowing warns; a subsequent strict call remains strict. |
-| Native result ownership/decoder tests | Cover missing getter/support, query/getter errors, invalid size/version/flags/resources and unknown actions: original failure survives, allocations freed once, no guessed retry or workload. |
-| Filesystem/network repair and real-runner regressions | Check matching RW-to-RO/deny boundaries, enumeration preservation, alias/root/malformed-UNC refusal, duplicate-only path budgets, capture/proxy-to-direct restrictions and no effective permission increase. Decode actual retry/warm PSEC, not just returned clones. |
-| Retry, timeout and cleanup tests | Stalled probes stop within per-probe bounds; repeated refusal/specification and eight-attempt limit stop without launch; trace/start/launch/wait/cleanup failures never replay; owners close once and later valid creation still works. |
-| SDK contract/transport/AOT tests | Default/false/true selection, unchanged request JSON and V1 Rust literals, missing mutation exports, warning/error copies, both stdin controls, cancellation/disposal and .NET source-generated option serialization. |
-| Unsupported modes/hosts | Wrong backend, PTY/dry-run/management combinations reject before creation. An old host still runs strict valid requests; no getter means no invented support or correction. |
+| Strict governed refusal, proposed public-SDK test | Govern the actual creator, request a forbidden grant and omit feedback: one refusal, unchanged request, high-level policy guidance/status, structured details and zero workload markers. |
+| Caller A -> A+B -> success, proposed governed test | Make three distinct public creation calls with caller-owned cumulative feedback. Assert one native attempt per call, no automatic retry, complete stored observations, unchanged input and only one workload launch. |
+| Explicit replay and changed-request reuse | Introduce/extend the prototype's `dev_json_processcontainer_policy_feedback_restricts_current_request`: enforce read-only access, keep an unrelated writable control/current inputs and original working directory, round-trip storage and reuse with another request. |
+| Different creator and stale feedback | Supply stored observations from a different creator/current policy: reevaluate Windows policy, retain only restrictive applicability, and allow the caller to omit stale restrictions. No creator-cache key or approval reuse. |
+| Native decode/ownership/support | Cover absent getter/unadvertised or failed support, failed getter, malformed/bounded versions/resources and unexpected native outputs: preserve original failure and free every allocation once. |
+| Restriction interactions | Decode submitted PSEC for current CA/proxy/capture inputs, stronger/repeated/satisfied constraints, intra-batch contradictions, deny/alias/root/enumeration rules and duplicate-only path budgets. Assert no access increase or permission reintroduction. |
+| Unknown data, limits and terminal state | Preserve unknown codes/flags, full u64 values and absent/empty/malformed resources. Input overflow fails before creation; terminal overflow retains all known batches. Missing fresh data cannot invent progress. |
+| Errors, cleanup and cancellation | Policy details never appear in ordinary error/debug/console/warning text. Unrelated launch/wait/cleanup failures retain normal semantics and never relaunch. Verify disposed/late handles and subsequent fresh creation. |
+| Unsupported surfaces | Feedback on another backend, PTY/lifecycle/validation or conflicting CLI mode rejects before creation, including an explicitly supplied empty feedback value. Strict old-host creation remains available. |
+| Cross-SDK storage/ABI/AOT | Public extraction, owned copies and serialization preserve batch boundaries/types and native status. Update co-versioned bindings; source-generated .NET net8.0/net10.0 and AOT roots must not fall back to reflection. |
 
-Hosts and CI wiring:
+Use the existing scheduled `process` suite in
+`scripts/ci/run_backend_validation_tests.ps1`, reached through
+`Validation.Tests.Scheduled.yml` and `Validation.Tests.Matrix.Job.yml`, with
+architecture-matched SDK bundles from
+`scripts/ci/build-windows-sdk-test-bundle.ps1`. Require discovered, positive,
+non-skipped native/public-SDK results on suitable Windows x64/ARM64 hosts.
 
-- Native interoperability/enforcement needs Windows x64 and ARM64 hosts with
-  a matching PSEC/PSEP contract, usable advertised capture support and a
-  verified governed creator. The administrative fixture must distinguish
-  ungoverned success from an enforced refusal. A matching build/capability
-  requirement must be documented before delivery; no public build floor is
-  asserted in this draft.
-- Extend the scheduled `process` suite in
-  `scripts/ci/run_backend_validation_tests.ps1`, reached through
-  `Validation.Tests.Scheduled.yml` and `Validation.Tests.Matrix.Job.yml`.
-  Package proposed native/SDK tests through
-  `scripts/ci/build-windows-sdk-test-bundle.ps1` and require named, positive,
-  non-skipped results. Required governed jobs fail missing governance; ordinary
-  incapable-host tests verify unavailable diagnostics separately.
-- Use `src/mxc-sdk/tests/`, existing ProcessContainer runner tests,
-  `sdk/node/tests/{unit,integration}/`, managed tests and AOT smoke tests.
-  Existing Windows build/SDK gates and native-contract drift checks remain.
-- Governing and restoring test policy must use an approved maintained
-  fixture/host contract with byte/security-state restoration and independent
-  workload evidence. A private launcher or manual lab run is not CI coverage.
-  This prerequisite is unresolved and blocks functional acceptance.
+Explicit-feedback replay coverage does not install administrative policy and
+does not prove fresh governed refusal capture. Required governed cases need
+a maintained fixture that verifies the creator is actually governed and
+restores exact policy/security state. Fixture ownership, matching host images
+and scheduled jobs remain prerequisites for functional acceptance. Manual
+prototype runs are not scheduled-CI coverage.
 
-No CI checks are removed or weakened. Live administrative enforcement is not
-testable on generic ungoverned workers; mock results do not close that gap.
-For ownership/fault cases unsafe to induce on production hosts, use injected
-native failures with an explicit boundary and retain positive real-host tests.
+No CI gate is removed or weakened. Use injected faults for ownership cases
+unsafe to induce on production hosts, with real-host positive controls.
 See the [validation runbook](../../../build-and-test/ci-validation-infrastructure.md).
 
 ## Delivery and documentation
 
 After maintainer acceptance and approval/merge of this feature/API spec:
 
-1. Add native diagnostic capture, result decoding/ownership and governed
-   refusal coverage. Extend the existing PSEC generation gate to the PSEP
-   result schema/modules and update ProcessContainer host/diagnostic guidance.
-2. Add conservative backend correction and internal reuse, with bounded
-   probes, failure recovery and scheduled governed functional coverage.
-   Use internal test entry points before exposing public SDK authorization.
-3. Add the approved SDK/FFI/CLI controls and cross-SDK functional scenarios.
-   Deliver compatible APIs in a new minor release. Link the merged spec
-   from each implementation PR.
+1. Deliver native capture/ownership, structured error transport and owned
+   observation storage, with refusal and unknown-data coverage.
+2. Deliver safe caller-supplied feedback application through the ordinary
+   backend path, public Dev APIs and CLI, with no internal retry/cache.
+3. Wire governed/public-SDK acceptance into the scheduled suite and document
+   supported host capabilities and release constraints before delivery.
 
-No MXC request-contract publication or experimental-backend authorization
-change is proposed. OS-contract availability/shipping policy is a separate
-decision, not implied by accepting the existing JSON format.
-
-Update the existing ProcessContainer OS-feature/OS-support guidance and the
-validation runbook. SDK references/examples are listed once in
-[api.md](api.md#validation-and-documentation). Keep the issue open through
-all implementation, validation and documentation; use non-closing references
-for this spec and intermediate PRs.
+Each implementation slice must preserve strict callers and be buildable.
+MXC request-contract publication and experimental-backend authorization do
+not change. Update ProcessContainer guidance and the validation runbook;
+SDK references/examples are listed in
+[api.md](api.md#validation-and-documentation). Keep #1634 open through agreed
+implementation, validation and documentation.
 
 ## Open questions
 
-- **Scope and contributor acceptance:** MXC maintainers must record
-  `feature-accepted`; it has not been applied.
-- **API placement:** maintainers must choose the proposed scoped Rust revision
-  or additive V1 operations with extensible options; see the alternatives in
-  [api.md](api.md#compatibility-and-request-mapping).
-- **Experimental OS contract and release:** Windows contract owners and MXC
-  maintainers must agree on support/shipping criteria before exposing a
-  supported SDK option. No new JSON version or `--experimental` interpretation
-  should be used as a substitute.
-- **Feature availability:** is an additional public diagnostic-capability
-  result needed, or are existing advisory backend probes and per-call outcomes
-  sufficient? Do not infer governance from an export/support bit.
-- **Required governed CI:** agree on maintained policy-fixture setup/restore,
-  matching x64/ARM64 images and the responsible scheduled jobs before delivery.
+- **Scope acceptance:** maintainers must apply `feature-accepted` and approve
+  the design/API; those approvals have not been recorded.
+- **Feedback authorization:** is supplying observations sufficient explicit
+  permission for MXC's supported restrictive edits, or should the supported
+  feature require caller-edited request JSON only? This proposal chooses the
+  feedback option while preserving strict diagnostics-only use.
+- **Dev compatibility and release:** approve the explicit Rust V1.Dev source
+  break/non-exhaustive types and decide supported SDK/OS-contract shipping
+  criteria. No new request version or experimental flag substitutes for that
+  decision.
+- **Governed CI:** agree on maintained setup/restore, matching x64/ARM64 images
+  and required scheduled jobs before functional acceptance.
 
 ## Review checklist
 
