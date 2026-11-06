@@ -65,16 +65,15 @@ mod tests {
     use super::*;
     use crate::mxc_common::common_request_ir::CommonRequestIR;
     use crate::mxc_common::config_contract_adapters::dev::{adapt_request, AdaptedConfigRequest};
-    use crate::mxc_common::state_aware_input::StateAwareInput;
     use serde_json::json;
 
     fn adapt(source: &str) -> (CommonRequestIR, Input) {
-        let AdaptedConfigRequest::StateAware(StateAwareInput::W365Agents { common, operation }) =
-            adapt_request(contract::parse_request(source).unwrap()).unwrap()
+        let contract::Request::Provision(contract::ProvisionRequest::W365Agents(request)) =
+            contract::parse_request(source).expect("valid W365 provision fixture")
         else {
             panic!("expected private W365 normalization input");
         };
-        (common, operation)
+        super::super::state_aware::w365_agents_contract_into_input(request)
     }
 
     macro_rules! fixture {
@@ -112,7 +111,7 @@ mod tests {
             else {
                 panic!("expected lifecycle request");
             };
-            let (common, operation) = input.into_parts().unwrap();
+            let (common, operation) = input.into_parts();
             if matches!(
                 operation,
                 crate::mxc_common::state_aware_operation::StateAwareOperation::Exec { .. }
