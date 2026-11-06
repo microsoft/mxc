@@ -289,6 +289,34 @@ try {
         Invoke-LoopbackCase -Name "proxy-blocks-direct-$family" -Url $direct.Url `
             -IngressDefault 'allow' -HostLoopback 'allow' -ProxyUrl $proxy.Url -Blocked
     }
+    # The sandbox gets the real proxy URL, but --debug output and the log file
+    # must show it with the credentials replaced.
+    $proxyAuthority = ([Uri]$proxy.Url).Authority
+    $config = @{
+        version = '1.0.0'
+        containment = 'processcontainer'
+        process = @{ commandLine = 'cmd.exe /d /s /c "echo PROXY_LOG_OK"'; cwd = $ScratchRoot; timeout = 30000 }
+        filesystem = @{ readwritePaths = @($ScratchRoot); readonlyPaths = @($env:SystemRoot) }
+        network = @{
+            egress = @{ default = 'deny' }
+            ingress = @{ default = 'allow'; hostLoopback = 'allow' }
+        }
+        runtimeConfig = @{ networkProxy = "http://alice:hunter2@$proxyAuthority" }
+    }
+    $configPath = Join-Path $ScratchRoot 'proxy-log-redaction.json'
+    $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath
+    $result = Invoke-NetworkExecutor -Name 'proxy-log-redaction' -Arguments @('--debug', $configPath)
+    $expected = "effective proxy: http://***@$proxyAuthority"
+    $diagnostics = "$($result.Log)$($result.Stdout)$($result.Stderr)"
+    # The file sink timestamps each write fragment.
+    $log = $result.Log -replace '\[\d+\] ', ''
+    if ($result.ExitCode -ne 0 -or $result.Stdout -notmatch '(?m)^PROXY_LOG_OK' -or
+        $diagnostics.Contains('hunter2') -or -not $log.Contains($expected) -or
+        -not $result.Stdout.Contains($expected)) {
+        throw "proxy-log-redaction failed: exit=$($result.ExitCode); stdout=$($result.Stdout); stderr=$($result.Stderr). See $ScratchRoot."
+    }
+    $script:Passed++
+    Write-Host 'PASSED: proxy-log-redaction' -ForegroundColor Green
     $rule = @{
         to = @(@{ cidr = "$($target.Address)/32" })
         ports = @(@{ protocol = 'tcp'; port = 443 })
