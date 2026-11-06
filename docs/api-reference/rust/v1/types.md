@@ -206,9 +206,7 @@ impl From<MxcError> for Error {
 sets `details` to `None`. Conversions to and from the internal error preserve
 structured details, including their JSON value type. Use
 `error.details.as_deref()` to borrow the value. `Display` omits details and
-`Debug` redacts them; do not log sensitive values. See the
-[MicroVM recovery contract](../../../backends/nvx/nvx.md#output-timeout-and-cleanup)
-for `details.nvxRecovery` and `details.primaryDetails`.
+`Debug` redacts them; do not log sensitive values.
 
 
 ## `mxc_sdk::v1::ErrorCode`

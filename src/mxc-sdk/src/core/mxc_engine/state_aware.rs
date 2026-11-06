@@ -450,9 +450,7 @@ fn exec_state_aware_with_capture_mode(
             }
             let bound = crate::mxc_common::state_aware_binding::bind_microvm(parsed)?;
             let mut runner = if _capture_output {
-                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::with_capture_limit(
-                    crate::backend_modules::nvx::CAPTURE_LIMIT_BYTES,
-                )
+                crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::for_capture()
             } else {
                 crate::backend_modules::nvx::state_aware::NvxStateAwareRunner::new()
             };

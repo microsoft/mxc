@@ -35,7 +35,7 @@ pub(super) const APPROVED_INITRD_SHA256: &str =
     "5e42d4617c1508e9116df8c330c0ff72243e954d7f132091ecdecfc743d904ed";
 
 const HOST_TIMEOUT_SLACK_MS: u64 = 30_000;
-pub(crate) const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const STARTUP_LOG_LIMIT: usize = 8 * 1024;
 const CANCELLATION_POLL_MS: u64 = 100;
 
@@ -97,24 +97,18 @@ pub(super) struct ExecOutput {
     pub stderr: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ProvisionOutput {
+    pub sandbox_id: SandboxId,
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 pub(super) trait SandboxClient {
     fn capabilities(&self) -> Result<Capabilities, MxcError>;
     fn validate_provision(&self, input: &ProvisionInput) -> Result<(), MxcError>;
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
-    fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError>;
-    fn provision_with_metadata(
-        &self,
-        input: &ProvisionInput,
-    ) -> Result<
-        (
-            SandboxId,
-            Option<serde_json::Map<String, serde_json::Value>>,
-        ),
-        MxcError,
-    > {
-        self.provision(input).map(|sandbox_id| (sandbox_id, None))
-    }
+    fn provision(&self, input: &ProvisionInput) -> Result<ProvisionOutput, MxcError>;
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError>;
     fn exec_and_wait(
@@ -676,23 +670,12 @@ impl SandboxClient for NvxClient {
         self.library.probe(self.host)
     }
 
-    fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError> {
+    fn provision(&self, input: &ProvisionInput) -> Result<ProvisionOutput, MxcError> {
         let reply = self.library.provision(self.host, input)?;
-        SandboxId::from_token(&reply.token)
-    }
-
-    fn provision_with_metadata(
-        &self,
-        input: &ProvisionInput,
-    ) -> Result<
-        (
-            SandboxId,
-            Option<serde_json::Map<String, serde_json::Value>>,
-        ),
-        MxcError,
-    > {
-        let reply = self.library.provision(self.host, input)?;
-        Ok((SandboxId::from_token(&reply.token)?, reply.metadata))
+        Ok(ProvisionOutput {
+            sandbox_id: SandboxId::from_token(&reply.token)?,
+            metadata: reply.metadata,
+        })
     }
 
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {

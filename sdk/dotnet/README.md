@@ -262,9 +262,6 @@ sandbox on the current host. `MxcPlatform.GetAvailableBackends()` reports
 host backend capabilities; availability is advisory and launch-time
 validation still applies.
 
-Discovery can report `ContainmentBackend.MicroVm` for NVX. This does not enable
-MicroVM streaming or container lifecycle operations in the .NET SDK.
-
 On Windows, ProcessContainer is reported only when native PSEC is available;
 other backends are detected independently. `MxcContainer.Probe(request)` checks
 request compatibility without creating a container. If native ProcessContainer

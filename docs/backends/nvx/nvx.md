@@ -182,6 +182,8 @@ and returns its ID in Rust `Error.details.nvxRecovery.sandboxId`, with
 Use that ID to continue or deprovision through Rust `v1::dev` JSON; do not retry
 provision. Treat the ID as sensitive; ordinary error formatting omits it.
 Pre-existing error details are retained under `details.primaryDetails`.
+These fields are part of the experimental Rust `v1::dev` behaviour and may
+change as the development API evolves.
 
 A workload timeout preserves captured partial output and tears down the
 create-and-run container. Live execution starts its workload deadline only

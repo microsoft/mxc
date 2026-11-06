@@ -30,9 +30,9 @@ impl NvxStateAwareRunner {
         }
     }
 
-    pub(crate) fn with_capture_limit(limit: usize) -> Self {
+    pub(crate) fn for_capture() -> Self {
         let mut runner = Self::new();
-        runner.capture_limit = Some(limit);
+        runner.capture_limit = Some(super::runtime::CAPTURE_LIMIT_BYTES);
         runner
     }
 
@@ -143,13 +143,13 @@ impl StatefulSandboxBackend for NvxStateAwareRunner {
             .validate_provision(&input)
             .map_err(|error| protect("validate_provision", error))?;
         client.probe().map_err(|error| protect("probe", error))?;
-        let (sandbox_id, metadata) = client
-            .provision_with_metadata(&input)
+        let provisioned = client
+            .provision(&input)
             .map_err(|error| protect("provision", error))?;
-        *self.provisioned_id.borrow_mut() = Some(sandbox_id.clone());
+        *self.provisioned_id.borrow_mut() = Some(provisioned.sandbox_id.clone());
         Ok(ProvisionResult {
-            sandbox_id: sandbox_id.to_mxc_string(),
-            metadata: metadata.map(Value::Object),
+            sandbox_id: provisioned.sandbox_id.to_mxc_string(),
+            metadata: provisioned.metadata.map(Value::Object),
         })
     }
 

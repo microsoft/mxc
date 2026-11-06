@@ -287,7 +287,8 @@ fn prepare_and_provision(
     }
     let sandbox_id = client
         .provision(&input)
-        .map_err(|error| protect_native_error(error, "provision", sensitive_proxy))?;
+        .map_err(|error| protect_native_error(error, "provision", sensitive_proxy))?
+        .sandbox_id;
     Ok((sandbox_id, exec))
 }
 
@@ -947,7 +948,7 @@ mod tests {
     use std::cell::RefCell;
 
     use super::super::abi::SandboxDiagnostics;
-    use super::super::runtime::{ExecOutput, SandboxId};
+    use super::super::runtime::{ExecOutput, ProvisionOutput, SandboxId};
     use super::*;
 
     fn test_capabilities() -> Capabilities {
@@ -1253,10 +1254,15 @@ mod tests {
             self.probe_res.clone()
         }
 
-        fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError> {
+        fn provision(&self, input: &ProvisionInput) -> Result<ProvisionOutput, MxcError> {
             self.record("provision");
             *self.provisioned_input.borrow_mut() = Some(input.clone());
-            self.provision_res.clone()
+            self.provision_res
+                .clone()
+                .map(|sandbox_id| ProvisionOutput {
+                    sandbox_id,
+                    metadata: None,
+                })
         }
 
         fn start(&self, _sandbox_id: &SandboxId) -> Result<(), MxcError> {
