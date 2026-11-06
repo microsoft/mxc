@@ -344,6 +344,18 @@ require a new versioned API surface.
 For PowerShell startup failures, see
 [troubleshooting](../../troubleshooting.md#powershell-startup).
 
+### Fail-closed servicing exception: WSLc `targetOs`
+
+The published `0.9.0-alpha` and `1.0.0` create-and-run contracts, and the
+Node V1 `WslcConfig.targetOs` property, accept any string for
+`wslc.targetOs`. WSLc runs only Linux containers and cannot select another
+operating system, so the WSLc backend rejects every value other than `"linux"`
+with `policy_validation` before it creates a session or container. Omit the
+field or set it to `"linux"`.
+
+This fail-closed exception applies within V1 and does not require a new
+versioned API surface.
+
 ### Shipped vs Experimental
 
 Development features use their intended permanent top-level locations in the
