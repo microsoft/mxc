@@ -17,6 +17,27 @@
 
 use crate::mxc_common::models::ContainerPolicy;
 
+/// Reject parent components before a Linux backend orders or mounts policy paths.
+pub(crate) fn validate_mount_paths(policy: &ContainerPolicy) -> Result<(), String> {
+    for (paths, field) in [
+        (&policy.readwrite_paths, "readwritePaths"),
+        (&policy.readonly_paths, "readonlyPaths"),
+        (&policy.denied_paths, "deniedPaths"),
+    ] {
+        for path in paths {
+            // Lexically collapsing ".." can disagree with host symlink resolution.
+            if path.split('/').any(|component| component == "..") {
+                return Err(format!(
+                    "Filesystem path '{}' (filesystem.{field}) contains a '..' segment; \
+                     specify a fully resolved path without '..'.",
+                    crate::mxc_common::config_deserialize::escape_diagnostic_text(path)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The access intent a resolved mount carries into the backend, mapped from the
 /// policy list the path came from. Ordered least- to most-restrictive so an
 /// exact same-path tie resolves most-restrictive-wins.
@@ -41,17 +62,17 @@ pub struct ResolvedMount {
     pub intent: FsIntent,
 }
 
-/// A path split into its non-empty components, so `/data` and `/data/` compare
-/// equal and `/data/secrets` is recognized as a descendant of `/data`. Splits on
-/// both `/` and `\` so Windows-style host paths compare the same way.
+/// Unix path components, excluding empty and current-directory segments.
+/// These mounts target Unix backends even when tests run on Windows;
+/// backslashes remain part of filenames.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 struct PathKey(Vec<String>);
 
 impl PathKey {
     fn from_path(path: &str) -> Self {
         Self(
-            path.split(['/', '\\'])
-                .filter(|component| !component.is_empty())
+            path.split('/')
+                .filter(|component| !component.is_empty() && *component != ".")
                 .map(str::to_string)
                 .collect(),
         )
@@ -166,6 +187,37 @@ mod tests {
             .iter()
             .map(|mount| (mount.path.as_str(), mount.intent))
             .collect()
+    }
+
+    #[test]
+    fn mount_validation_accepts_linux_names_without_parent_components() {
+        let policy = ContainerPolicy {
+            readwrite_paths: strings(&["/work", "/work/report..txt", "/work/..\\file"]),
+            readonly_paths: strings(&["/tools/./bin", "/tools//lib/", "/tools\\..\\bin"]),
+            denied_paths: strings(&["/work/secret"]),
+            ..Default::default()
+        };
+        assert_eq!(validate_mount_paths(&policy), Ok(()));
+    }
+
+    #[test]
+    fn mount_validation_rejects_parent_components_and_escapes_diagnostics() {
+        for path in [
+            "..",
+            "../work",
+            "/work/../",
+            "/work/a/../b/../",
+            "/work\n/..",
+        ] {
+            let policy = ContainerPolicy {
+                readwrite_paths: strings(&[path]),
+                ..Default::default()
+            };
+            let error = validate_mount_paths(&policy).expect_err("parent component");
+            assert!(error.contains("filesystem.readwritePaths"), "{error}");
+            assert!(error.contains("'..'"), "{error}");
+            assert!(!error.contains('\n'), "{error}");
+        }
     }
 
     /// Test oracle: the effective intent a resolved `plan` assigns to `path` —
@@ -333,12 +385,72 @@ mod tests {
     }
 
     #[test]
-    fn backslash_paths_are_compared_by_components() {
-        let resolved = plan(&["C:\\workspace"], &["C:\\workspace\\.git\\"], &[]);
+    fn current_directory_components_preserve_nested_policy_order() {
+        let parent = "/work/././";
+        for (rw, ro, intent) in [
+            (vec![parent], vec![], FsIntent::ReadWrite),
+            (vec![], vec![parent], FsIntent::ReadOnly),
+        ] {
+            let resolved = plan(&rw, &ro, &["/work/secret"]);
+            assert_eq!(
+                order(&resolved),
+                vec![(parent, intent), ("/work/secret", FsIntent::Denied)]
+            );
+        }
+
+        let resolved = plan(&["/work/./public"], &[], &[parent]);
         assert_eq!(
-            effective_intent(&resolved, "C:\\workspace\\.git\\config"),
-            Some(FsIntent::ReadOnly)
+            order(&resolved),
+            vec![
+                (parent, FsIntent::Denied),
+                ("/work/./public", FsIntent::ReadWrite),
+            ]
         );
+    }
+
+    #[test]
+    fn current_directory_aliases_keep_most_restrictive_last() {
+        let resolved = plan(&["/work/././"], &["/work"], &["/work/."]);
+        assert_eq!(
+            order(&resolved),
+            vec![
+                ("/work/././", FsIntent::ReadWrite),
+                ("/work", FsIntent::ReadOnly),
+                ("/work/.", FsIntent::Denied),
+            ]
+        );
+    }
+
+    #[test]
+    fn backslashes_and_dotted_names_are_literal_unix_components() {
+        let resolved = plan(
+            &[r"/work/team\notes\archive"],
+            &["/work/.config"],
+            &["/work/team/secret"],
+        );
+        assert_eq!(
+            order(&resolved),
+            vec![
+                (r"/work/team\notes\archive", FsIntent::ReadWrite),
+                ("/work/.config", FsIntent::ReadOnly),
+                ("/work/team/secret", FsIntent::Denied),
+            ]
+        );
+        assert_eq!(
+            effective_intent(&resolved, "/work/team/notes/archive/file"),
+            None
+        );
+        assert_eq!(
+            effective_intent(&resolved, r"/work/team\notes\archive/file"),
+            Some(FsIntent::ReadWrite)
+        );
+
+        for child in ["/work/.config", "/work/report..txt", r"/work/team\."] {
+            assert_eq!(
+                order(&plan(&[child], &[], &["/work"])),
+                vec![("/work", FsIntent::Denied), (child, FsIntent::ReadWrite)]
+            );
+        }
     }
 
     #[test]

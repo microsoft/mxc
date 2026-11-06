@@ -1072,6 +1072,8 @@ impl LxcScriptRunner {
 
 impl ScriptRunner for LxcScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        crate::mxc_common::filesystem_resolve::validate_mount_paths(&request.policy)
+            .map_err(|message| ScriptResponse::rejected(&message))?;
         if request.policy.runtime_network_proxy_specified {
             self.validate_runtime_proxy(&request.policy)?;
         }
@@ -1676,6 +1678,38 @@ mod tests {
         ExecutionRequest {
             policy,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn filesystem_parent_components_are_rejected_by_both_validation_paths() {
+        let runner = validating_runner();
+        for field in ["readwritePaths", "readonlyPaths", "deniedPaths"] {
+            for path in [
+                "/work/secret/..",
+                "/work/a/../b/../",
+                "/work/./secret/../public",
+            ] {
+                let mut policy = ContainerPolicy::default();
+                match field {
+                    "readwritePaths" => policy.readwrite_paths.push(path.into()),
+                    "readonlyPaths" => policy.readonly_paths.push(path.into()),
+                    _ => policy.denied_paths.push(path.into()),
+                }
+                let request = request_with_policy(policy);
+                for result in [
+                    ScriptRunner::validate_runner(&runner, &request),
+                    SandboxBackend::validate(&runner, &request),
+                ] {
+                    let error = result.expect_err("parent components must be rejected");
+                    assert!(error.error_message.contains(field), "{error:?}");
+                    assert!(error.error_message.contains("'..'"), "{error:?}");
+                    assert_eq!(
+                        error.failure_phase,
+                        crate::mxc_common::models::FailurePhase::Rejected
+                    );
+                }
+            }
         }
     }
 
