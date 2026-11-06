@@ -19,8 +19,7 @@ const dispatchPath = join(
 const enginePath = join(
   root, "src", "mxc-sdk", "src", "core", "mxc_engine", "state_aware.rs"
 );
-const sharedMicroVmRejection =
-  /if matches!\(surface, LifecycleSurface::Shared\)\s*&& backend == crate::mxc_common::models::ContainmentBackend::MicroVm\s*\{\s*return Err\(MxcError::unsupported_phase\([\s\S]*?\)\);\s*\}/;
+const typedLifecyclePath = join(root, "src", "mxc-sdk", "src", "state_aware_sdk.rs");
 
 function runGate(changedPath, transform) {
   const errors = [];
@@ -55,7 +54,7 @@ function runGate(changedPath, transform) {
   return { status, errors: errors.join("\n") };
 }
 
-test("native-only discovery and Rust-only lifecycle preserve managed parity", () => {
+test("native-only discovery and JSON-only lifecycle preserve managed parity", () => {
   assert.deepEqual(runGate(), { status: 0, errors: "" });
 });
 
@@ -102,35 +101,40 @@ test("supported lifecycle prefixes must remain in the native dispatcher", () => 
   assert.match(result.errors, /state-aware sandbox-id prefixes:.*wslc:Wslc/);
 });
 
-test("new shared lifecycle support requires managed enum and prefix parity", () => {
-  const result = runGate(enginePath, (source) => {
-    assert.match(source, sharedMicroVmRejection);
-    return source.replace(sharedMicroVmRejection, "");
+test("new typed lifecycle support requires managed enum and prefix parity", () => {
+  const result = runGate(typedLifecyclePath, (source) => {
+    const marker = "enum ProvisionContainment {";
+    assert.ok(source.includes(marker));
+    return source.replace(marker, `${marker}\n    MicroVm,`);
   });
   assert.equal(result.status, 1);
   assert.match(result.errors, /state-aware containment enum:.*MicroVm/);
   assert.match(result.errors, /state-aware sandbox-id prefixes:.*microvm:MicroVm/);
 });
 
-test("the shared entry point cannot delegate to the development surface", () => {
+test("typed lifecycle declarations must have native dispatch", () => {
   const result = runGate(enginePath, (source) => {
-    const marker = "run_state_aware_on_surface(parsed, dry_run, LifecycleSurface::Shared)";
+    const marker = "fn run_state_aware_typed(";
     assert.ok(source.includes(marker));
-    return source.replace(marker, marker.replace("::Shared", "::RustDevJson"));
-  });
-  assert.equal(result.status, 1);
-  assert.match(result.errors, /expected delegation to LifecycleSurface::Shared/);
-});
-
-test("a development-only rejection cannot hide shared lifecycle support", () => {
-  const result = runGate(enginePath, (source) => {
-    assert.match(source, sharedMicroVmRejection);
-    return source.replace(sharedMicroVmRejection, (guard) =>
-      guard.replace("::Shared", "::RustDevJson")
+    const start = source.indexOf(marker);
+    return source.slice(0, start) + source.slice(start).replaceAll(
+      "ContainmentBackend::Wslc =>", "ContainmentBackend::Future =>"
     );
   });
   assert.equal(result.status, 1);
-  assert.match(result.errors, /state-aware containment enum:.*MicroVm/);
+  assert.match(result.errors, /typed lifecycle backend Wslc is missing native dispatch/);
+});
+
+test("JSON lifecycle support does not require a typed managed API", () => {
+  const result = runGate(enginePath, (source) => {
+    const marker = "_ => run_state_aware_fallback(parsed, dry_run),";
+    assert.ok(source.includes(marker));
+    return source.replace(
+      marker,
+      `crate::mxc_common::models::ContainmentBackend::Future => unimplemented!(),\n${marker}`
+    );
+  });
+  assert.deepEqual(result, { status: 0, errors: "" });
 });
 
 test("discovery backends still require managed parser mappings", () => {

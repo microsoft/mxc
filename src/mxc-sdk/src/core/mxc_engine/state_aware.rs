@@ -98,38 +98,15 @@ fn inject_warnings(outcome: &mut Result<DispatchOutcome, MxcError>, warnings: &[
 /// phase it streams output live and returns
 /// [`DispatchOutcome::ExecCompleted`]. Dispatch failures return an
 /// [`MxcError`] the caller renders as a JSON error envelope.
-///
-/// MicroVM lifecycle is restricted to the Rust development JSON adapter, not
-/// this parsed-request entry point used by the executor.
 pub fn run_state_aware(
     parsed: ParsedStateAwareRequest,
     dry_run: bool,
-) -> Result<DispatchOutcome, MxcError> {
-    run_state_aware_on_surface(parsed, dry_run, LifecycleSurface::Shared)
-}
-
-enum LifecycleSurface {
-    Shared,
-    RustDevJson,
-}
-
-fn run_state_aware_on_surface(
-    parsed: ParsedStateAwareRequest,
-    dry_run: bool,
-    surface: LifecycleSurface,
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
     crate::mxc_engine::experimental::require_experimental_optin(
         &backend,
         parsed.request().experimental_enabled,
     )?;
-    if matches!(surface, LifecycleSurface::Shared)
-        && backend == crate::mxc_common::models::ContainmentBackend::MicroVm
-    {
-        return Err(MxcError::unsupported_phase(
-            "MicroVM lifecycle operations are supported only through Rust mxc_sdk::v1::dev JSON APIs",
-        ));
-    }
     match backend {
         #[cfg(target_os = "windows")]
         crate::mxc_common::models::ContainmentBackend::WindowsSandbox => {
@@ -791,7 +768,7 @@ fn run_state_aware_envelope(
             correlation_vector: &correlation,
         },
     );
-    let mut outcome = run_state_aware_on_surface(parsed, dry_run, LifecycleSurface::RustDevJson);
+    let mut outcome = run_state_aware(parsed, dry_run);
     inject_warnings(&mut outcome, &init_warnings);
     match phase {
         Phase::Provision => {

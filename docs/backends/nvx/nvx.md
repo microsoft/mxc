@@ -77,6 +77,7 @@ let result = dev::run_json(&json, JsonOptions { experimental: true })?;
 Use `dev::spawn_json` for live stdout and stderr. The `v1::dev` JSON lifecycle
 functions also support persistent provision, start, exec, stop, and
 deprovision operations. MicroVM remains absent from the typed V1 request API.
+Lifecycle calls use `%LOCALAPPDATA%\Microsoft\MXC\nvx` for agent state.
 
 Commands run in the guest's POSIX shell, not in a host shell or a Python
 interpreter. Every creation request requires a registry image in
@@ -114,10 +115,10 @@ does not define the limits of this integration.
 | Host platforms | Windows x64 with WHP. Windows ARM64 and Linux execution are unavailable. |
 | Execution | Create-and-run development JSON requests with captured output or live stdout and stderr, plus persistent container lifecycle operations. |
 | Rust SDK API | `v1::dev::run_json` and `v1::dev::spawn_json` support MicroVM JSON requests. The `v1::dev` JSON lifecycle functions support provision, start, captured or live exec, stop, and deprovision. Typed V1 operations do not expose MicroVM selection. |
-| C ABI, Node, and .NET | MicroVM streaming and lifecycle JSON requests, including lifecycle validation, are rejected at the C ABI boundary even when the shared engine includes MicroVM. Existing create-and-run captured execution is unchanged. |
-| Executor | MicroVM lifecycle requests through `--operation`, including `--dry-run`, are rejected after parsing and experimental authorization. Existing create-and-run captured execution is unchanged. |
+| C ABI, Node, and .NET | Existing JSON entry points support MicroVM captured execution, streaming, and lifecycle operations with experimental authorization. Typed V1 request APIs do not expose MicroVM selection. |
+| Executor | MicroVM lifecycle requests through `--operation`, including `--dry-run`, use the shared engine and require experimental authorization. |
 | Streaming and PTY | Live stdout and stderr are supported. Writable stdin and PTY operations are rejected before workload launch. |
-| Container lifecycle operations | Supported through `v1::dev` JSON only. Network, proxy, filesystem, image, and memory policy are fixed at provision. |
+| Container lifecycle operations | Supported through JSON entry points and the executor. Network, proxy, filesystem, image, and memory policy are fixed at provision. |
 | Workload image | Required caller-selected registry reference in `microvm.image`. |
 | Guest memory override | Optional positive `microvm.provision.memoryMib` on create-and-run and provision requests when the verified runtime advertises `spec.memory`; unsupported runtimes fail closed. |
 | Working directory | Optional absolute POSIX guest path; see the limits below. |
@@ -184,6 +185,10 @@ provision. Treat the ID as sensitive; ordinary error formatting omits it.
 Pre-existing error details are retained under `details.primaryDetails`.
 These fields are part of the experimental Rust `v1::dev` behaviour and may
 change as the development API evolves.
+
+The existing C ABI does not expose structured `Error.details`. C-backed Node
+and .NET callers therefore do not receive this recovery ID when provision
+succeeds but close fails, even though the container remains provisioned.
 
 A workload timeout preserves captured partial output and tears down the
 create-and-run container. Live execution starts its workload deadline only

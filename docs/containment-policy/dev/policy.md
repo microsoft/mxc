@@ -187,9 +187,8 @@ all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
 | `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. All four backends reject supplied network policy at exec and inherit their provision posture. IsolationSession, Windows Sandbox, and MicroVM reject an exec proxy; WSLc accepts one. |
 | `deprovision-session` / `wslc` | Required `sessionId`; no process, filesystem, network, UI, or backend configuration. |
 
-MicroVM lifecycle operations are supported only through Rust
-`mxc_sdk::v1::dev` JSON, not the C/Node/.NET or executor lifecycle entry points,
-including dry runs. A MicroVM ID has the form
+MicroVM lifecycle operations are supported through JSON entry points and the
+executor with experimental authorization. A MicroVM ID has the form
 `microvm:<32 lowercase hexadecimal characters>`; preserve the returned value
 as an opaque sensitive capability. Start, stop, and deprovision carry only the
 ID and common fields. Exec cannot change image, memory, filesystem, network,

@@ -336,7 +336,7 @@ pub(super) fn lifecycle_state_root(
         [
             std::ffi::OsStr::new("Microsoft"),
             std::ffi::OsStr::new("MXC"),
-            std::ffi::OsStr::new("nvx-v1"),
+            std::ffi::OsStr::new("nvx"),
         ]
         .as_slice(),
         2,
