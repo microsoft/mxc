@@ -28,9 +28,9 @@ function New-TestTrace {
     $eventXml = foreach ($invocation in $invocations) {
         foreach ($task in @('MXC.ExecutionStart', 'MXC.ExecutionEnd')) {
             $fields = [ordered]@{
-                'PartA_PrivacyProduct' = '11'
-                'PartA_PrivacyDataCategory' = '1'
-                'PartA_PrivTags' = $(if ($invocation.ContractVersion -eq '1.1.0-alpha') { '16777216' } else { '33554432' })
+                'PartA_PrivacyProduct' = '0'
+                'PartA_PrivacyDataCategory' = '0'
+                'PartA_PrivTags' = $(if ($invocation.ContractVersion -eq '1.1.0-alpha') { '131072' } else { '65536' })
                 'mxc.session_id' = "00000000-0000-4000-8000-00000000000$($invocation.Lifecycle)"
                 'mxc.capture_denials' = 'not_applicable'
                 'mxc.sandbox_kind' = 'isolation_session'
@@ -43,7 +43,7 @@ function New-TestTrace {
                 '__TlgCV__' = "lifecycle$($invocation.Lifecycle).$($invocation.ProcessId).0"
             }
             $eventData = foreach ($field in $fields.Keys) { "<Data Name='$field'>$($fields[$field])</Data>" }
-            $keyword = if ($invocation.ContractVersion -eq '1.1.0-alpha') { '0x800000000000' } else { '0x400000000000' }
+            $keyword = if ($invocation.ContractVersion -eq '1.1.0-alpha') { '0x200000000000' } else { '0x100000000000' }
             "<Event><System><Provider Guid='{$providerGuid}'/><Task>0</Task><Keywords>$keyword</Keywords><Execution ProcessID='$($invocation.ProcessId)'/><TimeCreated SystemTime='2026-01-01T00:00:00Z'/></System><EventData>$($eventData -join '')</EventData><RenderingInfo Culture='en-US'><Task>$task</Task></RenderingInfo></Event>"
         }
     }
@@ -55,9 +55,9 @@ function New-TestTrace {
                 if ($invocation.RequireError) { 'MXC.Error' }
             )) {
                 $keyword = if ($invocation.ContractVersion -eq '1.1.0-alpha' -and $task -ne 'MXC.PolicyHash') {
-                    '0x800000000000'
-                } else { '0x400000000000' }
-                $privacyTag = if ($keyword -eq '0x800000000000') { '16777216' } else { '33554432' }
+                    '0x200000000000'
+                } else { '0x100000000000' }
+                $privacyTag = if ($keyword -eq '0x200000000000') { '131072' } else { '65536' }
                 "<Event><System><Provider Guid='{$providerGuid}'/><Keywords>$keyword</Keywords><Execution ProcessID='$($invocation.ProcessId)'/><TimeCreated SystemTime='2026-01-01T00:00:00Z'/></System><EventData><Data Name='PartA_PrivTags'>$privacyTag</Data><Data Name='mxc.session_id'>00000000-0000-4000-8000-00000000000$($invocation.Lifecycle)</Data></EventData><RenderingInfo><Task>$task</Task></RenderingInfo></Event>"
             }
         }
@@ -110,27 +110,27 @@ $cases = @(
         $field = $trace.DocumentElement.FirstChild.SelectSingleNode("*[local-name()='EventData']/*[@Name='mxc.session_id']")
         $null = $field.ParentNode.RemoveChild($field)
     }; Fails = $true },
-    @{ Name = 'development event still Measures'; Mutate = { $trace.DocumentElement.ChildNodes[12].System.Keywords = '0x400000000000' }; Fails = $true },
-    @{ Name = 'published event changed to Critical'; Mutate = { $trace.DocumentElement.FirstChild.System.Keywords = '0x800000000000' }; Fails = $true },
+    @{ Name = 'development event still Measures'; Mutate = { $trace.DocumentElement.ChildNodes[12].System.Keywords = '0x100000000000' }; Fails = $true },
+    @{ Name = 'published event changed to Critical'; Mutate = { $trace.DocumentElement.FirstChild.System.Keywords = '0x200000000000' }; Fails = $true },
     @{ Name = 'combined telemetry categories'; Mutate = { $trace.DocumentElement.ChildNodes[12].System.Keywords = '0xC00000000000' }; Fails = $true },
     @{ Name = 'missing descriptor keywords'; Mutate = {
         $system = $trace.DocumentElement.FirstChild.System
         $null = $system.RemoveChild($system.SelectSingleNode("*[local-name()='Keywords']"))
     }; Fails = $true },
-    @{ Name = 'Core start still tagged Usage'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '33554432' }; Fails = $true },
-    @{ Name = 'Core end still tagged Usage'; Mutate = { Set-TestField $trace 13 'PartA_PrivTags' '33554432' }; Fails = $true },
-    @{ Name = 'published event changed to Performance'; Mutate = { Set-TestField $trace 0 'PartA_PrivTags' '16777216' }; Fails = $true },
+    @{ Name = 'Core start still tagged Usage'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '65536' }; Fails = $true },
+    @{ Name = 'Core end still tagged Usage'; Mutate = { Set-TestField $trace 13 'PartA_PrivTags' '65536' }; Fails = $true },
+    @{ Name = 'published event changed to Performance'; Mutate = { Set-TestField $trace 0 'PartA_PrivTags' '131072' }; Fails = $true },
     @{ Name = 'Core error still tagged Usage'; Mutate = {
-        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='System']/*[local-name()='Keywords']='0x800000000000'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.Error']")
-        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '33554432'
+        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='System']/*[local-name()='Keywords']='0x200000000000'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.Error']")
+        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '65536'
     }; Fails = $true },
     @{ Name = 'Core exit still tagged Usage'; Mutate = {
-        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='System']/*[local-name()='Keywords']='0x800000000000'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.ProcessExited']")
-        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '33554432'
+        $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='System']/*[local-name()='Keywords']='0x200000000000'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.ProcessExited']")
+        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '65536'
     }; Fails = $true },
     @{ Name = 'other events retain Usage'; Mutate = {
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
-        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '16777216'
+        $event.SelectSingleNode("*[local-name()='EventData']/*[@Name='PartA_PrivTags']").InnerText = '131072'
     }; Fails = $true },
     @{ Name = 'missing privacy tag'; Mutate = {
         $event = $trace.DocumentElement.FirstChild
@@ -138,11 +138,11 @@ $cases = @(
         $null = $field.ParentNode.RemoveChild($field)
     }; Fails = $true },
     @{ Name = 'invalid privacy tag'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' 'invalid' }; Fails = $true },
-    @{ Name = 'combined privacy categories'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '50331648' }; Fails = $true },
-    @{ Name = 'hexadecimal privacy tag'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '0x01000000' }; Fails = $false },
+    @{ Name = 'combined privacy categories'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '196608' }; Fails = $true },
+    @{ Name = 'hexadecimal privacy tag'; Mutate = { Set-TestField $trace 12 'PartA_PrivTags' '0x00020000' }; Fails = $false },
     @{ Name = 'other events must retain Measures'; Mutate = {
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")
-        $event.System.Keywords = '0x800000000000'
+        $event.System.Keywords = '0x200000000000'
     }; Fails = $true },
     @{ Name = 'backend event with another session ID'; Mutate = {
         $event = $trace.SelectSingleNode("//*[local-name()='Event'][*[local-name()='RenderingInfo']/*[local-name()='Task']='MXC.PolicyHash']")

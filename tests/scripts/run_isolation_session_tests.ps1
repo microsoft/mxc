@@ -30,6 +30,7 @@
       - isolation_session_stderr.json --separate stderr in non-ConPTY mode
       - isolation_session_stdout_stderr_interleaved.json --interleaved streams
       - isolation_session_timeout.json --timeout enforcement
+      - isolation_session_stdin_line.json --pipe/file line delivery with console stdout
       - isolation_session_streaming_smoke.json --output arrives incrementally
         rather than as a burst at exit
 
@@ -347,6 +348,82 @@ function Run-IsolationSessionTest {
     return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
 }
 
+function Run-StdinRoutingTest {
+    param([ValidateSet('pipe', 'file')][string]$InputKind)
+
+    $name = "$InputKind stdin with console stdout"
+    $root = Join-Path $env:TEMP ("mxc_stdin_routing_" + [guid]::NewGuid().ToString('N'))
+    $process = $null
+    $pass = $false
+    $reason = ''
+    Write-Host "  $name ... " -NoNewline
+    try {
+        New-Item -Path $root -ItemType Directory | Out-Null
+        $inputPath = Join-Path $root 'input.txt'
+        $requestPath = Join-Path $ConfigDir 'isolation_session_stdin_line.json'
+        $batchPath = Join-Path $root 'run.cmd'
+        $stderrPath = Join-Path $root 'stderr.txt'
+        Set-Content -LiteralPath $inputPath -Value 'MXC_STDIN_ROUTING' -Encoding Ascii
+
+        # cmd supplies either a real pipe or a file handle. Do not redirect stdout:
+        # that would bypass the console-output routing regression.
+        $invocation = '"{0}" "{1}" 2>"{2}"' -f $WxcExec, $requestPath, $stderrPath
+        $command = if ($InputKind -eq 'pipe') {
+            'type "{0}" | {1}' -f $inputPath, $invocation
+        } else {
+            '{0} <"{1}"' -f $invocation, $inputPath
+        }
+        Set-Content -LiteralPath $batchPath -Encoding Ascii -Value @(
+            '@echo off'
+            $command
+            'exit /b %errorlevel%'
+        )
+        # Start-Process gives cmd its own console even when CI captures the suite's stdout.
+        $process = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /c `"$batchPath`"" `
+            -WindowStyle Hidden -PassThru
+        if (-not $process.WaitForExit(120000)) {
+            throw 'Executor did not finish within 120 seconds.'
+        }
+        # exit code established in isolation_session_stdin_line.json commandLine.
+        if ($process.ExitCode -ne 42) {
+            $stderr = if (Test-Path -LiteralPath $stderrPath) {
+                Get-Content -LiteralPath $stderrPath -Raw
+            } else { 'Executor stderr was not created; console launcher may have failed.' }
+            throw "Expected exit 42 after reading the input line, got $($process.ExitCode). $stderr"
+        }
+        $pass = $true
+    } catch {
+        $reason = $_.Exception.Message
+    } finally {
+        try {
+            if ($null -ne $process -and -not $process.HasExited) {
+                $process.Kill($true)
+                if (-not $process.WaitForExit(10000)) {
+                    throw "Could not stop stdin routing launcher $($process.Id)."
+                }
+            }
+            if ($pass) {
+                Remove-Item -LiteralPath $root -Recurse -Force
+            }
+        } catch {
+            $pass = $false
+            $reason = "$reason Cleanup failed: $($_.Exception.Message)"
+        } finally {
+            if ($null -ne $process) {
+                $process.Dispose()
+            }
+        }
+    }
+    if ($pass) {
+        Write-Host 'PASS' -ForegroundColor Green
+    } else {
+        Write-Host 'FAIL' -ForegroundColor Red
+        Write-Host "    Reason: $reason" -ForegroundColor Red
+        Write-Host "    Diagnostics: $root" -ForegroundColor Gray
+    }
+    return @{ Name = $name; Pass = $pass; Skipped = $false; Reason = $reason }
+}
+
 [System.Collections.ArrayList]$results = @()
 
 Write-Host "--- Tests ---" -ForegroundColor Cyan
@@ -367,6 +444,8 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejec
     -OutputContains @("at ``isolationSession``", "unknown field ``isolationSession``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
+$null = $results.Add((Run-StdinRoutingTest -InputKind pipe))
+$null = $results.Add((Run-StdinRoutingTest -InputKind file))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
 # Both reach this script's captured output via wxc-exec's `2>&1` merge above; the assertion
 # proves stderr is being relayed (not dropped) on the non-ConPTY plain-pipes path.

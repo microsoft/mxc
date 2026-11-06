@@ -285,8 +285,8 @@ try {
             Set-Content -LiteralPath (Join-Path $tempDir 'failure-invocations.json')
     }
 
-    # Required diagnostics ignore consent and the request flag but honor
-    # administrative policy; published contracts still need consent.
+    # Required diagnostics ignore consent, the request flag and administrative
+    # policy; published contracts still need consent.
     $gatingCases = @()
     if ($CheckKeywords) {
         function Set-GatingState([string]$Consent, $Policy) {
@@ -308,8 +308,8 @@ try {
             @{ Name = 'development, consent absent'; Version = '1.1.0-alpha'; Consent = 'absent'; Policy = 3; Emits = $true },
             @{ Name = 'development, no policy'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = $null; Emits = $true },
             @{ Name = 'development, policy 1'; Version = '1.1.0-alpha'; Consent = 'denied'; Policy = 1; Emits = $true },
-            @{ Name = 'development, policy 0'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 0; Emits = $false },
-            @{ Name = 'development, unsupported policy'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 7; Emits = $false },
+            @{ Name = 'development, policy 0'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 0; Emits = $true },
+            @{ Name = 'development, unsupported policy'; Version = '1.1.0-alpha'; Consent = 'granted'; Policy = 7; Emits = $true },
             @{ Name = 'published, consent denied'; Version = '1.0.0'; Consent = 'denied'; Policy = 3; Emits = $false },
             @{ Name = 'published, consent absent'; Version = '1.0.0'; Consent = 'absent'; Policy = 3; Emits = $false }
         )) {
