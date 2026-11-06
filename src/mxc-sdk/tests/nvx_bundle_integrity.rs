@@ -338,11 +338,11 @@ fn rejects_archive_digest_mismatch_and_unsafe_or_unlisted_entries() {
 fn pins_official_release_url_and_hashes() {
     assert_eq!(
         build_nvx_bundled::OFFICIAL_BUNDLE_URL,
-        "https://github.com/microsoft/nvx/releases/download/v0.1.0-dev.0430ce79d125/aci-edge-sandboxes.zip"
+        "https://github.com/Azure/aci-edge-sandbox/releases/download/v0.1.0-build188642429/aci-edge-sandboxes-0.1.0-build188642429.zip"
     );
     assert_eq!(
         build_nvx_bundled::OFFICIAL_BUNDLE_ZIP_SHA256,
-        "98e3d6011b0664fad6fa783768370a34209639463f5ab812b7776840660ac24e"
+        "cad4db7c574a73aaa1c5a07e7a740cd2b01d5b83c62c81b2196d63bad9ecc126"
     );
-    assert_eq!(build_nvx_bundled::OFFICIAL_BUNDLE_FILES.len(), 18);
+    assert_eq!(build_nvx_bundled::OFFICIAL_BUNDLE_FILES.len(), 147);
 }

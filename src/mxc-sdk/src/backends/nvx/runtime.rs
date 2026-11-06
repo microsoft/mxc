@@ -14,8 +14,8 @@ use crate::mxc_common::script_runner::RunCancellation;
 
 use super::abi::{
     map_error_body, AgentLibrary, BundleSource, Capabilities, CpuProfile, Event, ExecEnd,
-    ExecInput, ExecOutcome, ExecRequest, HostInfo, ImageSource, ProvisionInput, RuntimeSource,
-    SandboxDiagnostics, SandboxSpec, SetupConfig,
+    ExecInput, ExecOutcome, ExecRequest, HostInfo, ImageRegistration, ImageSource,
+    PlatformSnapshots, ProvisionInput, RuntimeSource, SandboxDiagnostics, SandboxSpec, SetupConfig,
 };
 
 pub(super) const ARTIFACTS_DIR_ENV: &str = "ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR";
@@ -23,20 +23,28 @@ pub(super) const BESIDE_EXE_DIR: &str = "aci-edge-sandboxes";
 pub(super) const SOURCE_MANIFEST: &str = "SOURCE-MANIFEST.json";
 
 pub(super) const APPROVED_MANIFEST_SHA256: &str =
-    "d5487737b07d663d983373dec82d917bbfcab58e39fed45b6642e8885c3fb01b";
+    "33468418005a55daa9d1c23e1663d9da54af76fbb56f4c26cbb419ab6d9c8572";
 pub(super) const APPROVED_DLL_SHA256: &str =
-    "a203e58b97a642bd4a68824c0387965541895b25582e18db6f55e28947f5f135";
+    "d30a5058ab4765728f0422f43678ad46831d17d7677a82fba0cdcd0ed4ea4343";
 pub(super) const APPROVED_OPENVMM_SHA256: &str =
-    "697f8221e62a1ea4efb3846fefde6f595c89f4f81c0153a2609bf6fb4c81ea9e";
+    "adf2df9a147afd6cc31db74c9b98b3488845d1812cca0bd482c3020b9dd12ad9";
 pub(super) const APPROVED_KERNEL_SHA256: &str =
-    "b36ab45b22d1c14438047b24c3724f54cc71dd03601d0f3cbdca11438f40e768";
+    "1f0d15e9667ad506e4e98ca24eaca5e6aa69266b6069fa8fd848813457bf5c62";
 pub(super) const APPROVED_INITRD_SHA256: &str =
-    "5e42d4617c1508e9116df8c330c0ff72243e954d7f132091ecdecfc743d904ed";
+    "f566132af956284c70ff1dc11912b7eee95bbd7414957e0126a010d7e6ea02f1";
 
 const HOST_TIMEOUT_SLACK_MS: u64 = 30_000;
 pub(super) const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const STARTUP_LOG_LIMIT: usize = 8 * 1024;
 const CANCELLATION_POLL_MS: u64 = 100;
+
+// Sandboxes use the agent's default resources, one virtual processor and 256 MiB of memory, so the
+// smallest templates fit every sandbox.
+const PLATFORM_SNAPSHOTS: PlatformSnapshots = PlatformSnapshots {
+    enabled: true,
+    max_vcpus: 1,
+    max_memory_mib: 256,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SandboxId {
@@ -86,7 +94,7 @@ pub(super) trait SandboxClient {
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
     fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError>;
-    fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
+    fn start(&self, sandbox_id: &SandboxId, logger: &mut Logger) -> Result<(), MxcError>;
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError>;
     fn exec_and_wait(
         &self,
@@ -164,7 +172,7 @@ impl Drop for NvxClient {
     }
 }
 
-fn agent_setup(state_root: &Path, bundle_dir: PathBuf) -> SetupConfig {
+fn agent_setup(state_root: &Path, bundle_dir: PathBuf, platform_snapshots: bool) -> SetupConfig {
     SetupConfig {
         schema_version: 1,
         state_root: state_root.to_path_buf(),
@@ -175,14 +183,20 @@ fn agent_setup(state_root: &Path, bundle_dir: PathBuf) -> SetupConfig {
             },
         },
         cpu_profile: CpuProfile::Host,
+        platform_snapshots: platform_snapshots.then_some(PLATFORM_SNAPSHOTS),
     }
 }
 
-pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
+/// Opens the agent for `state_root`. With `platform_snapshots`, the first open of the directory
+/// boots and captures the templates that later sandboxes start as clones of.
+pub(super) fn create_client(
+    state_root: &Path,
+    platform_snapshots: bool,
+) -> Result<NvxClient, MxcError> {
     let bundle_dir = discover_bundle_dir()?;
     let dll_path = bundle_dir.join("bin").join("aci_edge_agent.dll");
     let library = AgentLibrary::load_verified(&dll_path, APPROVED_DLL_SHA256)?;
-    let setup = agent_setup(state_root, bundle_dir);
+    let setup = agent_setup(state_root, bundle_dir, platform_snapshots);
     let host = library.host_open(&setup)?;
     let mut client = NvxClient::from_library(library, host);
     let info = match client.library.host_info(client.host) {
@@ -555,14 +569,29 @@ impl SandboxClient for NvxClient {
     }
 
     fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError> {
+        // The agent provisions only registered images. Registering a reference that the state
+        // directory already holds reuses it without pulling.
+        if let Some(ImageSource::Reference(reference)) = &input.spec.image {
+            self.library.image_register(
+                self.host,
+                &ImageRegistration {
+                    reference: reference.clone(),
+                },
+            )?;
+        }
         let reply = self.library.provision(self.host, input)?;
         SandboxId::from_token(&reply.token)
     }
 
-    fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
-        self.library
-            .start(self.host, sandbox_id.token())
-            .map(|_| ())
+    fn start(&self, sandbox_id: &SandboxId, logger: &mut Logger) -> Result<(), MxcError> {
+        let result = self.library.start(self.host, sandbox_id.token())?;
+        // The metadata says whether the sandbox started as a clone of a template, or why it cold
+        // booted.
+        logger.log_diagnostic_line(&format!(
+            "NVX sandbox started: {}",
+            serde_json::Value::Object(result.metadata.unwrap_or_default())
+        ));
+        Ok(())
     }
 
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError> {
@@ -686,7 +715,7 @@ mod tests {
     #[test]
     fn signed_library_validates_image_and_policy_without_provisioning() {
         let state_root = tempfile::tempdir().unwrap();
-        let mut client = create_client(state_root.path()).unwrap();
+        let mut client = create_client(state_root.path(), false).unwrap();
         let result = (|| {
             let capabilities = client.capabilities()?;
             assert!(capabilities.spec.image_reference);
@@ -753,6 +782,7 @@ mod tests {
         cancel_on_exec: Option<RunCancellation>,
         cancel_on_exit: Option<RunCancellation>,
         exec_started: bool,
+        inputs: Vec<String>,
     }
 
     static FAKE_EXECS: OnceLock<Mutex<std::collections::BTreeMap<u64, FakeExecState>>> =
@@ -780,6 +810,7 @@ mod tests {
                     cancel_on_exec: None,
                     cancel_on_exit: None,
                     exec_started: false,
+                    inputs: Vec::new(),
                 },
             );
         handle
@@ -921,6 +952,76 @@ mod tests {
         STATUS_INVALID_HANDLE
     }
 
+    /// Records `call` and its input for the fake host `host`, then returns `reply`.
+    fn fake_call_replying(
+        host: u64,
+        call: &'static str,
+        input: *const u8,
+        input_len: usize,
+        reply: &[u8],
+        out: *mut *mut u8,
+        len: *mut usize,
+    ) -> i32 {
+        let mut map = FAKE_EXECS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(state) = map.get_mut(&host) else {
+            return STATUS_INVALID_HANDLE;
+        };
+        state.calls.push(call);
+        let input = unsafe { std::slice::from_raw_parts(input, input_len) };
+        state
+            .inputs
+            .push(String::from_utf8_lossy(input).into_owned());
+        alloc_buf(reply, out, len);
+        STATUS_OK
+    }
+
+    unsafe extern "C" fn fake_image_register(
+        host: u64,
+        input: *const u8,
+        input_len: usize,
+        out: *mut *mut u8,
+        len: *mut usize,
+    ) -> i32 {
+        let reply = format!(
+            r#"{{"id":"sha256:{}","path":"image","length":1,"trusted":false,"intact":true}}"#,
+            "0".repeat(64)
+        );
+        fake_call_replying(
+            host,
+            "register",
+            input,
+            input_len,
+            reply.as_bytes(),
+            out,
+            len,
+        )
+    }
+
+    unsafe extern "C" fn fake_provision(
+        host: u64,
+        input: *const u8,
+        input_len: usize,
+        out: *mut *mut u8,
+        len: *mut usize,
+    ) -> i32 {
+        let reply = br#"{"token":"0123456789abcdef0123456789abcdef"}"#;
+        fake_call_replying(host, "provision", input, input_len, reply, out, len)
+    }
+
+    unsafe extern "C" fn fake_start(
+        host: u64,
+        input: *const u8,
+        input_len: usize,
+        out: *mut *mut u8,
+        len: *mut usize,
+    ) -> i32 {
+        let reply = br#"{"metadata":{"bootMode":"clone","template":{"class":"noNic"}}}"#;
+        fake_call_replying(host, "start", input, input_len, reply, out, len)
+    }
+
     unsafe extern "C" fn fake_validate_exec(
         host: u64,
         input: *const u8,
@@ -1051,8 +1152,8 @@ mod tests {
                 probe: fake_probe,
                 validate_provision: fake_call_invalid,
                 validate_exec: fake_validate_exec,
-                provision: fake_call_invalid,
-                start: fake_call_invalid,
+                provision: fake_provision,
+                start: fake_start,
                 stop: fake_call_invalid,
                 deprovision: fake_call_invalid,
                 diagnostics: fake_diagnostics,
@@ -1063,7 +1164,7 @@ mod tests {
                 exec_close_input: fake_query_invalid,
                 exec_cancel: fake_query_cancel,
                 exec_release: fake_release,
-                image_register: fake_call_invalid,
+                image_register: fake_image_register,
                 image_list: fake_query_invalid,
                 image_verify: fake_call_invalid,
                 image_unregister: fake_call_invalid,
@@ -1406,7 +1507,7 @@ mod tests {
     #[test]
     fn real_staged_native_validation_checks_process_limits_without_provisioning() {
         let state_root = tempfile::tempdir().unwrap();
-        let mut client = create_client(state_root.path()).unwrap();
+        let mut client = create_client(state_root.path(), false).unwrap();
         let command = ExecRequest::command_line("printf forbidden");
         client.validate_exec(&command).unwrap();
         let boundary = command
@@ -1550,8 +1651,8 @@ mod tests {
     }
 
     #[test]
-    fn agent_setup_selects_host_cpu_profile() {
-        let setup = agent_setup(Path::new(r"C:\state"), PathBuf::from(r"C:\bundle"));
+    fn agent_setup_selects_host_cpu_profile_and_platform_snapshots() {
+        let setup = agent_setup(Path::new(r"C:\state"), PathBuf::from(r"C:\bundle"), true);
         let json = serde_json::to_value(&setup).unwrap();
         assert_eq!(
             json,
@@ -1565,9 +1666,56 @@ mod tests {
                     }
                 },
                 "cpuProfile": "host",
+                "platformSnapshots": {"enabled": true, "maxVcpus": 1, "maxMemoryMib": 256},
             })
         );
         assert_eq!(serde_json::from_value::<SetupConfig>(json).unwrap(), setup);
+
+        let validation = agent_setup(Path::new(r"C:\state"), PathBuf::from(r"C:\bundle"), false);
+        let json = serde_json::to_value(&validation).unwrap();
+        assert!(json.get("platformSnapshots").is_none(), "{json}");
+    }
+
+    #[test]
+    fn provision_registers_the_image_first_and_start_logs_how_the_sandbox_booted() {
+        let handle = register_fake_exec(Vec::new());
+        let mut client = NvxClient::from_library(fake_library(), handle);
+        let input = ProvisionInput {
+            request: Default::default(),
+            spec: sandbox_spec("mcr.microsoft.com/azurelinux/base/core:3.0").unwrap(),
+        };
+        let sandbox_id = client.provision(&input).unwrap();
+        let log_directory = tempfile::tempdir().unwrap();
+        let log_path = log_directory.path().join("diagnostics.log");
+        let mut logger = Logger::new(Mode::Buffer);
+        logger.enable_file_sink(&log_path).unwrap();
+        client.start(&sandbox_id, &mut logger).unwrap();
+        drop(logger);
+
+        assert_eq!(fake_calls(handle), ["register", "provision", "start"]);
+        let inputs = FAKE_EXECS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)[&handle]
+            .inputs
+            .clone();
+        assert_eq!(
+            inputs,
+            [
+                r#"{"reference":"mcr.microsoft.com/azurelinux/base/core:3.0"}"#.to_owned(),
+                serde_json::to_string(&input).unwrap(),
+                sandbox_id.token().to_owned(),
+            ]
+        );
+        let log = fs::read_to_string(&log_path).unwrap();
+        assert!(
+            log.contains(
+                r#"NVX sandbox started: {"bootMode":"clone","template":{"class":"noNic"}}"#
+            ),
+            "{log}"
+        );
+        client.close().unwrap();
     }
 
     #[test]
@@ -1616,6 +1764,7 @@ mod tests {
                 },
             },
             cpu_profile: CpuProfile::Host,
+            platform_snapshots: None,
         };
         let bad_host = lib.host_open(&bad_setup).unwrap_err();
         assert_eq!(bad_host.code, MxcErrorCode::BackendUnavailable);

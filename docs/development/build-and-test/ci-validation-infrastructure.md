@@ -275,6 +275,9 @@ check that traffic through a proxy works while direct connections are blocked,
 and that interrupting startup or execution removes the VM and leaves the agent
 state directory usable. Another scenario checks that later requests, including
 concurrent ones, boot a registered image while its registry is unreachable.
+A third checks that sandboxes start as clones of the platform snapshot
+templates, that validation captures no templates, and that a host that cannot
+capture them cold boots sandboxes.
 The executor and captured JSON execution scenarios also check that the guest
 uses the host CPU profile.
 

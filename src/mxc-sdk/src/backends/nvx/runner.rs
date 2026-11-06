@@ -4,7 +4,7 @@
 //! Minimal create-and-run adapter for the signed bundled NVX agent.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::mxc_common::audit::{AuditEvent, AuditEventName};
 use crate::mxc_common::logger::Logger;
@@ -72,7 +72,10 @@ impl NvxRunner {
 
     fn validate_dry_run(request: &ExecutionRequest) -> Result<(), MxcError> {
         super::policy::validate_request(request)?;
-        let (_, mut client) = open_client()?;
+        // Capturing platform snapshot templates boots VMs, so validation opens the agent without
+        // them.
+        let state_root = super::runtime::state_root()?;
+        let mut client = super::runtime::create_client(&state_root, false)?;
         validate_with_client(&mut client, request)
     }
 
@@ -83,7 +86,8 @@ impl NvxRunner {
     ) -> Result<CapturedRun, MxcError> {
         super::policy::validate_request(request)?;
         self.cancellation.check()?;
-        let (state_root, mut client) = open_client()?;
+        let state_root = super::runtime::state_root()?;
+        let mut client = open_run_client(&state_root, logger)?;
         run_with_client(
             &mut client,
             &state_root,
@@ -94,10 +98,15 @@ impl NvxRunner {
     }
 }
 
-fn open_client() -> Result<(PathBuf, NvxClient), MxcError> {
-    let state_root = super::runtime::state_root()?;
-    let client = super::runtime::create_client(&state_root)?;
-    Ok((state_root, client))
+/// Opens the agent with platform snapshots, so that sandboxes start as clones of its templates. A
+/// host that cannot capture the templates cold boots sandboxes instead.
+fn open_run_client(state_root: &Path, logger: &mut Logger) -> Result<NvxClient, MxcError> {
+    super::runtime::create_client(state_root, true).or_else(|error| {
+        logger.log_diagnostic_line(&format!(
+            "NVX platform snapshots are unavailable, so sandboxes cold boot: {error}"
+        ));
+        super::runtime::create_client(state_root, false)
+    })
 }
 
 fn request_has_sensitive_proxy(request: &ExecutionRequest) -> bool {
@@ -199,7 +208,7 @@ fn run_with_client(
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
-        if let Err(error) = client.start(&sandbox_id) {
+        if let Err(error) = client.start(&sandbox_id, logger) {
             let mut error = protect("start", error);
             if sensitive_proxy {
                 error.message.push_str("; startup diagnostics withheld");
@@ -713,7 +722,7 @@ mod tests {
             self.provision_res.clone()
         }
 
-        fn start(&self, _sandbox_id: &SandboxId) -> Result<(), MxcError> {
+        fn start(&self, _sandbox_id: &SandboxId, _logger: &mut Logger) -> Result<(), MxcError> {
             self.record("start");
             self.start_res.clone()
         }
