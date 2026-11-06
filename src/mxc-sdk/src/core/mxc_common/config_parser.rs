@@ -14,6 +14,7 @@ use crate::mxc_common::models::{
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
 use crate::mxc_common::state_aware_input::StateAwareInput;
+#[cfg(test)]
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::mxc_common::state_aware_request::{
     MxcRequest, ParsedStateAwareRequest, Phase, TargetIdKind,
@@ -175,7 +176,7 @@ pub fn load_one_shot_request_from_contract(
         }
     };
 
-    let result = normalize_common_request_ir(config, logger, true);
+    let result = normalize_common_request_ir(config, logger, true, None);
     log_one_shot_error(logger, &result);
     result
 }
@@ -436,7 +437,7 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
     match adapted {
         crate::mxc_common::config_contract_adapters::v0_9::AdaptedConfigRequest::OneShot(
             config,
-        ) => normalize_common_request_ir(config, logger, true)
+        ) => normalize_common_request_ir(config, logger, true, None)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot),
         crate::mxc_common::config_contract_adapters::v0_9::AdaptedConfigRequest::StateAware(
@@ -529,7 +530,7 @@ fn parse_exact_v1_0(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
     match adapted {
         crate::mxc_common::config_contract_adapters::v1_0::AdaptedConfigRequest::OneShot(
             config,
-        ) => normalize_common_request_ir(config, logger, true)
+        ) => normalize_common_request_ir(config, logger, true, None)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot),
         crate::mxc_common::config_contract_adapters::v1_0::AdaptedConfigRequest::StateAware(
@@ -612,7 +613,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
 
     match adapted {
         crate::mxc_common::config_contract_adapters::dev::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true)
+            normalize_common_request_ir(config, logger, true, None)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
@@ -1298,12 +1299,13 @@ pub(crate) fn map_wire_containment(c: Option<&wire::Containment>) -> Containment
     }
 }
 
-fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment> {
+fn state_aware_containment_from_id(sandbox_id: &str) -> Option<ContainmentBackend> {
     match sandbox_id.split_once(':')?.0 {
-        "wslc" => Some(wire::Containment::Wslc),
-        "wsb" => Some(wire::Containment::WindowsSandbox),
-        "iso" => Some(wire::Containment::IsolationSession),
-        "microvm" => Some(wire::Containment::Microvm),
+        "wslc" => Some(ContainmentBackend::Wslc),
+        "wsb" => Some(ContainmentBackend::WindowsSandbox),
+        "iso" => Some(ContainmentBackend::IsolationSession),
+        "microvm" => Some(ContainmentBackend::MicroVm),
+        "w365" => Some(ContainmentBackend::W365Agents),
         _ => None,
     }
 }
@@ -1382,6 +1384,7 @@ fn normalize_common_request_ir(
     cfg: crate::mxc_common::common_request_ir::CommonRequestIR,
     logger: &mut Logger,
     require_process: bool,
+    lifecycle_containment: Option<ContainmentBackend>,
 ) -> Result<ExecutionRequest, WxcError> {
     let _ignored_metadata = (&cfg.schema, &cfg.comment);
     let microvm_memory_mib = cfg.microvm.as_ref().and_then(|config| config.memory_mib);
@@ -1454,7 +1457,12 @@ fn normalize_common_request_ir(
     // Containment backend selection. The wire enum has already constrained the
     // value to a known variant (invalid strings fail at deserialize); abstract
     // intents and the omitted case resolve to the OS-native backend here.
-    let containment = map_wire_containment(cfg.containment.as_ref());
+    let requested_kind = lifecycle_containment.as_ref().map_or_else(
+        || requested_sandbox_kind(cfg.containment.as_ref()),
+        ContainmentBackend::wire_name,
+    );
+    let containment =
+        lifecycle_containment.unwrap_or_else(|| map_wire_containment(cfg.containment.as_ref()));
 
     validate_single_backend_section(containment.clone(), &present_backend_sections)?;
 
@@ -1690,7 +1698,7 @@ fn normalize_common_request_ir(
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
     let telemetry = cfg.telemetry.map(|raw| TelemetryConfig {
         enabled: raw.enabled,
-        requested_sandbox_kind: Some(requested_sandbox_kind(cfg.containment.as_ref())),
+        requested_sandbox_kind: Some(requested_kind),
     });
 
     // UI section. Capture presence before the typed mapping consumes `ui`:
@@ -1742,24 +1750,12 @@ fn normalize_state_aware(
     let (common, operation) = input.into_parts()?;
     let mut request = normalize_state_aware_common(
         common,
-        NormalizationContext {
-            phase: operation.phase(),
-            containment: match &operation {
-                StateAwareOperation::ProvisionSession(_)
-                | StateAwareOperation::DeprovisionSession { .. } => Some(wire::Containment::Wslc),
-                StateAwareOperation::Provision(provision) => Some(match provision {
-                    StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
-                    StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
-                    StateAwareProvision::MicroVm(_) => wire::Containment::Microvm,
-                    StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
-                }),
-                StateAwareOperation::Start { .. }
-                | StateAwareOperation::Exec { .. }
-                | StateAwareOperation::Stop { .. }
-                | StateAwareOperation::Deprovision { .. } => None,
-            },
-            sandbox_id: operation.sandbox_id(),
-        },
+        operation.phase(),
+        operation.containment().or_else(|| {
+            operation
+                .sandbox_id()
+                .and_then(state_aware_containment_from_id)
+        }),
         logger,
     )?;
     if !preserve_source_contract {
@@ -1778,27 +1774,16 @@ pub fn normalize_sdk_state_aware_request(
     normalize_state_aware(input.into_normalization_input()?, logger, false)
 }
 
-/// Temporary routing view; production derives it exclusively from the operation.
-struct NormalizationContext<'a> {
-    phase: Phase,
-    containment: Option<wire::Containment>,
-    sandbox_id: Option<&'a str>,
-}
-
 fn normalize_state_aware_common(
-    mut common: crate::mxc_common::common_request_ir::CommonRequestIR,
-    context: NormalizationContext<'_>,
+    common: crate::mxc_common::common_request_ir::CommonRequestIR,
+    phase: Phase,
+    containment: Option<ContainmentBackend>,
     logger: &mut Logger,
 ) -> Result<ExecutionRequest, WxcError> {
     let network_supplied = common.network.is_some();
-    common.containment = if context.phase.routes_by_containment() {
-        context.containment
-    } else {
-        context.sandbox_id.and_then(state_aware_containment_from_id)
-    };
-    let require_process = context.phase == Phase::Exec;
-    let mut request = normalize_common_request_ir(common, logger, require_process)?;
-    if context.phase != Phase::Provision && !network_supplied {
+    let require_process = phase == Phase::Exec;
+    let mut request = normalize_common_request_ir(common, logger, require_process, containment)?;
+    if phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
     }
@@ -2044,6 +2029,9 @@ mod tests {
         WindowsSandbox,
         MicroVm(Option<Option<u32>>),
         Wslc(Option<(Option<String>, Option<String>)>),
+        W365Agents(
+            Option<Option<crate::mxc_common::state_aware_operation::W365AgentsProvisionConfig>>,
+        ),
     }
 
     impl From<&MxcRequest> for RequestSnapshot {
@@ -2072,6 +2060,9 @@ mod tests {
                                 ProvisionSnapshot::Wslc(config.as_ref().map(|config| {
                                     (config.image.clone(), config.image_tar_path.clone())
                                 }))
+                            }
+                            StateAwareProvision::W365Agents(config) => {
+                                ProvisionSnapshot::W365Agents(config.clone())
                             }
                         }),
                         _ => None,

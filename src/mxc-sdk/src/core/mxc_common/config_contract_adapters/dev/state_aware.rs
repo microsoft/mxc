@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::w365_agents;
 use crate::mxc_common::config_contract_adapters::dev::common::{
     convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
@@ -204,14 +203,14 @@ pub(super) fn provision_into_input(
                 telemetry,
                 w365_agents,
             } = request;
-            Ok(StateAwareInput::W365Agents {
-                common: state_aware_common(schema, comment, version, telemetry),
-                operation: w365_agents::Input::Provision(
+            StateAwareInput::new(
+                state_aware_common(schema, comment, version, telemetry),
+                StateAwareOperation::Provision(StateAwareProvision::W365Agents(
                     w365_agents
                         .into_option()
                         .map(|wrapper| wrapper.provision.into_option().map(Into::into)),
-                ),
-            })
+                )),
+            )
         }
     }
 }

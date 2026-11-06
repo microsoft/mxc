@@ -39,6 +39,26 @@ pub struct LinuxExecutorArguments {
     #[arg(long)]
     experimental: bool,
 
+    /// Container lifecycle operation; routing is supplied outside request JSON.
+    #[arg(long, conflicts_with_all = ["delete", "available_backends", "setup_hyperlight"])]
+    operation: Option<mxc_sdk::mxc_common::state_aware_request::Phase>,
+
+    /// Opaque identity returned by provision.
+    #[arg(
+        long = "container-id",
+        requires = "operation",
+        conflicts_with = "session_id"
+    )]
+    container_id: Option<String>,
+
+    /// Placement-session identity.
+    #[arg(
+        long = "session-id",
+        requires = "operation",
+        conflicts_with = "container_id"
+    )]
+    session_id: Option<String>,
+
     /// Report host backend availability as JSON and exit
     #[arg(long = "available-backends")]
     available_backends: bool,
@@ -92,8 +112,8 @@ impl LinuxExecutorArguments {
         self.dry_run
     }
 
-    pub fn get_request(&self, logger: &mut Logger) -> ExecutionRequest {
-        let (config_data, is_base64) = if let Some(ref b64) = self.config_base64 {
+    fn config_input(&self) -> (String, bool) {
+        if let Some(ref b64) = self.config_base64 {
             (b64.clone(), true)
         } else if let Some(ref path) = self.config {
             (path.clone(), false)
@@ -103,8 +123,42 @@ impl LinuxExecutorArguments {
             emit_mxc_error_exit(&MxcError::malformed_request(
                 "No config provided. Use a positional path, --config, or --config-base64",
             ));
-        };
+        }
+    }
 
+    pub fn run_lifecycle(&self, logger: &mut Logger) -> Option<i32> {
+        self.operation.map(|phase| {
+            use mxc_sdk::mxc_common::config_parser::CliTargetId;
+            let target_id = self
+                .container_id
+                .as_deref()
+                .map(|value| CliTargetId {
+                    flag: "--container-id",
+                    value,
+                })
+                .or_else(|| {
+                    self.session_id.as_deref().map(|value| CliTargetId {
+                        flag: "--session-id",
+                        value,
+                    })
+                });
+            let (input, is_base64) = self.config_input();
+            mxc_sdk::mxc_engine::run_state_aware_cli(
+                &input,
+                is_base64,
+                mxc_sdk::mxc_engine::LifecycleCliOptions {
+                    phase,
+                    target_id,
+                    experimental: self.experimental,
+                    dry_run: self.dry_run,
+                },
+                logger,
+            )
+        })
+    }
+
+    pub fn get_request(&self, logger: &mut Logger) -> ExecutionRequest {
+        let (config_data, is_base64) = self.config_input();
         let mut request = match load_one_shot_request(&config_data, logger, is_base64) {
             Ok(r) => r,
             Err(error) => {

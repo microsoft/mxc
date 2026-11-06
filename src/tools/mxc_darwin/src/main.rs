@@ -5,9 +5,9 @@
 //!
 //! Mirrors the CLI shape of `lxc-exec` (clap args, config loading, dry-run,
 //! log-file). On macOS it dispatches to `SeatbeltScriptRunner`; on every
-//! other platform it prints an explanatory error and exits 1 — that way
-//! `cargo build -p mxc_darwin` succeeds in CI from any host, while runtime
-//! use still requires macOS.
+//! other platform local execution prints an explanatory error and exits 1.
+//! Explicit lifecycle requests delegate to the engine, including remote
+//! backends, without adding backend selection to this binary.
 
 use std::fmt::Write;
 
@@ -48,6 +48,26 @@ struct Cli {
     /// Enable experimental features
     #[arg(long)]
     experimental: bool,
+
+    /// Container lifecycle operation; routing is supplied outside request JSON.
+    #[arg(long)]
+    operation: Option<mxc_sdk::mxc_common::state_aware_request::Phase>,
+
+    /// Opaque identity returned by provision.
+    #[arg(
+        long = "container-id",
+        requires = "operation",
+        conflicts_with = "session_id"
+    )]
+    container_id: Option<String>,
+
+    /// Placement-session identity.
+    #[arg(
+        long = "session-id",
+        requires = "operation",
+        conflicts_with = "container_id"
+    )]
+    session_id: Option<String>,
 
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
@@ -100,6 +120,35 @@ fn main() {
         if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
             emit_warning_envelopes(&[format!("could not open log file '{log_path}': {e}")]);
         }
+    }
+
+    if let Some(phase) = cli.operation {
+        use mxc_sdk::mxc_common::config_parser::CliTargetId;
+        let target_id = cli
+            .container_id
+            .as_deref()
+            .map(|value| CliTargetId {
+                flag: "--container-id",
+                value,
+            })
+            .or_else(|| {
+                cli.session_id.as_deref().map(|value| CliTargetId {
+                    flag: "--session-id",
+                    value,
+                })
+            });
+        let code = mxc_sdk::mxc_engine::run_state_aware_cli(
+            &config_data,
+            is_base64,
+            mxc_sdk::mxc_engine::LifecycleCliOptions {
+                phase,
+                target_id,
+                experimental: cli.experimental,
+                dry_run: cli.dry_run,
+            },
+            &mut logger,
+        );
+        std::process::exit(code);
     }
 
     let mut request = match load_one_shot_request(&config_data, &mut logger, is_base64) {

@@ -5,6 +5,8 @@ pub mod bubblewrap {
     pub mod common;
 }
 
+pub(crate) mod w365agents;
+
 pub mod hyperlight {
     pub mod common;
 }

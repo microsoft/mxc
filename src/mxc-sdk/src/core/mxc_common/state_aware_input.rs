@@ -13,11 +13,6 @@ pub(crate) enum StateAwareInput {
         common: CommonRequestIR,
         operation: StateAwareOperation,
     },
-    /// Contract-only input must never become an executable runtime operation.
-    W365Agents {
-        common: CommonRequestIR,
-        operation: crate::mxc_common::config_contract_adapters::dev::w365_agents::Input,
-    },
 }
 
 impl StateAwareInput {
@@ -75,10 +70,6 @@ impl StateAwareInput {
     pub(crate) fn into_parts(self) -> Result<(CommonRequestIR, StateAwareOperation), WxcError> {
         match self {
             Self::Implemented { common, operation } => Ok((common, operation)),
-            Self::W365Agents { common, operation } => {
-                drop(common);
-                Err(operation.unavailable())
-            }
         }
     }
 }

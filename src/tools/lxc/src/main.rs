@@ -60,6 +60,10 @@ fn main() {
         process::exit(if success { 0 } else { 1 });
     }
 
+    if let Some(exit_code) = arguments.run_lifecycle(&mut logger) {
+        process::exit(exit_code);
+    }
+
     // User wants to run a request.
     // Make the request.
     let request = arguments.get_request(&mut logger);

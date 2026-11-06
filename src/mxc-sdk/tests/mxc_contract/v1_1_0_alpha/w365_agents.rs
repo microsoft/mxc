@@ -60,24 +60,22 @@ fn w365_agents_contract_acceptance_never_enables_execution() {
             let source = value.to_string();
             dev::parse_request(&source)
                 .expect("structural acceptance is independent of availability");
-            if phase != "provision" {
+            {
                 let parsed = load_mxc_request_from_json(&source, &mut Logger::new(Mode::Buffer))
-                    .expect("later phases use normal lifecycle adaptation");
+                    .expect("normal lifecycle adaptation");
                 let mxc_sdk::mxc_common::state_aware_request::MxcRequest::StateAware(parsed) =
                     parsed
                 else {
                     panic!("expected lifecycle request");
                 };
-                assert_eq!(parsed.sandbox_id(), Some(ID));
-                let error = mxc_sdk::mxc_common::state_aware_dispatch::resolve_backend(&parsed)
-                    .expect_err("W365 is not registered");
-                assert_eq!(error.code, MxcErrorCode::UnsupportedContainment);
+                assert!(!parsed.request().experimental_enabled);
+                if phase != "provision" { assert_eq!(parsed.sandbox_id(), Some(ID)); }
+                assert_eq!(
+                    mxc_sdk::mxc_common::state_aware_dispatch::resolve_backend(&parsed).unwrap(),
+                    mxc_sdk::mxc_common::models::ContainmentBackend::W365Agents,
+                );
                 continue;
             }
-            let error = load_mxc_request_from_json(&source, &mut Logger::new(Mode::Buffer))
-                .expect_err("no runtime operation may be produced for this backend");
-            assert_eq!(error.to_mxc_error().code, MxcErrorCode::BackendUnavailable);
-            assert!(error.to_mxc_error().message.contains("not implemented"));
         }
     }
 }
@@ -156,16 +154,23 @@ fn w365_agents_identity_field_types_are_enforced() {
 }
 
 #[test]
-fn w365_agents_supported_user_types_remain_unavailable() {
+fn w365_agents_supported_user_types_preserve_experimental_authorization() {
     for user_type in ["Local", "HumanUser", "Agentic"] {
         let mut value = request("provision");
         value["w365Agents"] = json!({"provision":settings("provision")});
         value["w365Agents"]["provision"]["userType"] = json!(user_type);
         let source = value.to_string();
         dev::parse_request(&source).expect("supported user type");
-        let error = load_mxc_request_from_json(&source, &mut Logger::new(Mode::Buffer))
-            .expect_err("contract support must not enable backend execution");
-        assert_eq!(error.to_mxc_error().code, MxcErrorCode::BackendUnavailable);
+        let parsed = load_mxc_request_from_json(&source, &mut Logger::new(Mode::Buffer))
+            .expect("normal lifecycle adaptation");
+        let mxc_sdk::mxc_common::state_aware_request::MxcRequest::StateAware(parsed) = parsed else {
+            panic!("expected lifecycle request");
+        };
+        assert!(!parsed.request().experimental_enabled);
+        assert_eq!(
+            mxc_sdk::mxc_common::state_aware_dispatch::resolve_backend(&parsed).unwrap(),
+            mxc_sdk::mxc_common::models::ContainmentBackend::W365Agents,
+        );
     }
 }
 
@@ -239,11 +244,7 @@ fn w365_agents_dev_sdk_refuses_every_phase_with_or_without_opt_in() {
                 "deprovision" => sdk::deprovision_container_json(&source, options).unwrap_err(),
                 _ => unreachable!(),
             };
-            let expected = if phase == "provision" {
-                mxc_sdk::v1::ErrorCode::BackendUnavailable
-            } else {
-                mxc_sdk::v1::ErrorCode::UnsupportedContainment
-            };
+            let expected = mxc_sdk::v1::ErrorCode::BackendUnavailable;
             assert_eq!(error.code, expected, "{phase}, experimental={experimental}");
             if phase == "exec" {
                 let error = sdk::spawn_in_container_json(&source, options)

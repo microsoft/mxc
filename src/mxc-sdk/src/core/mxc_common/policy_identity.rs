@@ -180,7 +180,9 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
             | StateAwareProvision::MicroVm(None)
-            | StateAwareProvision::Wslc(None),
+            | StateAwareProvision::Wslc(None)
+            // Pool/account coordinates are not containment policy.
+            | StateAwareProvision::W365Agents(_),
         ) => Value::Null,
 
         StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {

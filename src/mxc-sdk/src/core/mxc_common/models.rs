@@ -44,6 +44,9 @@ pub enum ContainmentBackend {
     /// Uses `bwrap` to create namespace-isolated processes without root
     /// privileges. Selected on the wire as `"bubblewrap"`.
     Bubblewrap,
+    /// Experimental remote Windows 365 checkout lifecycle.
+    #[serde(rename = "w365_agents")]
+    W365Agents,
 }
 
 impl ContainmentBackend {
@@ -60,6 +63,7 @@ impl ContainmentBackend {
             ContainmentBackend::IsolationSession => "isolation_session",
             ContainmentBackend::Seatbelt => "seatbelt",
             ContainmentBackend::Bubblewrap => "bubblewrap",
+            ContainmentBackend::W365Agents => "w365_agents",
         }
     }
 
@@ -75,6 +79,7 @@ impl ContainmentBackend {
             ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("isolationSession"),
             ContainmentBackend::Hyperlight => Some("hyperlight"),
+            ContainmentBackend::W365Agents => Some("w365Agents"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::MicroVm
             | ContainmentBackend::Vm => None,

@@ -33,6 +33,7 @@ mod backend_registry;
 mod dispatch;
 mod error;
 mod experimental;
+mod lifecycle_cli;
 mod platform;
 mod probe;
 #[cfg(target_os = "windows")]
@@ -44,6 +45,8 @@ mod state_aware;
 mod verbose_telemetry;
 
 pub use error::{Error, ErrorCode};
+#[doc(hidden)]
+pub use lifecycle_cli::{run_state_aware_cli, LifecycleCliOptions};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;
 pub use platform::{platform_support, BubblewrapNetworkSupport, PlatformSupport, ProxyEnforcement};
