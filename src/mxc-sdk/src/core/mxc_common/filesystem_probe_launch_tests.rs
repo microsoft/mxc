@@ -260,12 +260,12 @@ mod scenarios {
     #[test]
     #[ignore = "runs in backend validation with an external watchdog"]
     #[cfg(target_os = "linux")]
-    fn bubblewrap_denied_paths_reject_stalls() {
+    fn bubblewrap_mount_paths_reject_stalls() {
         run_cases(
             "bubblewrap",
             false,
-            "bubblewrap_denied_paths_reject_stalls",
-            &["bwrap-denied"],
+            "bubblewrap_mount_paths_reject_stalls",
+            &["bwrap-denied", "bwrap-granted"],
         );
     }
 

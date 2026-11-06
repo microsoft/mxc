@@ -185,6 +185,16 @@ Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites ski
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+The IsolationSession command-line suite also checks that piped and file stdin
+reach the workload when stdout is a console. A workload reads one line and
+returns a distinct exit code only if the line matches.
+
+The suite also runs `isolation_session_post_exit_output.json`. A child waits
+for the workload to exit, then writes numbered lines to stdout and stderr
+for about 30 seconds. The test requires every line, both final markers, and
+workload exit code 42. The streaming smoke test, by contrast, checks output
+while the workload is still running.
+
 Bubblewrap, LXC, and WSLC also run the prebuilt
 `mxc-filesystem-probe-tests` executable from their build artifact. These public
 SDK regressions block each policy probe in a subprocess, require a bounded
@@ -305,7 +315,7 @@ required cases fail the job even when the runner exits successfully.
 Every scheduled `isolation-session` job runs
 `run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle -CheckKeywords -SkipClean` against
 the architecture-matched telemetry test executor. That artifact is built with
-an empty `MXC_TELEMETRY_PROVIDER_GROUP_GUID` input, so the single registration
+an empty `MXC_TELEMETRY_COMPONENT_PATH` input, so the single registration
 has no UTC routing. Consent is granted only in a temporary test store (needed by
 the published contract; development Required collection ignores it) and policy is
 redirected to an isolated HKCU key; real user consent and HKLM policy are not

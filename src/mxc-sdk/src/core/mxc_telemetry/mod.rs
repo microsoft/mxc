@@ -35,7 +35,29 @@ mod provider {
     use std::sync::OnceLock;
 
     // One registration carries both event categories through the same group.
+    // The group literal is generated; the numeric metadata comes from
+    // compile-time environment variables set by the build script.
     include!(concat!(env!("OUT_DIR"), "/provider_def.rs"));
+
+    const fn build_u64(text: &str) -> u64 {
+        let bytes = text.as_bytes();
+        assert!(!bytes.is_empty(), "empty build metadata value");
+        let mut value = 0u64;
+        let mut i = 0;
+        while i < bytes.len() {
+            assert!(bytes[i].is_ascii_digit(), "build metadata must be decimal");
+            value = value * 10 + (bytes[i] - b'0') as u64;
+            i += 1;
+        }
+        value
+    }
+
+    const MXC_EVENT_KEYWORD: u64 = build_u64(env!("MXC_BUILD_EVENT_KEYWORD"));
+    const MXC_PRIVACY_TAG: u64 = build_u64(env!("MXC_BUILD_PRIVACY_TAG"));
+    const MXC_CRITICAL_EVENT_KEYWORD: u64 = build_u64(env!("MXC_BUILD_CRITICAL_EVENT_KEYWORD"));
+    const MXC_CRITICAL_PRIVACY_TAG: u64 = build_u64(env!("MXC_BUILD_CRITICAL_PRIVACY_TAG"));
+    const MXC_REQUIRED_COLLECTION_ELIGIBLE: bool =
+        build_u64(env!("MXC_BUILD_REQUIRED_COLLECTION_ELIGIBLE")) == 1;
 
     /// Whether this build may collect Required diagnostics without consent:
     /// routed through the internal group, or the debug-only local test mode.
@@ -57,12 +79,12 @@ mod provider {
         };
     }
 
-    /// Privacy-approved WinExt product identifier for
-    /// MXC (Microsoft Execution Containers).
-    pub(crate) const PRIVACY_PRODUCT_MXC: u16 = 11;
+    /// Privacy-approved WinExt product identifier for MXC, from build metadata.
+    pub(crate) const PRIVACY_PRODUCT_MXC: u16 = build_u64(env!("MXC_BUILD_PRIVACY_PRODUCT")) as u16;
 
-    /// WinExt permits only Client Diagnostic Data.
-    pub(crate) const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 = 1;
+    /// WinExt permits only Client Diagnostic Data; value from build metadata.
+    pub(crate) const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 =
+        build_u64(env!("MXC_BUILD_PRIVACY_DATA_CATEGORY")) as u16;
 
     /// Cached provider state, set once at init and read on every event.
     struct ProviderState {
@@ -831,15 +853,14 @@ mod tests {
             .next()
             .expect("provider source precedes tests");
 
-        assert!(provider_source.contains("const PRIVACY_PRODUCT_MXC: u16 = 11;"));
-        assert!(provider_source
-            .contains("const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 = 1;"));
+        assert!(provider_source.contains("PRIVACY_PRODUCT_MXC: u16 = build_u64("));
+        assert!(provider_source.contains("PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 ="));
         assert_eq!(
             provider_source
                 .matches("u16(\"PartA_PrivacyProduct\", &PRIVACY_PRODUCT_MXC)")
                 .count(),
             11,
-            "every MXC event must carry privacy product 11"
+            "every MXC event must carry the privacy product"
         );
         assert_eq!(
             provider_source
@@ -853,7 +874,7 @@ mod tests {
                 .matches("&PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA")
                 .count(),
             11,
-            "every MXC event must use Client Diagnostic Data category 1"
+            "every MXC event must carry the privacy data category"
         );
         assert_eq!(
             provider_source
@@ -1163,9 +1184,9 @@ mod provider_codegen_tests {
         let group = Some("11111111-2222-4333-8444-555555555555");
         let definition = generate_provider_def(group);
         assert_eq!(definition.matches("define_provider!").count(), 1);
-        let constants = generate_event_metadata_consts(group, false);
-        assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x0000_8000_0000_0000"));
-        assert!(constants.contains("MXC_CRITICAL_PRIVACY_TAG: u64 = 0x0000_0000_0100_0000"));
+        let metadata = event_metadata(group, false, None);
+        assert_eq!(metadata.critical_keyword, 0x0000_2000_0000_0000);
+        assert_eq!(metadata.critical_privacy_tag, 0x0000_0000_0002_0000);
     }
 
     #[test]
@@ -1209,30 +1230,58 @@ mod provider_codegen_tests {
 
     #[test]
     fn absent_guid_yields_local_only_event_metadata() {
-        let constants = generate_event_metadata_consts(None, false);
-        assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x1"));
-        assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x1"));
-        assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0"));
-        assert!(constants.contains("MXC_CRITICAL_PRIVACY_TAG: u64 = 0x0"));
-    }
-
-    #[test]
-    fn empty_guid_yields_local_only_event_metadata() {
-        let constants = generate_event_metadata_consts(Some(""), false);
-        assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x1"));
-        assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x1"));
-        assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0"));
-        assert!(constants.contains("MXC_CRITICAL_PRIVACY_TAG: u64 = 0x0"));
+        for group in [None, Some("")] {
+            let m = event_metadata(group, false, None);
+            assert_eq!(
+                (
+                    m.keyword,
+                    m.critical_keyword,
+                    m.privacy_tag,
+                    m.critical_privacy_tag
+                ),
+                (1, 1, 0, 0)
+            );
+            assert!(!m.eligible);
+        }
     }
 
     #[test]
     fn valid_guid_yields_telemetry_event_metadata() {
-        let constants =
-            generate_event_metadata_consts(Some("7f10def4-a258-5fea-510e-2c3bb976687f"), false);
-        assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x0000_4000_0000_0000"));
-        assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x0000_8000_0000_0000"));
-        assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0000_0000_0200_0000"));
-        assert!(constants.contains("MXC_CRITICAL_PRIVACY_TAG: u64 = 0x0000_0000_0100_0000"));
+        let m = event_metadata(Some("7f10def4-a258-5fea-510e-2c3bb976687f"), false, None);
+        assert_eq!(m.keyword, 0x0000_1000_0000_0000);
+        assert_eq!(m.critical_keyword, 0x0000_2000_0000_0000);
+        assert_eq!(m.privacy_tag, 0x0000_0000_0001_0000);
+        assert_eq!(m.critical_privacy_tag, 0x0000_0000_0002_0000);
+        assert!(m.eligible);
+    }
+
+    #[test]
+    fn component_metadata_drives_env_and_rejects_malformed_text() {
+        let group = "11111111-2222-4333-8444-555555555555";
+        let metadata =
+            parse_component_metadata(&format!("1;{group};0x10;0x20;0x30;0x40;0x5;0x6")).unwrap();
+        let m = event_metadata(Some(&metadata.group), false, Some(&metadata));
+        let env = metadata_rustc_env(&m);
+        for expected in [
+            "cargo::rustc-env=MXC_BUILD_EVENT_KEYWORD=16",
+            "cargo::rustc-env=MXC_BUILD_PRIVACY_TAG=32",
+            "cargo::rustc-env=MXC_BUILD_CRITICAL_EVENT_KEYWORD=48",
+            "cargo::rustc-env=MXC_BUILD_CRITICAL_PRIVACY_TAG=64",
+            "cargo::rustc-env=MXC_BUILD_PRIVACY_PRODUCT=5",
+            "cargo::rustc-env=MXC_BUILD_PRIVACY_DATA_CATEGORY=6",
+            "cargo::rustc-env=MXC_BUILD_REQUIRED_COLLECTION_ELIGIBLE=1",
+        ] {
+            assert!(env.iter().any(|d| d == expected), "{expected}");
+        }
+        for bad in [
+            "2;g;0x1;0x2;0x3;0x4;0x5;0x6",
+            "1;not-a-guid;0x1;0x2;0x3;0x4;0x5;0x6",
+            &format!("1;{group};1;0x2;0x3;0x4;0x5;0x6"),
+            &format!("1;{group};0x1;0x2;0x3;0x4;0x10000;0x6"),
+            &format!("1;{group};0x1"),
+        ] {
+            assert!(parse_component_metadata(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -1249,11 +1298,11 @@ mod provider_codegen_tests {
             })
             .is_err());
         }
-        let constants = generate_event_metadata_consts(None, true);
-        assert!(constants.contains("MXC_EVENT_KEYWORD: u64 = 0x0000_4000_0000_0000"));
-        assert!(constants.contains("MXC_CRITICAL_EVENT_KEYWORD: u64 = 0x0000_8000_0000_0000"));
-        assert!(constants.contains("MXC_PRIVACY_TAG: u64 = 0x0000_0000_0200_0000"));
-        assert!(constants.contains("MXC_CRITICAL_PRIVACY_TAG: u64 = 0x0000_0000_0100_0000"));
+        let m = event_metadata(None, true, None);
+        assert_eq!(m.keyword, 0x0000_1000_0000_0000);
+        assert_eq!(m.critical_keyword, 0x0000_2000_0000_0000);
+        assert_eq!(m.privacy_tag, 0x0000_0000_0001_0000);
+        assert_eq!(m.critical_privacy_tag, 0x0000_0000_0002_0000);
         assert!(generate_provider_def(None).contains("IS_UTC_ROUTED: bool = false"));
     }
 
@@ -1268,23 +1317,26 @@ mod provider_codegen_tests {
             assert!(definition.contains(&format!(
                 "define_provider!(MXC_PROVIDER, \"Microsoft.MXC\"{option});"
             )));
-            let constants = generate_event_metadata_consts(group, false);
-            let (keyword, critical_keyword, tag, critical_tag) = if group.is_some() {
+            let m = event_metadata(group, false, None);
+            let expected = if group.is_some() {
                 (
-                    "0x0000_4000_0000_0000",
-                    "0x0000_8000_0000_0000",
-                    "0x0000_0000_0200_0000",
-                    "0x0000_0000_0100_0000",
+                    0x0000_1000_0000_0000,
+                    0x0000_2000_0000_0000,
+                    0x0000_0000_0001_0000,
+                    0x0000_0000_0002_0000,
                 )
             } else {
-                ("0x1", "0x1", "0x0", "0x0")
+                (1, 1, 0, 0)
             };
-            assert!(constants.contains(&format!("MXC_EVENT_KEYWORD: u64 = {keyword};")));
-            assert!(constants.contains(&format!(
-                "MXC_CRITICAL_EVENT_KEYWORD: u64 = {critical_keyword};"
-            )));
-            assert!(constants.contains(&format!("MXC_PRIVACY_TAG: u64 = {tag};")));
-            assert!(constants.contains(&format!("MXC_CRITICAL_PRIVACY_TAG: u64 = {critical_tag};")));
+            assert_eq!(
+                (
+                    m.keyword,
+                    m.critical_keyword,
+                    m.privacy_tag,
+                    m.critical_privacy_tag
+                ),
+                expected
+            );
         }
     }
 }

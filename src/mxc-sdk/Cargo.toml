@@ -88,7 +88,7 @@ serial_test.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 flate2 = { version = "1", optional = true }
-hyperlight-unikraft = { version = "=0.17.0", default-features = false, optional = true }
+hyperlight-unikraft = { version = "=0.21.0", default-features = false, optional = true }
 ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -108,6 +108,14 @@ winreg.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_System_LibraryLoader",
+] }
 winresource = { version = "0.1.31", default-features = false }
 
 [[example]]
