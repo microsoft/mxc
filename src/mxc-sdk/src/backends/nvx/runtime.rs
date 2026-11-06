@@ -209,7 +209,8 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
 /// between requests, creating it with an access list for only the current user and Local SYSTEM.
 ///
 /// Each approved bundle gets its own directory, so an agent never opens state that another agent
-/// version wrote.
+/// version wrote. The current user owns the directory, so the user's elevated and non-elevated
+/// requests share it.
 pub(super) fn state_root() -> Result<PathBuf, MxcError> {
     let local_app_data = env::var_os("LOCALAPPDATA")
         .filter(|value| !value.is_empty())
@@ -245,12 +246,16 @@ fn state_root_in(local_app_data: &Path) -> Result<PathBuf, MxcError> {
             root.display()
         ))
     })?;
-    crate::mxc_common::filesystem_security::set_owner_only_dacl(&root, true).map_err(|error| {
-        MxcError::backend_unavailable(format!(
-            "NVX signed bundled agent: cannot secure the agent state directory {}: {error}",
-            root.display()
-        ))
-    })?;
+    // An elevated request can create the directory with the Administrators group as its owner,
+    // which the user's non-elevated requests would reject.
+    crate::mxc_common::filesystem_security::set_owner_only_dacl(&root, true)
+        .and_then(|()| crate::mxc_common::filesystem_security::set_current_user_owner(&root))
+        .map_err(|error| {
+            MxcError::backend_unavailable(format!(
+                "NVX signed bundled agent: cannot secure the agent state directory {}: {error}",
+                root.display()
+            ))
+        })?;
     Ok(root)
 }
 
@@ -1581,7 +1586,8 @@ mod tests {
                 .join(r"Microsoft\MXC\nvx")
                 .join(&APPROVED_MANIFEST_SHA256[..16])
         );
-        assert!(crate::mxc_common::filesystem_security::owner_is_self(&root).unwrap());
+        // Owned by the user rather than an elevated token owner, so non-elevated requests accept it.
+        assert!(crate::mxc_common::filesystem_security::owner_is_current_user(&root).unwrap());
         std::fs::write(root.join("registered-image"), b"cached").unwrap();
         assert_eq!(state_root_in(local_app_data.path()).unwrap(), root);
         assert_eq!(

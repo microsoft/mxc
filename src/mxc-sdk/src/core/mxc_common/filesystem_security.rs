@@ -187,7 +187,15 @@ pub fn owner_is_self(path: &Path) -> Result<bool, FilesystemSecurityError> {
     if let Ok(owner) = current_token_owner_sid() {
         accepted.push(owner);
     }
+    owner_is_any(path, &accepted)
+}
 
+/// Whether `path` is owned by the current process's user.
+pub fn owner_is_current_user(path: &Path) -> Result<bool, FilesystemSecurityError> {
+    owner_is_any(path, &[current_user_sid()?])
+}
+
+fn owner_is_any(path: &Path, accepted: &[OwnedSid]) -> Result<bool, FilesystemSecurityError> {
     let path_wide = wide(path);
     let mut owner = PSID(ptr::null_mut());
     let mut descriptor = PSECURITY_DESCRIPTOR(ptr::null_mut());
@@ -270,6 +278,41 @@ pub fn set_owner_only_dacl(path: &Path, inheritable: bool) -> Result<(), Filesys
     Ok(())
 }
 
+/// Make the current user the owner of `path`, which must already be owned by this process's user
+/// or token owner.
+///
+/// An elevated process's token owner can be the Administrators group, which the same user's
+/// non-elevated processes do not accept as their own. Storage that both reuse needs the user as
+/// its owner. Changing the owner needs `WRITE_OWNER`, which [`set_owner_only_dacl`] grants.
+pub fn set_current_user_owner(path: &Path) -> Result<(), FilesystemSecurityError> {
+    if owner_is_current_user(path)? {
+        return Ok(());
+    }
+    if !owner_is_self(path)? {
+        return Err(FilesystemSecurityError::ForeignOwner(path.to_path_buf()));
+    }
+    set_owner(path, &current_user_sid()?)
+}
+
+fn set_owner(path: &Path, owner: &OwnedSid) -> Result<(), FilesystemSecurityError> {
+    let path_wide = wide(path);
+    let result = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(path_wide.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(owner.as_psid()),
+            None,
+            None,
+            None,
+        )
+    };
+    if result != ERROR_SUCCESS {
+        return Err(win32_error(path, "SetNamedSecurityInfoW(owner)", result));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +344,21 @@ mod tests {
         assert_owner_acl(&child, true);
         set_owner_only_dacl(&child, true).expect("secure child");
         assert_owner_acl(&child, false);
+    }
+
+    #[test]
+    fn set_current_user_owner_replaces_the_token_owner() {
+        let directory = tempfile::tempdir().expect("create directory");
+        // Give the directory the owner an elevated process would assign. The token owner is the
+        // user itself in a non-elevated process, which leaves nothing to replace.
+        let token_owner = current_token_owner_sid().expect("token owner");
+        set_owner(directory.path(), &token_owner).expect("set token owner");
+        assert!(owner_is_self(directory.path()).expect("read owner"));
+        set_owner_only_dacl(directory.path(), true).expect("secure directory");
+        set_current_user_owner(directory.path()).expect("make the user the owner");
+        assert!(owner_is_current_user(directory.path()).expect("read owner"));
+        set_current_user_owner(directory.path()).expect("keep the user as owner");
+        assert!(owner_is_current_user(directory.path()).expect("read owner"));
     }
 
     fn assert_owner_acl(path: &Path, inherited: bool) {
