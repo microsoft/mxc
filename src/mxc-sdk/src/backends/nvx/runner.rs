@@ -78,7 +78,10 @@ impl NvxRunner {
 
     fn validate_dry_run(request: &ExecutionRequest) -> Result<(), MxcError> {
         super::policy::validate_request(request)?;
-        let (_, mut client) = open_client()?;
+        // Capturing platform snapshot templates boots VMs, so validation opens the agent without
+        // them.
+        let state_root = super::runtime::state_root()?;
+        let mut client = super::runtime::create_persistent_client(state_root)?;
         validate_with_client(&mut client, request)
     }
 
@@ -89,7 +92,7 @@ impl NvxRunner {
     ) -> Result<CapturedRun, MxcError> {
         super::policy::validate_request(request)?;
         self.cancellation.check()?;
-        let (state_root, mut client) = open_client()?;
+        let (state_root, mut client) = open_client(logger)?;
         run_with_client(
             &mut client,
             &state_root,
@@ -100,10 +103,12 @@ impl NvxRunner {
     }
 }
 
-fn open_client() -> Result<(PathBuf, NvxClient), MxcError> {
+/// Opens the agent for a create-and-run request with platform snapshots, so its sandbox starts as
+/// a clone of a template.
+fn open_client(logger: &mut Logger) -> Result<(PathBuf, NvxClient), MxcError> {
     let state_root = super::runtime::state_root()?;
     let path = state_root.path().to_path_buf();
-    let client = super::runtime::create_persistent_client(state_root)?;
+    let client = super::runtime::create_client_with_platform_snapshots(state_root, logger)?;
     Ok((path, client))
 }
 
@@ -193,9 +198,7 @@ fn run_with_client(
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
-        client
-            .start(&sandbox_id)
-            .map_err(|error| start_error(client, &sandbox_id, error, sensitive_proxy))?;
+        start_sandbox(client, &sandbox_id, sensitive_proxy, logger)?;
         if let Some(cancellation) = cancellation {
             cancellation.check()?;
         }
@@ -220,6 +223,24 @@ fn run_with_client(
         stdout: output.stdout,
         stderr: output.stderr,
     })
+}
+
+/// Starts the sandbox and logs how it booted: as a clone of a platform snapshot template, or cold,
+/// and why.
+fn start_sandbox(
+    client: &impl SandboxClient,
+    sandbox_id: &super::runtime::SandboxId,
+    sensitive_proxy: bool,
+    logger: &mut Logger,
+) -> Result<(), MxcError> {
+    let started = client
+        .start(sandbox_id)
+        .map_err(|error| start_error(client, sandbox_id, error, sensitive_proxy))?;
+    logger.log_diagnostic_line(&format!(
+        "NVX sandbox started: {}",
+        serde_json::Value::Object(started.metadata.unwrap_or_default())
+    ));
+    Ok(())
 }
 
 fn start_error(
@@ -395,7 +416,7 @@ pub(crate) fn spawn_streaming(
     super::policy::validate_request(request)?;
     let pipes = StreamingPipes::new()?;
     let sensitive_proxy = request_has_sensitive_proxy(request);
-    let (state_root, mut client) = open_client()?;
+    let (state_root, mut client) = open_client(logger)?;
     let (sandbox_id, exec) = match prepare_and_provision(&client, request, None) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -412,16 +433,13 @@ pub(crate) fn spawn_streaming(
             .str("backend", "microvm")
             .str("runtime", "signed-bundled-agent"),
     );
-    let started = client
-        .start(&sandbox_id)
-        .map_err(|error| start_error(&client, &sandbox_id, error, sensitive_proxy))
-        .and_then(|()| {
-            let execution_started = Instant::now();
-            client
-                .start_execution(&sandbox_id, &exec)
-                .map(|execution| (execution, execution_started))
-                .map_err(|error| protect_native_error(error, "exec", sensitive_proxy))
-        });
+    let started = start_sandbox(&client, &sandbox_id, sensitive_proxy, logger).and_then(|()| {
+        let execution_started = Instant::now();
+        client
+            .start_execution(&sandbox_id, &exec)
+            .map(|execution| (execution, execution_started))
+            .map_err(|error| protect_native_error(error, "exec", sensitive_proxy))
+    });
     let (execution, execution_started) = match started {
         Ok(execution) => execution,
         Err(error) => {
@@ -908,6 +926,7 @@ mod tests {
     use super::super::runtime::{ExecOutput, ProvisionOutput, SandboxId};
     use super::*;
     use aci_edge_sandboxes::agent::SandboxDiagnostics;
+    use aci_edge_sandboxes::{BootMode, ColdReason, StartResult};
 
     fn test_capabilities() -> Capabilities {
         let mut capabilities = Capabilities::default();
@@ -1149,7 +1168,7 @@ mod tests {
         validate_res: Result<(), MxcError>,
         probe_res: Result<(), MxcError>,
         provision_res: Result<SandboxId, MxcError>,
-        start_res: Result<(), MxcError>,
+        start_res: Result<StartResult, MxcError>,
         diagnostics_res: Result<SandboxDiagnostics, MxcError>,
         exec_res: Result<ExecOutput, MxcError>,
         stop_res: Result<(), MxcError>,
@@ -1172,7 +1191,7 @@ mod tests {
                 probe_res: Ok(()),
                 provision_res: SandboxId::from_token("0123456789abcdef0123456789abcdef")
                     .map_err(super::super::runtime::map_error),
-                start_res: Ok(()),
+                start_res: Ok(StartResult::default().with_boot_mode(BootMode::Clone)),
                 diagnostics_res: Err(MxcError::backend_error("diagnostics unavailable")),
                 exec_res: Ok(ExecOutput {
                     outcome: ExecOutcome::Exited(0),
@@ -1230,7 +1249,7 @@ mod tests {
                 })
         }
 
-        fn start(&self, _sandbox_id: &SandboxId) -> Result<(), MxcError> {
+        fn start(&self, _sandbox_id: &SandboxId) -> Result<StartResult, MxcError> {
             self.record("start");
             self.start_res.clone()
         }
@@ -2001,6 +2020,31 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn start_logs_how_the_sandbox_booted() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("diagnostics.log");
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        logger.enable_file_sink(&log_path).unwrap();
+        let request = ExecutionRequest {
+            script_code: "printf ok".to_owned(),
+            ..test_request()
+        };
+        let mut client = MockClient::ok();
+        client.start_res = Ok(StartResult::default()
+            .with_boot_mode(BootMode::Cold)
+            .with_cold_reason(ColdReason::MemoryAboveCapacity));
+        run_with_client(&mut client, directory.path(), &request, &mut logger, None).unwrap();
+        drop(logger);
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            log.contains(
+                r#"NVX sandbox started: {"bootMode":"cold","coldReason":"memory-above-capacity"}"#
+            ),
+            "{log}"
+        );
     }
 
     #[test]

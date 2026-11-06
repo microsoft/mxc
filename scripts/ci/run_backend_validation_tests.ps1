@@ -461,6 +461,7 @@ function Invoke-MicroVmTests {
         'JSON image and policy' = 'VM_EXECUTED JSON selected-image filesystem '
         'executor' = 'VM_EXECUTED executor sequential '
         'executor image reuse' = 'VM_EXECUTED executor registered-image reuse offline and concurrent'
+        'executor platform snapshots' = 'VM_EXECUTED executor platform snapshot clones, streaming capture, validation, and cold-boot fallback'
         'executor configs' = 'VM_EXECUTED executor configs '
         'executor interruption' = 'VM_EXECUTED executor console interruption '
         'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement'
