@@ -98,6 +98,22 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y \
             lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
 
+      - name: Configure unprivileged LXC
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+            sudo cp -a "$file" "$RUNNER_TEMP/mxc-lxc-$(basename "$file")"
+          done
+          sudo bash -c 'echo "root:100000:65536" >> /etc/subuid'
+          sudo bash -c 'echo "root:100000:65536" >> /etc/subgid'
+
+          # Remove existing mappings before adding the test-only UID/GID range.
+          sudo sed -i '/idmap/d' /etc/lxc/default.conf
+          sudo bash -c 'echo "lxc.idmap = u 0 100000 65536" >> /etc/lxc/default.conf'
+          sudo bash -c 'echo "lxc.idmap = g 0 100000 65536" >> /etc/lxc/default.conf'
+
       # The policy these tests use permits no network, so the container starts
       # with no interface and the runner's Docker-set FORWARD policy cannot
       # reach them.
@@ -130,6 +146,18 @@ jobs:
             if ! grep -qE 'succeeded: *[1-9]' "$log"; then
               echo "::error::$framework selected no passing LXC test."
               exit 1
+            fi
+          done
+
+      - name: Restore LXC configuration
+        if: always() && matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in /etc/lxc/default.conf /etc/subuid /etc/subgid; do
+            backup="$RUNNER_TEMP/mxc-lxc-$(basename "$file")"
+            if [ -f "$backup" ]; then
+              sudo mv "$backup" "$file"
             fi
           done
 
