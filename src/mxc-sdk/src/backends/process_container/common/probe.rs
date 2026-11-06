@@ -104,7 +104,7 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
     let base_container_usable = BaseContainerRunner::is_base_container_api_present();
     let decision = BaseContainerRunner::can_backend_service_request(request);
-    let error = decision.rejection_message().map(str::to_string);
+    let error = decision.rejection_message();
     let mut warnings = Vec::new();
     let identityless_loopback_proxy =
         match BaseContainerRunner::supports_identityless_loopback_proxy() {

@@ -344,6 +344,15 @@ require a new versioned API surface.
 For PowerShell startup failures, see
 [troubleshooting](../../troubleshooting.md#powershell-startup).
 
+### Security-servicing exception: ProcessContainer policy paths
+
+ProcessContainer rejects filesystem policy paths that are not fully qualified
+Windows paths, including relative entries in `filesystem.deniedPaths`. Previously
+accepted relative denies could leave files accessible through broader grants.
+This validation applies to all supported contracts and SDK V1 without changing
+the API surface or released schemas. Callers must supply fully qualified paths;
+`process.cwd` does not provide a base for filesystem policy.
+
 ### Shipped vs Experimental
 
 Development features use their intended permanent top-level locations in the
