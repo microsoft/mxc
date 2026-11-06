@@ -4,6 +4,7 @@
 using System.Text;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
+using Dev = Microsoft.Mxc.Sdk.V1.Dev;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
@@ -16,6 +17,40 @@ public class MxcProcessTests
     // enables these tests on capable Linux and macOS hosts; elsewhere they skip.
     private static bool HostCanSpawn =>
         Environment.GetEnvironmentVariable("MXC_E2E_PSEC_CAPABLE_HOST") == "1";
+
+    [Theory]
+    [InlineData("1.0.0")]
+    [InlineData("1.1.0-alpha")]
+    public async Task DevJson_CapturesOutputAndStreamsInput(string version)
+    {
+        Assert.SkipUnless(HostCanSpawn, "no host backend available");
+        var creation = OperatingSystem.IsWindows()
+            ? $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"cmd.exe /c \"echo DEV_CAPTURE_OK & echo DEV_CAPTURE_ERR 1>&2 & exit /b 7\"","timeout":30000}}"""
+            : $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"printf 'DEV_CAPTURE_OK\\n'; printf 'DEV_CAPTURE_ERR\\n' >&2; exit 7","timeout":30000}}""";
+        var result = await Dev.MxcContainer.RunJsonAsync(
+            creation, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False(result.TimedOut);
+        Assert.Equal(7, result.ExitCode);
+        Assert.Contains("DEV_CAPTURE_OK", result.Stdout);
+        Assert.Contains("DEV_CAPTURE_ERR", result.Stderr);
+
+        var piped = OperatingSystem.IsWindows()
+            ? $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"cmd.exe /v:on /c \"set /p L= & echo DEV_PIPE:!L! & exit /b 9\"","timeout":30000}}"""
+            : $$$"""{"version":"{{{version}}}","containment":"process","process":{"commandLine":"IFS= read -r line; printf 'DEV_PIPE:%s\\n' \"$line\"; exit 9","timeout":30000}}""";
+        using var process = await Dev.MxcContainer.SpawnJsonAsync(
+            piped, new Dev.JsonOptions { Experimental = true },
+            TestContext.Current.CancellationToken);
+        using var stdin = process.StandardInput;
+        Assert.NotNull(stdin);
+        var output = process.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
+        await stdin.WriteAsync(Encoding.UTF8.GetBytes("ping-pong\r\n"),
+            TestContext.Current.CancellationToken);
+        stdin.Dispose();
+        var (outcome, stdout, _) = await output;
+        Assert.False(outcome.TimedOut);
+        Assert.Equal(9, outcome.ExitCode);
+        Assert.Contains("DEV_PIPE:ping-pong", Encoding.UTF8.GetString(stdout));
+    }
 
     [Theory]
     [InlineData(null, null)]

@@ -21,7 +21,7 @@ pub enum Mode {
 ///
 /// Always operates in one of two primary modes (Console or Buffer), and
 /// optionally writes to a diagnostic log file and/or the shared diagnostic
-/// console (via named pipe) when enabled via [`Logger::enable_diagnostics`].
+/// console (via named pipe) when enabled via `Logger::enable_diagnostics`.
 ///
 /// Diagnostic sinks accumulate `fmt::Write` fragments in an internal buffer
 /// and flush complete lines, so that a single `writeln!` produces exactly one

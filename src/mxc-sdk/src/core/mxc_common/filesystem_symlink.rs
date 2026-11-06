@@ -88,9 +88,35 @@ pub(crate) fn resolve_through_symlinks(path: &Path) -> Option<SymlinkResolution>
     }
 }
 
+/// Whether a resolution error is a fault in the policy path itself (missing,
+/// loop, not a directory, inaccessible) rather than a host I/O failure.
+pub(crate) fn is_policy_path_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+
+    matches!(
+        error.kind(),
+        ErrorKind::NotFound
+            | ErrorKind::NotADirectory
+            | ErrorKind::PermissionDenied
+            | ErrorKind::InvalidFilename
+    ) || error.raw_os_error() == Some(libc::ELOOP)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_path_problems_blame_the_request() {
+        for errno in [libc::ENOENT, libc::ENOTDIR, libc::ELOOP, libc::EACCES] {
+            let error = std::io::Error::from_raw_os_error(errno);
+            assert!(is_policy_path_error(&error), "{error}");
+        }
+        for errno in [libc::EIO, libc::ESTALE] {
+            let error = std::io::Error::from_raw_os_error(errno);
+            assert!(!is_policy_path_error(&error), "{error}");
+        }
+    }
 
     /// Canonicalized up front so a symlinked `TMPDIR` does not make every
     /// expectation below differ from what the walk returns.

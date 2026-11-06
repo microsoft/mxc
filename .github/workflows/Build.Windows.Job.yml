@@ -91,6 +91,29 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      - name: Test and stage filesystem probe request deadlines
+        shell: pwsh
+        run: |
+          $messages = @(cargo test --locked --release --target '${{ matrix.target }}' `
+            -p mxc-sdk --features wslc --lib --no-run --message-format=json)
+          if ($LASTEXITCODE -ne 0) { throw 'Building filesystem probe tests failed.' }
+          $payload = @($messages | ConvertFrom-Json | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'mxc_sdk' -and
+            $_.profile.test -and $_.executable
+          })
+          if ($payload.Count -ne 1) { throw 'Expected one filesystem probe test executable.' }
+          $destination = 'target\${{ matrix.target }}\release\mxc-filesystem-probe-tests.exe'
+          Copy-Item -LiteralPath $payload[0].executable -Destination $destination -Force
+          $tests = @(& $destination --list --ignored)
+          if ($LASTEXITCODE -ne 0) { throw 'Listing filesystem probe tests failed.' }
+          foreach ($case in 'wslc_launch_rejects_stalled_paths', 'wslc_provision_rejects_stalled_paths',
+              'wslc_overlap_rejects_stalls', 'wslc_provision_overlap_rejects_stalls') {
+            $name = "core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
+            if ($tests -notcontains "${name}: test") { throw "Missing regression: $name" }
+          }
+          & $destination --ignored filesystem_probe::launch_tests::
+          if ($LASTEXITCODE -ne 0) { throw 'Filesystem probe request regression failed.' }
+
       - name: Test NVX host-only executor matrix
         if: matrix.target == 'x86_64-pc-windows-msvc'
         run: cargo test --locked --release --target ${{ matrix.target }}
@@ -124,7 +147,22 @@ jobs:
             -Features '${{ matrix.features }}'
 
       - name: Build debug executor for isolated telemetry smoke tests
-        run: cargo build --locked -p wxc --features test-support
+        env:
+          MXC_TELEMETRY_COMPONENT_PATH: ''
+          MXC_TELEMETRY_TEST_KEYWORDS: '1'
+        run: cargo build --locked -p wxc --features "test-support isolation_session"
+
+      - name: Test telemetry ETW assertions, lifecycle requests and consent fixtures
+        shell: pwsh
+        run: ..\tests\scripts\test_telemetry_etw_assertions.ps1 -WxcExePath target\debug\wxc-exec.exe
+
+      - name: Upload local-only telemetry test executor
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: telemetry-test-executor-${{ matrix.target }}
+          path: src/target/debug/wxc-exec.exe
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Run isolated telemetry consent smoke test
         working-directory: ${{ github.workspace }}
@@ -134,7 +172,7 @@ jobs:
       - name: Run isolated telemetry ETW smoke test
         working-directory: ${{ github.workspace }}
         shell: pwsh
-        run: tests\scripts\run_telemetry_etw_smoke_test.ps1 -BinDir src\target\debug
+        run: tests\scripts\run_telemetry_etw_smoke_test.ps1 -BinDir src\target\debug -CheckKeywords
 
       # Mutates the real consent store and HKLM policy, so it is confined to
       # the ephemeral GitHub-hosted runners this job declares.
@@ -163,6 +201,43 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
             src/target/${{ matrix.target }}/release/nvx-e2e-tests.exe
+            src/target/${{ matrix.target }}/release/mxc-filesystem-probe-tests.exe
             src/target/${{ matrix.target }}/release/aci-edge-sandboxes/
           if-no-files-found: error
           retention-days: 1
+
+  telemetry-component-check:
+    name: Telemetry component (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Surface toolchain file at repo root
+        shell: pwsh
+        run: Copy-Item src\rust-toolchain.toml rust-toolchain.toml
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          override: false
+          rustflags: ''
+
+      - name: Point cargo at the MxcDependencies feed
+        uses: ./.github/actions/setup-cargo-feed
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src -> target/telemetry-component-check
+          key: telemetry-component-${{ matrix.arch }}
+          cache-on-failure: false
+
+      - name: Verify telemetry component build checks
+        shell: pwsh
+        run: .\scripts\ci\check-telemetry-component.ps1

@@ -8,6 +8,24 @@ versioned public API is in `Microsoft.Mxc.Sdk.V1`. All request and policy types
 in this API use the SDK-selected contract version; callers do not select
 that version. See the [consumer glossary](https://github.com/microsoft/mxc/blob/main/docs/glossary.md) for terminology.
 
+Use [Microsoft.Mxc.Sdk.V1.Dev](https://github.com/microsoft/mxc/blob/main/docs/api-reference/dotnet/v1/dev.md)
+for MXC request JSON with a caller-declared contract version and separate
+experimental backend authorization.
+
+## Requirements
+
+The SDK targets `net8.0` and `net10.0`. Applications targeting .NET 8 or .NET 9
+use the .NET 8 assembly; applications targeting .NET 10 use the .NET 10 assembly.
+The behavioral tests and Native AOT smoke test validate both .NET 8 and
+.NET 10. Samples and the console driver target .NET 10.
+
+Building from source requires the .NET 10 SDK and the Rust toolchain selected
+by `src/rust-toolchain.toml`. The repository's `global.json` selects the latest
+installed stable .NET 10.0 SDK feature band. Framework-dependent applications
+require the runtime for their application target; self-contained applications
+include their runtime.
+Backend-specific operating-system requirements still apply.
+
 ## Run to completion
 
 ```csharp
@@ -166,6 +184,7 @@ support cancellation. Backend and phase-specific policy requirements are
 described in the
 [IsolationSession](https://github.com/microsoft/mxc/blob/main/docs/development/architecture/backends/isolation-session/state-aware-rust.md) and
 [WSLC](https://github.com/microsoft/mxc/blob/main/docs/backends/wslc/wslc-state-aware.md) guides.
+
 `MxcLifecycle.SpawnInContainerWithPty(id, request, options?)` starts an
 IsolationSession exec with a caller-controlled terminal and returns an
 `MxcPtyProcess`. Set `SpawnInContainerWithPtyOptions.Size` to choose initial

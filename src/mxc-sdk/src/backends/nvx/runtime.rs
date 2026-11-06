@@ -13,8 +13,8 @@ use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::script_runner::RunCancellation;
 
 use super::abi::{
-    map_error_body, AgentLibrary, BundleSource, Event, ExecEnd, ExecInput, ExecOutcome,
-    ExecRequest, HostInfo, ImageSource, ProvisionInput, ProvisionRequest, RuntimeSource,
+    map_error_body, AgentLibrary, BundleSource, Capabilities, CpuProfile, Event, ExecEnd,
+    ExecInput, ExecOutcome, ExecRequest, HostInfo, ImageSource, ProvisionInput, RuntimeSource,
     SandboxDiagnostics, SandboxSpec, SetupConfig,
 };
 
@@ -33,9 +33,8 @@ pub(super) const APPROVED_KERNEL_SHA256: &str =
 pub(super) const APPROVED_INITRD_SHA256: &str =
     "5e42d4617c1508e9116df8c330c0ff72243e954d7f132091ecdecfc743d904ed";
 
-const DEFAULT_IMAGE_REFERENCE: &str = "mcr.microsoft.com/azurelinux/base/core:3.0";
 const HOST_TIMEOUT_SLACK_MS: u64 = 30_000;
-const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+pub(super) const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 const STARTUP_LOG_LIMIT: usize = 8 * 1024;
 const CANCELLATION_POLL_MS: u64 = 100;
 
@@ -82,9 +81,11 @@ pub(super) struct ExecOutput {
 }
 
 pub(super) trait SandboxClient {
+    fn capabilities(&self) -> Result<Capabilities, MxcError>;
+    fn validate_provision(&self, input: &ProvisionInput) -> Result<(), MxcError>;
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
-    fn provision(&self) -> Result<SandboxId, MxcError>;
+    fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError>;
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
     fn diagnostics(&self, sandbox_id: &SandboxId) -> Result<SandboxDiagnostics, MxcError>;
     fn exec_and_wait(
@@ -163,11 +164,8 @@ impl Drop for NvxClient {
     }
 }
 
-pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
-    let bundle_dir = discover_bundle_dir()?;
-    let dll_path = bundle_dir.join("bin").join("aci_edge_agent.dll");
-    let library = AgentLibrary::load_verified(&dll_path, APPROVED_DLL_SHA256)?;
-    let setup = SetupConfig {
+fn agent_setup(state_root: &Path, bundle_dir: PathBuf) -> SetupConfig {
+    SetupConfig {
         schema_version: 1,
         state_root: state_root.to_path_buf(),
         runtime: RuntimeSource {
@@ -176,7 +174,15 @@ pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
                 manifest_sha256: APPROVED_MANIFEST_SHA256.to_owned(),
             },
         },
-    };
+        cpu_profile: CpuProfile::Host,
+    }
+}
+
+pub(super) fn create_client(state_root: &Path) -> Result<NvxClient, MxcError> {
+    let bundle_dir = discover_bundle_dir()?;
+    let dll_path = bundle_dir.join("bin").join("aci_edge_agent.dll");
+    let library = AgentLibrary::load_verified(&dll_path, APPROVED_DLL_SHA256)?;
+    let setup = agent_setup(state_root, bundle_dir);
     let host = library.host_open(&setup)?;
     let mut client = NvxClient::from_library(library, host);
     let info = match client.library.host_info(client.host) {
@@ -226,12 +232,12 @@ fn verify_runtime_digests(info: &HostInfo) -> Result<(), MxcError> {
     Ok(())
 }
 
-pub(super) fn sandbox_spec() -> SandboxSpec {
-    // The edge initramfs is the control guest, not a workload userland. Use the official
-    // example's public image; its host-side pull does not grant the workload network access.
-    SandboxSpec {
-        image: Some(ImageSource::Reference(DEFAULT_IMAGE_REFERENCE.to_owned())),
-    }
+pub(super) fn sandbox_spec(image: &str) -> Result<SandboxSpec, MxcError> {
+    crate::mxc_contract::dev::ImageReference::validate(image)
+        .map_err(MxcError::malformed_request)?;
+    Ok(SandboxSpec {
+        image: Some(ImageSource::Reference(image.to_owned())),
+    })
 }
 
 fn discover_bundle_dir() -> Result<PathBuf, MxcError> {
@@ -355,6 +361,12 @@ fn append_cleanup_error(primary: &mut MxcError, cleanup: MxcError) {
     primary.message.push_str(&cleanup.to_string());
 }
 
+pub(super) fn capture_limit_error(limit: usize) -> MxcError {
+    MxcError::backend_error(format!(
+        "NVX signed bundled agent: combined stdout/stderr capture limit of {limit} bytes exceeded"
+    ))
+}
+
 impl NvxClient {
     fn exec_and_wait_with_capture_limit(
         &self,
@@ -428,9 +440,7 @@ impl NvxClient {
                             };
                             // Check the combined budget before either buffer can grow.
                             if bytes.len() > capture_limit - captured {
-                                return Err(MxcError::backend_error(format!(
-                                    "NVX signed bundled agent: combined stdout/stderr capture limit of {capture_limit} bytes exceeded"
-                                )));
+                                return Err(capture_limit_error(capture_limit));
                             }
                             buffer.extend_from_slice(bytes);
                             Ok(None)
@@ -479,6 +489,14 @@ impl NvxClient {
 }
 
 impl SandboxClient for NvxClient {
+    fn capabilities(&self) -> Result<Capabilities, MxcError> {
+        self.library.capabilities(self.host)
+    }
+
+    fn validate_provision(&self, input: &ProvisionInput) -> Result<(), MxcError> {
+        self.library.validate_provision(self.host, input)
+    }
+
     fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError> {
         self.library.validate_exec(self.host, request)
     }
@@ -487,14 +505,8 @@ impl SandboxClient for NvxClient {
         self.library.probe(self.host)
     }
 
-    fn provision(&self) -> Result<SandboxId, MxcError> {
-        let reply = self.library.provision(
-            self.host,
-            &ProvisionInput {
-                request: ProvisionRequest {},
-                spec: sandbox_spec(),
-            },
-        )?;
+    fn provision(&self, input: &ProvisionInput) -> Result<SandboxId, MxcError> {
+        let reply = self.library.provision(self.host, input)?;
         SandboxId::from_token(&reply.token)
     }
 
@@ -620,6 +632,53 @@ mod tests {
             let err = SandboxId::from_token(invalid).unwrap_err();
             assert_eq!(err.code, MxcErrorCode::BackendError);
         }
+    }
+
+    #[test]
+    fn signed_library_validates_image_and_policy_without_provisioning() {
+        let state_root = tempfile::tempdir().unwrap();
+        let mut client = create_client(state_root.path()).unwrap();
+        let result = (|| {
+            let capabilities = client.capabilities()?;
+            assert!(capabilities.spec.image_reference);
+            assert!(capabilities.filesystem.readonly_paths);
+            assert!(capabilities.filesystem.readwrite_paths);
+            assert!(capabilities.filesystem.denied_paths);
+            assert!(capabilities.network.egress_rules);
+            assert!(capabilities.network.network_proxy);
+            let mut request = crate::mxc_common::models::ExecutionRequest {
+                microvm_image: Some("docker.io/library/python:3.12-alpine".to_owned()),
+                script_code: "printf ok".to_owned(),
+                ..Default::default()
+            };
+            request.policy.network_specified = true;
+            request.policy.network_egress = Some(Default::default());
+            request.policy.network_ingress = Some(Default::default());
+            let (provision, spec) =
+                super::super::policy::provision_request(&request, &capabilities)?;
+            let mut input = ProvisionInput {
+                request: provision,
+                spec,
+            };
+            client.validate_provision(&input)?;
+            client.validate_exec(&super::super::policy::exec_request(
+                &request,
+                &capabilities,
+            )?)?;
+            input.request.runtime_config = Some(super::super::abi::RuntimeConfig {
+                network_proxy: Some("http://192.0.2.1:3128".to_owned()),
+            });
+            let error = client.validate_provision(&input).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+            assert_eq!(
+                error.message,
+                "NVX signed bundled agent: \"http://192.0.2.1:3128\" must name host loopback: 127.0.0.1 or localhost"
+            );
+            Ok::<_, MxcError>(())
+        })();
+        let close = client.close();
+        result.unwrap();
+        close.unwrap();
     }
 
     enum FakeStep {
@@ -1442,6 +1501,27 @@ mod tests {
     }
 
     #[test]
+    fn agent_setup_selects_host_cpu_profile() {
+        let setup = agent_setup(Path::new(r"C:\state"), PathBuf::from(r"C:\bundle"));
+        let json = serde_json::to_value(&setup).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "schemaVersion": 1,
+                "stateRoot": r"C:\state",
+                "runtime": {
+                    "bundle": {
+                        "path": r"C:\bundle",
+                        "manifestSha256": APPROVED_MANIFEST_SHA256,
+                    }
+                },
+                "cpuProfile": "host",
+            })
+        );
+        assert_eq!(serde_json::from_value::<SetupConfig>(json).unwrap(), setup);
+    }
+
+    #[test]
     fn real_staged_dll_loads_verifies_cached_digest_and_rejects_bad_manifest() {
         let bundle_dir = discover_bundle_dir().expect("discover staged NVX bundle");
         let dll_path = bundle_dir.join("bin").join("aci_edge_agent.dll");
@@ -1466,6 +1546,7 @@ mod tests {
                     manifest_sha256: "0".repeat(64),
                 },
             },
+            cpu_profile: CpuProfile::Host,
         };
         let bad_host = lib.host_open(&bad_setup).unwrap_err();
         assert_eq!(bad_host.code, MxcErrorCode::BackendUnavailable);

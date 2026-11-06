@@ -16,6 +16,7 @@ mod unix_pty_contract;
 
 use mxc_sdk::v1::WaitResult;
 use mxc_sdk::v1::{spawn, ContainerRequest, FilesystemPolicy};
+use std::io;
 
 /// Whether `bwrap` is usable. Reuses the backend's own probe so this gate
 /// cannot drift from the real version check.
@@ -110,6 +111,83 @@ fn streaming_bubblewrap_bidirectional_stdio() {
     assert!(out.contains("ping-pong"), "got: {out:?}");
 
     assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
+}
+
+#[test]
+fn streaming_bubblewrap_reports_network_namespace_startup_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    use mxc_sdk::v1::{spawn_with_pty, NetworkAction, NetworkEgressPolicy, NetworkPolicy};
+
+    const FIXTURE_ENV: &str = "MXC_BWRAP_NAMESPACE_FAILURE_FIXTURE";
+    if std::env::var_os(FIXTURE_ENV).is_some() {
+        let mut request = bwrap_request("echo WORKLOAD_STARTED", 0);
+        request.network = Some(NetworkPolicy {
+            egress: Some(NetworkEgressPolicy {
+                default: Some(NetworkAction::Allow),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        for pty in [false, true] {
+            let result = if pty {
+                spawn_with_pty(request.clone(), Default::default()).map(|_| ())
+            } else {
+                spawn(request.clone(), Default::default()).map(|_| ())
+            };
+            let error = result.expect_err("a failed network namespace must not start the workload");
+            assert!(
+                error.message.contains("test: bwrap namespace refused")
+                    && error.message.contains("user.max_net_namespaces"),
+                "startup error lost the diagnostic or remedy (pty={pty}): {error:?}"
+            );
+        }
+        return;
+    }
+
+    if !bwrap_available() {
+        return;
+    }
+    if let Err(error) = mxc_sdk::bwrap_common::proxy_network::probe_proxy_enforcement() {
+        if std::env::var("MXC_BWRAP_TESTS_REQUIRE_EXECUTION").is_ok_and(|value| value != "0") {
+            panic!("strict mode: {error}");
+        }
+        println!("SKIPPED: {error}");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("shim directory");
+    let shim = dir.path().join("bwrap");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.11.0'; exit 0; fi\n\
+         echo 'test: bwrap namespace refused' >&2\nexit 1\n",
+    )
+    .expect("write bwrap shim");
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+        .expect("make bwrap shim executable");
+    let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").expect("PATH")),
+    ))
+    .expect("shim PATH");
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "streaming_bubblewrap_reports_network_namespace_startup_failure",
+            "--nocapture",
+        ])
+        .env(FIXTURE_ENV, "1")
+        .env("PATH", path)
+        .output()
+        .expect("run startup failure fixture");
+    assert!(
+        output.status.success(),
+        "startup failure fixture exited {}:\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -534,4 +612,81 @@ fn streaming_bubblewrap_reports_no_output_metadata() {
         proc.output_metadata().is_none(),
         "Bubblewrap should report no structured output metadata"
     );
+}
+
+#[test]
+fn streaming_bubblewrap_outlives_the_thread_that_spawned_it() {
+    if !bwrap_available() {
+        return;
+    }
+    use std::io::{BufRead, BufReader, Read};
+
+    let (mut proc, stdout) = std::thread::spawn(|| {
+        let mut proc = spawn(
+            bwrap_request("echo ready; sleep 1; echo survived", 30_000),
+            Default::default(),
+        )
+        .expect("spawn");
+        let stdout = proc.take_stdout().expect("stdout available");
+        let (line, stdout) = read_within(
+            move || {
+                let mut stdout = BufReader::new(stdout);
+                let mut line = String::new();
+                stdout.read_line(&mut line).map(|_| (line, stdout))
+            },
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap_or_else(|error| fail_stdout_read(&mut proc, "read first line", error));
+        assert_eq!(line.trim(), "ready");
+        (proc, stdout)
+    })
+    .join()
+    .expect("spawning thread");
+
+    let rest = read_within(
+        move || {
+            let mut stdout = stdout;
+            let mut rest = String::new();
+            stdout.read_to_string(&mut rest).map(|_| rest)
+        },
+        std::time::Duration::from_secs(10),
+    )
+    .unwrap_or_else(|error| fail_stdout_read(&mut proc, "read remaining stdout", error));
+    assert_eq!(
+        rest.trim(),
+        "survived",
+        "sandbox died with its spawning thread"
+    );
+    assert_eq!(proc.wait().expect("wait"), WaitResult::Exited(0));
+}
+
+fn read_within<T: Send + 'static>(
+    operation: impl FnOnce() -> io::Result<T> + Send + 'static,
+    deadline: std::time::Duration,
+) -> io::Result<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(operation());
+    });
+    rx.recv_timeout(deadline).map_err(|error| match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("stdout read did not finish within {deadline:?}"),
+        ),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            io::Error::other("stdout reader exited without reporting its result")
+        }
+    })?
+}
+
+fn fail_stdout_read(proc: &mut mxc_sdk::v1::MxcProcess, context: &str, error: io::Error) -> ! {
+    if let Some(closer) = proc.stdout_closer() {
+        closer.close();
+    }
+    proc.kill()
+        .expect("kill workload after stdout read failure");
+    let _ = proc
+        .wait()
+        .expect("reap workload after stdout read failure");
+    panic!("{context}: {error}");
 }

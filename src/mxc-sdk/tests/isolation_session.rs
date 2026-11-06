@@ -219,6 +219,59 @@ fn one_shot_run_propagates_a_nonzero_exit() {
     assert_eq!(output.outcome, mxc_sdk::v1::WaitResult::Exited(7));
 }
 
+#[test]
+#[serial_test::serial(isolation_session)]
+fn dev_json_one_shot_pty_supports_interactive_input() {
+    use mxc_sdk::v1::dev::{self, PtyJsonOptions};
+    use mxc_sdk::v1::{MxcPtySize, WaitResult};
+    use std::io::{Read, Write};
+
+    skip_unless_supported!();
+    let request = r#"{
+        "version":"1.1.0-alpha",
+        "containment":"isolation_session",
+        "network":{
+            "egress":{"default":"allow"},
+            "ingress":{"default":"allow","hostLoopback":"allow"}
+        },
+        "process":{"commandLine":"cmd.exe /q","timeout":30000}
+    }"#;
+    let terminal = dev::spawn_with_pty_json(
+        request,
+        PtyJsonOptions {
+            experimental: true,
+            size: MxcPtySize {
+                rows: 30,
+                cols: 90,
+                ..Default::default()
+            },
+        },
+    )
+    .expect("exact-JSON PTY");
+    let mut reader = terminal.try_clone_reader().expect("PTY output");
+    let output = std::thread::spawn(move || {
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("read PTY");
+        text
+    });
+    terminal
+        .resize(MxcPtySize {
+            rows: 40,
+            cols: 100,
+            ..Default::default()
+        })
+        .expect("resize PTY");
+    let mut writer = terminal.take_writer().expect("PTY input");
+    writer
+        .write_all(b"set MXC_DEV_MARK=OK\r\necho DEV_PTY_%MXC_DEV_MARK%\r\nexit /b 13\r\n")
+        .expect("write PTY");
+    let result = terminal.wait().expect("wait for PTY");
+    drop(writer);
+    drop(terminal);
+    assert_eq!(result, WaitResult::Exited(13));
+    assert!(output.join().expect("PTY reader").contains("DEV_PTY_OK"));
+}
+
 /// What a held sibling established. Kept apart so a failure names which one
 /// broke.
 struct Held {
@@ -654,6 +707,164 @@ fn one_shot_kill_stops_the_workload() {
 /// Provision mints a real OS account; a failure before deprovision leaks it onto
 /// the host. `Drop` covers the unwind path a failed assertion skips.
 struct Teardown(String);
+
+#[test]
+#[serial_test::serial(isolation_session)]
+fn dev_json_lifecycle_preserves_execution_and_caller_ownership() {
+    use mxc_sdk::v1::dev::{self, JsonOptions, PtyJsonOptions};
+    use mxc_sdk::v1::{MxcPtySize, WaitResult};
+    use std::io::{Read, Write};
+
+    skip_unless_supported!();
+    let assert_empty = |reply: Result<String, mxc_sdk::v1::Error>| {
+        let response: serde_json::Value =
+            serde_json::from_str(&reply.expect("lifecycle response")).expect("response JSON");
+        assert_eq!(response["result"], serde_json::json!({}));
+    };
+    let options = JsonOptions::default();
+    let provision = r#"{
+        "version":"1.1.0-alpha","phase":"provision","containment":"isolation_session",
+        "network":{
+            "egress":{"default":"allow"},
+            "ingress":{"default":"allow","hostLoopback":"allow"}
+        }
+    }"#;
+    assert_empty(dev::validate_provision_json(provision, options));
+    let provisioned: serde_json::Value = serde_json::from_str(
+        &dev::provision_container_json(provision, options).expect("exact-JSON provision"),
+    )
+    .expect("provision JSON");
+    let id = provisioned["result"]["sandboxId"]
+        .as_str()
+        .expect("provisioned identifier");
+    let teardown = Teardown(id.to_string());
+    let metadata = &provisioned["result"]["metadata"];
+    assert!(!metadata["agentUserName"]
+        .as_str()
+        .expect("agent name")
+        .is_empty());
+    assert!(!metadata["agentUserSid"]
+        .as_str()
+        .expect("agent SID")
+        .is_empty());
+    let workspace = std::path::Path::new(
+        metadata["ephemeralWorkspacePath"]
+            .as_str()
+            .expect("shared workspace"),
+    );
+    assert!(workspace.is_dir());
+    let phase =
+        |name| serde_json::json!({"version":"1.0.0","phase":name,"sandboxId":id}).to_string();
+    let exec = |command: &str, timeout: u32| {
+        serde_json::json!({
+            "version":"1.1.0-alpha","phase":"exec","sandboxId":id,
+            "process":{"commandLine":command,"timeout":timeout},
+        })
+        .to_string()
+    };
+    assert_empty(dev::validate_start_json(&phase("start"), options));
+    assert_empty(dev::start_container_json(
+        &phase("start"),
+        JsonOptions { experimental: true },
+    ));
+    let validation_file = workspace.join("dev-must-not-run.txt");
+    assert_empty(dev::validate_process_json(
+        &exec(
+            &format!("echo MUST_NOT_RUN> \"{}\"", validation_file.display()),
+            30000,
+        ),
+        options,
+    ));
+    assert!(!validation_file.exists());
+    let captured = dev::run_in_container_json(
+        &exec(
+            "echo DEV_EXEC_OUT & echo DEV_EXEC_ERR 1>&2 & exit /b 7",
+            30000,
+        ),
+        options,
+    )
+    .expect("captured exec");
+    assert_eq!(captured.outcome, WaitResult::Exited(7));
+    assert!(String::from_utf8_lossy(&captured.stdout).contains("DEV_EXEC_OUT"));
+    assert!(String::from_utf8_lossy(&captured.stderr).contains("DEV_EXEC_ERR"));
+
+    let mut pipe = dev::spawn_in_container_json(
+        &exec(
+            "cmd.exe /v:on /c \"set /p L= & echo DEV_PIPE:!L! & exit /b 9\"",
+            30000,
+        ),
+        options,
+    )
+    .expect("piped exec");
+    let mut stdin = pipe.take_stdin().expect("exec stdin");
+    stdin.write_all(b"ping-pong\r\n").expect("write exec input");
+    drop(stdin);
+    let output = pipe.wait_with_output().expect("piped output");
+    assert_eq!(output.outcome, WaitResult::Exited(9));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("DEV_PIPE:ping-pong"));
+
+    let terminal = dev::spawn_in_container_with_pty_json(
+        &exec("cmd.exe /q", 30000),
+        PtyJsonOptions {
+            size: MxcPtySize {
+                rows: 30,
+                cols: 90,
+                ..Default::default()
+            },
+            experimental: true,
+        },
+    )
+    .expect("PTY exec");
+    let mut reader = terminal.try_clone_reader().expect("PTY output");
+    let output = std::thread::spawn(move || {
+        let mut text = String::new();
+        reader.read_to_string(&mut text).expect("read PTY");
+        text
+    });
+    let mut writer = terminal.take_writer().expect("PTY input");
+    writer
+        .write_all(b"set MXC_DEV_MARK=OK\r\necho DEV_PTY_%MXC_DEV_MARK%\r\nexit /b 13\r\n")
+        .expect("write PTY");
+    let outcome = terminal.wait().expect("wait for PTY");
+    drop(writer);
+    drop(terminal);
+    assert_eq!(outcome, WaitResult::Exited(13));
+    assert!(output.join().expect("PTY reader").contains("DEV_PTY_OK"));
+
+    let began = std::time::Instant::now();
+    let timed_out = dev::run_in_container_json(
+        &exec(
+            "echo DEV_TIMEOUT_PARTIAL & start /b cmd.exe /c ping -n 60 127.0.0.1 >nul & ping -n 60 127.0.0.1 >nul",
+            750,
+        ),
+        options,
+    )
+    .expect("captured timeout");
+    assert_eq!(timed_out.outcome, WaitResult::TimedOut);
+    assert!(String::from_utf8_lossy(&timed_out.stdout).contains("DEV_TIMEOUT_PARTIAL"));
+    assert!(began.elapsed() < std::time::Duration::from_secs(10));
+
+    assert_empty(dev::validate_stop_json(&phase("stop"), options));
+    let retained =
+        dev::run_in_container_json(&exec("echo DEV_CALLER_OWNS_CONTAINER", 30000), options)
+            .expect("caller retains its container");
+    assert_eq!(retained.outcome, WaitResult::Exited(0));
+    assert!(String::from_utf8_lossy(&retained.stdout).contains("DEV_CALLER_OWNS_CONTAINER"));
+    assert_empty(dev::stop_container_json(&phase("stop"), options));
+    assert_empty(dev::validate_deprovision_json(
+        &phase("deprovision"),
+        options,
+    ));
+    assert_empty(dev::deprovision_container_json(
+        &phase("deprovision"),
+        options,
+    ));
+    teardown.defuse();
+    assert!(!workspace.exists());
+    let stale =
+        dev::start_container_json(&phase("start"), options).expect_err("retired identifier");
+    assert_eq!(stale.code, ErrorCode::StaleId);
+}
 
 #[test]
 #[serial_test::serial(isolation_session)]

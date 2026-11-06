@@ -4,7 +4,8 @@
 //! State-aware lifecycle C ABI over the native engine and binding adapters.
 //!
 //! Entry points mirror the SDK's [`mxc_sdk::__ffi::run_lifecycle_json`],
-//! [`mxc_engine::exec_state_aware_attached`] and [`mxc_sdk::__ffi::execute_lifecycle_json`]:
+//! [`mxc_sdk::mxc_engine::exec_state_aware_attached`] and
+//! [`mxc_sdk::__ffi::execute_lifecycle_json`]:
 //!
 //! - [`mxc_run_state_aware_json`] drives the **envelope phases** (`provision-session` /
 //!   `provision` / `start` / `stop` / `deprovision` / `deprovision-session`,

@@ -365,13 +365,13 @@ $null = $results.Add((Run-WslcTest "wslc_network_bridged.json" `
 # rules, so a per-destination egress rule must be refused rather than quietly
 # widened to the posture's default.
 foreach ($ruleConfig in @("wslc_network_egress_rules_rejected.json", "wslc_network_egress_deny_rules_rejected.json")) {
-    $null = $results.Add((Run-WslcTest $ruleConfig -ExpectedExit -1 `
+    $null = $results.Add((Run-WslcTest $ruleConfig -ExpectedExit 1 `
         -OutputContains "network.egress allow/deny rules" `
         -OutputNotContains "WSLC_EGRESS_RULES_SHOULD_NOT_RUN"))
 }
 # `process.env` without `inheritDefaultEnv` is launched through `env -i NAME=VALUE`,
 # which puts the injected proxy URL in argv and therefore in /proc/<pid>/cmdline.
-$null = $results.Add((Run-WslcTest "wslc_network_proxy_credentials_rejected.json" -ExpectedExit -1 `
+$null = $results.Add((Run-WslcTest "wslc_network_proxy_credentials_rejected.json" -ExpectedExit 1 `
     -OutputContains "must not carry credentials" `
     -OutputNotContains "WSLC_PROXY_CREDENTIALS_SHOULD_NOT_RUN"))
 # Delegate the cooperative proxy fixture to its owning script, which asserts
@@ -431,11 +431,11 @@ $null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ForceDebug `
     -OutputContains "Image 'busybox:latest' found" -OutputNotContains "Pulling image"))
 # The store is warm now, so a miss here can only come from the denied posture.
 Clear-ColdCacheStore
-$null = $results.Add((Run-WslcTest "wslc_cold_cache_denied_egress.json" -ExpectedExit -1 `
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_denied_egress.json" -ExpectedExit 1 `
     -OutputContains "declares no egress" -OutputNotContains "SHOULD_NOT_RUN"))
 # `Check the image name and tag` is unique to the non-retryable arm; every arm
 # says `could not be pulled`.
-$null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit -1 `
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit 1 `
     -OutputContains "Check the image name and tag"))
 Clear-ColdCacheStore
 
@@ -454,6 +454,12 @@ Clear-ColdCacheStore
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
 
+Write-Host "`n--- Target OS Tests ---" -ForegroundColor Cyan
+$null = $results.Add((Run-WslcTest "wslc_target_os_windows_rejected.json" `
+    -ExpectedExit 1 `
+    -OutputContains "wslc.targetOs" `
+    -OutputNotContains "unsupported target OS payload ran"))
+
 Write-Host "`n--- Lifecycle Tests ---" -ForegroundColor Cyan
 # `destroyOnExit: true` is a smoke test only: WSLC's session teardown reaps
 # session-scoped containers regardless of AutoRemove, so `true` has no
@@ -465,7 +471,7 @@ $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_true.json" `
 # deliver. It is refused before any container is created, so the payload must
 # never run.
 $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false_rejected.json" `
-    -ExpectedExit -1 `
+    -ExpectedExit 1 `
     -OutputContains "destroyOnExit=false"))
 
 Write-Host "`n--- Stdin Tests ---" -ForegroundColor Cyan
@@ -635,10 +641,24 @@ try {
         if (($r.Stdout + $r.Stderr) -notmatch 'timed out') { return "the timeout was not reported (stderr: $($r.Stderr.Trim()))" }
     }))
 
+    # Host stdin stays open, so the marker could only come from stdin being
+    # closed while the command was still running.
+    $null = $results.Add((Invoke-WslcStdinTest "a timed-out reader that ignores SIGTERM never sees end-of-file" {
+        $h = Start-WslcStdinRun -Command 'sh -c ''trap "" TERM; cat; echo SAW-EOF-BEFORE-STOP''' -TimeoutMs 3000 -WriteStdin
+        $r = Wait-WslcStdinRun $h -Seconds 180
+        Close-WslcStdin $h
+        Write-Host ("(took {0:N1}s) " -f $r.Seconds) -NoNewline -ForegroundColor Gray
+        if (-not $r.Exited) { return "wxc-exec did not exit within 180s of a 3s timeout" }
+        if ($r.ExitCode -ne -1) { return "expected exit -1, got $($r.ExitCode) (stderr: $($r.Stderr.Trim()))" }
+        if ($r.Stdout -match 'SAW-EOF-BEFORE-STOP') { return "the command saw end-of-file before it was stopped" }
+    }))
+
     # The WSLc SDK reports the exit of a command that left a lot of input unread
     # late, and may drop output the command wrote after its input backed up.
+    # A command that ends well after its input backs up is reported the minimum
+    # 30 s late, the smallest delay the warning has to catch.
     $null = $results.Add((Invoke-WslcStdinTest "a stdin flood into a command that ignores it finishes without losing output silently" {
-        $h = Start-WslcStdinRun -Command "sh -c 'sleep 3; echo FLOODED-DONE'" -WriteStdin
+        $h = Start-WslcStdinRun -Command "sh -c 'sleep 40; echo FLOODED-DONE'" -TimeoutMs 120000 -WriteStdin
         $flood = [byte[]]::new(32 * 1024 * 1024)
         $null = $h.Stdin.WriteAsync($flood, 0, $flood.Length)
         $r = Wait-WslcStdinRun $h -Seconds 300

@@ -135,10 +135,8 @@ pub(super) const SERVICE_TIMEOUT_GRACE_MS: u32 = 5_000;
 
 /// Relaxes the service-side timer so the caller's deadline is enforced locally.
 ///
-/// Only for the streaming path, which has somewhere to report a timeout. The
-/// run-to-completion path keeps the service timer exactly as it was: it has no
-/// timeout channel, and its observable behaviour (exit code 1 on an OS-side
-/// timeout) is pinned by the host suite.
+/// Without the margin the two deadlines coincide, and the service's kill (an
+/// ordinary exit code 1) could win the race and hide the timeout.
 ///
 /// Two deadlines are left alone rather than shifted:
 ///

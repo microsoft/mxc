@@ -8,7 +8,7 @@
 //!   [`temporary_files_policy`] enumerate the host environment to discover
 //!   tool/SDK/profile/temp directories as filesystem-policy fragments.
 //! - [`ContainerPolicy`] describes cross-platform restrictions, and
-//!   [`build_request`] maps it to an [`ExecutionRequest`] for Seatbelt,
+//!   [`build_request`] maps it to a [`ContainerRequest`] for Seatbelt,
 //!   Bubblewrap, and ProcessContainer.
 
 mod exact;

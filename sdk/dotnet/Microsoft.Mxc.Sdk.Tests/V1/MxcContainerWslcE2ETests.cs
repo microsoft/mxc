@@ -158,6 +158,105 @@ public class MxcContainerWslcE2ETests
         stdin.Dispose();
     }
 
+    // Unread stdin makes the WSLc SDK report this command's exit about 50 seconds late.
+    private static async Task<(MxcProcess Process, Stream Stdin)> SpawnCommandWithLateExitAsync()
+    {
+        var proc = MxcContainer.SpawnWithStdin(Request("sh -c 'sleep 2; head -c 1 >/dev/null'"));
+        try
+        {
+            var stdin = proc.StandardInput;
+            Assert.NotNull(stdin);
+            var flood = stdin.WriteAsync(new byte[4 * 1024 * 1024], TestContext.Current.CancellationToken).AsTask();
+            await AssertFinishesWithinAsync(flood, TimeSpan.FromSeconds(30), "the command's exit did not release the write");
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+            while (!proc.TryGetExitCode(out _))
+            {
+                Assert.True(DateTime.UtcNow < deadline, "the command's exit was never reported");
+                await Task.Delay(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+            }
+            return (proc, stdin);
+        }
+        catch
+        {
+            proc.Dispose();
+            throw;
+        }
+    }
+
+    [Fact]
+    public async Task SpawnWithStdin_CancellingAWaitDoesNotWaitForTheCleanupOfAnExitedCommand()
+    {
+        RequireWslc();
+
+        var late = await SpawnCommandWithLateExitAsync();
+        using var proc = late.Process;
+        var stdin = late.Stdin;
+        using var cancel = new CancellationTokenSource();
+        var cancelled = proc.WaitAsync(cancel.Token);
+        await Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        cancel.Cancel();
+
+        await AssertFinishesWithinAsync(cancelled, TimeSpan.FromSeconds(5), "the cancelled wait waited for the cleanup");
+        if (!cancelled.IsCompletedSuccessfully)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        }
+        var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
+        await AssertFinishesWithinAsync(wait, TimeSpan.FromSeconds(150), "the command never finished");
+        Assert.False((await wait).TimedOut);
+        stdin.Dispose();
+    }
+
+    [Fact]
+    public async Task SpawnWithStdin_WarningsAndDisposeDoNotWaitForTheCleanupOfAnExitedCommand()
+    {
+        RequireWslc();
+
+        var (proc, stdin) = await SpawnCommandWithLateExitAsync();
+        var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
+        await Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        var warnings = Task.Run(() => proc.Warnings, TestContext.Current.CancellationToken);
+        await AssertFinishesWithinAsync(warnings, TimeSpan.FromSeconds(5), "Warnings waited for the cleanup");
+        await warnings;
+        var dispose = Task.Run(proc.Dispose, TestContext.Current.CancellationToken);
+        await AssertFinishesWithinAsync(dispose, TimeSpan.FromSeconds(5), "Dispose waited for the cleanup");
+        await dispose;
+        await AssertFinishesWithinAsync(wait, TimeSpan.FromSeconds(150), "the command never finished");
+        Assert.False((await wait).TimedOut);
+        Assert.Throws<ObjectDisposedException>(() => proc.Warnings);
+        stdin.Dispose();
+        var next = await MxcContainer.RunAsync(
+            Request("true"),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(next.ExitCode == 0, "the disposed process did not release its session before its wait returned");
+    }
+
+    [Fact]
+    public async Task SpawnWithStdin_ATimeoutEndsACommandThatIgnoresSigtermAndReleasesItsBlockedWrite()
+    {
+        RequireWslc();
+
+        var request = new ContainerRequest("sh -c 'trap \"\" TERM; sleep 300'")
+        {
+            TimeoutMs = 5_000,
+            Containment = new Containment.Wslc(),
+        };
+        using var proc = MxcContainer.SpawnWithStdin(request);
+        var stdin = proc.StandardInput;
+        Assert.NotNull(stdin);
+        var write = await StartBlockedWriteAsync(stdin);
+
+        var wait = proc.WaitAsync(TestContext.Current.CancellationToken);
+
+        await AssertFinishesWithinAsync(wait, TimeSpan.FromSeconds(150), "the timed-out command never finished");
+        Assert.True((await wait).TimedOut);
+        await AssertFinishesWithinAsync(write, TimeSpan.FromSeconds(10), "the timeout did not release the write");
+        Assert.True(write.IsFaulted, "input the command never read must not be reported as delivered");
+        stdin.Dispose();
+    }
+
     [Fact]
     public async Task SpawnWithStdin_KillReleasesAWriteBlockedOnStdin()
     {

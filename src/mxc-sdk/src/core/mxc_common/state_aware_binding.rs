@@ -7,8 +7,8 @@
 //! Binding neither parses configuration nor supplies backend defaults.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
-    WslcProvisionSessionConfig,
+    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, MicroVmProvisionConfig,
+    WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::StatefulSandboxBackend;
@@ -222,6 +222,44 @@ where
         "wsb",
         |provision| match provision {
             StateAwareProvision::WindowsSandbox => Ok(None),
+            other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
+        },
+    )
+}
+
+/// Bind a MicroVM operation, preserving provision configuration and rejecting
+/// network and proxy settings on existing-container execution.
+pub fn bind_microvm<B>(
+    parsed: ParsedStateAwareRequest,
+) -> Result<BoundStateAwareRequest<B>, MxcError>
+where
+    B: StatefulSandboxBackend<
+        ProvisionConfig = MicroVmProvisionConfig,
+        StartConfig = (),
+        ExecConfig = (),
+        StopConfig = (),
+        DeprovisionConfig = (),
+    >,
+{
+    if parsed.phase() == Phase::Exec
+        && (parsed.request().policy.runtime_network_proxy_specified
+            || parsed.request().policy.network_proxy.is_enabled())
+    {
+        return Err(MxcError::policy_validation(
+            "MicroVM network proxy policy is fixed at provision",
+        ));
+    }
+    if parsed.phase() == Phase::Exec && parsed.request().policy.network_specified {
+        return Err(MxcError::policy_validation(
+            "MicroVM network policy is fixed at provision",
+        ));
+    }
+    BoundStateAwareRequest::bind(
+        parsed,
+        ContainmentBackend::MicroVm,
+        "microvm",
+        |provision| match provision {
+            StateAwareProvision::MicroVm(config) => Ok(config),
             other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
         },
     )

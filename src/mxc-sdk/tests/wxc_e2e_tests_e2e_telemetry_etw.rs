@@ -10,11 +10,12 @@
 //! `undetermined` is silently suppressed. This test closes it by observing the
 //! events themselves.
 //!
-//! It builds a private `wxc-exec.exe` with a **fake** provider group GUID (so
-//! the group-joined code path — the one internal builds ship — is the one under
-//! test), grants MXC telemetry consent to that binary through the debug-only
+//! It builds a private local-only `wxc-exec.exe` (an empty
+//! `MXC_TELEMETRY_COMPONENT_PATH`, so no routing), grants MXC telemetry consent
+//! to that binary through the debug-only
 //! consent-store override, runs a real sandboxed execution while an ETW session
-//! is collecting, and decodes the trace.
+//! is collecting, and decodes the trace. Routing through the signed telemetry
+//! component is covered by the Windows build job, not here.
 //!
 //! Two directions are asserted, because only the pair is meaningful:
 //! consent granted must produce a decodable `Microsoft.MXC` event, and consent
@@ -31,12 +32,6 @@ use std::process::Command;
 #[path = "support/wxc_e2e_tests.rs"]
 mod wxc_e2e_tests;
 use wxc_e2e_tests::{examples_dir, repo_root};
-
-/// A syntactically valid GUID that is deliberately **not** the real Microsoft
-/// telemetry group. The real value is injected by internal build pipelines and
-/// must never be committed; what this test needs is only that *some* group is
-/// compiled in, so the `group_id(...)` provider definition is exercised.
-const FAKE_GROUP_GUID: &str = "4d584354-0000-4000-8000-e2e7e57fa4e0";
 
 /// GUID that ETW derives from the provider name `"Microsoft.MXC"`. The
 /// `tracelogging` crate hashes the name rather than taking a literal, so this
@@ -126,8 +121,8 @@ impl Drop for EtwSession {
     }
 }
 
-/// Builds `wxc-exec.exe` with `FAKE_GROUP_GUID` compiled into the provider
-/// definition, and with the debug-only consent-store override enabled so the
+/// Builds a local-only `wxc-exec.exe` with the telemetry component disabled,
+/// and with the debug-only consent-store override enabled so the
 /// test can grant consent without touching the developer's real consent state.
 fn build_instrumented_wxc_exec() -> PathBuf {
     let target_dir = build_target_dir();
@@ -145,13 +140,14 @@ fn build_instrumented_wxc_exec() -> PathBuf {
             "--target-dir",
         ])
         .arg(&target_dir)
-        .env("MXC_TELEMETRY_PROVIDER_GROUP_GUID", FAKE_GROUP_GUID)
+        .env("MXC_TELEMETRY_COMPONENT_PATH", "")
+        .env_remove("MXC_TELEMETRY_PROVIDER_GROUP_GUID")
         .output()
         .expect("failed to invoke cargo");
 
     assert!(
         output.status.success(),
-        "building wxc with a provider group GUID failed:\n{}",
+        "building a local-only wxc failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -160,13 +156,9 @@ fn build_instrumented_wxc_exec() -> PathBuf {
     exe
 }
 
-/// Reads back the build script's generated provider definition.
-///
-/// This is the direct evidence that the environment variable reached codegen.
-/// It matters on its own: an ETW collector cannot distinguish "provider is in
-/// group X" from "provider is in no group" (see the note on
-/// `assert_events_recorded`), so without this check a build that silently
-/// dropped the group would still pass the trace assertions.
+/// Reads back the build script's generated provider definition, which shows
+/// whether the build is routed. An ETW collector cannot tell a routed provider
+/// from an unrouted one, so this is the only check on the build's routing.
 fn generated_provider_def() -> String {
     let build_dir = build_target_dir().join("debug").join("build");
     let entry = std::fs::read_dir(&build_dir)
@@ -194,7 +186,7 @@ fn seed_consent(local_app_data: &Path, state: &str) {
     std::fs::create_dir_all(&dir).expect("failed to create consent directory");
     let record = format!(
         r#"{{"schemaVersion":2,"consent":"{state}","source":"telemetry-etw-e2e",
-"promptedMxcVersion":"0.0.0-e2e","promptResourceVersion":3,
+"promptedMxcVersion":"0.0.0-e2e","promptResourceVersion":4,
 "promptLocale":"en-US","updatedAtEpoch":0}}"#
     );
     std::fs::write(dir.join("telemetry-consent.json"), record.replace('\n', ""))
@@ -315,19 +307,32 @@ fn decode_trace(etl: &Path, workdir: &Path) -> Option<String> {
 
 /// Asserts the decoded trace contains a real MXC execution event.
 ///
-/// The assertion is on the **provider** GUID, not the group GUID, because a
-/// trace session enabled on a group GUID does not deliver the group's members'
-/// events on this host — the provider GUID is the only reliable subscription.
-/// Group membership is therefore verified at the source, in
-/// `generated_provider_def`.
+/// The assertion is on the **provider** GUID: it is the only reliable
+/// subscription for an out-of-process collector.
 fn assert_events_recorded(dump: &str) {
     assert!(
         dump.contains("Microsoft.MXC"),
         "no Microsoft.MXC events were recorded while telemetry consent was granted"
     );
+    for name in ["MXC.ExecutionStart", "MXC.ExecutionEnd"] {
+        assert!(
+            dump.contains(&format!("<Task>{name}</Task>")),
+            "the execution pair is missing {name}"
+        );
+    }
+    assert!(
+        !dump.contains("<Task>MXC.Execution</Task>"),
+        "the retired execution event must not be emitted"
+    );
+    assert!(
+        !dump.contains("mxc.host_app"),
+        "MXC events must not include host application attribution"
+    );
     // Field-level checks, so the test fails if the event is emitted but its
     // payload has been gutted.
     for field in [
+        "mxc.session_id",
+        "mxc.capture_denials",
         "mxc.sandbox_kind",
         "mxc.outcome",
         "PartA_PrivacyProduct",
@@ -371,12 +376,12 @@ fn test_telemetry_emits_etw_events_when_consent_granted() {
 
     let provider_def = generated_provider_def();
     assert!(
-        provider_def.contains(&format!("group_id(\"{FAKE_GROUP_GUID}\")")),
-        "the provider group GUID did not reach codegen: {provider_def}"
+        provider_def.contains("IS_UTC_ROUTED: bool = false"),
+        "a build with the component disabled must be local-only: {provider_def}"
     );
     assert!(
-        provider_def.contains("IS_UTC_ROUTED: bool = true"),
-        "a group-joined build must report itself as UTC-routed: {provider_def}"
+        !provider_def.contains("group_id("),
+        "a local-only build must not join a provider group: {provider_def}"
     );
 
     let workdir = build_target_dir().join("etw-e2e");

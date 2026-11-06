@@ -30,6 +30,7 @@ import {
   type ContainerId,
 } from '@microsoft/mxc-sdk/v1';
 import { safeDeprovision } from './test-helpers.js';
+import * as dev from '@microsoft/mxc-sdk/v1/dev';
 
 const wslcImage = process.env.MXC_WSLC_TEST_IMAGE ?? 'alpine:latest';
 
@@ -78,6 +79,69 @@ describe('WSLC state-aware lifecycle E2E', {
     ? 'WSLC tests require MXC_ENABLE_WSLC_TESTS=1 on Windows with WSL2 and WSLC SDK'
     : undefined,
 }, () => {
+  it('V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership', { timeout: 180000 }, async () => {
+    const reply = (json: string): Record<string, unknown> => {
+      const envelope: { result: Record<string, unknown> } = JSON.parse(json);
+      assert.ok(envelope.result && typeof envelope.result === 'object');
+      return envelope.result;
+    };
+    const provision = JSON.stringify({
+      version: '1.1.0-alpha', phase: 'provision', containment: 'wslc',
+      wslc: { provision: { image: wslcImage } },
+    });
+    assert.deepEqual(reply(await dev.validateProvisionJson(provision)), {});
+    const provisioned = reply(await dev.provisionContainerJson(provision));
+    const sandboxId = provisioned.sandboxId;
+    assert.ok(typeof sandboxId === 'string' && sandboxId.length > 0);
+    const phase = (name: string) => JSON.stringify({ version: '1.0.0', phase: name, sandboxId });
+    const exec = (commandLine: string) => JSON.stringify({
+      version: '1.1.0-alpha', phase: 'exec', sandboxId,
+      process: { commandLine, timeout: 30000 },
+    });
+    let started = false;
+    try {
+      assert.deepEqual(reply(await dev.validateStartJson(phase('start'))), {});
+      assert.deepEqual(reply(await dev.startContainerJson(phase('start'), { experimental: true })), {});
+      started = true;
+      assert.deepEqual(reply(await dev.validateProcessJson(exec('touch /tmp/dev-must-not-run'))), {});
+      const captured = await dev.runInContainerJson(exec(
+        "test ! -e /tmp/dev-must-not-run || exit 99; cat; printf 'DEV_WSLC_OUT\\n'; printf 'DEV_WSLC_ERR\\n' >&2; exit 7"));
+      assert.equal(captured.exitCode, 7);
+      assert.equal(captured.timedOut, false);
+      assert.match(captured.stdout, /DEV_WSLC_OUT/);
+      assert.match(captured.stderr, /DEV_WSLC_ERR/);
+
+      const proc = await dev.spawnInContainerJson(exec("cat; echo DEV_WSLC_PIPE; exit 9"));
+      try {
+        assert.equal(proc.standardInput, null);
+        const stdout = collect(proc.standardOutput);
+        const stderr = collect(proc.standardError);
+        const result = await proc.wait();
+        assert.equal(result.exitCode, 9);
+        assert.equal(result.timedOut, false);
+        assert.match(await stdout, /DEV_WSLC_PIPE/);
+        assert.equal(await stderr, '');
+      } finally {
+        proc.dispose();
+      }
+      assert.deepEqual(reply(await dev.validateStopJson(phase('stop'))), {});
+      const retained = await dev.runInContainerJson(exec('echo DEV_WSLC_STILL_OWNED'));
+      assert.equal(retained.exitCode, 0);
+      assert.match(retained.stdout, /DEV_WSLC_STILL_OWNED/);
+      assert.deepEqual(reply(await dev.stopContainerJson(phase('stop'))), {});
+      started = false;
+      assert.deepEqual(reply(await dev.validateDeprovisionJson(phase('deprovision'))), {});
+    } finally {
+      try {
+        if (started) await dev.stopContainerJson(phase('stop'));
+      } finally {
+        assert.deepEqual(reply(await dev.deprovisionContainerJson(phase('deprovision'))), {});
+      }
+    }
+    await assert.rejects(dev.startContainerJson(phase('start')),
+      (error: unknown) => error instanceof MxcError && error.code === 'not_provisioned');
+  });
+
   it(
     'preserves lifecycle, streaming, stdin, timeout, and stale-id behavior',
     { timeout: 180_000 },

@@ -255,7 +255,7 @@ async fn handle_client(
     }
 }
 
-/// Handle an `EXEC` after the auth line: read the framed [`ExecStart`], acquire
+/// Handle an `EXEC` after the auth line: read the framed [`ipc_exec::ExecStart`], acquire
 /// the single-flight guest slot, emit a status line, and (on admission) stream
 /// the guest's output back as [`ipc_exec`] frames.
 async fn handle_exec(

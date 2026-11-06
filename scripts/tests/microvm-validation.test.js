@@ -115,14 +115,36 @@ fn main() {
         return;
     }
     if args == ["--list"] {
+        if mode != "missing-proxy-discovery" {
+            println!("windows_x64::signed_agent_proxy_validation_withholds_credentials: test");
+        }
+        if mode != "missing-alias-discovery" {
+            println!("windows_x64::guest_path_resolves_windows_case_alias: test");
+        }
+        if mode != "missing-executor-proxy-discovery" {
+            println!("windows_x64::signed_executor_proxy_validation_withholds_credentials: test");
+        }
         println!("windows_x64::host_only_executor_request_matrix: test");
         println!("windows_x64::signed_bundle_executor_configs: test");
         println!("windows_x64::signed_bundle_executor_create_and_run: test");
+        println!("windows_x64::signed_bundle_json_image_and_filesystem_policy: test");
         if mode != "missing-interruption-discovery" {
             println!("windows_x64::signed_bundle_executor_console_interrupt: test");
         }
         if mode != "missing-discovery" {
             println!("windows_x64::signed_bundle_facade_create_and_run: test");
+        }
+        if mode != "missing-sdk-json-discovery" {
+            println!("windows_x64::signed_bundle_sdk_json_capture: test");
+        }
+        if mode != "missing-network-discovery" {
+            println!("windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors: test");
+        }
+        if mode != "missing-host-loopback-discovery" {
+            println!("windows_network::signed_bundle_host_loopback_ingress: test");
+        }
+        if mode != "missing-network-proxy-discovery" {
+            println!("windows_network::signed_bundle_deny_default_proxy_policy: test");
         }
         return;
     }
@@ -140,6 +162,12 @@ fn main() {
     if mode != "missing-facade" {
         println!("VM_EXECUTED facade sequential stdout/stderr/exit/env/cwd/timeout/capture-limit/cleanup");
     }
+    if mode != "missing-sdk-json" {
+        println!("VM_EXECUTED SDK JSON binary capture timeout limit and cleanup");
+    }
+    if mode != "missing-json-image" {
+        println!("VM_EXECUTED JSON selected-image filesystem read/write/deny and cleanup");
+    }
     if mode != "missing-executor" {
         println!("VM_EXECUTED executor sequential stdout/stderr/exit/timeout/capture-limit/cleanup");
     }
@@ -148,6 +176,18 @@ fn main() {
     }
     if mode != "missing-interruption" {
         println!("VM_EXECUTED executor console interruption startup/execution/owned-vmm/cleanup");
+    }
+    if mode != "missing-network" {
+        println!("VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement");
+    }
+    if mode != "missing-network-udp" {
+        println!("VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges");
+    }
+    if mode != "missing-host-loopback" {
+        println!("VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls");
+    }
+    if mode != "missing-network-proxy" {
+        println!("VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic");
     }
     if mode == "skipped" {
         println!("SKIPPED: fixture VM unavailable");
@@ -336,6 +376,14 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   const artifactSuite = join(result.outputDirectory, result.triplet, "nvx-e2e-tests.exe");
   writeFileSync(artifactSuite, validationSuite);
   writeFileSync(join(x64, "nvx-e2e-tests.exe"), validationSuite);
+  const probeSuites = ["x64", "arm64"].flatMap((arch) =>
+    ["mxc-filesystem-probe-tests", "mxc-filesystem-probe-tests.exe"].map((name) => ({ arch, name }))
+  );
+  for (const { arch, name } of probeSuites) {
+    const directory = join(binaryRoot, arch);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, name), validationSuite);
+  }
   const script = join(result.directory, "npm-artifact.ps1");
   const quote = (path) => `'${path.replaceAll("'", "''")}'`;
   writeFileSync(script, [
@@ -359,6 +407,9 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   assert.deepEqual(fileDigests(join(result.outputDirectory, result.triplet, "aci-edge-sandboxes")), expected);
   assert.deepEqual(readFileSync(artifactSuite), validationSuite);
   assert.deepEqual(readFileSync(join(x64, "nvx-e2e-tests.exe")), validationSuite);
+  for (const { arch, name } of probeSuites) {
+    assert.deepEqual(readFileSync(join(binaryRoot, arch, name)), validationSuite);
+  }
 
   rmSync(join(binaryRoot, ".npmignore"));
   const unfiltered = spawnSync("npm pack --ignore-scripts --offline --json", {
@@ -371,6 +422,9 @@ test("npm pack excludes NVX runtime and validation payloads without removing sup
   assert.equal(unfiltered.status, 0, unfiltered.stdout + unfiltered.stderr);
   const unfilteredFiles = JSON.parse(unfiltered.stdout)[0].files.map(({ path }) => path);
   assert.ok(unfilteredFiles.includes("bin/x64/nvx-e2e-tests.exe"));
+  for (const { arch, name } of probeSuites) {
+    assert.ok(unfilteredFiles.includes(`bin/${arch}/${name}`));
+  }
   assert.deepEqual(
     unfilteredFiles
       .filter((path) => path.startsWith("bin/x64/aci-edge-sandboxes/"))
@@ -459,17 +513,29 @@ test("artifact dispatcher executes prebuilt SDK tests and preserves the log", ()
   assert.equal(result.status, 0, result.output);
   const log = readFileSync(join(directory, "logs", "microvm-nvx.log"), "utf8");
   assert.match(log, /VM_EXECUTED facade /);
+  assert.match(log, /VM_EXECUTED SDK JSON binary capture /);
+  assert.match(log, /VM_EXECUTED JSON selected-image filesystem /);
   assert.match(log, /VM_EXECUTED executor /);
   assert.match(log, /VM_EXECUTED executor console interruption /);
+  assert.match(log, /VM_EXECUTED reachable controls and network allow\/deny\/nonmatching-port enforcement/);
+  assert.match(log, /VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges/);
+  assert.match(log, /VM_EXECUTED host-loopback ingress TCP\/UDP allow deny ready listeners and reply controls/);
+  assert.match(log, /VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic/);
 });
 
 for (const [mode, message] of [
   ["native-failure", /exited 23/],
   ["zero-tests", /executed no tests/],
   ["missing-facade", /did not execute the facade VM scenario/],
+  ["missing-sdk-json", /did not execute the SDK JSON capture VM scenario/],
+  ["missing-json-image", /did not execute the JSON image and policy VM scenario/],
   ["missing-executor", /did not execute the executor VM scenario/],
   ["missing-configs", /did not execute the executor configs VM scenario/],
   ["missing-interruption", /did not execute the executor interruption VM scenario/],
+  ["missing-network", /did not execute the network rules VM scenario/],
+  ["missing-network-udp", /did not execute the UDP network rules VM scenario/],
+  ["missing-host-loopback", /did not execute the host-loopback ingress VM scenario/],
+  ["missing-network-proxy", /did not execute the network proxy VM scenario/],
   ["skipped", /skipped or filtered tests/],
   ["ignored", /skipped or filtered tests/],
 ]) {
@@ -521,14 +587,31 @@ test("staging uses Cargo's reported executable and checks VM test discovery", ()
 for (const [mode, message] of [
   ["cargo-failure", /cargo test --no-run failed with exit code 17/],
   ["cargo-no-artifact", /Expected one nvx_e2e test executable/],
+  ["missing-proxy-discovery", /did not discover windows_x64::signed_agent_proxy_validation_withholds_credentials/],
+  ["missing-alias-discovery", /did not discover windows_x64::guest_path_resolves_windows_case_alias/],
+  ["missing-executor-proxy-discovery", /did not discover windows_x64::signed_executor_proxy_validation_withholds_credentials/],
   ["missing-discovery", /did not discover windows_x64::signed_bundle_facade_create_and_run/],
+  ["missing-sdk-json-discovery", /did not discover windows_x64::signed_bundle_sdk_json_capture/],
   ["missing-interruption-discovery", /did not discover windows_x64::signed_bundle_executor_console_interrupt/],
+  ["missing-network-discovery", /did not discover[\s\S]*windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors/],
+  ["missing-host-loopback-discovery", /did not discover[\s\S]*windows_network::signed_bundle_host_loopback_ingress/],
+  ["missing-network-proxy-discovery", /did not discover[\s\S]*windows_network::signed_bundle_deny_default_proxy_policy/],
 ]) {
   test(`staging rejects ${mode}`, () => {
     const result = stage(mode);
     assert.notEqual(result.status, 0, result.output);
     assert.match(result.output, message);
-    if (!["missing-discovery", "missing-interruption-discovery"].includes(mode)) {
+    if (![
+      "missing-proxy-discovery",
+      "missing-alias-discovery",
+      "missing-executor-proxy-discovery",
+      "missing-discovery",
+      "missing-sdk-json-discovery",
+      "missing-interruption-discovery",
+      "missing-network-discovery",
+      "missing-host-loopback-discovery",
+      "missing-network-proxy-discovery",
+    ].includes(mode)) {
       assert.equal(existsSync(join(result.directory, "nvx-e2e-tests.exe")), false);
     }
   });

@@ -40,6 +40,21 @@ trait Case: Sized {
 struct Isolation;
 struct WindowsSandbox;
 struct Wslc;
+struct MicroVm;
+
+impl Case for MicroVm {
+    type ProvisionConfig = MicroVmProvisionConfig;
+    const BACKEND: &'static str = "microvm";
+    const PREFIX: &'static str = "microvm";
+    fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
+        config.map_or(Config::Absent, |_| Config::Unit)
+    }
+    fn bind(
+        parsed: ParsedStateAwareRequest,
+    ) -> Result<BoundStateAwareRequest<Recording<Self>>, MxcError> {
+        bind_microvm(parsed)
+    }
+}
 
 impl Case for Isolation {
     type ProvisionConfig = IsolationSessionProvisionConfig;
@@ -502,6 +517,100 @@ fn every_backend_and_phase_preserves_validation_execution_and_dry_run_order() {
     lifecycle_matrix::<Isolation>();
     lifecycle_matrix::<WindowsSandbox>();
     lifecycle_matrix::<Wslc>();
+}
+
+#[test]
+fn microvm_exec_rejects_every_explicit_network_before_backend_validation_or_execution() {
+    for network in [
+        json!({}),
+        json!({"egress": {"default": "deny"}}),
+        json!({"egress": {"default": "allow"}}),
+        json!({"ingress": {"default": "deny", "hostLoopback": "deny"}}),
+        json!({"ingress": {"default": "allow", "hostLoopback": "allow"}}),
+        json!({"egress": {"allow": []}}),
+        json!({"egress": {"deny": []}}),
+        json!({"egress": {"allow": [{"to": [{"cidr": "10.0.0.0/8"}]}]}}),
+        json!({"egress": {"deny": [{"to": [{"cidr": "192.0.2.0/24"}]}]}}),
+    ] {
+        for dry_run in [false, true] {
+            let mut value = input::<MicroVm>(Phase::Exec);
+            value["network"] = network.clone();
+            let parsed = parse(&value);
+            assert!(parsed.request().policy.network_specified, "{network}");
+            let mut backend = Recording::<MicroVm>::new(false);
+            let result = bind_microvm(parsed)
+                .and_then(|bound| dispatch_state_aware(&mut backend, bound, dry_run));
+            let error = result.unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+            assert_eq!(
+                error.message,
+                "MicroVM network policy is fixed at provision"
+            );
+            assert!(
+                backend.events.borrow().is_empty(),
+                "{network}: backend touched"
+            );
+        }
+    }
+    assert_dispatch::<MicroVm>(&input::<MicroVm>(Phase::Exec), Config::Absent);
+}
+
+#[test]
+fn microvm_exec_proxy_precedence_and_defensive_binding_preserve_existing_contracts() {
+    let mut value = input::<MicroVm>(Phase::Exec);
+    value["network"] = json!({});
+    value["runtimeConfig"] = json!({"networkProxy": "http://127.0.0.1:3128"});
+    let error = match bind_microvm::<Recording<MicroVm>>(parse(&value)) {
+        Err(error) => error,
+        Ok(_) => panic!("exec proxy must remain rejected"),
+    };
+    assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+    assert_eq!(
+        error.message,
+        "MicroVM network proxy policy is fixed at provision"
+    );
+
+    for id in ["microvm:test-id", "wslc:test-id"] {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_specified = true;
+        let parsed = ParsedStateAwareRequest::new(
+            request,
+            StateAwareOperation::Exec {
+                sandbox_id: id.to_owned(),
+            },
+        );
+        let error = match bind_microvm::<Recording<MicroVm>>(parsed) {
+            Err(error) => error,
+            Ok(_) => panic!("explicit network must fail before binding"),
+        };
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(
+            error.message,
+            "MicroVM network policy is fixed at provision"
+        );
+    }
+    let mut value = input::<MicroVm>(Phase::Exec);
+    value["sandboxId"] = json!("wslc:test-id");
+    let error = match bind_microvm::<Recording<MicroVm>>(parse(&value)) {
+        Err(error) => error,
+        Ok(_) => panic!("omitted network must retain backend-ID validation"),
+    };
+    assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+    assert!(error.message.contains("incompatible"));
+}
+
+#[test]
+fn exec_network_binding_restriction_is_microvm_only_and_does_not_restrict_provision() {
+    let mut provision = input::<MicroVm>(Phase::Provision);
+    provision["microvm"] = json!({"image": "docker.io/library/python:3.12-alpine"});
+    provision["network"] = json!({"egress": {"default": "deny"}});
+    assert_dispatch::<MicroVm>(&provision, Config::Unit);
+    let mut windows = input::<WindowsSandbox>(Phase::Exec);
+    windows["network"] = json!({});
+    assert_dispatch::<WindowsSandbox>(&windows, Config::Absent);
+    let mut wslc = input::<Wslc>(Phase::Exec);
+    wslc["network"] = json!({"egress": {"default": "deny"}});
+    assert_dispatch::<Wslc>(&wslc, Config::Absent);
 }
 
 #[test]

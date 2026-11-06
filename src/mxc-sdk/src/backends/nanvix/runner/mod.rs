@@ -56,7 +56,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, NetworkAction, ScriptResponse};
+use crate::mxc_common::models::{ExecutionRequest, FailurePhase, NetworkAction, ScriptResponse};
 use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
@@ -132,8 +132,13 @@ fn exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
 /// Classifies NanVix runner errors for structured error handling.
 #[derive(Debug)]
 enum NanVixError {
-    /// Pre-spawn validation failures (missing artifacts, invalid config, unsupported policy).
-    Preflight(String),
+    /// The request asks for something the NanVix guest will not enforce.
+    Policy(String),
+    /// A NanVix runtime artifact the host must supply is missing.
+    Unavailable(String),
+    /// Host-side preparation failed before the micro-VM was spawned
+    /// (snapshot generation, staging, locating the installation).
+    Setup(String),
     /// OS/platform failures while spawning/managing the NanVix process (WHP/spawn/handles).
     Platform(String),
     /// Stdin broken pipe, VM crash.
@@ -148,7 +153,11 @@ enum NanVixError {
 impl std::fmt::Display for NanVixError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NanVixError::Preflight(msg) => write!(f, "NanVix preflight error: {}", msg),
+            NanVixError::Policy(msg) => write!(f, "NanVix policy error: {}", msg),
+            NanVixError::Unavailable(msg) => {
+                write!(f, "NanVix is not available on this host: {}", msg)
+            }
+            NanVixError::Setup(msg) => write!(f, "NanVix setup error: {}", msg),
             NanVixError::Platform(msg) => write!(f, "NanVix platform error: {}", msg),
             NanVixError::Runtime(msg) => write!(f, "NanVix runtime error: {}", msg),
             NanVixError::Timeout {
@@ -165,12 +174,20 @@ impl std::fmt::Display for NanVixError {
 }
 
 impl NanVixError {
-    fn to_response(&self) -> ScriptResponse {
-        ScriptResponse {
-            exit_code: ERROR_EXIT_CODE,
-            error_message: self.to_string(),
-            ..Default::default()
+    /// Which side a failure is attributed to: the request, the host, or the
+    /// run itself.
+    fn failure_phase(&self) -> FailurePhase {
+        match self {
+            NanVixError::Policy(_) => FailurePhase::Rejected,
+            NanVixError::Unavailable(_) => FailurePhase::BackendUnavailable,
+            NanVixError::Setup(_) | NanVixError::Platform(_) => FailurePhase::LaunchFailed,
+            NanVixError::Runtime(_) => FailurePhase::PostLaunchFailed,
+            NanVixError::Timeout { .. } => FailurePhase::Timeout,
         }
+    }
+
+    fn to_response(&self) -> ScriptResponse {
+        ScriptResponse::failed(self.failure_phase(), &self.to_string())
     }
 }
 
@@ -180,11 +197,11 @@ impl NanVixError {
 /// `process_util` is gated to `target_os = "windows"`.
 fn exe_dir() -> Result<PathBuf, NanVixError> {
     std::env::current_exe()
-        .map_err(|e| NanVixError::Preflight(format!("cannot determine exe path: {}", e)))
+        .map_err(|e| NanVixError::Setup(format!("cannot determine exe path: {}", e)))
         .and_then(|exe| {
             exe.parent()
                 .map(|p| p.to_path_buf())
-                .ok_or_else(|| NanVixError::Preflight("exe has no parent directory".to_string()))
+                .ok_or_else(|| NanVixError::Setup("exe has no parent directory".to_string()))
         })
 }
 
@@ -321,7 +338,7 @@ impl NanVixScriptRunner {
 
         let nanvixd = dir.join(NANVIXD_BINARY);
         if !nanvixd.exists() {
-            return Err(NanVixError::Preflight(format!(
+            return Err(NanVixError::Unavailable(format!(
                 "{} not found in {:?}",
                 NANVIXD_BINARY, dir
             )));
@@ -329,7 +346,7 @@ impl NanVixScriptRunner {
 
         let ramfs = dir.join(RAMFS_IMAGE);
         if !ramfs.exists() {
-            return Err(NanVixError::Preflight(format!(
+            return Err(NanVixError::Unavailable(format!(
                 "{} not found in {:?}",
                 RAMFS_IMAGE, dir
             )));
@@ -337,7 +354,7 @@ impl NanVixScriptRunner {
 
         let initrd = dir.join(INITRD_BINARY);
         if !initrd.exists() {
-            return Err(NanVixError::Preflight(format!(
+            return Err(NanVixError::Unavailable(format!(
                 "{} not found in {:?}",
                 INITRD_BINARY, dir
             )));
@@ -350,7 +367,7 @@ impl NanVixScriptRunner {
         for name in crate::nanvix_common::BIN_SUBDIR_FILES {
             let path = bin_subdir.join(name);
             if !path.exists() {
-                return Err(NanVixError::Preflight(format!(
+                return Err(NanVixError::Unavailable(format!(
                     "{}/{} not found in {:?}",
                     BIN_DIR, name, dir
                 )));
@@ -405,7 +422,7 @@ impl NanVixScriptRunner {
             let p = PathBuf::from(val);
             if !p.as_os_str().is_empty() {
                 std::fs::create_dir_all(&p).map_err(|e| {
-                    NanVixError::Preflight(format!(
+                    NanVixError::Setup(format!(
                         "cannot create ${} directory {:?}: {}",
                         NANVIX_HOME_ENV, p, e
                     ))
@@ -457,9 +474,8 @@ impl NanVixScriptRunner {
         ramfs: &Path,
         initrd: &Path,
     ) -> Result<(), NanVixError> {
-        std::fs::create_dir_all(snapshot_home).map_err(|e| {
-            NanVixError::Preflight(format!("failed to create snapshot home: {}", e))
-        })?;
+        std::fs::create_dir_all(snapshot_home)
+            .map_err(|e| NanVixError::Setup(format!("failed to create snapshot home: {}", e)))?;
 
         eprintln!("nanvix: no snapshot found — generating via cold boot (one-time cost)...");
 
@@ -471,7 +487,7 @@ impl NanVixScriptRunner {
             ramfs,
             initrd,
         )
-        .map_err(NanVixError::Preflight)?;
+        .map_err(NanVixError::Setup)?;
 
         eprintln!(
             "nanvix: snapshot generated in {:.0?} — subsequent runs will use warm start",
@@ -501,7 +517,7 @@ impl NanVixScriptRunner {
             .as_ref()
             .is_some_and(|egress| !egress.allow.is_empty() || !egress.deny.is_empty())
         {
-            return Err(NanVixError::Preflight(ERR_DIRECTIONAL_FILTERS.to_string()));
+            return Err(NanVixError::Policy(ERR_DIRECTIONAL_FILTERS.to_string()));
         }
         let egress = policy
             .network_egress
@@ -519,7 +535,7 @@ impl NanVixScriptRunner {
             .map(|ingress| ingress.host_loopback)
             .unwrap_or(NetworkAction::Deny);
         if egress != ingress || ingress != host_loopback {
-            return Err(NanVixError::Preflight(ERR_DIRECTIONAL_NETWORK.to_string()));
+            return Err(NanVixError::Policy(ERR_DIRECTIONAL_NETWORK.to_string()));
         }
         Ok(egress == NetworkAction::Allow)
     }
@@ -527,13 +543,13 @@ impl NanVixScriptRunner {
     fn validate_policies(request: &ExecutionRequest) -> Result<(), NanVixError> {
         // denied_paths is explicitly rejected — microvm has no host visibility.
         if !request.policy.denied_paths.is_empty() {
-            return Err(NanVixError::Preflight(ERR_DENIED_PATHS.to_string()));
+            return Err(NanVixError::Policy(ERR_DENIED_PATHS.to_string()));
         }
         if request.policy.network_proxy.is_enabled() {
-            return Err(NanVixError::Preflight(ERR_PROXY_POLICY.to_string()));
+            return Err(NanVixError::Policy(ERR_PROXY_POLICY.to_string()));
         }
         if !request.working_directory.is_empty() {
-            return Err(NanVixError::Preflight(ERR_WORKDIR.to_string()));
+            return Err(NanVixError::Policy(ERR_WORKDIR.to_string()));
         }
         Self::resolve_networking_mode(request)?;
 
@@ -806,8 +822,9 @@ impl NanVixScriptRunner {
     }
     /// Returns `true` when filesystem copyback should run.
     /// Copyback runs on any normal process exit (including non-zero exit codes).
-    /// It is skipped for preflight, spawn, runtime, and timeout errors, and for
-    /// OS crashes (negative exit codes from NTSTATUS values).
+    /// It is skipped for every runner error (policy, availability, setup, spawn,
+    /// runtime, timeout) and for OS crashes (negative exit codes from NTSTATUS
+    /// values).
     fn should_copy_back(response: &ScriptResponse) -> bool {
         response.error_message.is_empty() && response.exit_code >= 0
     }
@@ -853,7 +870,7 @@ impl ScriptRunner for NanVixScriptRunner {
         ) {
             Ok(s) => s,
             Err(e) => {
-                let err = NanVixError::Preflight(e.to_string());
+                let err = NanVixError::Setup(e.to_string());
                 let _ = writeln!(logger, "{}", err);
                 return err.to_response();
             }
@@ -1184,7 +1201,8 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        assert_eq!(resp.exit_code, FailurePhase::Rejected.failure_exit_code());
         assert!(resp.error_message.contains(ERR_WORKDIR));
     }
 
@@ -1225,7 +1243,8 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = runner.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        assert_eq!(resp.exit_code, FailurePhase::Rejected.failure_exit_code());
         assert!(resp.error_message.contains(ERR_PROXY_POLICY));
     }
 
@@ -1338,10 +1357,24 @@ mod tests {
     // -- NanVixError display tests ---------------------------------------------
 
     #[test]
-    fn error_display_preflight() {
-        let err = NanVixError::Preflight("missing binary".to_string());
-        assert!(err.to_string().contains("preflight"));
+    fn error_display_policy() {
+        let err = NanVixError::Policy("workingDirectory".to_string());
+        assert!(err.to_string().contains("policy"));
+        assert!(err.to_string().contains("workingDirectory"));
+    }
+
+    #[test]
+    fn error_display_unavailable() {
+        let err = NanVixError::Unavailable("missing binary".to_string());
+        assert!(err.to_string().contains("not available on this host"));
         assert!(err.to_string().contains("missing binary"));
+    }
+
+    #[test]
+    fn error_display_setup() {
+        let err = NanVixError::Setup("snapshot home".to_string());
+        assert!(err.to_string().contains("setup"));
+        assert!(err.to_string().contains("snapshot home"));
     }
 
     #[test]
@@ -1371,8 +1404,52 @@ mod tests {
     }
 
     #[test]
+    fn refused_policy_is_reported_as_a_rejection() {
+        let resp = NanVixError::Policy(ERR_WORKDIR.to_string()).to_response();
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+        assert_eq!(resp.exit_code, 1);
+        assert!(!resp.error_message.is_empty());
+    }
+
+    #[test]
+    fn missing_runtime_artifacts_blame_the_host() {
+        let resp = NanVixError::Unavailable("nanvixd not found".to_string()).to_response();
+        assert_eq!(resp.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+    }
+
+    #[test]
+    fn run_faults_keep_the_generic_backend_error_code() {
+        for (err, phase) in [
+            (
+                NanVixError::Setup("staging".to_string()),
+                FailurePhase::LaunchFailed,
+            ),
+            (
+                NanVixError::Platform("spawn".to_string()),
+                FailurePhase::LaunchFailed,
+            ),
+            (
+                NanVixError::Runtime("crash".to_string()),
+                FailurePhase::PostLaunchFailed,
+            ),
+            (
+                NanVixError::Timeout {
+                    script_timeout_ms: 1,
+                    total_ms: 2,
+                },
+                FailurePhase::Timeout,
+            ),
+        ] {
+            let resp = err.to_response();
+            assert_eq!(resp.failure_phase, phase, "{err}");
+            assert_eq!(resp.exit_code, ERROR_EXIT_CODE, "{err}");
+        }
+    }
+
+    #[test]
     fn error_to_response_has_error_exit_code() {
-        let err = NanVixError::Preflight("test".to_string());
+        let err = NanVixError::Setup("test".to_string());
         let resp = err.to_response();
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(!resp.error_message.is_empty());

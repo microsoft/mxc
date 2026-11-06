@@ -36,10 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `MxcProcess.Kill` returns at once when a wait has already seen the process
-  exit and is finishing its cleanup, instead of waiting for that cleanup. For a
-  WSLC command that left a large amount of stdin unread, the cleanup can take
-  about a minute.
+- `MxcProcess.Kill`, `Dispose`, `Warnings`, and `OutputMetadata` return at once
+  when a wait has already seen the process exit, or killed it at its timeout,
+  and is finishing its cleanup, and cancelling `WaitAsync` returns at once
+  during that cleanup. For a WSLC command that left a large amount of stdin
+  unread, the cleanup can take about a minute. During it, `Kill` does nothing,
+  `Warnings` returns the warnings from before the cleanup, `OutputMetadata` is
+  null, and `TryGetExitCode` returns `false` for a process killed at its
+  timeout. A `Dispose` during it releases the process when the cleanup
+  completes, before the wait returns, without waiting for output a descendant
+  process still holds open.
 
 Entries below describe historical release APIs, not the current V1 surface.
 

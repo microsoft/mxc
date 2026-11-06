@@ -538,9 +538,25 @@ export async function createStreamingDriver(
   experimental = false,
   stdin = false,
 ): Promise<NativeLifecycleDriver> {
+  return createStreamingDriverFromJson(
+    JSON.stringify(request),
+    native,
+    factory,
+    experimental,
+    stdin,
+  );
+}
+
+/** Spawn a one-shot process without changing the caller's exact JSON. */
+export async function createStreamingDriverFromJson(
+  requestJson: string,
+  native: StreamingNativeFacade,
+  factory: NativeStreamFactory,
+  experimental = false,
+  stdin = false,
+): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
-  const requestJson = JSON.stringify(request);
   const spawn = stdin ? native.spawnWithStdin.bind(native) : native.spawn.bind(native);
   const status = await new Promise<number>((resolve, reject) => {
     spawn(
@@ -626,6 +642,35 @@ export async function spawnBindingSandboxProcess(
   }
   const driver = await spawnDriver(request, experimental, stdin);
   return createSandboxProcess(driver, request.process.timeout);
+}
+
+let rawOneShotProcessFactory:
+  | ((requestJson: string, experimental: boolean, timeoutMs?: number) => Promise<MxcProcess>)
+  | undefined;
+
+/** @internal Replaces raw one-shot process creation for unit tests. */
+export function _setBindingRawSandboxProcessFactory(
+  factory?: typeof rawOneShotProcessFactory,
+): void {
+  rawOneShotProcessFactory = factory;
+}
+
+export async function spawnBindingSandboxProcessJson(
+  requestJson: string,
+  experimental: boolean,
+  timeoutMs?: number,
+): Promise<MxcProcess> {
+  if (rawOneShotProcessFactory !== undefined) {
+    return rawOneShotProcessFactory(requestJson, experimental, timeoutMs);
+  }
+  ensureSupportedNodeVersion();
+  const driver = await createStreamingDriverFromJson(
+    requestJson,
+    getStreamingNative(),
+    nodeStreamFactory,
+    experimental,
+  );
+  return createSandboxProcess(driver, timeoutMs);
 }
 
 export function spawnBindingSandboxProcessSync(

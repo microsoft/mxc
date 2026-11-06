@@ -18,6 +18,11 @@ the individual local test scripts are documented in
   `Build.MacOS.Job.yml`, and for ProcessContainer, IsolationSession, and WSLC the
   Windows SDK bundle from `Package.WindowsSdk.TestBundle.Job.yml`, in the same
   workflow run, so what gets tested is exactly what got built.
+
+- IsolationSession also downloads `telemetry-test-executor-<target>`, a separate
+  local-only debug executor with `test-support` and `isolation_session`. Shipping
+  release binaries never enable the consent/policy test overrides.
+
 - The matrix is **declarative**. `scripts/ci/validation-test-matrix.json` is the
   only file you edit to change *what runs where*;
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
@@ -67,14 +72,22 @@ test jobs only ever `download-artifact`.
 | Job | What it does |
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
-| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. The x64 artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp and argument generation, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
+| `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>` and the separate `telemetry-test-executor-<target>`. The x64 release artifact also includes SDK MicroVM tests and the complete signed NVX bundle. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests including Bubblewrap seccomp, argument generation, host tool lookup, and version checks, Bubblewrap SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit tests, Seatbelt SDK streaming/PTY tests, `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `windows-sdk-bundle` | `Package.WindowsSdk.TestBundle.Job.yml` — uploads `windows-sdk-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |
 
 Both the standalone bundle builder and the Azure two-branch package template use the shared helper stager. The Azure template loads it from its `self` checkout (`lock-check`), but resolves helper sources against the selected main or feature checkout. Older suites that do not dot-source `LoopbackAnchor.ps1` do not require or package it. Referencing suites must include it, including in the standalone builder's required-file check. Run `scripts/ci/test-isolation-session-test-helpers.ps1` for the offline staging regression checks.
+
+The standalone bundle builder publishes the .NET tests for `net10.0`.
+The Azure two-branch template evaluates the selected checkout's test project,
+prefers `net10.0`, and falls back to `net8.0` for older branches. It fails if
+neither framework is supported or project evaluation fails. Both builders
+publish self-contained applications with the selected runtime, so validation
+hosts need no installed .NET SDK or runtime. Runtime servicing requires
+rebuilding the bundle.
 
 Build artifacts are kept for 1 day — they exist only to feed these jobs. The
 test jobs need the three builds; a failed SDK bundle fails the ProcessContainer,
@@ -172,6 +185,31 @@ Node create-and-run and lifecycle suites from the SDK bundle. The SDK suites ski
 no tests is reported as a failure, so a WSLC host can never pass on skipped SDK
 tests.
 
+The IsolationSession command-line suite also checks that piped and file stdin
+reach the workload when stdout is a console. A workload reads one line and
+returns a distinct exit code only if the line matches.
+
+Bubblewrap, LXC, and WSLC also run the prebuilt
+`mxc-filesystem-probe-tests` executable from their build artifact. These public
+SDK regressions block each policy probe in a subprocess, require a bounded
+path-specific rejection, and check that no workload ran. They cover both shared
+validation and backend-specific deny/mount/overlap probes; WSLC also covers
+container provisioning. LXC mount cases run as root against an empty, stopped
+container in private storage and verify cleanup. The blocked-call hook is test-only. See
+[filesystem probe request deadlines](pull-requests.md#filesystem-probe-request-deadlines)
+for local commands and watchdog behavior.
+
+ProcessContainer's required V1.Dev cases cover capture and bidirectional
+pipes in Rust, .NET, and Node, plus Node's executor-backed PTY. Rust and .NET
+direct PTY cases run in IsolationSession. Node's `dev.test.js` also runs
+against Bubblewrap and Seatbelt in Linux and macOS PR integration jobs.
+
+IsolationSession and WSLC require V1.Dev lifecycle, captured/piped exec,
+validation, and cleanup cases. IsolationSession also covers existing-container
+PTYs; its Rust and Node cases check partial capture on timeout with
+descendant-held pipes. Bundle discovery and runtime result gates require the
+named scenarios to pass.
+
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
 accepted-id lists (`ValidateSet` on Windows, the `case` arms on Unix) are what
@@ -220,13 +258,32 @@ get fixed or wired.
 | Backend | Status | Notes |
 |---------|--------|-------|
 | ProcessContainer | ✅ Good | Requires native PSEC; verifies public SDK streaming, filesystem policy and aliases, CLI contract boundaries, DOS/NT final paths, egress/loopback/proxy rules, the functional UI matrix, HANDLES, and global atoms. Unsupported host capabilities must reject requests. Privilege removal uses a host-token control. Application workload tests remain manual-only. |
-| Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. The Linux build job also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. |
+| Bubblewrap | ✅ Good | The scheduled CLI suite checks controlling-terminal isolation with private PTY fixtures, including redirected stdio. Private resolver fixtures check host IPC isolation, descriptor-backed snapshots, symlink layouts, filesystem-policy precedence, and nonregular-file rejection. The Linux build explicitly runs the resolver safety unit tests. It also checks SDK pipes under a controlling terminal, cancellation without parent-death protection, and private-PTY input/output and resizing. These checks do not require enabling legacy TIOCSTI. The proxy, firewall, and version-gate suites also run with host tools missing from `PATH`, so tool discovery and launch must find them in the standard system directories. |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. The in-process streaming handle is covered at PR time by `lxc-e2e.yml` instead, because this matrix runs prebuilt binaries. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
-| IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
+| IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, isolated lifecycle ETW capture, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
-| MicroVM | Experimental | Windows 25H2 x64 nightly runs the prebuilt `mxc-sdk/tests/nvx_e2e.rs` suite, including executor config scenarios, captured JSON execution, and real console interruption during startup and execution with VM/state cleanup assertions. Host-only and extracted-crate compilation checks remain in normal Windows x64 PR builds. |
+| MicroVM | Experimental | Windows 25H2 x64 nightly; see [MicroVM validation](#microvm-validation). |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
+
+### MicroVM validation
+
+The nightly job runs the compiled tests from `mxc-sdk/tests/nvx_e2e.rs`.
+They check executor configurations, JSON requests that collect output, image
+selection, file access rules, and network address and port rules. They also
+check that traffic through a proxy works while direct connections are blocked,
+and that interrupting startup or execution removes the VM and its temporary files.
+The executor and captured JSON execution scenarios also check that the guest
+uses the host CPU profile.
+
+The network tests connect to servers controlled by the test. They check that
+the servers are reachable before and after testing the restrictions, so an
+unavailable server cannot be mistaken for a blocked connection. The host needs
+an IPv4 route through a non-loopback interface to an address outside the guest
+network, `10.0.0.0/24`.
+
+Regular Windows x64 PR builds run checks that do not need a VM. They also
+unpack the Rust crate package and check that its tests compile.
 
 ### ProcessContainer SDK streaming
 
@@ -246,6 +303,59 @@ also checks host readability and denial without a grant. The .NET suite checks s
 stdout, stderr, large output, cancellation, kill, and timeout behavior.
 Required test names and methods must pass; empty selections and skipped
 required cases fail the job even when the runner exits successfully.
+
+### IsolationSession lifecycle telemetry
+
+Every scheduled `isolation-session` job runs
+`run_telemetry_etw_smoke_test.ps1 -IsolationSessionLifecycle -CheckKeywords -SkipClean` against
+the architecture-matched telemetry test executor. That artifact is built with
+an empty `MXC_TELEMETRY_COMPONENT_PATH` input, so the single registration
+has no UTC routing. Consent is granted only in a temporary test store (needed by
+the published contract; development Required collection ignores it) and policy is
+redirected to an isolated HKCU key; real user consent and HKLM policy are not
+modified. The test mode also makes the build eligible for Required collection.
+
+The Windows build job sets `MXC_TELEMETRY_TEST_KEYWORDS=1` only for this debug
+`test-support` artifact. It uses real Measures/Usage and Critical Data/Performance
+metadata while remaining local-only without provider-group routing. Release, non-Windows,
+non-test-support and grouped builds reject this test setting.
+All events use the same `Microsoft.MXC` registration and provider GUID.
+Generated-group and registration tests separately check the shared WinExt
+input, failure/retry, and cleanup. ETW capture verifies both metadata categories,
+not Microsoft ingestion or an MXC Required/Optional consent model.
+
+The existing lifecycle suite runs provision, start, two successful execs, stop
+and deprovision twice, once with published `1.0.0` and once with development
+`1.1.0-alpha`, each phase in a separate executor process. The local
+ETW trace must contain one matching ExecutionStart/ExecutionEnd pair per
+recorded PID, correct phase/backend/mode attribution, one session ID and CV
+root throughout each lifecycle, and fresh attribution after cleanup. Successful
+deprovision must remove the isolated correlation records. Missing privileges,
+unsupported hosts, incomplete scenarios and missing events fail the job.
+
+Keyword checks read actual `System/Keywords` from decoded ETW, require
+ProcessExited for each exec, and check Start, End, Error and ProcessExited
+against the request's contract. Separate valid requests for the Windows-
+unsupported Bubblewrap backend require failure pairs and Error for both
+contracts. The same checks read `PartA_PrivTags`: the four development
+events must carry Performance, and published events must retain Usage.
+Development requests must emit only ExecutionStart, ExecutionEnd, Error and
+ProcessExited; any other emitted event fails the trace oracle.
+Missing, invalid or combined privacy tags fail. Other published event families
+must retain Measures; combined category masks fail.
+The Windows build job also runs paired create-and-run requests and
+these failure cases. Keyword-check mode fails rather than skips without
+Administrator privileges.
+
+ETL, decoded XML and the invocation manifest remain under the suite's redirected
+TEMP for the normal log upload. The HKCU test key and process overrides are
+restored even on failure. No telemetry uploader is started. The offline
+`tests/scripts/test_telemetry_etw_assertions.ps1` regression checks the trace
+oracle, release consent fixture defaults, and the scenario's requests through
+real CLI/backend dry-run validation in each Windows build job. Its missing-network
+control confirms that provision cannot silently inherit a permissive policy.
+Trace fixtures follow `tracerpt` XML: TraceLogging event names are in
+`RenderingInfo/Task`; `System/Task` contains the numeric task ID.
 
 ### IsolationSession Rust test concurrency
 

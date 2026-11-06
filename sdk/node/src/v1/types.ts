@@ -292,7 +292,8 @@ export interface WslcConfig {
   image?: string;
   /** Storage path for WSLC session image store */
   storagePath?: string;
-  /** Target OS for the container (default: "linux") */
+
+  /** Container OS. Omit or set to "linux"; other values are rejected. */
   targetOs?: string;
   /** Number of CPUs allocated to the WSLC session */
   cpuCount?: number;

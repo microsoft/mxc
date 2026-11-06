@@ -806,14 +806,15 @@ pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, ScriptRes
 
 #[derive(Debug)]
 pub struct SessionCreateFailure {
-    pub response: ScriptResponse,
+    // Boxed to keep the error under clippy's `result_large_err` threshold.
+    pub response: Box<ScriptResponse>,
     pub store_may_be_held: bool,
 }
 
 impl From<ScriptResponse> for SessionCreateFailure {
     fn from(response: ScriptResponse) -> Self {
         Self {
-            response,
+            response: Box::new(response),
             store_may_be_held: false,
         }
     }
@@ -889,7 +890,7 @@ pub unsafe fn create_daemon_session(
             }
         };
         return Err(SessionCreateFailure {
-            response,
+            response: Box::new(response),
             store_may_be_held,
         });
     }

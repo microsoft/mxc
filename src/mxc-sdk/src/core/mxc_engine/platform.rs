@@ -456,7 +456,12 @@ mod tests {
     fn linux_support_stands_on_lxc_alone() {
         let support = linux_platform_support_with(
             LxcProbe(|| true),
-            BwrapProbe(|| Err(BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1)))),
+            BwrapProbe(|| {
+                Err(BwrapUnavailable::TooOld {
+                    found: BwrapVersion::new(0, 4, 1),
+                    path: "/usr/bin/bwrap".into(),
+                })
+            }),
             ProxyEnforcementProbe(|| {
                 panic!("the network walk must not run without a usable bwrap")
             }),
@@ -470,7 +475,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_support_preserves_probe_failure_reason() {
-        let failure = BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1));
+        let failure = BwrapUnavailable::TooOld {
+            found: BwrapVersion::new(0, 4, 1),
+            path: "/usr/bin/bwrap".into(),
+        };
         let expected = failure.to_string();
         let support = linux_platform_support_with(
             LxcProbe(|| false),

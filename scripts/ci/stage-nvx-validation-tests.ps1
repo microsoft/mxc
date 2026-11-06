@@ -50,11 +50,19 @@ if ($LASTEXITCODE -ne 0) {
     throw "Listing the staged NVX tests failed with exit code $LASTEXITCODE."
 }
 foreach ($name in @(
+    'windows_x64::signed_agent_proxy_validation_withholds_credentials',
+    'windows_x64::guest_path_resolves_windows_case_alias',
     'windows_x64::host_only_executor_request_matrix',
+    'windows_x64::signed_executor_proxy_validation_withholds_credentials',
     'windows_x64::signed_bundle_executor_configs',
     'windows_x64::signed_bundle_executor_create_and_run',
     'windows_x64::signed_bundle_executor_console_interrupt',
-    'windows_x64::signed_bundle_facade_create_and_run'
+    'windows_x64::signed_bundle_facade_create_and_run',
+    'windows_x64::signed_bundle_sdk_json_capture',
+    'windows_x64::signed_bundle_json_image_and_filesystem_policy',
+    'windows_network::signed_bundle_network_rules_enforce_allow_deny_and_port_selectors',
+    'windows_network::signed_bundle_host_loopback_ingress',
+    'windows_network::signed_bundle_deny_default_proxy_policy'
 )) {
     if ($discovered -notcontains "$name`: test") {
         throw "The staged NVX payload did not discover $name."

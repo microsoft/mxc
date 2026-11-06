@@ -186,15 +186,16 @@ function Invoke-ProcessContainerStreamingTests {
     $dotnetTests = Join-Path $bundle 'dotnet\Microsoft.Mxc.Sdk.Tests.exe'
     $node = Join-Path $bundle 'node\node.exe'
     $nodeSuiteRoot = Join-Path $bundle 'sdk-integration'
-    foreach ($file in $rustTests, $dotnetTests, $node, (Join-Path $nodeSuiteRoot 'dist\windows-process-container.test.js')) {
+    foreach ($file in $rustTests, $dotnetTests, $node, (Join-Path $nodeSuiteRoot 'dist\windows-process-container.test.js'), (Join-Path $nodeSuiteRoot 'dist\dev.test.js')) {
         Assert-File -Path $file
     }
 
-    $rustCase = 'streaming_processcontainer_bidirectional_stdio'
-    $run = Invoke-LoggedNative -FilePath $rustTests -LogName 'process-container-rust-streaming.log' `
-        -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
-    $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
-    if ($failure) { throw "Rust ProcessContainer streaming: $failure" }
+    foreach ($rustCase in 'streaming_processcontainer_bidirectional_stdio', 'dev_json_processcontainer_capture_and_pipes') {
+        $run = Invoke-LoggedNative -FilePath $rustTests -LogName "process-container-rust-$rustCase.log" `
+            -ArgumentList @('--ignored', '--exact', $rustCase, '--test-threads=1')
+        $failure = Get-LibtestFailure -Run $run -RequiredTests $rustCase
+        if ($failure) { throw "Rust ProcessContainer streaming: $failure" }
+    }
 
     $previousPsec = $env:MXC_E2E_PSEC_CAPABLE_HOST
     $previousSkip = $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS
@@ -209,7 +210,8 @@ function Invoke-ProcessContainerStreamingTests {
         $failure = Get-XunitSuiteFailure -ResultXml $resultXml -Classes 'MxcProcessTests' -RejectSkipped `
             -RequiredMethods @('Streaming_WritesStdin_AndReadsEchoedStdout', 'OutputHeavyChild_DoesNotDeadlock',
                 'Kill_DuringWaitAsync_Unblocks', 'Wait_EnforcesPolicyTimeout',
-                'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock')
+                'WaitForExitWithOutputAsync_Cancellation_DoesNotDeadlock',
+                'DevJson_CapturesOutputAndStreamsInput')
         if ($failure) { throw ".NET ProcessContainer streaming: $failure" }
 
         $junit = Join-Path $env:TEMP 'process-container-node-streaming.junit.xml'
@@ -217,7 +219,10 @@ function Invoke-ProcessContainerStreamingTests {
         $requiredNodeTests = @(
             'public run captures output and the workload exit code',
             'public spawn returns an SDK process with live standard streams',
-            'public tool discovery allows tool reads but denies sibling private files'
+            'public tool discovery allows tool reads but denies sibling private files',
+            'V1.Dev runJson captures output and exit status',
+            'V1.Dev spawnJson supports bidirectional pipes',
+            'V1.Dev spawnWithPtyJson supports an interactive terminal'
         )
         Push-Location $nodeSuiteRoot
         try {
@@ -226,7 +231,7 @@ function Invoke-ProcessContainerStreamingTests {
                     '--test-name-pattern', ($requiredNodeTests -join '|'),
                     '--test-reporter=spec', '--test-reporter-destination=stdout',
                     '--test-reporter=junit', "--test-reporter-destination=$junit",
-                    'dist/windows-process-container.test.js')
+                    'dist/windows-process-container.test.js', 'dist/dev.test.js')
         } finally {
             Pop-Location
         }
@@ -243,7 +248,8 @@ function Invoke-NodeIntegrationSuite {
     param(
         [Parameter(Mandatory)][string]$Bundle,
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][string]$TestFile
+        [Parameter(Mandatory)][string]$TestFile,
+        [string[]]$RequiredTests = @()
     )
 
     $junit = Join-Path $env:TEMP "$Name-node.junit.xml"
@@ -258,21 +264,22 @@ function Invoke-NodeIntegrationSuite {
     finally {
         Pop-Location
     }
-    if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-NodeSuiteFailure -JunitPath $junit }
+    if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-NodeSuiteFailure -JunitPath $junit -RequiredTests $RequiredTests }
 }
 
 function Invoke-XunitClasses {
     param(
         [Parameter(Mandatory)][string]$Bundle,
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][string[]]$Classes
+        [Parameter(Mandatory)][string[]]$Classes,
+        [string[]]$RequiredMethods = @()
     )
 
     $resultXml = Join-Path $env:TEMP "$Name-dotnet.xml"
     $run = Invoke-LoggedNative -FilePath (Join-Path $Bundle 'dotnet\Microsoft.Mxc.Sdk.Tests.exe') -LogName "$Name-dotnet.log" -ArgumentList @(
         $Classes | ForEach-Object { '-class', "*.$_" }
         '-result-xml', $resultXml)
-    if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-XunitSuiteFailure -ResultXml $resultXml -Classes $Classes }
+    if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-XunitSuiteFailure -ResultXml $resultXml -Classes $Classes -RequiredMethods $RequiredMethods }
 }
 
 # Run each named suite, report every result, then fail if any suite did.
@@ -323,14 +330,27 @@ function Invoke-WslcSuites {
     $env:MXC_ENABLE_WSLC_TESTS = '1'
 
     Invoke-NamedSuites -Backend 'wslc' -Suites ([ordered]@{
+        'filesystem probe deadlines' = {
+            $tests = Join-Path $binaryDirectoryPath 'mxc-filesystem-probe-tests.exe'
+            Assert-File -Path $tests
+            $listed = @(& $tests --list --ignored)
+            if ($LASTEXITCODE -ne 0) { throw 'Listing filesystem probe tests failed.' }
+            foreach ($case in 'wslc_launch_rejects_stalled_paths', 'wslc_provision_rejects_stalled_paths',
+                'wslc_overlap_rejects_stalls', 'wslc_provision_overlap_rejects_stalls') {
+                $name = "core_modules::mxc_common::filesystem_probe::launch_tests::scenarios::$case"
+                if ($listed -notcontains "${name}: test") { throw "Missing regression: $name" }
+            }
+            & $tests --ignored filesystem_probe::launch_tests:: | Out-Host
+            if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
+        }
         'command line' = {
             $global:LASTEXITCODE = 0
             & (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -WxcExecPath $wxc | Out-Host
             if ($LASTEXITCODE -ne 0) { "exited $LASTEXITCODE" }
         }
-        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' }
-        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' }
-        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' }
+        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc' -TestFile 'wslc-state-aware.test.js' -RequiredTests 'V1.Dev preserves WSLC lifecycle responses, captured exec, pipes, and caller ownership' }
+        'Node create-and-run' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'wslc-create-and-run' -TestFile 'wslc-e2e.test.js' -RequiredTests 'should reject an unsupported targetOs before starting a container' }
+        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'wslc' -Classes 'MxcLifecycleWslcE2ETests', 'MxcContainerWslcE2ETests' -RequiredMethods 'DevJson_WslcLifecyclePreservesResponsesExecutionAndCallerOwnership' }
     })
 }
 
@@ -357,14 +377,31 @@ function Invoke-IsolationSessionSuites {
     $suites = [ordered]@{
         'one-shot' = { Invoke-ScriptSuite 'run_isolation_session_tests.ps1' }
         'state-aware' = { Invoke-ScriptSuite 'run_isolation_session_state_aware_tests.ps1' }
-        'Node' = { Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'isolation-session' -TestFile 'isolation-session-state-aware.test.js' }
+        'lifecycle telemetry' = {
+            $telemetryBin = Join-Path $binaryDirectoryPath 'telemetry-test'
+            Assert-File -Path (Join-Path $telemetryBin 'wxc-exec.exe')
+            Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_telemetry_etw_smoke_test.ps1') `
+                -Arguments @{ BinDir = $telemetryBin; IsolationSessionLifecycle = $true; CheckKeywords = $true; SkipClean = $true } |
+                Out-Host
+        }
+        'Node' = {
+            Invoke-NodeIntegrationSuite -Bundle $bundle -Name 'isolation-session' -TestFile 'isolation-session-state-aware.test.js' `
+                -RequiredTests @('V1.Dev preserves lifecycle responses, captured exec, pipes, PTY, and caller ownership',
+                    'V1.Dev captured timeout returns partial output despite descendant-held pipes')
+        }
         'Rust' = {
-            Get-LibtestFailure (Invoke-LoggedNative -FilePath $inProcTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust.log')
+            Get-LibtestFailure -Run (Invoke-LoggedNative -FilePath $inProcTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust.log') `
+                -RequiredTests @('dev_json_one_shot_pty_supports_interactive_input',
+                    'dev_json_lifecycle_preserves_execution_and_caller_ownership')
         }
         'Rust SDK helpers' = {
             Get-LibtestFailure (Invoke-LoggedNative -FilePath $helperTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust-helpers.log')
         }
-        'C#' = { Invoke-XunitClasses -Bundle $bundle -Name 'isolation-session' -Classes 'MxcContainerIsolationSessionE2ETests', 'MxcLifecycleE2ETests' }
+        'C#' = {
+            Invoke-XunitClasses -Bundle $bundle -Name 'isolation-session' -Classes 'MxcContainerIsolationSessionE2ETests', 'MxcLifecycleE2ETests' `
+                -RequiredMethods @('DevJson_PtySupportsInteractiveInputAndExitStatus',
+                    'DevJson_LifecyclePreservesResponsesExecutionAndCallerOwnership')
+        }
         'apartment probe' = {
             $modes = [ordered]@{
                 'sta' = 'RESULT: COMPLETED'
@@ -420,9 +457,15 @@ function Invoke-MicroVmTests {
     }
     $scenarios = [ordered]@{
         'facade' = 'VM_EXECUTED facade sequential '
+        'SDK JSON capture' = 'VM_EXECUTED SDK JSON binary capture timeout limit and cleanup'
+        'JSON image and policy' = 'VM_EXECUTED JSON selected-image filesystem '
         'executor' = 'VM_EXECUTED executor sequential '
         'executor configs' = 'VM_EXECUTED executor configs '
         'executor interruption' = 'VM_EXECUTED executor console interruption '
+        'network rules' = 'VM_EXECUTED reachable controls and network allow/deny/nonmatching-port enforcement'
+        'UDP network rules' = 'VM_EXECUTED UDP datagrams replies delivery counts protocol separation and inclusive ranges'
+        'host-loopback ingress' = 'VM_EXECUTED host-loopback ingress TCP/UDP allow deny ready listeners and reply controls'
+        'network proxy' = 'VM_EXECUTED reachable controls, blocked direct egress and successful proxy traffic'
     }
     foreach ($scenario in $scenarios.Keys) {
         if (-not $output.Contains($scenarios[$scenario])) {

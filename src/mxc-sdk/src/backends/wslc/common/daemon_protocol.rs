@@ -365,7 +365,7 @@ pub enum ErrKind {
 /// one terminal exit, timeout, cancellation, or error frame on the
 /// [`DaemonRequest::Exec`] connection.
 ///
-/// The raw byte payloads are base64-encoded on the wire (see [`base64_bytes`]).
+/// The raw byte payloads are base64-encoded on the wire (see `base64_bytes`).
 /// serde_json renders a `Vec<u8>` as a JSON array of decimal integers (`[104,
 /// 105, ...]`), roughly **4 bytes of wire per payload byte**, and since
 /// [`MAX_FRAME_SIZE`] is measured against the *encoded* frame that would cut

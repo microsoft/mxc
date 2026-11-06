@@ -7,13 +7,11 @@
 use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io::{Seek, SeekFrom, Write};
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 use std::os::fd::{AsRawFd, FromRawFd};
 
 #[cfg(target_os = "linux")]
-use nix::errno::Errno;
-#[cfg(target_os = "linux")]
-use nix::fcntl::{fcntl, FcntlArg};
+use super::proxy_network::above_stdio;
 
 const BPF_LD_W_ABS: u16 = 0x20;
 #[cfg(any(target_arch = "x86_64", test))]
@@ -30,7 +28,7 @@ const SECCOMP_DATA_NR_OFFSET: u32 = 0;
 const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 const SECCOMP_DATA_ARG0_LOW_OFFSET: u32 = 16;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 const FIRST_NON_STDIO_FD: i32 = 3;
 
 #[cfg(any(target_arch = "x86_64", test))]
@@ -137,19 +135,6 @@ pub(crate) fn create_file() -> Result<File, String> {
         .map_err(|error| format!("Bubblewrap: failed to rewind seccomp filter: {error}"))?;
     above_stdio(file)
         .map_err(|error| format!("Bubblewrap: failed to move seccomp filter descriptor: {error}"))
-}
-
-// The child's stdio is mapped onto descriptors 0-2 before `pre_exec` runs, so
-// a filter left on one of those numbers is replaced before bwrap reads it.
-#[cfg(target_os = "linux")]
-fn above_stdio(file: File) -> Result<File, Errno> {
-    let fd = fcntl(
-        file.as_raw_fd(),
-        FcntlArg::F_DUPFD_CLOEXEC(FIRST_NON_STDIO_FD),
-    )?;
-
-    // SAFETY: `fcntl` returned a new descriptor that nothing else owns.
-    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 pub(crate) fn unsupported_architecture(architecture: &str) -> Option<String> {

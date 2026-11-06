@@ -2,17 +2,23 @@
 
 > **Audience:** MXC developers
 
-This document defines the implemented Windows telemetry-consent contract.
-MXC ships the canonical consent resource, persistent consent storage, and
-consent-management APIs described below. Telemetry remains off by default and
+This document defines the implemented Windows telemetry-consent contract for
+the published `0.9.0-alpha` and `1.0.0` request contracts. MXC ships the
+canonical consent resource, persistent consent storage, and consent-management
+APIs described below. For those contracts, telemetry remains off by default and
 is enabled only when every gate in this contract permits collection.
+
+The development `1.1.0-alpha` contract moves to Required telemetry to keep MXC
+secure, reliable, and up to date. It emits four Required events and is not
+governed by this consent model; only administrative policy can block it. See
+[Telemetry](../../telemetry.md) for that behavior.
 
 The purpose of the MXC Learning Mode Data Loop is to analyze collected data to
 identify usage patterns, improve Windows security, and inform MXC about
 application compatibility in containers with minimal capabilities.
 
-MXC telemetry is Windows-only and fails closed. Collection requires all four
-conditions at the time each event is written:
+MXC telemetry is Windows-only and fails closed. For the published contracts,
+collection requires all four conditions at the time each event is written:
 
 ```text
 per-run telemetry requested
@@ -36,7 +42,7 @@ native UI, but may not substitute wording.
 
 Current resource:
 
-- Resource version: `3`
+- Resource version: `4`
 - Locale: `en-US`
 - Mandatory fallback: `en-US`
 - Privacy link: <https://go.microsoft.com/fwlink/?linkid=521839>
@@ -52,7 +58,7 @@ Help improve Microsoft Products
 ```text
 Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
 
-If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability, including a random session ID that links events from the same container lifecycle. MXC does not send your commands, full file paths, credentials, or other customer content.
 ```
 
 ### Actions
@@ -66,6 +72,13 @@ falls back to `en-US`; complete messages are translated as units rather than
 assembled from fragments. Adding a translation does not change the public API.
 A material wording or data-inventory change requires a new resource version and
 explicit re-consent.
+
+Unreleased version `4` adds random lifecycle correlation disclosure for
+`mxc.session_id`. This inventory
+and wording require privacy/release-owner review before shipping. Grants
+for version `3` or earlier do not authorize this inventory: their effective
+state becomes `undetermined` until the user explicitly accepts the new notice.
+No existing record is automatically upgraded or rewritten.
 
 ## SDK presenter requirements
 
@@ -206,20 +219,29 @@ defined here:
 ## Live enforcement and event compatibility
 
 Consent and policy are checked immediately before each logical telemetry
-emission. A terminal failure may emit paired `MXC.Error` and `MXC.Execution`
-events under the same authorization decision so collectors never receive half
-of the pair. A withdrawal or newly blocking policy stops the next logical
+emission. A terminal failure may emit paired `MXC.Error` and `MXC.ExecutionEnd`
+events under the same authorization decision, without a consent-state reread
+between those writes. This does not guarantee collection or delivery of both
+events. A withdrawal or newly blocking policy stops the next logical
 emission from an already-running process even if the provider was registered
 earlier.
 
-The public ETW event identities remain:
+The execution event identities are now:
 
-- `MXC.Execution`
+- `MXC.ExecutionStart`
+- `MXC.ExecutionEnd`
 - `MXC.Error`
 - `MXC.VerboseDenials`
 
-Collectors may continue filtering those names; consent stabilization does not
-rename the provider or events.
+`MXC.ExecutionEnd` replaces `MXC.Execution`; collectors must update filters
+and queries. Start has the same payload schema, using `started`, zero duration
+and exit-code placeholders, and an empty failure reason before dispatch.
+Start and End reauthorize independently; withdrawing consent between them
+suppresses End. Both execution events additionally report a bounded
+`mxc.capture_denials` enum for the selected access-check configuration; they
+never emit arbitrary capability names or policy contents. These payload changes
+are included in the unreleased version `4` inventory and require
+privacy/release-owner review. The provider and privacy classifications are unchanged.
 
 ## Validation and release gate
 

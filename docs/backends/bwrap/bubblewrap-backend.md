@@ -28,7 +28,8 @@ requiring root privileges or a container runtime.
   compatibility on x86-64, and AArch32 compatibility on AArch64. Platform
   detection reports Bubblewrap as unavailable on architectures for which MXC
   cannot generate the required seccomp program.
-- **Bubblewrap** installed and on PATH:
+- **Bubblewrap** installed (see [Host tool lookup](#host-tool-lookup) for where
+  MXC looks for it):
   ```bash
   # Debian/Ubuntu
   sudo apt install bubblewrap
@@ -51,14 +52,15 @@ requiring root privileges or a container runtime.
   alive. Successful Rust-executor advisory results are cached for the process
   lifetime; Rust failures are not cached, and execution validation probes again
   before launch so a changed PATH target cannot reuse an advisory result. The
+  launch then runs the same `bwrap` file that validation checked. The
   Node SDK caches the complete `getPlatformSupport()` result, including
   failures, for the module lifetime; restart the Node process after remediating
   the host.
-- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed
-  and on PATH, plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
+- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed,
+  plus iproute2 `ip`, util-linux `unshare` (with `--map-current-user` and
   `--keep-caps`), `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
   `ip6tables-restore` for the in-namespace egress and ingress rules, a POSIX
-  `sh` (the supervisor runs as `sh -c`), and the
+  `sh` and `sleep` (the supervisor runs as `sh -c`), and the
   `nf_conntrack` kernel module loaded for the inbound chain's connection-state
   match (unprivileged Bubblewrap cannot load it on demand).
 
@@ -112,6 +114,29 @@ requiring root privileges or a container runtime.
   cat /proc/sys/kernel/unprivileged_userns_clone
   ```
 
+### Host tool lookup
+
+MXC finds `bwrap` and the network tools above in this order, both for the
+availability checks (including the Node SDK's `getPlatformSupport()`) and for
+the launch:
+
+1. The directories on the calling process's `PATH`, in order.
+2. `/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, and
+   `/bin`, in that order.
+
+A desktop session or service whose `PATH` leaves out `/usr/sbin` therefore
+still finds `iptables` there. MXC uses the first executable file with the
+tool's name and launches it from the path its checks approved. If that file
+cannot start, is too old, or uses an iptables backend the sandbox cannot drive,
+the request fails; MXC does not try another copy. The error names the file for
+the network tools, and for a `bwrap` that is not executable, is missing its
+interpreter or loader, or is too old. Empty and relative `PATH` entries are
+ignored, so a tool is never taken from the current directory.
+
+The lookup applies only to the host programs that set up the sandbox. The
+command inside the sandbox gets its own `PATH`; see
+[Process environment](#process-environment).
+
 ## Quick Start
 
 ```json
@@ -141,8 +166,9 @@ Bubblewrap creates a namespace-isolated process by:
 1. Unsharing user, PID, IPC, and UTS namespaces (`--unshare-*`)
 2. Bind-mounting a **minimal deny-by-default baseline** read-only into the
    sandbox (`/bin`, `/sbin`, `/lib*`, `/usr/bin`, `/usr/sbin`, `/usr/lib*`,
-   `/usr/libexec`, `/usr/share`, `/etc`, plus DNS stub-resolver dirs
-   under `/run`). Everything else on the host — including the caller's
+   `/usr/libexec`, `/usr/share`, `/etc`, plus a read-only copy of the resolver
+   configuration when its target is in a supported resolver location).
+   Everything else on the host — including the caller's
    `$HOME`, `/root`, `/opt`, `/var`, `/sys`, and `/run/user/<uid>` — is
    invisible inside the sandbox.
 3. Layering filesystem policy overrides (read-write, read-only, denied paths)
@@ -155,6 +181,12 @@ Bubblewrap creates a namespace-isolated process by:
 
 The sandboxed process runs as a child of `bwrap` and dies automatically when
 execution completes — no container lifecycle management required.
+
+`bwrap` runs with `--die-with-parent`, whose parent-death signal Linux delivers
+when the *thread* that forked `bwrap` exits. MXC therefore forks `bwrap` from
+a dedicated thread that lives as long as the process, so a sandbox started from
+a pooled or short-lived thread (for example a Tokio `spawn_blocking` worker)
+survives that thread and dies only with the embedding process.
 
 The address-family filter is always active. Attempts to create VSOCK, packet,
 or other unlisted socket families fail with `EPERM`. Because io_uring can
@@ -195,7 +227,6 @@ descriptors, but the workload cannot reopen the host terminal through
 `/dev/tty` or use it for terminal job control. For programs that need a
 controlling terminal, use the SDK's PTY execution API, which allocates a
 separate terminal and supports resizing and merged output.
-
 ### Deny-by-default filesystem
 
 The baseline mirrors the macOS Seatbelt backend's `(deny default)` posture:
@@ -230,20 +261,41 @@ Common consequences of this default:
   paths (including `..` and paths near policy mounts) are left to Bubblewrap;
   silence does not prove a cwd is accessible. The hint does not change
   execution or replace Bubblewrap's error.
-- The sandbox can *read* the host's resolver on systemd-resolved,
-  NetworkManager, and resolvconf hosts because the corresponding `/run/...`
-  directories are bound. The common symlink targets *outside* `/run` are
-  covered too: `/var/run/...`-routed `/etc/resolv.conf` symlinks resolve via a
-  synthesised `/var/run -> /run` compat symlink, and WSL's
-  `/mnt/wsl/resolv.conf` is bound directly. Neither exposes host `/var` or
-  `/mnt` contents. Hosts that point `/etc/resolv.conf` at some other custom
-  location still need that target listed in `readonlyPaths`. Bubblewrap
+- The sandbox can read resolver configuration on systemd-resolved,
+  NetworkManager, resolvconf, and WSL hosts without exposing their runtime
+  directories. MXC copies the regular file used by `/etc/resolv.conf` from
+  `/run/systemd/resolve`, `/run/NetworkManager`, `/run/resolvconf`, or
+  `/mnt/wsl/resolv.conf`, and recreates only the links needed to reach it.
+  Relative links and paths through the sandbox's `/var/run -> /run` link
+  are supported. The copy is read-only and does not track later host updates.
+  Filesystem-policy mounts still take precedence, including explicit grants
+  to custom resolver targets. An ancestor denial still applies when a resolver
+  directory is a symlink to another location.
+  Grants through resolver symlinks and sibling-file grants retain their declared
+  access; the read-only resolver copy does not make writable siblings read-only.
+  Child denials and read-only restrictions also take precedence when a writable
+  parent is named through an alias and the child uses its physical path.
+
+  Resolver snapshots use sealed, anonymous file descriptors rather than
+  temporary host pathnames. Bubblewrap copies them into private read-only
+  directories before applying filesystem policy.
+
+  The default mounts exclude host resolver sockets, including
+  `io.systemd.Resolve`, in every network mode. An unavailable or invalid resolver
+  produces a warning rather than a directory-wide fallback; an absent resolver
+  file is allowed.
+  NSS configurations using `nss-resolve` need a `dns` fallback when the host
+  daemon's socket is unavailable.
+
+  Hosts that point `/etc/resolv.conf` at another custom location still need
+  the resolver file listed in `readonlyPaths` unless it is already covered
+  by the system baseline. Bubblewrap
   retains a mount-configuration hint for SDK callers, which `lxc-exec` also
   prints to stderr, when a direct, absolute resolver symlink target has no
   overlapping known mount destination. The check reads the link but does not
   resolve or stat its target or policy paths; a missing file or symlink alias
-  can make the hint inapplicable. Check the link and consider listing its
-  containing directory in `readonlyPaths`. Relative targets, uncertain
+  can make the hint inapplicable. Check the link and consider listing the
+  resolver file in `readonlyPaths`. Relative targets, uncertain
   mounts, and synthetic destinations such as `/tmp` and `/var/run` suppress
   the hint. Silence does not prove DNS is available; the hint never changes
   mounts or the run's outcome.
@@ -297,18 +349,24 @@ whatever MXC passed.
 
 ### Filesystem Policy
 
+Policy validation and denied-path resolution use the shared
+[filesystem probe deadlines](../../schema.md#filesystem-probe-timeouts).
+A stalled probe rejects startup rather than leaving a policy check unenforced.
+
 | Field | bwrap Mapping | Description |
 |-------|---------------|-------------|
 | `readwritePaths` | `--bind <path> <path>` | Read-write bind mount (overrides base RO) |
 | `readonlyPaths` | `--ro-bind <path> <path>` | Explicit read-only bind mount |
-| `deniedPaths` (directory) | `--tmpfs <path>` | Masked with an empty tmpfs |
+| `deniedPaths` (directory or missing path) | `--tmpfs <path>`, then `--remount-ro <path>` | Masked with a read-only tmpfs |
 | `deniedPaths` (file) | `--ro-bind /dev/null <path>` | Masked with `/dev/null` (a tmpfs would turn the file into a directory) |
 
 A denied path is classified by its own on-disk type (via `symlink_metadata`,
-no symlink-follow): a directory is masked with an empty `--tmpfs`, while a
+no symlink-follow): a directory is masked with a read-only `--tmpfs`, while a
 regular file is masked by binding `/dev/null` over it (masking a file with a
 tmpfs would replace it with an empty *directory*, changing its type). Paths that
-cannot be stat'd (missing/unreadable) fall back to `--tmpfs`.
+cannot be stat'd (missing/unreadable) fall back to a read-only `--tmpfs`.
+The masks are remounted after policy mounts are created, so a more specific
+allowed child remains accessible with its own permissions.
 
 **Denied paths are resolved through symlinks before masking.** bwrap creates a
 mask by mounting over the destination path, and it cannot create a mount point
@@ -322,6 +380,18 @@ filesystem path before mounting — canonicalizing the deepest existing ancestor
 components — so the mask lands on the real object and its file/directory type is
 classified from that target. Dangling links, loops, and other paths that cannot
 be resolved fail before the sandbox starts.
+
+On merged-/usr hosts, baseline entries such as `/bin`, `/sbin`, and `/lib*` are
+symlinks into `/usr`. The sandbox recreates each one as a relative symlink to
+the mounted directory instead of mounting that directory a second time, so
+denying `/usr/bin/cat` or `/bin/cat` hides the file under both spellings. If one
+of these symlinks cannot be followed, for example because of a permission error
+or a symlink loop, the sandbox does not start. A baseline symlink whose target
+lies outside the baseline is still mounted at its own path, where a mask on the
+target's real path does not apply. A `readonlyPaths` or `readwritePaths` entry
+spelled through one of these symlinks can be hidden by a denied parent
+directory; spell it with its real path instead, such as `/usr/lib/x/file`
+rather than `/lib/x/file`.
 
 Example:
 ```json
@@ -377,8 +447,8 @@ chain never authorized.
 Every mode runs the sandbox in its own network namespace, so a nameserver on
 the host's loopback — `systemd-resolved`'s stub at `127.0.0.53`, a local
 `dnsmasq` at `127.0.0.1` — names an address that belongs to the sandbox's own
-empty loopback. Binding the host's resolver directories makes the file
-readable; it does not make that address reachable, and names do not resolve.
+empty loopback. Making the resolver file readable does not make that address
+reachable, and names do not resolve through it.
 
 Under **address filtering**, MXC therefore replaces the sandbox's resolver with
 slirp's built-in forwarder, `10.0.2.3`. libslirp rewrites a query sent there to
@@ -409,6 +479,7 @@ A policy that names `/etc/resolv.conf` (or the path its symlink chain ends at)
 in `readonlyPaths` / `readwritePaths` is supplying its own resolver, and the
 sandbox keeps that one — with a warning, because a resolver naming only
 loopback nameservers is unreachable from the sandbox whoever mounted it.
+This includes file grants through intermediate resolver-directory symlinks.
 Listing an ancestor such as `/etc` is not treated as a choice about the
 resolver.
 
@@ -504,8 +575,8 @@ hooked into `INPUT`, for both families:
 
 ```
 -i lo -j ACCEPT
--m state --state ESTABLISHED,RELATED -j ACCEPT
--m state --state NEW -j DROP
+-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-m conntrack --ctstate NEW -j DROP
 -j DROP
 ```
 
@@ -708,10 +779,11 @@ shared-host-network behavior.
 
 ### How it works
 
-0. Before anything is launched, `validate` probes the host tools this mode
+0. Before a launch, the runner checks the host tools this mode
    depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
-   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`, and
-   `ip6tables-restore` — so a host that is
+   `--keep-caps`), `sh`, `nsenter`, `ip`, `iptables`, `ip6tables`, `iptables-restore`,
+   `ip6tables-restore`, and `sleep`, found as described in
+   [Host tool lookup](#host-tool-lookup) — so a host that is
    missing one fails immediately with a message naming it, rather than partway
    through supervisor startup. For the `iptables` family presence is not
    enough: the probe also reads the backend from the version banner and refuses
@@ -720,9 +792,15 @@ shared-host-network behavior.
    probe is bounded by a short timeout, and runs in its own process group so a
    backgrounded descendant that inherited the probe's output cannot outlive it:
    a wedged binary is reported as hung and named, instead of stalling every
-   proxy-mode execution on the host indefinitely. A successful probe is cached
-   for the life of the process; failures are not, so installing the missing
-   tool takes effect without a restart.
+   proxy-mode execution on the host indefinitely. A successful probe is reused
+   for the life of the process while the lookup keeps selecting the same paths;
+   a different path is probed again before it runs, and failures are not
+   reused, so installing the missing tool takes effect without a restart. The
+   supervisor runs each tool from the path the probe checked.
+   Standalone validation and dry runs also
+   try creating disposable user and network namespaces and running `sh`. A
+   launch does not repeat that allocation: it checks namespace availability
+   when it starts the supervisor and Bubblewrap.
 1. The caller starts the proxy and names its loopback endpoint with
    `runtimeConfig.networkProxy`. The parser admits `localhost`, `127.0.0.1`,
    or `[::1]`; Bubblewrap rejects `[::1]` because its gateway reaches only
@@ -950,7 +1028,7 @@ Contract `0.9.0-alpha` provides no MXC-managed host-list policy for that proxy.
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
 | Startup | Create → Start → Attach | Single `bwrap` exec; proxy-only and firewall-enforced modes add a user/network-namespace supervisor, `slirp4netns`, and namespace-local firewall chains |
 | Network isolation | iptables + veth | `--unshare-net` for ruleless deny; private netns + slirp4netns and namespace-local iptables for proxy or firewall-enforced policies |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, iproute2 `ip`, a POSIX `sh`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, iproute2 `ip`, a POSIX `sh` and `sleep`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
@@ -991,15 +1069,30 @@ isolated wrapper that removes `--die-with-parent`, then checks explicit
 kill, timeout, and handle-drop cleanup. This reproduces the absence of
 parent-death protection during startup without relying on a scheduling race.
 
+## Troubleshooting
+
+These failures carry the `backend_error` code and exit `-1`.
+
+| Message | Meaning |
+|---|---|
+| `Bubblewrap (bwrap) is not installed or not on PATH` / version too old | The host has no usable Bubblewrap; install `bubblewrap` 0.5+ |
+| `requires 'slirp4netns' on PATH` / `requires unprivileged user and network namespaces` | The host cannot provide the sandbox network |
+| `script_code is empty` / `must not carry credentials` / an egress or proxy refusal | The request is at fault; change it and retry |
+| `failed to spawn bwrap` / `failed to allocate PTY` / proxy namespace start failure | The request was accepted but the launch faulted |
+| `could not resolve the host's /bin` (or another system directory) | A merged-/usr symlink such as `/bin -> usr/bin` could not be followed; check that the link and its target are readable |
+| `failed to wrap stdio pipes` | The sandbox started and then faulted |
+
 ## Limitations
 
 - **Linux only** — Bubblewrap requires Linux kernel namespaces
 - **Deny-by-default filesystem** — the sandbox sees a minimal allowlist
-  of host paths (system binaries, libs, `/etc`, DNS stub-resolver dirs)
+  of host paths (system binaries, libs, `/etc`, resolver configuration)
   and nothing else. `$HOME`, `/opt`, `/var`, `/sys`, `/run/user/<uid>`,
   and `/usr/local` are invisible unless explicitly listed in
   `readonlyPaths` / `readwritePaths`. There is no separate rootfs — the
-  visible paths are bind-mounted from the host.
+  visible paths are bind-mounted from the host, except for the resolver-file
+  copy. Explicitly granting a host directory containing Unix sockets can
+  expose host services outside IP egress filtering.
 - **Network filtering** — `network.egress` allows or denies numeric addresses
   and CIDRs without root (rules live in the sandbox's own namespace). Allowed
   IPv6 destinations remain unreachable until slirp supports IPv6 here.

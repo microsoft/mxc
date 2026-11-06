@@ -323,3 +323,49 @@ export function spawnBindingSandboxWithPty(
 ): Promise<MxcPtyProcess> {
   return spawnPtyImplementation(request, experimental, rows, columns);
 }
+
+function spawnBindingSandboxWithPtyJsonNative(
+  requestJson: string,
+  experimental: boolean,
+  rows: number,
+  columns: number,
+  timeoutMs?: number,
+): Promise<MxcPtyProcess> {
+  const ptyNative = getPtyNative();
+  return createPtyFromJson(
+    timeoutMs,
+    rows,
+    columns,
+    (outHandle, error, completion) => ptyNative.spawnPty(
+      requestJson,
+      experimental ? 1 : 0,
+      rows,
+      columns,
+      outHandle,
+      error,
+      completion,
+    ),
+    ptyNative,
+    getStreamingNative(),
+    nodeStreamFactory,
+  );
+}
+
+let rawPtyImplementation = spawnBindingSandboxWithPtyJsonNative;
+
+/** @internal Replaces raw one-shot PTY creation for unit tests. */
+export function _setSpawnBindingSandboxWithPtyJsonImplementation(
+  implementation?: typeof spawnBindingSandboxWithPtyJsonNative,
+): void {
+  rawPtyImplementation = implementation ?? spawnBindingSandboxWithPtyJsonNative;
+}
+
+export function spawnBindingSandboxWithPtyJson(
+  requestJson: string,
+  experimental: boolean,
+  rows: number,
+  columns: number,
+  timeoutMs?: number,
+): Promise<MxcPtyProcess> {
+  return rawPtyImplementation(requestJson, experimental, rows, columns, timeoutMs);
+}

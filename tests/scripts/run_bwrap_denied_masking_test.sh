@@ -108,6 +108,16 @@ else
     FAIL=1
 fi
 
+for path in secret_dir secret_dir/nested missing; do
+    if echo "$OUTPUT" | grep -qFx "DENIED_WRITE_OK:$path" \
+        && ! echo "$OUTPUT" | grep -qFx "DENIED_WRITE_FAIL:$path"; then
+        echo "PASS: denied path $path cannot be modified."
+    else
+        echo "FAIL: denied path $path is writable or its permissions can be changed."
+        FAIL=1
+    fi
+done
+
 # --- Denied-symlink masking ----------------------------------------------------
 # Denying a symlink masks the object it points to: the runner rewrites a denied
 # symlink to its canonical target so the mask lands on the real file/dir (bwrap
